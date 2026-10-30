@@ -52,6 +52,25 @@ class WriterCredentialPolicyTest {
     }
 
     @Test
+    void placementCredentialsBindScopeOwnerBootAndEpoch() {
+        var policy = policy(KEY);
+        String token = policy.issue("tenant", "workspace", "session", "pod-a", "boot-a", 1);
+        assertThat(token).startsWith("qwp1_").matches("[A-Za-z0-9_-]{32,512}");
+        assertThatCode(() -> policy.require("tenant", "workspace", "session", token)).doesNotThrowAnyException();
+        assertThatCode(() -> policy.requirePlacement("tenant", "workspace", "session", "pod-a", "boot-a", 1, token))
+                .doesNotThrowAnyException();
+        assertThatThrownBy(() -> policy.require("other", "workspace", "session", token)).isInstanceOf(ManagedAgentException.class);
+        assertThatThrownBy(() -> policy.requirePlacement("tenant", "workspace", "session", "pod-b", "boot-a", 1, token))
+                .isInstanceOf(ManagedAgentException.class);
+        assertThatThrownBy(() -> policy.requirePlacement("tenant", "workspace", "session", "pod-a", "boot-b", 1, token))
+                .isInstanceOf(ManagedAgentException.class);
+        assertThatThrownBy(() -> policy.requirePlacement("tenant", "workspace", "session", "pod-a", "boot-a", 2, token))
+                .isInstanceOf(ManagedAgentException.class);
+        assertThatThrownBy(() -> WriterCredentialPolicy.unbound().require("tenant", "workspace", "session", token))
+                .isInstanceOf(ManagedAgentException.class);
+    }
+
+    @Test
     void boundRejectsForeignAndSelfMintedTokens() {
         WriterCredentialPolicy policy = policy(KEY);
         String token = policy.issue("tenant", "workspace", "session");

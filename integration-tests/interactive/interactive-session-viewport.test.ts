@@ -70,6 +70,44 @@ setInterval(() => {}, 1000);`,
     expect((await session.viewport()).split('\n')).toHaveLength(12);
   });
 
+  it('captures visible RGB and dim attributes after pending writes are flushed', async () => {
+    session = await InteractiveSession.start({
+      cols: 30,
+      rows: 5,
+      command: {
+        bin: process.execPath,
+        args: [
+          '-e',
+          `console.log('Type your message');
+process.stdout.write('\\x1b[2;1H\\x1b[38;2;197;37;83mC\\x1b[2mD\\x1b[0mR');
+setInterval(() => {}, 1000);`,
+        ],
+      },
+    });
+    await session.idle(300);
+    const rows = await session.viewportCells();
+    expect(rows).toHaveLength(5);
+    expect(rows[1].text).toBe('CDR');
+    expect(rows[1].cells).toHaveLength(30);
+    expect(rows[1].cells[0]).toEqual({
+      text: 'C',
+      fg: 0xc52553,
+      rgb: true,
+      dim: false,
+    });
+    expect(rows[1].cells[1]).toEqual({
+      text: 'D',
+      fg: 0xc52553,
+      rgb: true,
+      dim: true,
+    });
+    expect(rows[1].cells[2]).toMatchObject({
+      text: 'R',
+      rgb: false,
+      dim: false,
+    });
+  });
+
   it('can isolate child configuration without losing the pinned renderer', async () => {
     vi.stubEnv('QWEN_E2E_PRIVATE_SENTINEL', 'must-not-leak');
     vi.stubEnv('QWEN_E2E_RENDERER', 'ink');

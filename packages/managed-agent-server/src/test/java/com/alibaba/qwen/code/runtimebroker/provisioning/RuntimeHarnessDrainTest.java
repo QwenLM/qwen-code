@@ -1137,6 +1137,11 @@ public class RuntimeHarnessDrainTest {
         assertNotNull(sessions.compareAndSet(theirs, theirs.withState(RuntimeSessionRecord.State.READY, Instant.now())));
         var authority = resourceClaim();
         try (var service = service()) {
+            service.prepareHarnessResources("tenant", "harness", authority).toCompletableFuture().get(5, TimeUnit.SECONDS);
+            assertEquals(RuntimeSessionRecord.State.READY, sessions.findById(sharedScope, "ours").getState());
+            assertEquals(RuntimeSessionRecord.State.READY, sessions.findById(sharedScope, "theirs").getState());
+            assertEquals(0, transport.releases);
+            assertEquals(0, provisioner.stops);
             service.drainHarnessResources("tenant", "harness", authority, false).toCompletableFuture().get(5, TimeUnit.SECONDS);
             assertEquals(RuntimeSessionRecord.State.RELEASED, sessions.findById(sharedScope, "ours").getState());
             assertEquals(RuntimeSessionRecord.State.READY, sessions.findById(sharedScope, "theirs").getState());

@@ -58,6 +58,7 @@ describe('StandaloneRecents', () => {
   let root: Root;
 
   beforeEach(() => {
+    window.localStorage.clear();
     vi.spyOn(console, 'warn').mockImplementation(() => {});
     mocks.t.mockImplementation((key: string) => key);
     mocks.list.mockReset();
@@ -193,7 +194,9 @@ describe('StandaloneRecents', () => {
     const newSession = container.querySelector<HTMLButtonElement>(
       '[data-testid="standalone-active-group"] button[aria-label="sidebar.newTask"]',
     );
-    expect(newSession?.parentElement?.className).toContain('invisible');
+    expect(newSession?.parentElement?.className).toContain(
+      'projectsHeaderActions',
+    );
     const sessions = container.querySelector(
       '[data-testid="standalone-active-group"] > div:nth-child(2)',
     );
@@ -201,6 +204,11 @@ describe('StandaloneRecents', () => {
     const header = container.querySelector<HTMLButtonElement>(
       '[data-testid="standalone-active-group"] > div > button',
     )!;
+    expect(header.parentElement?.className).toContain('projectsHeader');
+    expect(header.className).toContain('projectsHeaderToggle');
+    expect(header.querySelector('span + svg')?.classList).toContain(
+      'lucide-chevron-down',
+    );
     header.focus();
     await act(async () =>
       header.dispatchEvent(
@@ -208,6 +216,9 @@ describe('StandaloneRecents', () => {
       ),
     );
     expect(document.activeElement).not.toBe(header);
+    expect(header.querySelector('span + svg')?.classList).toContain(
+      'lucide-chevron-right',
+    );
     await act(async () =>
       header.dispatchEvent(
         new MouseEvent('click', { bubbles: true, detail: 1 }),
@@ -224,9 +235,104 @@ describe('StandaloneRecents', () => {
     });
   });
 
+  it.each(['active', 'archived'] as const)(
+    'persists %s collapse across remounts without collapsing the other group',
+    async (archiveState) => {
+      const collapsedTitle =
+        archiveState === 'active' ? 'Active chat' : 'Archived chat';
+      const otherState = archiveState === 'active' ? 'archived' : 'active';
+      const otherTitle =
+        archiveState === 'active' ? 'Archived chat' : 'Active chat';
+      await render({ archiveState, currentSessionId: archiveState });
+      const toggle = () =>
+        container.querySelector<HTMLButtonElement>(
+          `[data-testid="standalone-${archiveState}-group"] > div > button`,
+        )!;
+      await act(async () => toggle().click());
+      expect(container.textContent).not.toContain(collapsedTitle);
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await render({ archiveState, currentSessionId: archiveState });
+      expect(toggle().getAttribute('aria-expanded')).toBe('false');
+      expect(container.textContent).not.toContain(collapsedTitle);
+
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await render({ archiveState: otherState });
+      expect(container.textContent).toContain(otherTitle);
+      expect(
+        container
+          .querySelector('[aria-expanded]')
+          ?.getAttribute('aria-expanded'),
+      ).toBe('true');
+
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await render({ archiveState, currentSessionId: archiveState });
+      await act(async () => toggle().click());
+      expect(
+        window.localStorage.getItem(
+          `qwen.web-shell.sidebar.workspace-expanded:standalone:${archiveState}`,
+        ),
+      ).toBe('true');
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await render({ archiveState, currentSessionId: archiveState });
+      expect(toggle().getAttribute('aria-expanded')).toBe('true');
+      expect(container.textContent).toContain(collapsedTitle);
+    },
+  );
+
+  it.each([
+    ['active', false],
+    ['active', true],
+    ['archived', false],
+    ['archived', true],
+  ] as const)(
+    'preserves the %s expanded preference %s when clicking its header during search',
+    async (archiveState, expanded) => {
+      const title = archiveState === 'active' ? 'Active chat' : 'Archived chat';
+      const key = `qwen.web-shell.sidebar.workspace-expanded:standalone:${archiveState}`;
+      const toggle = () =>
+        container.querySelector<HTMLButtonElement>(
+          `[data-testid="standalone-${archiveState}-group"] > div > button`,
+        )!;
+      await render({ archiveState });
+      await act(async () => toggle().click());
+      if (expanded) await act(async () => toggle().click());
+      expect(window.localStorage.getItem(key)).toBe(String(expanded));
+
+      await render({ archiveState, searchQuery: archiveState.toUpperCase() });
+      expect(container.textContent).toContain(title);
+      await act(async () => toggle().click());
+      expect(window.localStorage.getItem(key)).toBe(String(expanded));
+      expect(toggle().getAttribute('aria-expanded')).toBe(String(expanded));
+      expect(container.textContent).toContain(title);
+
+      await render({ archiveState, searchQuery: '   ' });
+      expect(toggle().disabled).toBe(false);
+      expect(container.textContent?.includes(title)).toBe(expanded);
+      await act(async () => root.unmount());
+      root = createRoot(container);
+      await render({ archiveState });
+      expect(toggle().getAttribute('aria-expanded')).toBe(String(expanded));
+      expect(container.textContent?.includes(title)).toBe(expanded);
+    },
+  );
+
   it('loads only the requested archived group', async () => {
     const { renderSession } = await render({ archiveState: 'archived' });
 
+    const group = container.querySelector(
+      '[data-testid="standalone-archived-group"]',
+    )!;
+    expect(group.classList).toContain('mb-3');
+    const header = group.querySelector('button[aria-expanded]')!;
+    expect(header.parentElement?.className).toContain('headerRow');
+    expect(header.querySelector('svg')?.classList).toContain(
+      'lucide-circle-dashed',
+    );
+    expect(header.querySelector('span + svg')).toBeNull();
     expect(container.textContent).toContain('Archived chat');
     expect(container.textContent).not.toContain('Active chat');
     expect(renderSession).toHaveBeenCalledWith(

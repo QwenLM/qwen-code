@@ -14,6 +14,8 @@ import type {
   DaemonSessionActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
+import { DaemonAvailability } from '../../daemon/availability.js';
+import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
 import { TOAST_REQUEST_EVENT, type ToastRequestDetail } from '../ToastHost';
 import type { WebShellRightPanelItem } from '../../customization';
 import type { ArtifactWorkspaceTarget } from './useArtifactWorkspaceTarget';
@@ -4367,6 +4369,8 @@ describe('ArtifactPanel fullscreen toggle', () => {
   function renderPanel(props: {
     fullscreen?: boolean;
     onToggleFullscreen?: () => void;
+    variant?: 'docked' | 'drawer';
+    availability?: DaemonAvailability;
   }) {
     const task: DaemonSessionMonitorTaskStatus = {
       kind: 'monitor',
@@ -4387,32 +4391,88 @@ describe('ArtifactPanel fullscreen toggle', () => {
     mounted.push({ root, container });
     act(() => {
       root.render(
-        <I18nProvider language="en">
-          <ArtifactPanel
-            artifacts={[]}
-            tabs={[
-              {
-                id: 'monitor:monitor-1',
-                kind: 'monitor',
-                title: task.description,
-                task,
-              },
-            ]}
-            activeTabId="monitor:monitor-1"
-            reviewChanges={[]}
-            selectedReviewPath={null}
-            onSelectTab={() => {}}
-            onCloseTab={() => {}}
-            onOpenFilePreview={() => {}}
-            onClose={() => {}}
-            fullscreen={props.fullscreen}
-            onToggleFullscreen={props.onToggleFullscreen}
-          />
-        </I18nProvider>,
+        <DaemonAvailabilityContext.Provider value={props.availability}>
+          <I18nProvider language="en">
+            <ArtifactPanel
+              artifacts={[]}
+              tabs={[
+                {
+                  id: 'monitor:monitor-1',
+                  kind: 'monitor',
+                  title: task.description,
+                  task,
+                },
+              ]}
+              activeTabId="monitor:monitor-1"
+              reviewChanges={[]}
+              selectedReviewPath={null}
+              onSelectTab={() => {}}
+              onCloseTab={() => {}}
+              onOpenFilePreview={() => {}}
+              onClose={() => {}}
+              fullscreen={props.fullscreen}
+              variant={props.variant}
+              onToggleFullscreen={props.onToggleFullscreen}
+            />
+          </I18nProvider>
+        </DaemonAvailabilityContext.Provider>,
       );
     });
     return container;
   }
+
+  it.each([
+    ['docked', 'unavailable'],
+    ['drawer', 'unavailable'],
+    ['docked', 'auth-required'],
+    ['drawer', 'auth-required'],
+  ] as const)(
+    'keeps %s connection retry inside the panel when %s',
+    async (variant, state) => {
+      const native = vi.fn(async () => {
+        if (state === 'unavailable') throw new TypeError('offline');
+        return new Response(null, { status: 401 });
+      });
+      const availability = new DaemonAvailability(
+        'https://panel.example',
+        undefined,
+        native,
+      );
+      try {
+        await availability.check();
+        const container = renderPanel({
+          fullscreen: variant === 'docked',
+          variant,
+          availability,
+        });
+        const panel = container.querySelector('aside')!;
+        const banner = panel.querySelector(
+          '[data-testid="daemon-connection-banner"]',
+        );
+        expect(banner).not.toBeNull();
+        expect(banner?.closest('[hidden], [aria-hidden="true"]')).toBeNull();
+        native.mockImplementation(async (input?: unknown) =>
+          Response.json(
+            String(input).endsWith('/health')
+              ? { status: 'ok' }
+              : { features: [] },
+          ),
+        );
+        const retry = Array.from(banner!.querySelectorAll('button')).find(
+          (button) => button.textContent === 'Retry connection',
+        )!;
+        retry.focus();
+        expect(document.activeElement).toBe(retry);
+        await act(async () => retry.click());
+        expect(availability.getSnapshot()).toBe('available');
+        expect(
+          panel.querySelector('[data-testid="daemon-connection-banner"]'),
+        ).toBeNull();
+      } finally {
+        act(() => availability.dispose());
+      }
+    },
+  );
 
   it('shows a fullscreen toggle and reports clicks', () => {
     const onToggleFullscreen = vi.fn();

@@ -2,12 +2,15 @@ package com.alibaba.qwen.code.runtimebroker;
 
 import com.alibaba.qwen.code.runtimebroker.transport.HttpRuntimeTransport;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.CompletionStage;
@@ -51,18 +54,22 @@ class RuntimeBrokerStorageAdmissionTest {
         assertEquals(original.getProvisionSeed(), provisioner.createdWith);
     }
 
-    @Test
-    void scratchCapacityPreservesTheOriginalSeedAcrossPreCreateRetries() {
+    @ParameterizedTest
+    @CsvSource({
+            "kubernetes-scratch, runtime_kubernetes_capacity",
+            "external-scratch, runtime_external_capacity"
+    })
+    void scratchCapacityPreservesTheOriginalSeedAcrossPreCreateRetries(String kind, String code) {
         var bindings = new InMemoryRuntimeBindingRepository();
         var provisioner = new AdmissionProvisioner();
-        provisioner.provisionerKind = "kubernetes-scratch";
+        provisioner.provisionerKind = kind;
         provisioner.admit = binding -> {
-            throw new RuntimeBrokerException(503, "runtime_kubernetes_capacity", "Capacity exhausted.", true);
+            throw new RuntimeBrokerException(503, code, "Capacity exhausted.", true);
         };
         var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
         for (int round = 0; round < 2; round++) {
             try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
-                assertEquals("runtime_kubernetes_capacity", failure(broker.warm("harness")).getCode());
+                assertEquals(code, failure(broker.warm("harness")).getCode());
                 var current = bindings.findById(original.getBindingId());
                 assertEquals(RuntimeBindingRecord.State.PROVISIONING, current.getState());
                 assertEquals(original.getProvisionSeed(), current.getProvisionSeed());
@@ -81,14 +88,119 @@ class RuntimeBrokerStorageAdmissionTest {
     }
 
     @Test
-    void scratchCapacityAfterEnteringEnsureRemainsRecoveryBlocked() {
+    void preCreateUnavailablePreservesTheOriginalSeedAcrossRetriesAndBrokerRestart() {
         var bindings = new InMemoryRuntimeBindingRepository();
         var provisioner = new AdmissionProvisioner();
-        provisioner.provisionerKind = "kubernetes-scratch";
-        provisioner.ensureFailure = new RuntimeBrokerException(503, "runtime_kubernetes_capacity", "Capacity exhausted.", true);
+        provisioner.provisionerKind = "external-scratch";
+        provisioner.admit = binding -> {
+            throw new RuntimeBrokerException(503, "runtime_external_unavailable",
+                    "External Runtime provider is unavailable.", true);
+        };
+        var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
+        for (int round = 0; round < 2; round++) {
+            try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+                assertEquals("runtime_external_unavailable", failure(broker.warm("harness")).getCode());
+                var current = bindings.findById(original.getBindingId());
+                assertEquals(RuntimeBindingRecord.State.PROVISIONING, current.getState());
+                assertEquals(original.getProvisionSeed(), current.getProvisionSeed());
+                assertEquals(original.getGeneration(), current.getGeneration());
+                assertNull(current.getResourceHandle());
+                assertNull(current.getOperationOwner());
+            }
+        }
+        assertEquals(0, provisioner.ensureCalls);
+        provisioner.admit = binding -> { };
+        try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+            assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
+        }
+        assertEquals(1, provisioner.ensureCalls);
+        assertEquals(original.getProvisionSeed(), provisioner.createdWith);
+    }
+
+    @Test
+    void externalUnavailableAfterEnteringEnsurePreservesTheOriginalSeedAcrossBrokerRounds() {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var provisioner = new AdmissionProvisioner();
+        provisioner.provisionerKind = "external-scratch";
+        provisioner.ensureFailure = new RuntimeBrokerException(503, "runtime_external_unavailable",
+                "External Runtime provider is unavailable.", true);
+        var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
+        for (int round = 0; round < 2; round++) {
+            try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+                assertEquals("runtime_external_unavailable", failure(broker.warm("harness")).getCode());
+                var current = bindings.findById(original.getBindingId());
+                assertEquals(RuntimeBindingRecord.State.PROVISIONING, current.getState());
+                assertEquals(original.getProvisionSeed(), current.getProvisionSeed());
+                assertEquals(original.getGeneration(), current.getGeneration());
+                assertNull(current.getResourceHandle());
+                assertNull(current.getOperationOwner());
+            }
+        }
+        assertEquals(2, provisioner.ensureCalls);
+        provisioner.ensureFailure = new RuntimeBrokerException(409,
+                "workspace_csi_provenance_unavailable", "Provenance unavailable.", false);
+        try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+            assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
+            assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                    bindings.findById(original.getBindingId()).getState());
+        }
+        assertEquals(3, provisioner.ensureCalls);
+        assertEquals(original.getProvisionSeed(), provisioner.createdWith);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+            "runtime_external_unavailable",
+            "runtime_external_capacity"
+    })
+    void externalRetryableReserveWithPersistedHandleRemainsAdoptableAcrossBrokerRounds(String code) {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var provisioner = new AdmissionProvisioner();
+        provisioner.provisionerKind = "external-scratch";
+        var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
+        var handle = new RuntimeResourceHandle("external-scratch", 1, Map.of("providerId", "provider-a"));
+        var claimed = bindings.claimOperation(original.getBindingId(), "broker", Duration.ofMinutes(1));
+        var withHandle = bindings.compareAndSet(claimed, claimed.withResourceHandle(handle, Instant.now()));
+        assertEquals(original.getProvisionSeed(), withHandle.getProvisionSeed());
+        assertEquals(handle, bindings.releaseOperation(original.getBindingId(), "broker",
+                withHandle.getOperationGeneration()).getResourceHandle());
+        provisioner.admit = binding -> {
+            throw new RuntimeBrokerException(503, code, "External Runtime provider is unavailable.", true);
+        };
+        for (int round = 0; round < 2; round++) {
+            try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+                assertEquals(code, failure(broker.warm("harness")).getCode());
+                var current = bindings.findById(original.getBindingId());
+                assertEquals(RuntimeBindingRecord.State.PROVISIONING, current.getState());
+                assertEquals(handle, current.getResourceHandle());
+                assertEquals(original.getProvisionSeed(), current.getProvisionSeed());
+                assertEquals(original.getGeneration(), current.getGeneration());
+                assertNull(current.getOperationOwner());
+            }
+        }
+        assertEquals(0, provisioner.ensureCalls);
+        provisioner.admit = binding -> { };
+        try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
+            assertEquals("workspace_csi_provenance_unavailable", failure(broker.warm("harness")).getCode());
+        }
+        assertEquals(1, provisioner.ensureCalls);
+        assertEquals(original.getProvisionSeed(), provisioner.createdWith);
+    }
+
+    // External-scratch has its own row above: a retryable ensure failure with
+    // no persisted handle leaves that kind adoptable instead of blocked.
+    @ParameterizedTest
+    @CsvSource({
+            "kubernetes-scratch, runtime_kubernetes_capacity"
+    })
+    void scratchCapacityAfterEnteringEnsureRemainsRecoveryBlocked(String kind, String code) {
+        var bindings = new InMemoryRuntimeBindingRepository();
+        var provisioner = new AdmissionProvisioner();
+        provisioner.provisionerKind = kind;
+        provisioner.ensureFailure = new RuntimeBrokerException(503, code, "Capacity exhausted.", true);
         var original = bindings.findOrCreate(provisioner.createRequest(SCOPE, "harness"));
         try (var broker = broker(provisioner, bindings, Clock.systemUTC(), Duration.ofSeconds(30))) {
-            assertEquals("runtime_kubernetes_capacity", failure(broker.warm("harness")).getCode());
+            assertEquals(code, failure(broker.warm("harness")).getCode());
             assertEquals(RuntimeBindingRecord.State.RECOVERY_BLOCKED,
                     bindings.findById(original.getBindingId()).getState());
             assertEquals("runtime_broker_recovery_blocked", failure(broker.warm("harness")).getCode());

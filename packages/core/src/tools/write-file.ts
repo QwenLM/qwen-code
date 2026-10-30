@@ -66,6 +66,8 @@ import {
   buildWorkspaceArtifactCandidate,
   formatRecordArtifactReminder,
 } from './artifact/workspace-auto-record.js';
+import { backgroundFixHolding } from './autofix-pr-grants.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('WRITE_FILE');
 
@@ -125,6 +127,19 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       this.config.getTargetDir(),
     );
     return `Writing to ${shortenPath(relativePath)}`;
+  }
+
+  /**
+   * A write into the worktree of a fix of /autofix-pr running in the
+   * background, by anyone but its own agent, is the user's to approve: that
+   * agent builds and runs what is there without asking.
+   */
+  override requiresUserInteraction(): boolean {
+    return (
+      // As written: resolved as the kernel will.
+      backgroundFixHolding(this.params.file_path, getCurrentAgentId()) !==
+      undefined
+    );
   }
 
   /**

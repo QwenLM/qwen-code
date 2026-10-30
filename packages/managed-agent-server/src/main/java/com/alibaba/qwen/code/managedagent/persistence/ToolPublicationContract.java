@@ -359,7 +359,7 @@ public final class ToolPublicationContract {
         id(r.get("resourceId"));
         require(kind.equals(text(r, "kind")) && count(r.get("schemaVersion"), 1) == 1,
                 "Invalid publication resource kind");
-        count(r.get("byteLength"), MAX_BODY_BYTES);
+        count(r.get("byteLength"), ManagedSessionStoreModels.inlineResourceBytes(kind));
         digest(r.get("digest"));
     }
 

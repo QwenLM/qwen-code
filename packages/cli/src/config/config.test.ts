@@ -52,6 +52,14 @@ const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockUpdateHandler = vi.hoisted(() => vi.fn());
 const mockBatchHandler = vi.hoisted(() => vi.fn());
+const mockMemoryHandler = vi.hoisted(() => vi.fn());
+vi.mock('../commands/memory.js', () => ({
+  memoryCommand: {
+    command: 'memory <subcommand> <source>',
+    builder: { 'dry-run': { type: 'boolean' }, json: { type: 'boolean' } },
+    handler: mockMemoryHandler,
+  },
+}));
 const mockSessionServiceInstance = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
   loadSession: vi.fn(),
@@ -321,6 +329,25 @@ describe('isValidSessionId', () => {
 });
 
 describe('parseArguments', () => {
+  it.each(['on', 'off'] as const)(
+    'accepts explicit workflow mode %s',
+    async (mode) => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--workflow-mode',
+        mode,
+        '-p',
+        'ordinary',
+      ];
+      expect(await parseArguments()).toMatchObject({ workflowMode: mode });
+    },
+  );
+
+  it('preserves an absent workflow mode as undefined', async () => {
+    process.argv = ['node', 'script.js', '-p', 'ordinary'];
+    expect((await parseArguments()).workflowMode).toBeUndefined();
+  });
   const originalArgv = process.argv;
 
   afterEach(() => {
@@ -516,6 +543,27 @@ describe('parseArguments', () => {
     process.argv = ['node', 'script.js', '-p', 'query'];
     expect((await parseArguments()).sandbox).toBeUndefined();
   });
+
+  it.each(['--debug', '--safe-mode'])(
+    'exits after prefixed memory preview: %s',
+    async (flag) => {
+      process.argv = [
+        'node',
+        'script.js',
+        flag,
+        'memory',
+        'import',
+        'codex',
+        '--dry-run',
+        '--json',
+      ];
+      mockMemoryHandler.mockClear();
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "0"',
+      );
+      expect(mockMemoryHandler).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('includes every approval mode description in --help', async () => {
     process.argv = ['node', 'script.js', '--help'];
@@ -2959,7 +3007,7 @@ describe('loadCliConfig', () => {
   });
 
   it.each([undefined, false, true])(
-    'passes only the resolved Generated UI opt-in as a runtime candidate: %s',
+    'passes the resolved Generated UI setting, on by default, as a runtime candidate: %s',
     async (enabled) => {
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();
@@ -2967,7 +3015,7 @@ describe('loadCliConfig', () => {
       expect(mockConfigConstructorParams).toHaveBeenCalledWith(
         expect.objectContaining({
           bundledGeneratedUi: expect.objectContaining({
-            enabled: enabled === true,
+            enabled: enabled !== false,
           }),
         }),
       );
@@ -2983,6 +3031,7 @@ describe('loadCliConfig', () => {
         bundledGeneratedUi: {
           enabled: true,
           unavailableReason: 'unsupported-runtime',
+          explicit: true,
         },
       }),
     );
@@ -4052,6 +4101,39 @@ describe('loadCliConfig', () => {
         tools: { webSearch: { maxPerSession: 10 } },
       });
       expect(config.getWebSearchSettings()).toEqual({ maxPerSession: 10 });
+    });
+
+    it('lets WEB_SEARCH_ALLOWED_HOSTS override tools.webSearch.allowedHosts', async () => {
+      vi.stubEnv(
+        'WEB_SEARCH_ALLOWED_HOSTS',
+        ' gw.example.com , other.example.net ,',
+      );
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'gw.example.com',
+        'other.example.net',
+      ]);
+    });
+
+    it('falls back to tools.webSearch.allowedHosts when the env var is empty', async () => {
+      vi.stubEnv('WEB_SEARCH_ALLOWED_HOSTS', '   ');
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'settings.example.com',
+      ]);
+    });
+
+    it('passes an allowedHosts-only setting through without other web search keys', async () => {
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['gw.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({
+        allowedHosts: ['gw.example.com'],
+      });
     });
 
     // Both modes must turn the tool off explicitly: leaving the settings
@@ -6307,6 +6389,49 @@ describe('loadCliConfig chatCompression', () => {
       imageTokenEstimate: 1234,
       maxRecentFilesToRetain: 7,
     });
+  });
+
+  it('passes model.loopProtection to the core config, defaulting to warn', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const load = (loopProtection?: unknown) =>
+      loadCliConfig(
+        { model: { loopProtection } } as Settings,
+        argv,
+        undefined,
+        [],
+      );
+    expect((await load('stop')).getLoopProtection()).toBe('stop');
+    expect((await load('off')).getLoopProtection()).toBe('off');
+    expect((await load()).getLoopProtection()).toBe('warn');
+    expect((await load('never')).getLoopProtection()).toBe('warn');
+  });
+
+  it('warns once about an invalid model.loopProtection value', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      for (let i = 0; i < 2; i++) {
+        const config = await loadCliConfig(
+          { model: { loopProtection: 'Stop' } } as unknown as Settings,
+          argv,
+          undefined,
+          [],
+        );
+        expect(config.getLoopProtection()).toBe('warn');
+      }
+      const warnings = errorSpy.mock.calls.filter(([message]) =>
+        String(message).includes('model.loopProtection'),
+      );
+      expect(warnings).toEqual([
+        [
+          'WARNING: Invalid model.loopProtection value "Stop": expected "warn", "stop" or "off"; using the default "warn".',
+        ],
+      ]);
+    } finally {
+      errorSpy.mockRestore();
+    }
   });
 
   it('should have undefined chatCompression if not in settings', async () => {

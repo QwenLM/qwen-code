@@ -2,6 +2,7 @@ import { expect, test, type Page, type TestInfo } from '@playwright/test';
 import type {
   JavaAgentEvent,
   JavaAgentSession,
+  JavaAgentTranscript,
 } from '../components/managed/java-managed-agent-client';
 import type { components } from '../components/managed/generated/managed-agent-api';
 import {
@@ -61,6 +62,9 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
       sessionId: SESSION_ID,
       turnId: summary.activeTurn!.turnId,
       type,
+      ...(type.startsWith('item.tool_')
+        ? { itemId: String(data.itemId ?? data.toolCallId) }
+        : {}),
       data,
       terminal: ['turn.completed', 'turn.cancelled'].includes(type),
     });
@@ -81,6 +85,8 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
       '',
     );
     const body = request.postDataJSON();
+    if (path.endsWith('/user-messages/query'))
+      return route.fulfill({ json: { paused: false, messages: [] } });
     const respond = (json: unknown, status = 200) =>
       route.fulfill({ status, json });
     if (path === '/sessions/query')
@@ -88,10 +94,12 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
     if (path === '/sessions/get') return respond(summary);
     if (path === '/transcript/query')
       return respond({
+        items: [],
         events,
+        coveredSequence: summary.lastSequence,
         lastSequence: summary.lastSequence,
         hasMore: false,
-      });
+      } satisfies JavaAgentTranscript);
     if (path === '/tool-details/get') {
       detailRequests.push({ sessionId: body.sessionId, itemId: body.itemId });
       const details = toolDetails.get(body.itemId);
@@ -140,6 +148,9 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
           turnId: summary.activeTurn!.turnId,
           status: 'accepted',
           replayed: false,
+          operationId: `operation-${summary.activeTurn!.turnId}`,
+          admissionStage: 'java_durable',
+          deliveryState: 'pending',
         },
         202,
       );
@@ -154,9 +165,22 @@ async function installManagedScenario(page: Page, testInfo: TestInfo) {
           turnId: body.turnId,
           status: 'accepted',
           replayed: false,
+          operationId: `operation-${summary.activeTurn!.turnId}`,
+          admissionStage: 'java_durable',
+          deliveryState: 'pending',
         },
         202,
       );
+    }
+    if (path === '/operations/query') {
+      return respond({
+        sessionId: SESSION_ID,
+        operationId: body.operationId,
+        type: 'cancel',
+        status:
+          summary.activeTurn?.status === 'cancelled' ? 'completed' : 'running',
+        replayed: false,
+      });
     }
     return respond({ error: `Unexpected Managed request: ${path}` }, 500);
   });
@@ -237,7 +261,7 @@ test('Managed progress stays visible through a long transcript and live thought/
     'Thinking / responding',
   );
   await expect(page.locator('[data-managed-progress]')).toBeInViewport();
-  await expect(composer).toHaveAttribute('contenteditable', 'false');
+  await expect(composer).toHaveAttribute('contenteditable', 'true');
   await expect(
     page
       .getByRole('region', { name: 'Managed conversation' })
@@ -580,7 +604,7 @@ test('Managed cancellation waits for settlement before continuing the same sessi
   await expect(page.locator('[data-managed-progress]')).toContainText(
     'Cancelling',
   );
-  await expect(composer).toHaveAttribute('contenteditable', 'false');
+  await expect(composer).toHaveAttribute('contenteditable', 'true');
   await expect(
     page
       .getByRole('region', { name: 'Managed conversation' })
@@ -629,7 +653,7 @@ test('a permanently failing pending create exposes a discard path @smoke', async
     },
   );
 
-  await page.getByRole('button', { name: 'New task', exact: true }).click();
+  await page.getByRole('button', { name: 'New session', exact: true }).click();
   const composer = page
     .getByRole('region', { name: 'Managed conversation' })
     .locator('[data-web-shell-composer-editor] .cm-content');

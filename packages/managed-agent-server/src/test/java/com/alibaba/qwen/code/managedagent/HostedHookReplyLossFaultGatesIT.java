@@ -31,7 +31,6 @@ import org.springframework.jdbc.core.JdbcTemplate;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.lang.reflect.Field;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
@@ -60,6 +59,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 import static org.junit.jupiter.api.Assertions.assertAll;
@@ -291,13 +292,13 @@ class HostedHookReplyLossFaultGatesIT {
                 "input", List.of(Map.of("type", "input_text", "text", prompt))), prompt, 202).path("turn_id").asText();
     }
 
-    private HttpResponse<String> harnessStatus(String session, HarnessAttach attach) throws Exception {
+    private HttpResponse<String> harnessStatus(String session, HarnessSessionRef attach) throws Exception {
         var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
                         + "/session/" + session + "/status"))
                 .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + TOKEN)
-                .header("X-Qwen-Client-Id", attach.clientId())
+                .header("X-Qwen-Client-Id", attach.getHarnessClientId())
                 .header("X-Qwen-Harness-Protocol-Version", "1")
-                .header("X-Qwen-Harness-Boot-Id", attach.bootId()).GET().build();
+                .header("X-Qwen-Harness-Boot-Id", attach.getHarnessBootId()).GET().build();
         return http.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
@@ -346,7 +347,7 @@ class HostedHookReplyLossFaultGatesIT {
         // A later poll of the same owner resolves the receipt the worker
         // still holds, without a second physical call.
         String executionId = hookExecution(session).path("hookExecutionId").asText();
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        HarnessSessionRef attach = attachment(spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment").isNotNull();
         waitFor(() -> {
             var status = hookStatus(session, executionId, attach);
@@ -470,7 +471,7 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(events("hook.allow")).isEmpty();
         // A later read of the same operation returns the same decision.
         String executionId = hookExecution(session).path("hookExecutionId").asText();
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        HarnessSessionRef attach = attachment(spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment").isNotNull();
         waitFor(() -> {
             var status = hookStatus(session, executionId, attach);
@@ -517,7 +518,7 @@ class HostedHookReplyLossFaultGatesIT {
         assertThat(events("hook.allow")).isEmpty();
         // A later read of the same operation settles the wrapped failure.
         String executionId = hookExecution(session).path("hookExecutionId").asText();
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        HarnessSessionRef attach = attachment(spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment").isNotNull();
         waitFor(() -> {
             var status = hookStatus(session, executionId, attach);
@@ -593,7 +594,7 @@ class HostedHookReplyLossFaultGatesIT {
         waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
         // submit() returns 202 before the connector's background attach, so
         // the lookup waits for the dispatch that the fired fault proves ran.
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        HarnessSessionRef attach = attachment(spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment").isNotNull();
         waitFor(() -> {
             var probe = harnessStatus(session, attach);
@@ -638,7 +639,7 @@ class HostedHookReplyLossFaultGatesIT {
         waitFor(() -> assertThat(hookExecution(session).at("/run/state")
                 .asText()).isEqualTo("settled"));
         assertThat(events("hook.call")).as("physical calls").hasSize(1);
-        HarnessAttach attach = attachment(
+        HarnessSessionRef attach = attachment(
                 spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment").isNotNull();
         String executionId = hookExecution(session)
@@ -771,7 +772,7 @@ class HostedHookReplyLossFaultGatesIT {
         waitFor(() -> assertThat(StoreFaultGate.INSTANCE.attempts()).isGreaterThanOrEqualTo(1));
         // submit() returns 202 before the connector's background attach, so
         // the lookup waits for the dispatch that the fired fault proves ran.
-        HarnessAttach attach = attachment(spring.getBean(HarnessConnector.class), session);
+        HarnessSessionRef attach = attachment(spring.getBean(HarnessConnector.class), session);
         assertThat(attach).as("Session attachment").isNotNull();
         waitFor(() -> {
             var probe = harnessStatus(session, attach);
@@ -804,29 +805,13 @@ class HostedHookReplyLossFaultGatesIT {
         StoreFaultGate.INSTANCE.clear();
     }
 
-    // The Harness status route identifies the caller by the client id its
-    // attach minted and the process generation it attached to; the connector
-    // keeps both on the private attachment ref.
-    private record HarnessAttach(String clientId, String bootId) {}
-
-    private HarnessAttach attachment(HarnessConnector connector, String session) throws Exception {
-        Field field = connector.getClass().getDeclaredField("attachments");
-        field.setAccessible(true);
-        for (Object value : ((Map<?, ?>) field.get(connector)).values()) {
-            if (value instanceof HarnessSessionRef ref && session.equals(ref.getHarnessSessionId())) {
-                return new HarnessAttach(ref.getHarnessClientId(), ref.getHarnessBootId());
-            }
-        }
-        return null;
-    }
-
-    private HttpResponse<String> hookStatus(String session, String executionId, HarnessAttach attach) throws Exception {
+    private HttpResponse<String> hookStatus(String session, String executionId, HarnessSessionRef attach) throws Exception {
         var request = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
                         + "/session/" + session + "/hooks/operations/" + executionId))
                 .timeout(Duration.ofSeconds(10)).header("Authorization", "Bearer " + TOKEN)
-                .header("X-Qwen-Client-Id", attach.clientId())
+                .header("X-Qwen-Client-Id", attach.getHarnessClientId())
                 .header("X-Qwen-Harness-Protocol-Version", "1")
-                .header("X-Qwen-Harness-Boot-Id", attach.bootId()).GET().build();
+                .header("X-Qwen-Harness-Boot-Id", attach.getHarnessBootId()).GET().build();
         return http.send(request, HttpResponse.BodyHandlers.ofString());
     }
 
@@ -974,10 +959,6 @@ class HostedHookReplyLossFaultGatesIT {
                 throw new AssertionError("Model fixture: " + temporary, modelFailure.get());
             }
         }).untilAsserted(assertion::execute);
-    }
-
-    private static String quote(String text) {
-        return "'" + text.replace("'", "'\"'\"'") + "'";
     }
 
     @AfterEach

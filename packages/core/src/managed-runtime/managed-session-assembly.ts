@@ -15,6 +15,7 @@ import type { SessionWriterLease } from '../services/session-writer-lease.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 import {
   ManagedSessionCommitRejectedError,
+  type ManagedSessionCommitProof,
   type ManagedSessionJournalStore,
   type ManagedSessionResourceStore,
 } from './managed-session-storage.js';
@@ -55,15 +56,14 @@ const MAX_RENEWAL_FAILURES = 3;
 function startActivationRenewal(
   authority: LocalManagedSessionAuthority,
   leaseDurationMs: number,
-): { stop: () => void } {
+): { stop: () => Promise<void> } {
   const intervalMs = Math.max(Math.floor(leaseDurationMs / 3), 1);
-  let inFlight = false;
+  let inFlight: Promise<void> | undefined;
   let failures = 0;
   let stopped = false;
   const timer = setInterval(() => {
     if (inFlight || stopped) return;
-    inFlight = true;
-    authority
+    inFlight = authority
       .renewActivation({ leaseDurationMs })
       .then(() => {
         if (!stopped) failures = 0;
@@ -104,7 +104,7 @@ function startActivationRenewal(
         }
       })
       .finally(() => {
-        inFlight = false;
+        inFlight = undefined;
       });
   }, intervalMs);
   timer.unref();
@@ -112,6 +112,7 @@ function startActivationRenewal(
     stop: () => {
       stopped = true;
       clearInterval(timer);
+      return inFlight ?? Promise.resolve();
     },
   };
 }
@@ -204,6 +205,7 @@ export interface ManagedSession {
    * refused by the fence.
    */
   releaseActivation(): Promise<void>;
+  prepareOwnershipRelease(): Promise<ManagedSessionCommitProof>;
   /**
    * Releases the current activation and installs a successor. The next Harness
    * handle must present the returned identity; the sink names it automatically.
@@ -259,6 +261,7 @@ export async function openManagedSession(
       runtimeBaseDir: options.runtimeBaseDir,
       sessionId: options.sessionId,
       transcriptPath: options.transcriptPath,
+      requireNew: options.requireNew,
       ...(options.lease === undefined ? {} : { lease: options.lease }),
     });
   const journal = await journalStore.open({ sessionKey: options.sessionKey });
@@ -323,6 +326,19 @@ export async function openManagedSession(
       return activation;
     },
     releaseActivation: () => authority.releaseActivation(),
+    prepareOwnershipRelease: async () => {
+      if (adopted)
+        throw new ManagedSessionRecordError(
+          'An adopted writer cannot release ownership.',
+        );
+      await renewal.stop();
+      await authority.releaseActivation();
+      if (authority.currentActivation?.phase !== 'released')
+        throw new ManagedSessionRecordError(
+          'Ownership release requires a released activation.',
+        );
+      return authority.commitProof;
+    },
     async replaceActivation(subject, activationId) {
       // Refuse before the release, or the current activation would be left
       // released with no successor.

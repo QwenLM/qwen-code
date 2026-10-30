@@ -31,6 +31,10 @@ import { trailingReattachPartCount } from '../../../services/image-payload-refer
 import { appendAutoMemoryContext } from '../../../memory/request-context.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
+import {
+  buildDashScopeSourceConfig,
+  QWENCLOUD_MAAS_HOSTS,
+} from '../../dashscope-source-config.js';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -396,6 +400,31 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       });
     });
 
+    // Admission and attribution read the same host list but apply different
+    // rules: admission suffix-matches (any MaaS subdomain is served as
+    // DashScope), attribution exact-matches only the bare and `token-plan.`
+    // forms. That split is deliberate — see the "Exact host match" bullet in
+    // docs/design/qwencloud-source-attribution.md — and its cost is that a new
+    // MaaS subdomain is routed as QwenCloud while going unattributed. Pinned on
+    // both sides so widening either one has to be a conscious edit.
+    it('admits every known QwenCloud host and its Token Plan form, and attributes both', () => {
+      for (const host of QWENCLOUD_MAAS_HOSTS) {
+        for (const baseUrl of [
+          `https://${host}/compatible-mode/v1`,
+          `https://token-plan.${host}/compatible-mode/v1`,
+        ]) {
+          expect(isDashScope(baseUrl)).toBe(true);
+          expect(buildDashScopeSourceConfig(baseUrl)).toBeDefined();
+        }
+      }
+    });
+
+    it('admits a MaaS subdomain that attribution deliberately leaves unattributed', () => {
+      const unattributed = 'https://other.maas.qwencloudapi.com/v1';
+      expect(isDashScope(unattributed)).toBe(true);
+      expect(buildDashScopeSourceConfig(unattributed)).toBeUndefined();
+    });
+
     it('should return false for non-DashScope configurations', () => {
       [
         'https://api.openai.com/v1',
@@ -517,6 +546,52 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'X-DashScope-OssResourceResolve',
       );
     });
+
+    it.each([
+      [undefined, 'qwen-code-cli'],
+      ['CLI', 'qwen-code-cli'],
+      ['desktop', 'qwen-code-desktop'],
+    ])(
+      'attributes channel %s over a conflicting custom header',
+      (channel, t1) => {
+        const headers = gen(
+          {
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://maas.qwencloudapi.com/compatible-mode/v1',
+            customHeaders: {
+              'x-dashscope-source-config': 'user',
+              'X-Custom': '1',
+            },
+          },
+          { ...mockCliConfig, getChannel: () => channel } as Config,
+        ).buildHeaders();
+
+        expect(headers['X-DashScope-Source-Config']).toBe(
+          JSON.stringify({
+            channel: 'qwencloud-inner-agents',
+            source: 'model',
+            tags: { t1, t2: 'payg' },
+          }),
+        );
+        expect(headers).not.toHaveProperty('x-dashscope-source-config');
+        expect(headers['X-Custom']).toBe('1');
+      },
+    );
+
+    it.each([
+      [
+        'Bailian',
+        AuthType.USE_OPENAI,
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      ],
+      // The registry's Qwen OAuth baseUrl; the real endpoint is swapped in at
+      // runtime from the OAuth credentials and is never a QwenCloud host.
+      ['Qwen OAuth', AuthType.QWEN_OAUTH, 'DYNAMIC_QWEN_OAUTH_BASE_URL'],
+    ])('should not attribute %s requests', (_name, authType, baseUrl) => {
+      expect(gen({ authType, baseUrl }).buildHeaders()).not.toHaveProperty(
+        'X-DashScope-Source-Config',
+      );
+    });
   });
 
   describe('buildClient', () => {
@@ -577,6 +652,53 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(OpenAI).toHaveBeenCalledWith(
         expect.objectContaining({ timeout: DISABLED_REQUEST_TIMEOUT_MS }),
       );
+    });
+
+    // The attribution value is first-party: the user's entry is replaced before
+    // the request is built, so their value can never reach the wire. The
+    // dynamic-header warning says it "will not be sent" and offers a switch
+    // that cannot help, which describes the wrong thing (#15107 item 2).
+    it('does not warn about a placeholder in the reserved attribution header', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const cli = {
+        ...mockCliConfig,
+        getChannel: () => 'CLI',
+        getOutboundAllowDynamicHeaderValues: () => false,
+      } as unknown as Config;
+
+      gen(
+        {
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://maas.qwencloudapi.com/compatible-mode/v1',
+          customHeaders: { 'x-dashscope-source-config': '${session_id}' },
+        },
+        cli,
+      ).buildClient();
+
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it('still warns about a placeholder in any other custom header', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const cli = {
+        ...mockCliConfig,
+        getChannel: () => 'CLI',
+        getOutboundAllowDynamicHeaderValues: () => false,
+      } as unknown as Config;
+
+      gen(
+        {
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://maas.qwencloudapi.com/compatible-mode/v1',
+          customHeaders: { 'X-Trace-Id': '${session_id}' },
+        },
+        cli,
+      ).buildClient();
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain('X-Trace-Id');
+      warn.mockRestore();
     });
   });
 
@@ -2008,6 +2130,37 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       ],
     ])('%s', (_title, model, extra, expected) => {
       expect(hello(model, extra)['max_tokens']).toBe(expected);
+    });
+
+    // DashScope serves MiniMax-M2.5 with a 32K cap, below the 64K default the
+    // shared table derives from the MiniMax API; anything above is a 400.
+    it.each([
+      ['the default', {}, 32768],
+      ['an over-cap request value', { max_tokens: 64000 }, 32768],
+      ['an in-cap request value', { max_tokens: 1000 }, 1000],
+    ])(
+      'caps MiniMax-M2.5 output at the DashScope limit for %s',
+      (_t, extra, expected) => {
+        expect(hello('MiniMax-M2.5', extra)['max_tokens']).toBe(expected);
+      },
+    );
+
+    it('caps an explicit samplingParams max_tokens for MiniMax-M2.5', () => {
+      const result = hello(
+        'MiniMax-M2.5',
+        { max_tokens: 64000 },
+        gen({ samplingParams: { max_tokens: 64000 } }),
+      );
+      expect(result['max_tokens']).toBe(32768);
+    });
+
+    it('caps an extra_body max_tokens for MiniMax-M2.5', () => {
+      const result = hello(
+        'MiniMax-M2.5',
+        {},
+        gen({ extra_body: { max_tokens: 64000 } }),
+      );
+      expect(result['max_tokens']).toBe(32768);
     });
 
     it('should preserve other request parameters when limiting max_tokens', () => {

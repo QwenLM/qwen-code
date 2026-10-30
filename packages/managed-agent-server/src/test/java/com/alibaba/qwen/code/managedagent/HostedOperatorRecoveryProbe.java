@@ -11,12 +11,12 @@ import org.springframework.boot.web.servlet.context.ServletWebServerApplicationC
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 
-import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermissions;
+import java.time.Duration;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -49,7 +49,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
     HostedOperatorRecoveryProbe(ServletWebServerApplicationContext spring, List<Map<String, Object>> sessions,
             Path state, HttpServer server) {
         this.spring = spring;
-        this.jdbc = spring.getBean(JdbcTemplate.class);
+        this.jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         this.sessions = sessions;
         this.state = state;
         broker = (RuntimeBrokerService) ReflectionTestUtils.getField(spring.getBean(EmbeddedRuntimeBroker.class), "service");
@@ -116,7 +116,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
                 while (Files.size(proof) == before && System.nanoTime() < deadline) {
                     Thread.sleep(20);
                 }
-                assertThat(running(escaped)).isTrue();
+                assertThat(HostedProcessLiveness.running(escaped)).isTrue();
                 assertThat(Files.size(proof)).as("escaped writer survives worker death").isGreaterThan(before);
                 assertHeld(binding, holder);
             }
@@ -202,7 +202,7 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
             return null;
         }
         var process = ProcessHandle.of(Long.parseLong(Files.readString(identity).strip())).orElse(null);
-        if (process == null || !running(process)) {
+        if (process == null || !HostedProcessLiveness.running(process)) {
             return null;
         }
         Path cwd;
@@ -251,39 +251,11 @@ final class HostedOperatorRecoveryProbe implements AutoCloseable {
         }
     }
 
-    private static boolean running(ProcessHandle process) throws IOException {
-        if (!process.isAlive()) {
-            return false;
-        }
-        Path stat = Path.of("/proc", Long.toString(process.pid()), "stat");
-        if (!Files.exists(stat)) {
-            return false;
-        }
-        return statRunning(process, stat);
-    }
-
-    static boolean statRunning(ProcessHandle process, Path stat) throws IOException {
-        try {
-            String value = Files.readString(stat);
-            return value.charAt(value.lastIndexOf(')') + 2) != 'Z';
-        } catch (IOException error) {
-            // A reaped process fails the read after the exists() probe (ENOENT, or ESRCH from an
-            // already-dead entry); re-check liveness so unrelated I/O failures still propagate.
-            if (!process.isAlive()) {
-                return false;
-            }
-            throw error;
-        }
-    }
-
     private void stopOwnedProcesses() throws Exception {
         processes.forEach(ProcessHandle::destroyForcibly);
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
         for (ProcessHandle process : processes) {
-            while (running(process)) {
-                assertThat(System.nanoTime()).as("Owned producer %s", process.pid()).isLessThan(deadline);
-                Thread.sleep(20);
-            }
+            HostedProcessLiveness.awaitStopped(process, Duration.ofNanos(deadline - System.nanoTime()), "Owned producer");
         }
     }
 

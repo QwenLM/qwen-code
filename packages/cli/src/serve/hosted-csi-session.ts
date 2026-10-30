@@ -313,6 +313,7 @@ async function initialize(
       activation,
       releaseActivation: deny,
       replaceActivation: deny,
+      prepareOwnershipRelease: deny,
       close: deny,
     };
     owner.timer = setInterval(() => {

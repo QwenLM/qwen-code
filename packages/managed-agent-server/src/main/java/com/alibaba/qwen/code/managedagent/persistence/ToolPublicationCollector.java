@@ -25,6 +25,9 @@ public final class ToolPublicationCollector {
     private static final Logger LOG = LoggerFactory.getLogger(ToolPublicationCollector.class);
     private static final long CLAIM_MILLIS = 60_000;
     private static final long PROTECTED_RECHECK_MILLIS = Duration.ofHours(24).toMillis();
+    // The Session collector deletes the owner rows this blocker waits on, so the handoff clears
+    // in seconds; a full claim interval there cost a retire its whole collection window (#15191).
+    private static final long HANDOFF_RECHECK_MILLIS = 5_000;
     private final JdbcTemplate jdbc;
     private final TransactionTemplate transactions;
     private final ToolPublicationRetentionStore retention;
@@ -248,21 +251,12 @@ public final class ToolPublicationCollector {
                                             properties.getToolPublication().getDeletionGrace();
                                     var observed = retention.candidate(capture, grace);
                                     if (observed.blocker() != null) {
-                                        long next = now + switch (observed.blocker()) {
-                                            case "legacy_write_evidence_missing", "quarantined",
-                                                    "not_accepted_complete", "recovery_protected" -> PROTECTED_RECHECK_MILLIS;
-                                            default -> CLAIM_MILLIS;
-                                        };
-                                        if ("grace_period".equals(observed.blocker())) {
-                                            long retiredAt =
-                                                    jdbc.queryForObject(
-                                                            "SELECT retired_at FROM ma_session"
-                                                                    + " WHERE tenant_id = ? AND"
-                                                                    + " session_id = ?",
-                                                            Long.class,
-                                                            tenant,
-                                                            session);
-                                            next = Math.addExact(retiredAt, grace.toMillis());
+                                        long next = nextAttempt(observed.blocker(), tenant, session,
+                                                now, grace);
+                                        if (!observed.blocker().equals(work.get("failure_code"))) {
+                                            LOG.info("Tool output collection held scope={}"
+                                                    + " publication={} blocker={}", scope,
+                                                    publication, observed.blocker());
                                         }
                                         jdbc.update(
                                                 "UPDATE ma_operation SET failure_code = ?, available_at = ?, gmt_modified = ? WHERE operation_key = ?",
@@ -312,6 +306,35 @@ public final class ToolPublicationCollector {
             }
         }
         return null;
+    }
+
+    private long nextAttempt(String blocker, String tenant, String session, long now,
+            Duration grace) {
+        return switch (blocker) {
+            case "legacy_write_evidence_missing", "quarantined", "not_accepted_complete",
+                    "recovery_protected" -> now + PROTECTED_RECHECK_MILLIS;
+            case "grace_period" -> Math.addExact(
+                    jdbc.queryForObject("SELECT retired_at FROM ma_session WHERE tenant_id = ?"
+                            + " AND session_id = ?", Long.class, tenant, session),
+                    grace.toMillis());
+            // The lease expiry is the instant this blocker can clear, but a graceful close
+            // deletes the row without moving the scheduled instant; the claim interval bounds
+            // that path.
+            case "reader_active" -> Math.min(
+                    ToolPublicationRetentionStore.earliestReadLeaseExpiry(jdbc, tenant, session),
+                    now + CLAIM_MILLIS);
+            // The Session collector deletes these owner rows and then marks its ledger complete,
+            // so this is a handoff in progress rather than a pinned publication.
+            case "resource_referenced" -> sessionCollectionPending(tenant, session)
+                    ? now + HANDOFF_RECHECK_MILLIS : now + CLAIM_MILLIS;
+            default -> now + CLAIM_MILLIS;
+        };
+    }
+
+    private boolean sessionCollectionPending(String tenant, String session) {
+        return !Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT resource_gc_completed FROM ma_session WHERE tenant_id = ? AND session_id"
+                        + " = ?", Boolean.class, tenant, session));
     }
 
     private boolean confirm(Claim claim, List<ObjectKey> page) {
