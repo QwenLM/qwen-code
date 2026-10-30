@@ -3021,6 +3021,12 @@ describe('SessionOverviewPanel', () => {
         session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
       );
       sessionsState.sessions = many;
+      const invalidators = batchSizes.map(() => vi.fn());
+      const capture = vi.fn();
+      for (const invalidate of invalidators) {
+        capture.mockReturnValueOnce(invalidate);
+      }
+      generatedUiOwner = deletionOwner(capture);
       const completeBatches: Array<() => void> = [];
       workspaceClient.deleteSessionsData.mockImplementation(
         async (ids: string[]) => {
@@ -3044,8 +3050,22 @@ describe('SessionOverviewPanel', () => {
           index + 1,
         );
         expect(completeBatches).toHaveLength(index + 1);
+        expect(capture).toHaveBeenCalledTimes(index + 1);
+        expect(capture).toHaveBeenNthCalledWith(index + 1, '/w');
+        expect(capture.mock.invocationCallOrder[index]).toBeLessThan(
+          workspaceClient.deleteSessionsData.mock.invocationCallOrder[index]!,
+        );
+        expect(invalidators[index]).not.toHaveBeenCalled();
         await act(async () => completeBatches[index]!());
         await flushAsync();
+        expect(invalidators[index]).toHaveBeenCalledExactlyOnceWith(
+          many
+            .slice(index * 100, (index + 1) * 100)
+            .map((item) => item.sessionId),
+        );
+      }
+      for (const invalidate of invalidators) {
+        expect(invalidate).toHaveBeenCalledOnce();
       }
 
       const batches = workspaceClient.deleteSessionsData.mock.calls.map(
@@ -4410,6 +4430,74 @@ describe('SessionOverviewPanel standalone sessions', () => {
       expect(call.value.deleteSessionsData).not.toHaveBeenCalled();
     }
   });
+
+  it.each(['per-session', 'request'] as const)(
+    'retains workspace and standalone delete failures for %s failures',
+    async (failure) => {
+      useConversationsRuntimeCapabilities();
+      sessionsState.sessions = [
+        session('primary', { displayName: 'Workspace row' }),
+      ];
+      standaloneListPage.mockResolvedValue({
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Standalone one',
+          }),
+          standaloneSession('st2', {
+            workspaceCwd: '/conv',
+            displayName: 'Standalone two',
+          }),
+        ],
+      });
+      workspaceClient.deleteSessionsData.mockResolvedValueOnce({
+        removed: [],
+        notFound: [],
+        errors: [{ sessionId: 'primary', error: 'workspace locked' }],
+      });
+      if (failure === 'request') {
+        workspaceClient.deleteStandaloneSessions.mockRejectedValueOnce(
+          new Error('solo unavailable'),
+        );
+      } else {
+        workspaceClient.deleteStandaloneSessions.mockResolvedValueOnce({
+          removed: [],
+          notFound: [],
+          errors: [
+            { sessionId: 'st1', message: 'solo locked' },
+            { sessionId: 'st2', message: 'solo busy' },
+          ],
+          fileCleanupPending: [],
+        });
+      }
+      render();
+      await flushAsync();
+      expect(rows()).toHaveLength(3);
+      act(() => click(selectAllCheckbox()));
+      act(() => click(footerButton('Delete')!));
+      act(() =>
+        click(
+          document.querySelector<HTMLElement>(
+            '[data-slot="alert-dialog-action"]',
+          )!,
+        ),
+      );
+      await flushAsync();
+
+      expect(
+        workspaceClient.deleteSessionsData,
+      ).toHaveBeenCalledExactlyOnceWith(['primary']);
+      expect(
+        workspaceClient.deleteStandaloneSessions,
+      ).toHaveBeenCalledExactlyOnceWith(['st1', 'st2']);
+      expect(container!.textContent).toContain(
+        `Failed to delete session: workspace locked; ${
+          failure === 'request' ? 'solo unavailable' : 'solo locked; solo busy'
+        }`,
+      );
+      expect(rows()).toHaveLength(3);
+    },
+  );
 
   it('labels a standalone row "No workspace" instead of the internal root', async () => {
     useConversationsRuntimeCapabilities();
