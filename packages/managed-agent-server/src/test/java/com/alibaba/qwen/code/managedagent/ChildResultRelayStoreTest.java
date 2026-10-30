@@ -670,7 +670,7 @@ class ChildResultRelayStoreTest {
                         + " item_status, attributes_json, first_sequence,"
                         + " last_sequence, gmt_create, gmt_modified, revision, parts_json)"
                         + " VALUES (?, ?, 'item-1', 'turn-1', 'message',"
-                        + " 'assistant', 'completed', '{}', 1, 3, 1, 1, 1, '[]')",
+                        + " 'assistant', 'completed', '{}', 1, 5, 1, 1, 1, '[]')",
                 TENANT, session);
         part(session, "item-1", "part-1", "output_text", "审阅通过", 2);
         // R1-90: pin the two decisions the result query makes — the
@@ -690,14 +690,100 @@ class ChildResultRelayStoreTest {
                         + " item_status, attributes_json, first_sequence,"
                         + " last_sequence, gmt_create, gmt_modified, revision, parts_json)"
                         + " VALUES (?, ?, 'item-2', 'turn-1', 'message', 'user',"
-                        + " 'completed', '{}', 4, 4, 1, 1, 1, '[]')",
+                        + " 'completed', '{}', 6, 6, 1, 1, 1, '[]')",
                 TENANT, session);
-        part(session, "item-2", "part-2", "output_text", "newer but not the child answer", 4);
-        part(session, "item-1", "part-3", "output_text", "第二段", 3);
-        part(session, "item-1", "part-4", "reasoning_text", "not the answer", 5);
+        part(session, "item-2", "part-2", "output_text", "newer but not the child answer", 6);
+        // The projection split part-1 from part-3 because another event
+        // landed at sequence 3, and the trailing reasoning part starts no
+        // line after the answer.
+        part(session, "item-1", "part-3", "output_text", "第二段", 4);
+        part(session, "item-1", "part-4", "reasoning", "not the answer", 5);
         assertThat(relayStore.terminalResultText(TENANT, session, "turn-1"))
-                .isEqualTo("审阅通过\n第二段");
+                .isEqualTo("审阅通过第二段");
     }
+
+    @Test
+    void separatesTextRunsOnlyWhereAReasoningPartLies() throws Exception {
+        String session = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO ma_session (tenant_id,"
+                        + " session_id, agent_id, status, gmt_create,"
+                        + " gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1,"
+                        + " 1)",
+                TENANT, session);
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
+                        + " turn_id, prompt_id, input_json, payload_digest,"
+                        + " status, submission_attempted, gmt_create,"
+                        + " gmt_modified, completed_at, version)"
+                        + " VALUES (?, ?, 'turn-1', 'prompt-separated', '[]', 'd',"
+                        + " 'COMPLETED', TRUE, 1, 2, 2, 1)", TENANT, session);
+        jdbc.update("INSERT INTO ma_message (tenant_id, session_id,"
+                        + " item_id, turn_id, item_type, item_role,"
+                        + " item_status, attributes_json, first_sequence,"
+                        + " last_sequence, gmt_create, gmt_modified, revision, parts_json)"
+                        + " VALUES (?, ?, 'item-1', 'turn-1', 'message',"
+                        + " 'assistant', 'completed', '{}', 1, 6, 1, 1, 1, '[]')",
+                TENANT, session);
+        part(session, "item-1", "part-1", "output_text", "审", 2);
+        part(session, "item-1", "part-2", "reasoning", "先看文件", 3);
+        part(session, "item-1", "part-3", "output_text", "阅通过", 4);
+        part(session, "item-1", "part-4", "output_text", "第二段", 6);
+        assertThat(relayStore.terminalResultText(TENANT, session, "turn-1"))
+                .isEqualTo("审\n阅通过第二段");
+    }
+
+    @Test
+    void startsNoLineWhenTheAnswerFollowsALeadingReasoningPart() throws Exception {
+        String session = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO ma_session (tenant_id,"
+                        + " session_id, agent_id, status, gmt_create,"
+                        + " gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1,"
+                        + " 1)",
+                TENANT, session);
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
+                        + " turn_id, prompt_id, input_json, payload_digest,"
+                        + " status, submission_attempted, gmt_create,"
+                        + " gmt_modified, completed_at, version)"
+                        + " VALUES (?, ?, 'turn-1', 'prompt-leading', '[]', 'd',"
+                        + " 'COMPLETED', TRUE, 1, 2, 2, 1)", TENANT, session);
+        jdbc.update("INSERT INTO ma_message (tenant_id, session_id,"
+                        + " item_id, turn_id, item_type, item_role,"
+                        + " item_status, attributes_json, first_sequence,"
+                        + " last_sequence, gmt_create, gmt_modified, revision, parts_json)"
+                        + " VALUES (?, ?, 'item-1', 'turn-1', 'message',"
+                        + " 'assistant', 'completed', '{}', 1, 3, 1, 1, 1, '[]')",
+                TENANT, session);
+        part(session, "item-1", "part-1", "reasoning", "先看文件", 2);
+        part(session, "item-1", "part-2", "output_text", "答案", 3);
+        assertThat(relayStore.terminalResultText(TENANT, session, "turn-1"))
+                .isEqualTo("答案");
+    }
+
+    @Test
+    void reportsNoResultForATurnThatOnlyThought() throws Exception {
+        String session = UUID.randomUUID().toString();
+        jdbc.update("INSERT INTO ma_session (tenant_id,"
+                        + " session_id, agent_id, status, gmt_create,"
+                        + " gmt_modified) VALUES (?, ?, 'qwen-code', 'ACTIVE', 1,"
+                        + " 1)",
+                TENANT, session);
+        jdbc.update("INSERT INTO ma_turn (tenant_id, session_id,"
+                        + " turn_id, prompt_id, input_json, payload_digest,"
+                        + " status, submission_attempted, gmt_create,"
+                        + " gmt_modified, completed_at, version)"
+                        + " VALUES (?, ?, 'turn-1', 'prompt-thought', '[]', 'd',"
+                        + " 'COMPLETED', TRUE, 1, 2, 2, 1)", TENANT, session);
+        jdbc.update("INSERT INTO ma_message (tenant_id, session_id,"
+                        + " item_id, turn_id, item_type, item_role,"
+                        + " item_status, attributes_json, first_sequence,"
+                        + " last_sequence, gmt_create, gmt_modified, revision, parts_json)"
+                        + " VALUES (?, ?, 'item-1', 'turn-1', 'message',"
+                        + " 'assistant', 'completed', '{}', 1, 2, 1, 1, 1, '[]')",
+                TENANT, session);
+        part(session, "item-1", "part-1", "reasoning", "先看文件", 2);
+        assertThat(relayStore.terminalResultText(TENANT, session, "turn-1"))
+                .isNull();
+    }
+
     private void part(String session, String item, String id, String type, String text, long sequence) throws Exception {
         var json = new com.fasterxml.jackson.databind.ObjectMapper();
         var parts = (com.fasterxml.jackson.databind.node.ArrayNode) json.readTree(jdbc.queryForObject(
