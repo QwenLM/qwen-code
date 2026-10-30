@@ -174,7 +174,7 @@ mvn -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true install
 mvn -f packages/managed-agent-server/pom.xml verify
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
+  --server-jar packages/managed-agent-server/server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --jre-home /verified/java-21-home \
   --out-dir /output/managed-runtime
 ```
@@ -182,7 +182,7 @@ npm run package:managed-runtime -- \
 The runtime builder only needs the matching server JAR, Java runtime and CLI
 version from this checkout. It does not require built CLI assets or a Node
 archive. By default it writes to
-`packages/managed-agent-server/target/managed-runtime`, outside the CLI's
+`packages/managed-agent-server/server/target/managed-runtime`, outside the CLI's
 `dist/` assets. It emits the runtime archive and a per-archive `.sha256` file. The
 normal CLI is built/released separately.
 
@@ -192,7 +192,7 @@ instead of `--jre-home`:
 ```sh
 npm run package:managed-runtime -- \
   --target darwin-arm64 \
-  --server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
+  --server-jar packages/managed-agent-server/server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --without-jre \
   --out-dir /output/managed-runtime
 ```
@@ -204,7 +204,7 @@ The lightweight builder needs no Java input. For an optional complete distributi
 npm run package:standalone -- \
   --target darwin-arm64 \
   --node-archive /verified/node-v22-darwin-arm64.tar.gz \
-  --managed-server-jar packages/managed-agent-server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
+  --managed-server-jar packages/managed-agent-server/server/target/qwen-managed-agent-server-0.1.0-alpha-exec.jar \
   --managed-jre-home /verified/java-21-home \
   --out-dir /output/managed-local
 ```
