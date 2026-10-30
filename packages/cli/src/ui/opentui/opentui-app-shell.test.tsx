@@ -40,6 +40,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { isValidElement, type ReactNode } from 'react';
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -106,6 +107,7 @@ const mocks = vi.hoisted(() => {
     inputProps: null as Record<string, unknown> | null,
     dialogProps: null as Record<string, unknown> | null,
     toolConfirmProps: null as Record<string, unknown> | null,
+    extensionSettingProps: null as Record<string, unknown> | null,
     shellConfirmProps: null as Record<string, unknown> | null,
     actionConfirmProps: null as Record<string, unknown> | null,
     mcpApprovalProps: null as Record<string, unknown> | null,
@@ -344,15 +346,20 @@ vi.mock('./dialogs-confirm.js', () => ({
     return (
       <>
         <span>action-confirm</span>
-        <span>
-          {typeof props['prompt'] === 'string' ? props['prompt'] : null}
-        </span>
+        <span>{props['prompt'] as ReactNode}</span>
       </>
     );
   },
   OpenTuiMcpApprovalDialog: (props: Record<string, unknown>) => {
     mocks.state.mcpApprovalProps = props;
     return 'mcp-approval';
+  },
+}));
+vi.mock('./ExtensionAcquisition.js', () => ({
+  ExtensionSettingInput: (props: Record<string, unknown>) => {
+    mocks.state.extensionSettingProps = props;
+    const permission = props['permission'] as { setting: { name: string } };
+    return <span>{`extension-setting:${permission.setting.name}`}</span>;
   },
 }));
 vi.mock('../hooks/useMcpApproval.js', () => ({
@@ -395,7 +402,12 @@ vi.mock('../hooks/useStatusLine.js', () => ({
   },
 }));
 
+const extensionManager = {
+  setRequestConsent: vi.fn(),
+  setRequestSetting: vi.fn(),
+};
 const CONFIG = {
+  getExtensionManager: () => extensionManager,
   getSessionId: () => 'test-session',
   getContextFilePaths: () => [],
   getAccessibility: () => ({}),
@@ -2630,6 +2642,299 @@ describe('OpenTuiApp shell wiring', () => {
     expect(
       screen.getByText('Session state was not re-keyed for the new session.'),
     ).toBeTruthy();
+  });
+
+  describe('direct extension setting owner', () => {
+    type Manager = ReturnType<Config['getExtensionManager']>;
+    type SettingRequest = NonNullable<
+      Parameters<Manager['setRequestSetting']>[0]
+    >;
+    type ConsentRequest = Parameters<Manager['setRequestConsent']>[0];
+    const setting = {
+      name: 'Owned label',
+      description: 'Required label',
+      envVar: 'OWNED_LABEL',
+    };
+    function owner() {
+      const register = vi.fn<(request: SettingRequest) => void>();
+      const consent = vi.fn<(request: ConsentRequest) => void>();
+      const config = {
+        ...CONFIG,
+        getExtensionManager: () => ({
+          setRequestSetting: register,
+          setRequestConsent: consent,
+        }),
+      } as unknown as Config;
+      return {
+        config,
+        register,
+        request: () => register.mock.calls.at(-1)![0],
+        consent: () => consent.mock.calls.at(-1)![0],
+      };
+    }
+    function shell(config: Config, streaming = false) {
+      return (
+        <OpenTuiApp
+          config={config}
+          settings={SETTINGS}
+          logger={null}
+          commands={[]}
+          getSessionStats={getSessionStats}
+          streaming={streaming}
+        />
+      );
+    }
+    function permission() {
+      return mocks.state.extensionSettingProps!['permission'] as {
+        resolve: (value: string) => void;
+        cancel: () => void;
+      };
+    }
+    it('owns setting input instead of composer and keeps exact value across rerenders', async () => {
+      const o = owner();
+      const view = render(shell(o.config));
+      await settle();
+      let pending!: Promise<string>;
+      await act(async () => {
+        pending = o.request()(setting);
+      });
+      expect(screen.getByText('extension-setting:Owned label')).toBeTruthy();
+      expect(screen.queryByText('input-prompt')).toBeNull();
+      view.rerender(shell(o.config, true));
+      await settle();
+      expect(o.register).toHaveBeenCalledTimes(1);
+      await act(async () => permission().resolve('owned-value'));
+      await expect(pending).resolves.toBe('owned-value');
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    });
+    it('keeps settings and consent in one FIFO without sharing resolution', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let value!: Promise<string>;
+      let consent!: Promise<void>;
+      await act(async () => {
+        value = o.request()(setting);
+        consent = o.consent()({
+          extensionConfig: { name: 'queued', version: '1.0.0' },
+          originSource: 'QwenCode',
+        });
+      });
+      expect(screen.getByText('extension-setting:Owned label')).toBeTruthy();
+      expect(screen.queryByText(/Installing extension "queued"/)).toBeNull();
+      await act(async () => permission().resolve('exact'));
+      await expect(value).resolves.toBe('exact');
+      expect(screen.getByText(/Installing extension "queued"/)).toBeTruthy();
+      await act(async () =>
+        (
+          mocks.state.actionConfirmProps!['onResolve'] as (yes: boolean) => void
+        )(true),
+      );
+      await expect(consent).resolves.toBeUndefined();
+    });
+    it('keeps consecutive setting requests independent and ignores the old submit', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let first!: Promise<string>;
+      let second!: Promise<string>;
+      await act(async () => {
+        first = o.request()(setting);
+        second = o.request()({
+          ...setting,
+          name: 'Second label',
+          envVar: 'SECOND_LABEL',
+        });
+      });
+      const old = permission();
+      expect(screen.queryByText('extension-setting:Second label')).toBeNull();
+      await act(async () => old.resolve('first-value'));
+      await expect(first).resolves.toBe('first-value');
+      expect(screen.getByText('extension-setting:Second label')).toBeTruthy();
+      const next = permission();
+      expect(next).not.toBe(old);
+      await act(async () => old.resolve('stale-value'));
+      expect(screen.getByText('extension-setting:Second label')).toBeTruthy();
+      await act(async () => next.resolve('second-value'));
+      await expect(second).resolves.toBe('second-value');
+    });
+    it('rejects a cancelled setting without committing a value', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let pending!: Promise<string>;
+      await act(async () => {
+        pending = o.request()(setting);
+      });
+      const rejected = pending.catch((error: unknown) => error);
+      await act(async () => permission().cancel());
+      await expect(rejected).resolves.toMatchObject({
+        message: 'Setting input cancelled',
+      });
+      expect(screen.getByText('input-prompt')).toBeTruthy();
+    });
+    it.each(['replacement', 'unmount'] as const)(
+      'rejects stale setting ownership on %s',
+      async (change) => {
+        const old = owner();
+        const next = owner();
+        const view = render(shell(old.config));
+        await settle();
+        const captured = old.request();
+        let pending!: Promise<string>;
+        await act(async () => {
+          pending = captured(setting);
+        });
+        const rejected = pending.catch((error: unknown) => error);
+        const late = permission().resolve;
+        await act(async () => {
+          if (change === 'replacement') view.rerender(shell(next.config));
+          else view.unmount();
+        });
+        await expect(rejected).resolves.toMatchObject({
+          message: 'Setting input cancelled',
+        });
+        await expect(captured(setting)).rejects.toThrow(
+          'Setting input cancelled',
+        );
+        await act(async () => late('stale'));
+        if (change === 'replacement') {
+          let fresh!: Promise<string>;
+          await act(async () => {
+            fresh = next.request()(setting);
+          });
+          await act(async () => permission().resolve('new'));
+          await expect(fresh).resolves.toBe('new');
+          expect(next.register).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
+  });
+
+  describe('direct extension consent owner', () => {
+    type Consent = Parameters<
+      ReturnType<Config['getExtensionManager']>['setRequestConsent']
+    >[0];
+    const options = (name: string) => ({
+      extensionConfig: { name, version: '1.0.0' },
+      originSource: 'QwenCode' as const,
+    });
+    function owner() {
+      const register = vi.fn<(request: Consent) => void>();
+      const config = {
+        ...CONFIG,
+        getExtensionManager: () => ({
+          setRequestConsent: register,
+          setRequestSetting: vi.fn(),
+        }),
+      } as unknown as Config;
+      return {
+        config,
+        register,
+        request: () => register.mock.calls.at(-1)![0],
+      };
+    }
+    function shell(config: Config, streaming = false) {
+      return (
+        <OpenTuiApp
+          config={config}
+          settings={SETTINGS}
+          logger={null}
+          commands={[]}
+          getSessionStats={getSessionStats}
+          streaming={streaming}
+        />
+      );
+    }
+    const answer = (yes: boolean) =>
+      (mocks.state.actionConfirmProps!['onResolve'] as (yes: boolean) => void)(
+        yes,
+      );
+
+    it('formats direct consent and preserves its pending owner on ordinary rerenders', async () => {
+      const o = owner();
+      const view = render(shell(o.config));
+      await settle();
+      let pending!: Promise<void>;
+      await act(async () => {
+        pending = o.request()(options('owned'));
+      });
+      const prompt = mocks.state.actionConfirmProps!['prompt'];
+      expect(isValidElement(prompt)).toBe(true);
+      if (!isValidElement(prompt))
+        throw new Error('native prompt node missing');
+      // buildJsxRuntime maps native text to span; raw strings still fail above.
+      expect(prompt.type).toBe('span');
+      expect(screen.getByText(/Installing extension "owned"/)).toBeTruthy();
+      view.rerender(shell(o.config, true));
+      await settle();
+      expect(o.register).toHaveBeenCalledTimes(1);
+      expect(screen.getByText(/Installing extension "owned"/)).toBeTruthy();
+      await act(async () => answer(true));
+      await expect(pending).resolves.toBeUndefined();
+    });
+
+    it('keeps independent FIFO Yes and No resolutions', async () => {
+      const o = owner();
+      render(shell(o.config));
+      await settle();
+      let first!: Promise<void>;
+      let second!: Promise<void>;
+      await act(async () => {
+        first = o.request()(options('first'));
+        second = o.request()(options('second'));
+      });
+      const rejected = second.catch((error: unknown) => error);
+      expect(screen.getByText(/Installing extension "first"/)).toBeTruthy();
+      expect(screen.queryByText(/Installing extension "second"/)).toBeNull();
+      await act(async () => answer(true));
+      await expect(first).resolves.toBeUndefined();
+      expect(screen.getByText(/Installing extension "second"/)).toBeTruthy();
+      await act(async () => answer(false));
+      await expect(rejected).resolves.toMatchObject({
+        message: expect.stringContaining('Installation cancelled'),
+      });
+    });
+
+    it.each(['replacement', 'unmount'] as const)(
+      'rejects pending and captured stale callbacks on %s',
+      async (change) => {
+        const old = owner();
+        const next = owner();
+        const view = render(shell(old.config));
+        await settle();
+        const captured = old.request();
+        let pending!: Promise<void>;
+        await act(async () => {
+          pending = captured(options('old'));
+        });
+        const rejected = pending.catch((error: unknown) => error);
+        const late = mocks.state.actionConfirmProps!['onResolve'] as (
+          yes: boolean,
+        ) => void;
+        await act(async () => {
+          if (change === 'replacement') view.rerender(shell(next.config));
+          else view.unmount();
+        });
+        await expect(rejected).resolves.toMatchObject({
+          message: expect.stringContaining('Installation cancelled'),
+        });
+        await expect(captured(options('stale'))).rejects.toThrow(
+          'Extension installation cancelled',
+        );
+        await act(async () => late(true));
+        if (change === 'replacement') {
+          expect(screen.queryByText(/Installing extension "old"/)).toBeNull();
+          let fresh!: Promise<void>;
+          await act(async () => {
+            fresh = next.request()(options('new'));
+          });
+          await act(async () => answer(true));
+          await expect(fresh).resolves.toBeUndefined();
+          expect(next.register).toHaveBeenCalledTimes(1);
+        }
+      },
+    );
   });
 
   it('renders the shell confirmation modal and settles with its resolution', async () => {
