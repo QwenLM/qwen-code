@@ -10,7 +10,8 @@ export function formatTokenCount(count: number): string {
  * exact locale-grouped counts instead.
  */
 export function formatContextTokens(count: number): string {
-  if (count >= 1_000_000) return `${(count / 1_000_000).toFixed(1)}M`;
+  // 999,950 rounds to 1000.0k, so it belongs in the next unit.
+  if (count >= 999_950) return `${(count / 1_000_000).toFixed(1)}M`;
   if (count >= 1000) return `${(count / 1000).toFixed(1)}k`;
   return `${count}`;
 }
