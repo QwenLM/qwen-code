@@ -1,7 +1,10 @@
 package com.alibaba.qwen.code.managedagent.preflight;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.sun.net.httpserver.HttpServer;
+import org.flywaydb.core.Flyway;
+import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.core.env.StandardEnvironment;
@@ -13,6 +16,8 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.Connection;
 import java.sql.DriverManager;
+import java.sql.SQLException;
+import java.sql.Statement;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Base64;
@@ -20,6 +25,7 @@ import java.util.Collections;
 import java.util.List;
 import java.util.Optional;
 import java.util.Set;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -2056,6 +2062,80 @@ class ManagedAgentPreflightTest {
                 ManagedAgentPreflight.findManifest(relative.toString()));
         assertEquals("999",
                 ManagedAgentPreflight.expectedSchemaVersion(manifest));
+    }
+
+    @Test
+    void readsAnOlderSchemaAsTheUpgradeTheFirstStartFinishes() {
+        ManagedAgentPreflight.SchemaValidation valid = () -> {};
+        for (String[] same : new String[][] {
+                {"2", "2"}, {null, "2"}, {"2", null}, {"1.0", "1"}}) {
+            assertEquals(ManagedAgentPreflight.Status.PASS,
+                    ManagedAgentPreflight.schemaCheck(same[0], same[1], valid)
+                            .status(), same[0] + "/" + same[1]);
+        }
+        // Flyway order, not text order: 1.9 comes before 1.10.
+        ManagedAgentPreflight.Check older =
+                ManagedAgentPreflight.schemaCheck("1.9", "1.10", valid);
+        assertEquals(ManagedAgentPreflight.Status.WARN, older.status());
+        assertEquals("schema=1.9; the first start migrates it to 1.10,"
+                + " which only a database backup undoes", older.detail());
+        ManagedAgentPreflight.Check newer =
+                ManagedAgentPreflight.schemaCheck("10", "9", valid);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, newer.status());
+        assertEquals("schema=10 but the manifest expects 9", newer.detail());
+        assertEquals(ManagedAgentPreflight.Status.FAIL,
+                ManagedAgentPreflight.schemaCheck("2a", "2", valid).status());
+    }
+
+    @Test
+    void validatesASchemaAtThisReleasesVersionAsTheServerDoes() {
+        int[] runs = {0};
+        ManagedAgentPreflight.SchemaValidation rewritten = () -> {
+            runs[0]++;
+            throw new SQLException(
+                    "Managed schema column is missing: ma_session.x");
+        };
+        ManagedAgentPreflight.Check check =
+                ManagedAgentPreflight.schemaCheck("1", "1", rewritten);
+        assertEquals(ManagedAgentPreflight.Status.FAIL, check.status());
+        assertEquals("schema=1 does not match this distribution: Managed"
+                + " schema column is missing: ma_session.x", check.detail());
+        // Neither a fresh database nor one an upgrade has yet to migrate is
+        // held to this release's baseline.
+        assertEquals(ManagedAgentPreflight.Status.PASS,
+                ManagedAgentPreflight.schemaCheck(null, "1", rewritten)
+                        .status());
+        assertEquals(ManagedAgentPreflight.Status.WARN,
+                ManagedAgentPreflight.schemaCheck("1", "2", rewritten)
+                        .status());
+        assertEquals(1, runs[0]);
+    }
+
+    @Test
+    void holdsAMigratedDatabaseToTheBaselineThisReleaseShips() throws Exception {
+        JdbcDataSource source = new JdbcDataSource();
+        source.setURL("jdbc:h2:mem:preflight-schema-" + UUID.randomUUID()
+                + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE");
+        Flyway.configure()
+                .dataSource(source)
+                .locations(ManagedSchema.FLYWAY_LOCATION)
+                .load()
+                .migrate();
+        try (Connection connection = source.getConnection()) {
+            assertEquals(ManagedAgentPreflight.Status.PASS,
+                    ManagedAgentPreflight.schemaCheck(connection, "1").status());
+            // What a release that rewrote its baseline finds in the database.
+            try (Statement statement = connection.createStatement()) {
+                statement.execute("ALTER TABLE ma_operation"
+                        + " DROP CONSTRAINT ck_ma_operation_kind");
+            }
+            ManagedAgentPreflight.Check rewritten =
+                    ManagedAgentPreflight.schemaCheck(connection, "1");
+            assertEquals(ManagedAgentPreflight.Status.FAIL, rewritten.status());
+            assertTrue(rewritten.detail().startsWith(
+                    "schema=1 does not match this distribution: "),
+                    rewritten.detail());
+        }
     }
 
     @Test

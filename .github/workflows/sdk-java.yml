@@ -1373,9 +1373,9 @@ jobs:
     # that a failing integration test there no longer skips them: they need
     # only the bundled CLI, the server jar and a runner-private mysqld, not
     # its MySQL service or cgroup root. Each arm also runs when an earlier
-    # one failed. Ceilings: 22 arms × 10 = 220 plus ~13 minutes for the
-    # uncapped setup steps (Checkout.. Install MySQL binaries): 233 + 2.
-    timeout-minutes: 235
+    # one failed. Ceilings: 24 arms × 10 = 240 plus ~13 minutes for the
+    # uncapped setup steps (Checkout.. Install MySQL binaries): 253 + 2.
+    timeout-minutes: 255
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     steps:
@@ -1524,6 +1524,11 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
+      - name: 'Run takeover load reply-loss E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-load-reply-lost
       - name: 'Run committed terminal reply-loss E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
@@ -1534,6 +1539,11 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-terminal-write-failed
+      - name: 'Run refused cleanup release E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-cleanup-failed
       - name: 'Run Harness-restart continuation closeout E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10

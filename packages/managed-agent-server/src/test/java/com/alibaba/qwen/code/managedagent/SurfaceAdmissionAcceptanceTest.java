@@ -205,7 +205,7 @@ class SurfaceAdmissionAcceptanceTest {
         assertThat(artifacts).isNotEmpty();
         artifactId = artifacts.getFirst().descriptor().path("id").asText();
         artifactItemId = fixture.sessions()
-                .findSnapshot(ARTIFACT_TENANT, ARTIFACT_SESSION).orElseThrow()
+                .findMessagePage(ARTIFACT_TENANT, ARTIFACT_SESSION, null, 100, false)
                 .items().getFirst().itemId();
         jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                 + " workspace_id, workspace_generation, storage_id,"
@@ -1557,6 +1557,10 @@ class SurfaceAdmissionAcceptanceTest {
         if (path.startsWith("/internal/managed-session-store/")
                 && "GET".equals(entry.method())) {
             query.add("workspaceId=ws");
+        }
+        if (path.endsWith("/transactions:lookup")) {
+            query.add("operation=session.create");
+            query.add("commandId=command-genesis");
         }
         if (!query.isEmpty()) {
             path += "?" + String.join("&", query);

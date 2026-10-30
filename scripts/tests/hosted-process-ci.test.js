@@ -145,6 +145,18 @@ const failoverArms = [
     ],
   ],
   [
+    'Run takeover load reply-loss E2E',
+    'test:e2e:managed-harness-restart-approval-load-reply-lost',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'load-reply-lost',
+    ],
+  ],
+  [
     'Run committed terminal reply-loss E2E',
     'test:e2e:managed-harness-restart-approval-terminal-reply-lost',
     [
@@ -166,6 +178,18 @@ const failoverArms = [
       'allow',
       '--g3-fault',
       'terminal-write-failed',
+    ],
+  ],
+  [
+    'Run refused cleanup release E2E',
+    'test:e2e:managed-harness-restart-approval-cleanup-failed',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'cleanup-failed',
     ],
   ],
   [
@@ -601,8 +625,8 @@ describe('Hosted real-process gates', () => {
     // Step ceilings today (201 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
     ['hosted-harness-mysql', 291, 304],
-    // Twenty-two failover arms at 10 each.
-    ['hosted-failover-e2e', 220, 235],
+    // Twenty-four failover arms at 10 each.
+    ['hosted-failover-e2e', 240, 255],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling) => {
