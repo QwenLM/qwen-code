@@ -226,21 +226,37 @@ function createLegacyReadable(
   textDecoder: TextDecoderLike,
   hooks?: NdJsonStreamHooks,
 ): ReadableStream<AnyMessage> {
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let canceled = false;
   return new ReadableStream<AnyMessage>({
     async start(controller) {
       const pending: Uint8Array[] = [];
-      const reader = input.getReader();
+      reader = input.getReader();
       try {
         while (true) {
           const { value, done } = await reader.read();
-          if (done) break;
+          if (canceled || done) break;
           if (!value) continue;
-          readLegacyChunk(value, pending, controller, textDecoder, hooks);
+          readLegacyChunk(
+            value,
+            pending,
+            controller,
+            textDecoder,
+            hooks,
+            () => canceled,
+          );
         }
       } finally {
         reader.releaseLock();
-        controller.close();
+        if (!canceled) controller.close();
       }
+    },
+    // Defensive parity with bounded cancellation; current in-tree callers do
+    // not cancel this legacy readable. A connection holding its reader must
+    // cancel through that reader, since readable.cancel() rejects while locked.
+    async cancel(reason) {
+      canceled = true;
+      if (reader) await cancelReader(reader, reason);
     },
   });
 }
@@ -454,11 +470,13 @@ function readLegacyChunk(
   pending: Uint8Array[],
   controller: ReadableStreamDefaultController<AnyMessage>,
   textDecoder: TextDecoderLike,
-  hooks?: NdJsonStreamHooks,
+  hooks: NdJsonStreamHooks | undefined,
+  isCanceled: () => boolean,
 ): void {
   let start = 0;
   let newline = chunk.indexOf(0x0a, start);
   while (newline !== -1) {
+    if (isCanceled()) return;
     const lineBytes = takeLegacyLineBytes(
       pending,
       chunk.subarray(start, newline),
