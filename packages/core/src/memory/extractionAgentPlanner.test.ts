@@ -6,6 +6,7 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
+import type { Content } from '@google/genai';
 import { runAutoMemoryExtractionByAgent } from './extractionAgentPlanner.js';
 import { scanAutoMemoryTopicDocuments } from './structured-scan.js';
 import {
@@ -969,5 +970,68 @@ describe('runAutoMemoryExtractionByAgent', () => {
     const taskPrompt = vi.mocked(runForkedAgent).mock.calls[0]?.[0].taskPrompt;
     expect(taskPrompt).toContain('## Existing keyword vocabulary');
     expect(taskPrompt).toContain('terse responses');
+  });
+
+  it('sends a byte-identical extraHistory prefix across stable-window runs', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+    const first: Content[] = [
+      { role: 'user', parts: [{ text: 'I prefer pnpm.' }] },
+      { role: 'model', parts: [{ text: 'Noted.' }] },
+      { role: 'user', parts: [{ text: 'And terse replies.' }] },
+      { role: 'model', parts: [{ text: 'Understood.' }] },
+    ];
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [], undefined, {
+      curatedHistory: first,
+      windowStart: 0,
+    });
+    const grown: Content[] = [
+      ...first,
+      { role: 'user', parts: [{ text: 'One more preference.' }] },
+      { role: 'model', parts: [{ text: 'Noted again.' }] },
+    ];
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [], undefined, {
+      curatedHistory: grown,
+      windowStart: 0,
+    });
+
+    const calls = vi.mocked(runForkedAgent).mock.calls;
+    const firstExtra = calls[0]?.[0].extraHistory ?? [];
+    const secondExtra = calls[1]?.[0].extraHistory ?? [];
+    expect(firstExtra).toHaveLength(first.length);
+    expect(secondExtra).toHaveLength(grown.length);
+    // The pinned start makes the second run's history a strict extension of
+    // the first: everything before the task prompt is a reusable prefix.
+    expect(secondExtra.slice(0, firstExtra.length)).toEqual(firstExtra);
+  });
+
+  it('slices the stable window at the pinned curated index and ignores parked slices', async () => {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: [],
+      filesWritten: [],
+    });
+    const curated: Content[] = [
+      { role: 'user', parts: [{ text: 'covered-0' }] },
+      { role: 'model', parts: [{ text: 'covered-1' }] },
+      { role: 'user', parts: [{ text: 'window-2' }] },
+      { role: 'model', parts: [{ text: 'window-3' }] },
+    ];
+    await runAutoMemoryExtractionByAgent(
+      mockConfig,
+      '/tmp',
+      [{ role: 'user', parts: [{ text: 'parked turn' }] }],
+      undefined,
+      { curatedHistory: curated, windowStart: 2 },
+    );
+
+    const extraHistory =
+      vi.mocked(runForkedAgent).mock.calls[0]?.[0].extraHistory;
+    expect(extraHistory).toEqual(curated.slice(2));
   });
 });

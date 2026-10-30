@@ -9,6 +9,7 @@ import {
 } from './acp-channel-fallback.js';
 import { PRIVATE_CONVERSATIONS_RUNTIME_ENV } from '@qwen-code/qwen-code-core/conversationsRuntimeMarker';
 import { EXTRACT_NOOP_SKIP_TURNS_ENV } from '@qwen-code/qwen-code-core/memory/extract-cadence.js';
+import { EXTRACT_STABLE_WINDOW_ENV } from '@qwen-code/qwen-code-core/memory/extract-window.js';
 
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
@@ -80,6 +81,10 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // the paired runs measure. A repository must not switch it on for every
   // session in that repo through its own `.env`.
   EXTRACT_NOOP_SKIP_TURNS_ENV,
+  // The stable extraction-window experiment (#15493) is in the same class: an
+  // operator decision that changes the extractor's input shape, not something
+  // a repository may switch on for every session in it.
+  EXTRACT_STABLE_WINDOW_ENV,
   // Workflow execution is an explicit user opt-in. A project must not enable
   // it or override a user opt-in through settings.env or a project .env.
   'QWEN_CODE_ENABLE_WORKFLOWS',

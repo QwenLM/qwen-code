@@ -1518,6 +1518,9 @@ export class ChatCompressionService {
         config
           .getMemoryManager?.()
           ?.invalidatePendingExtract(config.getSessionId(), config);
+        // The same rewrite replaces the curated prefix a pinned stable
+        // extraction window started at (#15493).
+        config.getMemoryManager?.()?.invalidateExtractWindow();
       }
 
       return { newHistory: candidate.newHistory, info: candidate.info };

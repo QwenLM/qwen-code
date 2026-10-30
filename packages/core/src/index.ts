@@ -572,6 +572,7 @@ export * from './utils/toolResultDisplayCompaction.js';
 // Tests: new MemoryManager()
 export * from './memory/manager.js';
 export { getExtractNoopSkipTurns } from './memory/extract-cadence.js';
+export { isStableExtractionWindowEnabled } from './memory/extract-window.js';
 
 // Foundational utilities (paths, storage scaffold, type definitions, constants)
 // that are legitimately needed by UI code (MemoryDialog, commands, etc.)

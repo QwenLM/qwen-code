@@ -20,6 +20,10 @@ import {
 } from './indexer.js';
 import { refreshMemoryInstruction } from './refresh.js';
 import { getCacheSafeParamsSessionId } from '../agents/forkedAgent.js';
+import {
+  EXTRACT_STABLE_WINDOW_ENV,
+  hashCuratedEntry,
+} from './extract-window.js';
 
 vi.mock('./extractionAgentPlanner.js', () => ({
   runAutoMemoryExtractionByAgent: vi.fn(),
@@ -892,6 +896,268 @@ describe('auto-memory extraction', () => {
       });
 
       expect(result.cursor.processedOffset).toBe(1);
+    });
+  });
+
+  // #15493: opt-in stable extraction window. The extractor input is
+  // curated[windowStart..] and windowStart is pinned per epoch instead of
+  // sliding with the last-40 tail.
+  describe('stable extraction window (#15493, opt-in)', () => {
+    const progressResult = {
+      touchedTopics: [],
+      touchedProjectScope: false,
+      touchedUserScope: false,
+      hasToolActivity: true,
+      systemMessage: undefined,
+    };
+
+    function curated(count: number, prefix = 'curated'): Content[] {
+      const history: Content[] = [];
+      for (let i = 0; i < count; i++) {
+        history.push({
+          role: i % 2 === 0 ? 'user' : 'model',
+          parts: [{ text: `${prefix}-${i}` }],
+        });
+      }
+      if (history.length > 0 && history[history.length - 1].role === 'user') {
+        history.push({ role: 'model', parts: [{ text: `${prefix}-ack` }] });
+      }
+      return history;
+    }
+
+    function rawHistory(count: number): Content[] {
+      return Array.from({ length: count }, (_, i) => ({
+        role: i % 2 === 0 ? 'user' : 'model',
+        parts: [{ text: `raw-${i}` }],
+      })) as Content[];
+    }
+
+    async function readCursor(): Promise<Record<string, unknown>> {
+      return JSON.parse(
+        await fs.readFile(getAutoMemoryExtractCursorPath(projectRoot), 'utf-8'),
+      ) as Record<string, unknown>;
+    }
+
+    async function seedCursor(cursor: Record<string, unknown>): Promise<void> {
+      await fs.writeFile(
+        getAutoMemoryExtractCursorPath(projectRoot),
+        `${JSON.stringify(cursor, null, 2)}\n`,
+        'utf-8',
+      );
+    }
+
+    beforeEach(() => {
+      vi.mocked(runAutoMemoryExtractionByAgent).mockResolvedValue(
+        progressResult,
+      );
+      process.env[EXTRACT_STABLE_WINDOW_ENV] = '1';
+    });
+
+    afterEach(() => {
+      delete process.env[EXTRACT_STABLE_WINDOW_ENV];
+    });
+
+    it('pins one curated start across consecutive runs', async () => {
+      const first = curated(6);
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: rawHistory(2),
+        getCuratedHistory: () => first,
+        extractWindowEpochId: 'token:0',
+      });
+      // A turn lands between the runs; the covered index is now behind.
+      const grown = [
+        ...first,
+        { role: 'user' as const, parts: [{ text: 'another request' }] },
+        { role: 'model' as const, parts: [{ text: 'another answer' }] },
+      ];
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: rawHistory(4),
+        getCuratedHistory: () => grown,
+        extractWindowEpochId: 'token:0',
+      });
+
+      const calls = vi.mocked(runAutoMemoryExtractionByAgent).mock.calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[0]?.[4]).toEqual({ curatedHistory: first, windowStart: 0 });
+      expect(calls[1]?.[4]).toEqual({ curatedHistory: grown, windowStart: 0 });
+
+      const cursor = await readCursor();
+      expect(cursor['epoch']).toBe(1);
+      expect(cursor['windowStartCurated']).toBe(0);
+      expect(cursor['coveredCurated']).toBe(grown.length);
+      expect(cursor['windowEpochId']).toBe('token:0');
+    });
+
+    it('rebases on a restart identity instead of reusing the old prefix', async () => {
+      const first = curated(60);
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: rawHistory(2),
+        getCuratedHistory: () => first,
+        extractWindowEpochId: 'token:0',
+      });
+      const grown = [...first, ...curated(2, 'appended')];
+      // A new process gets a new token, so the persisted window cannot be
+      // trusted even though the session id survived a /resume.
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: rawHistory(4),
+        getCuratedHistory: () => grown,
+        extractWindowEpochId: 'token-restarted:0',
+      });
+
+      const calls = vi.mocked(runAutoMemoryExtractionByAgent).mock.calls;
+      expect(calls[0]?.[4]).toMatchObject({ windowStart: 20 });
+      expect(calls[1]?.[4]).toMatchObject({ windowStart: 22 });
+      const cursor = await readCursor();
+      expect(cursor['epoch']).toBe(2);
+      expect(cursor['windowStartCurated']).toBe(22);
+    });
+
+    it('rebases on a session change', async () => {
+      const first = curated(60);
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: rawHistory(2),
+        getCuratedHistory: () => first,
+        extractWindowEpochId: 'token:0',
+      });
+      const otherConfig = {
+        getSessionId: vi.fn().mockReturnValue('session-2'),
+        getModel: vi.fn().mockReturnValue('qwen3-coder-plus'),
+      } as unknown as Config;
+      vi.mocked(getCacheSafeParamsSessionId).mockReturnValue('session-2');
+      const other = curated(60, 'other');
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-2',
+        config: otherConfig,
+        history: rawHistory(2),
+        getCuratedHistory: () => other,
+        extractWindowEpochId: 'token:0',
+      });
+
+      const calls = vi.mocked(runAutoMemoryExtractionByAgent).mock.calls;
+      expect(calls[1]?.[4]).toMatchObject({ windowStart: 20 });
+      const cursor = await readCursor();
+      expect(cursor['sessionId']).toBe('session-2');
+      expect(cursor['epoch']).toBe(2);
+    });
+
+    it('rebases when compaction rewrote the pinned start entry', async () => {
+      const first = curated(60);
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: rawHistory(2),
+        getCuratedHistory: () => first,
+        extractWindowEpochId: 'token:0',
+      });
+      const rewritten = first.map((entry, index) =>
+        index === 20
+          ? { role: 'user' as const, parts: [{ text: 'compaction summary' }] }
+          : entry,
+      );
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: rawHistory(4),
+        getCuratedHistory: () => rewritten,
+        extractWindowEpochId: 'token:0',
+      });
+
+      const cursor = await readCursor();
+      expect(cursor['epoch']).toBe(2);
+      // The pinned index would have pointed at different bytes.
+      expect(cursor['windowHeadHash']).toBe(hashCuratedEntry(rewritten[20]));
+    });
+
+    it('seeds a rebased epoch no later than the unextracted tail', async () => {
+      const history = curated(50);
+      await seedCursor({
+        sessionId: 'session-1',
+        processedOffset: 2,
+        updatedAt: new Date(0).toISOString(),
+        epoch: 1,
+        windowStartCurated: 0,
+        coveredCurated: 3,
+        windowHeadHash: hashCuratedEntry(history[0]),
+        windowEpochId: 'token:0',
+      });
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: rawHistory(4),
+        getCuratedHistory: () => history,
+        extractWindowEpochId: 'token:1',
+      });
+
+      const calls = vi.mocked(runAutoMemoryExtractionByAgent).mock.calls;
+      expect(calls[0]?.[4]).toMatchObject({ windowStart: 3 });
+      const cursor = await readCursor();
+      expect(cursor['epoch']).toBe(2);
+      expect(cursor['windowStartCurated']).toBe(3);
+      // Everything after index 3 was unextracted and is still in the window.
+      expect(cursor['coveredCurated']).toBe(history.length);
+    });
+
+    it('keeps the legacy last-40 tail path and cursor shape when the flag is off', async () => {
+      delete process.env[EXTRACT_STABLE_WINDOW_ENV];
+      const history = curated(60);
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: rawHistory(2),
+        getCuratedHistory: () => history,
+        extractWindowEpochId: 'token:0',
+      });
+
+      const calls = vi.mocked(runAutoMemoryExtractionByAgent).mock.calls;
+      expect(calls[0]?.[4]).toBeUndefined();
+      expect(Object.keys(await readCursor()).sort()).toEqual([
+        'processedOffset',
+        'sessionId',
+        'updatedAt',
+      ]);
+    });
+
+    it('reads a pre-experiment cursor and starts a fresh epoch', async () => {
+      const history = curated(12);
+      await seedCursor({
+        sessionId: 'session-1',
+        processedOffset: 2,
+        updatedAt: new Date(0).toISOString(),
+      });
+      await runAutoMemoryExtract({
+        projectRoot,
+        sessionId: 'session-1',
+        config: mockConfig,
+        history: rawHistory(4),
+        getCuratedHistory: () => history,
+        extractWindowEpochId: 'token:0',
+      });
+
+      const cursor = await readCursor();
+      expect(cursor['epoch']).toBe(1);
+      expect(cursor['windowStartCurated']).toBe(0);
+      expect(cursor['coveredCurated']).toBe(history.length);
+      expect(cursor['windowEpochId']).toBe('token:0');
     });
   });
 });

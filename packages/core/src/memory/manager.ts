@@ -209,6 +209,13 @@ export interface ScheduleExtractParams {
    * its cursor write must not move that project cursor backwards.
    */
   flushReplay?: boolean;
+  /**
+   * Opt-in stable extraction window (#15493): returns the parent's CURATED
+   * history. Stored as a closure so the per-turn schedule path never
+   * materializes it; `runAutoMemoryExtract` calls it once at extraction
+   * execution time and only while the experiment flag is on.
+   */
+  getCuratedHistory?: () => Content[];
 }
 
 export interface ScheduleSkillReviewParams {
@@ -760,6 +767,16 @@ export class MemoryManager {
     string,
     { pending: ScheduleExtractParams; run: Promise<boolean> }
   >();
+  // Stable extraction window epoch identity (#15493), in memory only. It is
+  // persisted with the extraction cursor: the process token changes on
+  // restart and the generation is bumped by every boundary that rewrites the
+  // curated history in place, so a later run compares identities instead of
+  // trusting a start index the live history may no longer have.
+  private readonly extractWindowToken = randomUUID();
+  private extractWindowGeneration = 0;
+  private getExtractWindowEpochId(): string {
+    return `${this.extractWindowToken}:${this.extractWindowGeneration}`;
+  }
 
   // ── Skill-review in-flight dedup ─────────────────────────────────────────────
   private readonly skillReviewInFlightByProject = new Map<string, string>();
@@ -1634,6 +1651,22 @@ export class MemoryManager {
   discardExtractCadence(...sessionIds: string[]): void {
     this.cadenceDiscardEpoch += 1;
     for (const sessionId of sessionIds) this.extractCadence.delete(sessionId);
+    // A switch starts a new extraction window epoch too (#15493): `/resume`
+    // restores a session id this manager saw before, so the id alone cannot
+    // tell a stale window from a live one.
+    this.invalidateExtractWindow();
+  }
+
+  /**
+   * #15493: records that the curated history was rewritten in place — a
+   * compaction, `/clear`, or a rewind/branch — so the next extraction of the
+   * opt-in stable window starts a new epoch instead of reusing a prefix the
+   * live history no longer holds. Boundaries that rewrite history may not know
+   * which session's extraction is affected (a compaction runs per chat), so the
+   * generation is manager-wide: an unaffected session loses one cache reuse.
+   */
+  invalidateExtractWindow(): void {
+    this.extractWindowGeneration += 1;
   }
 
   /**
@@ -1919,7 +1952,14 @@ export class MemoryManager {
         };
       }
 
-      const result = await runAutoMemoryExtract(params);
+      // The stable-window epoch identity is stamped where the run actually
+      // starts, not where it was scheduled: a history-rewriting boundary that
+      // landed while this request waited must rebase it rather than let it
+      // reuse a window the live history no longer has (#15493).
+      const result = await runAutoMemoryExtract({
+        ...params,
+        extractWindowEpochId: this.getExtractWindowEpochId(),
+      });
       this.recordCadenceOutcome(params, result, cadenceEpoch);
       if (result.touchedUserScope && params.config) {
         await this.recordUserMutation(
@@ -3207,6 +3247,10 @@ export class MemoryManager {
     // reset holds the old value and would otherwise pass the guard and re-arm
     // an id this helper just cleared.
     this.cadenceDiscardEpoch += 1;
+    // Same reasoning for the stable-window generation (#15493): a run holding
+    // the pre-reset value must rebase rather than reuse a window this helper's
+    // caller is pretending was never computed.
+    this.invalidateExtractWindow();
   }
 
   /** Reset all dream scheduling state. */

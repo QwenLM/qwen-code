@@ -94,6 +94,22 @@ export interface UserAutoMemoryMetadata {
 
 export interface AutoMemoryExtractCursor {
   sessionId?: string;
+  /**
+   * RAW-history index covered by extraction. Never compare this with the
+   * curated-window fields below: curation merges and drops entries, so raw and
+   * curated index spaces are not interchangeable.
+   */
   processedOffset?: number;
   updatedAt: string;
+  /**
+   * Opt-in stable extraction window state (#15493,
+   * `QWEN_CODE_MEMORY_EXTRACT_STABLE_WINDOW`). Every offset here is a CURATED
+   * history index. All fields are absent unless the experiment has run for
+   * this project, so a pre-experiment cursor stays readable.
+   */
+  epoch?: number;
+  windowStartCurated?: number;
+  coveredCurated?: number;
+  windowHeadHash?: string;
+  windowEpochId?: string;
 }
