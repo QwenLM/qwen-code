@@ -363,8 +363,13 @@ export function getSlashCommandArgumentHint(
   if (!cmd) return null;
 
   const subcommandPath = match[2]?.trim();
-  if (cmd.source === 'skill')
-    return subcommandPath ? null : cmd.argumentHint?.trim() || null;
+  if (cmd.source === 'skill') {
+    const hint = cmd.argumentHint?.trim();
+    if (!hint) return null;
+    return subcommandPath
+      ? getRemainingSkillArgumentHint(hint, subcommandPath)
+      : hint;
+  }
   if (subcommandPath) {
     const parts = subcommandPath.split(/\s+/);
     if (cmdName === 'skills' && parts.length === 1) {
@@ -407,6 +412,136 @@ export function getSlashCommandArgumentHint(
   if (!nodes || nodes.length === 0) return null;
 
   return `[${nodes.map((node) => node.name).join('|')}]`;
+}
+
+type SkillHintToken =
+  | { kind: 'placeholder'; text: string; freeText: boolean }
+  | { kind: 'flag'; text: string; flags: string[]; valueHint: string | null }
+  | { kind: 'literal'; text: string; alternatives: string[] };
+
+function splitHintParts(
+  text: string,
+  isSeparator: (ch: string) => boolean,
+): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (const ch of text) {
+    if (ch === '<' || ch === '[') depth++;
+    else if (ch === '>' || ch === ']') depth = Math.max(0, depth - 1);
+    if (depth === 0 && isSeparator(ch)) {
+      if (current) parts.push(current);
+      current = '';
+    } else {
+      current += ch;
+    }
+  }
+  if (current) parts.push(current);
+  return parts;
+}
+
+function parseSkillHintToken(text: string): SkillHintToken {
+  if (text.startsWith('<') && text.endsWith('>')) {
+    return {
+      kind: 'placeholder',
+      text,
+      freeText: /\s/.test(text.slice(1, -1)),
+    };
+  }
+  if (text.startsWith('[') && text.endsWith(']')) {
+    const inner = text.slice(1, -1).trim();
+    if (inner.startsWith('--')) {
+      const spaceIdx = inner.search(/\s/);
+      const flagPart = spaceIdx === -1 ? inner : inner.slice(0, spaceIdx);
+      return {
+        kind: 'flag',
+        text,
+        flags: flagPart.split('|'),
+        valueHint: spaceIdx === -1 ? null : inner.slice(spaceIdx).trim(),
+      };
+    }
+    return { kind: 'placeholder', text, freeText: /\s/.test(inner) };
+  }
+  return { kind: 'literal', text, alternatives: text.split('|') };
+}
+
+function matchSkillHintBranch(
+  tokens: SkillHintToken[],
+  typed: string[],
+): { remaining: string[]; literals: number } | null {
+  const consumed = new Array<boolean>(tokens.length).fill(false);
+  const pendingValue = new Array<boolean>(tokens.length).fill(false);
+  let literals = 0;
+  let ti = 0;
+  while (ti < typed.length) {
+    const word = typed[ti];
+    if (word.startsWith('--')) {
+      const idx = tokens.findIndex(
+        (t, i) => !consumed[i] && t.kind === 'flag' && t.flags.includes(word),
+      );
+      if (idx !== -1) {
+        consumed[idx] = true;
+        literals++;
+        ti++;
+        const token = tokens[idx];
+        if (token.kind === 'flag' && token.valueHint) {
+          if (ti < typed.length && !typed[ti].startsWith('--')) ti++;
+          else pendingValue[idx] = true;
+        }
+        continue;
+      }
+      const prefixIdx = tokens.findIndex(
+        (t, i) =>
+          !consumed[i] &&
+          t.kind === 'flag' &&
+          t.flags.some((flag) => flag.startsWith(word)),
+      );
+      // A flag still being typed: keep it and everything not yet consumed.
+      if (prefixIdx !== -1) break;
+      return null;
+    }
+    const idx = tokens.findIndex((t, i) => !consumed[i] && t.kind !== 'flag');
+    if (idx === -1) return null;
+    const token = tokens[idx];
+    if (token.kind === 'literal') {
+      if (!token.alternatives.includes(word)) return null;
+      literals++;
+    }
+    consumed[idx] = true;
+    ti = token.kind === 'placeholder' && token.freeText ? typed.length : ti + 1;
+  }
+  const remaining: string[] = [];
+  for (let i = 0; i < tokens.length; i++) {
+    const token = tokens[i];
+    if (pendingValue[i] && token.kind === 'flag' && token.valueHint) {
+      remaining.push(token.valueHint);
+    } else if (!consumed[i]) {
+      remaining.push(token.text);
+    }
+  }
+  return { remaining, literals };
+}
+
+function getRemainingSkillArgumentHint(
+  argumentHint: string,
+  argsText: string,
+): string | null {
+  const typed = argsText.split(/\s+/).filter(Boolean);
+  if (!typed.length) return argumentHint;
+  // Hints may describe alternative modes separated by top-level '|' (e.g.
+  // autofix-pr's "... | status [<pr>] | stop [<pr>]"). Prefer the branch with
+  // the most literal matches so a mode word like "status" is not swallowed by
+  // an earlier branch's optional placeholder.
+  let best: { remaining: string[]; literals: number } | null = null;
+  for (const branch of splitHintParts(argumentHint, (ch) => ch === '|')) {
+    const tokens = splitHintParts(branch.trim(), (ch) => /\s/.test(ch)).map(
+      parseSkillHintToken,
+    );
+    const result = matchSkillHintBranch(tokens, typed);
+    if (result && (!best || result.literals > best.literals)) best = result;
+  }
+  if (!best || !best.remaining.length) return null;
+  return best.remaining.join(' ');
 }
 
 function getLineBounds(text: string, cursor: number) {
