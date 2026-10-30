@@ -201,11 +201,11 @@ class WorkspaceSchemaConsolidationTest {
         java.util.List<Object[]> resources = new java.util.ArrayList<>();
         java.util.List<Object[]> roots = new java.util.ArrayList<>();
         for (int index = 0; index < 4098; index++) {
-            String id = index == 0 ? "checkpoint" : "public-page-" + index;
+            String id = index == 0 ? "checkpoint" : "public-body-" + index;
             String resource = WorkspaceOperations.hash(scope, id);
             resources.add(new Object[] {resource, scope, id.getBytes(StandardCharsets.UTF_8),
-                    index == 0 ? "managed-checkpoint" : "managed-public-snapshot-page", WorkspaceEvidenceResources.digest(body), body});
-            roots.add(new Object[] {scope, index == 0 ? "JOURNAL" : "SNAPSHOT", WorkspaceOperations.hash("owner", id), resource,
+                    index == 0 ? "managed-checkpoint" : "managed-message-parts", WorkspaceEvidenceResources.digest(body), body});
+            roots.add(new Object[] {scope, index == 0 ? "JOURNAL" : "MESSAGE", WorkspaceOperations.hash("owner", id), resource,
                     index == 0 ? 1L : null, id.getBytes(StandardCharsets.UTF_8)});
         }
         jdbc.batchUpdate("INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, workspace_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, publish_command_id, state, gmt_create) VALUES (?, ?, 'tenant', 'root', 'session', ?, ?, 1, 2, ?, 'MYSQL_INLINE', ?, 'fixture', 'REFERENCED', " + ManagedSchemaTime.SQL_NOW + ")", resources);
