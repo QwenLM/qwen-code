@@ -2938,18 +2938,34 @@ describe('tool output logic', () => {
     const oldLines = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`);
     const newLines = [...oldLines];
     newLines[99] = 'updated line 100';
+    // Whole-file previews window around the change; fragments render
+    // headerless, so their fixture stays inside the row bound (an edit that
+    // carries more rows than that is file content, covered separately below).
+    const fragmentOld = oldLines.slice(90, 110).join('\n');
+    const fragmentNew = newLines.slice(90, 110).join('\n');
     for (const args of [
-      { oldText: oldLines.join('\n'), newText: newLines.join('\n') },
-      { old_string: oldLines.join('\n'), new_string: newLines.join('\n') },
+      {
+        oldText: oldLines.join('\n'),
+        newText: newLines.join('\n'),
+        expected: buildUnifiedDiff(oldLines.join('\n'), newLines.join('\n')),
+      },
+      {
+        old_string: fragmentOld,
+        new_string: fragmentNew,
+        expected: buildUnifiedDiff(fragmentOld, fragmentNew),
+      },
     ]) {
+      const { expected, ...payload } = args;
       for (const status of ['pending', 'in_progress'] as const) {
-        const diff = extractDiff(makeTool({ toolName: 'edit', status, args }));
-        if ('oldText' in args) {
+        const diff = extractDiff(
+          makeTool({ toolName: 'edit', status, args: payload }),
+        );
+        if ('oldText' in payload) {
           expect(diff).toContain('@@ -97,7 +97,7 @@');
           expect(diff.split('\n')).toHaveLength(9);
         } else {
           expect(diff).not.toContain('@@');
-          expect(diff).toBe(buildUnifiedDiff(args.old_string, args.new_string));
+          expect(diff).toBe(expected);
         }
         expect(diff).toContain('-line 100\n+updated line 100');
         expect(
@@ -2957,18 +2973,47 @@ describe('tool output logic', () => {
             makeTool({
               toolName: 'edit',
               status,
-              args: { ...args, patch: 'supplied patch' },
+              args: { ...payload, patch: 'supplied patch' },
             }),
           ),
         ).toBe('supplied patch');
       }
       expect(
-        extractDiff(makeTool({ toolName: 'edit', status: 'completed', args })),
-      ).toBe(buildUnifiedDiff(oldLines.join('\n'), newLines.join('\n')));
+        extractDiff(
+          makeTool({ toolName: 'edit', status: 'completed', args: payload }),
+        ),
+      ).toBe(expected);
       expect(
-        extractDiff(makeTool({ toolName: 'edit', status: 'failed', args })),
+        extractDiff(
+          makeTool({ toolName: 'edit', status: 'failed', args: payload }),
+        ),
       ).toBe('');
     }
+  });
+
+  it('omits a pending fragment that would render more rows than the card may hold', () => {
+    // 600 rows with one changed line is ~5.3k characters a side, so the
+    // character gate let it through and the approval card rendered the entire
+    // fragment behind the button the user was about to press. Rows are the
+    // unit the card pays for, so they are what the gate counts.
+    const oldLines = Array.from({ length: 600 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[299] = 'updated line 300';
+    const args = {
+      old_string: oldLines.join('\n'),
+      new_string: newLines.join('\n'),
+    };
+    expect(args.old_string.length).toBeLessThan(10_000);
+    for (const status of ['pending', 'in_progress'] as const) {
+      expect(extractDiff(makeTool({ toolName: 'edit', status, args }))).toBe(
+        DIFF_OMITTED_MARKER,
+      );
+    }
+    // A finished call shows what it did: the bound belongs to the waiting
+    // state, not to the record.
+    expect(
+      extractDiff(makeTool({ toolName: 'edit', status: 'completed', args })),
+    ).toBe(buildUnifiedDiff(args.old_string, args.new_string));
   });
 
   it('omits oversized pending args previews instead of fabricating a whole-file rewrite', () => {

@@ -1,3 +1,13 @@
+// This module imports no translator, and never will: `t()` cannot reach it, so
+// the alternative explanations it emits are ASCII markers resolved by the
+// render boundary (see `localizeDiffNotice`). It does import the diff *escape*
+// primitives, because a row that is copied must be the row that was painted —
+// see `diffPreviewText`.
+import {
+  DIFF_INVISIBLE_CHARACTERS,
+  escapeDiffContent,
+} from '../components/messages/tools/diffContent';
+
 // Cap the LCS table's memory: `dp` allocates (n+1) * (m+1) numbers, so an
 // asymmetric edit (small n+m but large n*m) can still balloon into an
 // enormous 2D array here. Callers that need a size gate on the raw payload
@@ -175,6 +185,7 @@ export function buildUnifiedDiff(oldText: string, newText: string): string {
   }
 
   const result: string[] = [];
+  let changed = false;
   let i = n,
     j = m;
   while (i > 0 || j > 0) {
@@ -184,11 +195,29 @@ export function buildUnifiedDiff(oldText: string, newText: string): string {
       j--;
     } else if (j > 0 && (i === 0 || dp[i][j - 1] >= dp[i - 1][j])) {
       result.push(`+${newLines[j - 1]}`);
+      changed = true;
       j--;
     } else {
       result.push(`-${oldLines[i - 1]}`);
+      changed = true;
       i--;
     }
+  }
+
+  // `splitLines` drops the final terminator from both sides and keeps a bare
+  // `\r` as content, so two texts can differ and still yield identical line
+  // arrays: `'a\r\n'` and `'a\r'` both split to `['a\r']` (the `\n` was a
+  // terminator, the `\r` was not). The LCS then has nothing to mark and emits a
+  // context-only patch, which the card reads as "nothing changed" for an edit
+  // that does change the file — the same false certification the identical-pair
+  // gate above prevents, reached through the CR side instead of the LF side.
+  // Line rows cannot express this difference, so answer it the way the bounded
+  // builder does: with a terminator notice, which is a header rather than a row
+  // and therefore never claims the bodies were compared.
+  if (!changed && oldText !== newText) {
+    return newText.endsWith('\n')
+      ? DIFF_TRAILING_NEWLINE_ADDED_MARKER
+      : DIFF_TRAILING_NEWLINE_REMOVED_MARKER;
   }
 
   const rows = result.reverse().join('\n');
@@ -404,13 +433,33 @@ export function parseUnifiedDiff(diff: string): {
 }
 
 /**
+ * The text a diff row paints, which is not the text it holds.
+ *
+ * `DiffView` splits every row on {@link DIFF_INVISIBLE_CHARACTERS} and renders
+ * each part through `escapeDiffContent`, so a bidi override reaches the screen
+ * as `\u202e` inside an "Invisible character" span. A copier that skipped that
+ * transform would hand over the live byte the pane exists to defuse — pasted
+ * into a terminal it reorders whatever follows, which is the payload this whole
+ * preview is about. Splitting first and escaping the parts is what the renderer
+ * does; mapping the whole string through the same helper yields the same text,
+ * because the class above already covers every character the helper rewrites.
+ */
+function escapeDiffRow(content: string): string {
+  return content
+    .split(DIFF_INVISIBLE_CHARACTERS)
+    .map(escapeDiffContent)
+    .join('');
+}
+
+/**
  * The plain text a diff preview shows, for the surfaces that copy instead of
  * render (the trajectory inspector's Copy button). It answers with the same
- * marker localization and the same verdict-row removal `DiffView` performs, and
- * repeats its marker column (`+`, `-`, a space), so Copy cannot disagree with
- * the pane it sits under: a marker-only preview copies as its localized
- * sentence rather than the internal `\diff-omitted` token, and a
- * certified-CRLF row copies without the `\r` the pane hides.
+ * marker localization, the same verdict-row removal and the same invisible
+ * character escaping `DiffView` performs, and repeats its marker column (`+`,
+ * `-`, a space), so Copy cannot disagree with the pane it sits under: a
+ * marker-only preview copies as its localized sentence rather than the internal
+ * `\diff-omitted` token, a certified-CRLF row copies without the `\r` the pane
+ * hides, and an uncertified row copies the `\r` the pane prints as text.
  */
 export function diffPreviewText(
   diff: string,
@@ -441,7 +490,7 @@ export function diffPreviewText(
             : line.type === 'context'
               ? ' '
               : '';
-      return `${marker}${content}`;
+      return `${marker}${escapeDiffRow(content)}`;
     })
     .join('\n');
 }

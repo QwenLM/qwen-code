@@ -13,9 +13,9 @@ import {
 } from './unifiedDiff';
 
 // The builder must emit an ASCII-safe marker, not a user-facing sentence: this
-// module is import-free, so the `t()` catalog can only reach the notice at the
-// render boundary. Asserting through a stub translator means re-hardcoding an
-// English literal into the builder turns these cases red.
+// module imports no translator, so the `t()` catalog can only reach the notice
+// at the render boundary. Asserting through a stub translator means
+// re-hardcoding an English literal into the builder turns these cases red.
 const stubT = (key: string) => `[${key}]`;
 
 describe('buildContextBoundedDiff', () => {
@@ -376,6 +376,24 @@ describe('CRLF uniformity is decided at the source layer', () => {
     );
   });
 
+  it('reports a CR-only difference as a terminator notice, not as "no change"', () => {
+    // `'a\r\n'` and `'a\r'` split to the same line array `['a\r']` — the `\n`
+    // was a terminator, the surviving `\r` is content — so the LCS had nothing
+    // to mark and emitted a context-only patch: a completed edit card read as
+    // "nothing changed" for a file that lost its newline. Rows cannot express
+    // the difference, so the builder answers with the notice the bounded
+    // builder already returns for this pair.
+    expect(buildUnifiedDiff('a\r\n', 'a\r')).toBe(
+      DIFF_TRAILING_NEWLINE_REMOVED_MARKER,
+    );
+    expect(buildUnifiedDiff('a\r', 'a\r\n')).toBe(
+      DIFF_TRAILING_NEWLINE_ADDED_MARKER,
+    );
+    // A pair that differs in its rows is untouched: the notice is for the
+    // shapes rows cannot show, not a shortcut for every CR-bearing edit.
+    expect(buildUnifiedDiff('a\r\nb\r\n', 'a\r\nc\r\n')).toContain('-b\r\n+c');
+  });
+
   it('keeps an insertion preview of a sole blank line as a content row', () => {
     // The terminator gate needs both sides non-empty. `extractDiff` builds
     // insertion previews from `('', newText)`, and
@@ -594,9 +612,25 @@ describe('diffPreviewText', () => {
     expect(diffPreviewText(diff, stubT)).toBe('@@ -1,1 +1,1 @@\n-a\n+b\n');
   });
 
-  it('keeps the verdict row when it was never certified', () => {
+  it('keeps the verdict row when it was never certified, and copies the CR', () => {
     const diff = `${DIFF_CRLF_MIXED_MARKER}\n@@ -1,1 +1,1 @@\n-a\r\n+b\r\n`;
-    expect(diffPreviewText(diff, stubT)).toBe('@@ -1,1 +1,1 @@\n-a\r\n+b\r\n');
+    // Mixed file: the pane keeps the verdict row and paints each row's `\r` as
+    // text, because there it is content. Copy reads the same preview, so it has
+    // to hand over the characters that were painted.
+    expect(diffPreviewText(diff, stubT)).toBe(
+      '@@ -1,1 +1,1 @@\n-a\\r\n+b\\r\n',
+    );
+  });
+
+  it('escapes an invisible character into the form the pane paints', () => {
+    // `DiffView` renders every row through the invisible-character escape and
+    // shows `\u202e` inside an "Invisible character" span. A copier that wrote
+    // the live byte would re-arm the override in whatever the paste lands in —
+    // the exact payload this preview exists to defuse.
+    const diff = '@@ -1,2 +1,2 @@\n-safe\u202elooking\n+safe\u202elooking\n';
+    expect(diffPreviewText(diff, stubT)).toBe(
+      '@@ -1,2 +1,2 @@\n-safe\\u202elooking\n+safe\\u202elooking\n',
+    );
   });
 
   it('repeats the marker column the pane draws', () => {

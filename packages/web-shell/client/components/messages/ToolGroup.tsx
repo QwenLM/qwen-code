@@ -219,13 +219,23 @@ export function extractDiff(tool: ACPToolCall): string {
     // or the pending card renders the whole file while it waits.
     if (!hasWholeFileText && isActiveToolStatus(tool.status)) {
       const MAX_PENDING_FRAGMENT_CHARS = 10_000;
+      // Characters are the wrong unit on their own: a 600-line fragment with a
+      // single changed line is ~5.3k characters a side, so it passed the gate
+      // and the card rendered six hundred rows — or, for a rewritten block, a
+      // rewrite the file never contained — behind a button the user is about
+      // to press. An edit argument is a passage, not a file: past this many
+      // rows it is file content arriving through the fragment keys, and the
+      // approval card says so instead of growing a file viewer.
+      const MAX_PENDING_FRAGMENT_LINES = 100;
       const pendingOldText =
         typeof previewOldText === 'string' ? previewOldText : '';
       const pendingNewText =
         typeof previewNewText === 'string' ? previewNewText : '';
       if (
         pendingOldText.length > MAX_PENDING_FRAGMENT_CHARS ||
-        pendingNewText.length > MAX_PENDING_FRAGMENT_CHARS
+        pendingNewText.length > MAX_PENDING_FRAGMENT_CHARS ||
+        pendingOldText.split('\n').length > MAX_PENDING_FRAGMENT_LINES ||
+        pendingNewText.split('\n').length > MAX_PENDING_FRAGMENT_LINES
       ) {
         return DIFF_OMITTED_MARKER;
       }
