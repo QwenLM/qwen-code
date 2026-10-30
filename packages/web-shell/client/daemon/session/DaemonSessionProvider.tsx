@@ -226,6 +226,7 @@ interface LiveJournalRepairEpisode {
   snapshotLastEventId: number;
   lastObservedEventId: number;
   terminalSeen: boolean;
+  withheldSettlement?: DaemonPromptSettledEvent;
   attempted: boolean;
   controller?: AbortController;
 }
@@ -3271,6 +3272,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                       };
               } else if (repairingEpisode) {
                 liveJournalRepairRef.current = undefined;
+                if (repairingEpisode.withheldSettlement) {
+                  publishPromptSettlement(repairingEpisode.withheldSettlement);
+                }
               }
             } else if (allUiEvents.length > 0) {
               store.dispatch(allUiEvents);
@@ -4328,8 +4332,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                   activeSession.sessionId,
                   event,
                 );
-                if (settlement && !repairTargetsTerminal) {
-                  publishPromptSettlement(settlement);
+                if (settlement) {
+                  if (repairTargetsTerminal && pendingRepair) {
+                    pendingRepair.withheldSettlement = settlement;
+                  } else {
+                    publishPromptSettlement(settlement);
+                  }
                 }
               }
               if (repairTargetsTerminal && pendingRepair) {
