@@ -9773,7 +9773,13 @@ export function createSessionControlPlane(
         // Delete BEFORE settling: `hasNoChannelWork` counts in-flight
         // restores as channel work, so this restore's own entry would
         // otherwise block the reap of a channel it left empty.
-        if (ci) void harness.startIdleTimer(ci.harness, 'session restore');
+        if (ci)
+          void harness.startIdleTimer(
+            ci.harness,
+            'session restore',
+            undefined,
+            true,
+          );
         void harness.settleReleasedRuntimeWork('session restore');
       }
     });
@@ -10026,7 +10032,12 @@ export function createSessionControlPlane(
     if (ci) {
       await harness.reapPendingEmptyChannel(ci.harness);
       if (!ci.harness.isDying) {
-        await harness.startIdleTimer(ci.harness, `closeSession "${sessionId}"`);
+        await harness.startIdleTimer(
+          ci.harness,
+          `closeSession "${sessionId}"`,
+          undefined,
+          true,
+        );
       }
     }
   }
@@ -10265,7 +10276,12 @@ export function createSessionControlPlane(
         // the idle policy.
         for (const ci of channels) {
           if (!ci.harness.isDying && harness.has(ci.harness)) {
-            void harness.startIdleTimer(ci.harness, 'workspace runtime stop');
+            void harness.startIdleTimer(
+              ci.harness,
+              'workspace runtime stop',
+              undefined,
+              true,
+            );
           }
         }
       }
@@ -17076,6 +17092,8 @@ export function createSessionControlPlane(
           await harness.startIdleTimer(
             ci.harness,
             `killSession "${sessionId}"`,
+            undefined,
+            true,
           );
         }
       }

@@ -66,6 +66,53 @@ describe('channel harness ownership', () => {
     }
   });
 
+  it.each(['rearm', 'pending work', 'armed pending failure', 'new activity'])(
+    'classifies failed idle retirement after %s',
+    async (scenario) => {
+      vi.useFakeTimers();
+      const handle = makeChannel();
+      const diagnostics: Array<{ line: string; level?: string }> = [];
+      let harness!: ReturnType<typeof createChannelHarness>;
+      const bridge = createSessionControlPlane(
+        {
+          boundWorkspace: WS_A,
+          channelFactory: async () => handle.channel,
+          channelIdleTimeoutMs: 1000,
+          onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
+        },
+        (options) => (harness = createChannelHarness(options)),
+      );
+      try {
+        const info = await harness.ensure();
+        if (scenario === 'armed pending failure') {
+          await harness.startIdleTimer(info, 'planned', undefined, true);
+        }
+        const pending =
+          scenario === 'pending work' || scenario === 'armed pending failure';
+        if (pending) harness.reserveRuntimeOperation();
+        await harness.startIdleTimer(info, 'failed initialization');
+        if (pending) {
+          await harness.releaseRuntimeOperationReservation('settled');
+        } else {
+          if (scenario === 'new activity') await harness.ensure();
+          await harness.startIdleTimer(info, 'settled', undefined, true);
+        }
+        await vi.advanceTimersByTimeAsync(1000);
+        await handle.channel.exited;
+        expect(
+          diagnostics.filter(({ line }) => line.includes('channel exited')),
+        ).toEqual([
+          {
+            line: expect.stringContaining('channel exited'),
+            level: scenario === 'new activity' ? 'info' : 'warn',
+          },
+        ]);
+      } finally {
+        await bridge.shutdown();
+      }
+    },
+  );
+
   it('preserves all six exit cleanup steps for the current channel', async () => {
     vi.useFakeTimers();
     const handle = makeChannel();

@@ -9,10 +9,24 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { expect, it, vi } from 'vitest';
+import { ApprovalMode } from '@qwen-code/qwen-code-core';
 import { createAcpSessionBridge } from './bridge.js';
 import { createSpawnChannelFactory } from './spawnChannel.js';
 
-it.skipIf(process.platform === 'win32').each([
+it.skipIf(process.platform === 'win32').each<{
+  scenario: string;
+  expectedLevel: 'info' | 'warn';
+  tornDown: number;
+  idleTimeout?: number;
+}>([
+  ...[0, 25].flatMap((idleTimeout) =>
+    ['approval-mode-failure', 'rejected-session'].map((scenario) => ({
+      scenario,
+      expectedLevel: 'warn' as const,
+      tornDown: 0,
+      idleTimeout,
+    })),
+  ),
   { scenario: 'force-kill', expectedLevel: 'warn', tornDown: 1 },
   { scenario: 'new-failure', expectedLevel: 'warn', tornDown: 0 },
   { scenario: 'load-failure', expectedLevel: 'warn', tornDown: 0 },
@@ -36,7 +50,7 @@ it.skipIf(process.platform === 'win32').each([
     idleTimeout: 60_000,
   },
 ])(
-  'reports $scenario at $expectedLevel with guarded real-child EOF',
+  'reports $scenario at $expectedLevel with guarded real-child EOF (idle=$idleTimeout)',
   async ({ scenario, expectedLevel, tornDown, idleTimeout }) => {
     const workspace = await mkdtemp(
       join(tmpdir(), 'qwen-retirement-severity-'),
@@ -69,7 +83,8 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
     return;
   }
   if ((${JSON.stringify(scenario)} === 'new-failure' && message.method === 'session/new') ||
-      (${JSON.stringify(scenario)} === 'load-failure' && message.method === 'session/load')) {
+      (${JSON.stringify(scenario)} === 'load-failure' && message.method === 'session/load') ||
+      (${JSON.stringify(scenario)} === 'approval-mode-failure' && message.method === 'qwen/control/session/approval_mode')) {
     process.stdout.write(JSON.stringify({ jsonrpc: '2.0', id: message.id, error: { code: -32603, message: 'fixture intentional failure' } }) + '\\n');
     return;
   }
@@ -101,11 +116,33 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
       boundWorkspace: workspace,
       initializeTimeoutMs: 1000,
       channelIdleTimeoutMs: idleTimeout,
-      channelFactory: factory,
+      ...(scenario === 'rejected-session'
+        ? {
+            executionEngines: {
+              legacy: factory,
+              managed: factory,
+              select: () => 'managed' as const,
+            },
+          }
+        : { channelFactory: factory }),
       onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
     });
     try {
-      if (scenario === 'new-failure') {
+      if (scenario === 'approval-mode-failure') {
+        await expect(
+          bridge.spawnOrAttach({
+            workspaceCwd: workspace,
+            approvalMode: ApprovalMode.YOLO,
+          }),
+        ).rejects.toThrow('fixture intentional failure');
+      } else if (scenario === 'rejected-session') {
+        await expect(
+          bridge.spawnOrAttach({
+            workspaceCwd: workspace,
+            sessionId: 'wanted',
+          }),
+        ).rejects.toThrow('invalid or already reserved session ID');
+      } else if (scenario === 'new-failure') {
         await expect(
           bridge.spawnOrAttach({ workspaceCwd: workspace }),
         ).rejects.toMatchObject({ message: 'fixture intentional failure' });
