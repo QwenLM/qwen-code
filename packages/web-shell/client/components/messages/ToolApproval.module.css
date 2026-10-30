@@ -258,7 +258,11 @@
   appearance: none;
 }
 
-.option:focus-visible {
+/* :focus, not :focus-visible: the view hotkey (Cmd/Ctrl+1–9) focuses an
+   option programmatically during the keydown, and WKWebView does not
+   match :focus-visible on that path — the ring would be invisible
+   exactly when the chord acts. */
+.option:focus {
   outline: 2px solid var(--agent-blue-500);
   outline-offset: 2px;
 }

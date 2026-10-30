@@ -7030,6 +7030,7 @@ export function WebShellSidebar({
             >
               <button
                 className={styles.newChatButton}
+                data-web-shell-new-task-button
                 type="button"
                 title={t('sidebar.newTask')}
                 aria-label={t('sidebar.newTask')}

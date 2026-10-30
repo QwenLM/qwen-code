@@ -50675,6 +50675,327 @@ describe('App view navigation shortcuts (#13175)', () => {
   });
 });
 
+// jsdom has no PointerEvent constructor; openRadixTrigger dispatches a
+// synthetic pointer sequence, so provide one that keeps the pointer fields.
+class TestPointerEvent extends MouseEvent {
+  readonly pointerId: number;
+  readonly pointerType: string;
+  readonly isPrimary: boolean;
+
+  constructor(type: string, init: PointerEventInit = {}) {
+    super(type, init);
+    this.pointerId = init.pointerId ?? 0;
+    this.pointerType = init.pointerType ?? 'mouse';
+    this.isPrimary = init.isPrimary ?? false;
+  }
+}
+if (typeof globalThis.PointerEvent === 'undefined') {
+  globalThis.PointerEvent = TestPointerEvent as unknown as typeof PointerEvent;
+}
+
+describe('App view navigation hotkeys — surface chords', () => {
+  // The DOM-action chords (digits, the row checkbox, maximize, split the
+  // selected rows, new task) navigate the rendered surface. Their behavior
+  // is pinned by the unit suite in utils/viewNavHotkeys.test.ts; this block
+  // pins the listener wiring: chord detection, the shared
+  // covering-surface guards, and event consumption, with fixtures injected
+  // beside the rendered app.
+  const VIEW_SIDEBAR: React.ComponentProps<typeof App>['sidebar'] = {
+    enabled: true,
+    footer: { items: ['sessionsOverview', 'splitView'] },
+  };
+  const savedPathname = window.location.pathname;
+
+  function setWidth(el: Element, width: number): void {
+    Object.defineProperty(el, 'offsetWidth', {
+      configurable: true,
+      value: width,
+    });
+  }
+
+  // A fixture host outside the React tree; removed after each test.
+  function fixture(html: string): HTMLElement {
+    const host = document.createElement('div');
+    host.setAttribute('data-hk-fixture', '');
+    host.innerHTML = html;
+    document.body.appendChild(host);
+    return host;
+  }
+
+  async function pressChord(
+    init: KeyboardEventInit,
+    target: EventTarget = window,
+  ): Promise<KeyboardEvent> {
+    let event!: KeyboardEvent;
+    await act(async () => {
+      event = new KeyboardEvent('keydown', {
+        bubbles: true,
+        cancelable: true,
+        ...init,
+      });
+      target.dispatchEvent(event);
+      await Promise.resolve();
+    });
+    return event;
+  }
+
+  function renderViewApp(): Awaited<ReturnType<typeof renderApp>> {
+    return renderApp({ sidebar: VIEW_SIDEBAR });
+  }
+
+  afterEach(() => {
+    window.history.replaceState({}, '', savedPathname);
+    document.querySelectorAll('[data-hk-fixture]').forEach((el) => el.remove());
+  });
+
+  const APPROVAL_FIXTURE = `
+    <div data-web-shell-permission-panel>
+      <div role="radiogroup">
+        <button type="button" role="radio">Reject</button>
+        <button type="button" role="radio">Allow</button>
+      </div>
+    </div>`;
+
+  it('focuses the Nth approval option with Cmd+1', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(APPROVAL_FIXTURE);
+    setWidth(host.querySelector('[data-web-shell-permission-panel]')!, 800);
+    const event = await pressChord({ code: 'Digit1', key: '1', metaKey: true });
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(
+      host.querySelector('[role="radiogroup"] > button'),
+    );
+  });
+
+  it('toggles the Overview row checkbox with Option+Shift+2', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(`
+      <div data-web-shell-session-table-viewport>
+        <table><tbody>
+          <tr><td><input type="checkbox" /></td></tr>
+          <tr><td><input type="checkbox" /></td></tr>
+        </tbody></table>
+      </div>`);
+    setWidth(
+      host.querySelector('[data-web-shell-session-table-viewport]')!,
+      800,
+    );
+    const event = await pressChord({
+      code: 'Digit2',
+      key: '2',
+      altKey: true,
+      shiftKey: true,
+    });
+    expect(event.defaultPrevented).toBe(true);
+    const boxes = host.querySelectorAll('input[type="checkbox"]');
+    expect((boxes[0] as HTMLInputElement).checked).toBe(false);
+    expect((boxes[1] as HTMLInputElement).checked).toBe(true);
+  });
+
+  it('leaves the checkbox chord to the browser while a modal is open', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(`
+      <div data-web-shell-session-table-viewport>
+        <table><tbody><tr><td><input type="checkbox" /></td></tr></tbody></table>
+      </div>
+      <div role="dialog" data-slot="dialog-content" data-state="open"></div>`);
+    setWidth(
+      host.querySelector('[data-web-shell-session-table-viewport]')!,
+      800,
+    );
+    const event = await pressChord({
+      code: 'Digit2',
+      key: '2',
+      altKey: true,
+      shiftKey: true,
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(
+      (host.querySelector('input[type="checkbox"]') as HTMLInputElement)
+        .checked,
+    ).toBe(false);
+  });
+
+  it('maximizes the focused pane with Cmd+Shift+F', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(`
+      <div data-pane-session-id="a" tabindex="-1">
+        <button type="button" data-web-shell-pane-maximize-button></button>
+        <div data-web-shell-composer-editor>
+          <div class="cm-content" contenteditable="true"></div>
+        </div>
+      </div>
+      <div data-pane-session-id="b" tabindex="-1">
+        <button type="button" data-web-shell-pane-maximize-button></button>
+        <div data-web-shell-composer-editor>
+          <div class="cm-content" contenteditable="true"></div>
+        </div>
+      </div>`);
+    let clicked = 0;
+    host.querySelectorAll('[data-pane-session-id]').forEach((pane, i) => {
+      setWidth(pane, 800);
+      pane.querySelector('button')!.addEventListener('click', () => {
+        clicked = i + 1;
+      });
+    });
+    host.querySelector('[data-pane-session-id="a"] .cm-content')!.focus();
+    const event = await pressChord({
+      code: 'KeyF',
+      key: 'f',
+      metaKey: true,
+      shiftKey: true,
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(clicked).toBe(1);
+  });
+
+  it('opens the selected rows in split view with Cmd+Shift+Backslash', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(`
+      <div data-web-shell-session-table-viewport><table></table></div>
+      <div data-web-shell-session-footer>
+        <div>
+          <button type="button">Archive</button>
+          <button type="button">Delete</button>
+          <button type="button">Open in Tab</button>
+          <button type="button">Open in Split</button>
+        </div>
+      </div>`);
+    setWidth(
+      host.querySelector('[data-web-shell-session-table-viewport]')!,
+      800,
+    );
+    const buttons = host.querySelectorAll(
+      '[data-web-shell-session-footer] button',
+    );
+    let splitClicked = false;
+    buttons[3].addEventListener('click', () => {
+      splitClicked = true;
+    });
+    const event = await pressChord({
+      code: 'Backslash',
+      key: '\\',
+      metaKey: true,
+      shiftKey: true,
+    });
+    expect(event.defaultPrevented).toBe(true);
+    expect(splitClicked).toBe(true);
+  });
+
+  it('opens the workspace picker with Cmd+T on the new-task screen', async () => {
+    renderViewApp();
+    await flush();
+    window.history.replaceState({}, '', '/');
+    const host = fixture(`
+      <button type="button" data-web-shell-workspace-select-trigger></button>`);
+    const trigger = host.querySelector(
+      '[data-web-shell-workspace-select-trigger]',
+    )!;
+    setWidth(trigger, 200);
+    // Radix opens on a primary pointerdown, not on a bare click.
+    let opened = false;
+    trigger.addEventListener('pointerdown', (event) => {
+      if ((event as PointerEvent).isPrimary) opened = true;
+    });
+    const chord = await pressChord({ code: 'KeyT', key: 't', metaKey: true });
+    expect(chord.defaultPrevented).toBe(true);
+    expect(opened).toBe(true);
+  });
+
+  it('clicks the New task button with Cmd+T on a session screen', async () => {
+    renderViewApp();
+    await flush();
+    window.history.replaceState({}, '', '/session/abc123');
+    const host = fixture(`
+      <button type="button" data-web-shell-new-task-button></button>
+      <button type="button" data-web-shell-workspace-select-trigger></button>`);
+    setWidth(host.querySelector('[data-web-shell-new-task-button]')!, 200);
+    setWidth(
+      host.querySelector('[data-web-shell-workspace-select-trigger]')!,
+      200,
+    );
+    let taskClicked = false;
+    let opened = false;
+    host
+      .querySelector('[data-web-shell-new-task-button]')!
+      .addEventListener('click', () => {
+        taskClicked = true;
+      });
+    host
+      .querySelector('[data-web-shell-workspace-select-trigger]')!
+      .addEventListener('pointerdown', (event) => {
+        if ((event as PointerEvent).isPrimary) opened = true;
+      });
+    const event = await pressChord({ code: 'KeyT', key: 't', metaKey: true });
+    expect(event.defaultPrevented).toBe(true);
+    expect(taskClicked).toBe(true);
+    // The picker stage is not attempted on a session screen.
+    expect(opened).toBe(false);
+  });
+
+  it('leaves the digit chords to an ordinary editable target', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(
+      APPROVAL_FIXTURE + '<input type="text" data-hk-input />',
+    );
+    setWidth(host.querySelector('[data-web-shell-permission-panel]')!, 800);
+    const input = host.querySelector('input')!;
+    input.focus();
+    const event = await pressChord(
+      { code: 'Digit1', key: '1', metaKey: true },
+      input,
+    );
+    expect(event.defaultPrevented).toBe(false);
+    expect(
+      document.activeElement?.closest('[data-web-shell-permission-panel]'),
+    ).toBeNull();
+  });
+
+  it('keeps the digit chords live inside the composer editor', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(
+      APPROVAL_FIXTURE +
+        '<div data-web-shell-composer-editor><div class="cm-editor">' +
+        '<div class="cm-content" contenteditable="true"></div></div></div>',
+    );
+    setWidth(host.querySelector('[data-web-shell-permission-panel]')!, 800);
+    const content = host.querySelector('.cm-content')!;
+    content.focus();
+    const event = await pressChord(
+      { code: 'Digit1', key: '1', metaKey: true },
+      content,
+    );
+    expect(event.defaultPrevented).toBe(true);
+    expect(document.activeElement).toBe(
+      host.querySelector('[role="radiogroup"] > button'),
+    );
+  });
+
+  it('ignores auto-repeat on the surface chords', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(APPROVAL_FIXTURE);
+    setWidth(host.querySelector('[data-web-shell-permission-panel]')!, 800);
+    const event = await pressChord({
+      code: 'Digit1',
+      key: '1',
+      metaKey: true,
+      repeat: true,
+    });
+    expect(event.defaultPrevented).toBe(false);
+    expect(
+      document.activeElement?.closest('[data-web-shell-permission-panel]'),
+    ).toBeNull();
+  });
+});
+
 describe('approval mode allowlist', () => {
   function configureModes(value: unknown) {
     approvalModesProbe.setting = value;
