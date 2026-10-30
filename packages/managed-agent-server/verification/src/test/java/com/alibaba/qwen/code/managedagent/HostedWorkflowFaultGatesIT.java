@@ -172,7 +172,7 @@ class HostedWorkflowFaultGatesIT {
                 ManagedAgentServerApplication.class);
         spring = (ServletWebServerApplicationContext) application.run(
                 arguments.toArray(String[]::new));
-        JdbcTemplate jdbc = spring.getBean(JdbcTemplate.class);
+        JdbcTemplate jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         ManagedAgentStore store = spring.getBean(ManagedAgentStore.class);
         EmbeddedRuntimeBroker broker = spring.getBean(
                 EmbeddedRuntimeBroker.class);

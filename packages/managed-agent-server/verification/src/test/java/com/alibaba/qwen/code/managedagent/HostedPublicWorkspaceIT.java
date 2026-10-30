@@ -1542,7 +1542,7 @@ class HostedPublicWorkspaceIT {
                     }
                 })
                 .run(arguments.toArray(String[]::new));
-        jdbc = spring.getBean(JdbcTemplate.class);
+        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         if (!publicChildRestarted && (definitionApproval || "Linux".equals(System.getProperty("os.name")))) {
             var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
             for (int index = 0; index < roots.size(); index++) {

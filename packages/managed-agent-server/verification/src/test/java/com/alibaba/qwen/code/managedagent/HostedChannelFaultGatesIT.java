@@ -467,7 +467,7 @@ class HostedChannelFaultGatesIT {
                 "--qwen.managed-agent.internal-server.address=127.0.0.1",
                 "--qwen.managed-agent.internal-server.port=" + internal);
         internalPort = internal;
-        jdbc = spring.getBean(JdbcTemplate.class);
+        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                 + " workspace_id, workspace_generation, storage_id,"
                 + " display_name, config_ref, policy_ref, state) VALUES"
