@@ -1028,12 +1028,9 @@ fn render_loop(
 }
 
 fn hardware_cursor_position() -> Option<(f64, f64)> {
-    use core_graphics::{
-        event::CGEvent,
-        event_source::{CGEventSource, CGEventSourceStateID},
-    };
+    use core_graphics::event::CGEvent;
 
-    let source = CGEventSource::new(CGEventSourceStateID::HIDSystemState).ok()?;
+    let source = crate::input::new_event_source().ok()?;
     let event = CGEvent::new(source).ok()?;
     let location = event.location();
     Some((location.x, location.y))
