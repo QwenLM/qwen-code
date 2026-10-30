@@ -86,6 +86,14 @@ describe('reconcile-failure title matching', () => {
         issues,
         JSON.stringify([
           {
+            number: 303,
+            url: 'https://github.example/QwenLM/qwen-code/issues/303',
+            labels: [],
+            author: { login: 'github-actions[bot]' },
+            title:
+              'Chrome extension release failed for v1.2.3-nightly.20261028 on 2026-10-28',
+          },
+          {
             number: 101,
             url: 'https://github.example/QwenLM/qwen-code/issues/101',
             labels: [],
@@ -140,6 +148,7 @@ describe('reconcile-failure title matching', () => {
         const calls = readFileSync(ghLog, 'utf8');
         expect(calls).toContain('issue close 202');
         expect(calls).not.toContain('issue close 101');
+        expect(calls).not.toContain('issue close 303');
       } finally {
         rmSync(directory, { recursive: true, force: true });
       }
