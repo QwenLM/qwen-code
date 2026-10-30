@@ -50,6 +50,11 @@ const report = {
   promptSubmissions: 0,
   continuationsAfterFailure: 0,
   postFailureLoads: [] as boolean[],
+  // Which caller produced each entry above. The boolean says a post-failure
+  // load was not cancellation-only; it does not say which of the connector's
+  // load paths sent it. #15898 shows the sequence changing shape between runs,
+  // so a failing entry has to name its own origin.
+  postFailureLoadOrigins: [] as string[],
   lateCancelReplays: 0,
   originalCancelBody: '',
 };
@@ -156,8 +161,18 @@ const proxy = createServer(async (req, res) => {
           `/session/${config.sessionId}/managed-runtime/continue`
       )
         report.continuationsAfterFailure++;
-      if (injected && target.pathname.endsWith('/load'))
+      if (injected && target.pathname.endsWith('/load')) {
         report.postFailureLoads.push(fields.cancellationTakeover === true);
+        report.postFailureLoadOrigins.push(
+          [
+            `takeover=${fields.cancellationTakeover === true}`,
+            `passive=${fields.passiveManagedRuntimeRecovery === true}`,
+            `drive=${fields.driveRuntimeRecovery === true}`,
+            `mcpOnly=${fields.mcpManagementOnly === true}`,
+            `promptId=${typeof fields.cancellationPromptId === 'string'}`,
+          ].join(' '),
+        );
+      }
       const headers = Object.fromEntries(
         Object.entries(req.headers)
           .filter(
@@ -679,10 +694,13 @@ async function runRecoverySettlement() {
   assert.equal(report.modelCalls, 1);
   assert.equal(report.promptSubmissions, 1);
   assert.equal(report.continuationsAfterFailure, 0);
-  assert(report.postFailureLoads.length > 0);
+  assert(
+    report.postFailureLoads.length > 0,
+    `no post-failure loads were recorded at all: ${JSON.stringify(report.postFailureLoadOrigins)}`,
+  );
   assert(
     report.postFailureLoads.every(Boolean),
-    'replacement must use cancellation-only loads',
+    `replacement must use cancellation-only loads: ${report.postFailureLoadOrigins.join(' | ')}`,
   );
   await unlink(`${proof}.read-gate`);
   await waitUntil(async () => {
