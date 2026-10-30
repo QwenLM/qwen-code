@@ -145,7 +145,13 @@ async function installRecovery(page: Page, running = false) {
       });
     if (path.endsWith('/transcript/query'))
       return route.fulfill({
-        json: { items: [], events, lastSequence: 6, hasMore: false },
+        json: {
+          items: [],
+          events,
+          coveredSequence: 6,
+          lastSequence: 6,
+          hasMore: false,
+        },
       });
     if (path.endsWith('/events/stream'))
       return route.fulfill({ contentType: 'text/event-stream', body: '' });
