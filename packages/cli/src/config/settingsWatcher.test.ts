@@ -932,6 +932,34 @@ describe('SettingsWatcher', () => {
       w.stopWatching();
     });
 
+    it('ignores private save directories and their child events without rebootstrap', async () => {
+      const loaded = makeLoadedSettings({ workspaceSettingsActive: false });
+      const watcher = new SettingsWatcher(loaded);
+      watcher.startWatching();
+      for (const [event, changed] of [
+        ['addDir', '/home/user/.qwen/settings.json.write-private'],
+        [
+          'add',
+          '/home/user/.qwen/settings.json.write-private/settings.json.tmp',
+        ],
+        [
+          'change',
+          '/home/user/.qwen/settings.json.write-private/settings.json.orig',
+        ],
+        [
+          'unlink',
+          '/home/user/.qwen/settings.json.write-private/settings.json.tmp',
+        ],
+        ['unlinkDir', '/home/user/.qwen/settings.json.write-private'],
+      ])
+        fireAllEvent(0, event, changed);
+      await vi.advanceTimersByTimeAsync(SettingsWatcher.DEBOUNCE_MS + 10);
+      expect(loaded.reloadScopeFromDisk).not.toHaveBeenCalled();
+      expect(mockWatchers).toHaveLength(1);
+      expect(mockWatchers[0].instance.close).not.toHaveBeenCalled();
+      watcher.stopWatching();
+    });
+
     it('should demote back to bootstrap when .qwen is removed', async () => {
       const workspaceOnly = makeLoadedSettings({
         workspaceSettingsActive: false,

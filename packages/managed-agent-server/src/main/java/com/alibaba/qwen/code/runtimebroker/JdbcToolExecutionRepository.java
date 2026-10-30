@@ -1,0 +1,1227 @@
+package com.alibaba.qwen.code.runtimebroker;
+
+import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONReader;
+import com.alibaba.fastjson2.JSONWriter;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
+import com.alibaba.qwen.code.runtimebroker.transport.ManagedHoldFamily;
+
+import javax.sql.DataSource;
+
+import java.sql.Connection;
+import java.sql.PreparedStatement;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.time.Duration;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/** JDBC ledger for idempotent Tool executions. */
+public final class JdbcToolExecutionRepository
+        implements ToolExecutionRepository {
+    private static final String EXECUTION_COLUMNS = String.join(", ",
+            "execution_call_id_hash", "execution_call_id",
+            "idempotency_key_hash", "idempotency_key",
+            "binding_id", "runtime_generation", "harness_session_id",
+            "runtime_session_id", "runtime_session_key", "turn_id",
+            "tool_call_id", "request_digest", "reference_json",
+            "execution_state", "execution_status", "result_json",
+            "last_sequence", "cancel_requested", "dispatch_owner",
+            "dispatch_lease_until", "dispatch_generation", "record_version",
+            "settled_at", "abandoned_at", "loss_evidence_id",
+            "authorized_dispatch_generation", "authorized_binding_version");
+    private final DataSource dataSource;
+    private final JdbcRuntimeBindingRepository csiBindings;
+
+    public JdbcToolExecutionRepository(DataSource dataSource) {
+        this(dataSource, null);
+    }
+
+    public JdbcToolExecutionRepository(
+            DataSource dataSource, JdbcRuntimeBindingRepository csiBindings) {
+        this.dataSource = JdbcRepositorySupport.requireDataSource(dataSource);
+        if (csiBindings != null && !csiBindings.usesDataSource(this.dataSource)) {
+            throw new IllegalArgumentException("CSI continuation requires the same DataSource");
+        }
+        this.csiBindings = csiBindings;
+    }
+
+    static void abandonByBinding(Connection connection, RuntimeBindingRecord binding)
+            throws SQLException {
+        List<ToolExecutionRecord> batch = new ArrayList<>();
+        String sql = "SELECT " + EXECUTION_COLUMNS + " FROM ma_tool_execution "
+                + "WHERE binding_id = ? AND runtime_generation = ? "
+                + "AND execution_state NOT IN ('SETTLED', 'ABANDONED') "
+                + "ORDER BY execution_call_id_hash LIMIT 100 FOR UPDATE";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            JdbcRepositorySupport.setIdentity(statement, 1, binding.getBindingId());
+            statement.setLong(2, binding.getGeneration());
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    ToolExecutionRecord record = mapExecution(result);
+                    if (record.getBindingId().equals(binding.getBindingId())) {
+                        batch.add(record);
+                    }
+                }
+            }
+        }
+        Instant now = JdbcRepositorySupport.databaseNow(connection);
+        for (ToolExecutionRecord record : batch) {
+            updateExecution(connection, record.abandon(binding, now)
+                    .withVersion(record.getVersion() + 1));
+        }
+    }
+
+    static boolean hasActiveByBinding(Connection connection, String bindingId,
+            long generation) throws SQLException {
+        String sql = "SELECT binding_id FROM ma_tool_execution "
+                + "WHERE binding_id = ? AND runtime_generation = ? "
+                + "AND execution_state NOT IN ('SETTLED', 'ABANDONED')";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            JdbcRepositorySupport.setIdentity(statement, 1, bindingId);
+            statement.setLong(2, generation);
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    if (bindingId.equals(result.getString("binding_id"))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    public static List<ToolExecutionRecord> findHarnessExecutions(Connection connection,
+            String tenantId, String harnessSessionId) throws SQLException {
+        List<ToolExecutionRecord> result = new ArrayList<>();
+        try (PreparedStatement statement =
+                connection.prepareStatement(
+                        "SELECT " + ManagedSchemaProjection.TOOL_EXECUTION.columns("e") + ", b.isolation_class, b.isolation_key, "
+                                + JdbcRuntimeBindingRepository.REQUEST_COLUMNS_AS_B
+                                + " FROM ma_tool_execution e JOIN ma_runtime_binding b ON b.binding_id = e.binding_id WHERE b.tenant_id = ? AND e.harness_session_id = ? ORDER BY e.execution_call_id_hash FOR UPDATE")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, tenantId);
+            JdbcRepositorySupport.setIdentity(statement, 2, harnessSessionId);
+            try (ResultSet rows = statement.executeQuery()) {
+                while (rows.next()) {
+                    ToolExecutionRecord record = mapExecution(rows);
+                    if (!harnessSessionId.equals(record.getHarnessSessionId())
+                            || !("session".equals(rows.getString("isolation_class"))
+                                            && harnessSessionId.equals(rows.getString("isolation_key"))
+                                    || JdbcRuntimeBindingRepository.sharesRuntimeSessions(rows, "b_"))) {
+                        throw new RuntimeBrokerException(
+                                409,
+                                "workspace_close_identity_unverified",
+                                "Execution scope differs",
+                                false);
+                    }
+                    result.add(record);
+                }
+            }
+        }
+        return List.copyOf(result);
+    }
+
+    @Override
+    public ToolExecutionRecord findOrCreate(ToolExecutionRecord candidate) {
+        requireCandidate(candidate);
+        JdbcRepositorySupport.read(
+                dataSource,
+                connection -> {
+                    JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
+                            connection, candidate.getBindingId());
+                    return null;
+                });
+        ToolExecutionRecord existing = findByIdempotencyKey(
+                candidate.getIdempotencyKey());
+        if (existing != null) {
+            return existing;
+        }
+        try {
+            return JdbcRepositorySupport.transaction(dataSource,
+                    connection -> {
+                        JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
+                                connection, candidate.getBindingId());
+                        insertExecution(connection, candidate);
+                        return candidate;
+                    });
+        } catch (IllegalStateException failure) {
+            if (!JdbcRepositorySupport.isConstraintViolation(failure)) {
+                throw failure;
+            }
+            ToolExecutionRecord winner = findByIdempotencyKey(
+                    candidate.getIdempotencyKey());
+            if (winner != null) {
+                return winner;
+            }
+            ToolExecutionRecord duplicateId = findByExecutionCallId(
+                    candidate.getExecutionCallId());
+            if (duplicateId != null) {
+                throw new IllegalArgumentException(
+                        "executionCallId already belongs to another request",
+                        failure);
+            }
+            throw failure;
+        }
+    }
+
+    @Override
+    public ToolExecutionRecord findByExecutionCallId(String executionCallId) {
+        String id = BrokerValues.requireId(executionCallId,
+                "executionCallId");
+        return JdbcRepositorySupport.read(dataSource, connection ->
+                selectByExecutionId(connection, id, false));
+    }
+
+    @Override
+    public ToolExecutionRecord findByIdempotencyKey(String idempotencyKey) {
+        String key = BrokerValues.requireId(idempotencyKey,
+                "idempotencyKey");
+        return JdbcRepositorySupport.read(dataSource,
+                connection -> selectByIdempotencyKey(connection, key));
+    }
+
+    static ToolExecutionRecord selectByIdempotencyKey(Connection connection,
+            String key) throws SQLException {
+        return selectByIdempotencyKey(connection, key, false);
+    }
+
+    static ToolExecutionRecord selectByIdempotencyKey(
+            Connection connection, String key, boolean lock) throws SQLException {
+        String sql = "SELECT " + EXECUTION_COLUMNS
+                + " FROM ma_tool_execution "
+                + "WHERE idempotency_key_hash = ?"
+                        + (lock ? " FOR UPDATE" : "");
+        try (PreparedStatement statement = connection.prepareStatement(
+                sql)) {
+            statement.setString(1, JdbcRepositorySupport.valueKey(key));
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                ToolExecutionRecord record = mapExecution(result);
+                if (!key.equals(record.getIdempotencyKey())) {
+                    throw new IllegalStateException(
+                            "Tool idempotency hash collision");
+                }
+                return record;
+            }
+        }
+    }
+
+    public boolean usesDataSource(DataSource source) {
+        return dataSource == source;
+    }
+
+    public ToolExecutionRecord findByExecutionCallIdForUpdate(Connection connection,
+            String executionCallId) throws SQLException {
+        if (connection == null || connection.getAutoCommit()) {
+            throw new IllegalArgumentException("An active transaction is required");
+        }
+        return selectByExecutionId(connection,
+                BrokerValues.requireId(executionCallId, "executionCallId"), true);
+    }
+
+    @Override
+    public ToolExecutionRecord compareAndSet(ToolExecutionRecord expected,
+            ToolExecutionRecord replacement, String owner,
+            long dispatchGeneration) {
+        requireReplacement(expected, replacement);
+        return JdbcRepositorySupport.transaction(
+                dataSource,
+                connection -> {
+                    ToolExecutionRecord hint =
+                            selectByExecutionId(connection, expected.getExecutionCallId(), false);
+                    if (hint == null) {
+                        return null;
+                    }
+                    var continuation = lockCsiContinuation(connection, hint);
+                    if (continuation != null) {
+                        var current =
+                                selectByExecutionId(
+                                        connection, expected.getExecutionCallId(), true);
+                        continuation.require(current);
+                        if (!running(current)
+                                || replacement.getState() != ToolExecutionRecord.State.SETTLED
+                                        && replacement.getState()
+                                                != ToolExecutionRecord.State.UNKNOWN
+                                || current.isCancelRequested() != replacement.isCancelRequested()
+                                || replacement.getLastSequence() < current.getLastSequence()) {
+                            throw csiContinuationUnavailable();
+                        }
+                    }
+                    return compareAndSet(
+                            connection,
+                            expected,
+                            replacement,
+                            owner,
+                            dispatchGeneration,
+                            false,
+                            continuation);
+                });
+    }
+
+    static ToolExecutionRecord authorizeDispatch(Connection connection, ToolExecutionRecord expected,
+            String owner, long dispatchGeneration, long bindingVersion) throws SQLException {
+        return compareAndSet(connection, expected, expected.authorizeDispatch(bindingVersion),
+                owner, dispatchGeneration, true,
+                null);
+    }
+
+    private static ToolExecutionRecord compareAndSet(Connection connection, ToolExecutionRecord expected,
+            ToolExecutionRecord replacement, String owner, long dispatchGeneration,
+            boolean authorizing,
+            CsiContinuation continuation) throws SQLException {
+        requireReplacement(expected, replacement);
+        if (!authorizing && !expected.sameAuthorization(replacement)) {
+            throw new IllegalArgumentException("replacement must preserve dispatch authorization");
+        }
+        ToolExecutionRecord current = selectByExecutionId(connection,
+                expected.getExecutionCallId(), true);
+        if (current == null || !current.sameIdentity(expected)
+                || !current.sameAuthorization(expected)
+                || authorizing && (current.getState() != ToolExecutionRecord.State.DISPATCHING
+                        || current.isCancelRequested()
+                        || current.getAuthorizedDispatchGeneration() != null)
+                || current.getVersion() != expected.getVersion()
+                || current.isTerminal()
+                || current.getState()
+                        == ToolExecutionRecord.State.UNKNOWN
+                || !current.sameDispatch(expected)
+                || !current.hasLiveDispatchAt(
+                        JdbcRepositorySupport.databaseNowPrecise(
+                                connection))
+                || !current.getDispatchOwner().equals(owner)
+                || current.getDispatchGeneration()
+                        != dispatchGeneration) {
+            return null;
+        }
+        ToolExecutionRecord.State nextState = replacement.getState();
+        if (nextState == ToolExecutionRecord.State.ABANDONED
+                || nextState == ToolExecutionRecord.State.PREPARED
+                || nextState == ToolExecutionRecord.State.DISPATCHING
+                        && current.getState()
+                                != ToolExecutionRecord.State.DISPATCHING) {
+            throw new IllegalArgumentException(
+                    "execution state must not move backwards");
+        }
+        if (current.isCancelRequested()
+                && !replacement.isCancelRequested()) {
+            throw new IllegalArgumentException(
+                    "replacement must not drop a cancellation request");
+        }
+        ToolExecutionRecord updated = replacement.withVersion(
+                expected.getVersion() + 1);
+        requireCsiCurrentTime(connection, continuation);
+        updateExecution(connection, updated);
+        return updated;
+    }
+
+    @Override
+    public ToolExecutionRecord claimDispatch(String executionCallId,
+            String owner, Duration leaseDuration) {
+        String id = BrokerValues.requireId(executionCallId,
+                "executionCallId");
+        String ownerId = BrokerValues.requireId(owner, "owner");
+        Duration duration = JdbcRepositorySupport.requireDuration(
+                leaseDuration);
+        return JdbcRepositorySupport.transaction(
+                dataSource,
+                connection -> {
+                    ToolExecutionRecord hint = selectByExecutionId(connection, id, false);
+                    if (hint == null) {
+                        return null;
+                    }
+                    var continuation = lockCsiContinuation(connection, hint);
+                    ToolExecutionRecord current = selectByExecutionId(connection, id, true);
+                    if (continuation != null) {
+                        continuation.require(current);
+                        if (!current.isTerminal()
+                                && current.getState() != ToolExecutionRecord.State.UNKNOWN
+                                && !running(current)) {
+                            continuation.original().requireAdmission();
+                        }
+                    }
+                    requireCsiCurrentTime(connection, continuation);
+                    if (current == null
+                            || current.isTerminal()
+                            || current.getState() == ToolExecutionRecord.State.UNKNOWN) {
+                        return null;
+                    }
+                    Instant now = JdbcRepositorySupport.databaseNowPrecise(connection);
+                    if (ownerId.equals(current.getDispatchOwner())
+                            && current.getDispatchLeaseUntil().isAfter(now)) {
+                        return current;
+                    }
+                    if (current.getDispatchOwner() != null
+                            && current.getDispatchLeaseUntil().isAfter(now)) {
+                        return null;
+                    }
+                    if (current.getState() == ToolExecutionRecord.State.EXECUTING
+                            || current.getState() == ToolExecutionRecord.State.CANCEL_REQUESTED) {
+                        ToolExecutionRecord unknown =
+                                current.withUnknown().withVersion(current.getVersion() + 1);
+                        requireCsiCurrentTime(connection, continuation);
+                        updateExecution(connection, unknown);
+                        return null;
+                    }
+                    if (continuation != null) {
+                        JdbcCsiExecutionAdmission.requireDispatch(
+                                connection, continuation.original(), current);
+                    }
+                    ToolExecutionRecord claimed =
+                            current.withDispatch(
+                                            ownerId,
+                                            JdbcRepositorySupport.leaseUntil(now, duration),
+                                            current.getDispatchGeneration() + 1,
+                                            ToolExecutionRecord.State.DISPATCHING)
+                                    .withVersion(current.getVersion() + 1);
+                    if (continuation != null) {
+                        continuation
+                                .progress()
+                                .requireLease(
+                                        connection,
+                                        claimed.getDispatchLeaseUntil().toEpochMilli(),
+                                        claimed.getDispatchLeaseUntil().toEpochMilli());
+                    }
+                    requireCsiCurrentTime(connection, continuation);
+                    updateExecution(connection, claimed);
+                    return claimed;
+                });
+    }
+
+    @Override
+    public ToolExecutionRecord renewDispatch(String executionCallId,
+            String owner, long dispatchGeneration, Duration leaseDuration) {
+        String id = BrokerValues.requireId(executionCallId,
+                "executionCallId");
+        String ownerId = BrokerValues.requireId(owner, "owner");
+        Duration duration = JdbcRepositorySupport.requireDuration(
+                leaseDuration);
+        return JdbcRepositorySupport.transaction(
+                dataSource,
+                connection -> {
+                    ToolExecutionRecord hint = selectByExecutionId(connection, id, false);
+                    if (hint == null) {
+                        return null;
+                    }
+                    var continuation = lockCsiContinuation(connection, hint);
+                    ToolExecutionRecord current = selectByExecutionId(connection, id, true);
+                    if (continuation != null) {
+                        continuation.require(current);
+                        if (!current.isTerminal()
+                                && current.getState() != ToolExecutionRecord.State.UNKNOWN
+                                && !running(current)) {
+                            continuation.original().requireAdmission();
+                        }
+                    }
+                    requireCsiCurrentTime(connection, continuation);
+                    if (current == null
+                            || current.isTerminal()
+                            || current.getState() == ToolExecutionRecord.State.UNKNOWN) {
+                        return null;
+                    }
+                    Instant now = JdbcRepositorySupport.databaseNowPrecise(connection);
+                    if (!ownerId.equals(current.getDispatchOwner())
+                            || dispatchGeneration != current.getDispatchGeneration()
+                            || !current.getDispatchLeaseUntil().isAfter(now)) {
+                        return null;
+                    }
+                    ToolExecutionRecord renewed =
+                            current.withDispatch(
+                                            ownerId,
+                                            JdbcRepositorySupport.leaseUntil(now, duration),
+                                            dispatchGeneration,
+                                            current.getState())
+                                    .withVersion(current.getVersion() + 1);
+                    if (continuation != null) {
+                        continuation
+                                .progress()
+                                .requireLease(
+                                        connection,
+                                        current.getDispatchLeaseUntil().toEpochMilli(),
+                                        renewed.getDispatchLeaseUntil().toEpochMilli());
+                    }
+                    requireCsiCurrentTime(connection, continuation);
+                    updateExecution(connection, renewed);
+                    return renewed;
+                });
+    }
+
+    @Override
+    public ToolExecutionRecord requestCancel(String executionCallId,
+            long expectedVersion) {
+        String id = BrokerValues.requireId(executionCallId,
+                "executionCallId");
+        return JdbcRepositorySupport.transaction(
+                dataSource,
+                connection -> {
+                    ToolExecutionRecord hint = selectByExecutionId(connection, id, false);
+                    if (hint == null) {
+                        return null;
+                    }
+                    var continuation = lockCsiContinuation(connection, hint);
+                    ToolExecutionRecord current = selectByExecutionId(connection, id, true);
+                    if (continuation != null) {
+                        continuation.require(current);
+                    }
+                    requireCsiCurrentTime(connection, continuation);
+                    if (current == null
+                            || current.isTerminal()
+                            || current.getVersion() != expectedVersion) {
+                        return null;
+                    }
+                    if (continuation != null && current.getAuthorizedDispatchGeneration() != null) {
+                        throw new RuntimeBrokerException(
+                                409,
+                                "csi_execution_cancel_unavailable",
+                                "An authorized private CSI execution does not support cancellation",
+                                false);
+                    }
+                    if (current.isCancelRequested()) {
+                        return current;
+                    }
+                    ToolExecutionRecord requested =
+                            current.withState(
+                                    current.getState() == ToolExecutionRecord.State.EXECUTING
+                                            ? ToolExecutionRecord.State.CANCEL_REQUESTED
+                                            : current.getState(),
+                                    true);
+                    if (continuation != null
+                            && current.getAuthorizedDispatchGeneration() == null
+                            && (current.getState() == ToolExecutionRecord.State.PREPARED
+                                    || current.getState()
+                                            == ToolExecutionRecord.State.DISPATCHING)) {
+                        requested =
+                                requested.withResult(
+                                        Map.of(
+                                                "executionStatus",
+                                                "not_started",
+                                                "responseParts",
+                                                List.of()),
+                                        current.getLastSequence(),
+                                        JdbcRepositorySupport.databaseNow(connection));
+                    } else if (current.getState() == ToolExecutionRecord.State.PREPARED) {
+                        requested =
+                                requested.withResult(
+                                        current.cancellationBeforeDispatch(),
+                                        current.getLastSequence(),
+                                        JdbcRepositorySupport.databaseNow(connection));
+                    }
+                    ToolExecutionRecord updated = requested.withVersion(current.getVersion() + 1);
+                    requireCsiCurrentTime(connection, continuation);
+                    updateExecution(connection, updated);
+                    return updated;
+                });
+    }
+
+    @Override
+    public ToolExecutionRecord settlePrepared(ToolExecutionRecord expected,
+            Map<String, Object> result, Instant settlementTime) {
+        if (expected == null || result == null || settlementTime == null) {
+            throw new IllegalArgumentException(
+                    "expected, result and time are required");
+        }
+        return JdbcRepositorySupport.transaction(
+                dataSource,
+                connection -> {
+                    JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
+                            connection, expected.getBindingId());
+                    ToolExecutionRecord current =
+                            selectByExecutionId(connection, expected.getExecutionCallId(), true);
+                    if (current == null
+                            || !current.sameIdentity(expected)
+                            || current.getVersion() != expected.getVersion()
+                            || current.isTerminal()
+                            || current.getState() != ToolExecutionRecord.State.PREPARED) {
+                        return null;
+                    }
+                    ToolExecutionRecord settled =
+                            current.withResult(result, current.getLastSequence(), settlementTime)
+                                    .withVersion(current.getVersion() + 1);
+                    updateExecution(connection, settled);
+                    return settled;
+                });
+    }
+
+    @Override
+    public ToolExecutionRecord resolveUnknown(ToolExecutionRecord expected,
+            Map<String, Object> resolutionResult, Instant resolutionTime) {
+        return resolve(expected, resolutionResult, resolutionTime, true);
+    }
+
+    @Override
+    public ToolExecutionRecord resolveUnsettled(ToolExecutionRecord expected,
+            Map<String, Object> resolutionResult, Instant resolutionTime) {
+        return resolve(expected, resolutionResult, resolutionTime, false);
+    }
+
+    private ToolExecutionRecord resolve(ToolExecutionRecord expected,
+            Map<String, Object> resolutionResult, Instant resolutionTime,
+            boolean unknownOnly) {
+        if (expected == null) {
+            throw new IllegalArgumentException("expected is required");
+        }
+        return JdbcRepositorySupport.transaction(
+                dataSource,
+                connection -> {
+                    JdbcCsiActivationAdmission.refuseUnqualifiedWriter(
+                            connection, expected.getBindingId());
+                    ToolExecutionRecord current =
+                            selectByExecutionId(connection, expected.getExecutionCallId(), true);
+                    if (current == null
+                            || !current.sameIdentity(expected)
+                            || current.getVersion() != expected.getVersion()
+                            || !current.needsReconciliation()
+                            || unknownOnly
+                                    && current.getState() != ToolExecutionRecord.State.UNKNOWN) {
+                        return null;
+                    }
+                    ToolExecutionRecord resolved =
+                            current.resolveUnsettled(resolutionResult, resolutionTime)
+                                    .withVersion(current.getVersion() + 1);
+                    updateExecution(connection, resolved);
+                    return resolved;
+                });
+    }
+
+    private CsiContinuation lockCsiContinuation(Connection connection, ToolExecutionRecord hint)
+            throws SQLException {
+        var scope =
+                JdbcCsiActivationAdmission.lockForContinuation(
+                        connection, hint.getBindingId(), csiBindings);
+        if (scope == null) {
+            return null;
+        }
+        var original = scope.original();
+        JdbcCsiActivationAdmission.requireExecution(original, hint);
+        JdbcCsiFilesRetirementGuard.requireSingleSession(connection, original);
+        var runtime =
+                JdbcRuntimeSessionRepository.selectSession(
+                        connection,
+                        original.request().getScope(),
+                        hint.getRuntimeSessionId(),
+                        true);
+        original.requireSession(runtime);
+        var continuation = new CsiContinuation(original, scope.progress(), scope.head(), runtime);
+        continuation.require(hint);
+        if (JdbcCsiExecutionAdmission.legacyReference(hint)) {
+            throw new RuntimeBrokerException(
+                    409,
+                    "csi_native_execution_unavailable",
+                    "The private CSI profile requires original native execution evidence.",
+                    false);
+        } else {
+            JdbcCsiExecutionAdmission.verifyRelated(connection, original);
+        }
+        requireCsiCurrentTime(connection, continuation);
+        return continuation;
+    }
+
+    private static void requireCsiCurrentTime(Connection connection, CsiContinuation continuation)
+            throws SQLException {
+        if (continuation != null) {
+            continuation.progress().requireCurrentTime(connection);
+            continuation.head().requireCurrentTime(connection);
+        }
+    }
+
+    private static boolean running(ToolExecutionRecord current) {
+        return current.getState() == ToolExecutionRecord.State.EXECUTING
+                || current.getState() == ToolExecutionRecord.State.CANCEL_REQUESTED;
+    }
+
+    private static RuntimeBrokerException csiContinuationUnavailable() {
+        return new RuntimeBrokerException(
+                409,
+                "csi_execution_continuation_unavailable",
+                "The original CSI execution continuation is unavailable.",
+                false);
+    }
+
+    private record CsiContinuation(
+            JdbcCsiFilesRetirementGuard.Original original,
+            JdbcCsiApplicationProgress.Continuation progress,
+            JdbcCsiActivationAdmission.NativeHead head,
+            RuntimeSessionRecord runtime) {
+        void require(ToolExecutionRecord execution) {
+            JdbcCsiActivationAdmission.requireExecution(original, execution);
+            RuntimeAdmission.requireSession(runtime, execution);
+            if (!"deferred".equals(execution.getReference().get("dispatchMode"))
+                    || !execution
+                            .getReference()
+                            .keySet()
+                            .equals(
+                                    Set.of(
+                                            "dispatchMode",
+                                            "sessionId",
+                                            "promptId",
+                                            "callId",
+                                            "argsDigest",
+                                            "batchId",
+                                            "functionCallId",
+                                            "partIndex",
+                                            "ordinal",
+                                            "inputRef",
+                                            "toolDefinitionRef"))
+                    || !execution.getRequestDigest().matches("sha256:[0-9a-f]{64}")) {
+                throw csiContinuationUnavailable();
+            }
+            Long authorized = execution.getAuthorizedBindingVersion();
+            if (authorized != null) {
+                if (authorized <= 0 || authorized > original.version()) {
+                    throw csiContinuationUnavailable();
+                }
+            } else if (running(execution)
+                    || execution.getState() == ToolExecutionRecord.State.UNKNOWN) {
+                throw csiContinuationUnavailable();
+            }
+        }
+    }
+
+    @Override
+    public List<ToolExecutionRecord> findUnsettled(RuntimeSessionRecord session,
+            String afterExecutionCallId, int limit) {
+        if (session == null || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("session and limit in [1, 100] are required");
+        }
+        String after =
+                afterExecutionCallId == null
+                        ? ""
+                        : JdbcRepositorySupport.valueKey(
+                                BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        return JdbcRepositorySupport.read(
+                dataSource,
+                connection -> {
+                    String sql =
+                            "SELECT "
+                                    + EXECUTION_COLUMNS
+                                    + " FROM ma_tool_execution WHERE binding_id = ? AND"
+                                    + " runtime_generation = ? AND runtime_session_key = ? AND"
+                                    + " harness_session_id = ? AND execution_call_id_hash > ? AND"
+                                    + " execution_state IN ('EXECUTING', 'CANCEL_REQUESTED',"
+                                    + " 'UNKNOWN') ORDER BY execution_call_id_hash LIMIT ?";
+                    try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                        JdbcRepositorySupport.setIdentity(statement, 1, session.getBindingId());
+                        statement.setLong(2, session.getRuntimeGeneration());
+                        statement.setString(
+                                3, JdbcRepositorySupport.valueKey(session.getRuntimeSessionId()));
+                        JdbcRepositorySupport.setIdentity(
+                                statement, 4, session.getSession().getHarnessSessionId());
+                        statement.setString(5, after);
+                        statement.setInt(6, limit);
+                        List<ToolExecutionRecord> records = new ArrayList<>();
+                        try (ResultSet result = statement.executeQuery()) {
+                            while (result.next()) {
+                                ToolExecutionRecord record = mapExecution(result);
+                                if (!record.belongsTo(session)) {
+                                    throw new IllegalStateException(
+                                            "Execution scan ownership differs");
+                                }
+                                records.add(record);
+                            }
+                        }
+                        return List.copyOf(records);
+                    }
+                });
+    }
+
+    @Override
+    public List<ToolExecutionRecord> findBackgroundProcesses(
+            RuntimeSessionRecord session, String afterExecutionCallId, int limit) {
+        if (session == null || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("session and limit in [1, 100] are required");
+        }
+        String after =
+                afterExecutionCallId == null
+                        ? ""
+                        : JdbcRepositorySupport.valueKey(
+                                BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        return JdbcRepositorySupport.read(
+                dataSource,
+                connection -> {
+                    List<ToolExecutionRecord> matches = new ArrayList<>();
+                    String cursor = after;
+                    // The dispatch mode lives in the reference payload, so SQL
+                    // pages the ownership-and-state window and the filter runs row
+                    // by row; the scan stops as soon as a page of matches is full
+                    // or the window is exhausted, keeping "short page means done".
+                    for (; ; ) {
+                        String sql =
+                                "SELECT "
+                                        + EXECUTION_COLUMNS
+                                        + " FROM ma_tool_execution WHERE binding_id = ? AND"
+                                        + " runtime_generation = ? AND runtime_session_key = ? AND"
+                                        + " harness_session_id = ? AND execution_call_id_hash > ?"
+                                        + " AND execution_state NOT IN ('SETTLED', 'ABANDONED')"
+                                        + " ORDER BY execution_call_id_hash LIMIT ?";
+                        List<ToolExecutionRecord> batch = new ArrayList<>();
+                        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                            JdbcRepositorySupport.setIdentity(statement, 1, session.getBindingId());
+                            statement.setLong(2, session.getRuntimeGeneration());
+                            statement.setString(
+                                    3,
+                                    JdbcRepositorySupport.valueKey(session.getRuntimeSessionId()));
+                            JdbcRepositorySupport.setIdentity(
+                                    statement, 4, session.getSession().getHarnessSessionId());
+                            statement.setString(5, cursor);
+                            statement.setInt(6, limit);
+                            try (ResultSet result = statement.executeQuery()) {
+                                while (result.next()) {
+                                    ToolExecutionRecord record = mapExecution(result);
+                                    if (!record.belongsTo(session)) {
+                                        throw new IllegalStateException(
+                                                "Execution scan ownership differs");
+                                    }
+                                    batch.add(record);
+                                }
+                            }
+                        }
+                        if (batch.isEmpty()) {
+                            return List.copyOf(matches);
+                        }
+                        for (ToolExecutionRecord record : batch) {
+                            if (ManagedHoldFamily.of(record) != null) {
+                                matches.add(record);
+                                if (matches.size() == limit) {
+                                    return List.copyOf(matches);
+                                }
+                            }
+                        }
+                        if (batch.size() < limit) {
+                            return List.copyOf(matches);
+                        }
+                        cursor =
+                                JdbcRepositorySupport.valueKey(
+                                        batch.get(batch.size() - 1).getExecutionCallId());
+                    }
+                });
+    }
+
+    @Override
+    public List<ToolHoldRow> findHoldRowsByHarnessSession(
+            String harnessSessionId, String afterExecutionCallId, int limit) {
+        if (harnessSessionId == null || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException(
+                    "harnessSessionId and limit in [1, 100] are required");
+        }
+        String after = afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireId(afterExecutionCallId, "cursor"));
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            List<ToolHoldRow> matches = new ArrayList<>();
+            String cursor = after;
+            // Same windowing as findBackgroundProcesses, but scoped by the
+            // harness session instead of one Runtime Session, and WITHOUT the
+            // terminal-state filter: a hold row's settle discharges nothing —
+            // only the Runtime Session's recorded release does, and that
+            // filter is the caller's (#13930 R1-2 review). The projection is
+            // narrowed to the two fields the caller reads: full
+            // mapExecution would parse the result payload and re-verify three
+            // digests for every scanned row, almost all of them non-hold
+            // (#13986 review R1-7).
+            for (;;) {
+                String sql = "SELECT execution_call_id, harness_session_id, "
+                        + "runtime_session_id, reference_json FROM ma_tool_execution "
+                        + "WHERE harness_session_id = ? AND execution_call_id_hash > ? "
+                        + "ORDER BY execution_call_id_hash LIMIT ?";
+                List<ToolHoldRow> batch = new ArrayList<>();
+                int scanned = 0;
+                String lastScanned = null;
+                try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                    JdbcRepositorySupport.setIdentity(statement, 1, harnessSessionId);
+                    statement.setString(2, cursor);
+                    statement.setInt(3, limit);
+                    try (ResultSet result = statement.executeQuery()) {
+                        while (result.next()) {
+                            scanned++;
+                            lastScanned = result.getString("execution_call_id");
+                            // The canonical schema stores identities in
+                            // VARBINARY, so the SQL's `=` is already
+                            // byte-exact; this fence keeps the exact Harness
+                            // identity guarantee independent of the store's
+                            // comparison semantics (#13986 review).
+                            if (!harnessSessionId.equals(
+                                    result.getString("harness_session_id"))) {
+                                continue;
+                            }
+                            Map<String, Object> reference =
+                                    fromJson(result.getString("reference_json"));
+                            if (ManagedHoldFamily.ofDispatchMode(
+                                    reference.get("dispatchMode")) == null) {
+                                continue;
+                            }
+                            batch.add(new ToolHoldRow(
+                                    result.getString("execution_call_id"),
+                                    result.getString("runtime_session_id")));
+                        }
+                    }
+                }
+                if (scanned == 0) {
+                    return List.copyOf(matches);
+                }
+                matches.addAll(batch);
+                if (matches.size() >= limit) {
+                    return List.copyOf(matches.subList(0, limit));
+                }
+                if (scanned < limit) {
+                    return List.copyOf(matches);
+                }
+                cursor = JdbcRepositorySupport.valueKey(lastScanned);
+            }
+        });
+    }
+
+    @Override
+    public List<ToolExecutionRecord> findByBinding(String bindingId,
+            long runtimeGeneration, String afterExecutionCallId, int limit) {
+        String id = BrokerValues.requireId(bindingId, "bindingId");
+        if (runtimeGeneration <= 0 || limit < 1 || limit > 100) {
+            throw new IllegalArgumentException(
+                    "positive runtimeGeneration and limit in [1, 100] are required");
+        }
+        String after = afterExecutionCallId == null ? ""
+                : JdbcRepositorySupport.valueKey(BrokerValues.requireWellFormed(
+                        BrokerValues.requireId(afterExecutionCallId, "cursor"), "cursor"));
+        return JdbcRepositorySupport.read(
+                dataSource,
+                connection -> {
+                    String sql =
+                            "SELECT "
+                                    + EXECUTION_COLUMNS
+                                    + " FROM ma_tool_execution "
+                                    + "WHERE binding_id = ? AND runtime_generation = ? "
+                                    + "AND execution_call_id_hash > ? "
+                                    + "ORDER BY execution_call_id_hash LIMIT ?";
+                    try (PreparedStatement statement = connection.prepareStatement(sql)) {
+                        JdbcRepositorySupport.setIdentity(statement, 1, id);
+                        statement.setLong(2, runtimeGeneration);
+                        statement.setString(3, after);
+                        statement.setInt(4, limit);
+                        List<ToolExecutionRecord> records = new ArrayList<>();
+                        try (ResultSet result = statement.executeQuery()) {
+                            while (result.next()) {
+                                ToolExecutionRecord record = mapExecution(result);
+                                BrokerValues.requireWellFormed(
+                                        record.getExecutionCallId(), "executionCallId");
+                                if (!id.equals(record.getBindingId())
+                                        || runtimeGeneration != record.getRuntimeGeneration()) {
+                                    throw new IllegalStateException(
+                                            "Execution inventory ownership differs");
+                                }
+                                records.add(record);
+                            }
+                        }
+                        return List.copyOf(records);
+                    }
+                });
+    }
+
+    @Override
+    public boolean hasActiveByBinding(String bindingId,
+            long runtimeGeneration) {
+        String id = BrokerValues.requireId(bindingId, "bindingId");
+        if (runtimeGeneration <= 0) {
+            throw new IllegalArgumentException(
+                    "runtimeGeneration must be positive");
+        }
+        return JdbcRepositorySupport.read(dataSource, connection ->
+                hasActiveByBinding(connection, id, runtimeGeneration));
+    }
+
+    @Override
+    public boolean hasActiveByRuntimeSession(String runtimeSessionId) {
+        String id = BrokerValues.requireId(runtimeSessionId,
+                "runtimeSessionId");
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            String sql = "SELECT runtime_session_id "
+                    + "FROM ma_tool_execution "
+                    + "WHERE runtime_session_key = ? "
+                    + "AND execution_state NOT IN ('SETTLED', 'ABANDONED')";
+            try (PreparedStatement statement = connection.prepareStatement(
+                    sql)) {
+                statement.setString(1, JdbcRepositorySupport.valueKey(id));
+                try (ResultSet result = statement.executeQuery()) {
+                    while (result.next()) {
+                        if (id.equals(result.getString(
+                                "runtime_session_id"))) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            }
+        });
+    }
+
+    @Override
+    public boolean hasActiveByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId) {
+        return JdbcRepositorySupport.read(dataSource, connection ->
+                hasActiveByRuntimeSession(connection, bindingId,
+                        runtimeGeneration, runtimeSessionId,
+                        java.util.Set.of()));
+    }
+
+    @Override
+    public boolean hasActiveByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds) {
+        return JdbcRepositorySupport.read(dataSource, connection ->
+                hasActiveByRuntimeSession(connection, bindingId,
+                        runtimeGeneration, runtimeSessionId,
+                        excludingExecutionCallIds));
+    }
+
+    @Override
+    public boolean hasUnprovenCaptureByRuntimeSession(String bindingId,
+            long runtimeGeneration, String runtimeSessionId) {
+        return JdbcRepositorySupport.read(dataSource, connection -> {
+            try (PreparedStatement statement = connection.prepareStatement(
+                    "SELECT binding_id, runtime_session_id, result_json FROM"
+                            + " ma_tool_execution WHERE binding_id = ? AND runtime_generation = ?"
+                            + " AND runtime_session_key = ? AND execution_state = 'SETTLED'")) {
+                JdbcRepositorySupport.setIdentity(statement, 1, bindingId);
+                statement.setLong(2, runtimeGeneration);
+                statement.setString(3, JdbcRepositorySupport.valueKey(runtimeSessionId));
+                try (ResultSet result = statement.executeQuery()) {
+                    while (result.next()) {
+                        if (bindingId.equals(result.getString("binding_id"))
+                                && runtimeSessionId.equals(result.getString("runtime_session_id"))
+                                && ToolExecutionRepository.captureStopUnproven(
+                                        fromJson(result.getString("result_json")))) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            return false;
+        });
+    }
+
+    static boolean hasActiveByRuntimeSession(Connection connection,
+            String bindingId, long runtimeGeneration, String runtimeSessionId)
+            throws SQLException {
+        return hasActiveByRuntimeSession(connection, bindingId,
+                runtimeGeneration, runtimeSessionId, java.util.Set.of());
+    }
+
+    static boolean hasActiveByRuntimeSession(Connection connection,
+            String bindingId, long runtimeGeneration, String runtimeSessionId,
+            java.util.Set<String> excludingExecutionCallIds)
+            throws SQLException {
+        try (PreparedStatement statement = connection.prepareStatement(
+                        "SELECT binding_id, runtime_session_id, execution_call_id FROM"
+                            + " ma_tool_execution WHERE binding_id = ? AND runtime_generation = ?"
+                            + " AND runtime_session_key = ? AND execution_state NOT IN ('SETTLED',"
+                            + " 'ABANDONED')")) {
+            JdbcRepositorySupport.setIdentity(statement, 1, bindingId);
+            statement.setLong(2, runtimeGeneration);
+            statement.setString(3, JdbcRepositorySupport.valueKey(runtimeSessionId));
+            try (ResultSet result = statement.executeQuery()) {
+                while (result.next()) {
+                    if (bindingId.equals(result.getString("binding_id"))
+                            && runtimeSessionId.equals(result.getString("runtime_session_id"))
+                            && !excludingExecutionCallIds.contains(
+                                    result.getString("execution_call_id"))) {
+                        return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    private static ToolExecutionRecord selectByExecutionId(
+            Connection connection, String executionCallId, boolean forUpdate)
+            throws SQLException {
+        String sql = "SELECT " + EXECUTION_COLUMNS
+                + " FROM ma_tool_execution WHERE execution_call_id_hash = ?"
+                + (forUpdate ? " FOR UPDATE" : "");
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            if (forUpdate) {
+                statement.setQueryTimeout(10);
+            }
+            statement.setString(1, JdbcRepositorySupport.valueKey(
+                    executionCallId));
+            try (ResultSet result = statement.executeQuery()) {
+                if (!result.next()) {
+                    return null;
+                }
+                ToolExecutionRecord record = mapExecution(result);
+                if (!executionCallId.equals(record.getExecutionCallId())) {
+                    throw new IllegalStateException(
+                            "Tool execution-call hash collision");
+                }
+                return record;
+            }
+        }
+    }
+
+    static void insertExecution(Connection connection,
+            ToolExecutionRecord record) throws SQLException {
+        String sql = "INSERT INTO ma_tool_execution (" + EXECUTION_COLUMNS
+                + ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, "
+                + "?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            setExecution(statement, record);
+            statement.executeUpdate();
+        }
+    }
+
+    private static void updateExecution(Connection connection,
+            ToolExecutionRecord record) throws SQLException {
+        String sql = "UPDATE ma_tool_execution SET execution_state = ?, "
+                + "execution_status = ?, result_json = ?, "
+                + "last_sequence = ?, cancel_requested = ?, "
+                + "dispatch_owner = ?, dispatch_lease_until = ?, "
+                + "dispatch_generation = ?, record_version = ?, "
+                + "settled_at = ?, abandoned_at = ?, loss_evidence_id = ?, "
+                + "authorized_dispatch_generation = ?, authorized_binding_version = ? "
+                + "WHERE execution_call_id_hash = ?";
+        try (PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, record.getState().name());
+            statement.setString(2, record.getExecutionStatus());
+            statement.setString(3, toJson(record.getResult()));
+            statement.setLong(4, record.getLastSequence());
+            statement.setBoolean(5, record.isCancelRequested());
+            JdbcRepositorySupport.setIdentity(statement, 6, record.getDispatchOwner());
+            JdbcRepositorySupport.setInstant(statement, 7,
+                    record.getDispatchLeaseUntil());
+            statement.setLong(8, record.getDispatchGeneration());
+            statement.setLong(9, record.getVersion());
+            JdbcRepositorySupport.setInstant(statement, 10,
+                    record.getSettledAt());
+            JdbcRepositorySupport.setInstant(statement, 11, record.getAbandonedAt());
+            JdbcRepositorySupport.setIdentity(statement, 12, record.getLossEvidenceId());
+            statement.setObject(13, record.getAuthorizedDispatchGeneration(), java.sql.Types.BIGINT);
+            statement.setObject(14, record.getAuthorizedBindingVersion(), java.sql.Types.BIGINT);
+            statement.setString(15, JdbcRepositorySupport.valueKey(
+                    record.getExecutionCallId()));
+            if (statement.executeUpdate() != 1) {
+                throw new SQLException("Tool execution update failed");
+            }
+        }
+    }
+
+    private static void setExecution(PreparedStatement statement,
+            ToolExecutionRecord record) throws SQLException {
+        statement.setString(1, JdbcRepositorySupport.valueKey(
+                record.getExecutionCallId()));
+        JdbcRepositorySupport.setIdentity(statement, 2, record.getExecutionCallId());
+        statement.setString(3, JdbcRepositorySupport.valueKey(
+                record.getIdempotencyKey()));
+        JdbcRepositorySupport.setIdentity(statement, 4, record.getIdempotencyKey());
+        JdbcRepositorySupport.setIdentity(statement, 5, record.getBindingId());
+        statement.setLong(6, record.getRuntimeGeneration());
+        JdbcRepositorySupport.setIdentity(statement, 7, record.getHarnessSessionId());
+        JdbcRepositorySupport.setIdentity(statement, 8, record.getRuntimeSessionId());
+        statement.setString(9, JdbcRepositorySupport.valueKey(
+                record.getRuntimeSessionId()));
+        JdbcRepositorySupport.setIdentity(statement, 10, record.getTurnId());
+        JdbcRepositorySupport.setIdentity(statement, 11, record.getToolCallId());
+        statement.setString(12, record.getRequestDigest());
+        statement.setString(13, toJson(record.getReference()));
+        statement.setString(14, record.getState().name());
+        statement.setString(15, record.getExecutionStatus());
+        statement.setString(16, toJson(record.getResult()));
+        statement.setLong(17, record.getLastSequence());
+        statement.setBoolean(18, record.isCancelRequested());
+        JdbcRepositorySupport.setIdentity(statement, 19, record.getDispatchOwner());
+        JdbcRepositorySupport.setInstant(statement, 20,
+                record.getDispatchLeaseUntil());
+        statement.setLong(21, record.getDispatchGeneration());
+        statement.setLong(22, record.getVersion());
+        JdbcRepositorySupport.setInstant(statement, 23,
+                record.getSettledAt());
+        JdbcRepositorySupport.setInstant(statement, 24, record.getAbandonedAt());
+        JdbcRepositorySupport.setIdentity(statement, 25, record.getLossEvidenceId());
+        statement.setObject(26, record.getAuthorizedDispatchGeneration(), java.sql.Types.BIGINT);
+        statement.setObject(27, record.getAuthorizedBindingVersion(), java.sql.Types.BIGINT);
+    }
+
+    static ToolExecutionRecord mapExecution(ResultSet result)
+            throws SQLException {
+        String executionCallId = result.getString("execution_call_id");
+        if (!JdbcRepositorySupport.valueKey(executionCallId).equals(
+                result.getString("execution_call_id_hash"))) {
+            throw new IllegalStateException(
+                    "Tool execution-call hash is invalid");
+        }
+        String idempotencyKey = result.getString("idempotency_key");
+        if (!JdbcRepositorySupport.valueKey(idempotencyKey).equals(
+                result.getString("idempotency_key_hash"))) {
+            throw new IllegalStateException(
+                    "Tool idempotency hash is invalid");
+        }
+        String runtimeSessionId = result.getString("runtime_session_id");
+        if (!JdbcRepositorySupport.valueKey(runtimeSessionId).equals(
+                result.getString("runtime_session_key"))) {
+            throw new IllegalStateException(
+                    "Tool Runtime Session hash is invalid");
+        }
+        return new ToolExecutionRecord(
+                executionCallId, idempotencyKey,
+                result.getString("binding_id"),
+                result.getLong("runtime_generation"),
+                result.getString("harness_session_id"), runtimeSessionId,
+                result.getString("turn_id"),
+                result.getString("tool_call_id"),
+                result.getString("request_digest"),
+                fromJson(result.getString("reference_json")),
+                ToolExecutionRecord.State.valueOf(
+                        result.getString("execution_state")),
+                result.getString("execution_status"),
+                fromJson(result.getString("result_json")),
+                result.getLong("last_sequence"),
+                result.getBoolean("cancel_requested"),
+                result.getString("dispatch_owner"),
+                JdbcRepositorySupport.getInstant(result,
+                        "dispatch_lease_until"),
+                result.getLong("dispatch_generation"),
+                result.getLong("record_version"),
+                JdbcRepositorySupport.getInstant(result, "settled_at"),
+                JdbcRepositorySupport.getInstant(result, "abandoned_at"),
+                result.getString("loss_evidence_id"),
+                result.getObject("authorized_dispatch_generation", Long.class),
+                result.getObject("authorized_binding_version", Long.class));
+    }
+
+    private static String toJson(Map<String, Object> value) {
+        return value == null ? null
+                : JSON.toJSONString(value, JSONWriter.Feature.WriteNulls,
+                        JSONWriter.Feature.WriteBigDecimalAsPlain);
+    }
+
+    private static Map<String, Object> fromJson(String value) {
+        return value == null ? null : JSON.parseObject(value,
+                JSONReader.Feature.DisableReferenceDetect);
+    }
+
+    static void requireCandidate(ToolExecutionRecord candidate) {
+        if (candidate == null || candidate.getVersion() != 0
+                || candidate.getLastSequence() != 0
+                || candidate.getState()
+                        != ToolExecutionRecord.State.PREPARED
+                || candidate.getDispatchOwner() != null
+                || candidate.getAuthorizedDispatchGeneration() != null) {
+            throw new IllegalArgumentException(
+                    "candidate must be a new prepared execution");
+        }
+    }
+
+    private static void requireReplacement(ToolExecutionRecord expected,
+            ToolExecutionRecord replacement) {
+        if (expected == null || replacement == null
+                || !expected.sameIdentity(replacement)
+                || !expected.sameDispatch(replacement)
+                || replacement.getVersion() != expected.getVersion()
+                || replacement.getLastSequence()
+                        < expected.getLastSequence()) {
+            throw new IllegalArgumentException(
+                    "replacement must preserve execution identity, dispatch"
+                            + " claim, version, and result sequence");
+        }
+    }
+}

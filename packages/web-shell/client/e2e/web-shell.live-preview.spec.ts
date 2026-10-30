@@ -177,9 +177,7 @@ test.beforeEach(async ({ page }, testInfo) => {
   await page
     .getByRole('button', { name: 'Toggle right panel', exact: true })
     .click();
-  await page
-    .getByRole('button', { name: /Web preview.*Preview a running/ })
-    .click();
+  await page.getByTestId('right-panel-open-web-preview').click();
 });
 
 async function openPreview(page: Page, url: string) {

@@ -189,6 +189,7 @@ async function openModelSettings(page: Page, testInfo: TestInfo) {
       .getByRole('button', { name: 'Toggle menu', exact: true })
       .click();
   }
+  await page.getByRole('button', { name: 'More', exact: true }).click();
   await page
     .getByRole('button', { name: 'Settings', exact: true })
     .first()
@@ -782,23 +783,14 @@ test('edits a persisted context window, retries a failure, and resets to automat
   page,
 }, testInfo) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  const { configurations, daemon, scenario } = await openModelSettings(
-    page,
-    testInfo,
-  );
+  const { configurations } = await openModelSettings(page, testInfo);
   const reloadSettings = async () => {
     await page.reload();
-    await daemon.sse.waitForConnection(scenario.sessionId);
-    await daemon.sendEvent(
-      replayCompleteEvent({ sessionId: scenario.sessionId }),
+    await expect(page).toHaveURL(/\/settings$/);
+    await expect(page.getByTestId('inline-panel')).toHaveAttribute(
+      'aria-label',
+      'Settings',
     );
-    await page
-      .getByRole('button', { name: 'Toggle menu', exact: true })
-      .click();
-    await page
-      .getByRole('button', { name: 'Settings', exact: true })
-      .first()
-      .click();
     await page
       .getByRole('navigation', { name: 'Settings' })
       .getByRole('button', { name: /^Model/ })

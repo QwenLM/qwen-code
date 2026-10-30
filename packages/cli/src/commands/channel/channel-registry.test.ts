@@ -802,7 +802,9 @@ describe('channel registry', () => {
       'weixin',
       'dingtalk',
       'dws',
+      'email',
       'wecom',
+      'wecom-callback',
       'feishu',
       'qq',
       'github',
@@ -812,7 +814,16 @@ describe('channel registry', () => {
       builtinCatalog
         .filter((entry) => entry.manageable)
         .map((entry) => entry.type),
-    ).toEqual(['dingtalk', 'dws', 'wecom', 'feishu', 'github', 'gitlab']);
+    ).toEqual([
+      'dingtalk',
+      'dws',
+      'email',
+      'wecom',
+      'wecom-callback',
+      'feishu',
+      'github',
+      'gitlab',
+    ]);
     expect(
       builtinCatalog
         .filter((entry) =>

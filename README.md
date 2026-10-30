@@ -105,6 +105,7 @@ For automation and custom integrations:
 - **Headless** — Run `qwen -p "..."` in scripts, CI/CD, or batch jobs.
 - **SDKs** — Build with [TypeScript](./packages/sdk-typescript/README.md), [Python](./packages/sdk-python/README.md), or [Java](./packages/sdk-java/qwencode/README.md).
 - **Daemon** — Run `qwen serve` to connect clients over HTTP + SSE (ACP). _(experimental)_ [Daemon guide](https://qwenlm.github.io/qwen-code-docs/en/users/qwen-serve/).
+- **Computer Use** — Set up [native MCP tools](./packages/cua-driver/README.md#agent-integration) or [Node REPL + SDK](./packages/node-repl/README.md#usage) in Qwen Code, Claude Code, or Codex.
 
 <details>
 <summary>SDK example (Python)</summary>
@@ -157,39 +158,18 @@ If you know Claude Code, you already know Qwen Code — and then some. We've put
 
 ## Qwen Code Evaluation
 
-### Evaluation Configuration
+On **SWE-bench Verified**, seven Qwen Code versions scored **76.40%–77.80%** on average using the same Qwen 3.7 Max model (500 tasks, three trials per version).
 
-| Configuration           | Value                                                                                               |
-| ----------------------- | --------------------------------------------------------------------------------------------------- |
-| Dataset                 | `princeton-nlp/SWE-bench_Verified`, 500 cases                                                       |
-| Runs                    | 3 trials per version, 1,500 jobs per version; 7 Qwen Code versions                                  |
-| Model                   | `Qwen 3.7 Max`                                                                                      |
-| Sampling                | `temperature=1`, `top_p=0.95`                                                                       |
-| Thinking / Reasoning    | `interleaved_thinking=true`, `thinking_type=adaptive`, `reasoning_effort=high`                      |
-| Context / Output Limits | `context_1m=true`, `model_context_length=1,000,000`, `max_tokens=64,000`, `model_max_tokens=65,535` |
-| Harness Limits          | `max_iterations=500`, `runtime_timeout_sec=7,200`, `agent_timeout_multiplier=3.0`                   |
+![Average SWE-bench Verified scores by Qwen Code version: 0.0.14, 77.80%; 0.1.0, 76.73%; 0.5.0, 76.60%; 0.10.0, 76.47%; 0.15.0, 77.67%; 0.19.0, 76.40%; 0.22.0, 77.33%.](./.github/assets/qwen-code-avg-score-trend.svg)
 
-### Scores by Qwen Code Version
-
-| Version |  Avg Score | Pass Rate | pass@3 | pass^3 |
-| ------- | ---------: | --------: | -----: | -----: |
-| 0.0.14  | **77.80%** |     84.6% |  84.6% |  69.2% |
-| 0.1.0   | **76.73%** |     84.6% |  84.6% |  68.0% |
-| 0.5.0   | **76.60%** |     83.0% |  83.0% |  68.4% |
-| 0.10.0  | **76.47%** |     84.4% |  84.4% |  67.4% |
-| 0.15.0  | **77.67%** |     84.6% |  84.6% |  68.6% |
-| 0.19.0  | **76.40%** |     85.0% |  85.0% |  65.8% |
-| 0.22.0  | **77.33%** |     84.4% |  84.4% |  68.0% |
-
-### Avg Score Trend
-
-![Qwen Code version Avg Score trend](./.github/assets/qwen-code-avg-score-trend.svg)
+[Full results and evaluation configuration →](./docs/evaluation.md)
 
 ## Ecosystem
 
 - [**Qwen Code Desktop**](https://github.com/QwenLM/qwen-code/releases/tag/desktop-latest) — Official desktop app for macOS, Windows, and Linux
 - [**AionUi**](https://github.com/iOfficeAI/AionUi) — A modern GUI for command-line AI tools including Qwen Code
 - [**Gemini CLI Desktop**](https://github.com/Piebald-AI/gemini-cli-desktop) — A cross-platform desktop/web/mobile UI for Qwen Code
+- [**qwen-audio-agent**](https://github.com/QwenAudio/qwen-audio-agent) — Realtime full-duplex voice frontend for Qwen Code over ACP — talk hands-free with barge-in and a local wake word
 
 - [**🦞 Qwen Code Claw**](https://github.com/openclaw/acpx) — Let other agents (Claude, Codex, etc.) delegate coding tasks to Qwen Code via ACP. Paste this prompt into your agent:
 

@@ -13,6 +13,7 @@
  * - Lifecycle hooks (pre/post tool use, stop) for synchronous callbacks
  */
 
+import type { ToolLifecycleEvent } from '../../telemetry/tool-lifecycle.js';
 import { EventEmitter } from 'events';
 import type {
   ToolCallConfirmationDetails,
@@ -22,6 +23,7 @@ import type {
 } from '../../tools/tools.js';
 import type { Part, GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { AgentStatus } from './agent-types.js';
+import type { RetryWaitEvent } from '../../utils/retry-wait.js';
 
 type WithoutConfirmationCallback<T> = T extends unknown
   ? Omit<T, 'onConfirm'>
@@ -44,6 +46,7 @@ export type AgentEvent =
   | 'tool_output_update'
   | 'tool_waiting_approval'
   | 'usage_metadata'
+  | 'retry_wait'
   | 'external_message'
   | 'finish'
   | 'error'
@@ -62,6 +65,8 @@ export enum AgentEventType {
   TOOL_OUTPUT_UPDATE = 'tool_output_update',
   TOOL_WAITING_APPROVAL = 'tool_waiting_approval',
   USAGE_METADATA = 'usage_metadata',
+  /** Start/end of a retry-owned backoff sleep inside the round's request. */
+  RETRY_WAIT = 'retry_wait',
   /** External user message injected mid-run (e.g. via send_message). */
   EXTERNAL_MESSAGE = 'external_message',
   FINISH = 'finish',
@@ -129,6 +134,7 @@ export interface AgentToolCallEvent {
 }
 
 export interface AgentToolResultEvent {
+  lifecycle?: ToolLifecycleEvent;
   subagentId: string;
   round: number;
   callId: string;
@@ -156,6 +162,7 @@ export interface AgentToolResponsesFinalizedEvent {
 }
 
 export interface AgentToolOutputUpdateEvent {
+  lifecycle?: ToolLifecycleEvent;
   subagentId: string;
   round: number;
   callId: string;
@@ -229,6 +236,13 @@ export interface AgentErrorEvent {
   timestamp: number;
 }
 
+export type AgentRetryWaitEvent = RetryWaitEvent & {
+  subagentId: string;
+  round: number;
+  promptId: string;
+  timestamp: number;
+};
+
 export interface AgentStatusChangeEvent {
   agentId: string;
   previousStatus: AgentStatus;
@@ -255,6 +269,7 @@ export interface AgentEventMap {
   [AgentEventType.TOOL_OUTPUT_UPDATE]: AgentToolOutputUpdateEvent;
   [AgentEventType.TOOL_WAITING_APPROVAL]: AgentApprovalRequestEvent;
   [AgentEventType.USAGE_METADATA]: AgentUsageEvent;
+  [AgentEventType.RETRY_WAIT]: AgentRetryWaitEvent;
   [AgentEventType.EXTERNAL_MESSAGE]: AgentExternalMessageEvent;
   [AgentEventType.FINISH]: AgentFinishEvent;
   [AgentEventType.ERROR]: AgentErrorEvent;

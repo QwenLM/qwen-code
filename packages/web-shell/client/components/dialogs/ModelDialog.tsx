@@ -1,3 +1,8 @@
+import {
+  ModelRefreshControl,
+  ModelRefreshError,
+  type ModelRefreshState,
+} from '../ModelRefreshControl';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useConnection } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
@@ -14,6 +19,7 @@ export type ModelDialogMode =
   | 'image';
 
 interface ModelDialogProps {
+  modelRefresh?: ModelRefreshState;
   mode?: ModelDialogMode;
   loading?: boolean;
   error?: Error;
@@ -83,14 +89,6 @@ function getModelKey(model: ModelDialogModel): string {
   ].join('\0');
 }
 
-function getModelSelectId(
-  model: ModelDialogModel,
-  isFastMode: boolean,
-): string {
-  if (!isFastMode) return model.id;
-  return model.baseModelId ?? model.id.replace(/\([^()]+\)$/, '');
-}
-
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
     <div className={styles.detailRow}>
@@ -101,6 +99,7 @@ function DetailRow({ label, value }: { label: string; value: string }) {
 }
 
 export function ModelDialog({
+  modelRefresh,
   mode = 'main',
   loading = false,
   error,
@@ -125,7 +124,7 @@ export function ModelDialog({
   const initialIndex =
     currentIdx >= 0
       ? currentIdx
-      : (mode === 'advisor' || mode === 'image') && currentModel
+      : (isFastMode || mode === 'advisor' || mode === 'image') && currentModel
         ? -1
         : 0;
   const [activeIndex, setActiveIndex] = useState(initialIndex);
@@ -157,8 +156,7 @@ export function ModelDialog({
 
   const confirm = (index: number) => {
     const model = availableModels[index];
-    if (model && !loading && !error)
-      onSelect(getModelSelectId(model, isFastMode));
+    if (model && !loading && !error) onSelect(model.id);
   };
 
   const { keyboardMode } = useListboxKeyboard({
@@ -272,6 +270,12 @@ export function ModelDialog({
             ) : null}
           </div>
         </>
+      ) : null}
+      {modelRefresh?.refresh ? (
+        <div className={styles.toolbar}>
+          <ModelRefreshControl state={modelRefresh} />
+          <ModelRefreshError state={modelRefresh} />
+        </div>
       ) : null}
     </div>
   );

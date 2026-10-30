@@ -19,7 +19,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   recoveryDigest,
   recoveryJson,
@@ -33,6 +33,7 @@ import type { RecoverySessionSource } from './workspace-recovery-session.js';
 
 const temporary: string[] = [];
 afterEach(async () => {
+  vi.unstubAllEnvs();
   for (const root of temporary.splice(0))
     await rm(root, { recursive: true, force: true });
 });
@@ -179,6 +180,7 @@ async function fixture() {
     calls,
     root,
     assets,
+    rows,
     interrupt: () => {
       failComplete = true;
     },
@@ -186,6 +188,187 @@ async function fixture() {
 }
 
 describe('workspace recovery private worker', () => {
+  it('captures and verifies a collected tombstone while preserving its retired authority', async () => {
+    const f = await fixture();
+    const original = f.rows[0].source;
+    const retiredHead = {
+      tenantId: original.binding.tenantId,
+      workspaceId: 'private-key',
+      sessionId: original.sessionId,
+      state: 'DELETED',
+      storageVersion: 1,
+      writerId: null,
+      writerGeneration: 9,
+      writerLeaseUntil: null,
+      journalRevision: 7,
+      committedSequence: 12,
+      lastCommitDigest: 'a'.repeat(64),
+      activationEpoch: 4,
+      latestCheckpointResourceId: null,
+      compactedThroughRevision: 7,
+      recoveryStatus: 'READY',
+      recoveryDetailCode: null,
+    };
+    const source: RecoverySessionSource = {
+      ...original,
+      head: null,
+      retiredHead,
+      publicSession: {
+        ...original.publicSession,
+        status: 'DELETED',
+        deletedAt: 1,
+      },
+      retirement: {
+        tenantId: original.binding.tenantId,
+        sessionId: original.sessionId,
+        operationId: 'delete',
+        generation: 1,
+        retiredAt: 2,
+        recoveryProtected: false,
+      },
+    };
+    const sourceJson = JSON.stringify(source);
+    Object.assign(f.rows[0], {
+      source,
+      sourceJson,
+      sourceDigest: recoveryDigest(sourceJson),
+    });
+    f.context.sourceDigest = recoveryDigest(
+      f.rows.map((row) => `${row.sourceJson}\n`).join(''),
+    );
+    const captured = (await runRecoveryWorker(f.rpc)) as {
+      manifestDigest: string;
+    };
+    const lines = await readFile(
+      join(f.context.request.bundleRoot, '.w1-recovery/sessions.ndjson'),
+      'utf8',
+    );
+    const saved = JSON.parse(lines.split('\n')[0]) as RecoverySessionSource;
+    expect(saved.retiredHead).toEqual(retiredHead);
+    expect(saved.head).toBeNull();
+    f.context.capture = {
+      operationId: f.context.request.operationId,
+      manifestDigest: captured.manifestDigest,
+    };
+    f.context.request.operationId = '00000000-0000-4000-8000-000000000003';
+    f.context.mode = 'verify';
+    await rm(f.context.request.sourceRoot, { recursive: true });
+    const verified = (await runRecoveryWorker(f.rpc)) as {
+      result: Record<string, unknown>;
+    };
+    expect(verified.result).toMatchObject({
+      contentVerified: true,
+      activation: false,
+    });
+    expect(f.calls).not.toContain('transaction');
+    expect(f.calls).not.toContain('resource');
+    expect(source.retiredHead).toEqual(retiredHead);
+    expect(source.publicSession.status).toBe('DELETED');
+  });
+
+  it.each(['canonical', 'trailing-slash', 'doubled-slash'])(
+    'accepts %s QWEN_HOME at the migration environment gate',
+    async (kind) => {
+      const f = await fixture();
+      const home = join(f.root, 'home');
+      const history = join(home, 'file-history');
+      await mkdir(history, { recursive: true });
+      for (const path of [
+        'workspace',
+        'file-history',
+        'authority/objects',
+        '.w1-recovery',
+      ])
+        await mkdir(join(f.context.request.bundleRoot, path), {
+          recursive: true,
+        });
+      vi.stubEnv(
+        'QWEN_HOME',
+        kind === 'trailing-slash'
+          ? `${home}/`
+          : kind === 'doubled-slash'
+            ? `${home.replace('/home', '//home')}//`
+            : home,
+      );
+      const rpc: RecoveryRpc = async (method, params) =>
+        method === 'context'
+          ? {
+              ...f.context,
+              mode: 'verify',
+              request: { ...f.context.request, fileHistoryRoot: history },
+              migration: {
+                targetRoot: join(f.root, 'target'),
+                targetMarker: {
+                  digest: recoveryDigest('marker'),
+                  byteLength: 6,
+                },
+              },
+            }
+          : f.rpc(method, params);
+      await expect(runRecoveryWorker(rpc)).rejects.toThrow(
+        'capture_not_sealed',
+      );
+      expect(f.calls).not.toContain('finish');
+    },
+  );
+
+  it.each([
+    'unset',
+    'relative',
+    'symlink',
+    'different-history',
+    'dot',
+    'parent',
+  ])(
+    'refuses the migration before completion with %s QWEN_HOME',
+    async (kind) => {
+      const f = await fixture();
+      const home = join(f.root, 'home');
+      const history = join(home, 'file-history');
+      await mkdir(history, { recursive: true });
+      await mkdir(join(home, 'child'));
+      if (kind === 'symlink') await symlink(home, join(f.root, 'alias'));
+      vi.stubEnv(
+        'QWEN_HOME',
+        kind === 'unset'
+          ? undefined
+          : kind === 'relative'
+            ? '.'
+            : kind === 'symlink'
+              ? join(f.root, 'alias')
+              : kind === 'dot'
+                ? `${home}/.`
+                : kind === 'parent'
+                  ? `${home}/child/..`
+                  : home,
+      );
+      const rpc: RecoveryRpc = async (method, params) =>
+        method === 'context'
+          ? {
+              ...f.context,
+              request: {
+                ...f.context.request,
+                fileHistoryRoot:
+                  kind === 'different-history'
+                    ? f.context.request.fileHistoryRoot
+                    : history,
+              },
+              migration: {
+                targetRoot: join(f.root, 'target'),
+                targetMarker: {
+                  digest: recoveryDigest('marker'),
+                  byteLength: 6,
+                },
+              },
+            }
+          : f.rpc(method, params);
+      await expect(runRecoveryWorker(rpc)).rejects.toThrow(
+        'migration_history_environment_mismatch',
+      );
+      expect(f.calls).not.toContain('finish');
+    },
+  );
+
   it.each(['absolute', 'dangling', 'not-directory', 'hardlink'])(
     'invalidates a fresh unsupported %s entry with its own code and private path',
     async (kind) => {

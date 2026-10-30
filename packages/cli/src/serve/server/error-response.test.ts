@@ -32,6 +32,10 @@ import {
   WorkspaceRuntimeStillStartingError,
 } from '../workspace-runtime-coordinator.js';
 import { sendBridgeError } from './error-response.js';
+import {
+  SessionArtifactLibraryError,
+  SessionStorageEntryError,
+} from '@qwen-code/qwen-code-core/services/sessionService.js';
 import { DaemonDrainingError } from './session-archive.js';
 import {
   BridgeTimeoutError,
@@ -55,6 +59,154 @@ function responseMock(): {
   json.mockReturnValue(response);
   return { response: response as unknown as Response, set, status, json };
 }
+
+describe('session cd errors', () => {
+  it.each(['directory_not_found', 'containment_violation'])(
+    'maps %s to a path validation response',
+    (errorKind) => {
+      const { response, status, json } = responseMock();
+      const targetPath = '/outside/workspace';
+      sendBridgeError(
+        response,
+        new RequestError(-32004, 'Invalid working directory', {
+          errorKind,
+          path: targetPath,
+        }),
+        { route: 'POST /session/:id/cd', sessionId: 'session-1' },
+      );
+      expect(status).toHaveBeenCalledWith(400);
+      expect(json).toHaveBeenCalledWith({
+        error: 'Invalid working directory',
+        code: errorKind,
+        path: targetPath,
+      });
+    },
+  );
+
+  it.each([
+    undefined,
+    'POST /session',
+    'POST /session/:id/load',
+    'POST /session/:id/worktree-reset',
+  ])('preserves non-cd containment errors and logging for %s', (route) => {
+    const { response, status, json } = responseMock();
+    const daemonLog = { error: vi.fn() } as unknown as DaemonLogger;
+    const data = {
+      errorKind: 'containment_violation',
+      path: '/outside/workspace',
+    };
+    const error = new RequestError(-32004, 'Invalid working directory', data);
+    const context = route ? { route, sessionId: 'session-1' } : undefined;
+
+    sendBridgeError(response, error, context, daemonLog);
+
+    expect(status).toHaveBeenCalledWith(500);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid working directory',
+      code: -32004,
+      data,
+    });
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      error.message,
+      error,
+      context ?? {},
+    );
+  });
+});
+
+describe('artifact library errors', () => {
+  it.each([
+    'foreign_project',
+    'ambiguous_project',
+    'unknown_project',
+    'non_regular',
+  ] as const)('maps %s storage failures explicitly', (reason) => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new SessionStorageEntryError('session-1', reason),
+    );
+    expect(status).toHaveBeenCalledWith(
+      reason === 'foreign_project' ? 404 : 409,
+    );
+    expect(json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        code:
+          reason === 'foreign_project'
+            ? 'session_not_found'
+            : 'session_storage_conflict',
+      }),
+    );
+  });
+  it('keeps artifact mutation refusal distinct from resume failures', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new SessionArtifactLibraryError(
+        'session-1',
+        'artifact_mutation_requires_managed_authority',
+        'Artifact mutation must use its managed session authority.',
+      ),
+    );
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      code: 'artifact_mutation_requires_managed_authority',
+      error: 'Artifact mutation must use its managed session authority.',
+    });
+  });
+});
+
+describe('message deletion errors', () => {
+  it('does not certify a later request as persisted while context recovery is required', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new RequestError(-32000, 'Reload the session', {
+        errorKind: 'session_history_context_unavailable',
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Reload the session',
+      code: 'session_history_context_unavailable',
+    });
+  });
+
+  it('preserves committed deletion identities in the 503 response', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new RequestError(-32000, 'Reopen the session', {
+        errorKind: 'message_deletion_context_unavailable',
+        deletedGroupIds: ['group'],
+        deletedPromptIds: ['prompt'],
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Reopen the session',
+      code: 'message_deletion_context_unavailable',
+      persisted: true,
+      deletedGroupIds: ['group'],
+      deletedPromptIds: ['prompt'],
+    });
+  });
+
+  it('reports invalid stored history separately from invalid selections', () => {
+    const { response, status, json } = responseMock();
+    sendBridgeError(
+      response,
+      new RequestError(-32602, 'Invalid history', {
+        errorKind: 'message_history_invalid',
+      }),
+    );
+    expect(status).toHaveBeenCalledWith(409);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid history',
+      code: 'message_history_invalid',
+    });
+  });
+});
 
 describe('session attachment upload errors', () => {
   it('records storage failures with their cause without exposing it to clients', () => {
@@ -629,6 +781,51 @@ describe('sendBridgeError session writer errors', () => {
     });
   });
 
+  it('maps a Managed engine quarantine to HTTP 503 with the reason kept', () => {
+    const { response, status, json } = responseMock();
+    const error = new RequestError(
+      -32024,
+      "The Managed engine is quarantined: a Runtime worker's stop could not be proven (3 groups remain).",
+      { errorKind: 'managed_engine_quarantined' },
+    );
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        "The Managed engine is quarantined: a Runtime worker's stop could not be proven (3 groups remain).",
+      code: 'managed_engine_quarantined',
+      errorKind: 'managed_engine_quarantined',
+    });
+  });
+
+  it('answers the service-level quarantine code 503, not the conflict ladder', () => {
+    // StandaloneSessionServiceError('managed_engine_quarantined') is how a
+    // liftable refusal reaches a daemon route after the bindAndRelease
+    // translation; it must satisfy 503=retry-later the same way the raw
+    // child refusal does, never fall to the default 409.
+    const { response, status, json } = responseMock();
+    const error = new StandaloneSessionServiceError(
+      'managed_engine_quarantined',
+      'session-1',
+      'The Managed engine is quarantined while a Runtime worker stop stays unproven; retry once it proves.',
+      true,
+    );
+
+    sendBridgeError(response, error);
+
+    expect(status).toHaveBeenCalledWith(503);
+    expect(json).toHaveBeenCalledWith({
+      error:
+        'The Managed engine is quarantined while a Runtime worker stop stays unproven; retry once it proves.',
+      code: 'managed_engine_quarantined',
+      errorKind: 'managed_engine_quarantined',
+      retryable: true,
+      sessionId: 'session-1',
+    });
+  });
+
   it('logs why an execution engine rejection happened', () => {
     const daemonLog = { warn: vi.fn() } as unknown as DaemonLogger;
     const ctx = { route: 'POST /session/:id/load', sessionId: 'session-1' };
@@ -741,6 +938,32 @@ describe('sendBridgeError session writer errors', () => {
       error: 'Invalid transcript turn anchor',
       code: 'invalid_turn_anchor',
     });
+  });
+
+  it('maps an operation the session does not offer to 400', () => {
+    const { response, status, json } = responseMock();
+    const daemonLog = { error: vi.fn() } as unknown as DaemonLogger;
+    const error = Object.assign(
+      new Error(
+        'Invalid params: A Managed session cannot change its directory.',
+      ),
+      { data: { errorKind: 'unsupported_operation' } },
+    );
+
+    sendBridgeError(
+      response,
+      error,
+      { route: 'POST /session/:id/cd' },
+      daemonLog,
+    );
+
+    expect(status).toHaveBeenCalledWith(400);
+    expect(json).toHaveBeenCalledWith({
+      error: 'Invalid params: A Managed session cannot change its directory.',
+      code: 'unsupported_operation',
+    });
+    // Not reported as an unexpected bridge failure.
+    expect(daemonLog.error).not.toHaveBeenCalled();
   });
 
   it('maps runtime still starting to 503 with Retry-After', () => {

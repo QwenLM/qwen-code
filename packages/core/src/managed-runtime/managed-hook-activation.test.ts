@@ -5,6 +5,7 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { randomUUID } from 'node:crypto';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -15,6 +16,7 @@ import {
 } from './managed-session-assembly.js';
 import {
   ManagedHookActivationController,
+  managedHookRestoreActivationId,
   type ManagedHookModelScope,
 } from './managed-hook-activation.js';
 import { createManagedHarnessHandle } from './managed-harness-factory.js';
@@ -22,6 +24,7 @@ import { TurnBudget } from '../core/turn-budget.js';
 import { uiTelemetryService, type UiEvent } from '../telemetry/uiTelemetry.js';
 import { ApiResponseEvent } from '../telemetry/types.js';
 import { EVENT_API_RESPONSE } from '../telemetry/constants.js';
+import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
 
 const operation = {
   operationId: 'operation-1',
@@ -53,13 +56,6 @@ afterEach(async () => {
 async function fixture() {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'hook-model-'));
   dirs.push(root);
-  const ref = {
-    resourceId: 'resource',
-    kind: 'managed-test',
-    schemaVersion: 1,
-    byteLength: 2,
-    digest: '9'.repeat(64),
-  };
   const options = {
     runtimeBaseDir: root,
     sessionId: '550e8400-e29b-41d4-a716-446655440000',
@@ -74,6 +70,8 @@ async function fixture() {
     workerId: 'worker-1',
     activationLeaseDurationMs: 60_000,
   };
+  const resources = LocalManagedSessionResourceStore.create(options);
+  const ref = await resources.publish('managed-test', Buffer.from('{}'));
   const session = await openManagedSession({
     ...options,
     create: { definitionRef: ref, rootSnapshotRef: ref, createdBy: 'test' },
@@ -88,6 +86,85 @@ async function fixture() {
 }
 
 describe('Managed Hook model activation', () => {
+  it('commits complete final Parts with its output marker after renewal and refuses changed replay', async () => {
+    const { session, controller, options } = await fixture();
+    await createManagedHarnessHandle(session).ensureRunnable();
+    const recoveryRef = await session.resources.publish(
+      'hosted-model-request',
+      Buffer.from('{}'),
+    );
+    const record = {
+      uuid: randomUUID(),
+      parentUuid: null,
+      sessionId: options.sessionId,
+      timestamp: new Date().toISOString(),
+      type: 'assistant' as const,
+      cwd: options.cwd,
+      version: 'test',
+      daemonPromptId: 'turn-1',
+      model: 'main',
+      message: {
+        role: 'model' as const,
+        parts: [
+          {
+            text: 'private thought',
+            thought: true,
+            thoughtSignature: 'original-signature',
+          },
+          { text: '原始输出'.repeat(20_000) },
+          { inlineData: { mimeType: 'image/png', data: 'AQID' } },
+        ],
+      },
+    };
+    await controller.runTurn('turn-1', async (scope) => {
+      await scope.bindBudget(new TurnBudget(), 'original');
+      const complete = await scope.beginMainAttempt('main', recoveryRef);
+      await Promise.all([
+        session.authority.renewActivation({ leaseDurationMs: 60_000 }),
+        complete(true, [{ candidatesTokenCount: 30 }], record),
+      ]);
+      const after = session.authority.committedSequence;
+      await complete(true, [{ candidatesTokenCount: 30 }], record);
+      expect(session.authority.committedSequence).toBe(after);
+      await expect(
+        complete(true, [{ candidatesTokenCount: 31 }], record),
+      ).rejects.toThrow('replay differs');
+      await expect(
+        complete(true, [{ candidatesTokenCount: 30 }], {
+          ...record,
+          message: {
+            ...record.message,
+            parts: [{ text: 'changed thought', thought: true }],
+          },
+        }),
+      ).rejects.toThrow('replay differs');
+      await expect(complete(false, [], record)).rejects.toThrow(
+        'Only successful',
+      );
+    });
+    expect(await session.sink.project()).toEqual([record]);
+    const rows = (await fs.readFile(options.transcriptPath, 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+    const markerIndex = rows.findIndex((row) =>
+      row.managedSession?.commandId?.endsWith(':output_committed'),
+    );
+    const marker = rows[markerIndex].managedSession;
+    const attempt = rows[markerIndex - 2].managedSession;
+    const message = rows[markerIndex - 1].managedSession;
+    expect(marker.eventCount).toBe(2);
+    expect(attempt.kind).toBe('model.attempt');
+    expect(attempt.payload.recoveryRef).toEqual(recoveryRef);
+    expect(message.kind).toBe('message.committed');
+    expect(message.sequence).toBe(attempt.sequence + 1);
+    expect(message.payload.modelAttemptId).toBe(attempt.payload.attemptId);
+    expect(message.payload.contentRef.kind).toBe('managed-message-chunks');
+    expect(rows[markerIndex - 3].managedSession.operation).toBe(
+      'renewActivation',
+    );
+  });
+
   it('shares the original turn budget and all model usage with lifecycle Hooks after cold restore', async () => {
     const { session, controller, options } = await fixture();
     await createManagedHarnessHandle(session).ensureRunnable();
@@ -180,6 +257,7 @@ describe('Managed Hook model activation', () => {
   it('owns a new epoch, preserves its subject on renewal and survives cold restore without a turn', async () => {
     const { session, controller, options } = await fixture();
     const initialEpoch = session.activation.epoch;
+    const replaced = session.activation.activationId;
     let expired: ManagedHookModelScope | undefined;
     await controller.runHookOperation(operation, async (scope) => {
       expired = scope;
@@ -201,6 +279,9 @@ describe('Managed Hook model activation', () => {
       ).resolves.toEqual(result);
     });
     expect(session.activation.epoch).toBe(initialEpoch + 2);
+    expect(session.activation.activationId).toBe(
+      managedHookRestoreActivationId(replaced),
+    );
     expect(() => expired!.evaluate(evaluation, async () => result)).toThrow(
       'active Session model slot',
     );
@@ -257,6 +338,7 @@ describe('Managed Hook model activation', () => {
 
   it('restores a turn activation when installing a Hook activation fails', async () => {
     const { session, controller } = await fixture();
+    const replaced = session.activation.activationId;
     const failure = new Error('install resource failed');
     vi.spyOn(session.authority, 'installActivation').mockRejectedValueOnce(
       failure,
@@ -275,12 +357,26 @@ describe('Managed Hook model activation', () => {
     expect(session.authority.currentActivationSubject?.type).not.toBe(
       'hook_operation',
     );
+    expect(session.activation.activationId).toBe(
+      managedHookRestoreActivationId(replaced),
+    );
     await expect(
       controller.runTurn('next-turn', async () => 'accepted'),
     ).resolves.toBe('accepted');
     await expect(
       controller.runHookOperation(operation, async () => 'retry'),
     ).resolves.toBe('retry');
+  });
+
+  it('derives a stable restore activation ID', () => {
+    // A later build must still recognize the restores an earlier one recorded.
+    const id = managedHookRestoreActivationId(
+      '00000000-0000-4000-8000-000000000000',
+    );
+    expect(id).toBe('f31ba97f-91c5-5815-83c9-3da5e9cec2bc');
+    expect(id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/,
+    );
   });
 
   it('serializes prompt Hooks inside a turn and preserves the checkpoint', async () => {

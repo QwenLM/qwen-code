@@ -14,10 +14,60 @@ import {
   parseAcpModelOption,
   publicProviderBaseUrl,
   resolveAcpModelOption,
+  resolveAcpFastModelSelector,
   sanitizeProviderBaseUrl,
 } from './acpModelUtils.js';
 
 describe('acpModelUtils', () => {
+  it('resolves fast-model ACP rows without exposing or losing endpoint identity', () => {
+    const privateUrl = 'https://user:secret@two.example/v1?token=value';
+    const models = [
+      {
+        id: 'shared',
+        label: 'First',
+        authType: AuthType.USE_OPENAI,
+        registryBaseUrl: 'https://one.example/v1',
+      },
+      {
+        id: 'shared',
+        label: 'Second',
+        authType: AuthType.USE_OPENAI,
+        registryBaseUrl: privateUrl,
+      },
+      { id: 'implicit', label: 'Implicit', authType: AuthType.USE_OPENAI },
+      { id: 'oauth', label: 'OAuth', authType: AuthType.QWEN_OAUTH },
+      {
+        id: 'vision',
+        label: 'Vision only',
+        authType: AuthType.USE_OPENAI,
+        visionOnly: true,
+      },
+      {
+        id: 'runtime',
+        label: 'Runtime',
+        authType: AuthType.USE_OPENAI,
+        isRuntimeModel: true,
+      },
+    ];
+    const second = buildAcpModelOptions(models)[1]!.modelId;
+    expect(resolveAcpFastModelSelector(second, models)).toBe(
+      `openai:shared\0${privateUrl}`,
+    );
+    expect(resolveAcpFastModelSelector('implicit(openai)', models)).toBe(
+      'openai:implicit\0',
+    );
+    expect(resolveAcpFastModelSelector('oauth(qwen-oauth)', models)).toBe(
+      'qwen-oauth:oauth',
+    );
+    for (const input of [
+      'qwen-route:v1:stale',
+      'vision(openai)',
+      'runtime(openai)',
+    ]) {
+      expect(resolveAcpFastModelSelector(input, models)).toBeNull();
+    }
+  });
+
   it('uses opaque ids only to disambiguate colliding model routes', () => {
     const models = [
       {

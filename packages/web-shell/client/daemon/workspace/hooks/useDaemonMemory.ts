@@ -18,6 +18,22 @@ export function useDaemonMemory(options: DaemonResourceOptions = {}) {
     [workspaceActions],
   );
   const result = useDaemonResource(load, options);
+  // Read through the memory route, not the sandboxed file API: the global
+  // file sits outside the bound workspace, and `GET /file` refuses it.
+  // Daemons that predate `includeContent` omit `content`, so fall back.
+  const readMemoryFile = useCallback(
+    async (filePath: string) => {
+      const status = await workspaceActions.loadMemoryStatus({
+        includeContent: true,
+      });
+      const file = status.files.find((item) => item.path === filePath);
+      if (typeof file?.content === 'string') {
+        return { content: file.content, truncated: file.truncated === true };
+      }
+      return workspaceActions.readWorkspaceFile(filePath);
+    },
+    [workspaceActions],
+  );
   const signals = useDaemonWorkspaceEventSignals();
   useWorkspaceEventReload(
     signals?.memoryVersion,
@@ -29,6 +45,7 @@ export function useDaemonMemory(options: DaemonResourceOptions = {}) {
     status: result.data,
     files: result.data?.files ?? [],
     readFile: workspaceActions.readWorkspaceFile,
+    readMemoryFile,
     writeMemory: workspaceActions.writeMemory,
   };
 }

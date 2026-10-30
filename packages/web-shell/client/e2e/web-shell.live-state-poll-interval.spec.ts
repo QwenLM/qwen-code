@@ -43,24 +43,36 @@ for (const { name, advertisedInterval, expectedInterval } of [
           /^\/workspaces\/[^/]+\/sessions\/live-state\/?$/.test(request.path),
       ).length;
     const expectCadence = async () => {
-      const before = liveRequests();
-      await page.clock.runFor(expectedInterval - 1);
-      expect(liveRequests()).toBe(before);
-      await page.clock.runFor(1);
-      await expect.poll(liveRequests).toBe(before + 1);
+      const initial = liveRequests();
+      await page.clock.runFor(expectedInterval);
+      await expect.poll(liveRequests).toBeGreaterThan(initial);
+      for (let cycle = 0; cycle < 2; cycle++) {
+        const before = liveRequests();
+        await page.clock.runFor(expectedInterval - 1);
+        expect(liveRequests()).toBe(before);
+        await page.clock.runFor(1);
+        await expect.poll(liveRequests).toBe(before + 1);
+      }
     };
+
+    // Reconciliation reads live-state again after staging the full catalog.
+    const waitForBootstrap = () =>
+      page
+        .waitForResponse(/\/workspaces?\/[^/]+\/sessions(?:\?|$)/)
+        .then(() => page.waitForResponse(/\/sessions\/live-state(?:\?|$)/));
 
     await page.clock.install({ time: new Date('2026-09-08T00:00:00Z') });
     await page.clock.pauseAt(new Date('2026-09-08T01:00:00Z'));
+    const bootstrap = waitForBootstrap();
     await page.goto(`/session/${encodeURIComponent(scenario.sessionId)}`);
     await expect(page.locator('[data-web-shell-root]')).toBeVisible();
-    await expect.poll(liveRequests).toBeGreaterThan(0);
+    await bootstrap;
     await expectCadence();
 
-    const beforeReload = liveRequests();
+    const reloadBootstrap = waitForBootstrap();
     await page.reload();
     await expect(page.locator('[data-web-shell-root]')).toBeVisible();
-    await expect.poll(liveRequests).toBeGreaterThan(beforeReload);
+    await reloadBootstrap;
     await expectCadence();
   });
 }

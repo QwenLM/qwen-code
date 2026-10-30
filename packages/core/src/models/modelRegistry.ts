@@ -127,7 +127,7 @@ export function validateModelProvidersConfig(
   }
 }
 
-/** Resolve raw startup settings, never an explicit switch or saved route. */
+/** Resolve the startup wire, including checks before persisting a selection. */
 export function resolveModelSelectionAuthType(
   authType: AuthType,
   modelId: string | undefined,

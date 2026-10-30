@@ -69,7 +69,10 @@ getCoreSystemPrompt(
   outputStyle?: OutputStyleDefinition | null,
   todoWriteEnabled?: boolean,
   codeModeOnly?: boolean,
-  options?: { declaredTools?: ReadonlySet<string> },
+  options?: {
+    declaredTools?: ReadonlySet<string>;
+    agentReachable?: boolean;
+  },
 ): string;
 ```
 
@@ -79,7 +82,7 @@ getCoreSystemPrompt(
 
 | 段落                                                                           | 规则                                                                                                                                                                                                                                                                                                                                                                             |
 | ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `## Using Your Tools` 各条目                                                   | 只有条目点名的**每一个**工具都已声明时才保留——若仍保留一个点名了缺失工具的条目，就会指引模型去调用它拿不到的东西，而这正是本改动要修的缺陷。子条目按它点名的那一个工具判断；当"优先使用专用工具"的全部子条目都被删除时，该父条目也一并删除。                                                                                                                                     |
+| `## Using Your Tools` 各条目                                                   | 只有条目点名的**每一个**工具都已声明时才保留——若仍保留一个点名了缺失工具的条目，就会指引模型去调用它拿不到的东西，而这正是本改动要修的缺陷。子条目按它点名的那一个工具判断；当"优先使用专用工具"的全部子条目都被删除时，该父条目也一并删除。后来的唯一例外：桥接可达性满足两条 Agent 条目的 Agent 条件（§4.6）；Codebase Search 仍要求 `grep_search` 和 `glob` 已声明。          |
 | `# Examples` 记录                                                              | 只有 `<example>` 块调用的每个工具都已声明时才保留。按 `<example>`/`</example>` 成对匹配，而不是按空行切分：示例内部本身可能含空行，按空行切会让它后续段落里的工具调用脱离门控它的标签（实现过程中被测试抓到）。现存的每个块都至少调用一个工具，因此都可能被门控；没有块存活时 `# Examples` 标题随整段省略；模型特定的 XML 与 JSON 格式不使用 `[tool_call: …]` 记法，因此不门控。 |
 | `## Software Engineering Tasks`、语气、沟通                                    | 不变；已由开关门控。                                                                                                                                                                                                                                                                                                                                                             |
 | `getActionsSection`、安全规则、Core Mandates                                   | 无条件生成。危险操作或被拒调用类条款绝不能取决于声明了哪些工具。                                                                                                                                                                                                                                                                                                                 |
@@ -93,6 +96,10 @@ getCoreSystemPrompt(
 ### 4.5 `/context`
 
 `collectContextData` 通过 `getMainSessionBaseSystemPrompt` 构建提示词、并另外读取声明列表，且它不预热注册表。因此它读取同一份快照，使其系统提示词一行与真实请求保持一致。本改动叠加在 [#12119](https://github.com/QwenLM/qwen-code/pull/12119)（#12033）的分类重构之上，后者的数字正是 §7 的度量工具。
+
+### 4.6 Agent 桥接可达（#13033）
+
+#13033 把 `agent` 改为默认延迟，这使 §4.3 规则的绝对形式自我否定：Subagent Delegation 与 Codebase Search 两条正是引导模型经延迟工具桥接发现 Agent 的策略，只要 `agent` 未声明就删除它们，等于把延迟变成静默移除。因此 `PromptToolSurface` 增加一个输入 `agentReachable`，在 `startChat` 中当 `agent` 已声明、或已注册、桥接两半齐全且列入延迟摘要时置位；可达性仅满足它们的 Agent 条件；Codebase Search 仍要求 `grep_search` 和 `glob` 已声明。其它受门控的行没有新增例外——`monitor` 仍按是否声明门控——而在桥接不完整的会话中被暂缓揭示的 Agent 既未声明也不可达，这两行仍会删除。
 
 ## 5. 设计决策
 
@@ -120,15 +127,15 @@ getCoreSystemPrompt(
 第 1-4 项已在本 PR 的 `prompts.test.ts` 中自动化，每次推送都会重新检查；第 5 项需要真实会话，交接文档为 [`docs/verification/resident-tool-prompt-assembly/README.md`](../verification/resident-tool-prompt-assembly/README.md)。
 
 1. **默认会话回归（已在 CI）。** 现有 17 份完整提示词快照覆盖"无快照"路径，`renders identically when every tool is declared` 覆盖"全部声明"路径。两者共同构成让改动对常见场景安全的守卫。
-2. **效果，以及效果之外不漂移（已在 CI）。** 两条测试夹住节省量：文件七件套白名单必须减少 900-1,400 字符（实测 1,104，约 276 token——只有策略条目，因为该白名单保留了全部示例），更窄的白名单必须减少 3,800-5,000 字符（实测 4,327，约 1,082 token，含三个示例块）。第三条断言四种按模型选择的示例写法都被门控，而不只是方括号写法。三者合起来能在收益丢失与新增未门控工具文案时失败。`changes nothing outside the two gated sections` 从两次渲染中剥掉 `## Using Your Tools` 与 `# Examples`，断言其余部分完全相同。
-3. **不变量，双向（已在 CI）。** `never names an undeclared tool inside the gated sections` 以词边界匹配把每个 `ToolNames` 取值扫一遍被门控文本；`gates every tool name the gated sections can mention, on every example set` 把它变成与配置无关的检查——逐个withhold 全部 66 个名字、对四套示例模板各跑一遍，这正是能抓住"按模型选择的写法未被门控"的那条。`keeps the policy text of every tool that is declared` 钉住相反方向，防止门控过度。之所以限定这两段，是因为 §6 中的那些残留。
-4. **反向检查与接线（已在 CI）。** `leaves CodeModeOnly guidance untouched by the declared set` 断言 code mode 在有无快照时渲染完全一致；`takes the declared set from the Config snapshot` 断言 `getMainSessionBaseSystemPrompt` 确实读取 `Config.getPromptToolSnapshot()`——这正是让 `/context` 与真实请求同源的性质。
+2. **效果，以及效果之外不漂移（已在 CI）。** 文件七件套的节省区间按可达性例外（§4.6）区分的两种状态分别钉住，且写出的边界就是 `prompts.test.ts` 实际断言的边界：`agentReachable` 未设置时，减少量必须落在 900-1,500 字符（实测 1,135——委派 448 + 代码库搜索 368 + monitor 317 的条目正文，外加被删的换行）；`agentReachable: true` 时——实践中这是默认状态，因为桥的两个半件免于 `tools.eager`——两条 Agent 条目都保留，只减少 monitor 策略（必须落在 250-450；实测 317）。更窄的白名单减少 3,158 字符（Agent 不可达）或 2,709（可达——本 PR 造成的默认状态），含两个示例块，均为本提交实测；CI 没有为窄名单钉数值区间，这两个数字只是描述性的（例外引入前的实测是 4,327、含三个示例块）。第三条断言四种按模型选择的示例写法都被门控，而不只是方括号写法。三者合起来能在收益丢失与新增未门控工具文案时失败。`changes nothing outside the two gated sections` 从两次渲染中剥掉 `## Using Your Tools` 与 `# Examples`，断言其余部分完全相同。
+3. **不变量，双向（已在 CI）。** 仅按 §4.6 的可达性例外允许未声明的 Agent，其它被点名工具仍须声明。`never names an undeclared tool inside the gated sections` 以词边界匹配把每个 `ToolNames` 取值扫一遍被门控文本；`gates every tool name the gated sections can mention, on every example set` 把它变成与配置无关的检查——逐个withhold 全部 66 个名字、对四套示例模板各跑一遍，这正是能抓住"按模型选择的写法未被门控"的那条。`keeps the policy text of every tool that is declared` 钉住相反方向，防止门控过度。之所以限定这两段，是因为 §6 中的那些残留。
+4. **反向检查与接线（已在 CI）。** `leaves CodeModeOnly guidance untouched by the declared set` 断言 code mode 在有无快照时渲染完全一致；`keeps Agent guidance when Agent is bridge-reachable` 断言 `getMainSessionBaseSystemPrompt` 确实读取 `Config` 上的会话快照（`getPromptToolSnapshot()`，以及 #13033 起的 `getPromptAgentReachable()`）——这正是让 `/context` 与真实请求同源的性质。
 5. **Token 度量（已交接）。** 在设置了裁剪版 `tools.eager` 白名单的会话上，对比改动前后的系统提示词一行，以 provider 的 `input_token_count` 为基准（分类标尺本身正在 #12119 中修复）。交接文档还包含把本改动与 `tools.eager` 自身收益分离的三档跑法，以及在仓库缺少 eval 设施下只能做的弱化召回验证。
 
 ## 8. 验收标准
 
-- 默认会话的基础提示词逐字节不变。
-- 裁剪过的会话中，没有任何条目或示例点名未声明的工具，且每个已声明工具的策略文本仍然存在。
+- 无声明快照与全部工具已声明时，基础提示词逐字节不变。
+- 裁剪过的会话中，没有任何条目或示例点名会话无法调用的工具——已声明，或两条 Agent 条目按 §4.6 桥接可达——且每个已声明工具的策略文本仍然存在。
 - 所有配置下安全、权限与危险操作文本均存在。
 - `setStaticSystemPrefix` 的写入频率不高于本改动之前。
 - `/context` 的系统提示词一行与请求的系统指令来自同一份快照。

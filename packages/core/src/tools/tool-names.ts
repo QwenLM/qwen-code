@@ -43,6 +43,7 @@ export const ToolNames = {
   CRON_CREATE: 'cron_create',
   CRON_LIST: 'cron_list',
   CRON_DELETE: 'cron_delete',
+  AUTOFIX_PR: 'autofix_pr',
   LOOP_WAKEUP: 'loop_wakeup',
   CREATE_SUB_SESSION: 'create_sub_session',
   LIST_AGENTS: 'list_agents',
@@ -92,13 +93,18 @@ export const ToolNames = {
   OMNI_RECALL_MEDIA_MEMORY: 'omni_recall_media_memory',
   PROPOSE_GOAL: 'propose_goal',
   DISPLAY_IMAGE: 'display_image',
-  THREAD_POST: 'thread_post',
-  THREAD_WAIT: 'thread_wait',
-  THREAD_BLOCK: 'thread_block',
-  THREAD_REVIEW: 'thread_review',
-  THREAD_CREATE: 'thread_create',
-  THREAD_READ: 'thread_read',
 } as const;
+
+/**
+ * The only tools an agent-host session declares and runs. The Host is
+ * read-only and auto-rejects permission prompts, so anything outside this
+ * set would be advertised to the model yet fail every invocation.
+ */
+export const AGENT_HOST_TOOL_NAMES: readonly string[] = [
+  ToolNames.READ_FILE,
+  ToolNames.GREP,
+  ToolNames.LS,
+];
 
 /**
  * Tool display name constants to avoid circular dependencies.
@@ -131,6 +137,7 @@ export const ToolDisplayNames = {
   CRON_CREATE: 'CronCreate',
   CRON_LIST: 'CronList',
   CRON_DELETE: 'CronDelete',
+  AUTOFIX_PR: 'AutofixPr',
   LOOP_WAKEUP: 'LoopWakeup',
   CREATE_SUB_SESSION: 'CreateSubSession',
   LIST_AGENTS: 'ListAgents',
@@ -176,12 +183,6 @@ export const ToolDisplayNames = {
   OMNI_RECALL_MEDIA_MEMORY: 'RecallMediaMemory',
   PROPOSE_GOAL: 'ProposeGoal',
   DISPLAY_IMAGE: 'DisplayImage',
-  THREAD_POST: 'ThreadPost',
-  THREAD_WAIT: 'ThreadWait',
-  THREAD_BLOCK: 'ThreadBlock',
-  THREAD_REVIEW: 'ThreadReview',
-  THREAD_CREATE: 'ThreadCreate',
-  THREAD_READ: 'ThreadRead',
 } as const;
 
 // Migration from old tool names to new tool names

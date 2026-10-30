@@ -5,21 +5,29 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import { LocalManagedSessionAuthority } from './managed-session-authority.js';
+import {
+  LocalManagedSessionAuthority,
+  activationAlreadyInstalledError,
+} from './managed-session-authority.js';
 import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { ManagedSessionRecordSink } from './managed-session-record-sink.js';
 import type { SessionWriterLease } from '../services/session-writer-lease.js';
 import { LocalManagedSessionResourceStore } from './managed-session-resources.js';
-import type {
-  ManagedSessionJournalStore,
-  ManagedSessionResourceStore,
+import {
+  ManagedSessionCommitRejectedError,
+  type ManagedSessionCommitProof,
+  type ManagedSessionJournalStore,
+  type ManagedSessionResourceStore,
 } from './managed-session-storage.js';
 import type {
   ManagedSessionDurableRef,
   ManagedSessionKey,
   ManagedSessionSubject,
 } from './managed-session-records.js';
-import { ManagedSessionRecordError } from './managed-session-records.js';
+import {
+  ManagedSessionAppendUnsettledError,
+  ManagedSessionRecordError,
+} from './managed-session-records.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('MANAGED_SESSION_ASSEMBLY');
@@ -28,30 +36,110 @@ const debugLogger = createDebugLogger('MANAGED_SESSION_ASSEMBLY');
  * Keeps the installed activation's horizon ahead of a reader while the worker
  * is alive. The install stamps a fixed expiry, so without renewal a session
  * that outlives its lease reads as abandoned behind a live writer lock.
- * Renewal failures are retried on the next tick: a durable write failure
- * already fences new appends, so the timer only logs.
+ * Renewal failures are retried on the next tick; a durable write failure
+ * already fences new appends. A renewal that is still in flight owns the next
+ * attempt: queueing another one behind a stalled Store call would grow the
+ * backlog for the whole outage.
+ *
+ * A stopped writer cannot renew again, and a persistent non-recoverable
+ * failure repeats the same rejection every interval for the rest of the
+ * process's life, so both end the loop. Two refusals are recoverable and keep
+ * retrying instead: an unsettled append (the store may settle it later) and a
+ * rejected commit (the store rolled the attempt back and the authority does
+ * not latch a write failure behind it). Both clear the count, so the cap
+ * measures consecutive refusals; three of them span one full lease
+ * (`leaseDurationMs / 3` per attempt), past which the activation cannot be
+ * kept ahead of a reader anyway.
  */
+const MAX_RENEWAL_FAILURES = 3;
+
 function startActivationRenewal(
   authority: LocalManagedSessionAuthority,
   leaseDurationMs: number,
-): { stop: () => void } {
+): { stop: () => Promise<void> } {
   const intervalMs = Math.max(Math.floor(leaseDurationMs / 3), 1);
+  let inFlight: Promise<void> | undefined;
+  let failures = 0;
+  let stopped = false;
   const timer = setInterval(() => {
-    authority.renewActivation({ leaseDurationMs }).catch((error: unknown) => {
-      debugLogger.debug(
-        'Managed Session activation renewal failed',
-        describeRenewalError(error),
-      );
-    });
+    if (inFlight || stopped) return;
+    inFlight = authority
+      .renewActivation({ leaseDurationMs })
+      .then(() => {
+        if (!stopped) failures = 0;
+      })
+      .catch((error: unknown) => {
+        if (stopped) return;
+        if (
+          error instanceof ManagedSessionAppendUnsettledError ||
+          error instanceof ManagedSessionCommitRejectedError
+        ) {
+          // Both are recoverable: the store may still settle the append, and a
+          // rollbackable commit rejection leaves the writer writable (the
+          // authority rethrows it before latching a write failure). A later
+          // tick can renew once the store recovers, so neither may count
+          // toward the permanent stop. Clearing the count keeps the cap
+          // measuring consecutive refusals rather than a process lifetime.
+          failures = 0;
+          debugLogger.debug(
+            'Managed Session activation renewal deferred',
+            describeRenewalError(error),
+          );
+          return;
+        }
+        debugLogger.debug(
+          'Managed Session activation renewal failed',
+          describeRenewalError(error),
+        );
+        failures += 1;
+        if (authority.writesStopped || failures >= MAX_RENEWAL_FAILURES) {
+          debugLogger.warn(
+            'Managed Session activation renewal stopped',
+            authority.writesStopped
+              ? 'the writer stopped accepting appends'
+              : `${failures} consecutive failures`,
+          );
+          stopped = true;
+          clearInterval(timer);
+        }
+      })
+      .finally(() => {
+        inFlight = undefined;
+      });
   }, intervalMs);
   timer.unref();
   return {
-    stop: () => clearInterval(timer),
+    stop: () => {
+      stopped = true;
+      clearInterval(timer);
+      return inFlight ?? Promise.resolve();
+    },
   };
 }
 
 function describeRenewalError(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Rejects a close whose activation release and writer seal both failed.
+ *
+ * `errors` keeps both failures. The seal failure is the one that says what
+ * state the writer was left in, so a caller that classifies a close failure
+ * (a writer conflict, a lost writer) reads `sealError` rather than this
+ * wrapper, whose own class names neither.
+ */
+export class ManagedSessionCloseError extends AggregateError {
+  constructor(
+    readonly sealError: unknown,
+    readonly releaseError: unknown,
+  ) {
+    super(
+      [sealError, releaseError],
+      `Managed Session close failed to seal the writer (${describeRenewalError(sealError)}) after releasing the activation failed (${describeRenewalError(releaseError)})`,
+    );
+    this.name = 'ManagedSessionCloseError';
+  }
 }
 
 export interface OpenManagedSessionOptions {
@@ -117,16 +205,30 @@ export interface ManagedSession {
    * refused by the fence.
    */
   releaseActivation(): Promise<void>;
+  prepareOwnershipRelease(): Promise<ManagedSessionCommitProof>;
   /**
    * Releases the current activation and installs a successor. The next Harness
    * handle must present the returned identity; the sink names it automatically.
+   * The successor's ID is random unless `activationId` names it. Hosted Hook
+   * release reads a random successor as a load that may own a Hook Runtime,
+   * so a successor that never acquires one carries a `hook_operation` subject
+   * or the ID `managedHookRestoreActivationId` derives. A named ID must be new
+   * to the log; a repeat is refused before the current activation is released.
    */
-  replaceActivation(subject?: ManagedSessionSubject): Promise<{
+  replaceActivation(
+    subject?: ManagedSessionSubject,
+    activationId?: string,
+  ): Promise<{
     readonly activationId: string;
     readonly epoch: number;
   }>;
-  /** Seals the writer, leaving the at-rest barrier in place. */
-  close(): Promise<void>;
+  /**
+   * Seals the writer, leaving the at-rest barrier in place. Omit activation
+   * release only when an external permanent lifecycle fence forbids appends.
+   * When both the release and the seal fail, the close rejects with a
+   * `ManagedSessionCloseError`; otherwise with the failure itself.
+   */
+  close(options?: { readonly releaseActivation?: boolean }): Promise<void>;
 }
 
 /**
@@ -159,6 +261,7 @@ export async function openManagedSession(
       runtimeBaseDir: options.runtimeBaseDir,
       sessionId: options.sessionId,
       transcriptPath: options.transcriptPath,
+      requireNew: options.requireNew,
       ...(options.lease === undefined ? {} : { lease: options.lease }),
     });
   const journal = await journalStore.open({ sessionKey: options.sessionKey });
@@ -223,10 +326,31 @@ export async function openManagedSession(
       return activation;
     },
     releaseActivation: () => authority.releaseActivation(),
-    async replaceActivation(subject) {
+    prepareOwnershipRelease: async () => {
+      if (adopted)
+        throw new ManagedSessionRecordError(
+          'An adopted writer cannot release ownership.',
+        );
+      await renewal.stop();
+      await authority.releaseActivation();
+      if (authority.currentActivation?.phase !== 'released')
+        throw new ManagedSessionRecordError(
+          'Ownership release requires a released activation.',
+        );
+      return authority.commitProof;
+    },
+    async replaceActivation(subject, activationId) {
+      // Refuse before the release, or the current activation would be left
+      // released with no successor.
+      if (
+        activationId !== undefined &&
+        authority.hasInstalledActivation(activationId)
+      ) {
+        throw activationAlreadyInstalledError(activationId);
+      }
       await authority.releaseActivation();
       activation = await authority.installActivation({
-        activationId: randomUUID(),
+        activationId: activationId ?? randomUUID(),
         workerId: options.workerId,
         leaseDurationMs: options.activationLeaseDurationMs,
         subject,
@@ -235,13 +359,40 @@ export async function openManagedSession(
     },
     // Sealing is the at-rest barrier, but only the lease's owner may end it.
     // A call that owns the whole lifecycle also records the boundary, or the
-    // activation would read as abandoned. An adopted lease still stops the
+    // activation would read as abandoned. An external permanent fence may
+    // forbid that append. An adopted lease still stops the
     // renewal it started; only the lease itself stays with its owner.
-    close: async () => {
+    // The seal runs even when releasing the activation failed: a writer left
+    // unsealed can neither resume cleanly nor be taken over. A release
+    // failure rejects the close; when the seal fails too, the close rejects
+    // with both, so neither is lost to a debug line that is off by default
+    // (review round 1, R1-4). The seal error itself is left untouched: the
+    // lease hands the same memoized rejection to every later seal, and the
+    // seal often carries a cause of its own (review round 1, R1-3 and R1-4).
+    // The wrapper exposes the seal error for callers that classify it.
+    close: async (options) => {
       renewal.stop();
       if (adopted) return;
-      await authority.releaseActivation();
-      await authority.close();
+      let released = true;
+      let releaseError: unknown;
+      try {
+        if (options?.releaseActivation !== false)
+          await authority.releaseActivation();
+      } catch (error) {
+        released = false;
+        releaseError = error;
+        debugLogger.debug(
+          'Managed Session activation release failed before seal',
+          describeRenewalError(error),
+        );
+      }
+      try {
+        await authority.close();
+      } catch (sealError) {
+        if (released) throw sealError;
+        throw new ManagedSessionCloseError(sealError, releaseError);
+      }
+      if (!released) throw releaseError;
     },
   };
 }

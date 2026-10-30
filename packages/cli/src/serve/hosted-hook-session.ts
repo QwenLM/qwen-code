@@ -27,7 +27,13 @@ import type {
   PromptHookConfig,
 } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { ManagedSession } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-assembly.js';
-import type { ManagedSessionDurableRef } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import type {
+  ManagedSessionDurableRef,
+  ManagedSessionSubject,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js';
+import { managedHookRestoreActivationId } from '@qwen-code/qwen-code-core/managed-runtime/managed-hook-activation.js';
+import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import type { ExtensionRun } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-record.js';
 import {
   parseHookExecution,
@@ -52,6 +58,7 @@ import {
 } from './hosted-workspace-broker.js';
 import type { HostedWorkspaceBrokerOptions } from './hosted-workspace-broker.js';
 import { waitForTurn } from './hosted-turn-wait.js';
+import { hostedShellInputError } from './hosted-shell-input.js';
 
 export class HostedHookRecoveryRequiredError extends Error {
   constructor() {
@@ -72,6 +79,14 @@ export type HostedPromptHookRunner = (
   signal: AbortSignal,
 ) => Promise<HookExecutionResult>;
 
+/**
+ * Marks the PreToolUse and PermissionRequest plans of a tool call whose
+ * PermissionRequest ran on the input PreToolUse left. An untagged plan
+ * belongs to the earlier order, which ran PermissionRequest first.
+ */
+export const HOSTED_TOOL_INPUT_ORDER = 'pre-permission/2';
+export type HostedToolInputOrder = typeof HOSTED_TOOL_INPUT_ORDER;
+
 interface HookPlan {
   readonly registrationId: string;
   readonly input: HookInput;
@@ -79,6 +94,7 @@ interface HookPlan {
   readonly sequential: boolean;
   readonly messagesRef?: ManagedSessionDurableRef;
   readonly refusedInputDigest?: string;
+  readonly toolInputOrder?: HostedToolInputOrder;
 }
 
 function exceedsHookResourceLimit(value: unknown): boolean {
@@ -109,15 +125,74 @@ function sequentialInput(
   if (!result.success || !result.output) return input;
   const effective = applyHookOutputToInput(input, result.output, event);
   const output = result.output.hookSpecificOutput;
+  const decision =
+    event === HookEventName.PermissionRequest
+      ? (output?.['decision'] as { updatedInput?: unknown } | undefined)
+      : undefined;
+  const updatedInput = decision?.updatedInput ?? output?.['updatedInput'];
   return {
     ...effective,
-    ...(output?.['updatedInput'] && typeof output['updatedInput'] === 'object'
-      ? { tool_input: output['updatedInput'] }
+    // PreToolUse replacements are validated by the shared helper above.
+    ...(event !== HookEventName.PreToolUse &&
+    updatedInput &&
+    typeof updatedInput === 'object'
+      ? { tool_input: updatedInput }
       : {}),
     ...(typeof output?.['updatedPrompt'] === 'string'
       ? { prompt: output['updatedPrompt'] }
       : {}),
   };
+}
+
+function malformedShellInput(input: HookInput, event: HookEventName): boolean {
+  return (
+    (event === HookEventName.PreToolUse ||
+      event === HookEventName.PermissionRequest) &&
+    'tool_name' in input &&
+    'tool_input' in input &&
+    hostedShellInputError(input['tool_name'], input['tool_input']) !== undefined
+  );
+}
+
+function shellRefusalOutput(
+  output: HookOutput | undefined,
+  input: HookInput,
+  event: HookEventName,
+): HookOutput | undefined {
+  if (
+    !('tool_name' in input) ||
+    !('tool_input' in input) ||
+    !malformedShellInput(input, event)
+  )
+    return output;
+  const specific = { ...output?.hookSpecificOutput };
+  delete specific['tool_input'];
+  delete specific['updatedInput'];
+  const refusal = {
+    ...output,
+    hookSpecificOutput: {
+      ...specific,
+      ...(event === HookEventName.PermissionRequest
+        ? {
+            decision: {
+              ...(specific?.['decision'] as
+                | Record<string, unknown>
+                | undefined),
+              updatedInput: input['tool_input'],
+            },
+          }
+        : { updatedInput: input['tool_input'] }),
+    },
+  };
+  return exceedsHookResourceLimit({ output: refusal })
+    ? {
+        ...byteLimitOutput(event),
+        stopReason: hostedShellInputError(
+          input['tool_name'],
+          input['tool_input'],
+        ),
+      }
+    : refusal;
 }
 
 function semanticInput(value: object): Record<string, unknown> {
@@ -134,7 +209,7 @@ function semanticInput(value: object): Record<string, unknown> {
   return JSON.parse(JSON.stringify(fields)) as Record<string, unknown>;
 }
 
-function semanticInputDigest(value: object): string {
+export function semanticInputDigest(value: object): string {
   return createHash('sha256')
     .update(
       JSON.stringify(semanticInput(value), (_key, item: unknown) =>
@@ -148,6 +223,36 @@ function semanticInputDigest(value: object): string {
       ),
     )
     .digest('hex');
+}
+
+export function recordedToolHookFields(
+  plan: { input: Record<string, unknown>; refusedInputDigest?: string },
+  fields: Record<string, unknown>,
+): Record<string, unknown> | undefined {
+  const modes = plan.refusedInputDigest
+    ? ['default', 'auto-edit', 'yolo']
+    : [plan.input['permission_mode']];
+  for (const mode of modes) {
+    if (
+      typeof mode !== 'string' ||
+      !['default', 'auto-edit', 'yolo'].includes(mode)
+    )
+      continue;
+    const candidate = { ...fields, permission_mode: mode };
+    if (
+      (plan.refusedInputDigest ?? semanticInputDigest(plan.input)) ===
+      semanticInputDigest(candidate)
+    )
+      return candidate;
+  }
+  return undefined;
+}
+
+/** Whether a saved plan was made for these event fields. */
+function plannedFor(plan: HookPlan, fields: object): boolean {
+  return plan.refusedInputDigest
+    ? plan.refusedInputDigest === semanticInputDigest(fields)
+    : isDeepStrictEqual(semanticInput(plan.input), semanticInput(fields));
 }
 
 function cancelledResult(): ManagedHookResult {
@@ -171,9 +276,34 @@ function executionUnavailable(response: ManagedHookOperationView): boolean {
   );
 }
 
+/**
+ * A release the Broker refuses because the owner still holds unfinished work —
+ * the shape an operation whose module evaluation was abandoned answers with
+ * when its Runtime certified the cancellation as settled; a current Runtime
+ * fences such an evaluation as outcome_unknown before any release is
+ * attempted. The producers name that one condition with a dedicated code:
+ * every other 409 stays a plain refusal, because the class defaults are
+ * catch-alls an identity mismatch or any unexpected provider error shares —
+ * absorbing those as fences wedged close() into a recovery-required error
+ * for a Session holding no Hook work at all. `runtime_session_held` joins the
+ * fence (#13856): a live background run holding the owner's Runtime is the
+ * same "keep it attached, retry once it exits" shape as the module-evaluation
+ * hold.
+ */
+function holdFencedRelease(cause: unknown): boolean {
+  return (
+    cause instanceof HostedWorkspaceBrokerRejection &&
+    cause.status === 409 &&
+    (cause.code === 'managed_runtime_owner_hold_pending' ||
+      cause.code === 'runtime_session_held')
+  );
+}
+
 function digest(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex');
 }
+
+const debugLogger = createDebugLogger('HOSTED_HOOK_SESSION');
 
 // Committed record revisions are immutable objects, so each is validated
 // once however often the Session's history is scanned.
@@ -219,8 +349,9 @@ export function parseHostedHookPin(value: unknown): ManagedHookCatalogPin {
 
 export class HostedHookSession {
   readonly broker: HostedWorkspaceBroker;
-  private readonly ownsBroker: boolean;
+  private ownsBroker: boolean;
   private acquired = false;
+  private acquiring?: Promise<void>;
   private readonly aggregator = new HookAggregator();
   private catalog?: ManagedHookCatalog;
   private registration?: HookRegistration;
@@ -234,10 +365,13 @@ export class HostedHookSession {
   >();
   private readonly recoveredBrokers = new Map<string, HostedWorkspaceBroker>();
   private readonly releasedOwners = new Set<string>();
+  private readonly fencedOwners = new Set<string>();
+  private retrying?: Promise<void>;
   private readonly occurrences = new Map<
     string,
     {
       input: Record<string, unknown>;
+      toolInputOrder?: HostedToolInputOrder;
       result: Promise<HookOutput | undefined>;
     }
   >();
@@ -250,19 +384,32 @@ export class HostedHookSession {
   };
   private messagesProvider?: () => Array<Record<string, unknown>>;
 
+  /**
+   * Construct only on a load activation. Release finds earlier owners by
+   * load activations alone, so an owner named after a Hook operation's
+   * activation or its restore would never be released by a successor.
+   */
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
     private readonly session: ManagedSession,
     private readonly initialPin: ManagedHookCatalogPin,
     broker?: HostedWorkspaceBroker,
+    private readonly lifecycleV2: () => boolean = () => false,
+    runtimeSessionId?: string,
   ) {
     this.ownsBroker = broker === undefined;
+    const previous = lifecycleV2()
+      ? session.authority.extensionRecordsInDomain('hook_execution').at(-1)
+      : undefined;
     this.broker =
       broker ??
       new HostedWorkspaceBroker(
         options,
         this.key,
-        `hooks-activation-${digest([session.activation.activationId, session.activation.epoch])}`,
+        runtimeSessionId ??
+          (previous
+            ? parseHookExecution(previous.record).runtimeSessionId
+            : `hooks-activation-${digest([session.activation.activationId, session.activation.epoch])}`),
       );
   }
 
@@ -297,26 +444,98 @@ export class HostedHookSession {
     );
   }
 
-  async acquire(): Promise<void> {
-    if (this.acquired) return;
-    await this.releaseEarlierOwners();
-    await this.broker.warm();
-    await this.broker.acquire();
-    if (!this.broker.runtime) throw new HostedHookRecoveryRequiredError();
-    this.acquired = true;
+  get selectedPin(): ManagedHookCatalogPin {
+    const latest = this.session.authority
+      .extensionRecordsInDomain('hook_registration')
+      .filter((entry) => entry.run.state === 'settled')
+      .at(-1);
+    if (!latest) return this.initialPin;
+    const registration = parseHookRegistration(latest.record);
+    return {
+      catalogId: registration.catalogId,
+      catalogRevision: registration.catalogRevision,
+      definitionDigest: registration.run.definition!.definitionDigest,
+    };
   }
 
-  private async releaseEarlierOwners(): Promise<void> {
+  async acquire(): Promise<void> {
+    if (this.acquired) {
+      // A release absorbed on an earlier turn is retried here, so a fenced
+      // owner does not stay attached for the rest of this instance's life.
+      await this.retryFencedOwners();
+      return;
+    }
+    // Parallel Hooks share one acquisition, so each earlier owner is
+    // released once.
+    this.acquiring ??= (async () => {
+      try {
+        if (!this.lifecycleV2()) await this.releaseEarlierOwners(false);
+        if (this.lifecycleV2()) {
+          const pins = this.session.authority
+            .extensionRecordsInDomain('hook_execution')
+            .filter(
+              (entry) =>
+                parseHookExecution(entry.record).runtimeSessionId ===
+                this.broker.runtimeSessionId,
+            )
+            .flatMap((entry) => (entry.run.runtime ? [entry.run.runtime] : []));
+          const runtime = this.broker.runtime;
+          const expected =
+            pins[0] ??
+            (runtime && {
+              runtimeBindingId: runtime.bindingId,
+              generation: runtime.generation,
+            });
+          if (
+            !expected ||
+            pins.some(
+              (pin) =>
+                pin.runtimeBindingId !== expected.runtimeBindingId ||
+                pin.generation !== expected.generation,
+            )
+          )
+            throw new HostedHookRecoveryRequiredError();
+          await this.broker.acquire(expected);
+        } else {
+          await this.broker.warm();
+          await this.broker.acquire();
+        }
+        if (!this.broker.runtime) throw new HostedHookRecoveryRequiredError();
+        this.acquired = true;
+      } finally {
+        this.acquiring = undefined;
+      }
+    })();
+    await this.acquiring;
+  }
+
+  /**
+   * `drain` belongs to the close alone: an acquire hands an earlier owner
+   * back while the Session lives, so it must never stop a background run
+   * that still provably holds that owner's Runtime (#13856).
+   */
+  private async releaseEarlierOwners(drain: boolean): Promise<void> {
     if (!this.ownsBroker) return;
     const owners = new Map<string, boolean>();
     const { authority } = this.session;
+    const restores = new Set<string>();
     // Activation is durable before even the first catalog request acquires.
     for (const event of authority.eventsInSequenceRange(
       1,
       authority.committedSequence,
     )) {
       if (event.kind !== 'activation.changed') continue;
-      const id = `hooks-activation-${digest([event.payload['activationId'], event.payload['epoch']])}`;
+      // Only a load constructs a Hook owner. A Hook operation's activation,
+      // and the one it restores on finishing, never acquire.
+      const activationId = event.payload['activationId'] as string;
+      restores.add(managedHookRestoreActivationId(activationId));
+      if (
+        restores.has(activationId) ||
+        (event.payload['subject'] as ManagedSessionSubject).type ===
+          'hook_operation'
+      )
+        continue;
+      const id = `hooks-activation-${digest([activationId, event.payload['epoch']])}`;
       if (id !== this.broker.runtimeSessionId && !this.releasedOwners.has(id))
         owners.set(id, true);
     }
@@ -332,26 +551,199 @@ export class HostedHookSession {
     }
     for (const [id, settled] of owners) {
       if (!settled) continue;
-      const broker =
-        this.recoveredBrokers.get(id) ??
-        new HostedWorkspaceBroker(this.options, this.key, id);
-      try {
-        await broker.release();
-      } catch (cause) {
-        if (
-          !(cause instanceof HostedWorkspaceBrokerRejection) ||
-          cause.status !== 404 ||
-          cause.code !== 'runtime_session_not_found'
-        )
-          throw cause;
-      }
-      this.recoveredBrokers.delete(id);
-      this.releasedOwners.add(id);
+      await this.releaseOwner(id, drain);
     }
   }
 
+  /**
+   * Releases one earlier owner, absorbing the two refusals that are not
+   * failures. A hold-fenced owner is kept in `fencedOwners` so a later turn
+   * retries it: booking it released here would strand the Runtime owner for
+   * the worker's lifetime, which is what blocks tools in the whole Workspace.
+   * `drain` belongs to the close alone, as in `releaseEarlierOwners`.
+   */
+  private async releaseOwner(id: string, drain: boolean): Promise<void> {
+    if (this.releasedOwners.has(id)) return;
+    const broker =
+      this.recoveredBrokers.get(id) ??
+      new HostedWorkspaceBroker(this.options, this.key, id);
+    try {
+      await broker.release(drain ? { drain: true } : undefined);
+    } catch (cause) {
+      const absent =
+        cause instanceof HostedWorkspaceBrokerRejection &&
+        cause.status === 404 &&
+        cause.code === 'runtime_session_not_found';
+      const holdFenced = holdFencedRelease(cause);
+      if (!absent && !holdFenced) throw cause;
+      const refusal =
+        cause instanceof HostedWorkspaceBrokerRejection
+          ? `${cause.status} ${cause.code}`
+          : String(cause);
+      this.recoveredBrokers.delete(id);
+      if (holdFenced) {
+        // The class defaults are the catch-alls an identity mismatch or any
+        // unexpected provider error also answers with, so only the dedicated
+        // hold code is absorbed as a fence. It keeps the Runtime owner
+        // attached — the one outcome worth a line on the daemon's default
+        // channel, where a debug logger is silent without --debug.
+        writeStderrLineSafe(
+          `qwen serve: earlier Hook owner release refused (left attached, retried on a later turn): ${id} ${refusal}`,
+        );
+        this.fencedOwners.add(id);
+        return;
+      }
+      // An absent owner is the routine, self-healing outcome — every
+      // reconstructed Session re-walks its whole activation history — so it
+      // stays off the daemon's default channel.
+      debugLogger.debug(
+        `qwen serve: earlier Hook owner release refused (owner absent, booked released): ${id} ${refusal}`,
+      );
+    }
+    this.recoveredBrokers.delete(id);
+    this.fencedOwners.delete(id);
+    this.releasedOwners.add(id);
+  }
+
+  private async retryFencedOwners(): Promise<void> {
+    if (this.fencedOwners.size === 0) return;
+    // Parallel Hooks share one retry pass, and releasedOwners still guards
+    // against releasing an owner twice. A refusal here must not escape: this
+    // runs on an already-acquired Session, so failing the turn would let a
+    // stale earlier owner break a healthy live one. Absorb, report, and leave
+    // the owner fenced for the next turn.
+    this.retrying ??= (async () => {
+      try {
+        for (const id of [...this.fencedOwners]) {
+          try {
+            await this.releaseOwner(id, false);
+          } catch (cause) {
+            writeStderrLineSafe(
+              `qwen serve: earlier Hook owner release retry failed, left attached: ${id} ${String(cause)}`,
+            );
+          }
+        }
+      } finally {
+        this.retrying = undefined;
+      }
+    })();
+    await this.retrying;
+  }
+
+  /**
+   * Whether this Session's Hook owner currently holds the Workspace
+   * mount — the tool turn must not mistake that hold for its own
+   * acquisition-free state when a foreground child would need the mount.
+   */
+  get mountHeld(): boolean {
+    return this.acquired || this.broker.acquired;
+  }
+
+  delegateBrokerToMcp(): void {
+    if (this.mountWorkUnproven()) throw new HostedHookRecoveryRequiredError();
+    this.ownsBroker = false;
+  }
+
+  /**
+   * The recovery-blocked turn's handback of this Session-scoped mount
+   * (#13800), under the claim of the acquire that holds it now. Only Hook
+   * work proven settled or never dispatched lets it go — the Broker cannot
+   * see a Hook run — and the next acquire claims the mount again. The
+   * owner's lease stays booked, so close() still runs the full release.
+   */
+  mountHandback(): (() => Promise<void>) | undefined {
+    const claim = this.broker.mountClaim();
+    if (!this.ownsBroker || claim === undefined) return undefined;
+    return async () => {
+      if (!this.ownsBroker) return;
+      if (this.mountWorkUnproven())
+        throw new Error('Hook work on the Workspace mount is unproven.');
+      await this.broker.releaseMount(claim);
+      if (this.broker.mountClaim() === claim) this.acquired = false;
+    };
+  }
+
+  /** Whether a Hook run on this owner's mount may still be running. */
+  mountWorkUnproven(): boolean {
+    return (
+      this.acquiring !== undefined ||
+      this.pending.size > 0 ||
+      this.occurrences.size > 0 ||
+      this.executions().some(
+        (record) =>
+          record.runtimeSessionId === this.broker.runtimeSessionId &&
+          record.hookId !== '__plan__' &&
+          !record.resultRef &&
+          record.run.execution !== 'not_started_proven' &&
+          record.run.execution !== 'intent',
+      )
+    );
+  }
+
+  /**
+   * Whether this Session's Hook catalog holds an eligible non-prompt Hook
+   * on a tool-result event. Any such Hook acquires the Session-owned mount
+   * when its results complete — possibly after child-agent admission — so a
+   * child must not be admitted while one exists. Command, http and function
+   * Hooks all dispatch through the broker (`executionBroker`), so all three
+   * hold the mount; only prompt Hooks run in-process and never take it.
+   *
+   * Scans the catalog without the `matcher` predicate dispatch applies, and
+   * that breadth is the intent. A foreground child cannot share a batch with
+   * a non-agent tool, so the only PostToolUse its parent fires that turn
+   * carries `tool_name: 'agent'` and a narrower matcher could never match;
+   * but a background child outlives the turn and later tools can match it.
+   *
+   * The `null` agent id matches this path's `hooks.fire(...)` payloads, which
+   * never carry `agent_id`, so an agent-scoped Hook never counts here.
+   */
+  get hasMountableToolResultHooks(): boolean {
+    // Only settled executions are spent: an unsettled once-Hook is what
+    // executeHook re-drives on a restored Session, and re-driving it takes
+    // the Session-owned mount. dispatch keeps its own broader set.
+    const usedOnce = new Set(
+      this.executions()
+        .filter(
+          (entry) =>
+            entry.run.state !== 'recovery_blocked' &&
+            (entry.resultRef !== null ||
+              entry.run.execution === 'not_started_proven'),
+        )
+        .map((entry) => entry.onceKey),
+    );
+    return (
+      this.catalog?.hooks.some(
+        (hook) =>
+          hook.config.type !== HookType.Prompt &&
+          this.isHookEligible(hook, usedOnce, null) &&
+          (hook.eventName === HookEventName.PostToolUse ||
+            hook.eventName === HookEventName.PostToolUseFailure ||
+            hook.eventName === HookEventName.PostToolBatch),
+      ) ?? false
+    );
+  }
+
+  private isHookEligible(
+    hook: ManagedHookDescriptor,
+    usedOnce: ReadonlySet<string | null>,
+    agentId: string | null,
+  ): boolean {
+    return (
+      hook.enabled !== false &&
+      hook.sourceTrusted !== false &&
+      (!hook.owner || hook.owner.sessionId === this.key.sessionId) &&
+      (!hook.agentScope ||
+        (hook.owner !== undefined && hook.owner.agentId === agentId)) &&
+      (!hook.onceKey || !usedOnce.has(hook.onceKey))
+    );
+  }
+
   get hasPendingOperations(): boolean {
-    return this.executions().some((record) => {
+    return this.pendingRecords().length > 0;
+  }
+
+  private pendingRecords(): HookExecution[] {
+    return this.executions().filter((record) => {
       if (record.run.state === 'recovery_blocked') return true;
       if (record.resultRef || record.run.execution === 'not_started_proven')
         return false;
@@ -362,6 +754,29 @@ export class HostedHookSession {
       );
       return !marker || savedExecution(marker.record).resultRef === null;
     });
+  }
+
+  /**
+   * One non-cancelling status poll for exactly the records the pending gate
+   * counts — never the wider unsettled set, since a failed lookup commits and
+   * an acknowledged async Hook whose marker already carries its result must
+   * not be tombstoned by an unrelated fence's reconciliation. A child whose
+   * own occurrence marker is pending is reached through the marker's fan-out
+   * rather than polled again here. Poll only: a fenced occurrence is never
+   * re-dispatched.
+   */
+  async reconcileUnsettled(signal?: AbortSignal): Promise<void> {
+    const pending = this.pendingRecords();
+    const markers = new Set(
+      pending
+        .filter((record) => record.hookId === '__plan__')
+        .map((record) => record.hookExecutionId),
+    );
+    for (const record of pending) {
+      if (record.hookId !== '__plan__' && markers.has(record.occurrenceId))
+        continue;
+      await waitForTurn(this.status(record.hookExecutionId), signal);
+    }
   }
 
   get hasUnsettledExecutions(): boolean {
@@ -541,29 +956,48 @@ export class HostedHookSession {
       });
   }
 
+  /**
+   * `earlier` holds the fields an earlier release built for the same
+   * occurrence. A saved plan made for them is resumed as saved; a new
+   * occurrence is always planned for `fields`. `toolInputOrder` is saved
+   * on a new plan, and a saved or running occurrence must carry the same.
+   */
   async fire(
     event: HookEventName,
     occurrenceId: string,
     fields: Record<string, unknown>,
     signal: AbortSignal,
     prompt?: HostedPromptHookRunner,
+    earlier?: Record<string, unknown>,
+    toolInputOrder?: HostedToolInputOrder,
   ): Promise<HookOutput | undefined> {
     const key = hostedHookOccurrenceId(event, occurrenceId);
     const input = semanticInput(fields);
     const running = this.occurrences.get(key);
     if (running) {
-      if (!isDeepStrictEqual(running.input, input))
+      if (
+        !isDeepStrictEqual(running.input, input) ||
+        running.toolInputOrder !== toolInputOrder
+      )
         throw new HostedHookInputConflictError();
       return running.result;
     }
     const promise = this.occurrenceQueue.then(() =>
-      this.fireOccurrence(event, key, fields, signal, prompt),
+      this.fireOccurrence(
+        event,
+        key,
+        fields,
+        signal,
+        prompt,
+        earlier,
+        toolInputOrder,
+      ),
     );
     this.occurrenceQueue = promise.then(
       () => undefined,
       () => undefined,
     );
-    this.occurrences.set(key, { input, result: promise });
+    this.occurrences.set(key, { input, toolInputOrder, result: promise });
     try {
       return await promise;
     } finally {
@@ -577,6 +1011,8 @@ export class HostedHookSession {
     fields: Record<string, unknown>,
     signal: AbortSignal,
     prompt?: HostedPromptHookRunner,
+    earlier?: Record<string, unknown>,
+    toolInputOrder?: HostedToolInputOrder,
   ): Promise<HookOutput | undefined> {
     await this.ensureReady(signal);
     const previous = this.session.authority.extensionRecord(
@@ -589,9 +1025,9 @@ export class HostedHookSession {
       marker = parseHookExecution(previous.record);
       plan = await this.read<HookPlan>(marker.planRef);
       if (
-        plan.refusedInputDigest
-          ? plan.refusedInputDigest !== semanticInputDigest(fields)
-          : !isDeepStrictEqual(semanticInput(plan.input), semanticInput(fields))
+        (!plannedFor(plan, fields) &&
+          !(earlier && plannedFor(plan, earlier))) ||
+        plan.toolInputOrder !== toolInputOrder
       )
         throw new HostedHookInputConflictError();
       if (marker.run.execution === 'not_started_proven')
@@ -600,8 +1036,26 @@ export class HostedHookSession {
         return (await this.read<{ output?: HookOutput }>(marker.resultRef))
           .output;
     } else {
-      if (this.hasPendingOperations)
-        throw new HostedHookRecoveryRequiredError();
+      if (this.hasPendingOperations) {
+        // A recovery fence is not terminal: once an abandoned module
+        // evaluation definitively ends, the Runtime republishes its receipt,
+        // so give every pending record one status poll before refusing.
+        // Otherwise a live Session would reject every later turn until a
+        // DELETE-path drain reconciled it.
+        try {
+          await this.reconcileUnsettled(signal);
+        } catch (cause) {
+          if (signal.aborted) throw cause;
+          // A failed poll is not a definite turn error: the re-check below
+          // is the fence, and only its typed refusal may reach the caller
+          // while a record's outcome is still unknown.
+          writeStderrLineSafe(
+            `qwen serve: Hook reconcile before dispatch failed: ${String(cause)}`,
+          );
+        }
+        if (this.hasPendingOperations)
+          throw new HostedHookRecoveryRequiredError();
+      }
       const { messages: suppliedMessages, ...eventFields } = fields;
       const input: HookInput = {
         ...eventFields,
@@ -630,13 +1084,11 @@ export class HostedHookSession {
       const hooks = this.catalog!.hooks.filter(
         (hook) =>
           hook.eventName === event &&
-          hook.enabled !== false &&
-          hook.sourceTrusted !== false &&
-          (!hook.owner || hook.owner.sessionId === this.key.sessionId) &&
-          (!hook.agentScope ||
-            (hook.owner !== undefined &&
-              hook.owner.agentId === (fields['agent_id'] ?? null))) &&
-          (!hook.onceKey || !usedOnce.has(hook.onceKey)) &&
+          this.isHookEligible(
+            hook,
+            usedOnce,
+            (fields['agent_id'] as string | undefined) ?? null,
+          ) &&
           (!hook.matcher ||
             !target?.target ||
             matchesHookPattern(
@@ -666,6 +1118,7 @@ export class HostedHookSession {
         input,
         hooks,
         sequential: hooks.some((hook) => hook.sequential),
+        ...(toolInputOrder ? { toolInputOrder } : {}),
       };
       let messagesLimitExceeded = false;
       if (
@@ -710,6 +1163,7 @@ export class HostedHookSession {
           },
           hooks: [],
           sequential: false,
+          ...(toolInputOrder ? { toolInputOrder } : {}),
         };
       }
       const planRef = await this.publish('managed-hook-plan', plan);
@@ -731,6 +1185,7 @@ export class HostedHookSession {
       await this.commit('hook_execution', occurrenceId, marker);
     }
     if (marker.run.execution === 'intent') {
+      await this.broker.authorizeLifecycle();
       marker = {
         ...marker,
         run: { ...marker.run, state: 'running', execution: 'dispatch_started' },
@@ -770,6 +1225,7 @@ export class HostedHookSession {
         const result = await execute(hook, index);
         results.push(result);
         effectiveInput = sequentialInput(effectiveInput, result, event);
+        if (malformedShellInput(effectiveInput, event)) break;
       }
     } else {
       const settled = await Promise.allSettled(plan.hooks.map(execute));
@@ -784,7 +1240,11 @@ export class HostedHookSession {
       ? cancelledResult().output
       : inputLimitExceeded
         ? byteLimitOutput(event)
-        : this.aggregateOutput(results, event);
+        : shellRefusalOutput(
+            this.aggregateOutput(results, event),
+            effectiveInput,
+            event,
+          );
     const resultRef = await this.publish('managed-hook-result', {
       ...(output ? { output: createHookOutput(event, output) } : {}),
     });
@@ -896,6 +1356,7 @@ export class HostedHookSession {
           return cancelBeforeDispatch();
         if (hook.config.type === HookType.Prompt && !prompt)
           throw new Error('Hook model activation is unavailable.');
+        await this.broker.authorizeLifecycle();
         record = {
           ...record,
           run: {
@@ -1084,8 +1545,17 @@ export class HostedHookSession {
       );
       this.recoveredBrokers.set(record.runtimeSessionId, broker);
     }
-    if (current && !reacquire) await this.acquire();
-    else await broker.acquire();
+    if (current && !reacquire) {
+      await this.acquire();
+      if (this.options.lifecycleAuthority?.() && broker.runtime)
+        await broker.acquire({
+          runtimeBindingId: broker.runtime.bindingId,
+          generation: broker.runtime.generation,
+        });
+    } else
+      await broker.acquire(
+        reacquire && record.run.runtime ? record.run.runtime : undefined,
+      );
     if (
       !broker.runtime ||
       this.executions().some(
@@ -1241,6 +1711,19 @@ export class HostedHookSession {
       this.children = { sequence, byOccurrence };
     }
     return this.children.byOccurrence.get(occurrenceId) ?? [];
+  }
+
+  async settleOccurrence(occurrenceId: string): Promise<void> {
+    const marker = await this.status(occurrenceId);
+    if (
+      !marker.resultRef ||
+      this.childrenOf(occurrenceId).some(
+        (child) =>
+          child.run.state === 'recovery_blocked' ||
+          (!child.resultRef && child.run.execution !== 'not_started_proven'),
+      )
+    )
+      throw new HostedHookRecoveryRequiredError();
   }
 
   async status(id: string, cancel = false): Promise<HookExecution> {
@@ -1413,8 +1896,10 @@ export class HostedHookSession {
         eventName: record.eventName as HookEventName,
         ...(result.error ? { error: new Error(result.error) } : {}),
       } as HookExecutionResult);
-      if (plan.sequential)
+      if (plan.sequential) {
         effectiveInput = sequentialInput(effectiveInput, result, event);
+        if (malformedShellInput(effectiveInput, event)) break;
+      }
     }
     if (record.run.execution === 'intent') {
       await this.commit('hook_execution', record.hookExecutionId, (latest) =>
@@ -1432,7 +1917,11 @@ export class HostedHookSession {
     }
     const output = inputLimitExceeded
       ? byteLimitOutput(event)
-      : this.aggregateOutput(results, event);
+      : shellRefusalOutput(
+          this.aggregateOutput(results, event),
+          effectiveInput,
+          event,
+        );
     const resultRef = await this.publish('managed-hook-result', {
       ...(output ? { output } : {}),
     });
@@ -1468,8 +1957,16 @@ export class HostedHookSession {
       : output;
   }
 
-  async drain(): Promise<void> {
-    for (const record of this.executions()) {
+  async drain(
+    excludedOccurrences: ReadonlySet<string> = new Set(),
+  ): Promise<void> {
+    const prior = () =>
+      this.executions().filter(
+        (record) =>
+          !excludedOccurrences.has(record.hookExecutionId) &&
+          !excludedOccurrences.has(record.occurrenceId),
+      );
+    for (const record of prior()) {
       if (!record.resultRef) await this.status(record.hookExecutionId, true);
     }
     await Promise.allSettled(
@@ -1478,7 +1975,7 @@ export class HostedHookSession {
     await Promise.allSettled(
       [...this.occurrences.values()].map((occurrence) => occurrence.result),
     );
-    for (const record of this.executions()) {
+    for (const record of prior()) {
       const latest = await this.status(record.hookExecutionId, true);
       if (!latest.resultRef && latest.run.execution !== 'not_started_proven')
         throw new HostedHookRecoveryRequiredError();
@@ -1487,11 +1984,53 @@ export class HostedHookSession {
 
   async close(): Promise<void> {
     await this.drain();
-    await this.releaseEarlierOwners();
-    for (const broker of this.recoveredBrokers.values()) await broker.release();
+    // The close is the drain arm. A Hook-configured Shell turn shares this
+    // broker and its `finish()` skips the release, so a background run that
+    // outlives the turn holds this Runtime, and a routine release here
+    // would refuse `runtime_session_held` and fail the Session's close
+    // before its own drain ever runs (#13856).
+    await this.releaseEarlierOwners(true);
+    // A recovered earlier owner goes through the same absorbing release as
+    // any other: its hold fence is recorded, not thrown, so one refused
+    // release neither escapes close() as a raw Broker refusal nor strands
+    // every owner behind it in the map.
+    for (const id of [...this.recoveredBrokers.keys()])
+      await this.releaseOwner(id, true);
     this.recoveredBrokers.clear();
-    if (this.ownsBroker && this.broker.runtime) {
-      await this.broker.release();
+    // The clear above empties the state a DELETE retry would release from,
+    // so the recorded fences are retried before they are named: without this
+    // pass the next close finds no recovered broker and throws off the
+    // still-fenced owner again without attempting any release. The retry
+    // absorbs every per-id refusal, so a fence it cannot clear is still
+    // named by the check below.
+    await this.retryFencedOwners();
+    // An earlier owner still fenced keeps its Runtime owner attached, so a
+    // DELETE that answered 204 here would drop the only state that could ever
+    // retry that release. The check sits below the loop and the retry: a
+    // fence recorded by either must still be named. Report recovery required
+    // before releasing the Session's own owner: the Session stays attached
+    // with it, so a later turn can still run and retry the fenced release.
+    if (this.fencedOwners.size > 0) throw new HostedHookRecoveryRequiredError();
+    if (this.ownsBroker && this.mountHeld) {
+      try {
+        await this.broker.release({ drain: true });
+      } catch (cause) {
+        // A Runtime that settled an abandoned module evaluation as cancelled
+        // lets drain() pass while the evaluation still runs, so this release
+        // can be hold-fenced. Name that condition instead of letting a bare
+        // Broker refusal reach the route.
+        if (!holdFencedRelease(cause)) throw cause;
+        writeStderrLineSafe(
+          `qwen serve: Hook owner release held by unfinished work: ${
+            this.broker.runtimeSessionId
+          } ${
+            cause instanceof HostedWorkspaceBrokerRejection
+              ? `${cause.status} ${cause.code}`
+              : String(cause)
+          }`,
+        );
+        throw new HostedHookRecoveryRequiredError();
+      }
       this.acquired = false;
     }
   }

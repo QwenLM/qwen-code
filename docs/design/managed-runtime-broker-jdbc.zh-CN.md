@@ -43,7 +43,7 @@ Scope 身份使用确定性哈希表示，并始终与完整的租户级身份�
 
 创建 Binding 时会锁定 Scope slot，在事务内重新读取 Binding，并确保每个 Scope 只插入一个活动记录。Binding 更新同时使用已保存的 version 和 generation 作为 fencing 条件。操作租约使用数据库时钟，使竞争 JVM 不依赖彼此同步的本地时钟。JDBC adapter 会在查询中把数据库时钟转换为精确的 Unix epoch，避免连接的会话时区偏移租约 instant。租约判断使用该精确时钟，持久化的租约截止时间则向上取整到整秒，使其至少存活完整的配置时长，并在会丢弃小数秒的 MySQL 兼容驱动中保持一致的往返读取。
 
-创建 Session 时依赖数据库唯一约束，并在并发插入后重新读取胜出的记录。Session 的 CAS 更新会锁定当前行，校验预期 version 和 Binding generation，并拒绝把终态 Session 重新激活。SQL 失败会回滚事务并向调用方传播；不会静默回退到进程内状态。
+创建 Session 时依赖数据库唯一约束，并在并发插入后重新读取胜出的记录。Session 的 CAS 更新会锁定当前行，校验预期 version 和 Binding generation，并拒绝把终态 Session 重新激活。SQL 失败会回滚事务并向调用方传播；不会静默回退到进程内状态。Session 释放在同一事务内判定：RELEASING 转换持有 Session 行锁——与准入获取的是同一把行锁——并在提交前复查活跃 execution，因此跨进程准入无法插入检查与转换之间（`JdbcRuntimeBindingRepository.beginSessionRelease`）。
 
 创建 Tool Execution 时使用唯一 SHA-256 key 保持数据库索引长度可控，同时保留并校验完整 idempotency key。变更操作会锁定 execution 行。CAS 更新和 `UNKNOWN` 对账校验调用方提供的不可变身份与 version；取消请求校验预期 version；dispatch claim 与续租校验各自适用的 owner、generation 和 lease fencing。Dispatch 租约与操作租约一样，使用精确数据库时钟做判断，并把持久化的截止时间向上取整到整秒。过期的 `DISPATCHING` claim 可以重新发放，因为物理执行尚未开始；过期的 `EXECUTING` 或 `CANCEL_REQUESTED` claim 会进入 `UNKNOWN`，在显式对账结果完成它之前不得再次 dispatch。
 
@@ -75,7 +75,28 @@ Repository 契约覆盖：
 - 通过新 Repository 实例恢复最终结果；
 - Schema 可重复初始化。
 
-默认测试套件在 MySQL 兼容模式的 H2 上运行该契约。CI 还会通过 MySQL Connector/J 在 MariaDB 上运行 `mysql-integration` Maven profile，以便在真实 MySQL 兼容协议上覆盖 session time zone 处理和持久化租约往返读取。同一 profile 也可以在本地对调用方提供的 MySQL 数据库运行。
+默认测试套件在 MySQL 兼容模式的 H2 上运行该契约。CI 通过 MySQL Connector/J 在 MySQL 8.4 上运行完整的 `mysql-integration` Maven profile。同一 profile 也可以在本地对调用方提供的 MySQL 数据库运行。
+
+### 数据库验证范围
+
+MySQL 是受支持的数据库系列，也是完整集成 CI 的目标。MariaDB 最初作为租约时钟
+改动的真实数据库回归夹具引入，后来增加了独立的全量 CI 分支；现在不再作为持续兼容
+目标。历史 MariaDB 测量仍保留为当时运行的记录，留存的方言处理不构成兼容承诺。
+本次不修改生产 SQL、引擎准入、schema 或 catalog 迁移行为。
+
+数据库任务收敛为一个 MySQL 8.4 配置。两个 Maven 分叉仍各用独立临时实例，因为
+服务器级死锁计数器不能用数据库名隔离。继续关闭 native AIO 和二进制日志，每个实例
+保留大包预算。完整、无选择过滤的 Maven profile、非 Hosted 报告守卫、取消清理和
+full 档触发条件均保留。Hosted/故障恢复及 EventTransport 门控保留原任务及覆盖。
+
+MySQL 契约保留 UTC、+08:00、-04:00 时钟检查，并验证精确读数和整秒读数。
+共享 Repository 夹具使用非零 epoch 毫秒，约束 H2 和 MySQL 上 Binding/Session/活动
+时间及持久化 CAS 相等性。当前 V1 时间戳使用整数 epoch 毫秒；这些数值路径测试
+不宣称复现历史 DATETIME/Connector-J 小数秒丢失问题。
+
+验证必须证明单引擎策略能拒绝原双引擎矩阵，再对实际启动、配置、验证和清理 shell
+脚本覆盖就绪、退出、超时及第二个分叉失败的场景。已有工作流消费者、完整 profile
+守卫和选定的真实 MySQL JDBC 契约必须继续通过。提交后仍要求完整 CI 验收。
 
 ## 验收标准
 

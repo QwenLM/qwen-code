@@ -4,11 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { measureToolOutput } from './tool-output-size.js';
+import { logToolResultSize } from '../telemetry/loggers.js';
+import { ToolResultSizeEvent } from '../telemetry/types.js';
 import type { FunctionDeclaration } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { AuthType } from '../core/contentGenerator.js';
 import { DEFAULT_DASHSCOPE_BASE_URL } from '../core/openaiContentGenerator/constants.js';
-import { DASHSCOPE_REGIONAL_HOSTS } from '../core/openaiContentGenerator/provider/dashscope.js';
+import {
+  DASHSCOPE_REGIONAL_HOSTS,
+  QWENCLOUD_MAAS_HOSTS,
+} from '../core/openaiContentGenerator/provider/dashscope.js';
 import { getDefaultApiKeyEnvVar } from '../models/modelConfigErrors.js';
 import {
   ALL_PROVIDERS,
@@ -152,6 +158,14 @@ export interface WebSearchSettings {
    * WEB_SEARCH_MAX_PER_SESSION); see {@link resolveWebSearchMaxPerSession}.
    */
   maxPerSession?: number;
+  /**
+   * Extra host suffixes the user explicitly trusts for an explicitly
+   * configured search backend (`tools.webSearch.allowedHosts` /
+   * WEB_SEARCH_ALLOWED_HOSTS). Consulted by the env backend and the
+   * modelProviders path only — never by automatic derivation, which must not
+   * adopt a host nobody declared; see {@link isAutoEligibleDashScopeHost}.
+   */
+  allowedHosts?: string[];
 }
 
 export type WebSearchGateResult =
@@ -174,12 +188,18 @@ export type WebSearchGateResult =
  * DashScope-compatible endpoint check for the search side channel. Accepts
  * the official DashScope regional hosts (the Standard preset regions,
  * including `dashscope-us`), Bailian Token Plan / workspace MaaS endpoints,
- * and internal Alibaba gateways. This overlaps, but is neither a subset nor a
- * superset of, the content provider's DashScope detection: it rejects generic
- * Alibaba Cloud API Gateway and proxy endpoints, but accepts all concrete
- * `*.maas.aliyuncs.com` endpoints for the Responses search side channel.
+ * QwenCloud MaaS hosts (QWENCLOUD_MAAS_HOSTS), and internal Alibaba
+ * gateways. This overlaps, but is neither a subset nor a superset of, the
+ * content provider's DashScope detection: it rejects generic Alibaba Cloud
+ * API Gateway and proxy endpoints, but accepts all concrete
+ * `*.maas.aliyuncs.com` and QwenCloud MaaS endpoints for the Responses
+ * search side channel.
  * This only catches obvious misconfiguration; a host that does not serve the
  * Responses API fails loudly on first use.
+ *
+ * `extraHosts` carries the user's `tools.webSearch.allowedHosts` and applies
+ * only where a backend was configured explicitly. The automatic derivation
+ * path calls this without it, so a custom host is never adopted implicitly.
  */
 type DashScopeBaseUrlIssue = 'invalid' | 'insecure' | 'unknown-host';
 
@@ -188,6 +208,7 @@ type DashScopeBaseUrlIssue = 'invalid' | 'insecure' | 'unknown-host';
  * a different fix than a wrong provider). */
 function classifyDashScopeBaseUrl(
   baseUrl: string,
+  extraHosts: readonly string[] = [],
 ): DashScopeBaseUrlIssue | null {
   let url: URL;
   try {
@@ -203,15 +224,37 @@ function classifyDashScopeBaseUrl(
   const hostname = url.hostname.toLowerCase();
   const suffixes = [
     ...DASHSCOPE_REGIONAL_HOSTS,
+    ...QWENCLOUD_MAAS_HOSTS,
     'maas.aliyuncs.com',
     'alibaba-inc.com',
     'aliyun-inc.com',
+    ...extraHosts,
   ];
   return suffixes.some(
     (suffix) => hostname === suffix || hostname.endsWith('.' + suffix),
   )
     ? null
     : 'unknown-host';
+}
+
+/**
+ * Normalize user-declared search host suffixes: trim, lower-case, drop empty
+ * entries and entries without a dot — a bare label such as `com` would accept
+ * every `.com` host — then de-duplicate. Invalid entries are dropped rather
+ * than rejected, matching the other `tools.webSearch` resolvers: a typo
+ * narrows the list, it never widens it.
+ */
+export function normalizeWebSearchAllowedHosts(
+  raw: readonly string[] | undefined,
+): string[] {
+  const seen = new Set<string>();
+  for (const entry of raw ?? []) {
+    if (typeof entry !== 'string') continue;
+    const host = entry.trim().toLowerCase();
+    if (!host.includes('.')) continue;
+    seen.add(host);
+  }
+  return [...seen];
 }
 
 function isDashScopeCompatibleBaseUrl(baseUrl: string): boolean {
@@ -256,6 +299,10 @@ function isUsableSearchEntry(entry: {
   envKey?: string;
   apiKey?: string;
 }): boolean {
+  // The host test here stays on the built-in list on purpose: this predicate
+  // decides whether an entry may back *automatic* adoption, while
+  // `tools.webSearch.allowedHosts` only expresses trust for a backend the user
+  // named explicitly (#15299).
   return (
     entry.authType !== AuthType.QWEN_OAUTH &&
     !!entry.baseUrl &&
@@ -277,6 +324,10 @@ function isUsableSearchEntry(entry: {
  * explicitly (via `tools.webSearch.model`) rather than adopted implicitly.
  */
 function isAutoEligibleDashScopeHost(baseUrl: string): boolean {
+  // Built-in suffixes only: `tools.webSearch.allowedHosts` expresses trust for
+  // an explicitly configured backend, and must not widen what derivation
+  // adopts on its own (it would hand the main provider's key to an undeclared
+  // host).
   if (classifyDashScopeBaseUrl(baseUrl) !== null) {
     return false;
   }
@@ -490,6 +541,9 @@ function resolveAutoBackend(
  */
 export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
   const settings = config.getWebSearchSettings();
+  // Explicit configuration only — both call sites below are the env backend and
+  // the modelProviders path. Derivation keeps the built-in list.
+  const extraHosts = normalizeWebSearchAllowedHosts(settings?.allowedHosts);
   // Defensive: the registry does not call the gate when the tool is turned
   // off, but the per-invocation re-check reads settings that can have changed.
   if (settings?.enabled === false) {
@@ -564,7 +618,7 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
   // entry for environments that cannot write settings.json. Takes precedence
   // over modelProviders resolution, per the env-over-settings rule.
   if (settings?.baseUrl) {
-    const baseUrlIssue = classifyDashScopeBaseUrl(settings.baseUrl);
+    const baseUrlIssue = classifyDashScopeBaseUrl(settings.baseUrl, extraHosts);
     if (baseUrlIssue === 'insecure') {
       return {
         ok: false,
@@ -574,7 +628,7 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
     if (baseUrlIssue !== null) {
       return {
         ok: false,
-        notice: `WebSearch is enabled but WEB_SEARCH_BASE_URL (${settings.baseUrl}) is not a DashScope-compatible endpoint.`,
+        notice: `WebSearch is enabled but WEB_SEARCH_BASE_URL (${settings.baseUrl}) is not a DashScope-compatible endpoint. If it serves the DashScope Responses API, add its host to tools.webSearch.allowedHosts (or WEB_SEARCH_ALLOWED_HOSTS).`,
       };
     }
     const keyEnv = settings.apiKeyEnv ?? 'DASHSCOPE_API_KEY';
@@ -637,7 +691,7 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
       notice: `WebSearch search model "${selector}" resolves to a non-DashScope endpoint (no baseUrl). The web_search backend requires a DashScope-compatible baseUrl.`,
     };
   }
-  const entryBaseUrlIssue = classifyDashScopeBaseUrl(entry.baseUrl);
+  const entryBaseUrlIssue = classifyDashScopeBaseUrl(entry.baseUrl, extraHosts);
   if (entryBaseUrlIssue === 'insecure') {
     return {
       ok: false,
@@ -647,7 +701,7 @@ export function evaluateWebSearchGate(config: Config): WebSearchGateResult {
   if (entryBaseUrlIssue !== null) {
     return {
       ok: false,
-      notice: `WebSearch search model "${selector}" resolves to a non-DashScope endpoint (${entry.baseUrl}). The web_search backend requires a DashScope-compatible baseUrl.`,
+      notice: `WebSearch search model "${selector}" resolves to a non-DashScope endpoint (${entry.baseUrl}). The web_search backend requires a DashScope-compatible baseUrl; if that host serves the DashScope Responses API, add it to tools.webSearch.allowedHosts (or WEB_SEARCH_ALLOWED_HOSTS).`,
     };
   }
   if (!entry.envKey) {
@@ -709,7 +763,11 @@ export const CITATION_RULES: readonly string[] = [
 
 const CITATION_POLICY = `\n\nCitation policy: ${CITATION_RULES.map((rule) => `${rule}.`).join(' ')}`;
 
-function formatLlmContent(query: string, outcome: WebSearchOutcome): string {
+function formatLlmContent(
+  query: string,
+  outcome: WebSearchOutcome,
+  applyLimit = true,
+): string {
   const allOpened = outcome.sources.filter((source) => source.opened);
   const opened = allOpened.slice(0, MAX_OPENED_URLS);
   const omittedOpened = allOpened.length - opened.length;
@@ -751,7 +809,7 @@ function formatLlmContent(query: string, outcome: WebSearchOutcome): string {
 
   const answer = outcome.answerText.trim();
   let body = buildBody(answer);
-  if (body.length > MAX_RESULT_SIZE_CHARS) {
+  if (applyLimit && body.length > MAX_RESULT_SIZE_CHARS) {
     // The URL sections are the citation evidence the policy below demands —
     // an oversized narrated answer must not push them past the limit. Shrink
     // the answer first; the hard slice is only a backstop for the (bounded)
@@ -904,12 +962,31 @@ class WebSearchToolInvocation extends BaseToolInvocation<
     outcome: WebSearchOutcome,
     startedAt: number,
   ): ToolResult {
+    const rawOutputSize = measureToolOutput(
+      formatLlmContent(this.params.query, outcome, false),
+    );
     const llmContent = formatLlmContent(this.params.query, outcome);
+    const processed = measureToolOutput(llmContent);
+    logToolResultSize(
+      this.config,
+      new ToolResultSizeEvent(
+        'web_search',
+        'native',
+        'producer',
+        rawOutputSize.chars,
+        processed.chars,
+        rawOutputSize.estimatedTokens,
+        processed.estimatedTokens,
+        rawOutputSize.chars > processed.chars,
+        MAX_RESULT_SIZE_CHARS,
+        'per_tool',
+      ),
+    );
     const seconds = ((Date.now() - startedAt) / 1000).toFixed(1);
     const returnDisplay =
       `Did ${outcome.searchCount} search${outcome.searchCount === 1 ? '' : 'es'} in ${seconds}s` +
       (outcome.partialNote ? ' (partial result)' : '');
-    return { llmContent, returnDisplay };
+    return { llmContent, returnDisplay, rawOutputSize };
   }
 }
 

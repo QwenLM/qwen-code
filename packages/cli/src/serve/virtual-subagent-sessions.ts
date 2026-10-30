@@ -5,10 +5,12 @@
  */
 
 import * as fs from 'node:fs/promises';
+import { hostname } from 'node:os';
 import { createReadStream } from 'node:fs';
 import readline from 'node:readline';
 import {
   getSubagentSessionDir,
+  isProcessRunning,
   parseLineTolerant,
   read as readJsonl,
   readAgentMeta,
@@ -23,6 +25,7 @@ import {
   type EventBusSubscriberDiagnostic,
 } from '@qwen-code/acp-bridge/eventBus';
 import { createTranscriptMessageUpdate } from '@qwen-code/acp-bridge/transcriptReplay';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { replayTranscriptRecordPage } from '../acp-integration/session/history-replay-page.js';
 import type { WorkspaceRuntime } from './workspace-registry.js';
 
@@ -750,8 +753,17 @@ export class VirtualSubagentSessions {
       toolUseId?: string;
     }) => boolean,
   ): Promise<ResolvedAgentTask | undefined> {
-    const status = await runtime.bridge.getSessionTasksStatus(parentSessionId);
-    const task = status.tasks.find(
+    const status = await runtime.bridge
+      .getSessionTasksStatus(parentSessionId)
+      .catch((error: unknown) => {
+        if (
+          error instanceof SessionNotFoundError &&
+          error.code === 'session_not_found'
+        )
+          return undefined;
+        throw error;
+      });
+    const task = status?.tasks.find(
       (candidate) =>
         candidate.kind === 'agent' &&
         typeof candidate.outputFile === 'string' &&
@@ -804,7 +816,13 @@ export class VirtualSubagentSessions {
         id: meta.agentId,
         title: meta.description || meta.agentType,
         outputFile: metaPath.slice(0, -'.meta.json'.length) + '.jsonl',
-        status: meta.status ?? 'completed',
+        status:
+          meta.status === 'running' &&
+          meta.isBackgrounded === false &&
+          meta.workflowOwner?.hostname === hostname() &&
+          !isProcessRunning(meta.workflowOwner.pid)
+            ? 'failed'
+            : (meta.status ?? 'completed'),
         startTime: Number.isFinite(Date.parse(meta.createdAt))
           ? Date.parse(meta.createdAt)
           : Date.now(),

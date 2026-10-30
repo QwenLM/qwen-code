@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { measureToolOutput } from './tool-output-size.js';
 import { safeJsonStringify } from '../utils/safeJsonStringify.js';
 import type {
   ToolCallConfirmationDetails,
@@ -29,6 +30,7 @@ import type {
 } from '@google/genai';
 import { StructuredToolError, ToolErrorType } from './tool-error.js';
 import type { Config, MCPServerConfig } from '../config/config.js';
+import { BUNDLED_GENERATED_UI_URI } from '../config/generated-ui.js';
 import { truncateToolOutput } from './truncation.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
@@ -53,6 +55,7 @@ import {
 } from '../utils/invocation-context.js';
 import {
   generateLegacyMcpToolName,
+  LEGACY_REDUCTION_HEAD_LENGTH,
   normalizeToolNameForProvider,
 } from '../utils/tool-name-utils.js';
 import { isImagePart } from '../services/visionBridge/image-part-utils.js';
@@ -382,6 +385,14 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   }
 
   /**
+   * The producer-carried identity permission matchers read the server
+   * boundary from; see {@link ToolInvocation.mcpIdentity}.
+   */
+  get mcpIdentity(): { serverName: string; serverToolName: string } {
+    return { serverName: this.serverName, serverToolName: this.serverToolName };
+  }
+
+  /**
    * MCP tool default permission based on trust:
    * - trust: true in a trusted folder → 'allow' (server explicitly trusted by user config)
    * - All other MCP tools → 'ask'
@@ -609,6 +620,12 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     signal: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    if (
+      this.cliConfig?.isBundledGeneratedUiServer?.(this.serverName) &&
+      !this.cliConfig.getBundledGeneratedUiStatus().enabled
+    ) {
+      throw new Error('Bundled Generated UI is unavailable for this session.');
+    }
     // Use direct MCP client if available (supports progress notifications),
     // otherwise fall back to the @google/genai mcpToTool wrapper.
     if (this.mcpClient) {
@@ -685,7 +702,17 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           ...(invocationContext
             ? {
                 _meta: {
-                  [INVOCATION_CONTEXT_META_KEY]: invocationContext,
+                  [INVOCATION_CONTEXT_META_KEY]: {
+                    version: invocationContext.version,
+                    sessionId: invocationContext.sessionId,
+                    promptId: invocationContext.promptId,
+                    ...(invocationContext.originatorClientId
+                      ? {
+                          originatorClientId:
+                            invocationContext.originatorClientId,
+                        }
+                      : {}),
+                  },
                 },
               }
             : {}),
@@ -769,6 +796,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
+        rawOutputSize: measureToolOutput(transformedParts, this.cliConfig),
         returnDisplay: appDisplay ?? fallbackText,
         persistedOutputFiles: truncated.persistedOutputFiles,
       };
@@ -927,6 +955,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       );
       return {
         type: 'mcp_app',
+        ...(this.appResourceUri === BUNDLED_GENERATED_UI_URI &&
+        this.cliConfig?.isBundledGeneratedUiServer?.(this.serverName)
+          ? { requiredFeature: 'generated-ui' as const }
+          : {}),
         serverName: this.serverName,
         resourceUri: this.appResourceUri,
         html,
@@ -960,6 +992,10 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
       );
       return {
         type: 'mcp_app',
+        ...(this.appResourceUri === BUNDLED_GENERATED_UI_URI &&
+        this.cliConfig?.isBundledGeneratedUiServer?.(this.serverName)
+          ? { requiredFeature: 'generated-ui' as const }
+          : {}),
         serverName: this.serverName,
         resourceUri: this.appResourceUri,
         html: '',
@@ -1012,6 +1048,7 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
 
       return {
         llmContent: truncated.parts,
+        rawOutputSize: measureToolOutput(transformedParts, this.cliConfig),
         returnDisplay: getDisplayFromPartsWithPersistedOutput(
           transformedParts,
           truncated.persistedOutputFiles,
@@ -1035,6 +1072,9 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
     rawResponseParts: Part[],
     functionCall: FunctionCall,
   ): Promise<ToolResult> {
+    // The body is replaced by `error` below and observeProducerOutput
+    // short-circuits on error results, so no raw size is declared here
+    // (#13652 R4-1).
     const imageContent = getMcpErrorImageContent(rawResponseParts);
     let llmContent: PartListUnion;
     let errorMessage: string;
@@ -1126,6 +1166,8 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
           // tables) would otherwise truncate while chars remain. Consistent
           // with the shell tool's in-tool truncation.
           {
+            layer: 'producer',
+            source: 'per_tool',
             threshold: 500_000,
             previewChars: 2000,
             lines: Number.POSITIVE_INFINITY,
@@ -1151,6 +1193,23 @@ class DiscoveredMCPToolInvocation extends BaseToolInvocation<
   }
 }
 
+/**
+ * A truncated alias keeps 28 characters up front. Require a preserved server
+ * boundary: internal `__` or a trailing `_` can imitate its separator.
+ * Different keys can still share this spelling; grants use the registry guard.
+ */
+function legacyReductionVouchesForServer(serverName: string): boolean {
+  const serverPrefixLength = 'mcp__'.length + serverName.length;
+  if (
+    serverPrefixLength + 2 > LEGACY_REDUCTION_HEAD_LENGTH &&
+    serverPrefixLength !== LEGACY_REDUCTION_HEAD_LENGTH
+  ) {
+    return false;
+  }
+  const legacyServerKey = generateLegacyMcpToolName(serverName);
+  return !legacyServerKey.includes('__') && !legacyServerKey.endsWith('_');
+}
+
 export class DiscoveredMCPTool extends BaseDeclarativeTool<
   ToolParams,
   ToolResult
@@ -1162,12 +1221,32 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
     return 500_000;
   }
 
-  /** Keeps pre-normalization permission and disabled-tool entries effective. */
+  /**
+   * Raw identity first; keep truncated legacy aliases only with a preserved
+   * server boundary. The registry checks grants for competing claimants.
+   */
   get permissionAliases(): readonly string[] {
-    const legacyName = generateLegacyMcpToolName(
-      `mcp__${this.serverName}__${this.serverToolName}`,
+    const rawLength = `mcp__${this.serverName}__${this.serverToolName}`.length;
+    return this.disabledToolAliases.filter(
+      (alias) =>
+        alias.length === rawLength ||
+        legacyReductionVouchesForServer(this.serverName),
     );
-    return legacyName === this.name ? [] : [legacyName];
+  }
+
+  /**
+   * Disabled entries retain ungated spellings: withholding a lossy alias
+   * would re-enable a previously disabled tool. Over-matching fails closed.
+   */
+  get disabledToolAliases(): readonly string[] {
+    const rawName = `mcp__${this.serverName}__${this.serverToolName}`;
+    const legacyName = generateLegacyMcpToolName(rawName);
+    return [
+      ...(rawName === this.name ? [] : [rawName]),
+      ...(legacyName === this.name || legacyName === rawName
+        ? []
+        : [legacyName]),
+    ];
   }
 
   constructor(
@@ -1307,15 +1386,20 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
 
   /**
    * Return a per-session projection of metadata that does not belong to the
-   * shared MCP transport snapshot. Pool entries can be shared by sessions
-   * whose trust and eager-loading settings differ, so neither field may be
-   * mutated on the canonical tool instance.
+   * shared MCP transport snapshot. Trust, eager loading, and the runtime
+   * Config belong to the session, without changing the canonical tool.
    */
   withSessionConfig(
     trust: boolean | undefined,
     alwaysLoad: boolean,
+    cliConfig: Config | undefined = this.cliConfig,
   ): DiscoveredMCPTool {
-    if (trust === this.trust && alwaysLoad === this.alwaysLoad) return this;
+    if (
+      trust === this.trust &&
+      alwaysLoad === this.alwaysLoad &&
+      cliConfig === this.cliConfig
+    )
+      return this;
     return new DiscoveredMCPTool(
       this.mcpTool,
       this.serverName,
@@ -1328,7 +1412,7 @@ export class DiscoveredMCPTool extends BaseDeclarativeTool<
       // different name would race-register two tools in the same
       // session.
       this.name,
-      this.cliConfig,
+      cliConfig,
       this.mcpClient,
       this.mcpTimeout,
       this.mcpToolIdleTimeoutMs,

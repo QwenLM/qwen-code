@@ -77,7 +77,9 @@ import {
 } from './runtime/agent-core.js';
 import { toolConfigAllowsSkill } from './runtime/subagent-plan-tool-policy.js';
 import { ToolMode } from '../tools/code-mode.js';
+import { toolSearchBridgeSentence } from '../skills/bundled-reference.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { isDirectToolBridgeAvailable } from '../tools/tool-search.js';
 import type {
   AgentExternalInput,
   PromptConfig,
@@ -440,11 +442,21 @@ function buildRecoveredNotice(count: number): string {
     : `Restored ${count} background agents from this session. Open Background tasks to inspect them.`;
 }
 
-function buildRecoveredModelNotice(count: number): string {
+function buildRecoveredModelNotice(
+  count: number,
+  listAgentsAvailable: boolean,
+  bridgeAvailable: boolean,
+): string {
+  const restored = `${count} background agent${count === 1 ? ' was' : 's were'} restored from this session.`;
+  // Without list_agents the model has no way to learn the restored agents'
+  // ids, so offer no instruction it cannot follow.
+  if (!listAgentsAvailable) return restored;
   return (
-    `${count} background agent${count === 1 ? ' was' : 's were'} restored ` +
-    `from this session. Use list_agents to inspect ${count === 1 ? 'it' : 'them'} ` +
-    'and send_message with a task_id to continue one.'
+    `${restored} Use list_agents to inspect ${count === 1 ? 'it' : 'them'} ` +
+    'and send_message with a task_id to continue one.' +
+    (bridgeAvailable
+      ? ` In Direct mode: ${toolSearchBridgeSentence(ToolNames.LIST_AGENTS)}`
+      : '')
   );
 }
 
@@ -565,6 +577,8 @@ export class BackgroundAgentResumeService {
           )
         ) {
           retainedStateBlockedReason = TRANSCRIPT_IDENTITY_BLOCKED_REASON;
+        } else if (meta.resumeBlockedReason) {
+          retainedStateBlockedReason = meta.resumeBlockedReason;
         } else if (
           meta.isolation === 'container' ||
           meta.executionBackend !== undefined
@@ -742,6 +756,10 @@ export class BackgroundAgentResumeService {
       debugLogger.warn(
         `[BackgroundAgentResume] Cannot revive "${agentId}": metadata could not be read.`,
       );
+      return undefined;
+    }
+    if (meta.resumeBlockedReason) {
+      entry.resumeBlockedReason = meta.resumeBlockedReason;
       return undefined;
     }
     if (meta.isolation === 'container' || meta.executionBackend !== undefined) {
@@ -1624,7 +1642,12 @@ export class BackgroundAgentResumeService {
   }
 
   buildRecoveredBackgroundAgentsModelNotice(count: number): string {
-    return buildRecoveredModelNotice(count);
+    const registry = this.config.getToolRegistry?.();
+    return buildRecoveredModelNotice(
+      count,
+      !!registry?.getAllToolNames().includes(ToolNames.LIST_AGENTS),
+      !!registry && isDirectToolBridgeAvailable(registry),
+    );
   }
 
   private async resolveResumeTarget(

@@ -103,9 +103,9 @@ function Copyable({ label, text }: { label: string; text: string }) {
 
 /**
  * Share one agent with a caller outside this workspace over A2A. The agent
- * keeps running here; the caller gets an endpoint, a token shown once and a
- * one-line test. Each share is its own grant, so revoking one leaves the
- * others working.
+ * runs under its live workspace configuration; the caller gets an endpoint,
+ * a token shown once and a one-line test. Each share is its own grant, so
+ * revoking one leaves the others working.
  */
 export function ShareAgentDialog({
   agentName,

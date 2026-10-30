@@ -1,3 +1,4 @@
+import { pierreResources } from './pierre-build';
 import { resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import type { PreviewServer, ProxyOptions, ViteDevServer } from 'vite';
@@ -77,10 +78,11 @@ function developmentCsp(requestUrl: string): string {
   const queryStart = requestUrl.indexOf('?');
   const raw = new URLSearchParams(
     queryStart === -1 ? '' : requestUrl.slice(queryStart + 1),
-  ).get('daemon');
-  const origin = getAllowedDaemonOrigin(raw || '');
+  );
   const connectOrigins: string[] = [];
-  if (origin) {
+  for (const value of [raw.get('daemon'), ...raw.getAll('fanout')]) {
+    const origin = getAllowedDaemonOrigin(value || '');
+    if (!origin || connectOrigins.includes(origin)) continue;
     const websocket = new URL(origin);
     websocket.protocol = websocket.protocol === 'https:' ? 'wss:' : 'ws:';
     connectOrigins.push(origin, websocket.origin);
@@ -107,22 +109,44 @@ function developmentCsp(requestUrl: string): string {
   ].join('; ');
 }
 
-function configureCsp(server: ViteDevServer | PreviewServer): void {
+function configureDevelopmentMiddleware(
+  server: ViteDevServer | PreviewServer,
+): void {
   server.middlewares.use((req, res, next) => {
     res.setHeader('Content-Security-Policy', developmentCsp(req.url || '/'));
+    // Vite resolves the extensionless settings page to settings.ts before SPA fallback.
+    if (
+      req.method === 'GET' &&
+      /^\/settings\/?(?:\?|$)/.test(req.url || '') &&
+      req.headers.accept?.includes('text/html')
+    ) {
+      req.url = '/index.html';
+    }
     next();
   });
 }
 
 export default defineConfig(({ command }) => ({
   root: 'client',
+  // Worker-only imports otherwise trigger a dev-page reload on first preview.
+  optimizeDeps: {
+    exclude: ['@pierre/diffs', 'shiki/wasm'],
+    include: [
+      'exceljs',
+      'ssf',
+      'shiki-files/core',
+      'shiki-files/engine/javascript',
+      'shiki-files/engine/oniguruma',
+    ],
+  },
   plugins: [
+    pierreResources(),
     react(),
     tailwindcss(),
     {
-      name: 'web-shell-development-csp',
-      configureServer: configureCsp,
-      configurePreviewServer: configureCsp,
+      name: 'web-shell-development-middleware',
+      configureServer: configureDevelopmentMiddleware,
+      configurePreviewServer: configureDevelopmentMiddleware,
     },
   ],
   resolve: {
@@ -186,6 +210,15 @@ export default defineConfig(({ command }) => ({
       'Referrer-Policy': 'no-referrer',
     },
     port: 5173,
+    // Dev launchers (scripts/managed-agent-dev.js) hand the token-bearing
+    // open path through the environment instead of argv: npm echoes expanded
+    // argv to its inherited stdio, and argv is world-readable in
+    // /proc/<pid>/cmdline. Caveat: server.open spawns the browser launcher
+    // with the full URL as an argv element, so on POSIX the token still
+    // reaches one world-readable argv before landing in the page — this
+    // transport removes only the npm hop's echo. Unset means no browser is
+    // opened, as before.
+    open: process.env['QWEN_WEB_SHELL_OPEN_PATH'],
     proxy: {
       [MANAGED_AGENT_JAVA_ROUTE_PROXY]: managedAgentJavaProxy,
       [MANAGED_AGENT_PUBLIC_ROUTE_PROXY]: managedAgentJavaProxy,
@@ -206,6 +239,7 @@ export default defineConfig(({ command }) => ({
       '/session': daemonProxy,
       '/permission': daemonProxy,
       '^/workspaces/[^/]+/agent(?:/|$)': daemonProxy,
+      '/agent-hosts': daemonProxy,
       [QUALIFIED_VOICE_STREAM_PROXY]: { ...daemonProxy, ws: true },
       [QUALIFIED_ACP_WS_PROXY]: { ...daemonProxy, ws: true },
       '/workspace': daemonProxy,

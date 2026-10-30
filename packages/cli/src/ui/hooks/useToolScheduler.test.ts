@@ -37,6 +37,11 @@ import {
   ToolErrorType,
 } from '@qwen-code/qwen-code-core';
 import { ToolCallStatus } from '../types.js';
+import { ToolNames } from '@qwen-code/qwen-code-core/tools/tool-names.js';
+import {
+  DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+  DEFERRED_TOOL_CALL_CANCELLATION_PREFIX,
+} from '@qwen-code/qwen-code-core/tools/tool-call.js';
 
 // Mocks
 const { debugLoggerErrors } = vi.hoisted(() => ({
@@ -202,13 +207,13 @@ describe('useReactToolScheduler in YOLO Mode', () => {
         response: expect.objectContaining({
           resultDisplay: 'YOLO Formatted tool output',
           responseParts: [
-            {
+            expect.objectContaining({
               functionResponse: {
                 id: 'yoloCall',
                 name: 'mockToolRequiresConfirmation',
                 response: { output: expectedOutput },
               },
-            },
+            }),
           ],
         }),
       }),
@@ -379,13 +384,13 @@ describe('useReactToolScheduler', () => {
         response: expect.objectContaining({
           resultDisplay: 'Formatted tool output',
           responseParts: [
-            {
+            expect.objectContaining({
               functionResponse: {
                 id: 'call1',
                 name: 'mockTool',
                 response: { output: 'Tool output' },
               },
-            },
+            }),
           ],
         }),
       }),
@@ -451,8 +456,10 @@ describe('useReactToolScheduler', () => {
     const { result } = renderScheduler();
     const request = {
       callId: 'unresolved-full-turn-call',
-      name: 'mockTool',
-      args: {},
+      name: ToolNames.TOOL_CALL,
+      args: { name: ToolNames.AGENT, arguments: {} },
+      isClientInitiated: false,
+      prompt_id: 'unresolved-full-turn-prompt',
     } as ToolCallRequestInfo;
 
     act(() => {
@@ -466,6 +473,9 @@ describe('useReactToolScheduler', () => {
       await vi.runAllTimersAsync();
     });
 
+    const message =
+      'Full-turn tool scheduling failed. The tool was not executed.';
+    const modelFacingMessage = `${DEFERRED_TOOL_CALL_REFUSAL_PREFIX}${message}`;
     expect(mockTool.execute).not.toHaveBeenCalled();
     expect(recordToolResult).not.toHaveBeenCalled();
     expect(onComplete).toHaveBeenCalledWith([
@@ -478,6 +488,17 @@ describe('useReactToolScheduler', () => {
           }),
           executionStatus: 'not_started',
           errorType: ToolErrorType.UNHANDLED_EXCEPTION,
+          resultDisplay: message,
+          contentLength: modelFacingMessage.length,
+          responseParts: [
+            expect.objectContaining({
+              functionResponse: {
+                id: request.callId,
+                name: ToolNames.TOOL_CALL,
+                response: { error: modelFacingMessage },
+              },
+            }),
+          ],
         }),
       }),
     ]);
@@ -566,8 +587,10 @@ describe('useReactToolScheduler', () => {
       const { result } = renderScheduler();
       const request = {
         callId: 'queued-full-turn-call',
-        name: 'mockTool',
-        args: {},
+        name: ToolNames.TOOL_CALL,
+        args: { name: ToolNames.AGENT, arguments: {} },
+        isClientInitiated: false,
+        prompt_id: 'queued-full-turn-prompt',
       } as ToolCallRequestInfo;
       const abortController = new AbortController();
 
@@ -611,16 +634,15 @@ describe('useReactToolScheduler', () => {
             errorType: undefined,
             executionStatus: 'not_started',
             responseParts: [
-              {
+              expect.objectContaining({
                 functionResponse: {
                   id: request.callId,
-                  name: 'mockTool',
+                  name: ToolNames.TOOL_CALL,
                   response: {
-                    error:
-                      '[Operation Cancelled] Reason: Tool call cancelled before execution.',
+                    error: `${DEFERRED_TOOL_CALL_CANCELLATION_PREFIX}[Operation Cancelled] Reason: Tool call cancelled before execution.`,
                   },
                 },
-              },
+              }),
             ],
           }),
         }),
@@ -703,7 +725,7 @@ describe('useReactToolScheduler', () => {
           callId: request.callId,
           errorType: undefined,
           executionStatus: 'not_started',
-          responseParts: [cancelledPart(request)],
+          responseParts: [expect.objectContaining(cancelledPart(request))],
         }),
       }),
       expect.objectContaining({
@@ -713,7 +735,9 @@ describe('useReactToolScheduler', () => {
           callId: secondRequest.callId,
           errorType: undefined,
           executionStatus: 'not_started',
-          responseParts: [cancelledPart(secondRequest)],
+          responseParts: [
+            expect.objectContaining(cancelledPart(secondRequest)),
+          ],
         }),
       }),
     ]);
@@ -1272,13 +1296,13 @@ describe('useReactToolScheduler', () => {
       response: expect.objectContaining({
         resultDisplay: 'Display 1',
         responseParts: [
-          {
+          expect.objectContaining({
             functionResponse: {
               id: 'multi1',
               name: 'tool1',
               response: { output: 'Output 1' },
             },
-          },
+          }),
         ],
       }),
     });
@@ -1288,13 +1312,13 @@ describe('useReactToolScheduler', () => {
       response: expect.objectContaining({
         resultDisplay: 'Display 2',
         responseParts: [
-          {
+          expect.objectContaining({
             functionResponse: {
               id: 'multi2',
               name: 'tool2',
               response: { output: 'Output 2' },
             },
-          },
+          }),
         ],
       }),
     });

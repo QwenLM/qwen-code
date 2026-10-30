@@ -9,6 +9,7 @@ import * as path from 'node:path';
 import { promises as fsp } from 'node:fs';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
   ExtensionManager,
   hashDaemonWorkspace,
@@ -390,12 +391,85 @@ describe('extension management v2 REST', () => {
     vi.restoreAllMocks();
   });
 
+  it('serves lightweight legacy-primary summaries with snapshot activation and redacted sources', async () => {
+    const h = await makeHarness();
+    try {
+      const extension = mockExtensionManager();
+      extension.installMetadata!.source =
+        'https://user:secret@example.com/demo.zip?token=private#fragment';
+      const response = await auth(
+        request(h.app).get('/workspace/extensions/summary'),
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.workspaceCwd).toBe(h.primary.workspaceCwd);
+      expect(response.body.extensions).toEqual([
+        expect.objectContaining({
+          name: 'demo',
+          isActive: false,
+          source: 'https://***REDACTED***@example.com/demo.zip',
+        }),
+      ]);
+      expect(response.body.extensions[0]).not.toHaveProperty('capabilities');
+      expect(response.body.extensions[0]).not.toHaveProperty('details');
+      expect(
+        ExtensionManager.prototype.refreshCatalogSnapshot,
+      ).toHaveBeenCalledOnce();
+      expect(ExtensionManager.prototype.refreshCache).not.toHaveBeenCalled();
+      expect(
+        ExtensionManager.prototype
+          .getExtensionActivationForIdentityFromSnapshot,
+      ).toHaveBeenCalledWith(
+        extension,
+        expect.objectContaining({ generation: 7 }),
+        h.primary.workspaceCwd,
+      );
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
+  it('serves one complete detail entry and returns 404 for an absent extension', async () => {
+    const h = await makeHarness();
+    try {
+      const extension = mockExtensionManager();
+      extension.commands = ['hello'];
+      const snapshot = await new ExtensionManager({
+        workspaceDir: h.primary.workspaceCwd,
+        isWorkspaceTrusted: true,
+      }).getExtensionStoreSnapshot();
+      const load = vi
+        .spyOn(ExtensionManager.prototype, 'refreshExtensionDetailsSnapshot')
+        .mockResolvedValueOnce({ snapshot, extension })
+        .mockResolvedValueOnce({ snapshot, extension: null });
+      const response = await auth(
+        request(h.app).get('/workspace/extensions/demo/details'),
+      );
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        name: 'demo',
+        isActive: false,
+        capabilities: { commandCount: 1 },
+        details: { commands: ['hello'] },
+      });
+      expect(load).toHaveBeenCalledWith('demo');
+      expect(ExtensionManager.prototype.refreshCache).not.toHaveBeenCalled();
+      const missing = await auth(
+        request(h.app).get('/workspace/extensions/missing/details'),
+      );
+      expect(missing.status).toBe(404);
+      expect(missing.body.code).toBe('extension_not_found');
+    } finally {
+      await fsp.rm(h.scratch, { recursive: true, force: true });
+    }
+  });
+
   it('advertises extension_management_v2 but not the abandoned capability', async () => {
     const h = await makeHarness({ singleWorkspace: true });
     try {
       const response = await auth(request(h.app).get('/capabilities'));
       expect(response.status).toBe(200);
       expect(response.body.features).toContain('extension_management_v2');
+      expect(response.body.features).toContain('extension_list_details');
       expect(response.body.features).toContain('extension_state');
       expect(response.body.features).toContain('extension_git_credentials');
       expect(response.body.features).toContain('extension_local_path_install');
@@ -1908,6 +1982,122 @@ describe('extension management v2 REST', () => {
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });
+
+  it.each([false, true])(
+    'rejects bare array refresh bodies before submission (qualified=%s)',
+    async (qualified) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      try {
+        const route = qualified
+          ? '/workspaces/' +
+            encodeURIComponent(h.secondary.workspaceId) +
+            '/extensions/refresh'
+          : '/workspace/extensions/refresh';
+        for (const body of ['[]', '["selected-session"]']) {
+          const response = await auth(
+            request(h.app)
+              .post(route)
+              .set('Content-Type', 'application/json')
+              .send(body),
+          );
+          expect(response.status).toBe(400);
+          expect(response.body.code).toBe('invalid_request_body');
+          expect(response.body.operationId).toBeUndefined();
+        }
+        expect(
+          h.secondary.bridge.refreshExtensionsForAllSessions,
+        ).not.toHaveBeenCalled();
+        expect(
+          h.primary.bridge.refreshExtensionsForAllSessions,
+        ).not.toHaveBeenCalled();
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    { sessionIds: [] },
+    { sessionIds: ['selected-session', 'selected-session'] },
+  ])(
+    'refreshes selection $sessionIds without advancing workspace applied generation',
+    async ({ sessionIds }) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      vi.mocked(h.secondary.bridge.getSessionSummary).mockReturnValue(
+        {} as ReturnType<AcpSessionBridge['getSessionSummary']>,
+      );
+      try {
+        const response = await auth(
+          request(h.app)
+            .post(
+              `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/refresh`,
+            )
+            .send({ sessionIds }),
+        );
+        expect(response.status).toBe(202);
+        await expect(
+          pollOperation(h.app, response.body.operationId),
+        ).resolves.toMatchObject({ status: 'succeeded' });
+        expect(
+          h.secondary.bridge.refreshExtensionsForAllSessions,
+        ).toHaveBeenCalledWith(expect.any(Object), {
+          sessionIds: [...new Set(sessionIds)],
+        });
+        expect(
+          h.primary.bridge.refreshExtensionsForAllSessions,
+        ).not.toHaveBeenCalled();
+        const projection = await auth(
+          request(h.app).get(
+            `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions`,
+          ),
+        );
+        expect(projection.body).toMatchObject({
+          desiredGeneration: 7,
+          appliedGeneration: 0,
+        });
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([null, 'session', [1], [' '], ['foreign-session']])(
+    'rejects an invalid or foreign refresh selection %j before submission',
+    async (sessionIds) => {
+      const h = await makeHarness();
+      mockExtensionManager();
+      vi.mocked(h.secondary.bridge.getSessionSummary).mockImplementation(
+        (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      );
+      try {
+        const response = await auth(
+          request(h.app)
+            .post(
+              `/workspaces/${encodeURIComponent(h.secondary.workspaceId)}/extensions/refresh`,
+            )
+            .send({ sessionIds }),
+        );
+        expect(response.status).toBe(
+          Array.isArray(sessionIds) && sessionIds[0] === 'foreign-session'
+            ? 404
+            : 400,
+        );
+        expect(response.body.operationId).toBeUndefined();
+        expect(
+          h.secondary.bridge.refreshExtensionsForAllSessions,
+        ).not.toHaveBeenCalled();
+        expect(
+          h.primary.bridge.refreshExtensionsForAllSessions,
+        ).not.toHaveBeenCalled();
+      } finally {
+        await fsp.rm(h.scratch, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('advances applied generation only after an explicit workspace refresh', async () => {
     const h = await makeHarness();

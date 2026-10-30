@@ -93,7 +93,10 @@ if (!qwenSandbox) {
 }
 
 qwenSandbox = (qwenSandbox || '').trim().toLowerCase();
-if (qwenSandbox === 'bwrap' || process.env.SANDBOX === 'bwrap') {
+if (
+  qwenSandbox === 'bwrap' ||
+  process.env.SANDBOX?.trim().toLowerCase() === 'bwrap'
+) {
   console.error(
     'Whole-CLI bwrap has been removed. Configure tools.executionSandbox in User or System settings and restart outside the old sandbox.',
   );

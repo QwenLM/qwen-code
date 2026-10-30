@@ -1,8 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import type { DaemonClient, DaemonUpdateStatus } from '@qwen-code/sdk/daemon';
 import { ArrowUpCircleIcon, LoaderCircleIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { Button } from '../ui/button';
+import {
+  Popover,
+  PopoverContent,
+  PopoverDescription,
+  PopoverTitle,
+  PopoverTrigger,
+} from '../ui/popover';
 
 interface UpdateControlProps {
   client: Pick<
@@ -13,6 +21,8 @@ interface UpdateControlProps {
   currentVersion: string;
   onError: (error: unknown, fallback: string) => void;
   onRestarted?: (url: string) => void;
+  /** Keep background update/restart polling alive when the menu closes. */
+  portalContainer?: HTMLElement | null;
 }
 
 function reloadPage(url: string) {
@@ -26,6 +36,7 @@ export function UpdateControl({
   currentVersion,
   onError,
   onRestarted = reloadPage,
+  portalContainer,
 }: UpdateControlProps) {
   const { t } = useI18n();
   const [status, setStatus] = useState<DaemonUpdateStatus | null>(null);
@@ -121,23 +132,33 @@ export function UpdateControl({
     }
   };
 
-  if (status?.state !== 'ready' && restarting === null) return null;
+  const manualInstructions =
+    restarting === null &&
+    status?.state === 'available' &&
+    !status.canInstall &&
+    status.instructions?.length
+      ? status.instructions
+      : undefined;
+  if (status?.state !== 'ready' && restarting === null && !manualInstructions)
+    return null;
   const label = t(restarting !== null ? 'update.restarting' : 'update.button');
   const Icon = restarting !== null ? LoaderCircleIcon : ArrowUpCircleIcon;
-  return (
+  const title =
+    restarting !== null
+      ? label
+      : t(manualInstructions ? 'update.manualTitle' : 'update.readyTitle', {
+          version: status?.latestVersion || '',
+        });
+  const button = (
     <Button
       type="button"
       variant="secondary"
       className={collapsed ? 'size-8 p-0' : 'h-6 gap-1 px-2 text-xs'}
-      title={
-        restarting !== null
-          ? label
-          : t('update.readyTitle', { version: status?.latestVersion || '' })
-      }
+      title={title}
       aria-label={label}
       disabled={restarting !== null}
       data-web-shell-update
-      onClick={() => void restart()}
+      onClick={manualInstructions ? undefined : () => void restart()}
     >
       <Icon
         size={14}
@@ -148,4 +169,28 @@ export function UpdateControl({
       {!collapsed && label}
     </Button>
   );
+  const control = manualInstructions ? (
+    <Popover>
+      <PopoverTrigger asChild>{button}</PopoverTrigger>
+      <PopoverContent
+        side="top"
+        align="start"
+        className="w-80"
+        data-web-shell-update-manual
+      >
+        <PopoverTitle>{title}</PopoverTitle>
+        <PopoverDescription>{t('update.manualHint')}</PopoverDescription>
+        <pre className="overflow-x-auto rounded-md bg-muted p-2 font-mono text-xs whitespace-pre-wrap">
+          {manualInstructions.join('\n')}
+        </pre>
+      </PopoverContent>
+    </Popover>
+  ) : (
+    button
+  );
+  return portalContainer === undefined
+    ? control
+    : portalContainer
+      ? createPortal(control, portalContainer)
+      : null;
 }

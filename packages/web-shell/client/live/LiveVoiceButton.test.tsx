@@ -124,6 +124,39 @@ afterEach(() => {
 });
 
 describe('LiveVoiceButton', () => {
+  it('moves its trigger into the sidebar without starting or interrupting a call', () => {
+    const slot = document.createElement('div');
+    document.body.appendChild(slot);
+    const container = mount({
+      portalContainer: slot,
+      hideInactiveTrigger: true,
+    });
+    expect(slot.querySelector('button')).not.toBeNull();
+    expect(container.querySelector('button')).toBeNull();
+    expect(mocks.result.begin).not.toHaveBeenCalled();
+    expect(mocks.result.browserHost.connect).not.toHaveBeenCalled();
+    expect(mocks.result.start).not.toHaveBeenCalled();
+
+    mocks.result.status = {
+      ...mocks.result.status!,
+      available: true,
+      state: 'listening',
+    };
+    act(() =>
+      mounted.at(-1)!.root.render(<LiveVoiceButton portalContainer={slot} />),
+    );
+    click(slot.querySelector('button')!);
+    expect(document.querySelector('[data-live-mute-input]')).not.toBeNull();
+    act(() => mounted.at(-1)!.root.render(<LiveVoiceButton />));
+    expect(slot.querySelector('button')).toBeNull();
+    expect(container.querySelector('button')).not.toBeNull();
+    expect(document.querySelector('[data-live-mute-input]')).not.toBeNull();
+    expect(mocks.result.stop).not.toHaveBeenCalled();
+    expect(mocks.result.browserHost.disconnect).not.toHaveBeenCalled();
+    click(document.querySelector('[data-live-mute-input]')!);
+    expect(mocks.result.setMute).toHaveBeenCalledWith({ inputMuted: true });
+  });
+
   it('stays absent when the daemon lacks realtime_voice', () => {
     mocks.result.supported = false;
     const container = mount();

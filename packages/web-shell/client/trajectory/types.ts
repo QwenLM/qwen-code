@@ -91,6 +91,7 @@ export interface TrajectoryRequestRow extends TrajectoryRowBase {
   /** Folded from the round's assistant block; absent when none carried it. */
   usage?: DaemonTurnUsage;
   recordId?: string;
+  executionId?: string;
   responseId?: string;
   promptId?: string;
   /** Set when a subagent issued the request. */

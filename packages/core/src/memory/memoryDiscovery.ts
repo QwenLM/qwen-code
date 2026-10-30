@@ -170,9 +170,7 @@ async function getMemoryFilePathsInternalForEachDir(
 
       const upwardPaths: string[] = [];
       let currentDir = resolvedCwd;
-      const ultimateStopDir = projectRoot
-        ? path.dirname(projectRoot)
-        : path.dirname(resolvedHome);
+      const ultimateStopDir = projectRoot ?? path.dirname(resolvedHome);
 
       while (currentDir && currentDir !== path.dirname(currentDir)) {
         if (

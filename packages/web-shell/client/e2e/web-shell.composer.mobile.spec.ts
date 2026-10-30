@@ -37,6 +37,330 @@ import { createGitWorkspaceScenario } from './utils/gitScenario';
 const COMPOSER_TEXTAREA = 'textarea[data-web-shell-composer-editor]';
 const SIDEBAR_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-sidebar-width';
 
+test('simple mobile composer grows and submits Chinese multiline input @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto(
+    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=false&sessionId=${scenario.sessionId}`,
+  );
+  await completeReplay(page, daemon, scenario.sessionId);
+  const composer = page.locator('[data-web-shell-composer-variant="simple"]');
+  const textarea = composer.locator(COMPOSER_TEXTAREA);
+  const content = composer.locator('[data-web-shell-composer-content]');
+  const send = composer.locator('[data-web-shell-composer-submit]');
+  await expect(textarea).toBeVisible();
+  await expect(composer.locator('.cm-editor')).toHaveCount(0);
+  await expect(send).toBeVisible();
+  await expect(send).toBeDisabled();
+  await expect(
+    composer.getByRole('button', {
+      name: 'Start voice dictation',
+      exact: true,
+    }),
+  ).toHaveCount(0);
+  const restingHeight = (await content.boundingBox())!.height;
+  expect(restingHeight).toBeLessThanOrEqual(72);
+  await textarea.fill('第一行');
+  await textarea.press('Enter');
+  await page.keyboard.insertText('第二行');
+  await expect(textarea).toHaveValue('第一行\n第二行');
+  expect(daemon.promptRequests()).toHaveLength(0);
+  await expect
+    .poll(async () => (await content.boundingBox())!.height)
+    .toBeGreaterThan(restingHeight);
+  await send.tap();
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  expectPromptBodyToContainText(
+    firstRequestBody(daemon.promptRequests()),
+    '第一行\n第二行',
+  );
+  await expect(textarea).toHaveValue('');
+});
+
+test('simple mobile add drawer keeps advanced controls in advanced mode @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  scenario.capabilities.features.push(
+    'workspace_file_upload',
+    'workspace_qualified_rest_core',
+  );
+  scenario.capabilities.workspaces = [
+    { id: 'primary', cwd: scenario.workspaceCwd, primary: true, trusted: true },
+  ];
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto(
+    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=false&sessionId=${scenario.sessionId}`,
+  );
+  await completeReplay(page, daemon, scenario.sessionId);
+  const composer = page.locator('[data-web-shell-composer]');
+  await expect(composer.locator('[data-web-shell-model-button]')).toHaveCount(
+    0,
+  );
+  await composer.getByTestId('composer-add-menu-trigger').tap();
+  const drawer = page.locator('[data-web-shell-mobile-add-menu]');
+  await expect(drawer).toBeVisible();
+  await expect(drawer.locator('[data-web-shell-model-button]')).toHaveCount(0);
+  await expect(drawer.locator('[data-web-shell-mode-button]')).toHaveCount(0);
+  expect(
+    await drawer
+      .getByRole('button')
+      .evaluateAll((buttons) =>
+        buttons.map((button) => button.textContent?.trim()).filter(Boolean),
+      ),
+  ).toEqual([
+    'Photos',
+    'Take photo',
+    'Attach files',
+    'Upload to workspace',
+    'Reference file',
+    'Extensions',
+    'MCP',
+    'Skills',
+  ]);
+  await drawer.getByRole('button', { name: /^close$/i }).tap();
+  await composer.locator('[data-web-shell-composer-expand]').tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'default',
+  );
+  const model = composer.locator('[data-web-shell-model-button]');
+  await expect(model).toBeVisible();
+  await expect(composer.locator('[data-web-shell-mode-button]')).toBeVisible();
+  await model.tap();
+  const picker = page.locator('[data-web-shell-toolbar-popover]');
+  await expect(picker).toBeVisible();
+  await picker
+    .getByRole('button', { name: 'Qwen Test Alt', exact: true })
+    .tap();
+  await expect.poll(() => daemon.modelRequests().length).toBe(1);
+});
+
+test('simple mobile composer switches directly to advanced mode without losing its draft or attachments @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, 'mediaDevices', {
+      configurable: true,
+      value: {
+        getUserMedia: () => new Promise(() => undefined),
+      },
+    });
+  });
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: ['voice_transcribe', 'workspace_voice'],
+    },
+    voice: { enabled: true },
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto(
+    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=false&sessionId=${scenario.sessionId}`,
+  );
+  await completeReplay(page, daemon, scenario.sessionId);
+  const composer = page.locator('[data-web-shell-composer]');
+  const textarea = composer.locator(COMPOSER_TEXTAREA);
+  const microphone = composer.getByRole('button', {
+    name: 'Start voice dictation',
+    exact: true,
+  });
+  const modeButton = composer.locator(
+    '[data-web-shell-composer-expand], [data-web-shell-composer-collapse]',
+  );
+  const send = composer.locator('[data-web-shell-composer-submit]');
+  await expect(modeButton).toHaveAccessibleName('Switch to advanced mode');
+  await expect(microphone).toBeVisible();
+  await expect(send).toBeHidden();
+  const modeBox = (await modeButton.boundingBox())!;
+  const micBox = (await microphone.boundingBox())!;
+  expect(modeBox.x + modeBox.width).toBeLessThanOrEqual(micBox.x);
+  await expect(
+    modeButton.locator('..').locator('button:visible').last(),
+  ).toHaveAccessibleName('Start voice dictation');
+
+  await modeButton.tap();
+  await expect(modeButton).toHaveAccessibleName('Switch to simple mode');
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'default',
+  );
+  await expect(microphone).toBeVisible();
+  await expect(send).toBeVisible();
+  await expect(send).toBeDisabled();
+  const advancedModeBox = (await modeButton.boundingBox())!;
+  const advancedMicBox = (await microphone.boundingBox())!;
+  const advancedSendBox = (await send.boundingBox())!;
+  expect(advancedModeBox.x + advancedModeBox.width).toBeLessThanOrEqual(
+    advancedMicBox.x,
+  );
+  expect(advancedMicBox.x + advancedMicBox.width).toBeLessThanOrEqual(
+    advancedSendBox.x,
+  );
+  expect(
+    advancedSendBox.x - advancedMicBox.x - advancedMicBox.width,
+  ).toBeLessThanOrEqual(12);
+  await expect(
+    modeButton.locator('..').locator('button:visible').last(),
+  ).toHaveAttribute('data-web-shell-composer-submit');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await modeButton.tap();
+  await expect(modeButton).toHaveAccessibleName('Switch to advanced mode');
+
+  await textarea.fill('保留中文草稿和附件');
+  await expect(microphone).toBeHidden();
+  await expect(send).toBeVisible();
+  const typedModeBox = (await modeButton.boundingBox())!;
+  const sendBox = (await send.boundingBox())!;
+  expect(typedModeBox.x + typedModeBox.width).toBeLessThanOrEqual(sendBox.x);
+  await expect(
+    modeButton.locator('..').locator('button:visible').last(),
+  ).toHaveAttribute('data-web-shell-composer-submit');
+  await composer
+    .locator('input[type="file"]')
+    .last()
+    .setInputFiles({
+      name: 'retained-note.txt',
+      mimeType: 'text/plain',
+      buffer: Buffer.from('retained attachment'),
+    });
+  const attachments = composer.locator('[data-web-shell-composer-attachments]');
+  await expect(attachments).toBeVisible();
+  const textareaNode = (await textarea.elementHandle())!;
+  const attachmentText = await attachments.textContent();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'simple',
+  );
+
+  await modeButton.tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'default',
+  );
+  await expect(
+    composer.locator('[data-web-shell-mobile-editing-actions]'),
+  ).toBeVisible();
+  await expect(composer.locator('[data-web-shell-model-button]')).toBeVisible();
+  await expect(modeButton).toHaveAccessibleName('Switch to simple mode');
+  await expect(microphone).toBeVisible();
+  await expect(send).toBeVisible();
+  await expect(
+    modeButton.locator('..').locator('button:visible').last(),
+  ).toHaveAttribute('data-web-shell-composer-submit');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  await expect(page.locator('[data-web-shell-expanded-editor]')).toHaveCount(0);
+  await expect(textarea).toHaveValue('保留中文草稿和附件');
+  expect(
+    await textareaNode.evaluate(
+      (node) =>
+        node ===
+        document.querySelector('textarea[data-web-shell-composer-editor]'),
+    ),
+  ).toBe(true);
+  expect(await attachments.textContent()).toBe(attachmentText);
+
+  await modeButton.tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'simple',
+  );
+  await expect(
+    composer.locator('[data-web-shell-mobile-editing-actions]'),
+  ).toHaveCount(0);
+  await expect(textarea).toHaveValue('保留中文草稿和附件');
+  await expect(modeButton).toHaveAccessibleName('Switch to advanced mode');
+  await expect(page.getByRole('menu')).toHaveCount(0);
+  await expect(page.getByRole('dialog')).toHaveCount(0);
+  expect(
+    await textareaNode.evaluate(
+      (node) =>
+        node ===
+        document.querySelector('textarea[data-web-shell-composer-editor]'),
+    ),
+  ).toBe(true);
+  expect(await attachments.textContent()).toBe(attachmentText);
+
+  await composer
+    .getByRole('button', { name: 'Remove retained-note.txt', exact: true })
+    .tap();
+  await expect(attachments).toHaveCount(0);
+  await composer.locator('[data-web-shell-composer-submit]').tap();
+  await expect.poll(() => daemon.promptRequests().length).toBe(1);
+  const submitted = JSON.stringify(firstRequestBody(daemon.promptRequests()));
+  expect(submitted).toContain('保留中文草稿和附件');
+  await expect(textarea).toHaveValue('');
+  await expect(attachments).toHaveCount(0);
+});
+
+test('switching to simple mode exits Shell before sending the retained draft @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario();
+  const daemon = await installScenario(page, scenario, testInfo);
+  const shellRequests: string[] = [];
+  await page.route(/\/shell\/?(?:\?|$)/, async (route) => {
+    shellRequests.push(route.request().url());
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        exitCode: 0,
+        output: 'Fixture only',
+        aborted: false,
+      }),
+    });
+  });
+  await page.goto(
+    `/e2e/composer-layout-harness.html?composerVariant=simple&tags=false&sessionId=${scenario.sessionId}`,
+  );
+  await completeReplay(page, daemon, scenario.sessionId);
+  const composer = page.locator('[data-web-shell-composer]');
+  const textarea = composer.locator(COMPOSER_TEXTAREA);
+  const shellPrefix = textarea.locator('..').getByText('!', { exact: true });
+  await expect(textarea).toBeVisible();
+  const original = await textarea.elementHandle();
+  const placeholder = await textarea.getAttribute('placeholder');
+  const draft = '保留普通聊天草稿';
+  await textarea.fill(draft);
+  await composer.locator('[data-web-shell-composer-expand]').tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'default',
+  );
+  await composer.getByRole('button', { name: 'Shell mode', exact: true }).tap();
+  await expect(textarea).toHaveAttribute(
+    'placeholder',
+    'Enter terminal command',
+  );
+  await expect(shellPrefix).toBeVisible();
+  await composer.locator('[data-web-shell-composer-collapse]').tap();
+  await expect(composer).toHaveAttribute(
+    'data-web-shell-composer-variant',
+    'simple',
+  );
+  await expect(textarea).toHaveValue(draft);
+  expect(
+    await textarea.evaluate((node, before) => node === before, original),
+  ).toBe(true);
+  expect.soft(await textarea.getAttribute('placeholder')).toBe(placeholder);
+  expect.soft(await shellPrefix.count()).toBe(0);
+  await composer.locator('[data-web-shell-composer-submit]').tap();
+  await expect
+    .poll(() => daemon.promptRequests().length + shellRequests.length)
+    .toBe(1);
+  expect(shellRequests).toEqual([]);
+  expect(daemon.promptRequests()).toHaveLength(1);
+  expectPromptBodyToContainText(
+    firstRequestBody(daemon.promptRequests()),
+    draft,
+  );
+  await expect(textarea).toHaveValue('');
+});
+
 test('renders the textarea backend instead of CodeMirror on touch devices', async ({
   page,
 }, testInfo) => {
@@ -313,58 +637,33 @@ test('?composer=codemirror escape hatch forces the CodeMirror path', async ({
   await expect(page.locator(COMPOSER_TEXTAREA)).toHaveCount(0);
 });
 
-test('history arrows recall the first welcome submission @smoke', async ({
-  page,
-}, testInfo) => {
-  const scenario = createWebShellDaemonScenario();
-  const daemon = await installScenario(page, scenario, testInfo);
-  await page.goto('/');
-  const textarea = page.locator(COMPOSER_TEXTAREA);
-  await textarea.fill('First input from mobile');
-  await page.locator('[data-web-shell-composer-submit]').tap();
-  await completeReplay(page, daemon, scenario.sessionId);
-  await expect.poll(() => daemon.promptRequests().length).toBe(1);
-  await daemon.sendEvent(turnCompleteEvent('prompt-mobile', { id: 11 }));
-  await expect(textarea).toHaveValue('');
-
-  const draft = 'New draft 😀\nsecond line';
-  await textarea.fill(draft);
-  await page.getByRole('button', { name: 'Previous input', exact: true }).tap();
-  await expect(textarea).toHaveValue('First input from mobile');
-  await expect(textarea).toBeFocused();
-  await page.getByRole('button', { name: 'Next input', exact: true }).tap();
-  await expect(textarea).toHaveValue(draft);
-  expect(daemon.promptRequests()).toHaveLength(1);
-});
-
 for (const width of [390, 240]) {
-  test(`history arrows restore the draft without submitting at ${width}px @smoke`, async ({
+  test(`editing row keeps 44px touch targets and fits the viewport at ${width}px @smoke`, async ({
     page,
   }, testInfo) => {
     await page.setViewportSize({ width, height: 844 });
-    await page.addInitScript(() => {
-      localStorage.setItem(
-        'qwen-web-shell-history',
-        JSON.stringify(['first input', 'second input']),
-      );
-    });
     const scenario = createWebShellDaemonScenario();
     const daemon = await installScenario(page, scenario, testInfo);
     await gotoSession(page, scenario, daemon);
     const textarea = page.locator(COMPOSER_TEXTAREA);
-    const draft = '当前草稿 😀\nsecond line';
-    await textarea.fill(draft);
-    const previous = page.getByRole('button', {
-      name: 'Previous input',
-      exact: true,
-    });
-    const next = page.getByRole('button', { name: 'Next input', exact: true });
-    for (const button of [
-      previous,
-      next,
-      page.getByRole('button', { name: 'Hide keyboard', exact: true }),
+    await textarea.fill('当前草稿 😀\nsecond line');
+    const buttons = page
+      .locator('[data-web-shell-mobile-editing-actions]')
+      .getByRole('button');
+    // Pin the controls this scenario must render before measuring them, so a
+    // dropped button fails the test instead of shrinking the iterated set.
+    // (Hide keyboard renders only while the textarea is focused; fill does
+    // focus it. The standalone dev host always opts into the Add entry, so
+    // the no-Add contextual buttons — Input history and the Shell toggle —
+    // never render here and this loop does not measure them.)
+    await expect(
       page.getByRole('button', { name: 'Expand editor', exact: true }),
-    ]) {
+    ).toHaveCount(1);
+    await expect(
+      page.getByRole('button', { name: 'Hide keyboard', exact: true }),
+    ).toHaveCount(1);
+    expect(await buttons.count()).toBeGreaterThan(0);
+    for (const button of await buttons.all()) {
       const bounds = await button.boundingBox();
       expect(bounds).not.toBeNull();
       expect(bounds!.width).toBeGreaterThanOrEqual(44);
@@ -375,38 +674,8 @@ for (const width of [390, 240]) {
     expect(
       await page.evaluate(() => document.documentElement.scrollWidth),
     ).toBe(width);
-    await next.tap();
-    await expect(textarea).toHaveValue(draft);
-    await previous.tap();
-    await expect(textarea).toHaveValue('second input');
-    await expect(textarea).toBeFocused();
-    await previous.tap();
-    await expect(textarea).toHaveValue('first input');
-    await previous.tap();
-    await expect(textarea).toHaveValue('first input');
-    await next.tap();
-    await expect(textarea).toHaveValue('second input');
-    await next.tap();
-    await expect(textarea).toHaveValue(draft);
-    await next.tap();
-    await expect(textarea).toHaveValue(draft);
-    expect(daemon.promptRequests()).toHaveLength(0);
   });
 }
-
-test('history arrows leave the draft intact when history is empty', async ({
-  page,
-}, testInfo) => {
-  const scenario = createWebShellDaemonScenario();
-  const daemon = await installScenario(page, scenario, testInfo);
-  await gotoSession(page, scenario, daemon);
-  const textarea = page.locator(COMPOSER_TEXTAREA);
-  await textarea.fill('keep this draft');
-  await page.getByRole('button', { name: 'Previous input', exact: true }).tap();
-  await page.getByRole('button', { name: 'Next input', exact: true }).tap();
-  await expect(textarea).toHaveValue('keep this draft');
-  expect(daemon.promptRequests()).toHaveLength(0);
-});
 
 test('mobile editing preserves draft, selection and keyboard dismissal @smoke', async ({
   page,
@@ -617,10 +886,10 @@ test('mobile workspace row stays clear of the editing row @smoke', async ({
   const branch = page.locator('[data-web-shell-git-branch]');
   await expect(branch).toBeVisible({ timeout: 10_000 });
   const branchBox = (await branch.boundingBox())!;
-  const previousBox = (await page
-    .getByRole('button', { name: 'Previous input' })
+  const editingBox = (await page
+    .locator('[data-web-shell-mobile-editing-actions]')
     .boundingBox())!;
-  expect(previousBox.y).toBeGreaterThanOrEqual(branchBox.y + branchBox.height);
+  expect(editingBox.y).toBeGreaterThanOrEqual(branchBox.y + branchBox.height);
 });
 
 // 412x450 is a Pixel 7 once the soft keyboard has resized the viewport. A

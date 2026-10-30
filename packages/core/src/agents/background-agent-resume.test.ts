@@ -612,6 +612,51 @@ describe('BackgroundAgentResumeService', () => {
     return metaPath;
   }
 
+  it('explains how to discover the roster after recovery', () => {
+    const service = new BackgroundAgentResumeService({
+      getToolRegistry: () => ({
+        getAllToolNames: () => [
+          ToolNames.LIST_AGENTS,
+          ToolNames.TOOL_SEARCH,
+          ToolNames.TOOL_CALL,
+        ],
+      }),
+    } as unknown as Config);
+    expect(service.buildRecoveredBackgroundAgentsModelNotice(1)).toContain(
+      'In Direct mode: If the list_agents tool is not in your tool list, review its schema with `tool_search` and then invoke it with `tool_call`.',
+    );
+    expect(service.buildRecoveredBackgroundAgentsNotice(1)).not.toContain(
+      'tool_search',
+    );
+  });
+
+  it('omits discovery instructions without both registered bridge halves', () => {
+    const service = new BackgroundAgentResumeService({
+      getToolRegistry: () => ({
+        getAllToolNames: () => [ToolNames.LIST_AGENTS, ToolNames.TOOL_CALL],
+      }),
+    } as unknown as Config);
+    expect(service.buildRecoveredBackgroundAgentsModelNotice(1)).not.toContain(
+      'tool_search',
+    );
+    expect(
+      new BackgroundAgentResumeService(
+        {} as Config,
+      ).buildRecoveredBackgroundAgentsModelNotice(1),
+    ).not.toContain('tool_search');
+  });
+
+  it('does not name list_agents when it is not registered', () => {
+    const service = new BackgroundAgentResumeService({
+      getToolRegistry: () => ({
+        getAllToolNames: () => [ToolNames.TOOL_SEARCH, ToolNames.TOOL_CALL],
+      }),
+    } as unknown as Config);
+    const notice = service.buildRecoveredBackgroundAgentsModelNotice(2);
+    expect(notice).not.toContain('list_agents');
+    expect(notice).toBe('2 background agents were restored from this session.');
+  });
+
   it('restores interrupted and completed background agents without notifying again', async () => {
     const sessionId = 'session-1';
     const runningAgentId = 'agent-running';
@@ -759,6 +804,68 @@ describe('BackgroundAgentResumeService', () => {
       expect(hookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
     },
   );
+
+  it('never resumes or revives a run whose record says it is never continued', async () => {
+    const sessionId = 'session-blocked';
+    const reason = 'A background fix of /autofix-pr is never continued.';
+    for (const [agentId, status] of [
+      ['blocked-running', 'running'],
+      ['blocked-done', 'completed'],
+    ] as const) {
+      seedMeta(sessionId, agentId, agentId, {
+        status,
+        isBackgrounded: true,
+        resumeBlockedReason: reason,
+      });
+      writeJsonl(
+        getAgentJsonlPath(tempDir, sessionId, agentId),
+        rec(`${agentId}-u1`, null, sessionId, T0, 'user', {
+          agentId,
+          cwd: tempDir,
+          message: userText('Fix it'),
+        }),
+      );
+    }
+    const { service, subagentManager } = createService();
+    await service.loadPausedBackgroundAgents(sessionId);
+    expect(registry.get('blocked-running')).toMatchObject({
+      status: 'paused',
+      resumeBlockedReason: reason,
+    });
+    expect(registry.get('blocked-done')).toMatchObject({
+      status: 'completed',
+      resumeBlockedReason: reason,
+    });
+    expect(
+      await service.resumeBackgroundAgent('blocked-running', 'go on'),
+    ).toBeUndefined();
+    expect(
+      await service.reviveCompletedBackgroundAgent('blocked-done', 'go on'),
+    ).toBeUndefined();
+    // Registered in this process without the reason: the record still holds.
+    const live = 'blocked-live';
+    seedMeta(sessionId, live, live, {
+      status: 'completed',
+      isBackgrounded: true,
+      resumeBlockedReason: reason,
+    });
+    const metaPath = getAgentMetaPath(tempDir, sessionId, live);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, live);
+    writeJsonl(
+      outputFile,
+      rec('live-u1', null, sessionId, T0, 'user', {
+        agentId: live,
+        cwd: tempDir,
+        message: userText('Fix it'),
+      }),
+    );
+    register(live, 'Live task', { status: 'completed', outputFile, metaPath });
+    expect(
+      await service.reviveCompletedBackgroundAgent(live, 'go on'),
+    ).toBeUndefined();
+    expect(registry.get(live)?.resumeBlockedReason).toBe(reason);
+    expect(subagentManager.createAgentHeadless).not.toHaveBeenCalled();
+  });
 
   it('keeps damaged and unsafe retained entries visible but non-continuable', async () => {
     const sessionId = 'session-unsafe';
@@ -1284,7 +1391,7 @@ describe('BackgroundAgentResumeService', () => {
         getTerminateMode: () => AgentTerminateMode.GOAL,
         getFinalText: () => 'done',
       };
-      const { service, subagentManager, stubToolRegistry } = createService({
+      const { service, subagentManager } = createService({
         toolMode,
         // The session this resume runs in does have the Skill tool; the rows
         // below are about `subagentWillHaveSkillTool`, not about #12838's
@@ -1303,7 +1410,6 @@ describe('BackgroundAgentResumeService', () => {
           isSkillActive: vi.fn().mockReturnValue(true),
         },
       });
-      stubToolRegistry.getAllToolNames.mockReturnValue([ToolNames.SKILL]);
       subagentManager.loadSubagent.mockResolvedValue({
         name: 'researcher',
         color: 'cyan',

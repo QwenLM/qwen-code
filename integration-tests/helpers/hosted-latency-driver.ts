@@ -21,6 +21,7 @@ import {
   type HostedLatencyMeasurement,
   type HostedLatencySample,
 } from './hosted-latency-baseline.js';
+import { relayUpstream } from './hosted-relay-headers.js';
 
 const config = JSON.parse(await readFile(process.argv[2], 'utf8')) as {
   tenantId: string;
@@ -44,7 +45,7 @@ const baselinePath = path.resolve(
   'integration-tests/baselines/hosted-latency.json',
 );
 const reportPath = path.resolve(
-  'packages/sdk-java/managed-agent-server/target/hosted-latency-baseline.json',
+  'packages/managed-agent-server/target/hosted-latency-baseline.json',
 );
 const samples: HostedLatencySample[] = [];
 let sample: HostedLatencySample;
@@ -60,7 +61,7 @@ const model = await startFakeOpenAIServer(({ body, requestIndex }) => {
     (body['tools'] as Array<{ function: { name: string } }>)
       .map((tool) => tool.function.name)
       .sort(),
-    ['edit', 'read_file', 'write_file'],
+    ['edit', 'read_file', 'web_fetch', 'write_file'],
   );
   const messages = body['messages'] as Array<{
     role: string;
@@ -208,21 +209,7 @@ const proxy = createServer(async (req, res) => {
     } else {
       const bytes = Buffer.from(await upstream.arrayBuffer());
       if (isWarm) active.runtimeReadyMs = elapsed();
-      res.writeHead(
-        upstream.status,
-        Object.fromEntries(
-          [...upstream.headers].filter(
-            ([key]) =>
-              ![
-                'connection',
-                'content-length',
-                'content-encoding',
-                'transfer-encoding',
-              ].includes(key),
-          ),
-        ),
-      );
-      res.end(bytes);
+      relayUpstream(res, upstream, bytes);
     }
   } catch (cause) {
     proxyFailures.push(cause);
@@ -351,6 +338,17 @@ try {
     }
     sample.storeRequests = turnStoreRequests;
     samples.push(structuredClone(sample));
+    await waitUntil(async () => {
+      const response = await cli.request(
+        `/session/${session.sessionId}/status`,
+        {
+          headers: cli.headers(clientId),
+        },
+      );
+      const text = await response.text();
+      assert.equal(response.status, 200, text);
+      return JSON.parse(text).hasActivePrompt === false;
+    });
     await json(`/session/${session.sessionId}/detach`, {}, 204);
   }
   assert.deepEqual(proxyFailures, []);
@@ -366,8 +364,9 @@ try {
     'integration-tests/helpers/hosted-latency-driver.ts',
     'integration-tests/helpers/hosted-latency-baseline.ts',
     'integration-tests/helpers/hosted-harness-process.ts',
+    'integration-tests/helpers/hosted-relay-headers.ts',
     'integration-tests/fake-openai-server.ts',
-    'packages/sdk-java/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java',
+    'packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java',
   ];
   const sourceHashes = Object.fromEntries(
     await Promise.all(

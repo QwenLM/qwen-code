@@ -2,9 +2,12 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import crypto from 'node:crypto';
-import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import {
+  verifyBundledRipgrep,
+  verifyRuntimeIntegrity,
+} from './runtime-smoke-checks.js';
 
 const packageDir = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
@@ -18,7 +21,8 @@ const nodePath =
 const entryPath = path.join(runtimeRoot, 'lib', 'cli-entry.js');
 const token = crypto.randomBytes(32).toString('hex');
 
-verifyRuntimeIntegrity();
+const manifest = verifyRuntimeIntegrity(runtimeRoot);
+verifyBundledRipgrep(runtimeRoot, manifest.target);
 verifyPtySupport();
 
 const child = spawn(
@@ -174,52 +178,4 @@ console.log('pid=' + child.pid);
     );
   }
   console.log(`Bundled runtime PTY round-trip ok (${result.stdout.trim()})`);
-}
-
-function verifyRuntimeIntegrity() {
-  const required = [
-    'manifest.json',
-    'checksums.json',
-    'LICENSE',
-    'NOTICE',
-    'node/LICENSE',
-    'lib/cli-entry.js',
-    'lib/web-shell/index.html',
-  ];
-  for (const relative of required) {
-    const file = path.join(runtimeRoot, relative);
-    if (!fs.statSync(file, { throwIfNoEntry: false })?.isFile()) {
-      throw new Error(`Bundled runtime file is missing: ${relative}`);
-    }
-  }
-  const manifest = JSON.parse(
-    fs.readFileSync(path.join(runtimeRoot, 'manifest.json'), 'utf8'),
-  );
-  for (const field of [
-    'desktopVersion',
-    'qwenCodeVersion',
-    'qwenCodeCommit',
-    'target',
-    'node',
-    'builtAt',
-  ]) {
-    if (!manifest[field])
-      throw new Error(`Runtime manifest is missing ${field}`);
-  }
-  const checksums = JSON.parse(
-    fs.readFileSync(path.join(runtimeRoot, 'checksums.json'), 'utf8'),
-  );
-  for (const [relative, expected] of Object.entries(checksums)) {
-    const file = path.join(runtimeRoot, relative);
-    if (!fs.statSync(file, { throwIfNoEntry: false })?.isFile()) {
-      throw new Error(`Checksummed runtime file is missing: ${relative}`);
-    }
-    const actual = crypto
-      .createHash('sha256')
-      .update(fs.readFileSync(file))
-      .digest('hex');
-    if (actual !== expected) {
-      throw new Error(`Bundled runtime checksum mismatch: ${relative}`);
-    }
-  }
 }

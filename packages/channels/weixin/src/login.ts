@@ -14,7 +14,12 @@ export interface LoginResult {
 
 /** Step 1: Get QR code from server and display in terminal */
 export async function startLogin(apiBaseUrl: string): Promise<string> {
-  const resp = await fetch(`${apiBaseUrl}/ilink/bot/get_bot_qrcode?bot_type=3`);
+  const resp = await fetch(
+    `${apiBaseUrl}/ilink/bot/get_bot_qrcode?bot_type=3`,
+    {
+      headers: buildHeaders(),
+    },
+  );
   if (!resp.ok) {
     throw new Error(`Failed to get QR code: HTTP ${resp.status}`);
   }

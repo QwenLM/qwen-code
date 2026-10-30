@@ -122,7 +122,7 @@ describe('ContextUsagePanel', () => {
       )!;
       expect(button.disabled).toBe(true);
       expect(button.parentElement?.title).toContain(
-        'Requires an idle, connected, writable session',
+        'Requires an idle, connected session with permission to compress context.',
       );
       act(() => button.click());
     }
