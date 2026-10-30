@@ -57,7 +57,7 @@ public final class RuntimeAdmission {
                 || binding.getDrainReceipt() == null || !binding.getDrainReceipt().matches(binding)
                 || !binding.getDrainReceipt().equals(claim.getDrainReceipt())
                 || !java.util.Objects.equals(binding.getResourceHandle(), claim.getResourceHandle())
-                || ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())
+                || WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
                         && (binding.getResourceHandle() == null || binding.getProvisionSeed() == null
                                 || !binding.getProvisionSeed().equals(claim.getProvisionSeed())
                                 || !binding.getProvisionSeed().matches(binding.getLease()))
@@ -77,7 +77,7 @@ public final class RuntimeAdmission {
     }
 
     private static boolean receiptBackedExternalLoss(RuntimeBindingRecord binding) {
-        return ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())
+        return WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
                 && binding.getState() == RuntimeBindingRecord.State.LOST && binding.isDrainRequested()
                 && binding.getDrainReceipt() != null && binding.getDrainReceipt().matches(binding);
     }

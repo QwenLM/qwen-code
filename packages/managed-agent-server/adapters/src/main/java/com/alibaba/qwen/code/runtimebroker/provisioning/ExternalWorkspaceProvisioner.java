@@ -14,8 +14,6 @@ import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 
-import org.apache.commons.lang3.StringUtils;
-
 import java.time.Duration;
 import java.time.Instant;
 import java.util.LinkedHashMap;
@@ -76,11 +74,7 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
 
     /** Structural selection only; not acquisition or execution authority. */
     public static boolean isWorkspaceRequest(RuntimeProvisionRequest request) {
-        return request != null && KIND.equals(request.getProvisionerKind()) && request.isManagedContext()
-                && WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())
-                && "session".equals(request.getScope().getIsolationClass())
-                && StringUtils.isNotBlank(request.getIsolationKey())
-                && request.getScope().getWorkspaceId().equals(request.getStorageId());
+        return WorkspaceExecutionProfile.isExternalWorkspaceRequest(request);
     }
 
     /** Verifies the saved original for acquisition; never provisions a replacement. */

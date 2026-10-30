@@ -12,6 +12,7 @@ import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.boot.context.properties.ConfigurationProperties;
+import org.springframework.boot.context.properties.NestedConfigurationProperty;
 import org.springframework.boot.context.properties.bind.Binder;
 import org.springframework.boot.convert.DurationUnit;
 import org.springframework.boot.web.server.Ssl;
@@ -47,7 +48,10 @@ public class ManagedAgentProperties
             ManagedAgentProperties.class);
 
     // The keys the Harness reads from its environment file, which both of
-    // its readers must take the same way.
+    // its readers must take the same way. NONE: the configuration metadata
+    // would otherwise list the constant as a setting, under the class's
+    // @Getter.
+    @Getter(AccessLevel.NONE)
     private static final Set<String> STRICT_HARNESS_KEYS = Set.of("QWEN_SERVER_TOKEN",
             "QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST", "QWEN_MANAGED_RUNTIME_BROKER_URL",
             "QWEN_MANAGED_RUNTIME_BROKER_TOKEN");
@@ -923,6 +927,9 @@ public class ManagedAgentProperties
     public static class RuntimeBroker
             implements com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings
                     .RuntimeBroker {
+        // A class of its own, which the configuration metadata, and so the
+        // configuration reference, leaves out unless marked nested.
+        @NestedConfigurationProperty
         private final SshRuntimeSettings ssh = new SshRuntimeSettings();
 
         private boolean enabled;
