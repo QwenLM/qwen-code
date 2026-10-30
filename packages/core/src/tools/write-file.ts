@@ -43,7 +43,11 @@ import type {
   TextFileMutation,
   TextFileObservation,
 } from '../services/fileSystemService.js';
-import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
+import {
+  makeRelative,
+  normalizeFilePath,
+  shortenPath,
+} from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
@@ -804,7 +808,7 @@ The user has the ability to modify \`content\`. If modified, this will be stated
   ): string | null {
     // Normalize shell-escaped paths (e.g. "my\ file.txt" → "my file.txt")
     // that may reach the LLM via at-completion or manual typing.
-    const filePath = unescapePath(params.file_path.trim());
+    const filePath = normalizeFilePath(params.file_path.trim());
     params.file_path = filePath;
 
     if (!filePath) {

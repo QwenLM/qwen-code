@@ -10,8 +10,8 @@ import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import {
   makeRelative,
+  normalizeFilePath,
   shortenPath,
-  unescapePath,
   isSubpaths,
   isSubpath,
 } from '../utils/paths.js';
@@ -360,7 +360,7 @@ export class LSTool extends BaseDeclarativeTool<LSToolParams, ToolResult> {
   protected override validateToolParamValues(
     params: LSToolParams,
   ): string | null {
-    params.path = unescapePath(params.path.trim());
+    params.path = normalizeFilePath(params.path.trim());
 
     if (!path.isAbsolute(params.path)) {
       return `Path must be absolute: ${params.path}`;

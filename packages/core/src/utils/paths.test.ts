@@ -23,6 +23,8 @@ import {
   validatePath,
   resolveAndValidatePath,
   unescapePath,
+  toWindowsPath,
+  normalizeFilePath,
   isSubpath,
   shortenPath,
   tildeifyPath,
@@ -199,6 +201,57 @@ describe('escapePath', () => {
       ],
     ],
   ]);
+});
+
+describe('toWindowsPath', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('is a no-op outside Windows', () => {
+    vi.spyOn(os, 'platform').mockReturnValue('linux');
+    expect(toWindowsPath('/tmp/report.json')).toBe('/tmp/report.json');
+  });
+
+  it('maps /tmp to the OS temp directory', () => {
+    vi.spyOn(os, 'platform').mockReturnValue('win32');
+    vi.spyOn(os, 'tmpdir').mockReturnValue('C:\\Temp');
+    expect(toWindowsPath('/tmp')).toBe('C:\\Temp');
+    expect(toWindowsPath('/tmp/report.json')).toBe(
+      path.join('C:\\Temp', 'report.json'),
+    );
+    expect(toWindowsPath('/tmp/sub/report.json')).toBe(
+      path.join('C:\\Temp', 'sub', 'report.json'),
+    );
+  });
+
+  it('maps a drive-prefixed MSYS path', () => {
+    vi.spyOn(os, 'platform').mockReturnValue('win32');
+    expect(toWindowsPath('/c/temp/report.json')).toBe('C:\\temp\\report.json');
+    expect(toWindowsPath('/d')).toBe('D:\\');
+  });
+
+  it('leaves Windows and relative paths untouched', () => {
+    vi.spyOn(os, 'platform').mockReturnValue('win32');
+    expect(toWindowsPath('C:\\temp\\x.txt')).toBe('C:\\temp\\x.txt');
+    expect(toWindowsPath('relative/x.txt')).toBe('relative/x.txt');
+  });
+});
+
+describe('normalizeFilePath', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('unescapes on Unix and converts on Windows', () => {
+    vi.spyOn(os, 'platform').mockReturnValue('linux');
+    expect(normalizeFilePath('/tmp/a\\ b.txt')).toBe('/tmp/a b.txt');
+
+    vi.spyOn(os, 'platform').mockReturnValue('win32');
+    expect(normalizeFilePath('/tmp/a.txt')).toBe(
+      path.join(os.tmpdir(), 'a.txt'),
+    );
+  });
 });
 
 describe('unescapePath', () => {
