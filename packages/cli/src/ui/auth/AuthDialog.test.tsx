@@ -112,6 +112,7 @@ const renderAuthDialog = (
 
   const mockConfig = {
     getAuthType: vi.fn(() => configAuthType),
+    isBrowserLaunchSuppressed: () => false,
     getModel: vi.fn(() => settings.merged.model?.name),
     getContentGeneratorConfig: vi.fn(() => ({ apiKey: configApiKey })),
   } as unknown as Config;

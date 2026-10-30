@@ -574,7 +574,7 @@ export function AuthDialog({
         onModelSelectionRequired={closeAuthDialog}
         onConnect={handleSubscriptionSubmit}
         onModelStudio={() => setViewLevel('alibaba-select')}
-        suppressBrowserLaunch={config.isBrowserLaunchSuppressed?.()}
+        suppressBrowserLaunch={config.isBrowserLaunchSuppressed()}
       />
     );
   }

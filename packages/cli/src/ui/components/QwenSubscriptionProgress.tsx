@@ -24,8 +24,7 @@ export function QwenSubscriptionProgress({
   status: 'waiting' | 'error' | 'timeout';
   message?: string;
 }) {
-  const authorizationUrl =
-    deviceAuth?.verification_uri_complete || deviceAuth?.verification_uri;
+  const authorizationUrl = deviceAuth?.verification_uri_complete;
   const waiting = status === 'waiting';
   useKeypress(
     (key) => {

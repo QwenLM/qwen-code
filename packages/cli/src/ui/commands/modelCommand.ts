@@ -19,6 +19,7 @@ import {
   subscriptionModelUnavailable,
 } from '@qwen-code/qwen-code-core/qwen/subscription-models.js';
 import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import { MessageType } from '../types.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
 import {
@@ -1140,7 +1141,7 @@ export const modelCommand: SlashCommand = {
           messageType: 'error',
           content:
             error instanceof SubscriptionOAuthError
-              ? 'Could not load Qwen Subscription models. Check your account in /auth and retry.'
+              ? subscriptionErrorMessage(error)
               : SUBSCRIPTION_MODELS_UNAVAILABLE,
         };
       }

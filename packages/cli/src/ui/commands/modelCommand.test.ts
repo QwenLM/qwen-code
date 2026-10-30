@@ -3324,7 +3324,36 @@ it('directs an invalid subscription session to auth without claiming it is still
   expect(await modelCommand.action!(context, '')).toMatchObject({
     type: 'message',
     messageType: 'error',
-    content:
-      'Could not load Qwen Subscription models. Check your account in /auth and retry.',
+    content: 'Your Qwen session has expired. Run /auth to sign in again.',
+  });
+});
+
+it('preserves the backend model permission message in /model', async () => {
+  const context = createMockCommandContext({
+    services: {
+      config: {
+        getContentGeneratorConfig: vi.fn().mockReturnValue(null),
+        refreshSubscriptionModels: vi
+          .fn()
+          .mockRejectedValue(
+            new SubscriptionOAuthError(
+              'request_failed',
+              403,
+              'Your account cannot access this model catalog.',
+            ),
+          ),
+      },
+      settings: {
+        ...createMockSettings(),
+        merged: {
+          security: { auth: { selectedType: AuthType.QWEN_SUBSCRIPTION } },
+        },
+      },
+    },
+  });
+  expect(await modelCommand.action!(context, '')).toMatchObject({
+    type: 'message',
+    messageType: 'error',
+    content: 'Your account cannot access this model catalog.',
   });
 });

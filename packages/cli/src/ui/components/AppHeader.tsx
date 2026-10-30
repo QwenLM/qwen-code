@@ -85,7 +85,7 @@ export const AppHeader = ({ version }: AppHeaderProps) => {
           authDisplayType={authDisplayType}
           subscriptionPlan={
             authType === AuthType.QWEN_SUBSCRIPTION
-              ? config.getSubscriptionPlan?.()
+              ? config.getSubscriptionPlan()
               : undefined
           }
           model={model}

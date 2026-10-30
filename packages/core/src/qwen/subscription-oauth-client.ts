@@ -89,7 +89,7 @@ export function subscriptionError(
   );
 }
 
-function retryAfterMs(value: string | null): number | undefined {
+export function retryAfterMs(value: string | null): number | undefined {
   if (!value) return undefined;
   const seconds = Number(value);
   const delay = Number.isFinite(seconds)
@@ -240,11 +240,6 @@ export class QwenSubscriptionOAuthClient {
               throw error;
             }
             delay = Math.max(interval, delay * 2, error.retryAfterMs ?? 0);
-          } else if (
-            error instanceof TypeError ||
-            (error instanceof Error && error.name === 'TimeoutError')
-          ) {
-            delay = Math.max(interval, delay * 2);
           } else {
             throw error;
           }

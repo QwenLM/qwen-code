@@ -267,7 +267,7 @@ export function OpenTuiBanner({ config, settings }: OpenTuiBannerProps) {
   const model = config.getModelDisplayName();
   const subscriptionPlan =
     generatorConfig?.authType === 'qwen-subscription'
-      ? config.getSubscriptionPlan?.()
+      ? config.getSubscriptionPlan()
       : undefined;
   const banner = useMemo(
     () =>

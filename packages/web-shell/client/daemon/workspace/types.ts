@@ -522,7 +522,6 @@ export interface DaemonWorkspaceActions
   > {
   activateSubscription(options?: {
     signal?: AbortSignal;
-    modelId?: string;
   }): Promise<DaemonSubscriptionActivation>;
   // Sessions
   listSessions(

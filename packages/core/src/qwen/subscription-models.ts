@@ -31,10 +31,7 @@ export function subscriptionModelUnavailable(model: string): string {
 }
 
 export class SubscriptionModelSelectionError extends Error {
-  constructor(
-    readonly model: string,
-    readonly models: string[],
-  ) {
+  constructor(model: string) {
     super(subscriptionModelUnavailable(model));
   }
 }
@@ -45,7 +42,7 @@ export function selectSubscriptionModel(
 ): string {
   if (selected) {
     if (!models.includes(selected))
-      throw new SubscriptionModelSelectionError(selected, models);
+      throw new SubscriptionModelSelectionError(selected);
     return selected;
   }
   if (!models.length) throw new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);

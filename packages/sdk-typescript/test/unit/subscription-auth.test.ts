@@ -91,16 +91,3 @@ describe('Subscription transport', () => {
     expect(init?.signal?.aborted).toBe(true);
   });
 });
-
-it('passes the explicit replacement model only to the selected workspace', async () => {
-  const { client, fetch } = clientWith();
-  await client
-    .workspaceById('secondary')
-    .activateSubscription({ modelId: 'replacement' });
-  expect(fetch.mock.calls[0][0]).toBe(
-    `${baseUrl}/workspaces/secondary/auth/subscription`,
-  );
-  expect(JSON.parse(String(fetch.mock.calls[0][1]?.body))).toEqual({
-    modelId: 'replacement',
-  });
-});

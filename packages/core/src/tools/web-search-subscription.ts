@@ -6,11 +6,19 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
+import {
+  CallToolResultSchema,
+  type CallToolResult,
+} from '@modelcontextprotocol/sdk/types.js';
 import type { Config } from '../config/config.js';
 import { buildSessionAwareFetch } from '../core/outbound-session-id.js';
 import { QWEN_SUBSCRIPTION_WEB_SEARCH_URL } from '../qwen/oauth-config.js';
 import { QwenSubscriptionSession } from '../qwen/subscription-session.js';
+import { SubscriptionOAuthError } from '../qwen/subscription-oauth-client.js';
+import {
+  subscriptionErrorMessage,
+  subscriptionHttpError,
+} from '../qwen/subscription-errors.js';
 import { buildRuntimeFetchOptions } from '../utils/runtimeFetchOptions.js';
 import { ToolErrorType } from './tool-error.js';
 import type {
@@ -83,10 +91,24 @@ export class SubscriptionWebSearchBackend implements WebSearchBackend {
                 redirect: 'error',
               });
             };
-            const response = await send(token);
-            if (response.status !== 401) return response;
-            await response.body?.cancel();
-            return send(await session.getAccessToken(requestSignal, token));
+            let response = await send(token);
+            if (response.status === 401) {
+              await response.body?.cancel();
+              response = await send(
+                await session.getAccessToken(requestSignal, token),
+              );
+            }
+            if (!response.ok) {
+              const body: unknown = await response
+                .json()
+                .catch(() => undefined);
+              throw subscriptionHttpError(
+                response.status,
+                body,
+                response.headers.get('Retry-After'),
+              );
+            }
+            return response;
           },
         },
       );
@@ -99,13 +121,11 @@ export class SubscriptionWebSearchBackend implements WebSearchBackend {
         );
       }
       onProgress?.(`Searching: ${query}`);
-      const result = CallToolResultSchema.parse(
-        await client.callTool(
-          { name: 'web_search', arguments: { query } },
-          CallToolResultSchema,
-          options,
-        ),
-      );
+      const result = (await client.callTool(
+        { name: 'web_search', arguments: { query } },
+        CallToolResultSchema,
+        options,
+      )) as CallToolResult;
       if (result.isError) {
         return failure('The subscription search service returned an error.');
       }
@@ -139,13 +159,15 @@ export class SubscriptionWebSearchBackend implements WebSearchBackend {
           searchCount: 1,
         },
       };
-    } catch {
+    } catch (error) {
       return failure(
         signal.aborted
           ? 'Web search was cancelled.'
           : searchSignal.aborted
             ? 'Qwen Subscription search timed out.'
-            : 'Qwen Subscription search failed. Check your account in /auth and retry.',
+            : error instanceof SubscriptionOAuthError
+              ? subscriptionErrorMessage(error)
+              : 'Qwen Subscription search failed. Please try again.',
       );
     } finally {
       await client.close().catch(() => undefined);

@@ -255,6 +255,7 @@ async function pasteText(text: string): Promise<FakePasteEvent> {
 
 function createMockConfig(authType?: AuthType): Config {
   return {
+    isBrowserLaunchSuppressed: () => false,
     getAuthType: vi.fn(() => authType),
     getContentGeneratorConfig: vi.fn(() => ({})),
     getModelsConfig: vi.fn(() => ({

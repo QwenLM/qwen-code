@@ -2,7 +2,7 @@
 
 ## Qwen Subscription development preview
 
-When the local daemon enables the development capability, the authentication dialog offers **Qwen Account with Subscription**. Authorize in the browser with an active Plus/Pro account, then choose models through the existing selector. Model refresh retains the previous list on failure. This integration still requires native-host acceptance and is not enabled in normal releases. See [Authentication](./configuration/auth.md).
+When the local daemon enables the development capability, the authentication dialog offers **Qwen Account with Subscription**. Authorize in the browser with an active Plus/Pro account, then choose models through the existing selector. Network or server refresh failures may use the previous list; HTTP 403 displays the service's error description without returning cached models. This integration still requires native-host acceptance and is not enabled in normal releases. See [Authentication](./configuration/auth.md).
 
 > The VS Code extension (Beta) lets you see Qwen's changes in real-time through a native graphical interface integrated directly into your IDE, making it easier to access and interact with Qwen Code.
 

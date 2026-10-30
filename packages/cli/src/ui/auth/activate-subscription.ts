@@ -18,7 +18,6 @@ export async function activateSubscription(
   settings: LoadedSettings,
   config: Config,
   signal: AbortSignal,
-  selectedModel?: string,
 ): Promise<SubscriptionUserInfo> {
   signal.throwIfAborted();
   if (process.env['DEV'] !== 'true') {
@@ -42,7 +41,7 @@ export async function activateSubscription(
     settings.merged.security?.auth?.selectedType === AuthType.QWEN_SUBSCRIPTION
       ? settings.merged.model?.name
       : undefined;
-  const modelId = selectSubscriptionModel(models, selectedModel ?? selected);
+  const modelId = selectSubscriptionModel(models, selected);
   signal.throwIfAborted();
   // After committing settings, finish the runtime switch even if the dialog closes.
   await applyProviderInstallPlan(

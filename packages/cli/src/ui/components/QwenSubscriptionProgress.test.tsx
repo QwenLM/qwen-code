@@ -52,41 +52,32 @@ beforeEach(() => {
 });
 afterEach(() => vi.useRealTimers());
 
-it.each([true, false])(
-  'keeps the pending subscription UI and copies the link (complete URL: %s)',
-  (complete) => {
-    const onCancel = vi.fn();
-    const deviceAuth = {
-      ...grant,
-      verification_uri_complete: complete
-        ? grant.verification_uri_complete
-        : '',
-    };
-    const ui = render(
-      <QwenSubscriptionProgress
-        status="waiting"
-        deviceAuth={deviceAuth}
-        onCancel={onCancel}
-      />,
+it('keeps the pending subscription UI and copies the complete link', () => {
+  const onCancel = vi.fn();
+  const ui = render(
+    <QwenSubscriptionProgress
+      status="waiting"
+      deviceAuth={grant}
+      onCancel={onCancel}
+    />,
+  );
+  try {
+    expect(ui.lastFrame()).toContain('Qwen Subscription');
+    expect(ui.lastFrame()).toContain('⠋ Waiting for sign-in…');
+    expect(ui.lastFrame()).not.toContain('Time remaining:');
+    expect(ui.lastFrame()).not.toContain('Authorization code:');
+    expect(ui.lastFrame()).toContain('c to copy link · Esc to cancel');
+    onKey(key('c'));
+    expect(copyToClipboard).toHaveBeenCalledWith(
+      grant.verification_uri_complete,
     );
-    try {
-      expect(ui.lastFrame()).toContain('Qwen Subscription');
-      expect(ui.lastFrame()).toContain('⠋ Waiting for sign-in…');
-      expect(ui.lastFrame()).not.toContain('Time remaining:');
-      expect(ui.lastFrame()).not.toContain('Authorization code:');
-      expect(ui.lastFrame()).toContain('c to copy link · Esc to cancel');
-      onKey(key('c'));
-      expect(copyToClipboard).toHaveBeenCalledWith(
-        complete ? grant.verification_uri_complete : grant.verification_uri,
-      );
-      expect(onCancel).not.toHaveBeenCalled();
-      onKey({ ...key('c'), ctrl: true });
-      expect(onCancel).toHaveBeenCalledOnce();
-    } finally {
-      ui.unmount();
-    }
-  },
-);
+    expect(onCancel).not.toHaveBeenCalled();
+    onKey({ ...key('c'), ctrl: true });
+    expect(onCancel).toHaveBeenCalledOnce();
+  } finally {
+    ui.unmount();
+  }
+});
 
 it('keeps ordinary keys inert and cancels with Escape before a grant arrives', () => {
   const onCancel = vi.fn();

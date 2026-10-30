@@ -995,7 +995,7 @@ export const AppContainer = (props: AppContainerProps) => {
   const [isConfigInitialized, setConfigInitialized] = useState(false);
 
   const [subscriptionHintsDismissed, setSubscriptionHintsDismissed] = useState(
-    () => Boolean(config.getResumedSessionData?.()),
+    () => Boolean(config.getResumedSessionData()),
   );
   const dismissSubscriptionHints = useCallback(
     () => setSubscriptionHintsDismissed(true),

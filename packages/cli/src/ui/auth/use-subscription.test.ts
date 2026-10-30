@@ -37,6 +37,14 @@ const free = {
   email: 'test@example.invalid',
   member_type: 'free',
 };
+const queryFailure = () =>
+  new SubscriptionOAuthError(
+    'network_error',
+    undefined,
+    undefined,
+    undefined,
+    'userinfo',
+  );
 const device = {
   device_code: 'synthetic-device',
   user_code: 'ABCD-EFGH',
@@ -200,7 +208,7 @@ it('stops automatic polling at 120 seconds and allows a single manual query', as
 it('stops on query failure, then can discover a purchased plan without reauthorizing', async () => {
   mocks.getUserInfo
     .mockResolvedValueOnce(free)
-    .mockRejectedValueOnce(new TypeError('offline'))
+    .mockRejectedValueOnce(queryFailure())
     .mockResolvedValue({ ...free, member_type: 'pro' });
   const { result, unmount } = renderHook(() =>
     useSubscription({ suppressBrowserLaunch: true }),
@@ -286,7 +294,7 @@ it('cancels in-flight membership work before signout', async () => {
 it('allows signout to cancel a pending manual membership query', async () => {
   mocks.getUserInfo
     .mockResolvedValueOnce(free)
-    .mockRejectedValueOnce(new TypeError('offline'));
+    .mockRejectedValueOnce(queryFailure());
   const { result, unmount } = renderHook(() =>
     useSubscription({ suppressBrowserLaunch: true }),
   );
@@ -482,6 +490,58 @@ it('activates a paid account, hides private errors, and permits retry', async ()
   hook.unmount();
 });
 
+it('retains backend activation errors and observes Retry-After in the CLI', async () => {
+  mocks.getUserInfo.mockResolvedValue({ ...free, member_type: 'pro' });
+  const onActivate = vi
+    .fn()
+    .mockRejectedValue(
+      new SubscriptionOAuthError(
+        'rate_limited',
+        429,
+        'Please wait before trying again.',
+        30_000,
+      ),
+    );
+  const hook = renderHook(() => useSubscription({ onActivate }));
+  await flush();
+  expect(hook.result.current.connectionError).toBe(
+    'Please wait before trying again.',
+  );
+  await act(async () => {
+    await hook.result.current.connect();
+  });
+  expect(onActivate).toHaveBeenCalledOnce();
+  await act(async () => {
+    await vi.advanceTimersByTimeAsync(30_000);
+    await hook.result.current.connect();
+  });
+  expect(onActivate).toHaveBeenCalledTimes(2);
+  hook.unmount();
+});
+
+it('leaves CLI readiness on activation refresh expiry without implicitly signing in', async () => {
+  mocks.getUserInfo.mockResolvedValue({ ...free, member_type: 'pro' });
+  const onActivate = vi
+    .fn()
+    .mockRejectedValue(
+      new SubscriptionOAuthError(
+        'invalid_grant',
+        400,
+        undefined,
+        undefined,
+        'refresh',
+      ),
+    );
+  const hook = renderHook(() => useSubscription({ onActivate }));
+  await flush();
+  expect(hook.result.current.state).toMatchObject({
+    status: 'error',
+    message: expect.stringContaining('session has expired'),
+  });
+  expect(mocks.signIn).not.toHaveBeenCalled();
+  hook.unmount();
+});
+
 it.each(['plus', 'pro', 'PLUS', 'Pro', 'pLuS'] as const)(
   'automatically activates restored %s membership once',
   async (member_type) => {
@@ -529,7 +589,7 @@ it('automatically activates a newly authorized paid account', async () => {
 
 it('automatically activates after a failed initial membership query is retried', async () => {
   mocks.getUserInfo
-    .mockRejectedValueOnce(new Error('offline'))
+    .mockRejectedValueOnce(queryFailure())
     .mockResolvedValue({ ...free, member_type: 'plus' });
   const onActivate = vi.fn().mockResolvedValue(undefined);
   const hook = renderHook(() => useSubscription({ onActivate }));
@@ -548,7 +608,7 @@ it('automatically activates after a failed initial membership query is retried',
 it('automatically activates when manual purchase recovery confirms Pro', async () => {
   mocks.getUserInfo
     .mockResolvedValueOnce(free)
-    .mockRejectedValueOnce(new Error('offline'))
+    .mockRejectedValueOnce(queryFailure())
     .mockResolvedValue({ ...free, member_type: 'pro' });
   const onActivate = vi.fn().mockResolvedValue(undefined);
   const hook = renderHook(() => useSubscription({ onActivate }));
@@ -656,7 +716,7 @@ it('does not let an old activation release a new lifetime membership-query guard
   let confirmNewMembership!: (info: typeof free) => void;
   mocks.getUserInfo
     .mockResolvedValueOnce({ ...free, member_type: 'pro' })
-    .mockRejectedValueOnce(new Error('offline'))
+    .mockRejectedValueOnce(queryFailure())
     .mockReturnValueOnce(
       new Promise((resolve) => {
         confirmNewMembership = resolve;
@@ -695,13 +755,13 @@ it('does not let an old membership query release a new lifetime query guard', as
   let confirmOld!: (info: typeof free) => void;
   let confirmNew!: (info: typeof free) => void;
   mocks.getUserInfo
-    .mockRejectedValueOnce(new Error('offline'))
+    .mockRejectedValueOnce(queryFailure())
     .mockReturnValueOnce(
       new Promise((resolve) => {
         confirmOld = resolve;
       }),
     )
-    .mockRejectedValueOnce(new Error('offline'))
+    .mockRejectedValueOnce(queryFailure())
     .mockReturnValueOnce(
       new Promise((resolve) => {
         confirmNew = resolve;

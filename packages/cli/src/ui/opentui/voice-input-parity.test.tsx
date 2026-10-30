@@ -303,6 +303,7 @@ vi.mock('./theme.js', () => ({ C: new Proxy({}, { get: () => '#ffffff' }) }));
 
 const config = {
   getAuthType: () => 'openai',
+  getResumedSessionData: () => undefined,
   getSessionId: () => 'owned-voice-session',
   getContextFilePaths: () => [],
   getAccessibility: () => ({}),

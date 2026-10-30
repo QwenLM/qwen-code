@@ -516,7 +516,7 @@ export function EmbeddedApp() {
     }
   };
 
-  const activateSubscription = (signal: AbortSignal, modelId?: string) =>
+  const activateSubscription = (signal: AbortSignal) =>
     new Promise<void>((resolve, reject) => {
       signal.throwIfAborted();
       if (subscriptionActivation.current)
@@ -548,7 +548,7 @@ export function EmbeddedApp() {
       signal.addEventListener('abort', cancel, { once: true });
       vscode.postMessage({
         type: 'qwenSubscriptionActivate',
-        data: { flowId, requestId, modelId },
+        data: { flowId, requestId },
       });
     });
 

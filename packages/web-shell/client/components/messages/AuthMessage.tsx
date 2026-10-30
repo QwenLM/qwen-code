@@ -1255,12 +1255,11 @@ export function AuthMessage({
       <QwenSubscriptionFlow
         dialog={dialog}
         transport={workspaceActions}
-        onActivate={async (signal, modelId) => {
+        onActivate={async (signal) => {
           const owner = sessionOwnerGuard.capture();
           const result = await workspaceActions
             .activateSubscription({
               signal,
-              ...(modelId ? { modelId } : {}),
             })
             .finally(() => {
               signal.throwIfAborted();

@@ -444,6 +444,16 @@ export function useSubscription(
     }
   };
 
+  const expire = useCallback((message?: string) => {
+    lifetime.current?.abort();
+    confirmedMembership.current = undefined;
+    setState({
+      status: 'error',
+      message: message ?? copy.current.expired,
+      retry: 'authorization',
+    });
+  }, []);
+
   return {
     state,
     readySignal:
@@ -453,6 +463,7 @@ export function useSubscription(
         ? confirmedMembership.current.signal
         : undefined,
     working,
+    expire,
     retry,
     signOut,
     openAuthorization: openUrl,

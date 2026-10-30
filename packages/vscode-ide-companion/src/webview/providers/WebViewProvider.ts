@@ -1915,7 +1915,6 @@ export class WebViewProvider {
         | {
             flowId?: string;
             requestId?: string;
-            modelId?: string;
             message?: string;
           }
         | undefined;
@@ -1933,13 +1932,10 @@ export class WebViewProvider {
         };
         try {
           assertOwner();
-          const modelId =
-            typeof data.modelId === 'string' ? data.modelId : undefined;
           const result = await owner.client
             .workspaceByCwd(owner.workspaceCwd)
             .activateSubscription({
               signal,
-              ...(modelId ? { modelId } : {}),
             });
           assertOwner();
           if (result.runtimeSync.status === 'failed')
@@ -1960,7 +1956,16 @@ export class WebViewProvider {
         } catch (error) {
           if (!signal.aborted && this.subscriptionRuntime === owner) {
             const body = (
-              error as { body?: { code?: string; modelId?: string } } | null
+              error as {
+                status?: number;
+                body?: {
+                  code?: string;
+                  message?: string;
+                  errorStage?: string;
+                  errorStatus?: number;
+                  retryAfterMs?: number;
+                };
+              } | null
             )?.body;
             if (
               body?.code === 'subscription_models_unavailable' ||
@@ -1980,7 +1985,15 @@ export class WebViewProvider {
                 requestId: data.requestId,
                 error: true,
                 body: body
-                  ? { code: body.code, modelId: body.modelId }
+                  ? {
+                      code: body.code,
+                      message: body.message,
+                      errorStage: body.errorStage,
+                      errorStatus:
+                        body.errorStatus ??
+                        (error as { status?: number }).status,
+                      retryAfterMs: body.retryAfterMs,
+                    }
                   : undefined,
               },
             });

@@ -372,9 +372,9 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // list lives inside the composer, so its visibility is lifted here.
   const [showSuggestions, setShowSuggestions] = useState(false);
   const subscriptionActive =
-    config?.getAuthType() === AuthType.QWEN_SUBSCRIPTION;
+    config.getAuthType() === AuthType.QWEN_SUBSCRIPTION;
   const [subscriptionHintsDismissed, setSubscriptionHintsDismissed] = useState(
-    () => Boolean(config?.getResumedSessionData?.()),
+    () => Boolean(config.getResumedSessionData()),
   );
   const dismissSubscriptionHints = useCallback(() => {
     if (subscriptionActive) setSubscriptionHintsDismissed(true);

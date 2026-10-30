@@ -86,12 +86,8 @@ type FlowProps = {
   transport: SubscriptionTransport;
   onOpenExternal: (url: string) => void | Promise<void>;
   onClose: () => void;
-  onModelSelectionRequired?: (message: string, signal: AbortSignal) => void;
   onOtherProviders: () => void;
-  onActivate?: (
-    signal: AbortSignal,
-    modelId?: string,
-  ) => Promise<string | void>;
+  onActivate?: (signal: AbortSignal) => Promise<string | void>;
   onActivated?: (message: string) => void;
   onModelsUnavailable?: () => void;
   onAuthError?: (message: string) => void;
@@ -100,6 +96,7 @@ type FlowProps = {
 export function QwenSubscriptionFlow(props: FlowProps) {
   const { t } = useI18n();
   const flow = useSubscription(props.transport, props.onOpenExternal);
+  const expire = flow.expire;
   const mounted = useRef(true);
   const activation = useRef<AbortController | null>(null);
   const automaticAttempt = useRef<AbortSignal | undefined>(undefined);
@@ -111,13 +108,21 @@ export function QwenSubscriptionFlow(props: FlowProps) {
   }, [flow.state]);
   const [connecting, setConnecting] = useState(false);
   const [connectionError, setConnectionError] = useState<string>();
-  const [modelSelectionRequired, setModelSelectionRequired] = useState(false);
+  const [connectionRetryAt, setConnectionRetryAt] = useState(0);
+  useEffect(() => {
+    if (!connectionRetryAt) return;
+    const timer = setTimeout(
+      () => setConnectionRetryAt(0),
+      Math.max(0, connectionRetryAt - Date.now()),
+    );
+    return () => clearTimeout(timer);
+  }, [connectionRetryAt]);
   useEffect(() => {
     mounted.current = true;
     activation.current = null;
     setConnecting(false);
     setConnectionError(undefined);
-    setModelSelectionRequired(false);
+    setConnectionRetryAt(0);
     return () => {
       mounted.current = false;
       activation.current?.abort();
@@ -133,6 +138,7 @@ export function QwenSubscriptionFlow(props: FlowProps) {
       !owner ||
       owner.aborted ||
       activation.current ||
+      connectionRetryAt > Date.now() ||
       flow.working
     )
       return;
@@ -155,9 +161,31 @@ export function QwenSubscriptionFlow(props: FlowProps) {
       if (!owner.aborted && !controller.signal.aborted && mounted.current) {
         const body = (
           error as {
-            body?: { code?: string; modelId?: string };
+            status?: number;
+            body?: {
+              code?: string;
+              message?: string;
+              errorStatus?: number;
+              errorStage?: string;
+              retryAfterMs?: number;
+            };
           } | null
         )?.body;
+        const message =
+          typeof body?.message === 'string' ? body.message : undefined;
+        const status =
+          body?.errorStatus ?? (error as { status?: number } | null)?.status;
+        if (body?.retryAfterMs)
+          setConnectionRetryAt(Date.now() + body.retryAfterMs);
+        if (
+          body?.code === 'session_changed' ||
+          body?.code === 'invalid_token' ||
+          status === 401 ||
+          (body?.code === 'invalid_grant' && body.errorStage === 'refresh')
+        ) {
+          expire(message);
+          return;
+        }
         if (
           (body?.code === 'subscription_models_unavailable' ||
             body?.code === 'subscription_model_unavailable') &&
@@ -166,31 +194,37 @@ export function QwenSubscriptionFlow(props: FlowProps) {
           callbacks.current.onModelsUnavailable();
           return;
         }
-        if (
-          body?.code === 'subscription_model_unavailable' &&
-          typeof body.modelId === 'string'
-        ) {
-          setConnectionError(
-            t('subscription.modelUnavailable', { model: body.modelId }),
-          );
-          setModelSelectionRequired(true);
-        } else {
-          setModelSelectionRequired(false);
-          setConnectionError(
+        setConnectionError(
+          message ??
             t(
-              body?.code === 'subscription_models_unavailable'
-                ? 'subscription.modelsUnavailable'
-                : 'subscription.connectFailed',
+              status === 429
+                ? 'subscription.rateLimited'
+                : body?.errorStage === 'credentials'
+                  ? 'subscription.credentialsFailed'
+                  : body?.code === 'network_error' ||
+                      body?.code === 'request_timeout'
+                    ? 'subscription.networkFailed'
+                    : body?.errorStage === 'refresh'
+                      ? 'subscription.refreshFailed'
+                      : body?.code === 'subscription_models_unavailable'
+                        ? 'subscription.modelsUnavailable'
+                        : 'subscription.connectFailed',
             ),
-          );
-        }
+        );
       }
     } finally {
       if (activation.current === controller) activation.current = null;
       if (!owner.aborted && !controller.signal.aborted && mounted.current)
         setConnecting(false);
     }
-  }, [flow.readySignal, flow.state, flow.working, t]);
+  }, [
+    flow.readySignal,
+    flow.state,
+    flow.working,
+    expire,
+    connectionRetryAt,
+    t,
+  ]);
   const canActivate = props.onActivate !== undefined;
   useEffect(() => {
     const owner = flow.readySignal;
@@ -208,17 +242,6 @@ export function QwenSubscriptionFlow(props: FlowProps) {
   const close = () => {
     activation.current?.abort();
     props.onClose();
-  };
-  const selectModel = () => {
-    if (
-      modelSelectionRequired &&
-      flow.state.status === 'ready' &&
-      flow.readySignal &&
-      !flow.readySignal.aborted &&
-      connectionError &&
-      props.onModelSelectionRequired
-    )
-      props.onModelSelectionRequired(connectionError, flow.readySignal);
   };
   const signOut = async () => {
     if ((await flow.signOut()) && mounted.current) props.onClose();
@@ -243,9 +266,11 @@ export function QwenSubscriptionFlow(props: FlowProps) {
         <>
           {connectionError && <p role="alert">{connectionError}</p>}
           {connecting && <p role="status">{t('subscription.connecting')}</p>}
-          {connectionError && !modelSelectionRequired && props.onActivate && (
+          {connectionError && props.onActivate && (
             <Button
-              disabled={connecting || flow.working}
+              disabled={
+                connecting || flow.working || connectionRetryAt > Date.now()
+              }
               onClick={() => {
                 void connect();
               }}
@@ -262,9 +287,6 @@ export function QwenSubscriptionFlow(props: FlowProps) {
           >
             {t('subscription.signOut')}
           </Button>
-          {modelSelectionRequired && props.onModelSelectionRequired && (
-            <Button onClick={selectModel}>{t('model.select')}</Button>
-          )}
           <Button variant="outline" onClick={close}>
             {t('subscription.cancel')}
           </Button>

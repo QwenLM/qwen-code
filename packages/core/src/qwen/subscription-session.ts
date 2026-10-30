@@ -19,6 +19,7 @@ import {
   QWEN_SUBSCRIPTION_BASE_URL,
 } from './oauth-config.js';
 import { fetchWithPolicy } from '../utils/fetch.js';
+import { subscriptionHttpError } from './subscription-errors.js';
 import {
   subscriptionModelIdsSchema,
   SUBSCRIPTION_MODELS_UNAVAILABLE,
@@ -389,6 +390,8 @@ export class QwenSubscriptionSession {
           timeoutMs: 5000,
           maxBytes: 1024 * 1024,
           maxRedirects: 0,
+          retryTransient: false,
+          readErrorBody: true,
           headers: {
             Accept: 'application/json',
             Authorization: `Bearer ${token}`,
@@ -406,10 +409,17 @@ export class QwenSubscriptionSession {
         response = await request(token);
       }
       signal?.throwIfAborted();
-      if (response.kind === 'response' && response.status === 401)
-        throw new SubscriptionOAuthError('invalid_token', 401);
-      if (response.kind !== 'response' || response.status !== 200)
+      if (response.kind !== 'response')
         throw new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
+      if (response.status !== 200) {
+        let body: unknown;
+        try {
+          body = JSON.parse(response.body.toString('utf8'));
+        } catch {
+          /* No business message in a non-JSON response. */
+        }
+        throw subscriptionHttpError(response.status, body, response.retryAfter);
+      }
       const body = z
         .object({ data: z.array(z.object({ id: z.string() })) })
         .parse(JSON.parse(response.body.toString('utf8')));
@@ -426,11 +436,17 @@ export class QwenSubscriptionSession {
       return { models, cached: false };
     } catch (error) {
       signal?.throwIfAborted();
-      if (error instanceof SubscriptionOAuthError) throw error;
+      if (
+        error instanceof SubscriptionOAuthError &&
+        (error.stage || !error.status || error.status < 500)
+      )
+        throw error;
       return this.locked(async () => {
         const credentials = await current();
         if (!credentials.models?.length)
-          throw new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
+          throw error instanceof SubscriptionOAuthError
+            ? error
+            : new Error(SUBSCRIPTION_MODELS_UNAVAILABLE);
         return { models: credentials.models, cached: true };
       }, signal);
     }

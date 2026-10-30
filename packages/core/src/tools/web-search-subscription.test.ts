@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config } from '../config/config.js';
 import { QWEN_SUBSCRIPTION_WEB_SEARCH_URL } from '../qwen/oauth-config.js';
 import { SubscriptionWebSearchBackend } from './web-search-subscription.js';
+import { SubscriptionOAuthError } from '../qwen/subscription-oauth-client.js';
 
 const { fetchMock, getAccessToken, dispatcher } = vi.hoisted(() => ({
   fetchMock: vi.fn<typeof fetch>(),
@@ -183,6 +184,63 @@ describe('subscription MCP search', () => {
     tools = [];
     expect((await search()).ok).toBe(false);
     expect(requests.some(({ rpc }) => rpc.method === 'tools/call')).toBe(false);
+  });
+
+  it('preserves the backend permission error without suggesting reauthorization', async () => {
+    fetchMock.mockResolvedValue(
+      Response.json(
+        {
+          error: 'access_denied',
+          error_description: 'Web search is not available for this account.',
+        },
+        { status: 403 },
+      ),
+    );
+    expect(await search()).toMatchObject({
+      ok: false,
+      message: 'Web search is not available for this account.',
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    ['invalid_grant', 400, undefined, 'session has expired'],
+    [
+      'rate_limited',
+      429,
+      'Wait before refreshing your session.',
+      'Wait before refreshing your session.',
+    ],
+    ['network_error', undefined, undefined, 'network request failed'],
+  ] as const)(
+    'preserves a %s credential failure through the MCP transport',
+    async (code, status, message, expected) => {
+      getAccessToken.mockRejectedValue(
+        new SubscriptionOAuthError(code, status, message, undefined, 'refresh'),
+      );
+      const response = await search();
+      expect(response).toMatchObject({ ok: false });
+      if (response.ok) throw new Error('Expected search failure');
+      expect(response.message).toContain(expected);
+      expect(fetchMock).not.toHaveBeenCalled();
+    },
+  );
+
+  it('does not replay a rate-limited search or suggest signing in again', async () => {
+    fetchMock.mockResolvedValue(
+      Response.json(
+        {
+          error: 'slow_down',
+          error_description: 'Search quota exceeded. Retry later.',
+        },
+        { status: 429, headers: { 'Retry-After': '30' } },
+      ),
+    );
+    expect(await search()).toMatchObject({
+      ok: false,
+      message: 'Search quota exceeded. Retry later.',
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 
   it.each([true, false])(

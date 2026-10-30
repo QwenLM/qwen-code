@@ -6,6 +6,7 @@
 
 import type { Application, RequestHandler } from 'express';
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import {
   selectSubscriptionModel,
@@ -47,13 +48,6 @@ export function registerWorkspaceSubscriptionRoutes(
         res.status(404).json({ code: 'subscription_unavailable' });
         return;
       }
-      if (
-        req.body?.modelId !== undefined &&
-        (typeof req.body.modelId !== 'string' || !req.body.modelId.trim())
-      ) {
-        res.status(400).json({ code: 'invalid_model' });
-        return;
-      }
       const runtime = resolveWorkspaceRuntimeFromParam(
         deps.workspaceRegistry,
         req,
@@ -91,15 +85,9 @@ export function registerWorkspaceSubscriptionRoutes(
           res.status(403).json({ code: 'auth_type_enforced' });
           return;
         }
-        let info;
-        try {
-          info = await new QwenSubscriptionSession().getUserInfo(
-            controller.signal,
-          );
-        } catch {
-          res.status(502).json({ code: 'subscription_query_failed' });
-          return;
-        }
+        const info = await new QwenSubscriptionSession().getUserInfo(
+          controller.signal,
+        );
         assertActive();
         if (
           !info ||
@@ -114,11 +102,9 @@ export function registerWorkspaceSubscriptionRoutes(
         assertActive();
         const modelId = selectSubscriptionModel(
           models,
-          req.body?.modelId ??
-            (settings.security?.auth?.selectedType ===
-            AuthType.QWEN_SUBSCRIPTION
-              ? settings.model?.name
-              : undefined),
+          settings.security?.auth?.selectedType === AuthType.QWEN_SUBSCRIPTION
+            ? settings.model?.name
+            : undefined,
         );
         await deps.persistSettings(
           runtime.workspaceCwd,
@@ -143,14 +129,29 @@ export function registerWorkspaceSubscriptionRoutes(
           runtimeSync,
         });
       } catch (error) {
+        if (!res.destroyed && error instanceof SubscriptionOAuthError) {
+          if (error.retryAfterMs)
+            res.setHeader('Retry-After', Math.ceil(error.retryAfterMs / 1000));
+          res
+            .status(error.status && error.status >= 400 ? error.status : 502)
+            .json({
+              code: error.code,
+              message:
+                error.status && error.status >= 400
+                  ? error.description
+                  : undefined,
+              errorStage: error.stage ?? 'models',
+              errorStatus: error.status,
+              retryAfterMs: error.retryAfterMs,
+            });
+          return;
+        }
         if (
           !res.destroyed &&
           error instanceof SubscriptionModelSelectionError
         ) {
           res.status(409).json({
             code: 'subscription_model_unavailable',
-            modelId: error.model,
-            models: error.models,
           });
           return;
         }

@@ -25,7 +25,7 @@ export function SubscriptionDialog({
   onModelSelectionRequired?: () => void;
   onModelStudio: () => void;
   suppressBrowserLaunch?: boolean;
-  onConnect?: (signal: AbortSignal, modelId?: string) => Promise<void>;
+  onConnect?: (signal: AbortSignal) => Promise<void>;
 }) {
   const flow = useSubscription({
     suppressBrowserLaunch,

@@ -9307,7 +9307,7 @@ export class WorkspaceDaemonClient {
   }
 
   activateSubscription(
-    opts: { clientId?: string; signal?: AbortSignal; modelId?: string } = {},
+    opts: { signal?: AbortSignal } = {},
   ): Promise<DaemonSubscriptionActivation> {
     return this.client.workspaceJsonRequest(
       this.workspaceSelector,
@@ -9315,8 +9315,7 @@ export class WorkspaceDaemonClient {
       'POST /workspaces/:workspace/auth/subscription',
       {
         method: 'POST',
-        body: opts.modelId === undefined ? {} : { modelId: opts.modelId },
-        clientId: opts.clientId,
+        body: {},
         signal: opts.signal,
         mode: 'rest',
         timeoutMs: 65000,

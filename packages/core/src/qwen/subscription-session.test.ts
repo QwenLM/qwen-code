@@ -147,6 +147,57 @@ it('does not hide a repeated unauthorized response behind the cached catalog', a
   expect(readCachedSubscriptionModels()).toEqual(['served']);
 });
 
+it.each([false, true])(
+  'preserves a backend model permission error (cached catalog: %s)',
+  async (cached) => {
+    const session = new QwenSubscriptionSession();
+    await session.signIn(() => {});
+    if (cached) {
+      modelFetch.mockResolvedValue(modelResponse(['served']));
+      await session.getModels();
+    }
+    modelFetch.mockResolvedValue({
+      kind: 'response',
+      status: 403,
+      body: Buffer.from(
+        JSON.stringify({
+          error: 'access_denied',
+          error_description: 'Your account cannot access this model catalog.',
+        }),
+      ),
+    });
+    await expect(session.getModels()).rejects.toMatchObject({
+      code: 'request_failed',
+      status: 403,
+      description: 'Your account cannot access this model catalog.',
+    });
+    expect(readCachedSubscriptionModels()).toEqual(cached ? ['served'] : []);
+  },
+);
+
+it('does not hide a refresh service failure behind the cached catalog', async () => {
+  const session = new QwenSubscriptionSession();
+  await session.signIn(() => {});
+  modelFetch.mockResolvedValue(modelResponse(['served']));
+  await session.getModels();
+  modelFetch.mockResolvedValue(modelResponse([], 401));
+  client.refreshToken.mockRejectedValue(
+    new SubscriptionOAuthError(
+      'service_unavailable',
+      503,
+      'Refresh service temporarily unavailable.',
+      undefined,
+      'refresh',
+    ),
+  );
+  await expect(session.getModels()).rejects.toMatchObject({
+    code: 'service_unavailable',
+    stage: 'refresh',
+    status: 503,
+  });
+  expect(readCachedSubscriptionModels()).toEqual(['served']);
+});
+
 it('reports an unavailable catalog without clearing login or inventing models', async () => {
   const session = new QwenSubscriptionSession();
   await session.signIn(() => {});

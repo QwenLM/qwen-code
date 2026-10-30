@@ -46,6 +46,7 @@ const createSettings = (options?: {
 
 const createMockConfig = (overrides = {}) => ({
   getContentGeneratorConfig: vi.fn(() => ({ authType: undefined })),
+  getSubscriptionPlan: () => undefined,
   getModel: vi.fn(() => 'gemini-pro'),
   getModelDisplayName: vi.fn(() => 'Gemini Pro'),
   getModelsConfig: () => ({ getModelDisplayName: () => 'Gemini Pro' }),

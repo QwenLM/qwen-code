@@ -397,6 +397,7 @@ vi.mock('../hooks/useStatusLine.js', () => ({
 }));
 
 const CONFIG = {
+  getResumedSessionData: () => undefined,
   getAuthType: () => 'openai',
   getSessionId: () => 'test-session',
   getContextFilePaths: () => [],

@@ -1299,7 +1299,7 @@ function SubscriptionView({
   onBack: () => void;
   onModelSelectionRequired: () => void;
   onModelStudio: () => void;
-  onConnect?: (signal: AbortSignal, modelId?: string) => Promise<void>;
+  onConnect?: (signal: AbortSignal) => Promise<void>;
   suppressBrowserLaunch?: boolean;
   availableTerminalHeight?: number;
 }) {
@@ -2001,16 +2001,11 @@ function AuthDialogFlow({
     return (
       <SubscriptionView
         availableTerminalHeight={availableTerminalHeight}
-        suppressBrowserLaunch={config.isBrowserLaunchSuppressed?.()}
+        suppressBrowserLaunch={config.isBrowserLaunchSuppressed()}
         onBack={goBack}
         onModelSelectionRequired={onClose}
-        onConnect={async (signal, modelId) => {
-          const info = await activateSubscription(
-            settings,
-            config,
-            signal,
-            modelId,
-          );
+        onConnect={async (signal) => {
+          const info = await activateSubscription(settings, config, signal);
           signal.throwIfAborted();
           notify?.(
             subscriptionSuccessMessage(info, config.getModel()),

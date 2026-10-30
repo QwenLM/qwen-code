@@ -8,6 +8,7 @@ import request from 'supertest';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { QWEN_SUBSCRIPTION_BASE_URL } from '@qwen-code/qwen-code-core/qwen/oauth-config.js';
 import { registerWorkspaceSubscriptionRoutes } from './workspace-subscription.js';
+import { SubscriptionOAuthError } from '@qwen-code/qwen-code-core/qwen/subscription-oauth-client.js';
 import {
   createWorkspaceRegistry,
   createWorkspaceGenerationGuard,
@@ -89,6 +90,45 @@ it('rejects an unregistered first-login client ID before account activation', as
   expect(reloadModelProviders).not.toHaveBeenCalled();
 });
 
+it.each([
+  ['userinfo', 'refresh', 'invalid_grant', 400, 'Your session has expired.'],
+  [
+    'userinfo',
+    'userinfo',
+    'rate_limited',
+    429,
+    'Please wait before checking membership.',
+  ],
+  [
+    'models',
+    undefined,
+    'request_failed',
+    403,
+    'Your account cannot access this model catalog.',
+  ],
+  ['userinfo', 'userinfo', 'invalid_response', 200, undefined],
+] as const)(
+  'preserves %s failures during activation (%s)',
+  async (operation, stage, code, status, message) => {
+    const { app, persistSettings } = setup();
+    mocks[operation === 'userinfo' ? 'userInfo' : 'models'].mockRejectedValue(
+      new SubscriptionOAuthError(code, status, message, 30_000, stage),
+    );
+    const response = await request(app).post(
+      '/workspaces/secondary/auth/subscription',
+    );
+    expect(response.status).toBe(status >= 400 ? status : 502);
+    expect(response.body).toMatchObject({
+      code,
+      ...(message ? { message } : {}),
+      errorStatus: status,
+      errorStage: stage ?? 'models',
+      retryAfterMs: 30_000,
+    });
+    expect(persistSettings).not.toHaveBeenCalled();
+  },
+);
+
 it('activates only the selected runtime using workspace-scoped non-secret settings', async () => {
   const { app, persistSettings, reloadModelProviders } = setup();
   const response = await request(app)
@@ -124,6 +164,28 @@ it('activates only the selected runtime using workspace-scoped non-secret settin
     modelId: 'qwen3.8-max',
     runtimeSync: { status: 'applied' },
   });
+});
+
+it('keeps local activation failures structured without exposing exception details', async () => {
+  const { app, persistSettings } = setup();
+  mocks.userInfo.mockRejectedValue(
+    new SubscriptionOAuthError(
+      'credentials_error',
+      undefined,
+      '/private/path/private-test-token',
+      undefined,
+      'credentials',
+    ),
+  );
+  const response = await request(app).post(
+    '/workspaces/secondary/auth/subscription',
+  );
+  expect(response.status).toBe(502);
+  expect(response.body).toEqual({
+    code: 'credentials_error',
+    errorStage: 'credentials',
+  });
+  expect(persistSettings).not.toHaveBeenCalled();
 });
 it.each(['plus', 'pro', 'PLUS', 'Pro', 'pLuS'])(
   'accepts %s membership regardless of casing',
@@ -218,18 +280,8 @@ it.each(['failed', 'deferred'])(
     expect(response.body.runtimeSync.status).toBe(status);
   },
 );
-it('does not expose arbitrary membership error text', async () => {
-  const { app, persistSettings } = setup();
-  mocks.userInfo.mockRejectedValue(new Error('secret-token'));
-  const response = await request(app).post(
-    '/workspaces/secondary/auth/subscription',
-  );
-  expect(response.status).toBe(502);
-  expect(response.text).not.toContain('secret-token');
-  expect(persistSettings).not.toHaveBeenCalled();
-});
 
-it('returns available models for explicit recovery without persisting a fallback', async () => {
+it('preserves a removed selection and recovers after the saved model is changed', async () => {
   const { app, persistSettings } = setup();
   mocks.models.mockResolvedValue({ models: ['replacement'], cached: false });
   mocks.loadSettings.mockReturnValue({
@@ -244,17 +296,17 @@ it('returns available models for explicit recovery without persisting a fallback
   expect(unavailable.status).toBe(409);
   expect(unavailable.body).toEqual({
     code: 'subscription_model_unavailable',
-    modelId: 'removed',
-    models: ['replacement'],
   });
   expect(persistSettings).not.toHaveBeenCalled();
-  const selected = await request(app)
-    .post('/workspaces/secondary/auth/subscription')
-    .send({ modelId: 'replacement' });
+  mocks.loadSettings.mockReturnValue({
+    merged: {
+      security: { auth: { selectedType: 'qwen-subscription' } },
+      model: { name: 'replacement' },
+    },
+  });
+  const selected = await request(app).post(
+    '/workspaces/secondary/auth/subscription',
+  );
   expect(selected.status).toBe(200);
   expect(selected.body.modelId).toBe('replacement');
-  const invalid = await request(app)
-    .post('/workspaces/secondary/auth/subscription')
-    .send({ modelId: 'not-served' });
-  expect(invalid.status).toBe(409);
 });

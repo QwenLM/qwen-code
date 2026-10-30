@@ -11,6 +11,8 @@ import { makeFakeConfig } from '../test-utils/config.js';
 import { AuthType } from '../utils/auth-type.js';
 import { preloadRuntimeFetchModule } from '../utils/runtimeFetchOptions.js';
 import { createSubscriptionContentGenerator } from './subscription-content-generator.js';
+import { SubscriptionOAuthError } from './subscription-oauth-client.js';
+import { getErrorMessage } from '../utils/errors.js';
 import {
   QWEN_SUBSCRIPTION_BASE_URL,
   QWEN_SUBSCRIPTION_MODEL,
@@ -363,6 +365,31 @@ it('does not send requests after credentials have been removed', async () => {
   ).rejects.toThrow();
   expect(fetchMock).not.toHaveBeenCalled();
 });
+
+it.each([
+  [
+    'invalid_grant',
+    400,
+    'refresh',
+    'Your Qwen session has expired. Run /auth to sign in again.',
+  ],
+  ['rate_limited', 429, 'refresh', 'Refresh limit reached. Try again later.'],
+] as const)(
+  'preserves %s token errors through the inference SDK',
+  async (code, status, stage, message) => {
+    session.getAccessToken.mockRejectedValue(
+      new SubscriptionOAuthError(code, status, message, 30_000, stage),
+    );
+    const error = await generator()
+      .generateContent(request, 'prompt')
+      .catch((error) => error);
+    expect(getErrorMessage(error)).toContain(message);
+    expect(error).toMatchObject({
+      cause: { code, status, stage, retryAfterMs: 30_000 },
+    });
+    expect(fetchMock).not.toHaveBeenCalled();
+  },
+);
 
 it('roundtrips a tool call and its result using Chat message roles', async () => {
   const toolCompletion = {

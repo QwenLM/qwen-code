@@ -23,6 +23,11 @@ import {
   QWEN_SUBSCRIPTION_TOKEN_PLACEHOLDER,
 } from './oauth-config.js';
 import { QwenSubscriptionSession } from './subscription-session.js';
+import {
+  SubscriptionOAuthError,
+  subscriptionError,
+} from './subscription-oauth-client.js';
+import { subscriptionErrorMessage } from './subscription-errors.js';
 
 class SubscriptionProvider extends DefaultOpenAICompatibleProvider {
   override buildClient(): OpenAI {
@@ -52,10 +57,15 @@ class SubscriptionProvider extends DefaultOpenAICompatibleProvider {
         const getToken = async (rejectedToken?: string) => {
           try {
             return await session.getAccessToken(signal, rejectedToken);
-          } catch {
+          } catch (error) {
             signal?.throwIfAborted();
-            throw new Error(
-              'Could not obtain a valid Qwen Subscription token. Check your account in /auth and retry.',
+            const failure = subscriptionError(error, 'credentials');
+            throw new SubscriptionOAuthError(
+              failure.code,
+              failure.status,
+              subscriptionErrorMessage(failure),
+              failure.retryAfterMs,
+              failure.stage,
             );
           }
         };

@@ -108,8 +108,12 @@ const EN: Messages = {
   'subscription.signOut': 'Sign out',
   'subscription.cancel': 'Cancel',
   'subscription.connecting': 'Loading models from provider…',
-  'subscription.modelUnavailable': (vars) =>
-    `The selected model, ${vars?.model}, is no longer available. Run /model to choose another model.`,
+  'subscription.refreshFailed':
+    'Could not refresh your Qwen session. Please try again.',
+  'subscription.credentialsFailed':
+    'Could not read or save Qwen credentials. Check local file permissions and disk space.',
+  'subscription.rateLimited': 'Too many requests. Please try again later.',
+  'subscription.networkFailed': 'The network request failed or timed out.',
   'subscription.modelsUnavailable':
     'Could not load models. Your account is still signed in. Please try again.',
   'subscription.connectFailed':
@@ -4732,8 +4736,11 @@ const ZH: Messages = {
   'subscription.signOut': '退出登录',
   'subscription.cancel': '取消',
   'subscription.connecting': '正在加载模型…',
-  'subscription.modelUnavailable': (vars) =>
-    `已选模型 ${vars?.model} 已不可用，请通过 /model 重新选择。`,
+  'subscription.refreshFailed': '无法刷新 Qwen 登录凭证，请重试。',
+  'subscription.credentialsFailed':
+    '无法读取或保存 Qwen 凭证，请检查本地文件权限和磁盘空间。',
+  'subscription.rateLimited': '请求过多，请稍后重试。',
+  'subscription.networkFailed': '网络请求失败或超时。',
   'subscription.modelsUnavailable': '无法加载模型。已保留登录态，请重试。',
   'subscription.connectFailed': '无法连接 Qwen 订阅，请重试。',
   'subscription.connected': (v) =>

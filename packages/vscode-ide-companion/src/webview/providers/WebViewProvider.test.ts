@@ -2375,7 +2375,6 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         data: {
           flowId: attached.flowId,
           requestId: 'request',
-          modelId: 'qwen3.8-max',
         },
       });
       expect(attached.calls.workspaceByCwd).toHaveBeenCalledWith(
@@ -2383,7 +2382,6 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       );
       expect(attached.calls.activate).toHaveBeenCalledWith({
         signal: expect.any(AbortSignal),
-        modelId: 'qwen3.8-max',
       });
       expect(attached.calls.setModel).toHaveBeenCalledWith(
         'session-a',
@@ -2542,7 +2540,7 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       async ({ sessionId, code }) => {
         const attached = await openSidebar(sessionId);
         attached.calls.activate.mockRejectedValueOnce({
-          body: { code, modelId: 'old-model', models: ['qwen3.8-plus'] },
+          body: { code },
         });
         await attached.messageHandler?.({
           type: 'qwenSubscriptionActivate',
@@ -2571,33 +2569,60 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       },
     );
 
-    it.each(['subscription_required', 'subscription_query_failed'])(
-      'keeps %s in the subscription flow',
-      async (code) => {
-        const attached = await openSidebar();
-        attached.calls.activate.mockRejectedValueOnce({ body: { code } });
-        await attached.messageHandler?.({
-          type: 'qwenSubscriptionActivate',
-          data: { flowId: attached.flowId, requestId: 'request' },
-        });
-        expect(attached.postMessage).toHaveBeenCalledWith({
-          type: 'qwenSubscriptionActivationResult',
-          data: {
-            flowId: attached.flowId,
-            requestId: 'request',
-            error: true,
-            body: { code, modelId: undefined },
-          },
-        });
-        expect(attached.postMessage).not.toHaveBeenCalledWith(
-          expect.objectContaining({ type: 'qwenSubscriptionClosed' }),
-        );
-        expect(attached.postMessage).not.toHaveBeenCalledWith({
-          type: 'authState',
-          data: { authenticated: true },
-        });
-      },
-    );
+    it('forwards backend model permission metadata instead of closing sidebar authentication', async () => {
+      const attached = await openSidebar();
+      const body = {
+        code: 'request_failed',
+        message: 'This account cannot access models.',
+        errorStage: 'models',
+        errorStatus: 403,
+        retryAfterMs: 30_000,
+      };
+      attached.calls.activate.mockRejectedValueOnce({ status: 403, body });
+      await attached.messageHandler?.({
+        type: 'qwenSubscriptionActivate',
+        data: { flowId: attached.flowId, requestId: 'request' },
+      });
+      expect(attached.postMessage).toHaveBeenCalledWith({
+        type: 'qwenSubscriptionActivationResult',
+        data: {
+          flowId: attached.flowId,
+          requestId: 'request',
+          error: true,
+          body,
+        },
+      });
+      expect(attached.postMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'qwenSubscriptionClosed' }),
+      );
+      expect(attached.calls.setModel).not.toHaveBeenCalled();
+    });
+
+    it('keeps a membership rejection in the subscription flow', async () => {
+      const code = 'subscription_required';
+      const attached = await openSidebar();
+      attached.calls.activate.mockRejectedValueOnce({ body: { code } });
+      await attached.messageHandler?.({
+        type: 'qwenSubscriptionActivate',
+        data: { flowId: attached.flowId, requestId: 'request' },
+      });
+      expect(attached.postMessage).toHaveBeenCalledWith({
+        type: 'qwenSubscriptionActivationResult',
+        data: {
+          flowId: attached.flowId,
+          requestId: 'request',
+          error: true,
+          body: { code },
+        },
+      });
+      expect(attached.postMessage).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'qwenSubscriptionClosed' }),
+      );
+      expect(attached.postMessage).not.toHaveBeenCalledWith({
+        type: 'authState',
+        data: { authenticated: true },
+      });
+    });
 
     it.each(['session', 'workspace', 'cancel'])(
       'ignores a late model failure after %s',

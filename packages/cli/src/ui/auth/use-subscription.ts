@@ -6,6 +6,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { QwenSubscriptionSession } from '@qwen-code/qwen-code-core/qwen/subscription-session.js';
+import { subscriptionErrorMessage } from '@qwen-code/qwen-code-core/qwen/subscription-errors.js';
 import {
   SubscriptionOAuthError,
   subscriptionError,
@@ -152,7 +153,7 @@ export function useSubscription({
   onActivate,
 }: {
   suppressBrowserLaunch?: boolean;
-  onActivate?: (signal: AbortSignal, modelId?: string) => Promise<void>;
+  onActivate?: (signal: AbortSignal) => Promise<void>;
 } = {}) {
   const [state, setState] = useState<SubscriptionState>({ status: 'waiting' });
   const [email, setEmail] = useState('');
@@ -250,11 +251,7 @@ export function useSubscription({
       plansUrl.current = getQwenSubscriptionPlansUrl();
       const activeSession = new QwenSubscriptionSession();
       session.current = activeSession;
-      const saved = await activeSession
-        .getUserInfo(signal)
-        .catch((error: unknown) => {
-          throw subscriptionError(error, 'userinfo');
-        });
+      const saved = await activeSession.getUserInfo(signal);
       const info =
         saved ??
         (await activeSession.signIn((device) => {
@@ -325,9 +322,7 @@ export function useSubscription({
       .catch((error: unknown) => {
         if (signal.aborted) return;
         rememberRetry(error);
-        const failure = authenticationError(
-          subscriptionError(error, 'userinfo'),
-        );
+        const failure = authenticationError(error);
         setState(
           failure.status === 'error' || current.status === 'query-error'
             ? failure
@@ -341,13 +336,14 @@ export function useSubscription({
       });
   };
 
-  const connect = useCallback(async (modelId?: string) => {
+  const connect = useCallback(async () => {
     const signal = lifetime.current?.signal;
     if (
       !activate.current ||
       !signal ||
       signal.aborted ||
       activationOwner.current === signal ||
+      Date.now() < retryAt.current ||
       signingOut.current ||
       stateRef.current.status !== 'ready' ||
       confirmedPaidOwner.current !== signal
@@ -358,20 +354,36 @@ export function useSubscription({
     setConnecting(true);
     setConnectionError(undefined);
     try {
-      if (modelId) await activate.current(signal, modelId);
-      else await activate.current(signal);
+      await activate.current(signal);
     } catch (error) {
       if (!signal.aborted && lifetime.current?.signal === signal) {
+        rememberRetry(error);
+        if (
+          error instanceof SubscriptionOAuthError &&
+          (error.code === 'session_changed' ||
+            error.code === 'invalid_token' ||
+            error.status === 401 ||
+            (error.stage === 'refresh' && error.code === 'invalid_grant'))
+        ) {
+          confirmedPaidOwner.current = null;
+          setState({
+            status: 'error',
+            message: subscriptionErrorMessage(error),
+          });
+          return;
+        }
         setModelSelectionRequired(
           error instanceof SubscriptionModelSelectionError,
         );
         setConnectionError(
           error instanceof SubscriptionModelSelectionError
             ? error.message
-            : error instanceof Error &&
-                error.message.includes(SUBSCRIPTION_MODELS_UNAVAILABLE)
-              ? SUBSCRIPTION_MODELS_UNAVAILABLE
-              : t('Could not connect Qwen Subscription. Please try again.'),
+            : error instanceof SubscriptionOAuthError
+              ? subscriptionErrorMessage(error)
+              : error instanceof Error &&
+                  error.message.includes(SUBSCRIPTION_MODELS_UNAVAILABLE)
+                ? SUBSCRIPTION_MODELS_UNAVAILABLE
+                : t('Could not connect Qwen Subscription. Please try again.'),
         );
       }
     } finally {
@@ -410,8 +422,7 @@ export function useSubscription({
       await session.current.signOut();
       return true;
     } catch (error) {
-      if (mounted.current)
-        setState(authenticationError(subscriptionError(error, 'cleanup')));
+      if (mounted.current) setState(authenticationError(error));
       return false;
     } finally {
       signingOut.current = false;

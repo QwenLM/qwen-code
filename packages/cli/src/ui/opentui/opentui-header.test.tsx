@@ -86,6 +86,7 @@ function logoRows(container: HTMLElement): Array<Array<string | null>> {
 
 function fakeConfig(overrides: Partial<Config> = {}): Config {
   return {
+    getSubscriptionPlan: () => undefined,
     getScreenReader: () => false,
     getCliVersion: () => '9.9.9-test',
     getContentGeneratorConfig: () => ({ contextWindowSize: 1_000_000 }),

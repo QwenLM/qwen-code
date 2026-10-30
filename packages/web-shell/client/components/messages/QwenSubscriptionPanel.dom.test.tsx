@@ -58,7 +58,6 @@ async function render(
   activation?: {
     onActivate: (signal: AbortSignal) => Promise<void>;
     onActivated: () => void;
-    onModelSelectionRequired?: (message: string, signal: AbortSignal) => void;
   },
   activeTransport = transport,
   presentation: {
@@ -443,7 +442,7 @@ it.each(['subscription_models_unavailable', 'subscription_model_unavailable'])(
     await render(
       {
         onActivate: vi.fn().mockRejectedValue({
-          body: { code, modelId: 'removed-model', models: ['available-model'] },
+          body: { code },
         }),
         onActivated,
       },
@@ -456,6 +455,77 @@ it.each(['subscription_models_unavailable', 'subscription_model_unavailable'])(
     expect(container.textContent).not.toContain('Retry');
   },
 );
+
+it('shows the backend model permission message in the desktop error area', async () => {
+  transport.startSubscriptionLogin.mockResolvedValue({
+    ...ready,
+    userInfo: { ...user, member_type: 'pro' },
+  });
+  const onModelsUnavailable = vi.fn();
+  await render(
+    {
+      onActivate: vi.fn().mockRejectedValue({
+        status: 403,
+        body: {
+          code: 'request_failed',
+          errorStatus: 403,
+          message: 'Your account cannot access this model catalog.',
+        },
+      }),
+      onActivated: vi.fn(),
+    },
+    transport,
+    { dialog: true, onModelsUnavailable },
+  );
+  expect(document.querySelector('[role="alert"]')?.textContent).toBe(
+    'Your account cannot access this model catalog.',
+  );
+  expect(onModelsUnavailable).not.toHaveBeenCalled();
+  expect(close).not.toHaveBeenCalled();
+});
+
+it('respects the activation Retry-After before allowing a manual retry', async () => {
+  transport.startSubscriptionLogin.mockResolvedValue({
+    ...ready,
+    userInfo: { ...user, member_type: 'pro' },
+  });
+  const onActivate = vi.fn().mockRejectedValue({
+    body: { code: 'rate_limited', errorStatus: 429, retryAfterMs: 30_000 },
+  });
+  await render({ onActivate, onActivated: vi.fn() });
+  const retry = [...container.querySelectorAll('button')].find(
+    (button) => button.textContent === 'Try again',
+  )!;
+  expect(container.textContent).toContain('Too many requests');
+  expect(retry.disabled).toBe(true);
+  await tick(29_000);
+  expect(retry.disabled).toBe(true);
+  expect(onActivate).toHaveBeenCalledOnce();
+  await tick(1000);
+  expect(retry.disabled).toBe(false);
+  await click('Try again');
+  expect(onActivate).toHaveBeenCalledTimes(2);
+});
+
+it('leaves the paid ready state after activation discovers expired refresh credentials', async () => {
+  transport.startSubscriptionLogin.mockResolvedValue({
+    ...ready,
+    userInfo: { ...user, member_type: 'pro' },
+  });
+  const onActivate = vi.fn().mockRejectedValue({
+    body: { code: 'invalid_grant', errorStage: 'refresh', errorStatus: 400 },
+  });
+  await render({ onActivate, onActivated: vi.fn() }, transport, {
+    dialog: true,
+  });
+  expect(document.body.textContent).toContain('session has expired');
+  expect(document.body.textContent).not.toContain('Signed in as');
+  expect(document.body.textContent).not.toContain('Try again');
+  expect(document.body.textContent).toContain('previous');
+  expect(transport.startSubscriptionLogin).toHaveBeenCalledOnce();
+  await tick(60_000);
+  expect(onActivate).toHaveBeenCalledOnce();
+});
 
 it.each(['revoke', 'cleanup'] as const)(
   'keeps %s errors visible without offering an authorization retry',
@@ -706,45 +776,4 @@ it('waits for the new transport to confirm membership and ignores the old activa
   );
   expect(nextActivate).toHaveBeenCalledOnce();
   expect(onActivated).toHaveBeenCalledOnce();
-});
-
-it('hands model selection back to the host without signing out', async () => {
-  transport.startSubscriptionLogin.mockResolvedValue({
-    ...ready,
-    userInfo: { ...user, member_type: 'pro' },
-  });
-  const onActivate = vi
-    .fn()
-    .mockRejectedValueOnce({
-      body: {
-        code: 'subscription_model_unavailable',
-        modelId: 'removed',
-        models: ['future-model'],
-      },
-    })
-    .mockResolvedValue(undefined);
-  const onActivated = vi.fn();
-  const onModelSelectionRequired = vi.fn();
-  await render({ onActivate, onActivated, onModelSelectionRequired });
-  expect(container.textContent).toContain(
-    'Run /model to choose another model.',
-  );
-  expect(container.textContent).not.toContain('future-model');
-  expect(
-    [...container.querySelectorAll('button')].some(
-      (b) => b.textContent === 'Retry',
-    ),
-  ).toBe(false);
-  await click('Select Model');
-  expect(onModelSelectionRequired).toHaveBeenCalledWith(
-    'The selected model, removed, is no longer available. Run /model to choose another model.',
-    expect.any(AbortSignal),
-  );
-  expect(onActivated).not.toHaveBeenCalled();
-  expect(onActivate).toHaveBeenCalledTimes(1);
-  expect(transport.signOutSubscription).not.toHaveBeenCalled();
-  expect(close).not.toHaveBeenCalled();
-  await click('Cancel');
-  expect(close).toHaveBeenCalledOnce();
-  expect(onModelSelectionRequired).toHaveBeenCalledOnce();
 });

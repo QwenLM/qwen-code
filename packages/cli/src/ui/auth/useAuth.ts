@@ -250,13 +250,8 @@ export const useAuthCommand = (
   );
 
   const handleSubscriptionSubmit = useCallback(
-    async (signal: AbortSignal, modelId?: string) => {
-      const info = await activateSubscription(
-        settings,
-        config,
-        signal,
-        modelId,
-      );
+    async (signal: AbortSignal) => {
+      const info = await activateSubscription(settings, config, signal);
       signal.throwIfAborted();
       addItem(
         {

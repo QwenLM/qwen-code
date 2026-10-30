@@ -33,9 +33,11 @@ CLI（Ink/OpenTUI）、桌面端和 VS Code 共用 Core 的会员凭证、会员
 
 恢复凭证、新授权、查询恢复或购买轮询确认 Plus/Pro 后，均在每个授权/transport 生命周期内自动激活一次。回调重渲染不能重复激活；等待时显示进度，普通失败提供显式重试。取消、卸载和归属替换抑制迟到成功。首个会话尚未创建时，关闭认证前先更新欢迎页输入框待用模型，避免首条请求恢复旧供应商模型。
 
-通过 `GET /compatible-mode/v1/models` 获取全部 ID，不设白名单。已记录的预发列表包含 `qwen3.8-max`、`qwen3.7-flash` 和 `qwen3.7-plus`。首次优先使用返回的 `qwen3.8-max`，否则选择首项；已保存模型下线不能静默替换。获取失败保留凭证和上次成功列表，无缓存时明确报错，不虚构模型。退出或新账号授权清除账号所属缓存。
+通过 `GET /compatible-mode/v1/models` 获取全部 ID，不设白名单。已记录的预发列表包含 `qwen3.8-max`、`qwen3.7-flash` 和 `qwen3.7-plus`。首次优先使用返回的 `qwen3.8-max`，否则选择首项；已保存模型下线不能静默替换。网络或服务端故障保留凭证，可使用上次成功列表；无缓存时明确报错，不虚构模型。HTTP 错误按状态处理，只提取既有 `error_description` 字段，不解释响应业务码或猜测其他错误结构。HTTP 403 原样显示该文案，不返回缓存列表。退出或新账号授权清除账号所属缓存。
 
-CLI 模型恢复提示 `/model`，启动时也允许 Esc 返回输入框。桌面和 VS Code 遇到 `subscription_models_unavailable` 或 `subscription_model_unavailable` 时关闭会员认证，保留凭证及现有会话模型，不增加专用重试或模型选择页，也不宣称激活成功；由现有输入框处理模型加载、选择和刷新。
+CLI 模型恢复提示 `/model`，启动时也允许 Esc 返回输入框。桌面和 VS Code 遇到 `subscription_models_unavailable` 或 `subscription_model_unavailable` 时关闭会员认证，保留凭证及现有会话模型，不增加专用重试或模型选择页，也不宣称激活成功。HTTP 403 为例外：在当前错误区保留后端业务文案；普通模型加载、选择和刷新仍由现有输入框处理。激活读取工作区已保存的模型，不提供临时覆盖模型的参数。
+
+激活在两个宿主间传递错误阶段、HTTP 状态、文案及 Retry-After。OAuth 保留既有 `error`/`error_description` 解析，以及轮询、刷新凭证所需的业务码判断；模型和搜索 HTTP 错误使用按状态确定的客户端分类，不使用响应业务码。刷新凭证过期时退出就绪态，不隐式重新授权；激活重试遵守返回的冷却期限。推理取凭证失败和 MCP 搜索失败保留刷新、权限、限流分类，不再统一替换为重新登录提示。不展示未知本地异常和非 JSON 响应正文；GUI 兜底文案跟随宿主语言。
 
 账号 daemon 路由属于进程级；激活和模型刷新明确访问选定工作区 runtime，遵守信任、generation 和生命周期，不回退主 runtime。CLI 写入受信任的工作区配置，不回退用户设置。取消终止提交前检查；安装事务一旦获准开始，需完整完成，取消视图忽略结果。
 
@@ -62,7 +64,7 @@ Core 负责私有权限的原子存储、恢复、跨进程刷新锁和撤销。
 
 复用 ModelReasoningControls 和现有 session/ACP reasoning 设置。会员 `qwen3.8-max`、`qwen3.8-flash` 关闭时发送顶层 `enable_thinking: false` 且不带预算；低/中/高发送 true 和 4096/16384/32768，已有 xhigh/max 映射高档。移除冲突 reasoning/reasoning_effort 和嵌套 chat-template 思考开关，保留无关选项。显式原生预算继续有效，单次请求关闭移除预算，仍遵守强制思考元数据。未操作默认值、未知模型和其他供应商保持原样。
 
-Max 已声明共用 UI 能力，Flash 只有请求映射，不增加能力声明。默认强度仍需产品确定。真实 Max 网关已接受关闭和三档预算，关闭无 reasoning_content、开启有；这证明参数接受和开关行为，不证明长推理预算严格执行或 Flash 支持。搜索已有独立设计：[会员 MCP 联网搜索](subscription-mcp-web-search.zh-CN.md)。
+Max 已声明共用 UI 能力，Flash 只有请求映射，不增加能力声明。默认强度仍需产品确定。真实 Max 网关已接受关闭和三档预算，关闭无 reasoning_content、开启有；这证明参数接受和开关行为，不证明长推理预算严格执行或 Flash 支持。会员搜索复用现有 MCP 后端，动态注入 Bearer Token，HTTP 401 时刷新被拒 Token 并仅重试一次，取消归属工具请求。详见[会员 MCP 联网搜索](subscription-mcp-web-search.zh-CN.md)。
 
 ## CLI 成功提示与账号命令
 

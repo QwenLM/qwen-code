@@ -160,10 +160,25 @@ describe('process-global Subscription routes', () => {
   });
   it.each([
     [
-      new SubscriptionOAuthError('access_denied', 400, 'secret'),
+      new SubscriptionOAuthError(
+        'access_denied',
+        400,
+        'secret',
+        undefined,
+        'userinfo',
+      ),
       'access_denied',
     ],
-    [new Error('<html>secret</html>'), 'authentication_failed'],
+    [
+      new SubscriptionOAuthError(
+        'operation_failed',
+        undefined,
+        '<html>secret</html>',
+        undefined,
+        'userinfo',
+      ),
+      'authentication_failed',
+    ],
   ])('returns a safe error only', async (error, code) => {
     mocks.userInfo.mockRejectedValue(error);
     const { post, get } = makeApp();

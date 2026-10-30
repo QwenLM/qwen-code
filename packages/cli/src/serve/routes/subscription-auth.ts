@@ -131,11 +131,7 @@ export function registerSubscriptionAuthRoutes(
       const run = async () => {
         const session = new QwenSubscriptionSession();
         const user =
-          (await session
-            .getUserInfo(controller.signal)
-            .catch((error: unknown) => {
-              throw subscriptionError(error, 'userinfo');
-            })) ??
+          (await session.getUserInfo(controller.signal)) ??
           (await session.signIn((device) => {
             controller.signal.throwIfAborted();
             const url = new URL('/authorize', webOrigin);
@@ -191,11 +187,9 @@ export function registerSubscriptionAuthRoutes(
       };
       res.on('close', disconnect);
       try {
-        const info = await new QwenSubscriptionSession()
-          .getUserInfo(controller.signal)
-          .catch((error: unknown) => {
-            throw subscriptionError(error, 'userinfo');
-          });
+        const info = await new QwenSubscriptionSession().getUserInfo(
+          controller.signal,
+        );
         controller.signal.throwIfAborted();
         res.json(info ? publicUser(info) : null);
       } catch (error) {
