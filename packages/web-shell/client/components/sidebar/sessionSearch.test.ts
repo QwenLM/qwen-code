@@ -117,6 +117,24 @@ describe('sessionMatchesSource', () => {
     expect(task.sourceType).toBe('qwen-live');
   });
 
+  it('scopes the scheduled-task tab to bound controller sessions only', () => {
+    const bound = session({
+      sourceType: 'scheduled_task',
+      sourceId: 'task-1',
+    });
+    expect(sessionMatchesSource(bound, 'scheduled_task')).toBe(true);
+    expect(sessionMatchesSource(bound, 'default')).toBe(false);
+    expect(sessionMatchesSource(bound, 'channel')).toBe(false);
+    // Per-run children keep the default source with a run sourceId, so they
+    // stay in the Tasks tab, not the scheduled-task tab.
+    const run = session({
+      sourceType: 'default',
+      sourceId: 'scheduled_task_run:task-1',
+    });
+    expect(sessionMatchesSource(run, 'default')).toBe(true);
+    expect(sessionMatchesSource(run, 'scheduled_task')).toBe(false);
+  });
+
   it('lists everything without an active filter', () => {
     expect(
       sessionMatchesSource(session({ sourceType: 'channel' }), undefined),

@@ -57,6 +57,30 @@ describe('getScheduledTaskSessionGroup', () => {
       } as DaemonSessionSummary),
     ).toBeUndefined();
   });
+
+  it('groups a bound controller session under its task id', () => {
+    expect(
+      getScheduledTaskSessionGroup({
+        sessionId: 'bound-1',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+        displayName: 'Hourly review',
+      } as DaemonSessionSummary),
+    ).toEqual({ id: 'scheduled-task:task-1', label: 'Hourly review' });
+    expect(
+      getScheduledTaskSessionGroup({
+        sessionId: 'bound-1',
+        sourceType: 'scheduled_task',
+        sourceId: 'task-1',
+      } as DaemonSessionSummary),
+    ).toEqual({ id: 'scheduled-task:task-1', label: 'task-1' });
+    expect(
+      getScheduledTaskSessionGroup({
+        sessionId: 'bound-1',
+        sourceType: 'scheduled_task',
+      } as DaemonSessionSummary),
+    ).toBeUndefined();
+  });
 });
 
 describe('collectScheduledTaskSession', () => {

@@ -32,6 +32,18 @@ function hasGeneratedRunName(session: DaemonSessionSummary): boolean {
 export function getScheduledTaskSessionGroup(
   session: DaemonSessionSummary,
 ): ScheduledTaskSessionGroupIdentity | undefined {
+  // The bound controller session of a persistent task keeps the task id as
+  // its source id (no run prefix), so it groups with that task's per-run
+  // sessions under the same section when both are listed.
+  if (session.sourceType === 'scheduled_task') {
+    const taskId = session.sourceId;
+    if (!taskId) return undefined;
+    const label = session.displayName?.trim();
+    return {
+      id: `scheduled-task:${taskId}`,
+      label: label || taskId,
+    };
+  }
   if (session.sourceType !== 'default') return undefined;
   const sourceId = session.sourceId;
   if (!sourceId?.startsWith(SCHEDULED_TASK_RUN_SOURCE_ID_PREFIX)) {

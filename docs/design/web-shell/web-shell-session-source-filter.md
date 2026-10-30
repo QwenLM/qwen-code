@@ -22,6 +22,9 @@ historical data.
 - The Sidebar groups scheduled-task run sessions (`sourceType: 'default'` and
   a `scheduled_task_run:` sourceId) into dedicated sections. Bound controller
   sessions use `sourceType: 'scheduled_task'` and stay outside the default catalog.
+  The opt-in `scheduled_task` option in the Sidebar's Session source switch
+  lists exactly those bound controller sessions (exact source filter); the
+  default `Tasks` tab is unchanged.
 - Support the source filter with organized session views so filtering does not
   disable grouping, pinning, or archived-session behavior.
 - Bind organized pagination cursors to the source filter that produced them.
