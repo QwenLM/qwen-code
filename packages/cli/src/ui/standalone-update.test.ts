@@ -1662,39 +1662,49 @@ describe('standalone-update', () => {
       expectInstallationPreserved();
     });
 
-    it('accepts an archive without a launcher once the entry point runs', async () => {
-      vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
-      // The standalone-runtime harness repacks a minimal runnable tree without
-      // bin/qwen; the archive contract is the entry point plus the bundled
-      // runtime, and the wrapper falls back to the entry point.
-      const hostTarget = `${process.platform}-${process.arch}`;
-      fs.writeFileSync(
-        path.join(standaloneDir, 'manifest.json'),
-        JSON.stringify({ target: hostTarget, version: '0.1.0' }),
-      );
-      await serveArchive({ runnable: true, binless: true, target: hostTarget });
-      await expect(
-        performStandaloneUpdate(standaloneDir, '1.2.3'),
-      ).resolves.toBe('done');
-      expect(
-        JSON.parse(
-          fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
-        ),
-      ).toMatchObject({ version: '1.2.3' });
+    it.skipIf(process.platform === 'win32')(
+      'accepts an archive without a launcher once the entry point runs',
+      async () => {
+        vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
+        // The standalone-runtime harness repacks a minimal runnable tree without
+        // bin/qwen; the archive contract is the entry point plus the bundled
+        // runtime, and the wrapper falls back to the entry point.
+        const hostTarget = `${process.platform}-${process.arch}`;
+        fs.writeFileSync(
+          path.join(standaloneDir, 'manifest.json'),
+          JSON.stringify({ target: hostTarget, version: '0.1.0' }),
+        );
+        await serveArchive({
+          runnable: true,
+          binless: true,
+          target: hostTarget,
+        });
+        await expect(
+          performStandaloneUpdate(standaloneDir, '1.2.3'),
+        ).resolves.toBe('done');
+        expect(
+          JSON.parse(
+            fs.readFileSync(path.join(standaloneDir, 'manifest.json'), 'utf8'),
+          ),
+        ).toMatchObject({ version: '1.2.3' });
 
-      const originalArgv = process.argv;
-      process.argv = [...originalArgv];
-      process.argv[1] = path.join(standaloneDir, 'lib', 'cli.js');
-      try {
-        // The activated tree must still classify as standalone, or automatic
-        // updates and exact-version updates silently stop applying to it.
-        const info = getInstallationInfo(path.join(testRoot, 'project'), false);
-        expect(info.isStandalone).toBe(true);
-        expect(info.standaloneDir).toBe(standaloneDir);
-      } finally {
-        process.argv = originalArgv;
-      }
-    });
+        const originalArgv = process.argv;
+        process.argv = [...originalArgv];
+        process.argv[1] = path.join(standaloneDir, 'lib', 'cli.js');
+        try {
+          // The activated tree must still classify as standalone, or automatic
+          // updates and exact-version updates silently stop applying to it.
+          const info = getInstallationInfo(
+            path.join(testRoot, 'project'),
+            false,
+          );
+          expect(info.isStandalone).toBe(true);
+          expect(info.standaloneDir).toBe(standaloneDir);
+        } finally {
+          process.argv = originalArgv;
+        }
+      },
+    );
 
     it('preserves the installation when the archive omits the launcher entry point', async () => {
       vi.stubEnv('QWEN_UPDATE_BASE_URL', baseUrl);
