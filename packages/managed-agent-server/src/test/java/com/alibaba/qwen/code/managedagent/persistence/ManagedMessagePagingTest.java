@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys;
@@ -8,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.h2.jdbcx.JdbcDataSource;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
 import org.springframework.jdbc.core.RowMapper;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.TransactionDefinition;
@@ -81,7 +83,7 @@ class ManagedMessagePagingTest {
         assertThat(page.items()).extracting(StoreModels.ItemRecord::itemId).containsExactly(id(9999), id(10000));
         assertThat(page.hasMore()).isTrue();
         assertThat(jdbc.messageReads).isEqualTo(2);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_snapshot", Long.class)).isZero();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource", Long.class)).isZero();
         var older = read(page.nextCursor(), 2, true);
         assertThat(older.items()).extracting(StoreModels.ItemRecord::itemId).containsExactly(id(9997), id(9998));
         assertThat(jdbc.messageReads).isEqualTo(4);
@@ -112,7 +114,11 @@ class ManagedMessagePagingTest {
         jdbc.update("UPDATE ma_event_stream SET last_sequence=20 WHERE tenant_id=? AND session_id=?",
                 "tenant", "session");
         assertThat(read(null, 100, true).coveredSequence()).isEqualTo(2);
-        assertThatThrownBy(() -> read(null, 100, false)).hasMessageContaining("pending messages");
+        assertThatThrownBy(() -> read(null, 100, false))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                    assertThat(error.getCode()).isEqualTo("message_projection_pending");
+                }).hasMessageContaining("pending messages");
     }
 
     @Test
@@ -120,7 +126,11 @@ class ManagedMessagePagingTest {
         seed(2, false);
         jdbc.update("UPDATE ma_event_stream SET last_sequence=20,replay_floor_sequence=10"
                 + " WHERE tenant_id=? AND session_id=?", "tenant", "session");
-        assertThatThrownBy(() -> read(null, 100, true)).hasMessageContaining("pending messages");
+        assertThatThrownBy(() -> read(null, 100, true))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                    assertThat(error.getCode()).isEqualTo("message_projection_pending");
+                }).hasMessageContaining("pending messages");
     }
 
     @Test
