@@ -19,6 +19,8 @@ export function createDaemonUpdateRestarter(options: {
   env: Readonly<NodeJS.ProcessEnv>;
   token?: string;
   externalToolGuardToken?: string;
+  managedRuntimeBrokerUrl?: string;
+  managedRuntimeBrokerToken?: string;
   getPort: () => number;
   close: () => Promise<void>;
 }): ((launcher: string) => Promise<void>) | undefined {
@@ -52,6 +54,15 @@ export function createDaemonUpdateRestarter(options: {
   else delete env['QWEN_SERVER_TOKEN'];
   if (options.externalToolGuardToken) {
     env[EXTERNAL_TOOL_GUARD_TOKEN_ENV] = options.externalToolGuardToken;
+  }
+  // `qwen serve` removes the Broker pair from its environment once read, and
+  // the replacement keeps this PID, so systemd never hands it the pair again.
+  if (options.managedRuntimeBrokerUrl) {
+    env['QWEN_MANAGED_RUNTIME_BROKER_URL'] = options.managedRuntimeBrokerUrl;
+  }
+  if (options.managedRuntimeBrokerToken) {
+    env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'] =
+      options.managedRuntimeBrokerToken;
   }
   const args: string[] = [];
   for (let index = 0; index < argv.length; index++) {

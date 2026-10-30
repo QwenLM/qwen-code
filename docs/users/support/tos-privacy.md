@@ -90,7 +90,7 @@ For questions about browser data handling, contact the team through the [Qwen Co
 
 ## Usage Statistics and Telemetry
 
-Qwen Code may collect anonymous usage statistics and [telemetry](../../developers/development/telemetry) data to improve the user experience and product quality. This data collection is optional and can be controlled through configuration settings.
+Qwen Code may collect anonymous usage statistics and [telemetry](../../developers/development/telemetry) data to improve the user experience and product quality. Usage statistics are enabled by default for all authentication methods. This data collection is optional and can be disabled through configuration settings.
 
 ### What Data is Collected
 
@@ -102,10 +102,19 @@ When enabled, Qwen Code may collect:
 
 ### Data Collection by Authentication Method
 
-- **Qwen OAuth:** Usage statistics are governed by Qwen's privacy policy. You can opt-out through Qwen Code's configuration settings.
-- **Alibaba Cloud Coding Plan:** Usage statistics are governed by Alibaba Cloud's privacy policy. You can opt-out through Qwen Code's configuration settings.
-- **API Key:** No additional data is collected by Qwen Code beyond what your chosen API provider collects.
-- **Vertex AI:** Usage statistics are governed by Google Cloud's privacy policy. No additional data is collected by Qwen Code beyond what Google Cloud collects.
+Qwen Code's usage statistics setting applies to all authentication methods: Qwen OAuth, Alibaba Cloud Coding Plan, your own API key, and Vertex AI. When enabled, these events are sent to an Alibaba Cloud RUM collection endpoint, independently of the data your chosen AI provider collects under its own privacy policy.
+
+To opt out, set the following in your Qwen Code settings:
+
+```json
+{
+  "privacy": {
+    "usageStatisticsEnabled": false
+  }
+}
+```
+
+You can also set the `QWEN_USAGE_STATISTICS_ENABLED` environment variable to `false`. The environment variable takes precedence over the setting. See [Usage Statistics](../configuration/settings.md#usage-statistics) for the collected fields and configuration details.
 
 ## Frequently Asked Questions (FAQ)
 

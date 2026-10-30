@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpExchange;
@@ -115,6 +116,12 @@ class HostedMcpRestartFaultGatesIT {
             ownerReleaseRefuseArmed =
                     new java.util.concurrent.atomic.AtomicBoolean();
     private boolean springSeeded;
+    // Once a v2 close is admitted the store fences ordinary writer renewals,
+    // and the Harness renews under the claim only when the first lifecycle
+    // phase reaches it (#15011). A short lease can lapse in that gap, so
+    // every case uses a long one; killHarness() expires the dead writer's
+    // lease instead of making the replacement wait it out.
+    private static final long WRITER_LEASE_MS = 30_000;
     private volatile String acquireHoldSession;
     private volatile String acquireHoldOperation;
     private volatile CountDownLatch acquireHold;
@@ -195,22 +202,16 @@ class HostedMcpRestartFaultGatesIT {
                 + json.writeValueAsString(cli.toString())
                 + "; await import("
                 + json.writeValueAsString(cli.toUri().toString()) + ");\n");
-        try (var control = new ServerSocket(0, 1,
-                InetAddress.getByName("127.0.0.1"));
-                var hosted = new ServerSocket(0, 1,
-                        InetAddress.getByName("127.0.0.1"));
-                var runtime = new ServerSocket(0, 1,
-                        InetAddress.getByName("127.0.0.1"))) {
-            port = control.getLocalPort();
-            harnessPort = hosted.getLocalPort();
-            brokerPort = runtime.getLocalPort();
-        }
         model = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
         modelExecutor = Executors.newVirtualThreadPerTaskExecutor();
         model.setExecutor(modelExecutor);
         model.createContext("/v1/chat/completions", this::modelReply);
         model.start();
-        startSpring();
+        spring = (ServletWebServerApplicationContext) HostedGateTestSupport
+                .bootWithFreshPorts(this::probePorts, () -> {
+                    startSpring();
+                    return spring;
+                });
         startBrokerProxy();
         startHarness();
     }
@@ -685,10 +686,27 @@ class HostedMcpRestartFaultGatesIT {
 
     private void killHarness() throws Exception {
         Process dead = harness;
+        String deadWriter = bootId;
         dead.destroyForcibly();
         assertThat(dead.waitFor(10, TimeUnit.SECONDS))
                 .as("the Harness must die before the replacement starts")
                 .isTrue();
+        // A killed Harness cannot release its writer lease. Expiring the
+        // leases it held stands in for waiting them out, so the replacement
+        // can take over the dead writer at once; scoping the update to that
+        // writer leaves any other writer's lease alone.
+        int expired = jdbc.update("UPDATE ma_session_head SET"
+                + " writer_lease_until = " + ManagedSchemaTime.SQL_NOW
+                + " + -1000 WHERE tenant_id = ? AND writer_id = ? AND"
+                + " writer_lease_until IS NOT NULL", tenant, deadWriter);
+        assertThat(expired).as("the dead writer held a lease to expire")
+                .isPositive();
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_session_head"
+                + " WHERE tenant_id = ? AND writer_id = ? AND"
+                + " writer_lease_until > " + ManagedSchemaTime.SQL_NOW,
+                Integer.class, tenant, deadWriter))
+                .as("the dead writer's leases have lapsed")
+                .isZero();
     }
 
     private void refuseNextControl(String kind) {
@@ -998,9 +1016,11 @@ class HostedMcpRestartFaultGatesIT {
                 .isEqualTo(runtimeBefore);
         assertThat(storageHolders(session)).isEqualTo(1);
 
-        // The Harness's Session writer lease may lapse while Spring is down;
-        // the lifecycle route answers unsettled until the writer is active
-        // again, and that attempt sends nothing to the Broker.
+        // The writer lease outlasts the restart, so the first attempt
+        // normally settles. If the Harness's writer is still inactive, the
+        // route answers unsettled; only that and hosted_turn_active are
+        // retried, and the exact wire assertion below still holds for any
+        // such attempt.
         HttpResponse<String> settled = null;
         for (int attempt = 0; attempt < 30 && settled == null; attempt++) {
             HttpResponse<String> response = rawLifecycle(session, closeId,
@@ -1373,9 +1393,7 @@ class HostedMcpRestartFaultGatesIT {
         store.put("tenantId", tenant);
         store.put("workspaceId", "workspace");
         store.put("writerId", bootId);
-        // A killed Harness cannot release its writer lease, so the
-        // replacement waits out a short lease rather than the 60 s default.
-        store.put("leaseDurationMs", 3_000);
+        store.put("leaseDurationMs", WRITER_LEASE_MS);
         return store;
     }
 
@@ -1426,8 +1444,9 @@ class HostedMcpRestartFaultGatesIT {
                 loaded = json.readTree(response.body());
                 break;
             }
-            // The killed Harness still holds the writer lease; wait for it
-            // to lapse instead of treating the conflict as a failed load.
+            // killHarness() has already expired the dead writer's lease, so
+            // the first load is expected to succeed. Retry only a writer
+            // conflict that outlived the expiry, until that lease lapses.
             assertThat(response.statusCode()).as("load: %s",
                     response.body()).isEqualTo(409);
             JsonNode refusal = json.readTree(response.body());
@@ -1542,7 +1561,7 @@ class HostedMcpRestartFaultGatesIT {
                         "--qwen.managed-agent.runtime-broker.workspace-mounts[0].storage-id=storage",
                         "--qwen.managed-agent.runtime-broker.workspace-mounts[0].root="
                                 + workspace.getParent());
-        jdbc = spring.getBean(JdbcTemplate.class);
+        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
         store = spring.getBean(ManagedAgentStore.class);
         // The storage registration and the Workspace rows are durable, so a
         // restarted context reuses them. Registering again is an operator
@@ -1925,6 +1944,25 @@ class HostedMcpRestartFaultGatesIT {
             int status, String operationId, int seq) {
         ProxyCall complete(int value) {
             return new ProxyCall(method, path, kind, value, operationId, seq);
+        }
+    }
+
+    // The advertised ports are probed and then rebound by the application; a
+    // bind conflict there is retried with fresh ports (see
+    // HostedGateTestSupport#bootWithFreshPorts). restartSpring keeps the
+    // current ports because the harness and the proxy already point at them.
+    private void probePorts() {
+        try (var control = new ServerSocket(0, 1,
+                InetAddress.getByName("127.0.0.1"));
+                var hosted = new ServerSocket(0, 1,
+                        InetAddress.getByName("127.0.0.1"));
+                var runtime = new ServerSocket(0, 1,
+                        InetAddress.getByName("127.0.0.1"))) {
+            port = control.getLocalPort();
+            harnessPort = hosted.getLocalPort();
+            brokerPort = runtime.getLocalPort();
+        } catch (java.io.IOException error) {
+            throw new java.io.UncheckedIOException(error);
         }
     }
 }

@@ -179,10 +179,14 @@ describe('EventTransport multi-node gates CI', () => {
   });
 
   it('installs the libfaketime the clock-skew row preloads', () => {
-    const library = /-Dqwen\.gate\.faketime\.library=(\S+)/.exec(
-      verify().run,
-    )[1];
-    expect(step('Install libfaketime').run).toContain(`test -f ${library}`);
+    // The pool mixes x64 and aarch64 hosts, so the multiarch directory is
+    // resolved at run time rather than pinned to one of them.
+    expect(verify().run).toContain(
+      '-Dqwen.gate.faketime.library="${FAKETIME_LIB}"',
+    );
+    const install = step('Install libfaketime').run;
+    expect(install).toContain('-name libfaketimeMT.so.1');
+    expect(install).toContain('echo "FAKETIME_LIB=${lib}"');
   });
 
   it('points the gate at the database its MySQL container creates', () => {

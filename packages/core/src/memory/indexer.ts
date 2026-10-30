@@ -22,6 +22,7 @@ import {
 } from './paths.js';
 import { resolveTrustedMemoryRoot } from './trusted-memory-filesystem.js';
 import {
+  isImportedMemoryDocument,
   scanAllAutoMemoryTopicDocumentsFromRoot,
   scanAutoMemoryTopicDocuments,
   scanTeamAutoMemoryTopicDocuments,
@@ -223,10 +224,10 @@ function docIndexLine(
  * line-count and character caps and appending a truncation warning when either
  * trips. Each entry is exactly one line (descriptions are single-line).
  */
-function assembleIndex(lines: string[]): string {
+function assembleIndex(lines: string[], priorityPrefixLength = 0): string {
   const raw = lines.join('\n');
   const wasLineTruncated = lines.length > MAX_INDEX_LINES;
-  const truncated = trimIndexToBudget(lines);
+  const truncated = trimIndexToBudget(lines, priorityPrefixLength);
 
   if (!wasLineTruncated && truncated.length === raw.length) {
     return truncated;
@@ -242,7 +243,15 @@ export function buildManagedAutoMemoryIndex(
     'updatedAt' | 'lastDreamAt' | 'lastDreamSessionId'
   >,
 ): string {
-  return assembleIndex(docs.map((doc) => docIndexLine(doc)));
+  const ordered = [...docs].sort(
+    (a, b) =>
+      Number(isImportedMemoryDocument(a)) - Number(isImportedMemoryDocument(b)),
+  );
+  const firstImported = ordered.findIndex(isImportedMemoryDocument);
+  return assembleIndex(
+    ordered.map((doc) => docIndexLine(doc)),
+    firstImported < 0 ? 0 : firstImported,
+  );
 }
 
 /**

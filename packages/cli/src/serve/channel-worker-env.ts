@@ -4,3 +4,6 @@ export const QWEN_DAEMON_TOKEN_ENV = 'QWEN_DAEMON_TOKEN';
 export const QWEN_DAEMON_URL_ENV = 'QWEN_DAEMON_URL';
 export const QWEN_DAEMON_WORKSPACE_ENV = 'QWEN_DAEMON_WORKSPACE';
 export const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
+// The Hosted Harness's Runtime Broker credential; no worker needs it.
+export const MANAGED_RUNTIME_BROKER_TOKEN_ENV =
+  'QWEN_MANAGED_RUNTIME_BROKER_TOKEN';

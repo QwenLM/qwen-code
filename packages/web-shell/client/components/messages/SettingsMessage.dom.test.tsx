@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { act, type ReactNode } from 'react';
+import { act, useState, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type {
   DaemonSettingDescriptor,
@@ -111,6 +111,18 @@ function themeSetting(): DaemonSettingDescriptor {
   };
 }
 
+function languageSetting(): DaemonSettingDescriptor {
+  return {
+    key: 'general.language',
+    type: 'enum',
+    label: 'Language: UI',
+    category: 'General',
+    requiresRestart: true,
+    default: 'auto',
+    values: { effective: 'en' },
+  };
+}
+
 function subDialogSetting(): DaemonSettingDescriptor {
   return {
     key: 'fastModel',
@@ -120,6 +132,24 @@ function subDialogSetting(): DaemonSettingDescriptor {
     requiresRestart: false,
     default: '',
     values: { effective: '' },
+  };
+}
+
+function outputLanguageSetting(effective: string): DaemonSettingDescriptor {
+  return {
+    key: 'general.outputLanguage',
+    type: 'string',
+    label: 'Language: Model',
+    category: 'General',
+    requiresRestart: true,
+    default: 'auto',
+    options: [
+      { value: 'English', label: 'English' },
+      { value: 'Traditional Chinese', label: '繁體中文 (Traditional Chinese)' },
+      { value: 'Chinese', label: '中文 (Chinese)' },
+      { value: 'Japanese', label: '日本語 (Japanese)' },
+    ],
+    values: { effective },
   };
 }
 
@@ -215,11 +245,19 @@ function renderPanel(
   state: SettingsMessageSettingsState,
   overrides: Partial<{
     onSubDialog: (key: string, scope: 'workspace' | 'user') => void;
+    onLanguageChange: (
+      language: 'en' | 'zh-CN',
+      scope: 'workspace' | 'user',
+    ) => void;
     onThemeChange: (theme: 'dark' | 'light') => void;
+    onOutputLanguageChange: (language: string) => void;
     modelManagementSectionProps: ModelManagementProps;
     initialCategory: string;
     presentation: WebShellSettingsOptions;
     connections: ReactNode;
+    archivedSessions: ReactNode;
+    workspaceDirectoriesSection: ReactNode;
+    workspaceSettingsWritable: boolean;
   }> = {},
 ): HTMLElement {
   return render(
@@ -229,13 +267,17 @@ function renderPanel(
         embedded
         initialCategory={overrides.initialCategory}
         presentation={overrides.presentation}
-        onLanguageChange={noop}
+        onLanguageChange={overrides.onLanguageChange ?? noop}
+        onOutputLanguageChange={overrides.onOutputLanguageChange ?? noop}
         onThemeChange={overrides.onThemeChange ?? noop}
         onSubDialog={overrides.onSubDialog ?? noop}
         chatWidthMode="1000"
         onChatWidthModeChange={noop}
         modelManagementSectionProps={overrides.modelManagementSectionProps}
         connections={overrides.connections}
+        archivedSessions={overrides.archivedSessions}
+        workspaceDirectoriesSection={overrides.workspaceDirectoriesSection}
+        workspaceSettingsWritable={overrides.workspaceSettingsWritable}
       />
     </I18nProvider>,
   );
@@ -401,6 +443,119 @@ describe('SettingsMessage initialCategory', () => {
     expect(activeCategoryButton(container).textContent).toContain('General');
   });
 
+  it('mounts archive management only in its category, without scope tabs or a settings count', () => {
+    const container = renderPanel(makeState([boolSetting()], vi.fn()), {
+      archivedSessions: (
+        <div data-testid="archive-management">Archive list</div>
+      ),
+    });
+    expect(
+      container.querySelector('[data-testid="archive-management"]'),
+    ).toBeNull();
+    const category = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('nav button'),
+    ).find((button) => button.textContent === 'Archived conversations')!;
+    expect(category).toBeDefined();
+    act(() => category.click());
+    expect(
+      container.querySelector('[data-testid="archive-management"]'),
+    ).not.toBeNull();
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(0);
+    expect(container.querySelector('h2')?.textContent).toBe(
+      'Archived conversations',
+    );
+    const general = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('nav button'),
+    ).find((button) => button.textContent?.startsWith('General'))!;
+    act(() => general.click());
+    expect(
+      container.querySelector('[data-testid="archive-management"]'),
+    ).toBeNull();
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(2);
+  });
+
+  it('keeps workspace directories and archives in separate categories across scopes', () => {
+    const container = renderPanel(makeState([boolSetting()], vi.fn()), {
+      initialCategory: 'Workspace',
+      archivedSessions: <div data-testid="archive-management" />,
+      workspaceDirectoriesSection: <div data-testid="workspace-directories" />,
+    });
+    expect(
+      container.querySelector('[data-testid="workspace-directories"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="archive-management"]'),
+    ).toBeNull();
+    const archiveCategory = () =>
+      Array.from(
+        container.querySelectorAll<HTMLButtonElement>('nav button'),
+      ).find((button) => button.textContent === 'Archived conversations')!;
+    act(() => archiveCategory().click());
+    expect(
+      container.querySelector('[data-testid="workspace-directories"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="archive-management"]'),
+    ).not.toBeNull();
+    const general = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('nav button'),
+    ).find((button) => button.textContent?.startsWith('General'))!;
+    act(() => general.click());
+    clickUserTab(container);
+    act(() => archiveCategory().click());
+    expect(
+      container.querySelector('[data-testid="archive-management"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="workspace-directories"]'),
+    ).toBeNull();
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(0);
+  });
+
+  it('keeps a pending restart visible when archive management hides the scope tabs', async () => {
+    const setValue = vi.fn().mockResolvedValue({ requiresRestart: true });
+    const container = renderPanel(
+      makeState([{ ...boolSetting(), requiresRestart: true }], setValue),
+      { archivedSessions: <div>Archive list</div> },
+    );
+    await act(async () => switchButton(container).click());
+    expect(container.textContent).toContain(
+      'This change requires a restart to take effect.',
+    );
+    const category = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('nav button'),
+    ).find((button) => button.textContent === 'Archived conversations')!;
+    act(() => category.click());
+    expect(container.textContent).toContain(
+      'This change requires a restart to take effect.',
+    );
+    expect(container.querySelectorAll('[role="tab"]')).toHaveLength(0);
+  });
+
+  it('honors archive host presentation and keeps an empty management slot available', () => {
+    const archivedSessions = <div data-testid="archive-management" />;
+    const excluded = renderPanel(makeState([], vi.fn()), {
+      archivedSessions,
+      initialCategory: 'Archived',
+      presentation: { excludeItems: ['builtin:archived-sessions'] },
+    });
+    expect(excluded.textContent).not.toContain('Archived conversations');
+    expect(
+      excluded.querySelector('[data-testid="archive-management"]'),
+    ).toBeNull();
+    const included = renderPanel(makeState([], vi.fn()), {
+      archivedSessions,
+      initialCategory: 'Archived',
+      presentation: { includeItems: ['builtin:archived-sessions'] },
+    });
+    expect(included.querySelector('nav')?.textContent).toBe(
+      'Archived conversations',
+    );
+    expect(
+      included.querySelector('[data-testid="archive-management"]'),
+    ).not.toBeNull();
+  });
+
   it('renders browser-local connections without workspace scope tabs', () => {
     const container = renderPanel(makeState([boolSetting()], vi.fn()), {
       initialCategory: 'Connections',
@@ -469,6 +624,61 @@ describe('SettingsMessage initialCategory', () => {
     renderWith(makeState([boolSetting(), daemonSetting()], vi.fn()));
     expect(activeCategoryButton(container).textContent).toContain('General');
     vi.unstubAllGlobals();
+  });
+});
+
+describe('SettingsMessage UI language scope', () => {
+  function languageTrigger(container: HTMLElement): HTMLButtonElement | null {
+    return container.querySelector<HTMLButtonElement>(
+      'button[aria-label="Language: UI"]',
+    );
+  }
+
+  it('starts on the User tab and writes user scope when the session cannot write workspace settings', async () => {
+    const onLanguageChange = vi.fn();
+    const container = renderPanel(makeState([languageSetting()], vi.fn()), {
+      onLanguageChange,
+      workspaceSettingsWritable: false,
+    });
+
+    const tabs = container.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+    expect(tabs[0]?.getAttribute('aria-selected')).toBe('false');
+    expect(tabs[1]?.getAttribute('aria-selected')).toBe('true');
+    expect(languageTrigger(container)).not.toBeNull();
+
+    await act(async () => languageTrigger(container)?.click());
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((item) => item.textContent?.includes('[zh-CN]'));
+    if (!option) throw new Error('zh-CN language option not found');
+    await act(async () => option.click());
+
+    expect(onLanguageChange).toHaveBeenCalledWith('zh-CN', 'user');
+  });
+
+  it('hides the UI language row on the Workspace tab when the session cannot write workspace settings', () => {
+    const container = renderPanel(makeState([languageSetting()], vi.fn()), {
+      workspaceSettingsWritable: false,
+    });
+
+    const workspaceTab =
+      container.querySelectorAll<HTMLButtonElement>('[role="tab"]')[0];
+    if (!workspaceTab) throw new Error('Workspace scope tab not found');
+    act(() => {
+      workspaceTab.focus();
+      workspaceTab.click();
+    });
+
+    expect(workspaceTab.getAttribute('aria-selected')).toBe('true');
+    expect(languageTrigger(container)).toBeNull();
+  });
+
+  it('keeps the UI language row on the Workspace tab in a workspace session', () => {
+    const container = renderPanel(makeState([languageSetting()], vi.fn()));
+
+    const tabs = container.querySelectorAll<HTMLButtonElement>('[role="tab"]');
+    expect(tabs[0]?.getAttribute('aria-selected')).toBe('true');
+    expect(languageTrigger(container)).not.toBeNull();
   });
 });
 
@@ -573,6 +783,424 @@ describe('SettingsMessage user-scope editing', () => {
       'tools.webSearch.maxPerSession',
       5,
     );
+  });
+
+  it('edits the model output language through the language callback, user scope only', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const setValue = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('auto')], setValue),
+      { onOutputLanguageChange },
+    );
+
+    // The language command cannot target workspace scope, so the row stays
+    // out of the Workspace tab instead of implying a write it cannot honor.
+    expect(
+      container.querySelector('input[name="general.outputLanguage"]'),
+    ).toBeNull();
+
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+    // 'auto' is the empty input, with the placeholder spelling it out.
+    expect(input?.value).toBe('');
+    expect(input?.placeholder).toBe('auto (follow input)');
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'English');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('English');
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it('shows a fixed model output language and commits an empty value as auto', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('中文')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+    expect(input?.value).toBe('中文');
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, '');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('');
+  });
+
+  it('restores the saved output language when the commit is rejected', async () => {
+    // A busy session or a failed command does not change the saved value, so
+    // the row must not keep showing an unsaved draft.
+    const onOutputLanguageChange = vi.fn(async () => false);
+    const container = renderPanel(
+      makeState([outputLanguageSetting('English')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+    expect(input?.value).toBe('English');
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'French');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('French');
+    expect(input?.value).toBe('English');
+  });
+
+  it('offers output language suggestions and commits a picked one', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('auto')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+    await act(async () => {
+      input!.focus();
+      await Promise.resolve();
+    });
+
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((node) => node.textContent === '中文 (Chinese)');
+    expect(option).toBeTruthy();
+    await act(async () => {
+      option!.click();
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('Chinese');
+  });
+
+  it('keeps free-form output languages that have no suggestion', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('auto')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Klingon');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const custom = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((node) => node.textContent === 'Use "Klingon"');
+    expect(custom).toBeTruthy();
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('Klingon');
+  });
+
+  it('ignores a second commit while a save is in flight', async () => {
+    let resolveSave: ((applied: boolean) => void) | undefined;
+    const onOutputLanguageChange = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolveSave = resolve;
+        }),
+    );
+    const container = renderPanel(
+      makeState([outputLanguageSetting('English')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+    const typeAndEnter = async (value: string) => {
+      act(() => {
+        Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'value',
+        )!.set!.call(input, value);
+        input!.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      await act(async () => {
+        input!.dispatchEvent(
+          new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+        );
+        await Promise.resolve();
+      });
+    };
+
+    await typeAndEnter('German');
+    expect(onOutputLanguageChange).toHaveBeenCalledTimes(1);
+
+    await typeAndEnter('Russian');
+    expect(onOutputLanguageChange).toHaveBeenCalledTimes(1);
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('German');
+
+    await act(async () => {
+      resolveSave?.(true);
+      await Promise.resolve();
+    });
+  });
+
+  it('keeps focus in the input when a suggestion is pressed', async () => {
+    const container = renderPanel(
+      makeState([outputLanguageSetting('auto')], vi.fn()),
+      { onOutputLanguageChange: vi.fn() },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+    await act(async () => {
+      input!.focus();
+      await Promise.resolve();
+    });
+
+    const list = document.querySelector('[role="listbox"]');
+    expect(list).toBeTruthy();
+    const event = new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => {
+      list!.dispatchEvent(event);
+    });
+    expect(event.defaultPrevented).toBe(true);
+  });
+
+  it('resets navigation after the saved value updates and the field is refocused', async () => {
+    const calls: string[] = [];
+    function UpdatingPanel() {
+      const [effective, setEffective] = useState('French');
+      return (
+        <I18nProvider language="en">
+          <SettingsMessage
+            settingsState={makeState(
+              [outputLanguageSetting(effective)],
+              vi.fn(),
+            )}
+            embedded
+            onLanguageChange={noop}
+            onOutputLanguageChange={(next) => {
+              calls.push(next);
+              setEffective(next);
+              return true;
+            }}
+            onThemeChange={noop}
+            onSubDialog={noop}
+            chatWidthMode="1000"
+            onChatWidthModeChange={noop}
+          />
+        </I18nProvider>
+      );
+    }
+
+    const container = render(<UpdatingPanel />);
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Eng');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    expect(calls).toEqual(['English']);
+
+    await act(async () => {
+      input!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      await Promise.resolve();
+    });
+    await act(async () => {
+      input!.focus();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    // The second Enter is unedited and un-navigated: it must not submit auto
+    // from the previous round's highlight.
+    expect(calls).toEqual(['English']);
+  });
+
+  it('keeps the exact typed language when Enter does not follow navigation', async () => {
+    // 'Chinese' is also a substring of the earlier 'Traditional Chinese'
+    // suggestion; Enter must not silently switch to that language.
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('French')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Chinese');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('Chinese');
+  });
+
+  it('does not submit an unedited output language on Enter', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('English')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+
+    await act(async () => {
+      input!.focus();
+      await Promise.resolve();
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).not.toHaveBeenCalled();
+  });
+
+  it('commits the highlighted suggestion after explicit keyboard navigation', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('auto')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+
+    await act(async () => {
+      input!.focus();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('English');
+  });
+
+  it('syncs the picked language and does not resubmit the query on blur', async () => {
+    const onOutputLanguageChange = vi.fn();
+    const container = renderPanel(
+      makeState([outputLanguageSetting('French')], vi.fn()),
+      { onOutputLanguageChange },
+    );
+    clickUserTab(container);
+    const input = container.querySelector<HTMLInputElement>(
+      'input[name="general.outputLanguage"]',
+    );
+
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Eng');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const option = Array.from(
+      document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ).find((node) => node.textContent === 'English');
+    expect(option).toBeTruthy();
+    await act(async () => {
+      option!.click();
+      await Promise.resolve();
+    });
+
+    expect(onOutputLanguageChange).toHaveBeenCalledTimes(1);
+    expect(onOutputLanguageChange).toHaveBeenCalledWith('English');
+    expect(input?.value).toBe('English');
+
+    await act(async () => {
+      input!.dispatchEvent(new FocusEvent('focusout', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(onOutputLanguageChange).toHaveBeenCalledTimes(1);
   });
 
   it('still persists to workspace scope on the default (Workspace) tab', async () => {

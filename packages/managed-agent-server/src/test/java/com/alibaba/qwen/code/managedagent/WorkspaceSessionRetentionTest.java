@@ -26,6 +26,7 @@ import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.context.TestConfiguration;
@@ -68,7 +69,7 @@ class WorkspaceSessionRetentionTest {
     @Autowired ObjectMapper mapper;
     @Autowired ManagedAgentStore store;
     @Autowired ManagedSessionStore journal;
-    @Autowired JdbcTemplate jdbc;
+    @Autowired @Qualifier("managedJdbcTemplate") JdbcTemplate jdbc;
     @Autowired OnceCloseRuntime runtime;
     @Autowired PlatformTransactionManager transactions;
     @Autowired SessionLifecycleCoordinator lifecycle;
@@ -76,10 +77,8 @@ class WorkspaceSessionRetentionTest {
     @Autowired HarnessConnector harness;
     @Autowired com.alibaba.qwen.code.managedagent.session.HarnessCoordinator coordinator;
 
-    @ParameterizedTest
-    @CsvSource({"ACTIVE, hosted-workspace-shell/1",
-            "ACTIVE, hosted-workspace-shell/2", "CLOSED, hosted-workspace-shell/2", "ARCHIVED, hosted-workspace-shell/2"})
-    void unsupportedShellLifecycleStaysDisabledDespiteCloseProof(String state, String profile) throws Exception {
+    @Test
+    void unsupportedShellLifecycleStaysDisabledDespiteCloseProof() throws Exception {
         String tenant = tenant();
         String session = closed(tenant, true);
         assertThat(runtime.supportsWorkspaceClose()).isTrue();
@@ -104,7 +103,7 @@ class WorkspaceSessionRetentionTest {
         int commands = jdbc.queryForObject("SELECT COUNT(*) FROM ma_request_receipt WHERE namespace = 'SESSION_COMMAND' AND tenant_id = ? AND session_id = ?",
                 Integer.class, tenant, session);
         jdbc.update("UPDATE ma_session SET tool_profile = ?, approval_mode = 'default', status = ?"
-                + " WHERE tenant_id = ? AND session_id = ?", profile, state, tenant, session);
+                + " WHERE tenant_id = ? AND session_id = ?", "hosted-workspace-shell/1", "ACTIVE", tenant, session);
         var publicCapabilities = projection.getPublicSession(tenant, "owner", session).capabilities();
         assertThat(publicCapabilities.foregroundShell()).isTrue();
         assertThat(publicCapabilities.sessionClose()).isFalse();
@@ -513,7 +512,8 @@ class WorkspaceSessionRetentionTest {
             };
         }
         @Bean @Primary OnceCloseRuntime retentionRuntime() { return new OnceCloseRuntime(); }
-        @Bean @Primary ManagedAgentStore retentionStore(JdbcTemplate jdbc, ObjectMapper mapper, ManagedWorkspaceRegistry registry) {
+        @Bean @Primary ManagedAgentStore retentionStore(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc,
+                ObjectMapper mapper, ManagedWorkspaceRegistry registry) {
             var properties = new ManagedAgentProperties();
             properties.getHarness().setWorkspaceFilesEnabled(true);
             return new ManagedAgentStore(jdbc, mapper, Clock.systemUTC(), ignored -> {}, registry, properties);

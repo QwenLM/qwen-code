@@ -209,6 +209,7 @@ export default {
   'toolDisplayName.CronCreate': '建立定時任務',
   'toolDisplayName.CronList': '定時任務清單',
   'toolDisplayName.CronDelete': '刪除定時任務',
+  'toolDisplayName.AutofixPr': 'PR 自動修復',
   'toolDisplayName.LoopWakeup': '循環喚醒',
   'toolDisplayName.CreateSubSession': '建立子會話',
   'toolDisplayName.ListAgents': '列出 Agent',

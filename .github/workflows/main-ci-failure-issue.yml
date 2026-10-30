@@ -10,11 +10,15 @@ on:
     # only trigger outside a pull request, and a lane nobody is told about is a
     # lane nobody looks at — which is how those two came to stop running. The
     # push arm covers ci.yml's post-merge lane on `main`, whose whole point is
-    # to surface a regression as it lands; a failure there files an issue with
-    # `type/bug`, `status/ready-for-agent` and `autofix/approved`, so expect
-    # one per red merge, not per red nightly only.
+    # to surface a regression as it lands. A run that names its failing tests
+    # files or reuses a per-signature issue — deduped by the test markers in
+    # its body — so a new regression is a visible, triageable unit instead of
+    # a comment nobody sees; only a run with no test identity shares the
+    # workflow's aggregate issue, one comment per occurrence. A newer push run
+    # that already owns main's tip supersedes this report; see 'Skip a
+    # superseded attempt'.
     # Daily Java and Desktop checks report main regressions through the same
-    # deduplicated issue and autofix route as the nightly CLI checks.
+    # routing as the nightly CLI checks.
     # The Managed Agent gate's post-merge fast tier rides the push arm.
     workflows:
       - 'E2E Tests'
@@ -23,6 +27,7 @@ on:
       - 'SDK Python'
       - 'Qwen Code CI'
       - 'Desktop Checks'
+      - 'tui-parity'
     types: ['completed']
     # PR approval runs can finish after merge and still need a failure report.
 
@@ -32,10 +37,9 @@ defaults:
 
 jobs:
   # The job holding the bot PAT is split off so it still checks out nothing
-  # and runs no repository code. This job works out WHICH tests broke — the
-  # dedupe key — from the failed run's logs, using read-only scopes and the
-  # workflow token, and hands the finished title and body to the privileged
-  # job as outputs.
+  # and runs no repository code. This job identifies failing tests from the
+  # run's logs using read-only scopes and the workflow token, then hands the
+  # finished failure summary to the privileged job as an output.
   analyze:
     name: 'Identify the failing tests'
     if: >-
@@ -44,7 +48,7 @@ jobs:
       ((github.event.workflow_run.head_branch == 'main' &&
       (github.event.workflow_run.event == 'push' ||
       (github.event.workflow_run.event == 'schedule' &&
-      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks"]'), github.event.workflow.name)))) ||
+      contains(fromJSON('["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]'), github.event.workflow.name)))) ||
       (github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') ||
       (github.event.workflow.name == 'Managed Agent gate' &&
       contains(fromJSON('["pull_request","pull_request_review"]'), github.event.workflow_run.event))) }}
@@ -57,17 +61,19 @@ jobs:
       # runner lost the server, the disk filled) is rerun, not filed.
       checks: 'read'
       contents: 'read'
-      # Find an issue that already tracks this failure.
-      issues: 'read'
       pull-requests: 'read'
     outputs:
-      issue_number: '${{ steps.plan.outputs.issue_number }}'
-      title: '${{ steps.plan.outputs.title }}'
-      body: '${{ steps.plan.outputs.body }}'
       infra_only: '${{ steps.infra.outputs.infra_only }}'
       pr_number: '${{ steps.destination.outputs.pr_number }}'
       file_issue: '${{ steps.destination.outputs.file_issue }}'
       comment_body: '${{ steps.summary.outputs.body }}'
+      # Empty when the run named no failing test; that emptiness routes the
+      # record to the workflow's aggregate issue downstream.
+      signature_title: '${{ steps.summary.outputs.signature_title }}'
+      test_markers: '${{ steps.summary.outputs.test_markers }}'
+      # The newer run at main's tip had not settled when this report was
+      # prepared. The issue is still filed, with a note saying so.
+      provisional: '${{ steps.live.outputs.provisional }}'
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
@@ -87,9 +93,14 @@ jobs:
           REPO: '${{ github.repository }}'
           WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
           RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
+          WORKFLOW_ID: '${{ github.event.workflow_run.workflow_id }}'
+          EVENT_NAME: '${{ github.event.workflow_run.event }}'
+          HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
+          HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
         run: |-
           set -euo pipefail
           superseded=false
+          provisional=false
           if live_attempt="$(
             gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}" \
               --jq '.run_attempt'
@@ -102,7 +113,83 @@ jobs:
           else
             echo "::warning::Could not read run ${WORKFLOW_RUN_ID}; assuming this attempt-${RUN_ATTEMPT} event is current and reporting."
           fi
+          # A post-merge push run reports the commit that was main when it
+          # started. When main has since advanced, a newer run of the same
+          # workflow at that tip owns the result: filing here would open a
+          # repair issue for a head main has already replaced, which is how
+          # #15259 was filed after #15128 fixed its host-lock timeout.
+          #
+          # Only a SETTLED successor can own the result. The job gate above
+          # admits only `failure` conclusions, so a successor that ends
+          # cancelled, timed_out, skipped or startup_failure never re-enters
+          # this workflow; crediting its mere existence would drop the only
+          # report of a real regression. A completed success means the tree is
+          # green at the tip, and a completed failure reports itself.
+          #
+          # An unsettled successor proves nothing yet, and waiting for it is
+          # not possible here: this job runs on a pool that queued it
+          # for 20-100 minutes (#15470), so the tip's run is usually still
+          # young when the report is prepared, and the successor's own re-entry
+          # only covers the failure conclusion. Reporting is therefore the
+          # lesser mistake, marked provisional: the per-signature route files
+          # those for a human to triage and never routes them to autofix
+          # (#15405), so a stale one costs a close, while a dropped one costs
+          # the regression.
+          #
+          # A path-filtered push arm (SDK Python) or a `[skip ci]` commit
+          # leaves no run at the new tip at all, and that also reports here.
+          # Read failures keep the old fail-open reporting.
+          #
+          # Every attempt is compared, not just the first: #15259 itself was
+          # filed by such an attempt-2 recovery run. The successor check is
+          # what keeps a lone recovery attempt reporting when main moved while
+          # it queued.
+          if [[ "${superseded}" != 'true' &&
+            "${EVENT_NAME}" == 'push' && "${HEAD_BRANCH}" == 'main' &&
+            -n "${HEAD_SHA}" ]]; then
+            if tip="$(gh api "repos/${REPO}/commits/main" --jq '.sha')"; then
+              if [[ -n "${tip}" && "${tip}" != "${HEAD_SHA}" ]]; then
+                if successor="$(
+                  gh api "repos/${REPO}/actions/workflows/${WORKFLOW_ID}/runs?event=push&branch=main&head_sha=${tip}&per_page=1" \
+                    --jq '.workflow_runs[0] // {} | if (.status // "") == "" then "none" else "\(.status) \(.conclusion // "")" end'
+                )"; then
+                  read -r successor_status successor_conclusion <<< "${successor}"
+                  successor_owns=false
+                  # Complement, not an enumeration: only a settled successor
+                  # owns the result, and not-yet-final statuses grow.
+                  case "${successor_status}" in
+                    completed)
+                      case "${successor_conclusion}" in
+                        success | failure) successor_owns=true ;;
+                      esac
+                      ;;
+                    none)
+                      ;;
+                    *)
+                      provisional=true
+                      ;;
+                  esac
+                  if [[ "${successor_owns}" == 'true' ]]; then
+                    superseded=true
+                    echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA}, but main is now ${tip}; the newer push run owns its result."
+                    echo "Superseded main-CI failure: run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA}, but main is now ${tip}; the newer push run owns the result." >> "${GITHUB_STEP_SUMMARY}"
+                  elif [[ "${provisional}" == 'true' ]]; then
+                    echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA} and main is now ${tip}; its newer push run is ${successor_status}, so this report is provisional."
+                  elif [[ "${successor_status}" == 'none' ]]; then
+                    echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA} and main is now ${tip}, but workflow ${WORKFLOW_ID} has no newer push run there; reporting this run."
+                  else
+                    echo "::warning::Run ${WORKFLOW_RUN_ID} tested ${HEAD_SHA} and main is now ${tip}, but its newer push run is ${successor_status}${successor_conclusion:+ ${successor_conclusion}}, which this workflow does not report; reporting this run."
+                  fi
+                else
+                  echo "::warning::Could not list the newer runs of workflow ${WORKFLOW_ID}; reporting this run as though it had no successor."
+                fi
+              fi
+            else
+              echo "::warning::Could not read the tip of main; reporting this run as though it were still current."
+            fi
+          fi
           echo "superseded=${superseded}" >> "${GITHUB_OUTPUT}"
+          echo "provisional=${provisional}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Select the failure destination'
         id: 'destination'
@@ -113,6 +200,7 @@ jobs:
           EVENT_NAME: '${{ github.event.workflow_run.event }}'
           HEAD_BRANCH: '${{ github.event.workflow_run.head_branch }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
+          RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
         run: |-
           set -euo pipefail
           pr_number=''
@@ -141,6 +229,20 @@ jobs:
             fi
             pr_number="$(jq -r '.number // empty' <<< "${pr}")"
             file_issue="$(jq -r '.merged_at != null' <<< "${pr}")"
+            # A rerun re-executes the PR's pre-merge workflow against a head
+            # main has already replaced; run 39768204855's attempt 2 filed
+            # #15239 that way. A dispatch's attempt counts its own manual
+            # runs, not a rerun of the PR's workflow, so it files at any
+            # attempt. A missing attempt fails open, like the supersession
+            # guard above.
+            if [[ "${file_issue}" == 'true' ]]; then
+              if [[ -z "${RUN_ATTEMPT}" ]]; then
+                echo "::warning::No run_attempt in the workflow_run payload for PR #${pr_number}; failing open and filing."
+              elif [[ "${RUN_ATTEMPT}" != '1' && "${EVENT_NAME}" != 'workflow_dispatch' ]]; then
+                file_issue=false
+                echo "::warning::Attempt ${RUN_ATTEMPT} of the PR's pre-merge workflow; not filing a main-regression issue for an already-merged head."
+              fi
+            fi
           fi
           if [[ -z "${pr_number}" && "${file_issue}" != 'true' ]]; then
             echo "::warning::The admitted ${EVENT_NAME} run on ${HEAD_BRANCH} resolved to no PR and no issue; nothing will be reported."
@@ -149,6 +251,7 @@ jobs:
           echo "file_issue=${file_issue}" >> "${GITHUB_OUTPUT}"
 
       - name: 'Download failed job logs'
+        id: 'download'
         if: "${{ steps.live.outputs.superseded != 'true' }}"
         env:
           GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
@@ -169,13 +272,31 @@ jobs:
           # here — a run wider than 100 jobs would otherwise render a comment
           # naming no job. `gh api` writes a non-2xx body to stdout before
           # exiting non-zero, and that body carries no `.jobs`, so a parked
-          # error normalizes to an empty list: the same degradation the
-          # per-commit body already handles.
+          # error normalizes to an empty list, which the comment renderer handles.
+          # The merged document is staged and promoted only once it accounts
+          # for every job the pages report: page 1 can arrive and page 2 still
+          # fail, and jq happily merges what it got. A partial list reads like
+          # a complete one to every consumer here — including the infra
+          # classifier, which would rerun a regression parked on the missing
+          # page instead of filing it. `total_count` is the receipt, and a
+          # response carrying none cannot be certified either: no receipt is a
+          # missing receipt, not a licence to publish.
           jobs_json="${RUNNER_TEMP}/run-jobs.json"
-          if ! gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
-            --paginate | jq -s '{jobs: [ .[].jobs[]? ]}' > "${jobs_json}"; then
-            echo "::warning::Could not list the jobs of run ${WORKFLOW_RUN_ID}"
+          jobs_tmp="${jobs_json}.tmp"
+          jobs_complete=false
+          if gh api "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/attempts/${RUN_ATTEMPT}/jobs?per_page=100" \
+            --paginate \
+            | jq -s '{jobs: [ .[].jobs[]? ]} as $doc | ([.[].total_count] | max) as $total | if $total != null and ($doc.jobs | length) == $total then $doc else error("incomplete job list: merged \($doc.jobs | length) of \($total)") end' \
+              > "${jobs_tmp}"; then
+            mv "${jobs_tmp}" "${jobs_json}"
+            jobs_complete=true
+          else
+            rm -f "${jobs_tmp}"
+            printf '{"jobs":[]}\n' > "${jobs_json}"
+            echo "::warning::Could not read the whole job list of run ${WORKFLOW_RUN_ID}; reporting without it"
           fi
+          # Both bodies read this list; the flag lets them say when it is short.
+          echo "jobs_complete=${jobs_complete}" >> "${GITHUB_OUTPUT}"
 
           mapfile -t job_ids < <(
             jq -r '.jobs[] | select(.conclusion == "failure") | .id' \
@@ -183,11 +304,8 @@ jobs:
           )
           echo "Failed jobs: ${#job_ids[@]}"
 
-          # A lane that dies before printing any test result leaves the helper
-          # nothing to dedupe on, but the same payload still names the job and
-          # the step that failed — the one identity the per-commit issue can
-          # carry. Tolerated like a missing log: it costs precision, never the
-          # issue.
+          # Even without test results, the jobs payload names the failed job
+          # and step. A missing listing costs detail, never the failure report.
           jq -r '.jobs[] | select(.conclusion == "failure") | [.name] + [.steps[] | select(.conclusion == "failure") | .name] | @tsv' \
             "${jobs_json}" 2>/dev/null \
             > "${RUNNER_TEMP}/failed-jobs.tsv" || true
@@ -195,14 +313,13 @@ jobs:
           # gh >= 2.97.0 (GHSA-3m3g-3wcr-px46) refuses to print a response
           # carrying terminal escape sequences unless opted in, and the
           # colourised vitest/pytest logs always carry them: without the flag
-          # every download fails and the plan below falls back to a
-          # per-commit issue naming no failing test. The analyzer strips ANSI
-          # before matching, so none of it reaches an issue body.
+          # every download fails. Logs feed analyze, whose tests populate the
+          # comment renderer's Failing tests section; without them the summary
+          # degrades to job/step names. The analyzer strips ANSI before matching.
           for job_id in "${job_ids[@]}"; do
             if ! gh api "repos/${REPO}/actions/jobs/${job_id}/logs" \
               --allow-escape-sequences > "${log_dir}/${job_id}.log"; then
-              # A missing log only costs precision: with no identifiable test the
-              # plan below falls back to the per-commit issue.
+              # A missing log costs test details, not the job/step summary.
               echo "::warning::Could not download the log of job ${job_id}"
               rm -f "${log_dir}/${job_id}.log"
             fi
@@ -217,7 +334,7 @@ jobs:
           RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
           # Keep in sync with qwen-autofix.yml's INFRA_FAILURE_SIGNATURES — a
           # test pins the equality. There the same annotation class auto-reruns
-          # a PR's red check; here it suppresses the per-commit issue.
+          # a PR's red check; here it suppresses the issue failure record.
           # Full rationale → qwen-autofix.md#af-076
           INFRA_FAILURE_SIGNATURES: 'lost communication with the server|No space left on device|ENOSPC|received a shutdown signal|The runner has received|Failed to initialize container|runner (was|has been) (lost|terminated)|invalid index-pack output|RPC failed|failed to be acquired|lock not acquired within'
         run: |-
@@ -226,10 +343,12 @@ jobs:
           # A failed job whose annotations carry an infrastructure signature
           # died with the runner, not with the code, and clears on a re-run.
           # Only when EVERY failed job matches — and only on the first
-          # attempt, so a persistent break still files once the rerun re-fails
-          # — does the run get a rerun instead of an issue. Every read fails
-          # CLOSED: an unfetchable or unannotated job, an empty failure list,
-          # and a later attempt all file exactly as before.
+          # attempt, so on main a persistent break still files once the rerun
+          # re-fails — does the run get a rerun instead of an issue. Every
+          # read fails CLOSED: an unfetchable or unannotated job, an empty
+          # failure list, and a later main attempt all file exactly as before;
+          # a merged PR's later attempt is suppressed by the destination
+          # guard.
           infra_only=false
           if [[ "${RUN_ATTEMPT}" == '1' ]]; then
             total=0
@@ -276,6 +395,7 @@ jobs:
           WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
           HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
           INFRA_ONLY: '${{ steps.infra.outputs.infra_only }}'
+          JOBS_COMPLETE: '${{ steps.download.outputs.jobs_complete }}'
         run: |-
           helper='.github/scripts/ci/main-failure-signature.mjs'
           shopt -s nullglob
@@ -292,94 +412,42 @@ jobs:
             if [[ "${INFRA_ONLY}" == 'true' ]]; then
               echo 'GitHub runner infrastructure failed; this result does not identify a Java test regression.'
             fi
+            if [[ "${JOBS_COMPLETE}" != 'true' ]]; then
+              echo 'The job list could not be read in full, so this report may name fewer failing jobs than the run had.'
+            fi
             echo "${delim}"
           } >> "${GITHUB_OUTPUT}"
 
-      - name: 'Plan the issue'
-        id: 'plan'
-        if: "${{ steps.destination.outputs.file_issue == 'true' }}"
-        env:
-          GH_TOKEN: '${{ secrets.GITHUB_TOKEN }}'
-          REPO: '${{ github.repository }}'
-          WORKFLOW_NAME: '${{ github.event.workflow.name }}'
-          WORKFLOW_RUN_ID: '${{ github.event.workflow_run.id }}'
-          WORKFLOW_RUN_URL: '${{ github.event.workflow_run.html_url }}'
-          # Actions supplies the timestamp; the helper stays free of clock reads
-          # so its output is reproducible under test.
-          WORKFLOW_RUN_AT: '${{ github.event.workflow_run.updated_at }}'
-          HEAD_SHA: '${{ github.event.workflow_run.head_sha }}'
-        run: |-
-          helper='.github/scripts/ci/main-failure-signature.mjs'
-          analysis="${RUNNER_TEMP}/analysis.json"
-          echo "Failing tests identified: $(jq '.tests | length' "${analysis}")"
-          jq -r '.tests[].id' "${analysis}"
-
-          plan_args=(
-            --analysis "${analysis}"
-            --sha "${HEAD_SHA}"
-            --run-id "${WORKFLOW_RUN_ID}"
-            --run-url "${WORKFLOW_RUN_URL}"
-            --at "${WORKFLOW_RUN_AT}"
-          )
-          plan="${RUNNER_TEMP}/plan.json"
-          node "${helper}" plan "${plan_args[@]}" > "${plan}"
-
-          # Match on any of this run's failing tests: a failure set that grew
-          # (`[A]` then `[A, B]`) still belongs to the issue that tracks A. With
-          # no identifiable test this is the per-commit marker instead.
-          existing_issue=''
-          while read -r marker; do
-            existing_issue="$(
-              gh issue list \
-                --repo "${REPO}" \
-                --state open \
-                --search "${marker} in:body" \
-                --json number \
-                --jq '.[0].number // ""'
-            )"
-            if [[ -n "${existing_issue}" ]]; then
-              echo "Issue #${existing_issue} already tracks this failure (${marker})."
-              break
-            fi
-          done < <(jq -r '.searchMarkers[]' "${plan}")
-
-          # Re-plan against the existing body so recorded recurrences, extra
-          # markers and hand-written notes survive.
-          if [[ -n "${existing_issue}" ]]; then
-            existing_body="${RUNNER_TEMP}/existing-body.md"
-            gh issue view "${existing_issue}" \
-              --repo "${REPO}" \
-              --json body \
-              --jq '.body' > "${existing_body}"
-            node "${helper}" plan "${plan_args[@]}" --existing "${existing_body}" \
-              > "${plan}"
-          fi
-
-          # A random delimiter keeps issue-body prose from ending the heredoc
-          # early and injecting fresh outputs (GitHub's own hardening guidance).
-          delim="QWEN_MAIN_CI_FAILURE_BODY_$(openssl rand -hex 16)"
+          # The writer routes on these two: the per-signature issue title (the
+          # helper leaves it empty when no test was identified) and the dedupe
+          # markers it embeds in the bodies it files. The markers are
+          # helper-generated hex strings, but the title is one line at most —
+          # cleanLine collapses whitespace before a test id is ever collected.
+          marker_delim="QWEN_TEST_MARKERS_$(openssl rand -hex 16)"
           {
-            echo "issue_number=${existing_issue}"
-            echo "title=$(jq -r '.title' "${plan}")"
-            echo "body<<${delim}"
-            jq -r '.body' "${plan}"
-            echo "${delim}"
+            echo "signature_title=$(jq -r '.title // ""' "${RUNNER_TEMP}/analysis.json")"
+            echo "test_markers<<${marker_delim}"
+            jq -r '.searchMarkers[]?' "${RUNNER_TEMP}/analysis.json"
+            echo "${marker_delim}"
           } >> "${GITHUB_OUTPUT}"
 
   # An all-infrastructure failure has no code signal to file: the runner died,
   # not the code, and the run's green legs already exonerate the tree. Rerun
   # its failed jobs once (analyze gates this to attempt 1) and file nothing;
   # if the break is real or the pool stays sick, the rerun's own completion
-  # re-enters this workflow at attempt 2 and the issue is filed then.
+  # re-enters this workflow at attempt 2 and, for main, the issue is filed
+  # then; a merged PR's rerun is suppressed as a stale pre-merge head.
   # The rerun holds actions: write while infra_only is classified from
   # check-run annotation text — text a fork's own steps print — so it runs
   # only for destinations that file (main runs and merged PRs). An open PR's
   # infra death is reported on the PR without dispatching a rerun, and the
   # classifier never grants an untrusted run actions: write.
+  # Not for a provisional report: that head is already replaced, and its rerun
+  # could not re-enter here — skipping lets file_issue record it instead.
   rerun_infra:
     name: 'Rerun infrastructure-only failures'
     needs: 'analyze'
-    if: "${{ needs.analyze.outputs.infra_only == 'true' && needs.analyze.outputs.file_issue == 'true' }}"
+    if: "${{ needs.analyze.outputs.infra_only == 'true' && needs.analyze.outputs.file_issue == 'true' && needs.analyze.outputs.provisional != 'true' }}"
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
     permissions:
@@ -394,12 +462,12 @@ jobs:
           gh api -X POST "repos/${REPO}/actions/runs/${WORKFLOW_RUN_ID}/rerun-failed-jobs"
           echo "Every failed job of run ${WORKFLOW_RUN_ID} died on infrastructure; reran them and filed no issue."
 
-  # Every ISSUE write happens here, as the autofix bot — the one other write
+  # Every ISSUE write happens here, as the reporting bot — the one other write
   # is rerun_infra's rerun, which holds no PAT. This job deliberately checks
-  # out nothing and runs no repository code: it only consumes the title and
-  # body the job above produced.
+  # out nothing and runs no repository code: it consumes the failure summary
+  # the job above produced.
   file_issue:
-    name: 'Create autofix issue'
+    name: 'Record the workflow failure'
     needs: ['analyze', 'rerun_infra']
     # always() because rerun_infra is SKIPPED on the ordinary path and a
     # skipped need is not a success: file when the run is not
@@ -411,60 +479,492 @@ jobs:
     # the very failure it documents.
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
+    concurrency:
+      group: 'main-ci-failure-issue-${{ github.event.workflow.id }}'
+      cancel-in-progress: false
+      queue: 'max'
     permissions:
       issues: 'write'
     outputs:
       issue_url: '${{ steps.issue.outputs.issue_url }}'
     steps:
-      - name: 'File or update the autofix issue'
+      - name: 'Create or comment on the workflow issue'
         id: 'issue'
         env:
           GH_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           REPO: '${{ github.repository }}'
-          EXISTING_ISSUE: '${{ needs.analyze.outputs.issue_number }}'
-          ISSUE_TITLE: '${{ needs.analyze.outputs.title }}'
-          ISSUE_BODY: '${{ needs.analyze.outputs.body }}'
-          AUTOFIX_BOT: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
-          BUG_LABEL: 'type/bug'
-          READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
-          AUTOFIX_APPROVED_LABEL: 'autofix/approved'
+          WORKFLOW_NAME: '${{ github.event.workflow.name }}'
+          WORKFLOW_ID: '${{ github.event.workflow.id }}'
+          BOT_LOGIN: "${{ vars.AUTOFIX_BOT_LOGIN || 'qwen-code-dev-bot' }}"
+          ISSUE_BODY: '${{ needs.analyze.outputs.comment_body }}'
+          RUN_ATTEMPT: '${{ github.event.workflow_run.run_attempt }}'
+          SIGNATURE_TITLE: '${{ needs.analyze.outputs.signature_title }}'
+          TEST_MARKERS: '${{ needs.analyze.outputs.test_markers }}'
+          PROVISIONAL: '${{ needs.analyze.outputs.provisional }}'
+          RUN_AT: '${{ github.event.workflow_run.updated_at }}'
         run: |-
-          apply_autofix_route() {
-            gh issue edit "$1" \
-              --repo "${REPO}" \
-              --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}" \
-              --add-assignee "${AUTOFIX_BOT}"
+          set -euo pipefail
+          if [[ "${PROVISIONAL}" == 'true' ]]; then
+            # Heads every route's body — both create paths and both
+            # comment-on-existing paths — so it must not assume this issue is
+            # the tracker for this occurrence.
+            ISSUE_BODY="$(
+              printf '%s\n\n%s' \
+                '> **Provisional.** Main advanced past this head while the report was being prepared, and the newer push run at the tip had not finished. If that run passes, this failure is already covered and this report can be dismissed.' \
+                "${ISSUE_BODY}"
+            )"
+          fi
+          title="Main CI failed: ${WORKFLOW_NAME}"
+          marker="<!-- main-ci-failure-aggregate:${WORKFLOW_ID} -->"
+          # Embedded in every per-signature filing (and accreted onto every
+          # issue this step comments on): the test markers carry no workflow
+          # component, and the writer's concurrency group serializes only
+          # within one workflow — this key is what scopes a marker match back
+          # to the workflow that owns it.
+          scope_key="main-ci-failure-scope:${WORKFLOW_ID}"
+          # Writes get the same transient-failure tolerance the lookups have
+          # had all along; a one-shot write that dies loses the occurrence.
+          # Retrying create/comment after a lost response can mint one
+          # duplicate when the first attempt succeeded server-side — accepted:
+          # same-marker duplicates converge on the oldest next run, which
+          # beats the recorded failure vanishing with no trace.
+          gh_write() {
+            local attempt
+            for attempt in 1 2 3; do
+              if gh "$@"; then
+                return 0
+              fi
+              sleep "${attempt}"
+            done
+            return 1
           }
+          # Look up inside the serialized writer. renderIssueTitle emitted the
+          # legacy " on <sha12>" and " — <shortened test>" title suffixes, and
+          # the aggregate's dated retitle below rides the " — " arm too — the
+          # body-marker check on a legacy-shaped match is what keeps a retitled
+          # aggregate from being misread as an adopted single-failure issue.
+          # A truncated newest-first list can hide the oldest match; request
+          # 3000 lightweight records. Avoid --search's asynchronously indexed results.
+          title_filter='
+            map(select(.author.login == $bot) | select(
+              .title == $title or
+              (.title | startswith($title + " on ")) or
+              (.title | startswith($title + " — "))
+            )) | sort_by(.number) | .[] |
+            [.number, (if .title == $title then "exact" else "legacy" end)] | @tsv'
+          open_issues="${RUNNER_TEMP}/open-issues.json"
+          lookup_ok=false
+          for attempt in 1 2 3; do
+            if gh issue list --repo "${REPO}" --state open \
+              --json number,title,author --limit 3000 > "${open_issues}"; then
+              lookup_ok=true
+              break
+            fi
+            sleep "${attempt}"
+          done
+          [[ "${lookup_ok}" == true ]] || exit 1
+          family_tsv="${RUNNER_TEMP}/family.tsv"
+          if ! jq -r --arg bot "${BOT_LOGIN}" --arg title "${title}" \
+            "${title_filter}" "${open_issues}" > "${family_tsv}"; then
+            # An unreadable listing must not read as an empty family: the
+            # signature route would certify a false miss and file a duplicate.
+            echo '::error::Could not parse the open-issues listing; not writing.'
+            exit 1
+          fi
+          family=()
+          while IFS= read -r family_line; do
+            [[ -z "${family_line}" ]] || family+=("${family_line}")
+          done < "${family_tsv}"
 
-          body_file="${RUNNER_TEMP}/issue-body.md"
-          printf '%s\n' "${ISSUE_BODY}" > "${body_file}"
+          markers=()
+          while IFS= read -r marker_line; do
+            [[ -z "${marker_line}" ]] || markers+=("${marker_line}")
+          done <<< "${TEST_MARKERS}"
 
-          # issue_url is written before the route edit on both paths: under
-          # bash -e a failed label or assignee edit aborts the step, and the
-          # PR comment must still find the tracking-issue link.
-          if [[ -n "${EXISTING_ISSUE}" ]]; then
-            gh issue edit "${EXISTING_ISSUE}" \
-              --repo "${REPO}" \
-              --body-file "${body_file}"
-            echo "Recorded this run on issue #${EXISTING_ISSUE}."
-            echo "issue_url=https://github.com/${REPO}/issues/${EXISTING_ISSUE}" >> "${GITHUB_OUTPUT}"
-            apply_autofix_route "${EXISTING_ISSUE}"
-            exit 0
+          if [[ -n "${SIGNATURE_TITLE}" && "${#markers[@]}" -gt 0 ]]; then
+            # Per-signature route: the run named its failing tests. Filings
+            # embed each test's dedupe marker in the issue body, so a marker
+            # hit means this signature is already tracked and the run is a
+            # recurrence comment there; a certified miss means the regression
+            # is new and gets its own triage issue — a comment on the shared
+            # aggregate is where new regressions went unnoticed.
+            existing_issue=''
+            matched_body=''
+            signature_unresolved=false
+            for family_line in "${family[@]}"; do
+              candidate="${family_line%%$'\t'*}"
+              candidate_body="${RUNNER_TEMP}/candidate-${candidate}.md"
+              if ! gh issue view "${candidate}" --repo "${REPO}" \
+                --json body --jq '.body // ""' > "${candidate_body}"; then
+                # The truncated file the redirect just made must not linger:
+                # the sibling corpus reuses it with -f and would read the
+                # unreadable candidate as an owned-marker-free empty body.
+                rm -f "${candidate_body}"
+                echo "::warning::Could not read issue #${candidate}; the signature route cannot certify a miss."
+                signature_unresolved=true
+                continue
+              fi
+              for test_marker in "${markers[@]}"; do
+                if grep -qF -- "${test_marker}" "${candidate_body}"; then
+                  existing_issue="${candidate}"
+                  matched_body="${candidate_body}"
+                  break
+                fi
+              done
+              [[ -z "${existing_issue}" ]] || break
+            done
+
+            if [[ -z "${existing_issue}" ]]; then
+              # A human retitle drops a per-signature issue out of the title
+              # family; its body still carries the test markers, so scan
+              # those before certifying a miss and filing a duplicate. The
+              # scope key restricts the scan to this workflow's filings —
+              # legacy per-signature bodies predate it and stay findable only
+              # through their titles.
+              retitled_pages="${RUNNER_TEMP}/open-bot-issues.pages"
+              markers_json="$(printf '%s\n' "${markers[@]}" | jq -R . | jq -sc .)"
+              lookup_ok=false
+              for attempt in 1 2 3; do
+                if gh api --paginate "repos/${REPO}/issues?state=open&per_page=100" \
+                  > "${retitled_pages}"; then
+                  lookup_ok=true
+                  break
+                fi
+                sleep "${attempt}"
+              done
+              if [[ "${lookup_ok}" != true ]]; then
+                echo '::warning::Could not scan retitled issues for the test markers; the signature route cannot certify a miss.'
+                signature_unresolved=true
+              elif ! existing_issue="$(jq -sr --arg bot "${BOT_LOGIN}" --arg scope "${scope_key}" --argjson ms "${markers_json}" '
+                add | map(select(.pull_request == null and .user.login == $bot)
+                  | select((.body // "") | contains($scope))
+                  | select((.body // "") as $b | any($ms[]; . as $m | $b | contains($m))))
+                | sort_by(.number) | .[0].number // empty' "${retitled_pages}")"; then
+                echo '::error::Could not parse the retitled-issues listing; not writing.'
+                exit 1
+              elif [[ -n "${existing_issue}" ]]; then
+                matched_body="${RUNNER_TEMP}/candidate-${existing_issue}.md"
+                if ! jq -sr --argjson n "${existing_issue}" \
+                  'add | map(select(.number == $n)) | .[0].body // ""' \
+                  "${retitled_pages}" > "${matched_body}"; then
+                  echo '::error::Could not re-read the matched issue body; not writing.'
+                  exit 1
+                fi
+              fi
+            fi
+
+            if [[ -z "${existing_issue}" ]]; then
+              # A resolved per-signature issue regresses into a reopen, not a
+              # fresh filing — the same lifecycle the aggregate has below.
+              # Closed titles still name the workflow family, and scoped
+              # bodies survive human retitles.
+              closed_pages="${RUNNER_TEMP}/closed-signature.json"
+              lookup_ok=false
+              for attempt in 1 2 3; do
+                if gh issue list --repo "${REPO}" --state closed \
+                  --json number,title,author,body --limit 1000 > "${closed_pages}"; then
+                  lookup_ok=true
+                  break
+                fi
+                sleep "${attempt}"
+              done
+              if [[ "${lookup_ok}" != true ]]; then
+                echo '::warning::Could not scan closed issues for the test markers; the signature route cannot certify a miss.'
+                signature_unresolved=true
+              elif ! existing_issue="$(jq -r --arg bot "${BOT_LOGIN}" --arg title "${title}" --arg scope "${scope_key}" --argjson ms "${markers_json}" '
+                map(select(.author.login == $bot)
+                  | select(.title == $title or (.title | startswith($title + " — ")) or ((.body // "") | contains($scope)))
+                  | select((.body // "") as $b | any($ms[]; . as $m | $b | contains($m))))
+                | sort_by(.number) | .[0].number // empty' "${closed_pages}")"; then
+                echo '::error::Could not parse the closed-issues listing; not writing.'
+                exit 1
+              elif [[ -n "${existing_issue}" ]]; then
+                matched_body="${RUNNER_TEMP}/candidate-${existing_issue}.md"
+                if ! jq -r --argjson n "${existing_issue}" \
+                  'map(select(.number == $n)) | .[0].body // ""' \
+                  "${closed_pages}" > "${matched_body}"; then
+                  echo '::error::Could not re-read the closed issue body; not writing.'
+                  exit 1
+                fi
+                gh_write issue reopen "${existing_issue}" --repo "${REPO}"
+              fi
+            fi
+
+            if [[ -n "${existing_issue}" ]]; then
+              comment_file="${RUNNER_TEMP}/issue-comment.md"
+              printf '%s\n\nRun attempt: %s\n' "${ISSUE_BODY}" "${RUN_ATTEMPT}" \
+                > "${comment_file}"
+              echo "issue_url=https://github.com/${REPO}/issues/${existing_issue}" >> "${GITHUB_OUTPUT}"
+              gh_write issue comment "${existing_issue}" --repo "${REPO}" --body-file "${comment_file}"
+              # Tests that join a standing failure set later must still find
+              # this issue, so accrete their markers into its body; the scope
+              # key rides along, so a human retitle later never drops the
+              # issue out of the retitled scan. The matched body can predate
+              # the comment (the retitled and closed scans read listings), so
+              # re-read it before the full-body replacement — appending beats
+              # silently overwriting a human's concurrent edit. Best-effort
+              # either way: the occurrence above is already recorded.
+              if gh issue view "${existing_issue}" --repo "${REPO}" \
+                --json body --jq '.body // ""' > "${matched_body}"; then
+                missing=()
+                for test_marker in "${markers[@]}"; do
+                  grep -qF -- "${test_marker}" "${matched_body}" || missing+=("${test_marker}")
+                done
+                if [[ "${#missing[@]}" -gt 0 ]]; then
+                  # A marker a sibling tracker already owns belongs to it:
+                  # accreting it here would shadow that issue on later runs.
+                  # The family bodies were read this pass, inside the writer
+                  # lock; candidates past the first hit are read now, only
+                  # when there is anything to accrete.
+                  siblings_ok=true
+                  siblings_corpus="${RUNNER_TEMP}/sibling-bodies.md"
+                  : > "${siblings_corpus}"
+                  for family_line in "${family[@]}"; do
+                    sibling="${family_line%%$'\t'*}"
+                    [[ "${sibling}" == "${existing_issue}" ]] && continue
+                    sibling_body="${RUNNER_TEMP}/candidate-${sibling}.md"
+                    if [[ ! -f "${sibling_body}" ]] &&
+                      ! gh issue view "${sibling}" --repo "${REPO}" \
+                        --json body --jq '.body // ""' > "${sibling_body}"; then
+                      siblings_ok=false
+                      break
+                    fi
+                    cat "${sibling_body}" >> "${siblings_corpus}"
+                  done
+                  if [[ "${siblings_ok}" == true ]]; then
+                    accrete=()
+                    for test_marker in "${missing[@]}"; do
+                      grep -qF -- "${test_marker}" "${siblings_corpus}" || accrete+=("${test_marker}")
+                    done
+                  else
+                    echo '::warning::Could not read every sibling tracker body; skipping marker accretion this run.'
+                    accrete=()
+                  fi
+                  if [[ "${#accrete[@]}" -gt 0 ]]; then
+                    # A tracker a human retitled out of the family owns its
+                    # markers the same way; only its scoped body settles that.
+                    # The retitled scan's pages are reused when it already ran.
+                    if [[ -z "${retitled_pages:-}" || ! -s "${retitled_pages}" ]]; then
+                      retitled_pages="${RUNNER_TEMP}/open-bot-issues.pages"
+                      lookup_ok=false
+                      for attempt in 1 2 3; do
+                        if gh api --paginate "repos/${REPO}/issues?state=open&per_page=100" \
+                          > "${retitled_pages}"; then
+                          lookup_ok=true
+                          break
+                        fi
+                        sleep "${attempt}"
+                      done
+                    fi
+                    if [[ "${lookup_ok:-false}" != true ]]; then
+                      echo '::warning::Could not scan retitled trackers for marker ownership; skipping marker accretion this run.'
+                      accrete=()
+                    else
+                      markers_json="$(printf '%s\n' "${accrete[@]}" | jq -R . | jq -sc .)"
+                      if ! kept="$(jq -sr --arg bot "${BOT_LOGIN}" --arg scope "${scope_key}" --argjson ms "${markers_json}" '
+                        (add | map(select(.pull_request == null and .user.login == $bot)
+                          | select((.body // "") | contains($scope))
+                          | (.body // ""))) as $bodies
+                        | [$ms[] | . as $m | select(any($bodies[]; contains($m)) | not)]
+                        | join("\n")' "${retitled_pages}")"; then
+                        echo '::error::Could not parse the retitled-issues listing; not writing.'
+                        exit 1
+                      fi
+                      accrete=()
+                      while IFS= read -r kept_marker; do
+                        [[ -z "${kept_marker}" ]] || accrete+=("${kept_marker}")
+                      done <<< "${kept}"
+                    fi
+                  fi
+                else
+                  accrete=()
+                fi
+                grep -qF -- "${scope_key}" "${matched_body}" || accrete+=("${scope_key}")
+                if [[ "${#accrete[@]}" -gt 0 ]]; then
+                  if ! { printf '<!-- %s -->\n' "${accrete[@]}" >> "${matched_body}" &&
+                    gh issue edit "${existing_issue}" --repo "${REPO}" --body-file "${matched_body}"; }; then
+                    echo '::warning::Could not accrete the new test markers onto the tracking issue.'
+                  fi
+                fi
+              else
+                echo '::warning::Could not re-read the tracking issue body for accretion; its markers lag until the next recurrence.'
+              fi
+              exit 0
+            fi
+
+            if [[ "${signature_unresolved}" != true ]]; then
+              body_file="${RUNNER_TEMP}/issue-body.md"
+              {
+                printf '%s\n\nRun attempt: %s\n\n' "${ISSUE_BODY}" "${RUN_ATTEMPT}"
+                printf '<!-- %s -->\n' "${markers[@]}" "${scope_key}"
+              } > "${body_file}"
+              issue_url="$(gh_write issue create --repo "${REPO}" \
+                --title "${SIGNATURE_TITLE}" --body-file "${body_file}")"
+              echo "issue_url=${issue_url}" >> "${GITHUB_OUTPUT}"
+              # Label churn must not cost the failure record. A named
+              # regression is a bug for a human to triage — it is not routed
+              # to autofix, and it is not the aggregate's ci-cd bucket.
+              gh issue edit "${issue_url##*/}" --repo "${REPO}" \
+                --add-label 'type/bug' --add-label 'status/needs-triage' || true
+              exit 0
+            fi
+            echo '::warning::Falling back to the workflow aggregate: a candidate body could not be read.'
           fi
 
-          issue_url="$(
-            gh issue create \
-              --repo "${REPO}" \
-              --title "${ISSUE_TITLE}" \
-              --body-file "${body_file}"
-          )"
-          echo "issue_url=${issue_url}" >> "${GITHUB_OUTPUT}"
-          apply_autofix_route "${issue_url}"
+          # Aggregate route: the run reported no test identity (or the
+          # signature route could not certify itself), so the occurrence is
+          # recorded on the workflow's one shared issue. A legacy-shaped title
+          # is adoption evidence only with a body to back it: a per-signature
+          # issue carries qwen-main-ci-failure-test markers and must keep its
+          # identity (adopting it here would retitle it into the generic
+          # bucket), and a candidate whose body cannot be read is left for the
+          # marker fallback rather than adopted blind. An exact title needs no
+          # body check — per-signature titles always carry the " — " suffix.
+          existing_issue=''
+          match_kind=''
+          via_title_lookup=false
+          # Exact machine titles win first — a per-signature filing's title
+          # always carries the " — " suffix — but a title alone is never
+          # enough: a human can retitle a per-signature issue to the exact
+          # shape, so every candidate passes the same body screen in order.
+          family_ordered=()
+          for family_line in "${family[@]}"; do
+            [[ "${family_line#*$'\t'}" == exact ]] && family_ordered+=("${family_line}")
+          done
+          for family_line in "${family[@]}"; do
+            [[ "${family_line#*$'\t'}" == exact ]] || family_ordered+=("${family_line}")
+          done
+          for family_line in "${family_ordered[@]}"; do
+            candidate="${family_line%%$'\t'*}"
+            candidate_body="${RUNNER_TEMP}/family-${candidate}.md"
+            if ! gh issue view "${candidate}" --repo "${REPO}" \
+              --json body --jq '.body // ""' > "${candidate_body}"; then
+              # An unreadable candidate cannot be certified, and adopting the
+              # NEXT admissible one on sight could hand the occurrence to a
+              # per-commit filing; the body-marker fallback finds the real
+              # aggregate without per-issue reads.
+              rm -f "${candidate_body}"
+              echo "::warning::Could not read issue #${candidate}; leaving adoption to the marker fallback."
+              break
+            fi
+            # Both marker classes mean an already-adopted aggregate; test
+            # markers alone mean a per-signature issue, whatever its title.
+            if grep -qF 'qwen-main-ci-failure-test:' "${candidate_body}" &&
+              ! grep -qF -- "${marker}" "${candidate_body}"; then
+              continue
+            fi
+            existing_issue="${candidate}"
+            match_kind="${family_line#*$'\t'}"
+            via_title_lookup=true
+            break
+          done
+
+          if [[ -z "${existing_issue}" ]]; then
+            # A bot-owned aggregate remains recognizable after a human retitles it.
+            issue_match=''
+            lookup_ok=false
+            for attempt in 1 2 3; do
+              if issue_match="$(gh api --paginate "repos/${REPO}/issues?state=open&per_page=100" \
+                | jq -sr --arg bot "${BOT_LOGIN}" --arg marker "${marker}" '
+                  add | map(select(.pull_request == null and .user.login == $bot) |
+                    select((.body // "") | contains($marker))) |
+                  sort_by(.number) | .[0] // empty | [.number, "exact"] | @tsv')"; then
+                lookup_ok=true
+                break
+              fi
+              sleep "${attempt}"
+            done
+            [[ "${lookup_ok}" == true ]] || exit 1
+            if [[ -n "${issue_match}" ]]; then
+              IFS=$'\t' read -r existing_issue match_kind <<< "${issue_match}"
+            fi
+          fi
+
+          if [[ -z "${existing_issue}" ]]; then
+            # Bound closed history to the 1000 most recent issues. Older matches
+            # or an unavailable closed lookup fall back to a fresh aggregate.
+            # A human-reshaped title produces a fresh aggregate even when the
+            # body has the workflow marker, and a closed per-signature issue
+            # (test markers, no workflow marker) is never reopened as one.
+            issue_match="$(gh issue list --repo "${REPO}" --state closed \
+              --json number,title,author,body --limit 1000 \
+              | jq -r --arg bot "${BOT_LOGIN}" --arg title "${title}" --arg marker "${marker}" '
+                map(select(.author.login == $bot) | select(
+                  .title == $title or
+                  (.title | startswith($title + " on ")) or
+                  (.title | startswith($title + " — "))
+                ) | select(
+                  (.body // "") as $b |
+                  (($b | contains("qwen-main-ci-failure-test:") | not))
+                  or ($b | contains($marker))
+                )) | sort_by(.number) | .[] |
+                [.number, (if .title == $title then "exact" else "legacy" end)] | @tsv')" || issue_match=''
+            if [[ -n "${issue_match}" ]]; then
+              # The jq emits one TSV candidate per line, oldest first; read
+              # stops at the first line, which is the only one wanted.
+              IFS=$'\t' read -r existing_issue match_kind <<< "${issue_match}"
+              via_title_lookup=true
+              gh_write issue reopen "${existing_issue}" --repo "${REPO}"
+            fi
+          fi
+
+          body_file="${RUNNER_TEMP}/issue-body.md"
+          printf '%s\n\nRun attempt: %s\n\n%s\n' "${ISSUE_BODY}" "${RUN_ATTEMPT}" "${marker}" > "${body_file}"
+          if [[ -n "${existing_issue}" ]]; then
+            # Publish the record before retiring a legacy route: an edit failure
+            # must not lose the comment or report_pr's tracking-issue link.
+            echo "issue_url=https://github.com/${REPO}/issues/${existing_issue}" >> "${GITHUB_OUTPUT}"
+            gh_write issue comment "${existing_issue}" --repo "${REPO}" --body-file "${body_file}"
+            # Migrate adopted bodies so a later human retitle can still find
+            # the issue. Decoration is best-effort: the occurrence is already
+            # recorded above. `had_marker` is read BEFORE the migration: an
+            # aggregate we already retitled carries the marker and must not be
+            # re-adopted below.
+            existing_body_file="${RUNNER_TEMP}/existing-issue-body.md"
+            had_marker=false
+            body_read_ok=true
+            if gh issue view "${existing_issue}" --repo "${REPO}" --json body --jq '.body // ""' > "${existing_body_file}"; then
+              if grep -Fq -- "${marker}" "${existing_body_file}"; then
+                had_marker=true
+              elif ! { printf '\n%s\n' "${marker}" >> "${existing_body_file}" &&
+                gh issue edit "${existing_issue}" --repo "${REPO}" --body-file "${existing_body_file}"; }; then
+                echo '::warning::Could not add the workflow marker to the existing issue body.'
+              fi
+            else
+              body_read_ok=false
+              echo '::warning::Could not read the existing issue body for marker migration; leaving its labels alone.'
+            fi
+            if [[ "${match_kind}" == legacy && "${had_marker}" != true && "${body_read_ok}" == true ]]; then
+              # Retire only the old single-failure route, and only with the
+              # body in hand: on an unreadable body the issue may already be
+              # a human-routed aggregate, whose labels are not ours to strip.
+              gh issue edit "${existing_issue}" --repo "${REPO}" \
+                --remove-label 'status/ready-for-agent' --remove-label 'autofix/approved'
+            fi
+            # Keep the shared issue honest in the issue list: an aggregate's
+            # title otherwise freezes at filing time and a month-old comment
+            # stream looks stale. Only machine-shaped titles are refreshed —
+            # a human retitle (reachable only through the marker fallback) is
+            # left alone, and a same-day second edit is a no-op.
+            if [[ "${via_title_lookup}" == true ]]; then
+              gh issue edit "${existing_issue}" --repo "${REPO}" \
+                --title "${title} — no test identified (latest: ${RUN_AT:0:10})" || \
+                echo '::warning::Could not retitle the aggregate issue.'
+            fi
+          else
+            issue_url="$(gh_write issue create --repo "${REPO}" --title "${title}" \
+              --body-file "${body_file}")"
+            echo "issue_url=${issue_url}" >> "${GITHUB_OUTPUT}"
+            # Label churn must not cost the failure record. Unlike the image-build
+            # reporter, this lookup does not depend on labels. Aggregates need triage.
+            gh issue edit "${issue_url##*/}" --repo "${REPO}" \
+              --add-label 'scope/ci-cd' --add-label 'status/needs-triage' || true
+          fi
 
   report_pr:
     name: 'Report Java CI failure on the PR'
     needs: ['analyze', 'file_issue', 'rerun_infra']
-    # A prepared summary survives issue planning errors. Only a successfully
+    # A prepared summary survives issue-write errors. Only a successfully
     # dispatched infrastructure rerun suppresses the comment.
     if: "${{ always() && needs.analyze.outputs.comment_body != '' && needs.analyze.outputs.pr_number != '' && (needs.analyze.outputs.infra_only != 'true' || needs.rerun_infra.result != 'success') }}"
     runs-on: 'ubuntu-latest'
@@ -484,16 +984,25 @@ jobs:
         run: |-
           set -euo pipefail
           body_file="${RUNNER_TEMP}/pr-comment.md"
-          printf '%s\n' "${COMMENT_BODY}" > "${body_file}"
-          if [[ -n "${ISSUE_URL}" ]]; then
-            printf '\n[Tracking issue](%s)\n' "${ISSUE_URL}" >> "${body_file}"
-          fi
           marker="<!-- qwen-managed-agent-ci-failure:${WORKFLOW_RUN_ID} -->"
           # Keep the lookup/publish retry contract of upsert-bot-comment.sh
           # without checking out repository code in this write-only job.
           for attempt in 1 2 3; do
-            if comment_id="$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
-              | jq -sr --arg marker "${marker}" 'add | map(select(.user.login == "github-actions[bot]" and ((.body // "") | contains($marker)))) | last | .id // empty')"; then
+            if existing="$(gh api --paginate "repos/${REPO}/issues/${PR_NUMBER}/comments?per_page=100" \
+              | jq -sr --arg marker "${marker}" 'add | map(select(.user.login == "github-actions[bot]" and ((.body // "") | contains($marker)))) | last // {} | {id: (.id // ""), body: (.body // "")}')"; then
+              comment_id="$(jq -r '.id' <<< "${existing}")"
+              tracking=''
+              if [[ -n "${ISSUE_URL}" ]]; then
+                tracking="[Tracking issue](${ISSUE_URL})"
+              elif [[ -n "${comment_id}" ]]; then
+                # A suppressed rerun recovers the link from the earlier
+                # attempt's comment; a missing or deleted comment loses it.
+                tracking="$(jq -r '.body' <<< "${existing}" | grep -m1 -E '^\[Tracking issue\]\([^)]*\)$' || true)"
+              fi
+              printf '%s\n' "${COMMENT_BODY}" > "${body_file}"
+              if [[ -n "${tracking}" ]]; then
+                printf '\n%s\n' "${tracking}" >> "${body_file}"
+              fi
               if [[ -n "${comment_id}" ]]; then
                 endpoint="repos/${REPO}/issues/comments/${comment_id}"
                 method=PATCH

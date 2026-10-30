@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecovery;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecoveryActions;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
+import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionLineage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
@@ -33,6 +34,56 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class ManagedAgentSessionCapabilitiesTest {
+    @ParameterizedTest
+    @CsvSource({"false,true", "false,false", "true,true", "true,false"})
+    void publicChildRestrictionsComposeWithLifecycleOwnership(boolean child, boolean owner) {
+        var store = mock(AgentStateStore.class);
+        var workspaces = mock(ManagedWorkspaceRegistry.class);
+        var harness = mock(HarnessConnector.class);
+        var warmer = mock(RuntimeWarmer.class);
+        var service = new ManagedAgentService(store, new RequestDigests(),
+                mock(HarnessCoordinator.class), harness, workspaces);
+        service.setRuntimeWarmer(warmer);
+        var workspace = new ContextBinding("tenant", "workspace", 1,
+                "storage", ".", WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1);
+        var session = new SessionRecord("tenant", "session", "qwen-code", "1", "title",
+                "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1, workspace, "default",
+                WorkspaceToolProfiles.FILES, null, 1);
+        when(store.workspaceFilesEnabled()).thenReturn(true);
+        when(harness.isWorkspaceFilesAvailable()).thenReturn(true);
+        when(harness.supportsApprovalSelection()).thenReturn(true);
+        when(harness.supportsPublicChildAgents()).thenReturn(true);
+        when(harness.supportsPlanMode()).thenReturn(true);
+        when(harness.supportsLifecycle(anyString())).thenReturn(true);
+        when(warmer.supportsWorkspaceContextChange(workspace)).thenReturn(true);
+        when(warmer.supportsWorkspaceClose(workspace)).thenReturn(true);
+        when(workspaces.canRead("tenant", "actor", "workspace")).thenReturn(true);
+        when(workspaces.findReadable(eq("tenant"), eq("actor"), anyCollection()))
+                .thenReturn(Map.of("workspace",
+                        new ManagedWorkspaceRegistry.ReadableGrant("workspace", 1, "storage", true)));
+        when(store.sessionsWithExecutionRegistryFacts(eq("tenant"), any())).thenReturn(Set.of("session"));
+        when(store.findApprovalOwners("tenant", "actor", List.of("session")))
+                .thenReturn(owner ? Set.of("session") : Set.of());
+        when(store.supportsPlanMode(session)).thenReturn(true);
+        when(store.requireSession("tenant", "session")).thenReturn(session);
+        when(store.listSessions("tenant", "actor", null, null, 10, "all"))
+                .thenReturn(new SessionPage(List.of(session), false));
+        when(store.findChildLineage("tenant", "session"))
+                .thenReturn(child ? new SessionLineage("parent", "parent", "run", 1) : null);
+
+        var views = List.of(service.getWebShellSession("tenant", "actor", "session"),
+                service.listWebShellSessions("tenant", "actor", null, 10).data().getFirst());
+        assertThat(views).allSatisfy(view -> {
+            assertThat(view.capabilities().workspaceTurns()).isEqualTo(!child);
+            assertThat(view.capabilities().cwdChange()).isFalse();
+            assertThat(view.capabilities().approvalModeChange()).isEqualTo(!child && owner);
+            assertThat(view.planModeSupported()).isEqualTo(!child && owner);
+            assertThat(view.capabilities().sessionClose()).isEqualTo(owner);
+            assertThat(view.capabilities().sessionDelete()).isEqualTo(owner);
+            assertThat(view.capabilities().childAgents()).isEqualTo(!child);
+        });
+    }
+
     @Test
     void recoveryProjectionKeepsAnUnsettledLifecycleOperationOnSingleSessionReads() {
         var store = mock(AgentStateStore.class);
@@ -78,7 +129,7 @@ class ManagedAgentSessionCapabilitiesTest {
         when(harness.supportsApprovalSelection()).thenReturn(true);
         when(harness.supportsPlanMode()).thenReturn(true);
         when(harness.supportsLifecycle(anyString())).thenReturn(true);
-        when(warmer.supportsWorkspaceCwdChange(workspace)).thenReturn(true);
+        when(warmer.supportsWorkspaceContextChange(workspace)).thenReturn(true);
         when(warmer.supportsWorkspaceClose(workspace)).thenReturn(true);
         when(workspaces.canRead("tenant", "actor", "workspace")).thenReturn(true);
         when(workspaces.findReadable(eq("tenant"), eq("actor"), anyCollection()))
@@ -97,7 +148,7 @@ class ManagedAgentSessionCapabilitiesTest {
         var views = service.listWebShellSessions("tenant", "actor", null, 10).data();
         assertThat(views.getFirst().capabilities().approvalModeChange()).isTrue();
         var view = views.getLast();
-        assertThat(view.capabilities().cwdChange()).isTrue();
+        assertThat(view.capabilities().cwdChange()).isFalse();
         assertThat(view.capabilities().sessionClose()).isTrue();
         assertThat(view.planModeSupported()).isFalse();
         assertThat(service.getWebShellSession("tenant", "actor", "excluded")
