@@ -5,7 +5,17 @@
  */
 
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import {
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { dirname, join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import { describe, expect, it, vi } from 'vitest';
 import { transformSync } from 'esbuild';
@@ -59,6 +69,87 @@ describe('preflight screenshot validation', () => {
   });
 });
 
+describe('smoke artifact preflight', () => {
+  it.each([false, true])(
+    'resolves import-only CUA exports before checking Browser SDK artifacts (missing host: %s)',
+    (missingHost) => {
+      const root = mkdtempSync(join(tmpdir(), 'qwen-smoke-preflight-'));
+      const write = (name: string, text = '') => {
+        const target = join(root, name);
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, text);
+      };
+      try {
+        write('dist/cli.js');
+        write('packages/node-repl/dist/index.js');
+        const sdk = 'packages/node-repl/node_modules/@qwen-code/cua-sdk';
+        write(
+          `${sdk}/package.json`,
+          JSON.stringify({
+            type: 'module',
+            exports: { './runtime': { import: './lib/runtime-entry.js' } },
+          }),
+        );
+        write(`${sdk}/lib/runtime-entry.js`);
+        const browser = `${sdk}/node_modules/@qwen-code/browser-use`;
+        write(
+          `${browser}/package.json`,
+          JSON.stringify({ exports: { './package.json': './package.json' } }),
+        );
+        write(`${browser}/dist/index.js`);
+        if (!missingHost) write(`${browser}/dist/native-host.js`);
+        write(`${browser}/node_modules/playwright-core/package.json`, '{}');
+        const smoke = readFileSync(
+          new URL('./smoke-qwen-saucedemo.ts', import.meta.url),
+          'utf8',
+        );
+        const start = smoke.indexOf('const packageRoot =');
+        const end = smoke.indexOf("await withManagedChrome('sauce'");
+        assert.ok(start >= 0 && end > start);
+        const builtUrl = pathToFileURL(
+          join(
+            root,
+            'packages/browser-use/dist/scripts/smoke-qwen-saucedemo.js',
+          ),
+        ).href;
+        const code = transformSync(
+          smoke
+            .slice(start, end)
+            .replaceAll('import.meta.url', JSON.stringify(builtUrl)),
+          { loader: 'ts', target: 'node22' },
+        ).code;
+        const result = spawnSync(
+          process.execPath,
+          [
+            '--input-type=module',
+            '--eval',
+            `
+        import assert from 'node:assert/strict';
+        import { access } from 'node:fs/promises';
+        import { createRequire } from 'node:module';
+        import { dirname, join, resolve } from 'node:path';
+        import { fileURLToPath } from 'node:url';
+        import { spawnSync } from 'node:child_process';
+        ${code}
+      `,
+          ],
+          { cwd: tmpdir(), encoding: 'utf8', timeout: 20_000 },
+        );
+        expect(result.error).toBeUndefined();
+        if (missingHost) {
+          expect(result.status).not.toBe(0);
+          expect(result.stderr).toContain('ENOENT');
+          expect(result.stderr).toContain('native-host.js');
+        } else {
+          expect(result.status, result.stderr).toBe(0);
+        }
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+});
+
 describe('smoke observation claims', () => {
   const smoke = readFileSync(
     new URL('./smoke-qwen-saucedemo.ts', import.meta.url),
@@ -66,33 +157,61 @@ describe('smoke observation claims', () => {
   );
   const checks = smoke.match(/const checks = \{[\s\S]*?\n {4}\};/)?.[0];
   assert.ok(checks, 'Smoke checks must be exercised');
-  const helperStart = smoke.indexOf('function stagedRuntimeImported(');
+  const helperStart = smoke.indexOf('function preloadedBrowserUsed(');
   const helperEnd = smoke.indexOf('\n}\n', helperStart) + 3;
-  assert.ok(helperStart >= 0, 'stagedRuntimeImported must be exercised');
-  const stagedRuntimeImported = runInNewContext(
+  assert.ok(helperStart >= 0, 'preloadedBrowserUsed must be exercised');
+  const preloadedBrowserUsed = runInNewContext(
     transformSync(smoke.slice(helperStart, helperEnd), {
       loader: 'ts',
       target: 'node22',
-    }).code + '\nstagedRuntimeImported;',
+    }).code + '\npreloadedBrowserUsed;',
     {},
-  ) as (
-    calls: Array<{ code: string; output: string }>,
-    browserRuntimeRoot: string,
-    builtinSkillRoot: string,
-  ) => boolean;
+  ) as (calls: Array<{ code: string; output: string }>) => boolean;
+
+  const bootstrap = {
+    code: 'var browser = await cua.getBrowser();',
+    output: '# Qwen Browser Use\nBrowser documentation',
+  };
 
   it.each([
-    '// .type( .click( .finalize(',
-    'nodeRepl.write(".type( .click( .finalize(");',
-  ])('does not report SDK setup from unrelated action text: %s', (code) => {
+    ['the preloaded browser bootstrap', [bootstrap], true],
+    ['no calls', [], false],
+    ['a failed or unobserved bootstrap', [{ ...bootstrap, output: '' }], false],
+    [
+      'a comment',
+      [{ ...bootstrap, code: '// await cua.getBrowser();' }],
+      false,
+    ],
+    [
+      'printed code',
+      [{ ...bootstrap, code: 'nodeRepl.write("cua.getBrowser()");' }],
+      false,
+    ],
+    [
+      'a manually imported SDK',
+      [
+        {
+          ...bootstrap,
+          code: "await (await import('/elsewhere/index.js')).setupBrowserRuntime();",
+        },
+      ],
+      false,
+    ],
+    [
+      'setup preceding the bootstrap',
+      [{ code: 'var cua = replacement;', output: '' }, bootstrap],
+      false,
+    ],
+    [
+      'a fallback import after bootstrap',
+      [bootstrap, { code: "await import('/elsewhere/index.js');", output: '' }],
+      false,
+    ],
+  ])('reports preloaded Browser Use for %s', (_label, calls, expected) => {
     const result = runInNewContext(checks + '\nchecks;', {
-      calls: [{ code, output: '' }],
-      joinedCode: code,
+      calls,
       joinedOutput: 'Total: $36.69',
-      browserRuntimeEntry: '/skill/runtime/index.js',
-      browserRuntimeRoot: '/skill/runtime',
-      builtinSkillRoot: '/skill',
-      stagedRuntimeImported,
+      preloadedBrowserUsed,
       events: [],
       moduleDirectoryRegistrationRequested: () => false,
       completion: {
@@ -102,72 +221,9 @@ describe('smoke observation claims', () => {
       cartMatchesLowestThree: true,
       finalAnswer: '$36.69',
     }) as Record<string, boolean>;
-
-    expect(result.browserSdkImported).toBe(false);
+    expect(result.preloadedBrowserUsed).toBe(expected);
     expect(result.checkoutCompletionObserved).toBe(true);
     expect(result.reportedTotalIsExpected).toBe(true);
-  });
-
-  it.each([
-    [
-      'a literal entry path',
-      "await (await import('/skill/runtime/index.js')).setupBrowserRuntime();",
-      true,
-    ],
-    [
-      'an entry built from the staged runtime directory',
-      "const SKILL_BASE = '/skill/runtime';\nawait (await import(SKILL_BASE + '/index.js')).setupBrowserRuntime();",
-      true,
-    ],
-    [
-      'an entry built from the skill root',
-      "const base = '/skill';\nglobalThis.SKILL_BASE = base;\nawait (await import(SKILL_BASE + '/runtime/index.js')).setupBrowserRuntime();",
-      true,
-    ],
-    [
-      'a runtime loaded from somewhere else',
-      "await (await import('/elsewhere/runtime/index.js')).setupBrowserRuntime();",
-      false,
-    ],
-    [
-      'the skill root without setup',
-      "import('/skill/runtime/index.js');",
-      false,
-    ],
-    [
-      'a staged import that threw and fell back to a foreign entry',
-      "let sdk; try { sdk = await import('/skill/runtime/index.js'); } catch { sdk = await import('/repo/packages/browser-use/dist/index.js'); } await sdk.setupBrowserRuntime();",
-      false,
-    ],
-    [
-      'the setup export reached through an alias',
-      "const { setupBrowserRuntime: setup } = await import('/skill/runtime/index.js');\nawait setup();",
-      true,
-    ],
-    [
-      'the skill root echoed in prose next to a foreign import',
-      "// staged at /skill/runtime/index.js\nawait (await import('/elsewhere/index.js')).setupBrowserRuntime();",
-      false,
-    ],
-  ])('reports SDK setup for %s', (_label, code, expected) => {
-    const result = runInNewContext(checks + '\nchecks;', {
-      calls: [{ code, output: '' }],
-      joinedCode: code,
-      joinedOutput: 'Total: $36.69',
-      browserRuntimeEntry: '/skill/runtime/index.js',
-      browserRuntimeRoot: '/skill/runtime',
-      builtinSkillRoot: '/skill',
-      stagedRuntimeImported,
-      events: [],
-      moduleDirectoryRegistrationRequested: () => false,
-      completion: {
-        url: 'https://www.saucedemo.com/checkout-complete.html',
-        snapshot: 'Thank you for your order!',
-      },
-      cartMatchesLowestThree: true,
-      finalAnswer: '$36.69',
-    }) as Record<string, boolean>;
-    expect(result.browserSdkImported).toBe(expected);
   });
 });
 

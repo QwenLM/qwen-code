@@ -23,7 +23,7 @@ public state in MySQL, and keep Harness and Tool Runtime credentials private.
 ## 2. Goals
 
 - Add an independently runnable Spring Boot application under
-  `packages/sdk-java/managed-agent-server`.
+  `packages/managed-agent-server`.
 - Require `X-Qwen-Tenant-Id` on Agent API requests and use it as the database
   ownership boundary.
 - Do not implement end-user authentication or interpret `Authorization` on the

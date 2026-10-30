@@ -2022,6 +2022,356 @@ describe('createTranscriptReplayMachine', () => {
     },
   );
 
+  it('rebuilds agent identity on a replayed Agent result', () => {
+    const machine = createTranscriptReplayMachine();
+    const result = updates(
+      machine,
+      record('agent-result', 'tool_result', {
+        toolCallResult: {
+          callId: 'agent-1',
+          status: 'success',
+          resultDisplay: {
+            type: 'task_execution',
+            subagentName: 'general-purpose',
+            status: 'completed',
+            result: 'done',
+          },
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'agent-1',
+                name: 'agent',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(result).toHaveLength(1);
+    expect(result[0]).toMatchObject({
+      sessionUpdate: 'tool_call_update',
+      toolCallId: 'agent-1',
+      _meta: {
+        agent: {
+          agentName: '/root/general-purpose',
+          depth: 1,
+          kind: 'subagent',
+        },
+      },
+    });
+  });
+
+  it('leaves a task_execution result without a subagent name unattributed', () => {
+    const machine = createTranscriptReplayMachine();
+    const result = updates(
+      machine,
+      record('agent-result', 'tool_result', {
+        toolCallResult: {
+          callId: 'agent-1',
+          status: 'success',
+          resultDisplay: {
+            type: 'task_execution',
+            status: 'completed',
+            result: 'done',
+          },
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'agent-1',
+                name: 'agent',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(result).toHaveLength(1);
+    expect(
+      (result[0] as { _meta?: Record<string, unknown> })._meta?.['agent'],
+    ).toBeUndefined();
+  });
+
+  it('leaves a blocked spawn unattributed instead of minting from the raw request', () => {
+    // Every Agent-tool rejection returns through `buildSpawnBlockedResult`,
+    // which echoes the model-supplied `subagent_type` verbatim with
+    // `status: 'failed'`. That string never reached `SubagentValidator` and
+    // nothing ran, so replay must not stamp an identity path on it. The name
+    // is deliberately a single valid segment: only the status guard can
+    // reject this fixture, so the name guard cannot mask it.
+    const machine = createTranscriptReplayMachine();
+    const result = updates(
+      machine,
+      record('agent-result', 'tool_result', {
+        toolCallResult: {
+          callId: 'agent-1',
+          status: 'error',
+          resultDisplay: {
+            type: 'task_execution',
+            subagentName: 'reviewer',
+            status: 'failed',
+            terminateReason: 'Nesting depth limit reached (max 5)',
+          },
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'agent-1',
+                name: 'agent',
+                response: { output: 'blocked' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(result).toHaveLength(1);
+    expect(
+      (result[0] as { _meta?: Record<string, unknown> })._meta?.['agent'],
+    ).toBeUndefined();
+  });
+
+  it.each([
+    [
+      'worktree provisioning failed',
+      {
+        status: 'failed',
+        executionMode: 'foreground',
+        terminateReason: 'worktree provisioning failed',
+      },
+    ],
+    [
+      'foreground model-slot cancel',
+      { status: 'cancelled', executionMode: 'foreground' },
+    ],
+  ])(
+    'leaves a %s display unattributed although it carries an execution mode',
+    (_label, extra) => {
+      // Both rejection paths persist `executionMode` for a subagent whose
+      // session never registered, so the mode alone is not evidence that
+      // anything ran; the live wire stamps nothing on these frames either.
+      const machine = createTranscriptReplayMachine();
+      const result = updates(
+        machine,
+        record('agent-result', 'tool_result', {
+          toolCallResult: {
+            callId: 'agent-1',
+            status: 'error',
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'researcher',
+              subagentSessionReady: false,
+              ...extra,
+            },
+          },
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'agent-1',
+                  name: 'agent',
+                  response: { output: 'failed' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+      expect(
+        (result[0] as { _meta?: Record<string, unknown> })._meta?.['agent'],
+      ).toBeUndefined();
+    },
+  );
+
+  it.each([
+    ['absent', undefined],
+    ['non-string', 42],
+    ['null', null],
+  ])('leaves a display with %s status unattributed', (_label, status) => {
+    // A truncated record or an older writer can omit the status entirely.
+    // Only an allowlisted status is evidence that a subagent ran.
+    const machine = createTranscriptReplayMachine();
+    const display: Record<string, unknown> = {
+      type: 'task_execution',
+      subagentName: 'reviewer',
+    };
+    if (status !== undefined) display['status'] = status;
+    const result = updates(
+      machine,
+      record('agent-result', 'tool_result', {
+        toolCallResult: {
+          callId: 'agent-1',
+          status: 'success',
+          resultDisplay: display,
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'agent-1',
+                name: 'agent',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(
+      (result[0] as { _meta?: Record<string, unknown> })._meta?.['agent'],
+    ).toBeUndefined();
+  });
+
+  it('attributes a background or cancelled subagent that really ran', () => {
+    // `background` (AgentTool detaches after spawn) and `cancelled` are
+    // resolved statuses whose display carries the validated
+    // `subagentConfig.name`, not the raw request string, so rejecting them
+    // would unattribute a subagent that genuinely ran. The name is a single
+    // valid segment: only the status guard can reject this fixture.
+    for (const status of ['background', 'cancelled'] as const) {
+      const machine = createTranscriptReplayMachine();
+      const result = updates(
+        machine,
+        record('agent-result', 'tool_result', {
+          toolCallResult: {
+            callId: 'agent-1',
+            status: 'success',
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'researcher',
+              status,
+            },
+          },
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'agent-1',
+                  name: 'agent',
+                  response: { output: 'done' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-1',
+        _meta: {
+          agent: {
+            agentName: '/root/researcher',
+            depth: 1,
+            kind: 'subagent',
+          },
+        },
+      });
+    }
+  });
+
+  it('attributes a subagent that ran and then failed', () => {
+    // A run that throws returns `{ ...currentDisplay, status: 'failed' }`, so
+    // the frame keeps the validated name *and* its `executionMode`. Single
+    // valid segment: only the started/status guard can reject this fixture.
+    for (const executionMode of ['foreground', 'background'] as const) {
+      const machine = createTranscriptReplayMachine();
+      const result = updates(
+        machine,
+        record('agent-result', 'tool_result', {
+          toolCallResult: {
+            callId: 'agent-1',
+            status: 'error',
+            resultDisplay: {
+              type: 'task_execution',
+              subagentName: 'researcher',
+              status: 'failed',
+              executionMode,
+              subagentSessionReady: true,
+              terminateReason: 'Failed to run subagent: boom',
+            },
+          },
+          message: {
+            role: 'user',
+            parts: [
+              {
+                functionResponse: {
+                  id: 'agent-1',
+                  name: 'agent',
+                  response: { output: 'boom' },
+                },
+              },
+            ],
+          },
+        }),
+      );
+      expect(result).toHaveLength(1);
+      expect(result[0]).toMatchObject({
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'agent-1',
+        _meta: {
+          agent: {
+            agentName: '/root/researcher',
+            depth: 1,
+            kind: 'subagent',
+          },
+        },
+      });
+    }
+  });
+
+  it('leaves a spawn unattributed when the persisted name is not one segment', () => {
+    // A replayed transcript is read back from disk, so the persisted name is
+    // only as trustworthy as whichever version wrote it. Admitting a `/` here
+    // would mint `/root/security/deps` — byte-identical to the path a
+    // genuinely nested agent gets — collapsing two unrelated cards onto one
+    // identity.
+    const machine = createTranscriptReplayMachine();
+    const result = updates(
+      machine,
+      record('agent-result', 'tool_result', {
+        toolCallResult: {
+          callId: 'agent-1',
+          status: 'success',
+          resultDisplay: {
+            type: 'task_execution',
+            subagentName: 'security/deps',
+            status: 'completed',
+            result: 'done',
+          },
+        },
+        message: {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                id: 'agent-1',
+                name: 'agent',
+                response: { output: 'done' },
+              },
+            },
+          ],
+        },
+      }),
+    );
+    expect(result).toHaveLength(1);
+    expect(
+      (result[0] as { _meta?: Record<string, unknown> })._meta?.['agent'],
+    ).toBeUndefined();
+  });
+
   it('attributes persisted Agent usage to its parent and omits it in summary', () => {
     const machine = createTranscriptReplayMachine();
     const result = updates(
@@ -3049,6 +3399,23 @@ describe('ui_telemetry timing frames', () => {
     );
 
     expect(withTiming).toEqual(withoutTiming);
+  });
+
+  it('preserves request execution identity without creating a visible message', () => {
+    const [frame] = timings(
+      timingMachine(),
+      telemetry('execution-record', {
+        ...API_RESPONSE_EVENT,
+        execution_id: 'execution-1',
+      }),
+    );
+    expect(frame).toMatchObject({
+      executionId: 'execution-1',
+      kind: 'request',
+    });
+    expect(
+      timings(timingMachine(), telemetry('legacy', API_RESPONSE_EVENT))[0],
+    ).not.toHaveProperty('executionId');
   });
 
   it('keeps timing frames out of the replay state when it is off', () => {

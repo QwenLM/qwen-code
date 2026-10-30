@@ -365,12 +365,21 @@ export function parseStreamJsonToolCalls(stdout: string): ToolCaptureResult {
   return { result, toolCalls };
 }
 
+/**
+ * `TestRig.getDefaultTimeout()`'s CI branch. Exported so a suite that derives
+ * its own ceilings multiplies this value instead of re-spelling it.
+ */
+export const CI_DEFAULT_WAIT_MS = 60_000;
+
 export class TestRig {
   bundlePath: string;
   testDir: string | null;
   testName?: string;
   _lastRunStdout?: string;
   _interactiveOutput = '';
+  // cleanup() sets this so an abandoned poll stops instead of scanning a dead
+  // pty until its own budget expires.
+  _closed = false;
   private readonly interactiveProcesses: pty.IPty[] = [];
 
   constructor() {
@@ -380,7 +389,7 @@ export class TestRig {
 
   // Get timeout based on environment
   getDefaultTimeout() {
-    if (env['CI']) return 60000; // 1 minute in CI
+    if (env['CI']) return CI_DEFAULT_WAIT_MS; // 1 minute in CI
     if (env['QWEN_SANDBOX']) return 30000; // 30s in containers
     return 15000; // 15s locally
   }
@@ -390,6 +399,8 @@ export class TestRig {
     options: { settings?: Record<string, unknown> } = {},
   ) {
     this.testName = testName;
+    // setup() re-arms a rig reused after cleanup().
+    this._closed = false;
     const sanitizedName = sanitizeTestName(testName);
     this.testDir = join(
       env['INTEGRATION_TEST_FILE_DIR']!,
@@ -700,6 +711,7 @@ export class TestRig {
   }
 
   async cleanup() {
+    this._closed = true;
     // A session a test never closed keeps its CLI child forwarding PTY bytes
     // into this worker's stdout; after vitest tears the worker down those
     // writes EPIPE and fail an otherwise all-green run (#10969).
@@ -814,7 +826,7 @@ export class TestRig {
     const startTime = Date.now();
     let attempts = 0;
     let lastError: unknown;
-    while (Date.now() - startTime < timeout) {
+    while (!this._closed && Date.now() - startTime < timeout) {
       attempts++;
       try {
         const result = predicate();

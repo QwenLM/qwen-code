@@ -15,6 +15,7 @@ import {
   isTeamLead,
   getTeammateColor,
   runWithTeammateIdentity,
+  runOutsideTeammateIdentity,
 } from './identity.js';
 import type { TeammateIdentity } from './types.js';
 
@@ -119,6 +120,24 @@ describe('identity', () => {
         // Outer context restored
         expect(getAgentName()).toBe('worker');
       });
+    });
+  });
+
+  describe('runOutsideTeammateIdentity', () => {
+    it('hides the identity from the callback and its async work', async () => {
+      await runWithTeammateIdentity(WORKER_IDENTITY, async () => {
+        const seen = await runOutsideTeammateIdentity(async () => {
+          await Promise.resolve();
+          return isTeammate();
+        });
+        expect(seen).toBe(false);
+        // The caller's own context is untouched.
+        expect(getAgentName()).toBe('worker');
+      });
+    });
+
+    it('returns the callback result', () => {
+      expect(runOutsideTeammateIdentity(() => 42)).toBe(42);
     });
   });
 

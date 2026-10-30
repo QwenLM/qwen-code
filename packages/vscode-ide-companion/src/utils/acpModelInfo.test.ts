@@ -169,21 +169,21 @@ describe('extractSessionModelState', () => {
     expect(result?.availableModels).toHaveLength(0);
   });
 
-  it('derives contextLimit for known models when the ACP payload omits it', () => {
+  it('derives catalog contextLimit when the ACP payload omits it', () => {
     const result = extractSessionModelState({
       models: {
-        currentModelId: 'qwen3-max',
-        availableModels: [{ modelId: 'qwen3-max', name: 'Qwen3 Max' }],
+        currentModelId: 'gpt-4o',
+        availableModels: [{ modelId: 'gpt-4o', name: 'GPT-4o' }],
       },
     });
 
     expect(result).toEqual({
-      currentModelId: 'qwen3-max',
+      currentModelId: 'gpt-4o',
       availableModels: [
         {
-          modelId: 'qwen3-max',
-          name: 'Qwen3 Max',
-          _meta: { contextLimit: 262144 },
+          modelId: 'gpt-4o',
+          name: 'GPT-4o',
+          _meta: { contextLimit: 128000 },
         },
       ],
     });
@@ -258,19 +258,19 @@ describe('extractModelInfoFromNewSessionResult', () => {
     expect(extractModelInfoFromNewSessionResult(null)).toBeNull();
   });
 
-  it('derives contextLimit for known models when the payload has null metadata', () => {
+  it('derives catalog contextLimit when the payload has null metadata', () => {
     expect(
       extractModelInfoFromNewSessionResult({
         model: {
-          name: 'Qwen3 Max',
-          modelId: 'qwen3-max',
+          name: 'GPT-4o',
+          modelId: 'gpt-4o',
           _meta: null,
         },
       }),
     ).toEqual({
-      name: 'Qwen3 Max',
-      modelId: 'qwen3-max',
-      _meta: { contextLimit: 262144 },
+      name: 'GPT-4o',
+      modelId: 'gpt-4o',
+      _meta: { contextLimit: 128000 },
     });
   });
 

@@ -388,6 +388,33 @@ describe('trimModelsDevCatalog', () => {
     expect(models['glm-5-3-flash']).toEqual(models['glm-5.3-flash']);
   });
 
+  it.each(['glm-4.5v', 'glm-4-5v'])(
+    'projects both spellings of the vision model %s',
+    (id) => {
+      const entry = {
+        context: 64_000,
+        output: 16_384,
+        modalities: { image: true, video: true },
+      };
+      const models = trimModelsDevCatalog(
+        {
+          zai: {
+            models: {
+              [id]: chat(id, { context: 64_000, output: 16_384 }, [
+                'text',
+                'image',
+                'video',
+              ]),
+            },
+          },
+        },
+        NOW,
+      ).models;
+      expect(models['glm-4.5v']).toEqual(entry);
+      expect(models['glm-4-5v']).toEqual(entry);
+    },
+  );
+
   it('never aliases over a key the projection committed itself', () => {
     // Both spellings are real keys with different endpoint limits here, so
     // each keeps its own numbers instead of one aliasing over the other.

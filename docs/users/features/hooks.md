@@ -559,14 +559,14 @@ Hook output supports three categories of fields:
 
 - `hookSpecificOutput.permissionDecision`: "allow", "deny", or "ask" (REQUIRED)
 - `hookSpecificOutput.permissionDecisionReason`: explanation for the decision (REQUIRED)
-- `hookSpecificOutput.updatedInput`: modified tool input parameters to use instead of original
+- `hookSpecificOutput.updatedInput`: an object that replaces the tool's whole input (see [Replacing the tool input](#replacing-the-tool-input))
 - `hookSpecificOutput.additionalContext`: text appended, after a blank line, to this call's tool result that the model sees next (for a call made from a Code Mode `exec` script, to the `exec` call's result; see below). It is delivered whatever the decision: after the tool's own output when it runs, or after the error message when it is denied, stopped, or fails. `<` and `>` are escaped.
 
 The `permissionDecision` value controls whether the tool runs:
 
-- `"allow"` — run the tool without the usual approval prompt.
+- `"allow"` — let the call continue; the usual permission checks and approval prompt still apply.
 - `"deny"` — block the tool; it does not execute and an error is returned to the model.
-- `"ask"` — pause and ask the user to confirm the tool call in the TUI before it runs. Confirming runs the tool once; declining cancels it. In contexts that cannot prompt for confirmation — headless (`--prompt`) runs and background subagents — `"ask"` falls back to `"deny"`.
+- `"ask"` — pause and ask the user to confirm the tool call in the TUI before it runs. Confirming runs the tool once; declining cancels it. This confirmation takes the place of the usual approval prompt, and no permission rule, approval mode (including YOLO) or PermissionRequest hook approves the call instead; a PermissionRequest hook can still deny it, or replace its input, which the user then confirms. In contexts that cannot prompt for confirmation — headless (`--prompt`) runs and background subagents — `"ask"` falls back to `"deny"`.
 
 For `"ask"`, the TUI displays `permissionDecisionReason` as literal text rather than interpreting inline Markdown. This keeps formatting markers and link targets visible to the user.
 
@@ -579,6 +579,33 @@ The text a call's PreToolUse hooks add is cut to `tools.truncateToolOutputThresh
 The context is not delivered when the call is cancelled, or when the turn is cancelled before the tool results go back to the model, even if the tool itself completed.
 
 In Code Mode (`tools.codeModeOnly`), a call made from an `exec` script returns its result to the script, not to the model. Its PreToolUse and PostToolUseFailure context is appended to the `exec` call's tool result instead, after the `exec` call's own context, and the value the script receives is unchanged.
+
+##### Replacing the tool input
+
+`updatedInput` replaces the tool's entire input. It is not merged with the original: a field you leave out is removed, and the tool's own default for it applies. An empty object `{}` is a replacement too.
+
+```json
+{
+  "hookSpecificOutput": {
+    "hookEventName": "PreToolUse",
+    "updatedInput": { "file_path": "/workspace/notes/today.md" }
+  }
+}
+```
+
+- A call's PreToolUse hooks run once, after the tool is known to be enabled and callable but before its input is validated or checked against permissions. A replacement can therefore correct an input that would have been rejected. When several calls from one turn are scheduled together, as in the interactive terminal UI, every call's hooks run before any of them runs.
+- The replacement then goes through everything the original input would have: the tool's own validation, `permissions` rules, the approval mode, plan mode, and the approval prompt, which shows the replacement. `"allow"` does not let a replacement skip any of these.
+- The hook cannot change which tool runs, its call id or its working directory. The model's own tool call stays as it was in the conversation; the approval prompt, the tool, its result and the PostToolUse event use the replacement.
+- An `updatedInput` that is present but not a JSON object (`null`, an array, a string or a number) stops the call with an error; the original input is not used. When hooks run in parallel, they all receive the same input, the last replacement in configuration order wins, and an invalid replacement from any of them stops the call. Hooks that run sequentially each receive the previous replacement as `tool_input`.
+- The older `hookSpecificOutput.tool_input` field only changes the input passed to the next sequential hook; it never changes the input the tool runs with. Use `updatedInput` instead. When an output has both, `updatedInput` wins.
+- A shell command that a hook could still rewrite is not run in parallel with other tool calls.
+- If a skill registers a PreToolUse hook while other calls from the same turn are still waiting to run, those calls are not run, because their hooks ran without it; the model is told to call the tool again.
+- Changes the user makes in the approval prompt (for example, modifying the content in an editor) come after the hooks ran.
+- `updatedInput` from an async hook is ignored.
+- In ACP sessions, `"ask"` is still treated as `"deny"` even with a replacement.
+- Tool calls run through a managed tool runtime, and fixed-policy calls made by an orchestrator, do not support `updatedInput` yet. A replacement stops the call with an error instead of running either input.
+
+A PermissionRequest hook's `decision.updatedInput` is checked the same way: one that is not a JSON object stops the call, and a replacement is validated and checked against the permission rules before it runs, and the hook's `"allow"` counts only as the approval of that replacement. A replacement that needs a decision the hook cannot make, such as an answer from the user, goes to the approval prompt instead; in ACP sessions it is not run. In AUTO mode, a replacement is reviewed again before it runs.
 
 **Note**: While standard hook output fields like `decision` and `reason` are technically supported by the underlying class, the official interface expects the `hookSpecificOutput` with `permissionDecision` and `permissionDecisionReason`.
 
@@ -729,6 +756,8 @@ Web Shell provides the original composer text at its submission boundary. Realti
 
 On the ACP path, the initial legacy `prompt` is the request's text blocks joined with a space before resource, attachment, slash-command, or model-only expansion. It does not expose the complete expanded model input. `submitted_prompt` can equal that text, but comes only from the explicit declaration and preserves its original whitespace. On the core/headless path, legacy `prompt` represents the current model-bound text for the hook invocation. Neither field is a complete DLP inspection surface.
 
+In headless runs, an input that invokes a custom command or skill, including several stacked skills, is checked before the command expands. The hook runs once for that input, with `prompt` and `submitted_prompt` both set to the raw input, such as `/deploy staging`. A block stops the command before it runs: its `!{...}` shell commands do not run, a skill does not register its allowed tools or hooks, and no model request is made. When the input is allowed, its `additionalContext` is added once to the expanded prompt, and `UserPromptExpansion` still runs after the expansion. Hooks that the skill registers do not check the input that invoked it. Other slash commands, MCP prompts and saved workflows, and the interactive UI and ACP sessions, still run the hook on the expanded prompt.
+
 The following composer rules apply to the interactive TUI, not to ACP clients. Deferred input can retain the field when its provenance remains complete. A combined batch retains provenance only when every constituent item has it; edited, partially known, or otherwise ambiguous input omits the field. Prompt, command, and shell-history navigation or selected search matches, cross-restart stash restores, and conversation rewind restores also omit it because those paths can surface model-bound text without its original provenance. Consumers that require user-submitted text should treat absence as unavailable rather than falling back to `prompt`.
 
 After restored or provenance-unavailable model-bound input is cleared or submitted, the composer also clears its undo and redo history. This prevents undo from restoring expanded text after its marker or sidecar has been consumed.
@@ -796,7 +825,7 @@ recall both use the pre-hook prompt. They do not include
 - `reason`: human-readable explanation for the decision
 - `hookSpecificOutput.additionalContext`: additional context to append to the prompt (optional)
 
-When sent to the model, injected `additionalContext` is appended as its own message part wrapped in a reserved `<qwen:user-prompt-submit-context>...</qwen:user-prompt-submit-context>` tag, so it stays distinguishable from user-authored text in model history and session transcripts. Angle brackets in hook output are escaped before wrapping, so hook content cannot close or forge the tag. The session transcript also records the user's original prompt text separately; the interactive TUI and the ACP/export transcript-replay path display that original text rather than the injected context.
+When sent to the model, injected `additionalContext` is appended as its own message part wrapped in a reserved `<qwen:user-prompt-submit-context>...</qwen:user-prompt-submit-context>` tag, so it stays distinguishable from user-authored text in model history and session transcripts. Angle brackets in hook output are escaped before wrapping, so hook content cannot close or forge the tag. The session transcript also records the user's original prompt text separately; the interactive TUI and the ACP/export transcript-replay path display that original text rather than the injected context. If the sanitized payload is byte-identical to a block a hook already delivered earlier in the same session, it is not appended again, so a deterministic standing instruction reaches the model once rather than once per turn; this is unconditional with no opt-out, and any change to the payload re-injects it.
 
 **Note**: Since UserPromptSubmitOutput extends HookOutput, all standard fields are available but only additionalContext in hookSpecificOutput is specifically defined for this event.
 

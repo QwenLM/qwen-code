@@ -468,6 +468,40 @@ describe('WorkflowRunner', () => {
     }
   });
 
+  // The pinned-script host (the managed workflow child) runs only the bytes
+  // its pin examined: every nested resolution is refused — by name, through
+  // an alias, or through the global — whatever the lexical scan missed.
+  it('refuses every nested resolution for a launch that pinned its script', async () => {
+    const nested = savedWorkflow(
+      'audit',
+      '/saved/audit.js',
+      "return 'nested';",
+    );
+    for (const script of [
+      "return await workflow('audit');",
+      "const w = workflow; return await w('audit');",
+      "return await globalThis.workflow('audit');",
+    ]) {
+      const { config } = configWithRegistry();
+      stubStorage(config, await makeStorageRoot());
+      resolveSavedWorkflowScriptMock.mockReset();
+      resolveSavedWorkflowScriptMock.mockResolvedValue(nested);
+
+      const handle = await startRun(config, {
+        script,
+        dispatch: unused,
+        refuseNestedWorkflows: true,
+      });
+      const settlement = await handle.completion;
+
+      expect(settlement.ok).toBe(false);
+      expect(!settlement.ok && settlement.message).toContain(
+        'workflow(): nested workflow runs are unavailable here; this run executes only its pinned script.',
+      );
+      expect(resolveSavedWorkflowScriptMock).not.toHaveBeenCalled();
+    }
+  });
+
   it('leaves a malformed nested ref to the resolver under the restriction', async () => {
     const { config } = await storedConfig();
     resolveSavedWorkflowScriptMock.mockReset();
@@ -583,6 +617,17 @@ describe('WorkflowRunner', () => {
       controller.abort();
       releases.forEach((release) => release());
     }
+  });
+
+  it('hands the Workflow tool call id to the dispatch', async () => {
+    const { config } = configWithRegistry();
+    createProductionDispatchMock.mockReturnValue(async () => 'done');
+    const handle = await startRun(config, {
+      toolUseId: 'call_wf',
+      script: "return await agent('read');",
+    });
+    expect((await handle.completion).ok).toBe(true);
+    expect(createProductionDispatchMock.mock.calls[0]?.[6]).toBe('call_wf');
   });
 
   it('keeps an ordinary workflow on generic dispatch bounds despite review metadata', async () => {
@@ -2510,6 +2555,8 @@ describe('WorkflowRunner', () => {
       script: 'return budget.total',
       dispatch: unused,
     });
+
+    expect(registry.get(handle.runId)?.parentSessionId).toBe('runner-turn');
 
     await expect(handle.completion).resolves.toMatchObject({
       ok: true,

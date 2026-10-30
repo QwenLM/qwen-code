@@ -250,7 +250,11 @@ function summarizeTranscript(
   for (const record of records) {
     if (record.type === 'system' && record.subtype === 'ui_telemetry') {
       const payload = record.systemPayload as { uiEvent?: UiEvent } | undefined;
-      if (payload?.uiEvent) {
+      if (
+        payload?.uiEvent &&
+        payload.uiEvent['event.name'] !== 'request_lifecycle' &&
+        payload.uiEvent['event.name'] !== 'tool_lifecycle'
+      ) {
         telemetry.addEvent(payload.uiEvent);
         hasEvents = true;
       }

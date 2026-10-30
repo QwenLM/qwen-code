@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Regenerate `client/components/managed/generated/managed-agent-api.ts` from
-// the Managed Agent OpenAPI owned by packages/sdk-java/managed-agent-server:
+// the Managed Agent OpenAPI owned by packages/managed-agent-server:
 //
 //   npm run generate:managed-agent-api --workspace=@qwen-code/web-shell
 //
@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import openapiTS, { astToString } from 'openapi-typescript';
 
 const SPEC = new URL(
-  '../../sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json',
+  '../../managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json',
   import.meta.url,
 );
 export const OUTPUT = new URL(

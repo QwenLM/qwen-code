@@ -4,11 +4,21 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  MANAGED_SESSION_LIMITS,
+  ManagedSessionRecordError,
+} from '../utils/managed-session-format.js';
+export {
+  MANAGED_SESSION_LIMITS,
+  ManagedSessionRecordError,
+} from '../utils/managed-session-format.js';
+
 import { createHash } from 'node:crypto';
 import { parseBranchCheckpointPayload } from '../services/branch-points.js';
 import type { ChatRecord } from '../services/chatRecordingService.js';
 
 import { stripAnsiAndControl } from '../utils/textUtils.js';
+import { validateTranscriptRecord } from '../utils/transcript-records.js';
 
 export type ManagedSessionJsonValue =
   | null
@@ -26,6 +36,7 @@ export const MANAGED_SESSION_FORMAT_VERSION = 1;
 // created in between (H3 round-5 verification matrix), so the stamp
 // rises only when a change genuinely breaks an older reader mid-scan.
 export const MANAGED_SESSION_MINIMUM_READER = 'managed-session/1';
+export const MANAGED_SESSION_READER_CAPABILITY = 'managed-session/2';
 
 const MANAGED_SESSION_DOMAIN_RECORD_VERSION = 1;
 const MAX_ERROR_VALUE_LENGTH = 4096;
@@ -33,22 +44,6 @@ const MAX_ERROR_VALUE_LENGTH = 4096;
 export const MANAGED_SESSION_HEADER_SUBTYPE = 'managed_session_header_v1';
 export const MANAGED_SESSION_EVENT_SUBTYPE = 'managed_session_event_v1';
 export const MANAGED_SESSION_COMMIT_SUBTYPE = 'managed_session_commit_v1';
-
-export const MANAGED_SESSION_LIMITS = {
-  maxIdBytes: 512,
-  // Not frozen by the storage spec: a bound for free-form enum-adjacent fields
-  // such as `source` or `stopReason`, borrowed from its error-message cap.
-  maxTextBytes: 4096,
-  maxTimeMs: 8_640_000_000_000_000,
-  maxJsonDepth: 64,
-  maxHeaderBytes: 64 * 1024,
-  maxEventBytes: 1024 * 1024,
-  maxCommitMarkerBytes: 64 * 1024,
-  maxTransactionEvents: 256,
-  maxTransactionBytes: 8 * 1024 * 1024,
-  defaultReadEvents: 100,
-  maxReadEvents: 256,
-} as const;
 
 export const MANAGED_SESSION_EVENT_KINDS = [
   'input.accepted',
@@ -68,6 +63,9 @@ export const MANAGED_SESSION_EVENT_KINDS = [
   'domain.committed',
   'message.delta',
   'message.retracted',
+  'operation.replayed',
+  'hosted.batch.planned',
+  'hosted.cleanup',
 ] as const;
 
 export type ManagedSessionEventKind =
@@ -108,9 +106,11 @@ export const MANAGED_SESSION_DOMAINS = [
   'team_message',
   'team_plan',
   'session_message',
+  'session_command',
   'session_metadata',
   'file_history',
   'session_source',
+  'hosted_harness_release',
 ] as const;
 
 export type ManagedSessionDomain = (typeof MANAGED_SESSION_DOMAINS)[number];
@@ -122,7 +122,10 @@ export type ManagedSessionDomain = (typeof MANAGED_SESSION_DOMAINS)[number];
  */
 export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
   [
+    'tool_stage',
+    'config_install',
     'goal_state',
+    'todo_state',
     'session_metadata',
     'file_history',
     'session_source',
@@ -130,7 +133,156 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
     'mcp_operation',
     'hook_registration',
     'hook_execution',
+    'history_maintenance',
+    'schedule',
+    'automation_run',
+    'child_acceptance',
+    'channel_route',
+    'channel_delivery',
+    // H4d-b: produced by send_message and the control plane's relay.
+    'session_message',
+    // H4e-b1: a lead's team and its task board.
+    'team_state',
+    'team_task',
+    // H4e-b3: produced by member board tools and the control plane's relay.
+    'session_command',
+    // H3 (#13856): the Monitor runtime, enabled after its physical
+    // acceptance pass; the hold semantics land with the gate.
+    'monitor_run',
   ];
+
+/**
+ * The Schedule target modes a Session may actually commit today (H6b).
+ * `schedule` and `automation_run` are enabled as domains, but a definition
+ * names the mode its runs execute in, and the authority admits a definition
+ * revision only for a mode listed here — every revision, not only the
+ * first, because the mode is not a fixed key of the chain; runs bind to a
+ * committed definition, so they are gated with it. `per_run` joins when
+ * the H4 child Session pipeline carries it. The Java store validates both
+ * bodies since H6a and deploys before any writer, keeping the server-first
+ * order.
+ */
+export const MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES = Object.freeze([
+  'persistent',
+] as const);
+
+/**
+ * The Schedule mode gate. This stands beside {@link
+ * assertManagedSessionDomainEnabled} for the two automation domains:
+ * enablement is decided per target mode, and the definition names the mode.
+ */
+export function assertManagedSessionScheduleSessionModeEnabled(
+  sessionMode: string,
+): void {
+  if (
+    !(
+      MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES as readonly string[]
+    ).includes(sessionMode)
+  ) {
+    throw new ManagedSessionModeGateError(sessionMode);
+  }
+}
+
+/**
+ * The `child_run` body kinds a caller may actually submit today.
+ * `child_run` carries three capabilities with independent enablement gates
+ * — H3's background Shell, H4's child agent and H4's workflow — so it never
+ * joins the plain enabled list as a whole. H4b admitted `child_agent`; the
+ * shell kind joined once H3's hold semantics and physical acceptance landed
+ * (#13856); the workflow kind joined with its runtime slice (#13803). The
+ * kind gate fires on every `child_run` revision commitment, so a kind joins
+ * this list only together with the runtime whose verbs commit its later
+ * revisions (relay, cascade, funnel). The Java store validates every kind
+ * ahead of any writer, keeping the server-first order H1/H2 used.
+ */
+export const MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS = Object.freeze([
+  'child_agent',
+  'shell',
+  'workflow',
+] as const);
+
+/**
+ * The input sources a child run's completion notification carries — the
+ * child Session kinds of the gate above. A background `shell` run is not a
+ * child Session and never posts an acceptance notification, so it stays
+ * off this list. Consumers spread this constant instead of re-listing
+ * `'child_agent', 'workflow'` by hand.
+ */
+export const CHILD_NOTIFICATION_SOURCES = Object.freeze([
+  'child_agent',
+  'workflow',
+] as const);
+
+/** True when an input's source names one of the child Session kinds. */
+export function isChildNotificationSource(source: unknown): boolean {
+  return (
+    typeof source === 'string' &&
+    (CHILD_NOTIFICATION_SOURCES as readonly string[]).includes(source)
+  );
+}
+export function assertManagedSessionChildRunKindEnabled(kind: string): void {
+  if (
+    !(MANAGED_SESSION_ENABLED_CHILD_RUN_KINDS as readonly string[]).includes(
+      kind,
+    )
+  ) {
+    throw new ManagedSessionRecordError(
+      `domain child_run kind ${kind} is registered but not enabled for submission.`,
+    );
+  }
+}
+
+/**
+ * Whether a child Session run may continue a completed one (H4d). Both
+ * languages validate continuations and the rules they obey; H4d-b's relay
+ * revives a continuation with its chain's history, so submission is open.
+ */
+export const MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED = true;
+
+/**
+ * The continuation gate. This stands beside {@link
+ * assertManagedSessionChildRunKindEnabled}: a continuation is a `child_run`
+ * of an enabled kind, so the kind gate alone would admit it.
+ */
+export function assertManagedSessionChildContinuationEnabled(): void {
+  if (!MANAGED_SESSION_CHILD_CONTINUATIONS_ENABLED) {
+    throw new ManagedSessionRecordError(
+      'child_run continuations are registered but not enabled for submission.',
+    );
+  }
+}
+
+/**
+ * The channel adapters whose routes a Session may actually commit today
+ * (H5b/H5c). `channel_route` and `channel_delivery` are enabled as domains,
+ * but a route's committed policy names the adapter that produced it, and
+ * the authority admits a first route revision only for an adapter listed
+ * here; deliveries bind to a committed route, so they are gated with it.
+ * The Java store validates both bodies since H5a and deploys before any
+ * writer, keeping the server-first order H1/H2 used.
+ */
+export const MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS = Object.freeze([
+  'email',
+] as const);
+
+/**
+ * The channel adapter gate. This stands beside {@link
+ * assertManagedSessionDomainEnabled} for the two channel domains: enablement
+ * is decided per adapter, and the route policy names the adapter.
+ */
+export function assertManagedSessionChannelAdapterEnabled(
+  adapter: string,
+): void {
+  if (
+    !(MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS as readonly string[]).includes(
+      adapter,
+    )
+  ) {
+    throw new ManagedSessionRecordError(
+      `channel adapter ${adapter} is not enabled for submission.`,
+    );
+  }
+}
 
 /**
  * The enabled domains whose records commit through the envelope path
@@ -140,7 +292,14 @@ export const MANAGED_SESSION_ENABLED_DOMAINS: readonly ManagedSessionDomain[] =
  * list; the bodies module refuses to load over a name left here.
  */
 export const MANAGED_SESSION_ENVELOPE_DOMAINS: readonly ManagedSessionDomain[] =
-  ['goal_state', 'session_metadata', 'file_history', 'session_source'];
+  [
+    'config_install',
+    'goal_state',
+    'todo_state',
+    'session_metadata',
+    'file_history',
+    'session_source',
+  ];
 
 export function assertManagedSessionDomainEnabled(
   domain: ManagedSessionDomain,
@@ -257,12 +416,60 @@ export interface ManagedSessionCommitMarker {
   readonly previousCommitDigest: string | null;
 }
 
-export class ManagedSessionRecordError extends Error {
-  readonly code: string = 'managed_session_invalid_record';
+/**
+ * The writer died on an earlier append: nothing new will ever commit, so
+ * callers must not read this as a retriable or a shape conflict.
+ */
+export class ManagedSessionWritesStoppedError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_writes_stopped';
+
+  constructor(cause: Error) {
+    super(
+      `session log writes stopped after an earlier failure: ${cause.message}`,
+    );
+    this.name = 'ManagedSessionWritesStoppedError';
+  }
+}
+
+/**
+ * An append the journal could not observe: the transaction may or may not have
+ * committed. A journal that can prove the answer from its durable head keeps
+ * the attempt and answers `settleAppend`; until then the authority must not
+ * latch the log dead, because a lapsed writer lease is re-acquirable.
+ */
+export class ManagedSessionAppendUnsettledError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_append_unsettled';
+
+  constructor(readonly failure: Error) {
+    super(`session log append outcome is unknown: ${failure.message}`);
+    this.name = 'ManagedSessionAppendUnsettledError';
+  }
+}
+
+/**
+ * Settlement proved another writer owns this append position. Unlike an
+ * unknown outcome, this fence is permanent: the Session needs a takeover.
+ * It is typed so the Hosted routes classify it as a store-side fence rather
+ * than as a request-shape refusal.
+ */
+export class ManagedSessionJournalFencedError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_journal_fenced';
 
   constructor(message: string) {
     super(message);
-    this.name = 'ManagedSessionRecordError';
+    this.name = 'ManagedSessionJournalFencedError';
+  }
+}
+
+/** A target mode the mode gate has not enabled for submission. */
+export class ManagedSessionModeGateError extends ManagedSessionRecordError {
+  override readonly code: string = 'managed_session_mode_disabled';
+
+  constructor(sessionMode: string) {
+    super(
+      `schedule session mode ${sessionMode} is not enabled for submission.`,
+    );
+    this.name = 'ManagedSessionModeGateError';
   }
 }
 
@@ -270,7 +477,7 @@ function fail(message: string): never {
   throw new ManagedSessionRecordError(message);
 }
 
-function safeErrorValue(value: string): string {
+export function safeErrorValue(value: string): string {
   return stripAnsiAndControl(value).slice(0, MAX_ERROR_VALUE_LENGTH);
 }
 
@@ -731,7 +938,9 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         inputCheckpointRef: 'refOrNull',
         state: 'text',
         usageRef: 'refOrNull',
+        recoveryRef: 'ref',
       },
+      optional: ['recoveryRef'],
     },
     'message.committed': {
       fields: {
@@ -769,7 +978,17 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         messageId: 'id',
         turnId: 'id',
         fromSequence: 'sequence',
+        sourceBootId: 'id',
+        sourceEventEpoch: 'id',
+        throughSequence: 'sequence',
       },
+      optional: ['sourceBootId', 'sourceEventEpoch', 'throughSequence'],
+    },
+    'hosted.batch.planned': {
+      fields: { batchId: 'id', planRevision: 'sequence', planRef: 'ref' },
+    },
+    'hosted.cleanup': {
+      fields: { cleanupId: 'id', descriptorRef: 'ref', state: 'text' },
     },
     'action.changed': {
       fields: {
@@ -853,6 +1072,14 @@ const EVENT_SCHEMAS: Readonly<Record<ManagedSessionEventKind, PayloadSchema>> =
         recordRef: 'ref',
       },
     },
+    'operation.replayed': {
+      fields: {
+        domain: 'text',
+        recordId: 'id',
+        revision: 'sequence',
+        recordRef: 'ref',
+      },
+    },
   };
 
 /**
@@ -870,6 +1097,8 @@ const EVENT_ACTORS: Readonly<
   'tool.intent': ['harness'],
   'message.delta': ['harness'],
   'message.retracted': ['harness'],
+  'hosted.batch.planned': ['harness'],
+  'hosted.cleanup': ['harness'],
   'action.changed': ['harness', 'trusted_entry'],
   'tool.receipt': ['trusted_entry'],
   'checkpoint.committed': ['harness'],
@@ -879,6 +1108,7 @@ const EVENT_ACTORS: Readonly<
   'config.bound': ['trusted_entry'],
   'lifecycle.changed': ['trusted_entry'],
   'domain.committed': ['trusted_entry'],
+  'operation.replayed': ['trusted_entry'],
 };
 
 const ACTIVATION_SUBJECT_KINDS: Readonly<
@@ -892,6 +1122,8 @@ const ACTIVATION_SUBJECT_KINDS: Readonly<
   'tool.intent': true,
   'message.delta': true,
   'message.retracted': true,
+  'hosted.batch.planned': true,
+  'hosted.cleanup': true,
   'action.changed': false,
   'tool.receipt': false,
   'checkpoint.committed': true,
@@ -901,6 +1133,7 @@ const ACTIVATION_SUBJECT_KINDS: Readonly<
   'config.bound': false,
   'lifecycle.changed': false,
   'domain.committed': false,
+  'operation.replayed': false,
 };
 
 function assertField(
@@ -1054,6 +1287,59 @@ function assertPayloadRules(
       if (state === 'started' && payload['usageRef'] !== null) {
         fail(`${at}.usageRef must be null while the attempt is started.`);
       }
+      if (Object.hasOwn(payload, 'recoveryRef')) {
+        const ref = payload[
+          'recoveryRef'
+        ] as unknown as ManagedSessionDurableRef;
+        if (ref.kind !== 'hosted-model-request' || ref.schemaVersion !== 1) {
+          fail(`${at}.recoveryRef must be a hosted-model-request/1.`);
+        }
+      }
+      return;
+    }
+    case 'hosted.batch.planned': {
+      if ((payload['planRevision'] as number) < 1) {
+        fail(`${at}.planRevision must start at 1.`);
+      }
+      const ref = payload['planRef'] as unknown as ManagedSessionDurableRef;
+      if (
+        ref.kind !== 'hosted-approval-continuation' ||
+        ref.schemaVersion !== 1
+      ) {
+        fail(`${at}.planRef must be a hosted-approval-continuation/1.`);
+      }
+      return;
+    }
+    case 'hosted.cleanup': {
+      assertEnum(
+        payload['state'],
+        ['owed', 'confirmed'] as const,
+        `${at}.state`,
+      );
+      const ref = payload[
+        'descriptorRef'
+      ] as unknown as ManagedSessionDurableRef;
+      if (ref.kind !== 'hosted-turn-cleanup' || ref.schemaVersion !== 1) {
+        fail(`${at}.descriptorRef must be a hosted-turn-cleanup/1.`);
+      }
+      return;
+    }
+    case 'message.retracted': {
+      const fields = ['sourceBootId', 'sourceEventEpoch', 'throughSequence'];
+      const count = fields.filter((name) =>
+        Object.hasOwn(payload, name),
+      ).length;
+      if (count !== 0 && count !== fields.length) {
+        fail(`${at} bounded source fields must be present together.`);
+      }
+      if (
+        (payload['fromSequence'] as number) < 1 ||
+        (count > 0 &&
+          (payload['throughSequence'] as number) <
+            (payload['fromSequence'] as number))
+      ) {
+        fail(`${at} retraction range is invalid.`);
+      }
       return;
     }
     case 'action.changed': {
@@ -1159,10 +1445,28 @@ function assertPayloadRules(
       }
       return;
     }
+    case 'operation.replayed': {
+      const domain = assertEnum(
+        payload['domain'],
+        MANAGED_SESSION_DOMAINS,
+        `${at}.domain`,
+      );
+      const recordRef = payload[
+        'recordRef'
+      ] as unknown as ManagedSessionDurableRef;
+      if (recordRef.kind !== `managed-${domain}`) {
+        fail(`${at}.recordRef.kind must be managed-${domain}.`);
+      }
+      if (recordRef.schemaVersion !== MANAGED_SESSION_DOMAIN_RECORD_VERSION) {
+        fail(
+          `${at}.recordRef.schemaVersion must be ${MANAGED_SESSION_DOMAIN_RECORD_VERSION}.`,
+        );
+      }
+      return;
+    }
     case 'input.accepted':
     case 'tool.intent':
     case 'message.delta':
-    case 'message.retracted':
     case 'tool.receipt':
     case 'cancel.requested':
     case 'turn.settled':
@@ -1259,6 +1563,119 @@ export function parseManagedSessionEvent(value: unknown): ManagedSessionEvent {
     ...(subject === undefined ? {} : { subject }),
     payload,
   };
+}
+
+/**
+ * The refs an event carries at its schema-declared positions. Anything that
+ * merely has the ref field names without being a declared ref position — a
+ * free-form `json` payload field, for example — is not a dependency.
+ */
+export function managedSessionEventRefs(
+  event: ManagedSessionEvent,
+): ManagedSessionDurableRef[] {
+  const schema = EVENT_SCHEMAS[event.kind];
+  const refs: ManagedSessionDurableRef[] = [];
+  for (const [name, kind] of Object.entries(schema.fields)) {
+    if (kind !== 'ref' && kind !== 'refOrNull' && kind !== 'refs') continue;
+    const value = event.payload[name];
+    if (value === null || value === undefined) continue;
+    if (kind === 'refs') {
+      (value as ManagedSessionJsonValue[]).forEach((item, index) =>
+        refs.push(
+          assertManagedSessionDurableRef(
+            item,
+            `${event.kind}.${name}[${index}]`,
+          ),
+        ),
+      );
+    } else {
+      refs.push(assertManagedSessionDurableRef(value, `${event.kind}.${name}`));
+    }
+  }
+  return refs;
+}
+
+/**
+ * Domains whose body is a whole reader-facing record. The rest carry their own
+ * shape and are not something a reader replays.
+ */
+const RECORD_CARRYING_DOMAINS: ReadonlySet<unknown> = new Set([
+  'goal_state',
+  'file_history',
+  'session_source',
+]);
+
+/** Whether a domain's envelope carries a whole reader-facing record. */
+export function managedSessionDomainCarriesRecord(domain: unknown): boolean {
+  return RECORD_CARRYING_DOMAINS.has(domain);
+}
+
+/**
+ * Where a whole reader-facing record lives, for the channels that carry one.
+ *
+ * A domain body is the authority's envelope wrapping the content, so the record
+ * sits under its own key there, unlike the event channels whose body is the
+ * record itself.
+ *
+ * This list is deliberately wider than the hot `project()`: a reader
+ * rebuilding the whole history needs turn results, compaction summaries and
+ * record-carrying domains materialized, while a live message projection
+ * presents them as events. The writer fences this same list at commit time, so
+ * a channel added here is validated on both sides at once.
+ */
+export function managedSessionReaderFacingBody(event: ManagedSessionEvent):
+  | {
+      readonly ref: ManagedSessionEvent['payload'][string];
+      readonly inDomainEnvelope: boolean;
+    }
+  | undefined {
+  switch (event.kind) {
+    case 'message.committed':
+      return { ref: event.payload['contentRef'], inDomainEnvelope: false };
+    case 'turn.settled':
+      return { ref: event.payload['resultRef'], inDomainEnvelope: false };
+    case 'context.compacted':
+      return { ref: event.payload['summaryRef'], inDomainEnvelope: false };
+    case 'domain.committed':
+      return managedSessionDomainCarriesRecord(event.payload['domain'])
+        ? { ref: event.payload['recordRef'], inDomainEnvelope: true }
+        : undefined;
+    default:
+      return undefined;
+  }
+}
+
+/**
+ * The acceptance predicate the writer fence and the cold reader share, so the
+ * two cannot drift: a body the writer commits is a body the reader replays.
+ * Returns the validated record, or the refusal reason for the caller to wrap
+ * in its own error context.
+ */
+export function validateManagedReaderFacingRecord(
+  value: unknown,
+  sessionId: string,
+): { readonly record: ChatRecord } | { readonly error: string } {
+  const { record, diagnostics } = validateTranscriptRecord(value);
+  const candidate = record as Partial<ChatRecord> | undefined;
+  if (record !== undefined && record.sessionId !== sessionId) {
+    return {
+      error: `it belongs to session ${safeErrorValue(record.sessionId)}, not ${safeErrorValue(sessionId)}.`,
+    };
+  }
+  if (
+    record === undefined ||
+    typeof candidate?.cwd !== 'string' ||
+    typeof candidate?.version !== 'string' ||
+    typeof candidate?.timestamp !== 'string' ||
+    diagnostics.length > 0
+  ) {
+    return {
+      error:
+        diagnostics.map((entry) => entry.message).join('; ') ||
+        'missing sessionId/cwd/version/timestamp',
+    };
+  }
+  return { record: candidate as ChatRecord };
 }
 
 /**
@@ -1363,7 +1780,7 @@ export function parseManagedSessionHeader(
   const minimumReader = record['minimumReader'];
   const requiredReaderVersion = managedSessionReaderVersion(minimumReader);
   const currentReaderVersion = managedSessionReaderVersion(
-    MANAGED_SESSION_MINIMUM_READER,
+    MANAGED_SESSION_READER_CAPABILITY,
   );
   if (
     requiredReaderVersion === null ||
@@ -1507,6 +1924,19 @@ export function managedSessionEventsDigest(
     return fail('transaction identity exceeds the maximum encoded size.');
   }
   return createHash('sha256').update(encoded).digest('hex');
+}
+
+/**
+ * SHA-256 over the canonical JSON of one JSON value: the canonical form
+ * `managedSessionEventsDigest` applies to an event list, for a committed
+ * body that is not a journal event (the public event row a `public_event`
+ * envelope binds).
+ */
+export function managedSessionJsonDigest(value: unknown): string {
+  assertJsonValue(value, 'value', new Set<object>(), 0);
+  return createHash('sha256')
+    .update(canonicalManagedSessionJson(value))
+    .digest('hex');
 }
 
 function canonicalManagedSessionJson(value: ManagedSessionJsonValue): string {

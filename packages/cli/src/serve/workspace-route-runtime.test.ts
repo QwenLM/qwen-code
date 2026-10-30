@@ -29,6 +29,7 @@ import {
   resolveWorkspaceRuntimeWithLiveCompatibilityFromParam,
 } from './workspace-route-runtime.js';
 import { createWorkspaceRuntimeSessionService } from './workspace-runtime-storage.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 function fakeReq(cwd?: unknown): Request {
   return { query: cwd !== undefined ? { cwd } : {} } as Request;
@@ -622,7 +623,7 @@ describe('resolveSessionManagedGitCwd', () => {
     }
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'reports an unsearchable client cwd as invalid_cwd, not a daemon error',
     async () => {
       // realpath needs +x only on the parents, so the path resolves and the

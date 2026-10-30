@@ -34,12 +34,18 @@ function render(node: ReactNode, language: 'en' | 'zh-CN' = 'en'): HTMLElement {
 
 describe('SystemMessage — prompt_cancelled marker', () => {
   it.each([
-    ['zh-CN', 10999, '你在 11 秒后取消了请求'],
-    ['zh-CN', 999, '你在 1 秒后取消了请求'],
-    ['zh-CN', 0, '你在 0 秒后取消了请求'],
-    ['zh-CN', 7069, '你在 8 秒后取消了请求'],
-    ['en', 10999, 'You cancelled this request after 11 seconds'],
-  ] as const)('renders elapsed seconds in %s', (language, elapsedMs, text) => {
+    ['zh-CN', 10999, '你在 11s 后取消了请求'],
+    ['zh-CN', 999, '你在 1s 后取消了请求'],
+    ['zh-CN', 0, '你在 0s 后取消了请求'],
+    ['zh-CN', 7069, '你在 8s 后取消了请求'],
+    ['zh-CN', 59999, '你在 1m 0s 后取消了请求'],
+    ['zh-CN', 60000, '你在 1m 0s 后取消了请求'],
+    ['zh-CN', 60001, '你在 1m 1s 后取消了请求'],
+    ['zh-CN', 397000, '你在 6m 37s 后取消了请求'],
+    ['en', 10999, 'You cancelled this request after 11s'],
+    ['en', 999, 'You cancelled this request after 1s'],
+    ['en', 397000, 'You cancelled this request after 6m 37s'],
+  ] as const)('renders elapsed duration in %s', (language, elapsedMs, text) => {
     const container = render(
       <SystemMessage
         content=""

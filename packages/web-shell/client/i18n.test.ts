@@ -12,6 +12,67 @@ const FOLLOWUP_SETTING_KEYS = [
 ] as const;
 
 describe('web-shell i18n catalog', () => {
+  it('explains missing rewind identities in both locales', () => {
+    expect(getTranslator('en')('rewind.identityUnavailable')).toContain(
+      'no prompt identity',
+    );
+    expect(getTranslator('zh-CN')('rewind.identityUnavailable')).toContain(
+      '身份',
+    );
+  });
+
+  it('pluralizes deletion counts and explains unsupported sessions in both locales', () => {
+    const en = getTranslator('en');
+    expect(en('messageDelete.selected', { count: 1 })).toBe('1 group selected');
+    expect(en('messageDelete.selected', { count: 2 })).toBe(
+      '2 groups selected',
+    );
+    expect(en('messageDelete.confirmTitle', { count: 1 })).toBe(
+      'Delete 1 message group?',
+    );
+    expect(en('messageDelete.confirmTitle', { count: 2 })).toBe(
+      'Delete 2 message groups?',
+    );
+    expect(en('messageDelete.unsupported')).toBe(
+      'Deleting saved messages is not supported for this session.',
+    );
+    expect(getTranslator('zh-CN')('messageDelete.unsupported')).toBe(
+      '此会话不支持删除已保存的消息。',
+    );
+    expect(getTranslator('zh-CN')('messageDelete.selected', { count: 2 })).toBe(
+      '已选 2 组',
+    );
+  });
+  it('keeps task cancellation and elapsed-time copy available in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    expect(en('managed.tasks.title')).toBe('Session tasks');
+    expect(zh('managed.tasks.title')).toBe('会话任务');
+    expect(en('managed.tasks.cancel.stopping')).toBe(
+      'Stop requested. Waiting for the task to end.',
+    );
+    expect(zh('managed.tasks.cancel.stopping')).toBe(
+      '停止请求已送达，等待任务结束。',
+    );
+    expect(en('managed.tasks.seconds', { seconds: 12 })).toBe('12 seconds');
+    expect(zh('managed.tasks.seconds', { seconds: 12 })).toBe('12 秒');
+  });
+
+  it('keeps filter translations available and pluralizes record counts', () => {
+    const en = getTranslator('en');
+    expect(en('trajectory.filter.search')).toBe('Search loaded records…');
+    expect(getTranslator('zh-CN')('trajectory.filter.search')).toBe(
+      '搜索已加载记录…',
+    );
+    expect(en('trajectory.filter.count', { count: 1 })).toBe('1 match');
+    expect(en('trajectory.filter.count', { count: 2 })).toBe('2 matches');
+    expect(en('trajectory.filter.truncated', { count: 1 })).toContain(
+      '(1 record)',
+    );
+    expect(en('trajectory.filter.truncated', { count: 2 })).toContain(
+      '(2 records)',
+    );
+  });
   it('keeps the follow-up suggestion setting copy overridden in EN', () => {
     const t = getTranslator('en');
     for (const key of FOLLOWUP_SETTING_KEYS) {

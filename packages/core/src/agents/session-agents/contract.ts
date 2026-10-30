@@ -24,7 +24,8 @@
  *
  * Cross-package copies: web-shell cannot import core, so the wire shapes the
  * browser reads (`QwenAgentMessageMeta`, `SessionAgentRunFrame`) are mirrored
- * in `packages/sdk-typescript/src/daemon/ui/types.ts`. Keep both in sync.
+ * in `packages/sdk-typescript/src/daemon/session-agents.ts`. Keep both in
+ * sync.
  */
 
 /** Programs an agent can run with. Mirrors `AgentProgram` in workspace-agents/types.ts. */

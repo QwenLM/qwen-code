@@ -178,12 +178,15 @@ function expectNoTools(request: Record<string, unknown>) {
 
 function assertCompleted(events: Event[], promptId: string, text: string) {
   const visible = events.filter((event) => event.promptId === promptId);
+  // Assistant text streams as durable message.delta chunks; the committed
+  // message then projects as managed_journal_event, not a second chunk.
   expect(visible.map((event) => event.type)).toEqual([
     'session_update',
+    'managed_journal_event',
     'turn_complete',
   ]);
   expect(visible[0].data.update?.content.text).toBe(text);
-  expect(visible[1].data.stopReason).toBe('end_turn');
+  expect(visible[2].data.stopReason).toBe('end_turn');
 }
 
 async function replay(after: number, epoch: string, last: number) {
@@ -262,18 +265,28 @@ describe(
       const visible = events.filter(
         (event) => event.promptId === body.promptId,
       );
+      // The answer streams as a durable message.delta chunk; the committed
+      // message carries the same messageId and projects as the journal
+      // record instead of a second chunk.
       expect(visible.map((event) => event.type)).toEqual([
         'session_update',
+        'managed_journal_event',
         'turn_complete',
       ]);
       expect(visible[0].data.update?.content.text).toBe('HOSTED_REPLY');
-      expect(visible[1].data.stopReason).toBe('end_turn');
+      expect(visible[2].data.stopReason).toBe('end_turn');
       const committed = (await store!.scan()).events;
       expect(events.map((event) => event.id)).toEqual(
         committed.map((event) => event.sequence),
       );
+      expect(
+        committed.find((event) => event.sequence === visible[0].id),
+      ).toMatchObject({
+        kind: 'message.delta',
+        payload: { role: 'assistant', text: 'HOSTED_REPLY' },
+      });
       const message = committed.find(
-        (event) => event.sequence === visible[0].id,
+        (event) => event.sequence === visible[1].id,
       )!;
       expect(message).toMatchObject({
         kind: 'message.committed',
@@ -293,7 +306,7 @@ describe(
         message: { role: 'model', parts: [{ text: 'HOSTED_REPLY' }] },
       });
       expect(
-        committed.find((event) => event.sequence === visible[1].id),
+        committed.find((event) => event.sequence === visible[2].id),
       ).toMatchObject({
         kind: 'turn.settled',
         payload: {
@@ -366,7 +379,7 @@ describe(
           {
             failed: {
               type: 'turn_error',
-              data: { code: 'hosted_turn_failed' },
+              data: { code: 'model_request_failed' },
             },
             cancelled: {
               type: 'turn_complete',
@@ -554,13 +567,14 @@ describe(
     it("keeps the caller's HOME, QWEN_HOME and environment out of the child", async () => {
       vi.stubEnv('QWEN_HOME', 'caller-qwen-home');
       vi.stubEnv('HOSTED_CALLER_ONLY', 'leaked');
+      vi.stubEnv('QWEN_CODE_MODELS_DEV_REFRESH', 'on');
       try {
         cli = new HostedHarnessProcess();
         await expect(
           cli.start('http://127.0.0.1:9/v1', {
             args: [
               '-e',
-              'const e = process.env; process.stdout.write(JSON.stringify([e.HOME, e.USERPROFILE, e.QWEN_HOME, e.HOSTED_CALLER_ONLY]))',
+              'const e = process.env; process.stdout.write(JSON.stringify([e.HOME, e.USERPROFILE, e.QWEN_HOME, e.HOSTED_CALLER_ONLY, e.QWEN_CODE_MODELS_DEV_REFRESH]))',
             ],
           }),
         ).rejects.toThrow('Hosted CLI exited');
@@ -574,6 +588,7 @@ describe(
         cli.root,
         path.join(cli.root, '.qwen'),
         null,
+        'off',
       ]);
     });
 

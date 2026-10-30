@@ -610,6 +610,11 @@ jobs:
           git worktree prune -v || true
           echo "stale agent state cleaned"
 
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout repo'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -1322,6 +1327,11 @@ jobs:
             rm -rf .qwen/tmp/review-pr-* 2>/dev/null || true
           fi
           git worktree prune -v || true
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout PR merge ref'
         if: "steps.pr.outputs.decision == 'run'"
@@ -2223,12 +2233,17 @@ jobs:
     #                                (≤~345s)
     #   resolver/tools, checkout,
     #   pin, upload, cleanup         ~5m
+    #   java toolchain + Maven repo
+    #   + sibling modules            ≤ ~20m, and only when the diff touches
+    #                                a Java module. curl --max-time caps
+    #                                each download; `timeout 300` caps each
+    #                                mvn install
     #   ------------------------------------
-    #   worst case                   ~180m  ⇒ 190 leaves 10m of headroom.
+    #   worst case                   ~200m  ⇒ 210 leaves 10m of headroom.
     #
     # Cost of the raise, stated so it is a decision and not a surprise: a
-    # verify run now occupies one ECS slot for up to ~3h instead of 1h.
-    timeout-minutes: 190
+    # verify run now occupies one ECS slot for up to ~3.5h instead of 1h.
+    timeout-minutes: 210
     runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
     # The job checks out and executes PR code. Run the steps in a container so
     # package scripts/builds cannot persist changes in the self-hosted runner's
@@ -2249,6 +2264,13 @@ jobs:
       verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
       failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
       agent_verdict: '${{ steps.run.outputs.agent_verdict }}'
+      # Report-footer attribution: the configured model, the runner's CLI
+      # version, and the content hash of the base-pinned skill that ran.
+      # Empty when the run step never reached its output writes; the
+      # publisher then keeps its generic signature.
+      model: '${{ steps.run.outputs.model }}'
+      cli_version: '${{ steps.run.outputs.cli_version }}'
+      skill_hash: '${{ steps.run.outputs.skill_hash }}'
       # Deterministic flakiness gate (#9125): `flaky` demotes the published
       # headline; every other value is informational. The summary is
       # gate-authored fixed text plus counters — never PR-controlled strings.
@@ -2348,6 +2370,13 @@ jobs:
             echo "verdict=n/a" >> "$GITHUB_OUTPUT"
             echo "decision=na" >> "$GITHUB_OUTPUT"
             exit 0
+          fi
+          # Same full list, same `grep <<<` (a pipe would SIGPIPE under
+          # pipefail). Only the Maven package trees pay for a JDK; the broader
+          # sdk-java.yml path list is mostly core/CLI, and those diffs still
+          # cannot run the database-backed Java ITs this lane does not host.
+          if grep -qE '^packages/(sdk-java|managed-agent-server)/' <<< "$files"; then
+            echo "java=true" >> "$GITHUB_OUTPUT"
           fi
           # Snapshot PR metadata for the token-free agent: the agent env
           # carries no GitHub credential, so everything it may cite (title,
@@ -2636,6 +2665,50 @@ jobs:
             echo "::warning::Chromium system deps install failed; the verification agent will produce a text-only report."
           fi
 
+      # Before checkout, as root, with no PR tree on disk — same supply-chain
+      # surface as the runner-tools step above. /opt is container-local and
+      # root-owned, so the node user cannot plant the ready marker, and a
+      # fresh container cannot inherit one. Best-effort: a failed download
+      # leaves Java under Not covered instead of failing the verification.
+      - name: 'Install Java toolchain'
+        if: "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true'"
+        env:
+          TEMURIN_VERSION: '21.0.12.1+1'
+          TEMURIN_SHA256: 'ce79869e1307ed8ee1e2baa86a412b1eb5b75d10a01006d788a6f968bcfaee94'
+          TEMURIN_URL: 'https://github.com/adoptium/temurin21-binaries/releases/download/jdk-21.0.12.1%2B1/OpenJDK21U-jdk_x64_linux_hotspot_21.0.12.1_1.tar.gz'
+          MAVEN_VERSION: '3.9.11'
+          MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
+        run: |-
+          set -uo pipefail
+          prefix=/opt/verify-java
+          rm -rf -- "$prefix"
+          work="$(mktemp -d)"
+          maven_url="https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/jdk.tar.gz" "$TEMURIN_URL" \
+            && echo "${TEMURIN_SHA256}  $work/jdk.tar.gz" | sha256sum --check --status \
+            && curl -fsSL --retry 3 --retry-delay 2 --max-time 300 -o "$work/maven.tar.gz" "$maven_url" \
+            && echo "${MAVEN_SHA512}  $work/maven.tar.gz" | sha512sum --check --status \
+            && tar -xzf "$work/jdk.tar.gz" -C "$work" \
+            && tar -xzf "$work/maven.tar.gz" -C "$work" \
+            && jdk_dir="$(find "$work" -mindepth 1 -maxdepth 1 -type d -name 'jdk-*' -print -quit)" \
+            && [ -n "$jdk_dir" ] \
+            && [ -d "$work/apache-maven-${MAVEN_VERSION}" ] \
+            && mkdir -p "$prefix" \
+            && mv -- "$jdk_dir" "$prefix/jdk" \
+            && mv -- "$work/apache-maven-${MAVEN_VERSION}" "$prefix/maven" \
+            && chmod -R a+rX "$prefix" \
+            && export JAVA_HOME="$prefix/jdk" \
+            && export PATH="$JAVA_HOME/bin:$prefix/maven/bin:$PATH" \
+            && "$prefix/jdk/bin/java" -version \
+            && "$prefix/maven/bin/mvn" -version \
+            && printf 'ok\n' > "$prefix/ready"; then
+            echo "Java toolchain ready at ${prefix} (Temurin ${TEMURIN_VERSION}, Maven ${MAVEN_VERSION})."
+          else
+            rm -rf -- "$prefix"
+            echo "::warning::Java toolchain install failed; Java changes will be reported as not covered."
+          fi
+          rm -rf -- "$work"
+
       # This container mounts the persistent runner workspace, and a previous
       # run EXECUTED PR code as the node user with write access to .git —
       # hooks or config planted then would fire during the checkout below (as
@@ -2838,6 +2911,11 @@ jobs:
           fi
           git worktree prune -v || true
           echo "stale agent state cleaned"
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout PR merge ref'
         if: "steps.pr.outputs.decision == 'run'"
@@ -3133,6 +3211,23 @@ jobs:
       - name: 'Report pnpm store hit'
         if: "steps.pr.outputs.decision == 'run'"
         run: 'echo "pnpm store: hit=${{ steps.pnpm-store.outputs.cache-hit }} key=${{ steps.pnpm-store.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"'
+
+      # restore-only, before any PR code runs. The producer is
+      # verify-maven-repo.yml on main; a save step here would let a PR write
+      # the shared cache. A cache outage degrades to a cold repo.
+      - name: 'Clear stale verify Maven repo'
+        if: "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true'"
+        run: 'rm -rf "$RUNNER_TEMP/verify-maven-repo"'
+
+      - name: 'Restore verify Maven repo'
+        id: 'maven-repo'
+        if: "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true'"
+        continue-on-error: true
+        uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
+        with:
+          path: '${{ runner.temp }}/verify-maven-repo'
+          key: "verify-maven-repo-${{ hashFiles('packages/sdk-java/*/pom.xml', 'packages/managed-agent-server/pom.xml') }}"
+          restore-keys: 'verify-maven-repo-'
 
       - name: 'Install and build PR app'
         id: 'prepare'
@@ -3959,6 +4054,58 @@ jobs:
           [ "$ncoll" -gt 0 ] && pass_note=" (${ncoll} not collected by the runner — see the log)"
           finish pass "${total} changed test file(s) x ${rounds_done} identical rounds, no divergence${pass_note}"
 
+      # After the TypeScript build, as node, credentials already stripped.
+      # Always exits 0: a sibling-install failure must not turn a TypeScript
+      # verification into fail. The agent reads the exit codes from the log.
+      - name: 'Install Java modules'
+        if: "steps.pr.outputs.decision == 'run' && steps.pr.outputs.java == 'true' && steps.prepare.outputs.verdict == ''"
+        env:
+          GITHUB_TOKEN: ''
+          GH_TOKEN: ''
+        run: |-
+          set -uo pipefail
+          log="${RUNNER_TEMP:?}/verify-context/java-prepare.log"
+          mkdir -p "${RUNNER_TEMP:?}/verify-context"
+          : > "$log"
+          echo "verify Maven repo: hit=${{ steps.maven-repo.outputs.cache-hit }} key=${{ steps.maven-repo.outputs.cache-matched-key }}" >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -f /opt/verify-java/ready ]; then
+            echo "::warning::Java toolchain is not ready; skipping sibling module install."
+            printf 'toolchain=missing\n' >> "$log"
+            exit 0
+          fi
+          repo="${RUNNER_TEMP:?}/verify-maven-repo"
+          mkdir -p "$repo"
+          if ! chown -R node:node "$repo"; then
+            echo "::warning::could not hand the Maven repo to the build user; sibling install skipped."
+            printf 'toolchain=chown-failed\n' >> "$log"
+            exit 0
+          fi
+          unset ACTIONS_RUNTIME_TOKEN ACTIONS_RUNTIME_URL ACTIONS_CACHE_URL
+          JAVA_HOME=/opt/verify-java/jdk
+          PATH="/opt/verify-java/jdk/bin:/opt/verify-java/maven/bin:${PATH}"
+          run_mvn() {
+            local pom="$1"
+            shift
+            printf '\n$ mvn -f %s %s\n' "$pom" "$*"
+            timeout -k 30 300 runuser -u node -- env -u GITHUB_OUTPUT -u GITHUB_STATE -u GITHUB_ENV -u GITHUB_PATH -u GITHUB_STEP_SUMMARY \
+              -u ACTIONS_RUNTIME_TOKEN -u ACTIONS_RUNTIME_URL -u ACTIONS_CACHE_URL \
+              -u GITHUB_TOKEN -u GH_TOKEN \
+              HOME=/home/node \
+              USER=node \
+              JAVA_HOME="$JAVA_HOME" \
+              PATH="$PATH" \
+              LANG="${LANG:-C.UTF-8}" \
+              mvn --batch-mode --no-transfer-progress \
+                -Dmaven.repo.local="$repo" \
+                -f "$pom" "$@"
+          }
+          set +e
+          {
+            run_mvn packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+            qwencode_status=$?
+          } >> "$log" 2>&1
+          printf 'qwencode=%s\n' "$qwencode_status" >> "$log"
+
       - name: 'Install evidence browser'
         if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
         env:
@@ -4084,6 +4231,22 @@ jobs:
           rm -rf "$STAGE_DIR"
           chown -R root:root .qwen
           chmod -R a-w,a+rX .qwen
+
+          # Attribution for the published report's footer, collected HERE —
+          # after the re-pin above and BEFORE the agent starts. The workspace
+          # parent directory stays node-owned, so during the agent era PR
+          # code can replace the whole .qwen directory (mv + mkdir) without
+          # touching the root-owned files inside it; a hash taken after the
+          # agent could then name instructions the round never loaded. The
+          # model is the lane's own config and the CLI is the root-owned
+          # global install. --no-filters matters even here: prepare left
+          # .git node-owned, and a planted clean filter would otherwise
+          # choose what gets hashed — or run as root. Best-effort: an empty
+          # value makes the publisher keep its generic signature instead of
+          # posting a half-attributed footer. The timeout keeps a planted
+          # shim from hanging the step.
+          CLI_VERSION="$(timeout 30s qwen --version 2>/dev/null | head -1 | tr -d '[:space:]' | cut -c1-64 || true)"
+          SKILL_HASH="$(timeout 30s git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md 2>/dev/null | cut -c1-12 || true)"
 
           # 3. Fake artifact dirs planted during the build: a zeroed
           #    timestamp sorts AHEAD of the agent's real dir at collection
@@ -4451,6 +4614,16 @@ jobs:
               "QWEN_VERIFY_CHROMIUM=1"
             )
           fi
+          # env applies QWEN_ENV left to right, so this PATH overrides the
+          # one above. ready is root-owned under /opt; node cannot create it.
+          if [ -f /opt/verify-java/ready ]; then
+            QWEN_ENV+=(
+              "PATH=/opt/verify-java/jdk/bin:/opt/verify-java/maven/bin:${PATH}"
+              "JAVA_HOME=/opt/verify-java/jdk"
+              "MAVEN_ARGS=-Dmaven.repo.local=${RUNNER_TEMP}/verify-maven-repo"
+              "QWEN_VERIFY_JAVA=1"
+            )
+          fi
           if [ -n "${OPENAI_MODEL:-}" ]; then
             QWEN_ENV+=("OPENAI_MODEL=$OPENAI_MODEL")
           fi
@@ -4539,6 +4712,16 @@ jobs:
             esac
           fi
           echo "agent_verdict=$AGENT_VERDICT" >> "$GITHUB_OUTPUT"
+
+          # Emit the attribution collected before the agent started (see the
+          # re-pin above) — the saved values, never re-derived here: the
+          # agent era can replace the .qwen directory itself, so a post-agent
+          # hash could name instructions the round never loaded.
+          {
+            echo "model=$(printf '%s' "${OPENAI_MODEL:-}" | tr -d '\r\n' | cut -c1-200)"
+            echo "cli_version=$CLI_VERSION"
+            echo "skill_hash=$SKILL_HASH"
+          } >> "$GITHUB_OUTPUT"
           echo "verify verdict: $VERDICT agent: ${AGENT_VERDICT:-none} (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
 
       # The gate log's authoritative copy lives root-owned inside the 0700
@@ -5127,6 +5310,9 @@ jobs:
           PR_NUMBER: '${{ needs.verify.outputs.pr_number || github.event.issue.number }}'
           VERDICT: '${{ needs.verify.outputs.verdict }}'
           AGENT_VERDICT: '${{ needs.verify.outputs.agent_verdict }}'
+          VERIFY_MODEL: '${{ needs.verify.outputs.model }}'
+          VERIFY_CLI_VERSION: '${{ needs.verify.outputs.cli_version }}'
+          VERIFY_SKILL_HASH: '${{ needs.verify.outputs.skill_hash }}'
           FLAKE_VERDICT: '${{ needs.verify.outputs.flake_verdict }}'
           FLAKE_SUMMARY: '${{ needs.verify.outputs.flake_summary }}'
           SKIP_REASON: '${{ needs.verify.outputs.skip_reason }}'
@@ -5965,7 +6151,17 @@ jobs:
                 printf '%s' "$EVIDENCE_SECTION"
               fi
               printf 'Harness scripts and raw logs are in the workflow run artifacts (7-day retention).\n\n'
-              printf '%s\n' '— _Qwen Code · sandboxed verification_'
+              # Attribution footer, the same shape /review posts: model, CLI
+              # version, and the content hash of the skill that ran. Only on
+              # a body that actually carries a report and only when all three
+              # workflow-owned values arrived — a missing report makes this
+              # a weak notice (WEAK_BODY above), and a half-known identity
+              # keeps the generic signature too.
+              if [ -n "$REPORT" ] && [ -n "${VERIFY_MODEL:-}" ] && [ -n "${VERIFY_CLI_VERSION:-}" ] && [ -n "${VERIFY_SKILL_HASH:-}" ]; then
+                printf '_— %s via Qwen Code /verify-pr (v%s; skill %s)_\n' "$VERIFY_MODEL" "$VERIFY_CLI_VERSION" "$VERIFY_SKILL_HASH"
+              else
+                printf '%s\n' '— _Qwen Code · sandboxed verification_'
+              fi
             } > "$BODY_FILE"
           fi
 
