@@ -69,6 +69,58 @@ describe('DOCX generation', () => {
     ]);
   });
 
+  it.each([
+    { name: 'LF', newline: '\n' },
+    { name: 'CRLF', newline: '\r\n' },
+    { name: 'CR', newline: '\r' },
+  ])(
+    'preserves $name line breaks in titles and paragraphs',
+    async ({ newline }) => {
+      const generate = await createDocxGenerator(workspace);
+      const result = await generate({
+        ...input,
+        title: `NDA${newline}合同 & <title>`,
+        paragraphs: [
+          `${newline}First line${newline}${newline}  第二段: café 😀 & <text>  ${newline}`,
+          '',
+        ],
+      });
+      const zip = await JSZip.loadAsync(await readFile(result.resolvedPath));
+      const xml = await zip.file('word/document.xml')!.async('string');
+      expect(xml.match(/<w:br\b/g) ?? []).toHaveLength(5);
+      const parsed = new XMLParser({
+        preserveOrder: true,
+        trimValues: false,
+      }).parse(xml);
+      const body = parsed.find(
+        (node: Record<string, unknown>) => 'w:document' in node,
+      )['w:document'][0]['w:body'];
+      type RunChild = {
+        'w:br'?: unknown;
+        'w:t'?: Array<{ '#text': string }>;
+      };
+      const paragraphs = body.filter(
+        (node: Record<string, unknown>) => 'w:p' in node,
+      );
+      expect(
+        paragraphs.map((paragraph: { 'w:p': Array<{ 'w:r'?: RunChild[] }> }) =>
+          paragraph['w:p']
+            .flatMap((node) => node['w:r'] ?? [])
+            .map((node) =>
+              'w:br' in node
+                ? '\n'
+                : (node['w:t']?.map((text) => text['#text']).join('') ?? ''),
+            )
+            .join(''),
+        ),
+      ).toEqual([
+        'NDA\n合同 & <title>',
+        '\nFirst line\n\n  第二段: café 😀 & <text>  \n',
+        '',
+      ]);
+    },
+  );
+
   it('preserves an existing destination', async () => {
     await writeFile(path.join(workspace, 'nda.docx'), 'keep me');
     const generate = await createDocxGenerator(workspace);

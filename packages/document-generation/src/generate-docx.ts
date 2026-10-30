@@ -14,7 +14,7 @@ import {
   rm,
 } from 'node:fs/promises';
 import path from 'node:path';
-import { Document, HeadingLevel, Packer, Paragraph } from 'docx';
+import { Document, HeadingLevel, Packer, Paragraph, TextRun } from 'docx';
 import { z } from 'zod';
 
 export const DOCX_MIME =
@@ -129,6 +129,14 @@ function isWithinWorkspace(root: string, directory: string): boolean {
   );
 }
 
+function createTextRuns(text: string): TextRun[] {
+  return text
+    .split(/\r\n|\r|\n/)
+    .map(
+      (line, index) => new TextRun({ text: line, break: index > 0 ? 1 : 0 }),
+    );
+}
+
 async function checkDirectory(
   root: string,
   directory: string,
@@ -187,8 +195,13 @@ export async function createDocxGenerator(workspacePath: string) {
       sections: [
         {
           children: [
-            new Paragraph({ text: params.title, heading: HeadingLevel.TITLE }),
-            ...params.paragraphs.map((text) => new Paragraph({ text })),
+            new Paragraph({
+              children: createTextRuns(params.title),
+              heading: HeadingLevel.TITLE,
+            }),
+            ...params.paragraphs.map(
+              (text) => new Paragraph({ children: createTextRuns(text) }),
+            ),
           ],
         },
       ],
