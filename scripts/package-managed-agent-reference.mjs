@@ -37,11 +37,10 @@ const VERSION_PATTERN = new RegExp(
   `^(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)-${PRERELEASE_IDENTIFIER}(?:\\.${PRERELEASE_IDENTIFIER})*$`,
 );
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
-const MAIN_SOURCE_ROOT = 'packages/managed-agent-server/src/main/java';
-const PERSISTENCE = 'com.alibaba.qwen.code.managedagent.persistence';
+const MAIN_SOURCE_ROOT = 'packages/managed-agent-server/server/src/main/java';
+const PERSISTENCE = 'com.alibaba.qwen.code.managedagent.maintenance';
 const PREFLIGHT = 'com.alibaba.qwen.code.managedagent.preflight';
-const WORKSPACE_RUNTIME =
-  'com.alibaba.qwen.code.managedagent.workspace.runtime';
+const WORKSPACE_RUNTIME = 'com.alibaba.qwen.code.managedagent.maintenance';
 
 // The offline maintenance entry points, each a main class in the server jar.
 // bin/qwen-managed-agent-admin runs them through Spring Boot's
@@ -375,7 +374,7 @@ export async function createReferenceDistribution({
   const serverPom = path.join(root, 'packages/managed-agent-server/pom.xml');
   const serverVersion = await pomVersion(
     serverPom,
-    'qwen-managed-agent-server',
+    'qwen-managed-agent-parent',
   );
   const packageJson = JSON.parse(
     await readFile(path.join(root, 'package.json')),
@@ -397,7 +396,7 @@ export async function createReferenceDistribution({
   const applicationConfiguration = await readFile(
     path.join(
       root,
-      'packages/managed-agent-server/src/main/resources/application.yml',
+      'packages/managed-agent-server/server/src/main/resources/application.yml',
     ),
     'utf8',
   );
@@ -432,14 +431,14 @@ export async function createReferenceDistribution({
     {
       name: 'qwen-managed-agent-server',
       version: serverVersion,
-      source: `packages/managed-agent-server/target/qwen-managed-agent-server-${serverVersion}-exec.jar`,
+      source: `packages/managed-agent-server/server/target/qwen-managed-agent-server-${serverVersion}-exec.jar`,
       destination: `lib/${serverJar}`,
       role: 'control-plane',
     },
     {
       name: 'qwen-managed-agent-operator-recovery',
       version: serverVersion,
-      source: `packages/managed-agent-server/target/${recoveryJar}`,
+      source: `packages/managed-agent-server/server/target/${recoveryJar}`,
       destination: `lib/${recoveryJar}`,
       role: 'operator-recovery',
     },

@@ -24,3 +24,42 @@ pub use interactive::{
 };
 pub use keyboard::{hotkey, press_key, type_text};
 pub use mouse::click_at_xy;
+
+pub(crate) fn new_event_source() -> Result<core_graphics::event_source::CGEventSource, ()> {
+    use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    // HID state can deadlock inside SkyLight event construction for an isolated
+    // user attached to another user's GUI session. Session events need no access
+    // to hardware state; callers still select and guard their posting destination.
+    CGEventSource::new(CGEventSourceStateID::CombinedSessionState)
+}
+
+#[cfg(test)]
+mod tests {
+    use core_graphics::{
+        event::{CGEvent, CGEventType, CGMouseButton, EventField},
+        event_source::CGEventSourceStateID,
+        geometry::CGPoint,
+    };
+
+    #[test]
+    fn synthetic_events_use_the_combined_session_source() {
+        let source = super::new_event_source().unwrap();
+        let events = [
+            CGEvent::new(source.clone()).unwrap(),
+            CGEvent::new_keyboard_event(source.clone(), 53, true).unwrap(),
+            CGEvent::new_mouse_event(
+                source,
+                CGEventType::LeftMouseDown,
+                CGPoint::new(0.0, 0.0),
+                CGMouseButton::Left,
+            )
+            .unwrap(),
+        ];
+        for event in events {
+            assert_eq!(
+                event.get_integer_value_field(EventField::EVENT_SOURCE_STATE_ID),
+                CGEventSourceStateID::CombinedSessionState as i64
+            );
+        }
+    }
+}
