@@ -60,8 +60,6 @@ public final class ManagedSchemaRows {
                     "artifact_id",
                     "result_id",
                     "occurrence_key",
-                    "snapshot_id",
-                    "current_snapshot_id",
                     "turn_id",
                     "prompt_id",
                     "item_id",

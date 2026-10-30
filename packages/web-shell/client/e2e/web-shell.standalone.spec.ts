@@ -110,12 +110,10 @@ test('keeps workspace navigation reachable inside a standalone chat @smoke', asy
 
   // Row actions are hidden until the row is hovered.
   await workspaceRow.hover();
-  const newTaskButtons = sidebar.getByRole('button', {
-    name: 'New session',
-    exact: true,
-  });
-  await expect(newTaskButtons).toHaveCount(2);
-  await newTaskButtons.last().click();
+  await workspaceRow
+    .locator('..')
+    .getByRole('button', { name: 'New session', exact: true })
+    .click();
 
   await fillComposer(page, 'Back to the workspace');
   await page.locator('[data-web-shell-composer-submit]').click();
@@ -212,7 +210,7 @@ test('no-workspace sessions remain visible beside collapsed Workspaces and persi
   const sidebar = page.getByRole('complementary');
   const projects = sidebar
     .getByRole('button', {
-      name: 'Project',
+      name: 'Workspaces',
       exact: true,
     })
     .first();
@@ -265,6 +263,86 @@ test('no-workspace sessions remain visible beside collapsed Workspaces and persi
       String(testInfo.project.use.baseURL),
     ).href,
   );
+});
+
+test('no-workspace category matches peer header geometry and expansion affordances @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: [
+        ...standaloneFeatures,
+        'workspace_qualified_rest_core',
+        'session_organization',
+      ],
+    },
+    standaloneSessions: [standaloneSummary('standalone-header', 'Standalone')],
+  });
+  scenario.sessions[0].isPinned = true;
+  await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+
+  const sidebar = page.getByRole('complementary');
+  const names = ['Pinned', 'Workspaces', 'No-workspace sessions', 'Recent'];
+  const toggles = names.map((name) =>
+    sidebar.getByRole('button', { name, exact: true }).first(),
+  );
+  for (const toggle of toggles) {
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  }
+
+  const geometry = await Promise.all(
+    toggles.map((toggle) =>
+      toggle.evaluate((button) => {
+        const header = button.parentElement!;
+        const label = button.querySelector('span')!;
+        const style = getComputedStyle(button);
+        return {
+          height: header.getBoundingClientRect().height,
+          labelLeft: label.getBoundingClientRect().left,
+          labelTop:
+            label.getBoundingClientRect().top -
+            header.getBoundingClientRect().top,
+          color: style.color,
+          marginBottom: getComputedStyle(header.parentElement!).marginBottom,
+        };
+      }),
+    ),
+  );
+  for (const header of geometry) {
+    expect(header.height).toBe(32);
+    expect(header.labelLeft).toBe(geometry[1].labelLeft);
+    expect(header.labelTop).toBe(geometry[1].labelTop);
+    expect(header.color).toBe(geometry[1].color);
+  }
+  expect(geometry[2].marginBottom).toBe('0px');
+
+  const toggle = toggles[2];
+  const chevron = toggle.locator('svg');
+  await expect(chevron).toHaveCount(1);
+  await expect(chevron).toHaveAttribute('aria-hidden', 'true');
+  const labelBox = await toggle.locator('span').boundingBox();
+  const iconBox = await chevron.boundingBox();
+  expect(iconBox!.x).toBeGreaterThanOrEqual(labelBox!.x + labelBox!.width);
+  await page.mouse.move(1000, 700);
+  await expect(chevron).toHaveCSS('opacity', '0');
+  await toggle.hover();
+  await expect(chevron).toHaveCSS('opacity', '1');
+  await page.mouse.move(1000, 700);
+  await page.keyboard.press('Tab');
+  await toggle.focus();
+  await expect(chevron).toHaveCSS('opacity', '1');
+  const collapsedPath = await chevron.locator('path').getAttribute('d');
+  await page.keyboard.press('Enter');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(chevron.locator('path')).not.toHaveAttribute(
+    'd',
+    collapsedPath!,
+  );
+  await page.keyboard.press('Space');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
 });
 
 test('standalone Recents keeps lifecycle actions on exact standalone routes @smoke', async ({
