@@ -196,7 +196,12 @@ jobs:
       # keep their provisioned permissions and use normal setup-java.
       - name: 'Restore runner-local Java tool cache'
         if: "${{ runner.environment == 'self-hosted' && endsWith(runner.tool_cache, '/_tool') }}"
-        run: 'bash .github/scripts/restore-java-tool-cache.sh'
+        run: |-
+          if [ -f .github/scripts/restore-java-tool-cache.sh ]; then
+            bash .github/scripts/restore-java-tool-cache.sh
+          else
+            echo '::warning::this ref predates restore-java-tool-cache.sh; the runner-local Java cache is left as provisioned'
+          fi
 
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
@@ -777,7 +782,12 @@ jobs:
 
       - name: 'Restore runner-local Java tool cache'
         if: "${{ runner.environment == 'self-hosted' && endsWith(runner.tool_cache, '/_tool') }}"
-        run: 'bash .github/scripts/restore-java-tool-cache.sh'
+        run: |-
+          if [ -f .github/scripts/restore-java-tool-cache.sh ]; then
+            bash .github/scripts/restore-java-tool-cache.sh
+          else
+            echo '::warning::this ref predates restore-java-tool-cache.sh; the runner-local Java cache is left as provisioned'
+          fi
 
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
@@ -1707,7 +1717,12 @@ jobs:
           ref: '${{ inputs.ref || github.sha }}'
       - name: 'Restore runner-local Java tool cache'
         if: "${{ runner.environment == 'self-hosted' && endsWith(runner.tool_cache, '/_tool') }}"
-        run: 'bash .github/scripts/restore-java-tool-cache.sh'
+        run: |-
+          if [ -f .github/scripts/restore-java-tool-cache.sh ]; then
+            bash .github/scripts/restore-java-tool-cache.sh
+          else
+            echo '::warning::this ref predates restore-java-tool-cache.sh; the runner-local Java cache is left as provisioned'
+          fi
 
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
@@ -1971,7 +1986,12 @@ jobs:
           ref: '${{ inputs.ref || github.sha }}'
       - name: 'Restore runner-local Java tool cache'
         if: "${{ runner.environment == 'self-hosted' && endsWith(runner.tool_cache, '/_tool') }}"
-        run: 'bash .github/scripts/restore-java-tool-cache.sh'
+        run: |-
+          if [ -f .github/scripts/restore-java-tool-cache.sh ]; then
+            bash .github/scripts/restore-java-tool-cache.sh
+          else
+            echo '::warning::this ref predates restore-java-tool-cache.sh; the runner-local Java cache is left as provisioned'
+          fi
 
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
@@ -2341,7 +2361,12 @@ jobs:
 
       - name: 'Restore runner-local Java tool cache'
         if: "${{ runner.environment == 'self-hosted' && endsWith(runner.tool_cache, '/_tool') }}"
-        run: 'bash .github/scripts/restore-java-tool-cache.sh'
+        run: |-
+          if [ -f .github/scripts/restore-java-tool-cache.sh ]; then
+            bash .github/scripts/restore-java-tool-cache.sh
+          else
+            echo '::warning::this ref predates restore-java-tool-cache.sh; the runner-local Java cache is left as provisioned'
+          fi
 
       - name: 'Use pre-installed Node.js (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"

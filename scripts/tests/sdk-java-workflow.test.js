@@ -2375,13 +2375,17 @@ describe('SDK Java runner-local tool-cache repair', () => {
       const java = steps.findIndex((s) =>
         String(s.uses ?? '').startsWith('actions/setup-java'),
       );
-      const repair = steps.findIndex(
-        (s) => s.run === 'bash .github/scripts/restore-java-tool-cache.sh',
+      const helper = '.github/scripts/restore-java-tool-cache.sh';
+      const repair = steps.findIndex((s) =>
+        String(s.run ?? '').includes(helper),
       );
       if (java < 0 || !String(job['runs-on']).includes('self-hosted')) {
         expect(repair, name).toBe(-1);
         continue;
       }
+      // A resumed release checks out an older tag that predates this helper,
+      // so the step must probe for it before invoking bash.
+      expect(steps[repair].run, name).toContain(`[ -f ${helper} ]`);
       const checkout = steps.findIndex((s) =>
         String(s.uses ?? '').startsWith('actions/checkout'),
       );
