@@ -96,6 +96,10 @@ export function getSandboxPassthroughEnvArgs(
     HOST_UPDATE_RELAUNCH_ENV_VAR,
     QWEN_CODE_SERVE_ENV,
     QWEN_CODE_DESKTOP_ENV,
+    // Workflow enablement is an operator decision; the inner CLI would
+    // otherwise read only the mounted settings and ignore the exported switch.
+    'QWEN_CODE_ENABLE_WORKFLOWS',
+    'QWEN_CODE_DISABLE_WORKFLOWS',
   ].flatMap((envVar) =>
     env[envVar] === undefined ? [] : ['--env', `${envVar}=${env[envVar]}`],
   );

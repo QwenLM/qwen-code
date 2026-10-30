@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.config;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeProvisioner;
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import jakarta.annotation.PostConstruct;
 import org.apache.commons.lang3.StringUtils;
@@ -59,6 +59,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private final SessionStore sessionStore = new SessionStore();
     private final ToolPublication toolPublication = new ToolPublication();
     private final Artifacts artifacts = new Artifacts();
+    private final Extensions extensions = new Extensions();
+    private final ManagedExtensions managedExtensions = new ManagedExtensions();
     private final Dispatch dispatch = new Dispatch();
     private final Events events = new Events();
     private final RuntimeBroker runtimeBroker = new RuntimeBroker();
@@ -75,6 +77,8 @@ public class ManagedAgentProperties implements EnvironmentAware {
     private List<String> definitionModels = List.of();
     private List<ModelOption> modelCatalog = List.of();
     private String trustedActorHeader = "";
+    // The account the server runs as; preflight checks file access as it.
+    private String serviceUser = "";
     // Validation may run more than once; the file is read only the first time.
     private boolean harnessCredentialsApplied;
     private String harnessBrokerUrl = "";
@@ -122,6 +126,12 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public Artifacts getArtifacts() {
         return artifacts;
+    }
+
+    public ManagedExtensions getManagedExtensions() { return managedExtensions; }
+
+    public Extensions getExtensions() {
+        return extensions;
     }
 
     public Dispatch getDispatch() {
@@ -183,6 +193,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
     public void setTrustedActorHeader(String trustedActorHeader) {
         this.trustedActorHeader = trustedActorHeader;
+    }
+
+    public String getServiceUser() {
+        return serviceUser;
+    }
+
+    public void setServiceUser(String serviceUser) {
+        this.serviceUser = serviceUser == null ? "" : serviceUser.strip();
     }
 
     @Override
@@ -533,9 +551,17 @@ public class ManagedAgentProperties implements EnvironmentAware {
         }
     }
 
-    /** Shared startup and preflight validation for scratch-only external workers. */
+    /**
+     * Shared startup and preflight validation for every external worker kind.
+     *
+     * <p>{@code external-workspace} is a provisioning prerequisite in this
+     * increment: it binds registered EXTERNAL storage, but Hosted files, Shell and
+     * Session close stay unimplemented, so it must keep the managed Workspace
+     * features disabled exactly as the scratch profile does.
+     */
     public void validateExternalRuntime() {
-        if (!ExternalRuntimeProvisioner.KIND.equals(runtimeBroker.getProvisioner())) {
+        String provisioner = runtimeBroker.getProvisioner();
+        if (!ExternalRuntimeKinds.isExternal(provisioner)) {
             return;
         }
         if (harness.isWorkspaceFilesEnabled() || harness.isWorkspaceShellEnabled()
@@ -547,8 +573,12 @@ public class ManagedAgentProperties implements EnvironmentAware {
                 || runtimeBroker.isOperatorRecoveryEnabled()
                 || runtimeBroker.isChildWorkspacesEnabled() || runtimeBroker.isChildSnapshotsEnabled()
                 || runtimeBroker.getSsh().isEnabled() || !runtimeBroker.getSsh().getNodes().isEmpty()) {
-            throw new IllegalStateException("External Runtime supports scratch Sessions only;"
-                    + " managed Workspace features must be disabled");
+            throw new IllegalStateException(ExternalRuntimeKinds.isWorkspace(provisioner)
+                    ? "External Workspace Runtime is a storage provisioning prerequisite;"
+                            + " managed Workspace files, Shell and recovery features must stay"
+                            + " disabled until files execution and Session close are verified"
+                    : "External Runtime supports scratch Sessions only;"
+                            + " managed Workspace features must be disabled");
         }
         if (!"session".equals(runtimeBroker.getIsolationClass())
                 || !"session".equals(runtimeBroker.getBoundSessionIsolationClass())
@@ -1229,6 +1259,34 @@ public class ManagedAgentProperties implements EnvironmentAware {
         public void setMaxVerificationTimeout(Duration value) { maxVerificationTimeout = value; }
     }
 
+    public static class ManagedExtensions {
+        private boolean enabled;
+        private String mode = "linux-cgroup";
+        private String cacheDirectory = "";
+        private String cgroupRoot = "";
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean value) { enabled = value; }
+        public String getMode() { return mode; }
+        public void setMode(String value) { mode = value; }
+        public String getCacheDirectory() { return cacheDirectory; }
+        public void setCacheDirectory(String value) { cacheDirectory = value; }
+        public String getCgroupRoot() { return cgroupRoot; }
+        public void setCgroupRoot(String value) { cgroupRoot = value; }
+    }
+
+    public static class Extensions {
+        private boolean enabled;
+        private String artifactDirectory = "";
+        private List<String> allowedActors = List.of();
+
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public String getArtifactDirectory() { return artifactDirectory; }
+        public void setArtifactDirectory(String value) { artifactDirectory = value; }
+        public List<String> getAllowedActors() { return allowedActors; }
+        public void setAllowedActors(List<String> value) { allowedActors = List.copyOf(value); }
+    }
+
     public static class Artifacts {
         private boolean enabled;
         private boolean publishOriginal;
@@ -1257,10 +1315,11 @@ public class ManagedAgentProperties implements EnvironmentAware {
     public static class Dispatch {
         // No typed scan-delay field. The deployed default comes from
         // application.yml (`dispatch.scan-delay: '1s'`); the same
-        // "${...scan-delay:1s}" fallback is repeated by three @Scheduled
+        // "${...scan-delay:1s}" fallback is repeated by four @Scheduled
         // methods — ActionResponseCoordinator.recover,
-        // HarnessCoordinator.recoverExpiredTurns and
-        // SessionLifecycleCoordinator.recoverOperations — and @Scheduled
+        // HarnessCoordinator.recoverExpiredTurns,
+        // SessionLifecycleCoordinator.recoverOperations and
+        // HostedCleanupRetryCoordinator.retryOwedCleanup — and @Scheduled
         // reads a bare number as milliseconds, not seconds.
         @DurationUnit(ChronoUnit.SECONDS)
         private Duration leaseDuration = Duration.ofSeconds(60);
@@ -1484,6 +1543,7 @@ public class ManagedAgentProperties implements EnvironmentAware {
         private long staticEpoch = 1;
         private Map<String, String> environment = new LinkedHashMap<>();
         private boolean childWorkspacesEnabled;
+        private boolean sessionWorktreesEnabled;
         private boolean childSnapshotsEnabled;
         private String childWorkspaceGit = "git";
         @DurationUnit(ChronoUnit.MILLIS)
@@ -1716,6 +1776,14 @@ public class ManagedAgentProperties implements EnvironmentAware {
 
         public boolean isChildWorkspacesEnabled() {
             return childWorkspacesEnabled;
+        }
+
+        public boolean isSessionWorktreesEnabled() {
+            return sessionWorktreesEnabled;
+        }
+
+        public void setSessionWorktreesEnabled(boolean sessionWorktreesEnabled) {
+            this.sessionWorktreesEnabled = sessionWorktreesEnabled;
         }
 
         public void setChildWorkspacesEnabled(boolean childWorkspacesEnabled) {

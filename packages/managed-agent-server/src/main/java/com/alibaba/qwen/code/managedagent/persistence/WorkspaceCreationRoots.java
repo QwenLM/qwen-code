@@ -25,9 +25,11 @@ import java.util.Objects;
 import java.util.UUID;
 
 final class WorkspaceCreationRoots {
+    static final String IMPORTED_PREFIX = "imported-";
     private final JdbcTemplate jdbc;
     private final Path base;
     private final Object baseKey;
+    private final Path stateDirectory;
     private final WorkspaceLocalDirectories localDirectories;
     private static final ObjectMapper JSON = JsonMapper.builder().build();
 
@@ -35,6 +37,8 @@ final class WorkspaceCreationRoots {
         this.jdbc = jdbc;
         localDirectories = new WorkspaceLocalDirectories(properties);
         var broker = properties.getRuntimeBroker();
+        stateDirectory = StringUtils.isBlank(broker.getStateDirectory()) ? null
+                : Path.of(broker.getStateDirectory()).toAbsolutePath().normalize();
         String configured = broker.getWorkspaceCreationRoot();
         if (StringUtils.isBlank(configured)) {
             base = null;
@@ -70,10 +74,10 @@ final class WorkspaceCreationRoots {
     }
 
     Root registration(String tenant, String storage, boolean pending) {
-        if (storage == null || !storage.matches("created-[a-f0-9]{64}")) {
+        if (storage == null || !storage.matches("(?:created|imported)-[a-f0-9]{64}")) {
             return null;
         }
-        String key = storage.substring("created-".length());
+        String key = storage.substring(storage.indexOf('-') + 1);
         List<Map<String, Object>> rows = jdbc.query(
                 "SELECT receipt_key, tenant_id, scope_kind, scope_id, idempotency_key, state,"
                         + " result_json FROM ma_request_receipt WHERE receipt_key = ? AND namespace = ?"
@@ -146,6 +150,31 @@ final class WorkspaceCreationRoots {
         }
     }
 
+    static boolean sharedStorage(String storage) {
+        return storage != null && storage.matches("imported-[a-f0-9]{64}");
+    }
+
+    Path importedMetadataDirectory(String storage, boolean create) {
+        if (!sharedStorage(storage) || stateDirectory == null) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        try {
+            directoryKey(stateDirectory);
+            Path imports = stateDirectory.resolve("imported-projects");
+            Path metadata = imports.resolve(storage);
+            if (create) {
+                createDirectory(imports);
+                createDirectory(metadata);
+            } else {
+                directoryKey(imports);
+                directoryKey(metadata);
+            }
+            return metadata;
+        } catch (IOException error) {
+            throw WorkspaceExecutionStore.unavailable(error);
+        }
+    }
+
     static Details details(String resultJson, String receiptKey) {
         try {
             Details value = JSON.readValue(resultJson, Details.class);
@@ -154,7 +183,8 @@ final class WorkspaceCreationRoots {
                     || value.displayName().length() > 128
                     || value.displayName().codePoints().anyMatch(Character::isISOControl)
                     || !("workspace-" + receiptKey).equals(value.workspaceId())
-                    || value.sourceWorkspaceId() == null && (!("created-" + receiptKey).equals(value.storageId())
+                    || value.sourceWorkspaceId() == null && (!(("created-" + receiptKey).equals(value.storageId())
+                            || (IMPORTED_PREFIX + receiptKey).equals(value.storageId()) && value.localRoot() != null)
                         || value.sourceGeneration() != null
                         || value.localRoot() == null && value.cwdRelative() != null
                         || value.localRoot() != null && (value.cwdRelative() == null

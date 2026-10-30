@@ -18,6 +18,14 @@ import {
   record,
   validateResult,
 } from './dispatch.js';
+import {
+  ENGINE_NODE,
+  adjustRenderTree,
+  validateRenderTree,
+  type ModRenderElement,
+  type ModRenderInput,
+  type ModRenderSite,
+} from './render-tree.js';
 import type {
   ModToolCallInput,
   ModToolNext,
@@ -45,6 +53,14 @@ type ModToolResolver = (
   name: string,
 ) => Promise<AnyDeclarativeTool | undefined>;
 
+/** What a host that draws offers its Mods. */
+export interface ModRenderHost {
+  /** The render sites the host draws. */
+  sites: readonly ModRenderSite[];
+  /** A plugin whose `ui.render` hooks may draw asked for a redraw. */
+  invalidate: (plugin: string) => void;
+}
+
 function workerEntry(): URL | string {
   if (import.meta.url.endsWith('.ts')) {
     return new URL(
@@ -69,6 +85,12 @@ export class ModRuntime {
     start: false,
     complete: [],
   };
+  private renders: string[] = [];
+  // Asked for during the load, before the host knows which plugins draw.
+  private early?: Set<string> = new Set();
+  // Refusal lines are said once per load and reason, adjustment lines once
+  // per load, site and kind.
+  private readonly noted = new Set<string>();
   private sequence = 0;
   private root?: {
     id: number;
@@ -99,6 +121,7 @@ export class ModRuntime {
     private readonly resolveTool?: ModToolResolver,
     private readonly surface: 'terminal' | null = null,
     private readonly abortTurn?: (turnId: string) => void,
+    private readonly renderHost?: ModRenderHost,
   ) {
     this.worker = new Worker(workerEntry(), {
       stdout: true,
@@ -118,7 +141,12 @@ export class ModRuntime {
         this.tool?.checks.get(reply.id)?.(reply);
       else if (reply.type === 'turn-abort')
         this.answerTurnAbort(reply, root.id);
-      else if (reply.type === 'activity') {
+      else if (reply.type === 'invalidate') {
+        if (reply.event !== 'ui.render' || this.failure) return;
+        if (this.early) this.early.add(reply.plugin);
+        else if (this.renders.includes(reply.plugin))
+          this.renderHost?.invalidate(reply.plugin);
+      } else if (reply.type === 'activity') {
         if (
           reply.phase !== root.phase ||
           reply.revision <= root.revision ||
@@ -169,6 +197,7 @@ export class ModRuntime {
     version = 'unknown',
     facts?: () => ModSessionFacts,
     abortTurn?: (turnId: string) => void,
+    render?: ModRenderHost,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -196,22 +225,32 @@ export class ModRuntime {
         : undefined,
       surface,
       abortTurn,
+      render,
     );
     try {
       const result = await runtime.request(
-        { type: 'load', plugins, cwd, surface, version },
+        {
+          type: 'load',
+          plugins,
+          cwd,
+          surface,
+          version,
+          sites: render?.sites ?? [],
+        },
         signal,
         60_000,
       );
+      const names = (value: unknown): value is string[] =>
+        Array.isArray(value) &&
+        value.every((name) => plugins.some((plugin) => plugin.name === name));
       const turnComplete = record(result) ? result['turnComplete'] : undefined;
+      const renders = record(result) ? result['render'] : undefined;
       if (
         !record(result) ||
         typeof result['tools'] !== 'boolean' ||
         typeof result['turnStart'] !== 'boolean' ||
-        !Array.isArray(turnComplete) ||
-        turnComplete.some(
-          (name) => !plugins.some((plugin) => plugin.name === name),
-        )
+        !names(turnComplete) ||
+        !names(renders)
       )
         throw new Error('Invalid Mod declarations.');
       const commands = result['commands'];
@@ -234,8 +273,13 @@ export class ModRuntime {
       runtime.tools = result['tools'];
       runtime.turns = {
         start: result['turnStart'],
-        complete: turnComplete as string[],
+        complete: turnComplete,
       };
+      runtime.renders = renders;
+      const early = runtime.early!;
+      runtime.early = undefined;
+      for (const plugin of early)
+        if (renders.includes(plugin)) render?.invalidate(plugin);
       return runtime;
     } catch (error) {
       await runtime.dispose();
@@ -259,6 +303,46 @@ export class ModRuntime {
     readonly complete: readonly string[];
   } {
     return this.turns;
+  }
+
+  /** The plugins whose `ui.render` hooks may draw where this host draws. */
+  get renderHooks(): readonly string[] {
+    return this.renders;
+  }
+
+  /**
+   * Raises `ui.render` for a site and judges the tree the chain settles on.
+   * A tree that fails draws the engine's own, nothing at the band; `notes`
+   * holds what the debug log is told, each refusal and kind of adjustment
+   * once per load.
+   */
+  async render(
+    input: ModRenderInput,
+    signal: AbortSignal,
+  ): Promise<{ tree: ModRenderElement; notes: string[] }> {
+    const settled = await this.request({ type: 'render', input }, signal);
+    const owner = this.renders.length === 1 ? this.renders[0] : 'hooks';
+    const notes: string[] = [];
+    const note = (line: string, key = line) => {
+      if (this.noted.has(key)) return;
+      this.noted.add(key);
+      notes.push(`${owner}: ${line}`);
+    };
+    try {
+      validateRenderTree(settled);
+    } catch (error) {
+      note(
+        `ui.render (${input.component}) refused: ${error instanceof Error ? error.message : String(error)}; nothing was drawn`,
+      );
+      return { tree: ENGINE_NODE, notes };
+    }
+    const adjusted = adjustRenderTree(
+      settled as ModRenderElement,
+      input.component,
+    );
+    for (const { key, text } of adjusted.notes)
+      note(text, `${input.component}\0${key}`);
+    return { tree: adjusted.tree, notes };
   }
 
   private async builtinTool(name: string): Promise<string | undefined> {

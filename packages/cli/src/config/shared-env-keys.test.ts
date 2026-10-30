@@ -5,6 +5,7 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import { EXTRACT_NOOP_SKIP_TURNS_ENV } from '@qwen-code/qwen-code-core/memory/extract-cadence.js';
 import {
   acquireInheritedLoaderEnvScrub,
   clearLoaderKeyRejectionReporterIfCurrent,
@@ -61,6 +62,16 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
   it('keeps ACP repeated-tool-failure rollout policy operator-owned', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
       ENV_ACP_REPEATED_TOOL_FAILURE_GUARD,
+    );
+  });
+
+  // The extraction-cadence experiment (#13004) is default-off, and its gate
+  // reads process.env on every call: a repo-shipped .env that set it would
+  // switch the experiment on for every session in that repository without an
+  // operator opt-in and change what the paired runs measure.
+  it('keeps the extraction-cadence experiment operator-owned', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain(
+      EXTRACT_NOOP_SKIP_TURNS_ENV,
     );
   });
 

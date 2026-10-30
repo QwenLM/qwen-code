@@ -11,6 +11,7 @@ import {
   validToolResult,
   validToolCheck,
 } from './tool-events.js';
+import { INVALIDATABLE_EVENTS, validateRenderTree } from './render-tree.js';
 
 export const MOD_METHODS = [
   'clock.now',
@@ -26,6 +27,7 @@ export const MOD_METHODS = [
   'session.usage',
   'session.version',
   'turn.abort',
+  'ui.invalidate',
   'ui.log',
 ] as const;
 export const MOD_EVENTS = [
@@ -49,8 +51,14 @@ export const MOD_EVENTS = [
   'turn.abort',
   'turn.complete',
   'turn.start',
+  'ui.invalidate',
   'ui.log',
+  'ui.render',
 ] as const;
+// Events a host raises only where it draws: the load request names the sites.
+export const MOD_HOST_EVENTS: readonly ModEvent[] = ['ui.render'];
+// `$` methods that read rather than dispatch, so no hook hears them.
+export const MOD_READS = ['ui.resolve'] as const;
 export type ModEvent = (typeof MOD_EVENTS)[number];
 export type ModMethod = (typeof MOD_METHODS)[number];
 export const isModMethod = (name: string): name is ModMethod =>
@@ -161,10 +169,51 @@ export function validateInput(
       throw new Error(
         'Mod turn.abort takes { turnId } (the id turn.start carried).',
       );
+  } else if (event === 'ui.invalidate') {
+    if (
+      !only(value, ['event']) ||
+      !(INVALIDATABLE_EVENTS as readonly unknown[]).includes(value['event'])
+    )
+      throw new Error(
+        'Mod ui.invalidate takes ui.render or a cached-answer event.',
+      );
+  } else if (event === 'ui.render') {
+    validateRenderInput(value, original);
   } else if (!isDeepStrictEqual(value, original))
     throw new Error('Mod hook changed pinned event fields.');
   if (Buffer.byteLength(JSON.stringify(value)) > MOD_MAX_BYTES)
     throw new Error('Mod event is too large.');
+}
+
+// The envelope and `props.view` are pinned; the other props keep their kind.
+function validateRenderInput(value: ModInput, original: ModInput): void {
+  const props = value['props'];
+  const before = original['props'] as ModInput;
+  for (const key of ['surface', 'component', 'requestId', 'viewport'])
+    if (!isDeepStrictEqual(value[key], original[key]))
+      throw new Error('Mod hook changed pinned event fields.');
+  if (
+    !only(value, ['surface', 'component', 'requestId', 'viewport', 'props']) ||
+    !record(props) ||
+    !isDeepStrictEqual(Object.keys(props).sort(), Object.keys(before).sort()) ||
+    !isDeepStrictEqual(props['view'], before['view'])
+  )
+    throw new Error('Mod hook changed pinned event fields.');
+  for (const key of Object.keys(before)) {
+    const kindOf = (item: unknown) =>
+      item === null ? 'null' : Array.isArray(item) ? 'array' : typeof item;
+    if (kindOf(props[key]) !== kindOf(before[key]))
+      throw new Error(
+        `Mod ui.render props.${key} is ${kindOf(props[key])}, not ${kindOf(before[key])}.`,
+      );
+  }
+}
+
+/** A hook's tree that does not validate, in Claude Code's words. */
+export class ModRenderShapeError extends Error {
+  constructor(component: string, reason: string) {
+    super(`returned the wrong shape (a tree ${component} refuses: ${reason})`);
+  }
 }
 
 // The engine events whose answer is the one field core echoes back.
@@ -174,7 +223,22 @@ const ECHOES: Partial<Record<ModEvent, string>> = {
   'turn.start': 'turnId',
 };
 
-export function validateResult(event: ModEvent, value: unknown): void {
+export function validateResult(
+  event: ModEvent,
+  value: unknown,
+  input?: ModInput,
+): void {
+  if (event === 'ui.render') {
+    try {
+      validateRenderTree(value);
+    } catch (error) {
+      throw new ModRenderShapeError(
+        String(input?.['component'] ?? 'the site'),
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    return;
+  }
   if (!record(value)) throw new Error('Invalid Mod ' + event + ' result.');
   let valid: boolean;
   const echoed = ECHOES[event];
@@ -271,6 +335,7 @@ const API_VALUES: Partial<Record<ModEvent, (value: unknown) => boolean>> = {
   'session.version': (value) =>
     record(value) && typeof value['version'] === 'string',
   'turn.abort': (value) => value === undefined,
+  'ui.invalidate': (value) => value === undefined,
 };
 
 export class ModTimeoutError extends Error {

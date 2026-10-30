@@ -11,15 +11,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 
-/**
- * Raises each Session's replay floor as far as its Snapshot proves safe, the
- * first half of the Session event retention work (#12380): events at or below
- * the floor may be pruned later, and a replay cursor below it expires while
- * the Snapshot backs the floor.
- * Nothing deletes events here, and the pass is disabled until a deployment
- * opts in; the retention window and the reader-aware cleanup remain separate
- * decisions.
- */
+/** Advances replay floors through message projection coverage when explicitly enabled. */
 @Component
 public class ReplayFloorAdvancer {
     private static final Logger LOG = LoggerFactory.getLogger(
@@ -57,8 +49,7 @@ public class ReplayFloorAdvancer {
                 }
                 fresh = true;
                 try {
-                    // MAX_VALUE asks for as far as the Snapshot proves safe;
-                    // the store clamps the floor to the covered sequence.
+                    // The store clamps the requested floor to readable projection coverage.
                     store.advanceReplayFloor(target.tenantId(),
                             target.sessionId(), Long.MAX_VALUE);
                 } catch (RuntimeException error) {

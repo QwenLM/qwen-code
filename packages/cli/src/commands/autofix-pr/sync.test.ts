@@ -15,6 +15,7 @@ import {
 } from 'vitest';
 import { execFileSync } from 'node:child_process';
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -24,6 +25,7 @@ import {
   rmSync,
   statSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -58,6 +60,7 @@ import { runSync } from './sync.js';
 import {
   autofixPrPaths,
   readState,
+  writeAnchor,
   writeState,
   type AutofixPrState,
 } from './state.js';
@@ -161,6 +164,7 @@ describe('runSync (real git, bare remote)', () => {
       postedCommentIds: [],
     };
     writeState(paths.statePath, initial);
+    writeAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, 7, repo);
     mocks.live = {
       state: 'OPEN',
       headRefName: 'feat',
@@ -189,6 +193,50 @@ describe('runSync (real git, bare remote)', () => {
       moved: false,
     });
     expect(known()).toBe(featSha);
+  });
+
+  it('removes a background fix its session left behind, with its round, and says so', () => {
+    const startedAt = new Date(Date.now() - 10 * 60_000).toISOString();
+    writeFileSync(
+      paths.fixPath,
+      JSON.stringify({
+        version: 1,
+        attempt: '0123456789ab',
+        task: 't',
+        head: featSha,
+        startedAt,
+      }),
+    );
+    writeFileSync(paths.snapshotPath, '{}');
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(paths.fixPath, old, old);
+    expect(runSync(7)).toEqual({
+      synced: true,
+      headSha: featSha,
+      moved: false,
+      abandonedFix: { startedAt },
+    });
+    expect(existsSync(paths.fixPath)).toBe(false);
+    expect(existsSync(paths.snapshotPath)).toBe(false);
+    expect(runSync(7)).not.toHaveProperty('abandonedFix');
+  });
+
+  it('keeps a marker its session left behind for the next sync when this one fails', () => {
+    writeFileSync(paths.fixPath, '{}');
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(paths.fixPath, old, old);
+    mocks.live = { ...mocks.live!, state: 'CLOSED' };
+    expect(() => runSync(7)).toThrow(/closed/);
+    expect(existsSync(paths.fixPath)).toBe(true);
+  });
+
+  it("leaves the marker alone for another session's sync", () => {
+    writeFileSync(paths.fixPath, '{}');
+    const old = new Date(Date.now() - 5 * 60_000);
+    utimesSync(paths.fixPath, old, old);
+    process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
+    expect(() => runSync(7)).toThrow(/watched by another session/);
+    expect(existsSync(paths.fixPath)).toBe(true);
   });
 
   it('starts a round only for the task that drives the watch, and none of a watch cleanup ended', () => {

@@ -17,6 +17,8 @@ import {
 import {
   DaemonClient,
   DaemonHttpError,
+  findDaemonRewindUserBlock,
+  isDaemonRewindUserBlock,
   type DaemonSessionSummary,
   type DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
@@ -45,20 +47,21 @@ const SESSION_SWITCH_MIN_VISIBLE_MS = 120;
 /** Longest an edit submit waits for the rewind to land in the transcript. */
 const REWIND_APPLIED_TIMEOUT_MS = 2_000;
 
-/** Conversational user turns — the blocks a rewind indexes against. */
+/**
+ * Conversational user turns — the blocks a rewind indexes against.
+ * `mid_turn_message_injected` renders as `role: 'system'`, so the web shell's
+ * ordinal never numbers it; counting it here shifts every later index.
+ */
+function isEditableUserBlock(
+  block: DaemonTranscriptBlock | undefined,
+): boolean {
+  return isDaemonRewindUserBlock(block);
+}
+
 function countEditableUserTurns(
   blocks: readonly DaemonTranscriptBlock[],
 ): number {
-  let count = 0;
-  for (const block of blocks) {
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification'
-    ) {
-      count += 1;
-    }
-  }
-  return count;
+  return blocks.filter(isEditableUserBlock).length;
 }
 
 function waitForRewindApplied(
@@ -301,7 +304,7 @@ interface InsightProgress {
 }
 
 interface EditingMessage {
-  turnIndex?: number;
+  blockId?: string;
 }
 
 function isAutomaticApprovalMode(modeId: unknown): boolean {
@@ -1517,7 +1520,10 @@ export function EmbeddedApp() {
           className="qwen-code-vscode-web-shell"
           style={SHELL_STYLE}
           theme={theme}
-          language={language}
+          // No `language` prop on purpose: the shell resolves its own UI
+          // language (daemon setting, then browser locale), so a pick in its
+          // settings dialog is not reset to the host chrome language.
+          // `readLanguage` above feeds only the chrome's own copy table.
           sessionSourceType={
             runtime.sessionId ? undefined : VSCODE_SESSION_SOURCE_TYPE
           }
@@ -1612,11 +1618,16 @@ export function EmbeddedApp() {
             const editContent = queuedPromptForEdit
               ? queuedPromptForEdit.prompt
               : content;
+            const target =
+              transcriptBlocksRef.current.filter(isEditableUserBlock)[
+                turnIndex
+              ];
+            if (!editsQueuedPrompt && !target) return false;
             composerRef.current?.clear({ text: true, tags: true });
             composerRef.current?.setText(editContent);
             composerRef.current?.focus?.();
             setEditingMessage({
-              turnIndex: editsQueuedPrompt ? undefined : turnIndex,
+              blockId: editsQueuedPrompt ? undefined : target?.id,
             });
             return true;
           }}
@@ -1650,12 +1661,18 @@ export function EmbeddedApp() {
           prepareSubmit={async (submission) => {
             if (submission.source === 'mcp-app') return undefined;
             if (editingMessage) {
-              const { turnIndex } = editingMessage;
+              const { blockId } = editingMessage;
               setEditingMessage(undefined);
               const sessionId = submission.sessionId ?? runtime.sessionId;
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
               }
+              const blocks = transcriptBlocksRef.current;
+              const userBlocks = blocks.filter(isEditableUserBlock);
+              const target =
+                blockId === undefined
+                  ? userBlocks.at(-1)
+                  : userBlocks.find((block) => block.id === blockId);
               // The clear above is unconditional so no refusal can wedge the
               // next send, but a transient daemon failure has to re-arm the
               // edit: the message says "Please try again", and a retry that
@@ -1669,7 +1686,7 @@ export function EmbeddedApp() {
                 if (error instanceof DaemonHttpError && error.status < 500) {
                   return;
                 }
-                setEditingMessage({ turnIndex });
+                setEditingMessage({ blockId });
               };
               let snapshots: Awaited<
                 ReturnType<typeof daemonClient.getRewindSnapshots>
@@ -1681,18 +1698,22 @@ export function EmbeddedApp() {
                 rearmOnTransientFailure(err);
                 throw new Error(t('composer.editFailed'), { cause: err });
               }
-              const snapshot =
-                turnIndex === undefined
-                  ? snapshots.reduce<(typeof snapshots)[number] | undefined>(
-                      (latest, entry) =>
-                        !latest || entry.turnIndex > latest.turnIndex
-                          ? entry
-                          : latest,
-                      undefined,
+              const matches =
+                target?.promptId &&
+                findDaemonRewindUserBlock(blocks, target.promptId)?.id ===
+                  target.id
+                  ? snapshots.filter(
+                      (entry) => entry.daemonPromptId === target.promptId,
                     )
-                  : snapshots.find((entry) => entry.turnIndex === turnIndex);
-              if (!snapshot) {
-                throw new Error(t('composer.editExpired'));
+                  : [];
+              const snapshot = matches.length === 1 ? matches[0] : undefined;
+              if (!snapshot || !target) {
+                const reason =
+                  snapshots.length > 0 &&
+                  snapshots.every((entry) => !entry.daemonPromptId)
+                    ? 'composer.editIdentityUnavailable'
+                    : 'composer.editExpired';
+                throw new Error(t(reason));
               }
               try {
                 // No X-Qwen-Client-Id on purpose: the daemon registers a
@@ -1721,7 +1742,7 @@ export function EmbeddedApp() {
               if (
                 !(await waitForRewindApplied(
                   () => transcriptBlocksRef.current,
-                  snapshot.turnIndex,
+                  userBlocks.indexOf(target),
                 )) &&
                 runtimeRef.current?.sessionId === sessionId
               ) {

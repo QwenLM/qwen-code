@@ -220,7 +220,7 @@ export async function runAgentLoop(
       config,
       client,
       signal,
-      toolSignal: options.toolSignal ?? signal,
+      toolSignal: options.toolSignal,
       host,
       duplicates,
       executor,
@@ -247,11 +247,17 @@ const STOP_EVENTS: Partial<Record<LlmEventType, AgentLoopStopReason>> = {
   [LlmEventType.UserPromptSubmitBlocked]: 'user_prompt_blocked',
 };
 
-async function runModelRound(
+/**
+ * One model round of the loop: the events go to `host.onModelEvent`, the
+ * calls of an attempt a retry or fallback replaced are dropped, and the
+ * client's terminal events become a stop reason. A surface that still runs
+ * its own tool step calls it directly.
+ */
+export async function runModelRound(
   client: LlmClient,
   round: AgentLoopRound,
   signal: AbortSignal,
-  host: AgentLoopHost,
+  host: Pick<AgentLoopHost, 'onModelEvent'>,
 ): Promise<{
   turn?: Turn;
   calls: ToolCallRequestInfo[];
@@ -293,22 +299,35 @@ async function runModelRound(
   }
 }
 
-interface ToolBatchContext {
+export interface ToolBatchOptions {
   config: Config;
   client: LlmClient;
+  /** Cancels the batch, as the loop's signal does. */
   signal: AbortSignal;
-  toolSignal: AbortSignal;
-  host: AgentLoopHost;
+  /** The signal tools run under, when it differs from `signal`. */
+  toolSignal?: AbortSignal;
+  host?: AgentLoopHost;
   duplicates: AgentLoopDuplicateState;
   executor: AgentLoopToolExecutor;
+  /**
+   * Finish and record a batch `signal` cancelled and return its results,
+   * with the stop reason `cancelled`, for a surface that keeps them.
+   */
+  keepCancelledResults?: boolean;
 }
 
-async function runToolBatch(
+/**
+ * One tool batch of the loop: duplicates, selection, one executor run, the
+ * results in request order, finalized and recorded. A surface that still
+ * runs its own model loop calls it directly.
+ */
+export async function runToolBatch(
   calls: ToolCallRequestInfo[],
-  context: ToolBatchContext,
+  options: ToolBatchOptions,
 ): Promise<{ parts: Part[]; stop?: AgentLoopStopReason }> {
-  const { config, client, signal, toolSignal, host, duplicates, executor } =
-    context;
+  const { config, client, signal, duplicates, executor } = options;
+  const host = options.host ?? {};
+  const toolSignal = options.toolSignal ?? signal;
   const providerKey = (request: ToolCallRequestInfo) =>
     request.providerCallId ?? (request.callId || undefined);
   const isReplay = (request: ToolCallRequestInfo) => {
@@ -445,7 +464,9 @@ async function runToolBatch(
   }
   // Nothing is sent or recorded after an abort, which the surface routes,
   // unless a result already ended the loop.
-  if (aborted && !ended) return { parts: [], stop: 'cancelled' };
+  if (aborted && !ended && !options.keepCancelledResults) {
+    return { parts: [], stop: 'cancelled' };
+  }
   for (const request of executable) {
     if (results.has(request)) continue;
     answer(
@@ -505,6 +526,7 @@ async function runToolBatch(
     );
   });
 
+  if (aborted && !ended) return { parts, stop: 'cancelled' };
   if (ended) return { parts, stop: 'surface_ended' };
   if (terminateTurn && (host.endsOnTerminateTurn?.() ?? true)) {
     return { parts, stop: 'tool_ended_turn' };

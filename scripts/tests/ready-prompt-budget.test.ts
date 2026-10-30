@@ -21,6 +21,11 @@ describe('readyPromptBudgetMs', () => {
     const branches = [
       readyPromptBudgetMs({}),
       readyPromptBudgetMs({ RUNNER_ENVIRONMENT: 'github-hosted' }),
+      readyPromptBudgetMs({
+        RUNNER_ENVIRONMENT: 'github-hosted',
+        RUNNER_OS: 'macOS',
+        RUNNER_ARCH: 'X64',
+      }),
       readyPromptBudgetMs({ RUNNER_ENVIRONMENT: 'self-hosted' }),
       readyPromptBudgetMs({
         RUNNER_ENVIRONMENT: 'self-hosted',
@@ -61,6 +66,29 @@ describe('readyPromptBudgetMs', () => {
     ).toBe(90_000);
   });
 
+  it('widens the ready-prompt budget on GitHub-hosted macOS x64 (#15677)', () => {
+    // macos-15-intel is the slowest host in the tui-parity matrix: the
+    // installed-distribution darwin-x64 leg stalled past the 30s default on
+    // 5 of its first 6 runs with the banner already rendered, so it joins
+    // the 90s stall tier the self-hosted hosts already carry.
+    expect(
+      readyPromptBudgetMs({
+        RUNNER_ENVIRONMENT: 'github-hosted',
+        RUNNER_OS: 'macOS',
+        RUNNER_ARCH: 'X64',
+      }),
+    ).toBe(90_000);
+    // The stall has only been observed on the intel image; the arm64
+    // macos-15 legs keep the tight fail-fast budget.
+    expect(
+      readyPromptBudgetMs({
+        RUNNER_ENVIRONMENT: 'github-hosted',
+        RUNNER_OS: 'macOS',
+        RUNNER_ARCH: 'ARM64',
+      }),
+    ).toBe(30_000);
+  });
+
   it('keeps the tight 30s budget in every other runner state', () => {
     expect(readyPromptBudgetMs({ RUNNER_ENVIRONMENT: 'github-hosted' })).toBe(
       30_000,
@@ -69,6 +97,14 @@ describe('readyPromptBudgetMs', () => {
     expect(readyPromptBudgetMs({ RUNNER_ENVIRONMENT: 'unmapped-value' })).toBe(
       30_000,
     );
+    // The ubuntu legs of every workflow keep the tight fail-fast budget.
+    expect(
+      readyPromptBudgetMs({
+        RUNNER_ENVIRONMENT: 'github-hosted',
+        RUNNER_OS: 'Linux',
+        RUNNER_ARCH: 'X64',
+      }),
+    ).toBe(30_000);
     // The docker-boot stall class has only been observed on the shared
     // self-hosted ECS pool; hosted VMs keep the tight fail-fast budget.
     expect(

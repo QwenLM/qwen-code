@@ -1006,13 +1006,20 @@ describe('serve rate limit env parsing', () => {
       stderrWrites.push(String(chunk));
       return true;
     });
-    mockRunQwenServe.mockResolvedValueOnce({
-      url: 'http://127.0.0.1:4170/',
-      webShellMounted: false,
+    // The runtime snapshots process.env for every process it starts, so the
+    // pair must already be gone when it begins.
+    let brokerEnvAtRuntimeStart: Array<string | undefined> = [];
+    mockRunQwenServe.mockImplementationOnce(async () => {
+      brokerEnvAtRuntimeStart = [
+        process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'],
+        process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'],
+      ];
+      return { url: 'http://127.0.0.1:4170/', webShellMounted: false };
     });
 
     await startServeHandlerWithArgs('--profile hosted-harness --no-web');
 
+    expect(brokerEnvAtRuntimeStart).toEqual([undefined, undefined]);
     expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
       managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
       managedRuntimeBrokerToken: 'env-broker-secret',

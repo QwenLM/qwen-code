@@ -128,6 +128,8 @@ export interface TranscriptViewProps {
    * *behind* another waiting call, while its card goes back to pending in place,
    * so transcript order and queue order disagree. */
   awaitingCallId?: string;
+  activeShellCallId?: string;
+  focusedShellCallId?: string;
   /**
    * Which end of the transcript is on screen before the first frame reports a
    * real scroll position. The app shell pins its scroll region to the bottom,
@@ -549,6 +551,8 @@ export function OpenTuiTranscriptView({
   showToolCallDetails = true,
   mouseTracking = true,
   awaitingCallId,
+  activeShellCallId,
+  focusedShellCallId,
   initialAnchor = 'bottom',
 }: TranscriptViewProps) {
   const visibleItems = useMemo(
@@ -617,6 +621,15 @@ export function OpenTuiTranscriptView({
                 showToolCallDetails={showToolCallDetails}
                 mouseTracking={mouseTracking}
                 awaitingApproval={item === awaitingItem}
+                shellFocus={
+                  item.kind === 'tool' &&
+                  !item.done &&
+                  item.id === activeShellCallId
+                    ? item.id === focusedShellCallId
+                      ? 'focused'
+                      : 'available'
+                    : undefined
+                }
               />
             </OpenTuiErrorBoundary>
           </box>
@@ -638,6 +651,7 @@ function TranscriptItem({
   showToolCallDetails,
   mouseTracking,
   awaitingApproval,
+  shellFocus,
 }: {
   item: LiveHistoryItem;
   maxRows: number;
@@ -649,6 +663,7 @@ function TranscriptItem({
   showToolCallDetails: boolean;
   mouseTracking: boolean;
   awaitingApproval: boolean;
+  shellFocus?: 'available' | 'focused';
 }) {
   switch (item.kind) {
     case 'user':
@@ -681,6 +696,7 @@ function TranscriptItem({
           showToolCallDetails={showToolCallDetails}
           mouseTracking={mouseTracking}
           awaitingApproval={awaitingApproval}
+          shellFocus={shellFocus}
         />
       );
     case 'task':
@@ -861,6 +877,7 @@ function ToolCard({
   showToolCallDetails,
   mouseTracking,
   awaitingApproval,
+  shellFocus,
 }: {
   item: CompactToolPresentation;
   maxRows: number;
@@ -871,6 +888,7 @@ function ToolCard({
   showToolCallDetails: boolean;
   mouseTracking: boolean;
   awaitingApproval: boolean;
+  shellFocus?: 'available' | 'focused';
 }) {
   const [clickedOpen, setClickedOpen] = useState(false);
   const status = toolStatusMeta(item);
@@ -985,6 +1003,11 @@ function ToolCard({
             ) : null}
           </text>
         )}
+        {shellFocus ? (
+          <text fg={C.accent} flexShrink={0}>
+            {shellFocus === 'focused' ? ' (Focused)' : ' (ctrl+f to focus)'}
+          </text>
+        ) : null}
       </box>
       {collapsed ? null : (
         <>

@@ -60,6 +60,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Flow;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -88,6 +89,8 @@ class HttpRuntimeTransportTest {
     private final AtomicReference<Headers> capturedHeaders =
             new AtomicReference<>();
     private final CountDownLatch requested = new CountDownLatch(1);
+    private final AtomicInteger requestCount = new AtomicInteger();
+    private final AtomicInteger droppedResponses = new AtomicInteger();
 
     @BeforeEach
     void setUp() throws IOException {
@@ -109,6 +112,10 @@ class HttpRuntimeTransportTest {
                     .getFirst("Cache-Control"));
             capturedPath.set(exchange.getRequestURI().getRawPath());
             capturedHeaders.set(exchange.getRequestHeaders());
+            if (requestCount.incrementAndGet() <= droppedResponses.get()) {
+                exchange.close();
+                return;
+            }
             Reply planned = reply.get();
             exchange.getResponseHeaders().set("Cache-Control",
                     planned.cacheControl);
@@ -219,6 +226,86 @@ class HttpRuntimeTransportTest {
         routed.attest(remoteLease, request, seed).toCompletableFuture().get(2, TimeUnit.SECONDS);
         assertEquals(ManagedContextProtocol.ATTEST_PATH, capturedPath.get());
         assertEquals(URI.create("http://127.0.0.1:2/"), remoteLease.getEndpoint());
+    }
+
+    @Test
+    void retriesOnlyOneEofForReadOnlyContextAttestation() throws Exception {
+        var request = ManagedContextProtocolTest.request();
+        var seed = ManagedContextProtocolTest.seed();
+        var boot = ManagedContextProtocol.boot(request, seed);
+        reply.set(json(200, JsonCodec.encode(ManagedContextProtocol.attestationResponse(boot))));
+        droppedResponses.set(1);
+        assertEquals(request.getStorageId(), transport.attest(contextLease(seed), request, seed)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS).getStorageId());
+        assertEquals(2, requestCount.get());
+        assertEquals(JSON.valueToTree(ManagedContextProtocol.attestationRequest(boot)),
+                JSON.readTree(captured.get()));
+        assertEquals("Bearer " + seed.getToken(), capturedAuthorization.get());
+        assertEquals(seed.getLeaseId(), capturedHeaders.get().getFirst("X-Qwen-Managed-Lease-Id"));
+    }
+
+    @Test
+    void stopsAfterTheSecondAttestationEof() {
+        droppedResponses.set(Integer.MAX_VALUE);
+        var error = assertThrows(ExecutionException.class, () -> transport.attest(
+                contextLease(ManagedContextProtocolTest.seed()), ManagedContextProtocolTest.request(),
+                ManagedContextProtocolTest.seed()).toCompletableFuture().get(2, TimeUnit.SECONDS));
+        assertEquals("managed_runtime_unavailable", ((RuntimeBrokerException) error.getCause()).getCode());
+        assertEquals(2, requestCount.get());
+    }
+
+    @Test
+    void sharesTheHttpDeadlineAcrossAnAttestationRetry() throws Exception {
+        var firstReceived = new CountDownLatch(1);
+        var retryReceived = new CountDownLatch(1);
+        var closeFirst = new CompletableFuture<Void>();
+        var closeSecond = new CompletableFuture<Void>();
+        var requests = new AtomicInteger();
+        var stalled = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        stalled.createContext("/", exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            if (requests.incrementAndGet() == 1) {
+                firstReceived.countDown();
+                closeFirst.join();
+            } else {
+                retryReceived.countDown();
+                closeSecond.join();
+            }
+            exchange.close();
+        });
+        stalled.start();
+        try {
+            var client = new HttpRuntimeTransport(HttpClient.newHttpClient(), Duration.ofSeconds(1));
+            var seed = ManagedContextProtocolTest.seed();
+            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(),
+                    URI.create("http://127.0.0.1:" + stalled.getAddress().getPort()),
+                    seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+            var pending = client.attest(lease, ManagedContextProtocolTest.request(), seed).toCompletableFuture();
+            assertTrue(firstReceived.await(2, TimeUnit.SECONDS));
+            Thread.sleep(600);
+            closeFirst.complete(null);
+            assertTrue(retryReceived.await(2, TimeUnit.SECONDS));
+            var error = assertThrows(ExecutionException.class, () -> pending.get(700, TimeUnit.MILLISECONDS));
+            assertEquals("managed_runtime_unavailable", ((RuntimeBrokerException) error.getCause()).getCode());
+            assertEquals(2, requests.get());
+        } finally {
+            closeFirst.complete(null);
+            closeSecond.complete(null);
+            stalled.stop(0);
+        }
+    }
+
+    @Test
+    void doesNotRetryContextMutationAfterEof() {
+        var request = ManagedContextProtocolTest.request();
+        var seed = ManagedContextProtocolTest.seed();
+        var runtime = ready(request, seed, contextLease(seed));
+        var session = on(runtime, session("session", request));
+        droppedResponses.set(1);
+        var error = assertThrows(ExecutionException.class, () -> transport.installContext(runtime, session,
+                "op", ManagedContextProtocolTest.binding()).toCompletableFuture().get(2, TimeUnit.SECONDS));
+        assertEquals("managed_runtime_unavailable", ((RuntimeBrokerException) error.getCause()).getCode());
+        assertEquals(1, requestCount.get());
     }
 
     @Test

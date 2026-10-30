@@ -36,6 +36,7 @@ import {
   type HostedFileHistorySettleBlocker,
 } from './hosted-file-history.js';
 import { HostedShellPublisher } from './hosted-shell-publisher.js';
+import type { HostedExtensionToolConfig } from './hosted-extension-tool-context.js';
 import {
   HOSTED_TOOL_INPUT_ORDER,
   HostedHookSession,
@@ -9809,6 +9810,7 @@ function backgroundTurnRig(
     fitsInline?: (type: string) => boolean;
     publicationMissing?: boolean;
     foregroundOnly?: boolean;
+    extensionConfig?: HostedExtensionToolConfig;
     closeResults?: ReadonlyArray<'NOT_STARTED' | 'MISSING'>;
     executionCallIds?: readonly string[];
     hooks?: HostedHookSession;
@@ -9966,6 +9968,7 @@ function backgroundTurnRig(
       childRuns: orchestrator as never,
       backgroundLane: options.lane,
       foregroundOnly: options.foregroundOnly,
+      extensionConfig: options.extensionConfig,
     },
   );
   return {
@@ -10722,6 +10725,136 @@ it.each([true, false])(
       expect(shell?.parametersJsonSchema).not.toHaveProperty(
         'properties.is_background',
       );
+    expect(declarations.map((tool) => tool.name)).not.toContain('monitor');
+  },
+);
+
+it.each([
+  { enabled: true, isBackground: false },
+  { enabled: false, isBackground: false },
+  { enabled: true, isBackground: 'FaLsE' },
+  { enabled: false, isBackground: 'FaLsE' },
+])(
+  'matches its advertised explicit foreground Shell contract (background enabled: $enabled, input: $isBackground)',
+  async ({ enabled, isBackground }) => {
+    const rig = backgroundTurnRig({
+      executionStatus: 'not_started',
+      responseParts: [],
+      capture: null,
+    });
+    turn = rig.turn;
+    enablement.childRun = enabled;
+    const declarations = await turn.declarations(new AbortController().signal);
+    const shell = declarations.find(
+      (tool) => tool.name === 'run_shell_command',
+    );
+    const args = { command: 'echo hi', is_background: isBackground };
+    const call = { ...calls[0], name: 'run_shell_command', args };
+    const results = await turn.execute(
+      [call],
+      [{ functionCall: { id: call.callId, name: call.name, args } }],
+      'model',
+      new AbortController().signal,
+    );
+    if (enabled) {
+      expect(shell?.parametersJsonSchema).toHaveProperty(
+        'properties.is_background',
+      );
+      expect(broker.prepareV3).toHaveBeenCalledOnce();
+      expect(broker.executeV3).toHaveBeenCalledOnce();
+      expect(JSON.parse(broker.executeV3.mock.calls[0]![1])).toMatchObject({
+        toolName: 'run_shell_command',
+        input: { command: 'echo hi', is_background: false },
+      });
+      expect(
+        JSON.parse(broker.executeV3.mock.calls[0]![1]).input.is_background,
+      ).toBe(false);
+    } else {
+      expect(shell?.parametersJsonSchema).not.toHaveProperty(
+        'properties.is_background',
+      );
+      expect(results[0]?.functionResponse?.response?.['error']).toContain(
+        'foreground command',
+      );
+      expect(broker.prepareV3).not.toHaveBeenCalled();
+      expect(broker.executeV3).not.toHaveBeenCalled();
+    }
+    expect(rig.orchestrator.calls).toEqual([]);
+  },
+);
+
+it('reports a malformed background flag without hiding admitted capabilities', async () => {
+  const rig = backgroundTurnRig({
+    executionStatus: 'not_started',
+    responseParts: [],
+    capture: null,
+  });
+  turn = rig.turn;
+  const args = { command: 'echo hi', is_background: 'yes' };
+  const call = { ...calls[0], name: 'run_shell_command', args };
+  const results = await turn.execute(
+    [call],
+    [{ functionCall: { id: call.callId, name: call.name, args } }],
+    'model',
+    new AbortController().signal,
+  );
+  const error = results[0]?.functionResponse?.response?.['error'];
+  expect(error).toContain('is_background');
+  expect(error).not.toContain('unavailable');
+  expect(broker.prepareV3).not.toHaveBeenCalled();
+  expect(broker.executeV3).not.toHaveBeenCalled();
+  expect(rig.orchestrator.calls).toEqual([]);
+});
+
+it.each([true, false])(
+  'preserves extension Shell pins with background admission enabled (%s)',
+  async (enabled) => {
+    const pin = {
+      extensionId: 'ext_11111111-1111-4111-8111-111111111111',
+      packageRevision: 1,
+      packageDigest: 'a'.repeat(64),
+    };
+    const rig = backgroundTurnRig(
+      { executionStatus: 'not_started', responseParts: [], capture: null },
+      {
+        extensionConfig: {
+          revision: 1,
+          packages: [{ pin, assetRoot: path.join(root, 'extension-assets') }],
+        },
+      },
+    );
+    turn = rig.turn;
+    enablement.childRun = enabled;
+    const declarations = await turn.declarations(new AbortController().signal);
+    const shell = declarations.find(
+      (tool) => tool.name === 'run_shell_command',
+    );
+    expect(shell?.parametersJsonSchema).toHaveProperty(
+      'properties.extension_context.oneOf',
+      [
+        {
+          properties: Object.fromEntries(
+            Object.entries(pin).map(([key, value]) => [key, { const: value }]),
+          ),
+        },
+      ],
+    );
+    expect(shell?.description).toContain('$QWEN_EXTENSION_ROOT');
+    expect(shell?.description).toContain(
+      'cwd stays the Session working directory',
+    );
+    if (enabled)
+      expect(shell?.parametersJsonSchema).toHaveProperty(
+        'properties.is_background',
+      );
+    else {
+      expect(shell?.parametersJsonSchema).not.toHaveProperty(
+        'properties.is_background',
+      );
+      expect(shell?.description).toContain(
+        'Shell file mutations are not backed up',
+      );
+    }
     expect(declarations.map((tool) => tool.name)).not.toContain('monitor');
   },
 );
@@ -12556,4 +12689,64 @@ it('refuses a malformed permission rewrite on an admitted background Shell', asy
   expect(broker.prepareV3).not.toHaveBeenCalled();
   expect(broker.executeV3).not.toHaveBeenCalled();
   expect(broker.acquire).toHaveBeenCalledOnce();
+});
+
+it.each(['auto', 'yolo'] as const)(
+  'enforces Session deny rules on extension command steps in %s mode',
+  async (mode) => {
+    turn = createTurn(true, {
+      mode,
+      permissionRules: { allow: [], ask: [], deny: ['Bash'] },
+    });
+    const signal = new AbortController().signal;
+    await turn.declarations(signal);
+    const permission = await (
+      turn as unknown as {
+        commandPermission(
+          id: string,
+          toolName: 'shell',
+          input: Record<string, unknown>,
+          signal: AbortSignal,
+          outerCallId: string,
+        ): Promise<{ allowed: boolean; approvalMode: string }>;
+      }
+    ).commandPermission(
+      'command-step',
+      'shell',
+      { command: 'printf denied' },
+      signal,
+      'outer-command',
+    );
+    expect(permission).toMatchObject({ allowed: false, approvalMode: mode });
+    expect(actionIds()).toEqual([]);
+    expect(broker.execute).not.toHaveBeenCalled();
+  },
+);
+
+it('honors an explicit Session allow rule for an extension command step', async () => {
+  turn = createTurn(true, {
+    mode: 'default',
+    permissionRules: { allow: ['Bash'], ask: [], deny: [] },
+  });
+  const signal = new AbortController().signal;
+  await turn.declarations(signal);
+  const permission = await (
+    turn as unknown as {
+      commandPermission(
+        id: string,
+        toolName: 'shell',
+        input: Record<string, unknown>,
+        signal: AbortSignal,
+        outerCallId: string,
+      ): Promise<{ allowed: boolean }>;
+    }
+  ).commandPermission(
+    'command-step',
+    'shell',
+    { command: 'printf allowed' },
+    signal,
+    'outer-command',
+  );
+  expect(permission.allowed).toBe(true);
+  expect(actionIds()).toEqual([]);
 });

@@ -41,8 +41,9 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 public final class JdbcRepositoryContract {
     private static final Instant START = Instant.parse(
-            "2026-09-20T00:00:00Z");
-    private static final Instant HEALTH = START.plusSeconds(30);
+            "2026-09-20T00:00:00.123Z");
+    private static final Instant HEALTH = Instant.parse(
+            "2026-09-20T00:00:30.456Z");
 
     private JdbcRepositoryContract() {
     }

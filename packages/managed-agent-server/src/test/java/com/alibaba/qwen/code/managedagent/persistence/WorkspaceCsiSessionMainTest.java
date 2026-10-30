@@ -14,7 +14,6 @@ import com.alibaba.qwen.code.runtimebroker.CsiFilesRetirementProfile;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
-import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.core.StreamReadFeature;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -396,7 +395,7 @@ class WorkspaceCsiSessionMainTest {
         var before = allTables();
         var names = List.of("insertTurnCommand", "insertCancelCommand", "beginSessionMutation",
                 "completeSessionMutation", "abandonSessionMutation", "beginOperation", "beginWorkspaceClose",
-                "beginWorkspaceLifecycle", "unarchiveWorkspaceSession", "beginCwdChangeOperation",
+                "beginWorkspaceLifecycle", "unarchiveWorkspaceSession",
                 "completeCwdChangeOperation", "failCwdChangeOperation", "claimOperation", "completeOperation",
                 "renewLifecycleOperation", "blockLifecycleOperation", "retryOperation", "advanceReplayFloor",
                 "materializeNextBatch", "claimTurn", "renewTurn", "releaseTurnLease", "scheduleTurnRetry",
@@ -472,27 +471,9 @@ class WorkspaceCsiSessionMainTest {
         for (int index = 0; index < 3; index++) {
             var original = create(request("backlog-" + index));
             insertLegacyOperation(original.sessionId());
-            String resourceKey =
-                    com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.key(
-                            ManagedSessionStore.sessionScopeKey("tenant", original.sessionId()),
-                            "private-manifest");
             jdbc.update(
-                    "INSERT INTO ma_resource (resource_key, session_scope_key, tenant_id, session_id, resource_id, kind, schema_version, byte_length, sha256, storage_kind, inline_bytes, state, publish_command_id, gmt_create) VALUES (?, ?, 'tenant', ?, 'private-manifest', 'snapshot-manifest', 1, 2, ?, 'MYSQL_INLINE', ?, 'REFERENCED', 'private-fixture', " + ManagedSchemaTime.SQL_NOW + ")",
-                    resourceKey,
-                    ManagedSessionStore.sessionScopeKey("tenant", original.sessionId()),
-                    original.sessionId(),
-                    com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(
-                            new byte[] {91, 93}),
-                    new byte[] {91, 93});
-            jdbc.update(
-                    "INSERT INTO ma_snapshot (tenant_id, session_id, snapshot_id, snapshot_version, covered_sequence, projection_version, manifest_resource_key, manifest_sha256, item_count, state, gmt_create, retain_until) VALUES ('tenant', ?, 'private-snapshot', 1, 1, 1, ?, ?, 0, 'PUBLISHED', 0, 0)",
-                    original.sessionId(),
-                    resourceKey,
-                    com.alibaba.qwen.code.runtimebroker.CsiNativeActivationProof.sha256(
-                            new byte[] {91, 93}));
-            jdbc.update(
-                    "UPDATE ma_event_stream SET covered_sequence = 1, current_snapshot_id ="
-                        + " 'private-snapshot' WHERE tenant_id = X'74656e616e74' AND session_id ="
+                    "UPDATE ma_event_stream SET covered_sequence = 1"
+                        + " WHERE tenant_id = X'74656e616e74' AND session_id ="
                         + " ?",
                     original.sessionId());
         }
@@ -645,7 +626,7 @@ class WorkspaceCsiSessionMainTest {
                     .sorted(Comparator.comparing(JsonNode::toString)).toList();
             result.put(table, json.valueToTree(rows));
         }
-        assertThat(result).hasSize(36);
+        assertThat(result).hasSize(39);
         return result;
     }
 

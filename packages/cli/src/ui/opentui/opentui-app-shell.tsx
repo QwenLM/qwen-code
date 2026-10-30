@@ -50,6 +50,7 @@ import {
 import type { PartListUnion } from '@google/genai';
 import { MessageSenderType } from '@qwen-code/qwen-code-core/core/logger.js';
 import type { LoadedSettings } from '../../config/settings.js';
+import type { MicrophonePermission } from '../hooks/use-voice-input.js';
 import type { VimMode } from '../contexts/VimModeContext.js';
 import type { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
 import type { SlashCommand } from '../commands/types.js';
@@ -79,7 +80,11 @@ import {
   selectAutoApprovals,
   type WaitingCallInfo,
 } from './live-session.js';
-import type { OpenTuiSubmitOptions } from './live-turn.js';
+import type {
+  ForegroundShellOwner,
+  OpenTuiLiveTurn,
+  OpenTuiSubmitOptions,
+} from './live-turn.js';
 import {
   restoreInputSubmissions,
   type OpenTuiInputSubmission,
@@ -103,8 +108,9 @@ import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
 import { useKeyboard, useTerminalDimensions } from '@opentui/react';
-import type { KeyEvent } from '@opentui/core';
-import { toOriginalKey } from './key-map.js';
+import type { KeyEvent, BoxRenderable } from '@opentui/core';
+import { Command, matchesCommand, toOriginalKey } from './key-map.js';
+import { keyToAnsi } from '../hooks/keyToAnsi.js';
 import {
   normalizeQuitSubmission,
   OpenTuiSlashGateway,
@@ -121,6 +127,9 @@ import { OpenTuiInputPrompt, type InputPromptProps } from './input-prompt.js';
 import { OpenTuiBanner } from './opentui-header.js';
 import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
 import { OpenTuiQueuedMessageDisplay } from './queued-message.js';
+import { OpenTuiModBand } from './mod-band.js';
+import { useModBand } from '../hooks/use-mod-band.js';
+import { modBandMaxRows } from '../utils/mod-band-tree.js';
 import {
   OpenTuiActionConfirmation,
   OpenTuiMcpApprovalDialog,
@@ -160,7 +169,10 @@ export interface OpenTuiAppProps {
 
   // --- seams owned by the renderer / entry layer ---------------------------
   /** Renders the transcript + status line (needs the real OpenTUI renderer). */
-  renderMain?: () => ReactNode;
+  renderMain?: (shell?: {
+    owner: ForegroundShellOwner | null;
+    focused: boolean;
+  }) => ReactNode;
   /** Current live prompts; the shell combines persisted input history. */
   userMessages?: readonly string[];
   historyItems?: readonly LiveHistoryItem[];
@@ -240,6 +252,14 @@ export interface OpenTuiAppProps {
    * `onConfirm` and is reported back via {@link onToolCallSettled}.
    */
   waitingToolCalls?: readonly WaitingCallInfo[];
+  foregroundShellControl?: Pick<
+    OpenTuiLiveTurn,
+    | 'foregroundShell'
+    | 'promoteShellToBackground'
+    | 'writeShellInput'
+    | 'resizeShell'
+    | 'scrollShell'
+  >;
   /** Drops a waiting call after its dialog settled. */
   onToolCallSettled?: (callId: string) => void;
   /** U-10 parity: the entry logs/echoes render crashes (error boundary). */
@@ -327,6 +347,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const shellControllersRef = useRef<Set<AbortController>>(new Set());
   const { width: terminalWidth, height: terminalHeight } =
     useTerminalDimensions();
+  const modBand = useModBand(config);
   // ink renders every dialog inside a region of exactly this height, clipped,
   // with the composer swapped out (`DefaultAppLayout`'s dialog wrapper) — in
   // ink's default state: its show-more-lines key lifts `constrainHeight`, which
@@ -618,12 +639,114 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   // offered here and its servers stay silently disconnected.
   const mcpApproval = useMcpApproval(config);
 
+  const shellControl = props.foregroundShellControl;
+  const foregroundShell = shellControl?.foregroundShell;
+  const [shellFocus, setShellFocus] = useState<ForegroundShellOwner | null>(
+    null,
+  );
+  const shellBlocked = Boolean(
+    dialog ||
+      activeModal ||
+      activeToolCall ||
+      mcpApproval.isMcpApprovalDialogOpen ||
+      shellModeActive,
+  );
+  const shellFocused =
+    !shellBlocked &&
+    !!foregroundShell &&
+    shellFocus?.callId === foregroundShell.callId &&
+    shellFocus.pid === foregroundShell.pid &&
+    shellFocus.turn === foregroundShell.turn;
+  useEffect(() => {
+    if (!shellFocused) setShellFocus(null);
+  }, [shellFocused]);
+
+  const controlsRef = useRef<BoxRenderable | null>(null);
+  const [controlsHeight, setControlsHeight] = useState(0);
+  const shellColumns = Math.max(1, Math.floor(terminalWidth * 0.89));
+  const shellRows = Math.max(1, terminalHeight - controlsHeight - 10);
+  const resizeShell = shellControl?.resizeShell;
+  const hasShellControl = Boolean(shellControl);
+  const shellCallId = foregroundShell?.callId;
+  const shellPid = foregroundShell?.pid;
+  const shellTurn = foregroundShell?.turn;
+  useEffect(() => {
+    if (!hasShellControl) return;
+    config.setShellExecutionConfig({
+      ...config.getShellExecutionConfig(),
+      terminalWidth: shellColumns,
+      terminalHeight: shellRows,
+    });
+  }, [config, hasShellControl, shellColumns, shellRows]);
+  useEffect(() => {
+    if (
+      shellCallId !== undefined &&
+      shellPid !== undefined &&
+      shellTurn !== undefined
+    )
+      resizeShell?.(
+        { callId: shellCallId, pid: shellPid, turn: shellTurn },
+        shellColumns,
+        shellRows,
+      );
+  }, [shellCallId, shellPid, shellTurn, resizeShell, shellColumns, shellRows]);
+
+  const handleShellKey = (key: KeyEvent): boolean => {
+    if (key.eventType === 'release' || shellBlocked || !shellControl)
+      return false;
+    if (
+      matchesCommand(Command.PROMOTE_SHELL_TO_BACKGROUND, key) &&
+      shellControl.promoteShellToBackground()
+    ) {
+      setShellFocus(null);
+      return true;
+    }
+    if (
+      matchesCommand(Command.TOGGLE_SHELL_INPUT_FOCUS, key) &&
+      foregroundShell
+    ) {
+      setShellFocus(shellFocused ? null : foregroundShell);
+      return true;
+    }
+    if (!shellFocused || !foregroundShell) return false;
+    // Ink's global exit/cancel guard runs before terminal input.
+    if (
+      matchesCommand(Command.QUIT, key) ||
+      (matchesCommand(Command.EXIT, key) &&
+        !props.composerHandle?.current?.getText())
+    )
+      return false;
+    if (key.ctrl && key.shift && (key.name === 'up' || key.name === 'down')) {
+      shellControl.scrollShell(foregroundShell, key.name === 'up' ? -1 : 1);
+    } else {
+      const sequence = keyToAnsi(toOriginalKey(key));
+      if (sequence && !shellControl.writeShellInput(foregroundShell, sequence))
+        setShellFocus(null);
+    }
+    return !(
+      matchesCommand(Command.EXIT, key) ||
+      matchesCommand(Command.TOGGLE_THINKING_EXPANDED, key) ||
+      (key.name === 'tab' && key.shift && !key.ctrl)
+    );
+  };
+  const handleShellPaste = (text: string): boolean => {
+    if (!shellFocused || !foregroundShell || !shellControl) return false;
+    if (!shellControl.writeShellInput(foregroundShell, text))
+      setShellFocus(null);
+    return true;
+  };
+
   // Shift+Tab lives here, not in the composer: ink mounts useAutoAcceptIndicator
   // at App level (disabled only for the agent-tab view), so it still cycles
   // while a dialog or a confirmation has the composer unmounted. The composer
   // keeps only the Windows bare-Tab fallback — the one route that has to know
   // whether Tab was already spent on a completion.
   useKeyboard((key: KeyEvent) => {
+    if (shellFocused && handleShellKey(key)) {
+      key.preventDefault();
+      key.stopPropagation();
+      return;
+    }
     const { name, shift, ctrl } = toOriginalKey(key);
     if (
       key.eventType !== 'release' &&
@@ -673,6 +796,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   rewindIdleRef.current = !streaming;
   const rewindInjectionRef = useRef<(() => void) | null>(null);
   useEffect(() => () => rewindInjectionRef.current?.(), []);
+  const voiceMicWarnedStatusRef = useRef<MicrophonePermission | null>(null);
   const host = useMemo(
     () =>
       new OpenTuiAppHost({
@@ -960,7 +1084,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     );
     reloadRef.current = async () => {
       await dispatcher.loadCommands();
-      setCommandList(dispatcher.commands);
+      if (!disposed) setCommandList(dispatcher.commands);
     };
     let disposed = false;
     (async () => {
@@ -1398,7 +1522,12 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           focusable={false}
         >
           <OpenTuiBanner config={config} settings={settings} />
-          {renderMain ? renderMain() : null}
+          {renderMain
+            ? renderMain({
+                owner: foregroundShell ?? null,
+                focused: shellFocused,
+              })
+            : null}
           {!dialog &&
           !activeModal &&
           !activeToolCall &&
@@ -1412,7 +1541,16 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
             Yoga otherwise spreads the scroll region's content height over the
             column and squeezes the composer's three border rows into one row
             painted three times. */}
-        <box flexDirection="column" flexShrink={0}>
+        <box
+          flexDirection="column"
+          flexShrink={0}
+          ref={(el) => {
+            controlsRef.current = el as BoxRenderable | null;
+          }}
+          onSizeChange={() =>
+            setControlsHeight(controlsRef.current?.height ?? 0)
+          }
+        >
           {mcpApproval.isMcpApprovalDialogOpen &&
           mcpApproval.currentMcpApproval ? (
             // ink ranks the gated-server approval above both the shell and the
@@ -1480,6 +1618,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
               overflow="hidden"
             >
               <OpenTuiDialogMount
+                extensionRefreshState={extensionRefreshState}
                 key={dialog.dialog}
                 request={dialog}
                 host={host}
@@ -1510,20 +1649,31 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
           ) : (
             <box key="composer" flexDirection="column" marginTop={1}>
               <OpenTuiLoadingIndicator
-                streaming={Boolean(streaming)}
+                streaming={Boolean(streaming) && !shellFocused}
                 streamingCharsRef={streamingCharsRef}
                 isReceivingContent={isReceivingContent}
                 showPhrase={showLoadingPhrases}
               />
               <OpenTuiQueuedMessageDisplay messageQueue={displayedQueue} />
+              <OpenTuiModBand
+                band={modBand}
+                maxRows={modBandMaxRows(terminalHeight)}
+              />
               <OpenTuiInputPrompt
                 onSubmit={onSubmit}
                 onNotice={notify}
+                voice={{
+                  settings,
+                  voiceMicWarnedStatusRef,
+                  addItem: (item, at) => host.addItem(item, at),
+                }}
                 preferredEditor={settings.merged.general?.preferredEditor}
                 topRightLabel={host.sessionName ?? undefined}
                 userMessages={userMessages}
                 config={config}
-                focus
+                focus={!shellFocused}
+                onShellKey={handleShellKey}
+                onShellPaste={handleShellPaste}
                 streaming={streaming}
                 onInterrupt={onInterrupt}
                 onRetry={

@@ -2,6 +2,8 @@
 
 [English](2026-10-09-managed-workspace-w2-webshell.md) | [简体中文](2026-10-09-managed-workspace-w2-webshell.zh-CN.md)
 
+当前状态：新建目录切换的准入和界面已移除，仅保留既有操作查询与清算。见[移除设计](2026-10-26-retire-managed-cwd-change.zh-CN.md)。
+
 ## 问题与基线
 
 W2 控制面（#13247）已有同一 Workspace 内持久化、幂等的 cwd 变更和 `session.context.changed` 事件。WebShell 能显示绑定目录，但没有切换入口。Session summary 的 TypeScript 合同缺少 context revision，事件投影也忽略上下文变更。基线为 main `5b1c701400` 之后；#13545（角色权限）已合入且本分支已与其角色模型统一，#13564（Hosted 规则缓存失效）仍 open。

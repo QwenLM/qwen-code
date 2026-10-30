@@ -90,6 +90,16 @@ public interface HarnessConnector extends AutoCloseable {
         throw new UnsupportedOperationException("MCP management is unavailable");
     }
 
+    default boolean supportsSessionExtensions() { return false; }
+
+    default Map<String, Object> applyExtensions(String tenantId, String sessionId, Map<String, Object> command) {
+        throw new UnsupportedOperationException("Extension management is unavailable");
+    }
+
+    default Map<String, Object> continueExtensionOperation(String tenantId, String sessionId, String operationId, boolean recoverPrevious) {
+        throw new UnsupportedOperationException("Extension management is unavailable");
+    }
+
     default boolean isWorkspaceFilesAvailable() {
         return false;
     }

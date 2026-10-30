@@ -1080,7 +1080,12 @@ describe('Hosted Harness model boundary', () => {
     expect(hooks.setHistory).toHaveBeenCalledWith([]);
     expect(hooks.shutdown).toHaveBeenCalledOnce();
     const args = vi.mocked(loadCliConfig).mock.calls[0];
-    expect(args?.[1]).toMatchObject({ safeMode: true, chatRecording: false });
+    expect(args?.[1]).toMatchObject({
+      safeMode: true,
+      chatRecording: false,
+      sessionId: input.sessionId,
+      sessionIdGenerated: true,
+    });
     expect(args?.[9]?.toolInvocationGuard?.({} as never)).toMatchObject({
       allowed: false,
     });
@@ -2961,6 +2966,83 @@ it('keeps agent instructions ahead of refreshed project context', async () => {
   expect(mocks.setUserMemory).toHaveBeenLastCalledWith(
     '# Agent instructions\n\nAGENT_SECTION\n\nPROJECT_SECTION',
   );
+});
+
+it('preserves pinned instruction sources when Todo changes after a tool batch', async () => {
+  const mocks = config([]);
+  const observed: string[] = [];
+  const skills = new HostedSkillCatalog([
+    { name: 'published', description: 'SKILL_SECTION', body: 'body' },
+  ]);
+  let todo = 'TODO_FIRST';
+  let round = 0;
+  const call = {
+    callId: 'context-call',
+    name: 'read_file',
+    args: {},
+    isClientInitiated: false,
+    prompt_id: input.promptId,
+  };
+  mocks.getHistory.mockImplementation(() => [
+    {
+      role: 'model',
+      parts:
+        round === 1
+          ? [{ functionCall: { name: call.name } }]
+          : [{ text: 'done' }],
+    },
+  ]);
+  mocks.sendMessageStream.mockImplementation(async function* () {
+    observed.push(mocks.setUserMemory.mock.calls.at(-1)?.[0] ?? '');
+    round++;
+    if (round === 1) yield { type: LlmEventType.ToolCallRequest, value: call };
+    else yield { type: LlmEventType.Content, value: 'done' };
+    yield { type: LlmEventType.Finished };
+  });
+  const execute = vi.fn(async () => {
+    todo = 'TODO_UPDATED';
+    return [
+      {
+        functionResponse: {
+          id: call.callId,
+          name: call.name,
+          response: { output: 'contents' },
+        },
+      },
+    ];
+  });
+  await runHostedHarnessTextTurn({
+    ...input,
+    agentInstructions: 'AGENT_SECTION',
+    extensionInstructions: 'EXTENSION_SECTION',
+    skills,
+    workspaceContext: { read: () => 'WORKSPACE_SECTION' },
+    toolTurn: {
+      declarations: async () => [{ name: call.name }],
+      consumeResults: async () => undefined,
+      execute,
+      planModeInstructions: () => 'PLAN_SECTION',
+      todoInstructions: async () => todo,
+    },
+  });
+  expect(execute).toHaveBeenCalledOnce();
+  expect(observed).toHaveLength(2);
+  for (const [index, prompt] of observed.entries()) {
+    let position = -1;
+    for (const marker of [
+      'AGENT_SECTION',
+      'EXTENSION_SECTION',
+      'SKILL_SECTION',
+      'PLAN_SECTION',
+      index === 0 ? 'TODO_FIRST' : 'TODO_UPDATED',
+      'WORKSPACE_SECTION',
+    ]) {
+      const next = prompt.indexOf(marker);
+      expect(next).toBeGreaterThan(position);
+      position = next;
+    }
+  }
+  expect(observed[1]).not.toContain('TODO_FIRST');
 });
 
 it('advertises only the published Skill catalog while keeping host Skill discovery disabled', async () => {

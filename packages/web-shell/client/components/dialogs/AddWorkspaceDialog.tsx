@@ -1,4 +1,11 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import {
+  useState,
+  useCallback,
+  useRef,
+  useEffect,
+  useLayoutEffect,
+} from 'react';
+import type { WebShellWorkspaceDirectoryPicker } from '../../customization';
 import { useI18n } from '../../i18n';
 import { getShadowAwareActiveElement } from '../../utils/dom';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
@@ -69,6 +76,10 @@ export interface GitWorkspaceCloneControls {
 }
 
 interface AddWorkspaceDialogProps {
+  /** Overrides the default "Add workspace" heading. */
+  title?: string;
+  /** Overrides the default submit label; the in-flight label is unchanged. */
+  submitLabel?: string;
   executionMode?: WorkspaceExecutionMode;
   onExecutionModeChange?: (mode: WorkspaceExecutionMode) => void;
   executionModeLocked?: boolean;
@@ -87,7 +98,10 @@ interface AddWorkspaceDialogProps {
    * surfaces matching subdirectories in a listbox under the input.
    */
   onSuggest?: (prefix: string) => Promise<WorkspacePathSuggestions>;
-  onPick?: () => Promise<string | undefined>;
+  onPick?: WebShellWorkspaceDirectoryPicker;
+  /** Stable identity for the current connection/target; replace it to cancel a pick. */
+  pickerTarget?: unknown;
+  pickerUsesHostUi?: boolean;
   persistenceSupported?: boolean;
   /**
    * Git clone controls. Presence means the connected daemon advertises
@@ -131,6 +145,8 @@ function targetBasename(value: string): string {
 }
 
 export function AddWorkspaceDialog({
+  title,
+  submitLabel,
   executionMode,
   onExecutionModeChange,
   executionModeLocked,
@@ -146,6 +162,8 @@ export function AddWorkspaceDialog({
   onLocationChange,
   onSuggest,
   onPick,
+  pickerTarget,
+  pickerUsesHostUi = false,
   persistenceSupported = true,
   gitClone,
 }: AddWorkspaceDialogProps) {
@@ -189,6 +207,28 @@ export function AddWorkspaceDialog({
   const [hostSep, setHostSep] = useState('/');
   const [browsing, setBrowsing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
+  const browseButtonRef = useRef<HTMLButtonElement>(null);
+  const suggestionListRef = useRef<HTMLUListElement | null>(null);
+  const pickerListSnapshotRef = useRef<
+    | {
+        suggestions: WorkspacePathSuggestion[];
+        scrollTop: number;
+        height: number;
+      }
+    | undefined
+  >(undefined);
+  const setSuggestionListRef = useCallback(
+    (node: HTMLUListElement | null) => {
+      suggestionListRef.current = node;
+      if (!node) return;
+      const snapshot = pickerListSnapshotRef.current;
+      if (snapshot?.suggestions === suggestions) {
+        node.scrollTop = snapshot.scrollTop;
+      }
+      pickerListSnapshotRef.current = undefined;
+    },
+    [suggestions],
+  );
   const listOpenRef = useRef(false);
   listOpenRef.current = listOpen && suggestions.length > 0;
   const suggestSeqRef = useRef(0);
@@ -199,6 +239,35 @@ export function AddWorkspaceDialog({
   const blurTimeoutRef = useRef<ReturnType<typeof setTimeout> | undefined>(
     undefined,
   );
+  const pickerRequestRef = useRef<AbortController | undefined>(undefined);
+  const cancelPicker = useCallback(() => {
+    const request = pickerRequestRef.current;
+    pickerRequestRef.current = undefined;
+    request?.abort();
+  }, []);
+  const pickerAvailable = Boolean(onPick);
+
+  // Callback identity may change on ordinary host renders. Only the target,
+  // connection, or picker source invalidates an in-flight selection.
+  useLayoutEffect(() => {
+    setBrowsing(false);
+    suppressNextFetchOpenRef.current = false;
+    return cancelPicker;
+  }, [
+    pickerTarget,
+    selectedLocation,
+    pickerAvailable,
+    pickerUsesHostUi,
+    source,
+    cancelPicker,
+  ]);
+
+  const handleClose = useCallback(() => {
+    cancelPicker();
+    setBrowsing(false);
+    suppressNextFetchOpenRef.current = false;
+    onClose();
+  }, [cancelPicker, onClose]);
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -383,18 +452,36 @@ export function AddWorkspaceDialog({
 
   const pickDirectory = useCallback(async () => {
     if (!onPick) return;
+    cancelPicker();
+    const request = new AbortController();
+    pickerRequestRef.current = request;
+    const list = suggestionListRef.current;
+    pickerListSnapshotRef.current = list
+      ? { suggestions, scrollTop: list.scrollTop, height: list.offsetHeight }
+      : undefined;
     inputRef.current?.blur();
     // The blur above scheduled the delayed dismiss; cancel it and apply the
     // close + suppress now so the timer cannot fire after the outcome below.
     cancelBlurDismiss();
     closeList();
-    suppressNextFetchOpenRef.current = true;
+    setGitSuggestOpen(false);
+    ++gitSuggestSeqRef.current;
+    suppressNextFetchOpenRef.current = source === 'directory';
     setBrowsing(true);
     setError(null);
     let pickedPath: string | undefined;
     try {
-      pickedPath = await onPick();
-      if (pickedPath && pickedPath !== path) {
+      pickedPath = await onPick({ signal: request.signal });
+      if (pickerRequestRef.current !== request || request.signal.aborted)
+        return;
+      if (source === 'git') {
+        if (pickedPath) {
+          autoGitTargetRef.current = undefined;
+          setGitTarget(
+            `${pickedPath.replace(/[\\/]+$/, '')}/${repoNameFromUrl(gitUrl)}`,
+          );
+        }
+      } else if (pickedPath && pickedPath !== path) {
         // Leave the suppress flag set: the path-change effect consumes it,
         // keeping the pick-triggered lookup closed until the first edit.
         ++suggestSeqRef.current;
@@ -407,13 +494,37 @@ export function AddWorkspaceDialog({
         if (pickedPath) ++suggestSeqRef.current;
         suppressNextFetchOpenRef.current = false;
       }
-    } catch {
+    } catch (error) {
+      if (pickerRequestRef.current !== request || request.signal.aborted)
+        return;
       suppressNextFetchOpenRef.current = false;
-      setError(t('sidebar.addWorkspaceBrowseError'));
+      if (
+        !(
+          typeof error === 'object' &&
+          error !== null &&
+          'name' in error &&
+          error.name === 'AbortError'
+        )
+      ) {
+        setError(t('sidebar.addWorkspaceBrowseError'));
+      }
     } finally {
-      setBrowsing(false);
+      if (pickerRequestRef.current === request) {
+        pickerRequestRef.current = undefined;
+        setBrowsing(false);
+      }
     }
-  }, [onPick, path, closeList, cancelBlurDismiss, t]);
+  }, [
+    onPick,
+    source,
+    gitUrl,
+    path,
+    suggestions,
+    closeList,
+    cancelBlurDismiss,
+    cancelPicker,
+    t,
+  ]);
 
   const registerClonedWorkspace = useCallback(
     async (cwd: string) => {
@@ -460,7 +571,7 @@ export function AddWorkspaceDialog({
           setClonedCwd(job.cwd);
           try {
             await registerClonedWorkspace(job.cwd);
-            onClose();
+            handleClose();
           } catch (err) {
             cloneRegisteredJobRef.current = undefined;
             setError(
@@ -503,7 +614,7 @@ export function AddWorkspaceDialog({
         setSubmitting(false);
       }
     },
-    [gitClone, onClose, registerClonedWorkspace, t],
+    [gitClone, handleClose, registerClonedWorkspace, t],
   );
 
   const cancelClone = useCallback(async () => {
@@ -542,21 +653,6 @@ export function AddWorkspaceDialog({
     setCloneUnknown(false);
     setSubmitting(false);
   }, [submitting]);
-
-  const pickGitTargetParent = useCallback(async () => {
-    if (!onPick) return;
-    try {
-      const picked = await onPick();
-      if (!picked) return;
-      autoGitTargetRef.current = undefined;
-      setGitTarget(
-        `${picked.replace(/[\\/]+$/, '')}/${repoNameFromUrl(gitUrl)}`,
-      );
-      if (error) setError(null);
-    } catch {
-      setError(t('sidebar.addWorkspaceBrowseError'));
-    }
-  }, [error, gitUrl, onPick, t]);
 
   /**
    * Reuses the directory path as the clone parent. It only writes while the
@@ -751,6 +847,7 @@ export function AddWorkspaceDialog({
   const handleSubmit = useCallback(
     async (e: React.FormEvent) => {
       e.preventDefault();
+      if (pickerRequestRef.current) return;
       // A double Enter can fire before the disabled state renders; clone is
       // not idempotent, so the second submission must not start another job.
       if (submitting) return;
@@ -760,7 +857,7 @@ export function AddWorkspaceDialog({
           setSubmitting(true);
           try {
             await registerClonedWorkspace(clonedCwd);
-            onClose();
+            handleClose();
           } catch (err) {
             setError(
               err instanceof Error
@@ -821,7 +918,7 @@ export function AddWorkspaceDialog({
         } else {
           await onAdd(trimmed, effectivePersist);
         }
-        onClose();
+        handleClose();
       } catch (err) {
         setError(
           err instanceof Error ? err.message : t('sidebar.addWorkspaceError'),
@@ -844,23 +941,31 @@ export function AddWorkspaceDialog({
       persist,
       persistenceSupported,
       onAdd,
-      onClose,
+      handleClose,
       closeList,
       submitting,
       t,
     ],
   );
 
-  const showList = (browseDirectories || listOpen) && suggestions.length > 0;
+  const showList =
+    !browsing && (browseDirectories || listOpen) && suggestions.length > 0;
   const showGitSuggestions =
-    gitSuggestOpen && !submitting && !clonedCwd && gitSuggestions.length > 0;
+    gitSuggestOpen &&
+    !submitting &&
+    !browsing &&
+    !clonedCwd &&
+    gitSuggestions.length > 0;
 
   return (
     <DialogShell
-      title={t('sidebar.addWorkspaceTitle')}
+      title={title ?? t('sidebar.addWorkspaceTitle')}
       size="md"
       dismissible={!submitting}
-      onClose={onClose}
+      modal={!(pickerUsesHostUi && browsing)}
+      modalRestoreFocusRef={browseButtonRef}
+      aria-busy={browsing || undefined}
+      onClose={handleClose}
     >
       <form className="flex flex-col gap-6" onSubmit={handleSubmit}>
         {cloneJob || cloneUnknown ? (
@@ -902,7 +1007,7 @@ export function AddWorkspaceDialog({
                 onClick={
                   cloneJob?.status === 'running' && !cloneUnknown
                     ? () => void cancelClone()
-                    : onClose
+                    : handleClose
                 }
                 disabled={
                   cloneJob?.status === 'running' && !cloneUnknown
@@ -1095,7 +1200,7 @@ export function AddWorkspaceDialog({
                             variant="outline"
                             title={t('workspaceHost.parent')}
                             aria-label={t('workspaceHost.parent')}
-                            disabled={submitting}
+                            disabled={submitting || browsing}
                             onMouseDown={(event) => event.preventDefault()}
                             onClick={() => {
                               const trimmed = path.replace(/[\\/]+$/, '');
@@ -1119,6 +1224,7 @@ export function AddWorkspaceDialog({
                         )}
                       {onPick && (
                         <Button
+                          ref={browseButtonRef}
                           type="button"
                           variant="outline"
                           onMouseDown={(event) => event.preventDefault()}
@@ -1126,7 +1232,9 @@ export function AddWorkspaceDialog({
                           disabled={submitting || browsing}
                         >
                           <FolderOpenIcon aria-hidden="true" />
-                          {t('sidebar.addWorkspaceBrowse')}
+                          {browsing
+                            ? t('sidebar.addWorkspaceBrowsing')
+                            : t('sidebar.addWorkspaceBrowse')}
                         </Button>
                       )}
                     </div>
@@ -1143,6 +1251,7 @@ export function AddWorkspaceDialog({
                     )}
                     {showList && (
                       <ul
+                        ref={setSuggestionListRef}
                         id={LISTBOX_ID}
                         role="listbox"
                         aria-label={t('sidebar.addWorkspaceSuggestions')}
@@ -1181,18 +1290,33 @@ export function AddWorkspaceDialog({
                         ))}
                       </ul>
                     )}
-                    {browseDirectories && suggestionsLoaded && !showList && (
-                      <div
-                        role={suggestionsError ? 'alert' : 'status'}
-                        className="mt-1 rounded-md border px-3 py-3 text-sm text-muted-foreground"
-                      >
-                        {t(
-                          suggestionsError
-                            ? 'workspaceHost.folderListError'
-                            : 'workspaceHost.noFolders',
-                        )}
-                      </div>
-                    )}
+                    {browseDirectories &&
+                      browsing &&
+                      pickerListSnapshotRef.current && (
+                        // Keep the body from shrinking and clamping its scroll offset.
+                        <div
+                          aria-hidden="true"
+                          className="mt-1"
+                          style={{
+                            height: pickerListSnapshotRef.current.height,
+                          }}
+                        />
+                      )}
+                    {browseDirectories &&
+                      !browsing &&
+                      suggestionsLoaded &&
+                      !showList && (
+                        <div
+                          role={suggestionsError ? 'alert' : 'status'}
+                          className="mt-1 rounded-md border px-3 py-3 text-sm text-muted-foreground"
+                        >
+                          {t(
+                            suggestionsError
+                              ? 'workspaceHost.folderListError'
+                              : 'workspaceHost.noFolders',
+                          )}
+                        </div>
+                      )}
                   </div>
                   <FieldDescription
                     id={browseDirectories ? undefined : HINT_ID}
@@ -1221,7 +1345,9 @@ export function AddWorkspaceDialog({
                           seedGitTargetFromDirectoryPath(nextUrl);
                         }
                       }}
-                      disabled={submitting || clonedCwd !== undefined}
+                      disabled={
+                        submitting || browsing || clonedCwd !== undefined
+                      }
                       autoCapitalize="off"
                       autoCorrect="off"
                       autoComplete="off"
@@ -1263,7 +1389,9 @@ export function AddWorkspaceDialog({
                               setGitSuggestOpen(false);
                             }, 100);
                           }}
-                          disabled={submitting || clonedCwd !== undefined}
+                          disabled={
+                            submitting || browsing || clonedCwd !== undefined
+                          }
                           autoCapitalize="off"
                           autoCorrect="off"
                           autoComplete="off"
@@ -1321,14 +1449,19 @@ export function AddWorkspaceDialog({
                       </div>
                       {onPick && (
                         <Button
+                          ref={browseButtonRef}
                           type="button"
                           variant="outline"
                           onMouseDown={(event) => event.preventDefault()}
-                          onClick={() => void pickGitTargetParent()}
-                          disabled={submitting || clonedCwd !== undefined}
+                          onClick={() => void pickDirectory()}
+                          disabled={
+                            submitting || browsing || clonedCwd !== undefined
+                          }
                         >
                           <FolderOpenIcon aria-hidden="true" />
-                          {t('sidebar.addWorkspaceBrowse')}
+                          {browsing
+                            ? t('sidebar.addWorkspaceBrowsing')
+                            : t('sidebar.addWorkspaceBrowse')}
                         </Button>
                       )}
                     </div>
@@ -1397,7 +1530,7 @@ export function AddWorkspaceDialog({
                 type="button"
                 variant="outline"
                 className="flex-1 sm:flex-none"
-                onClick={onClose}
+                onClick={handleClose}
                 disabled={submitting}
               >
                 {t('sidebar.addWorkspaceCancel')}
@@ -1407,6 +1540,7 @@ export function AddWorkspaceDialog({
                 className="flex-1 sm:flex-none"
                 disabled={
                   submitting ||
+                  browsing ||
                   (source === 'git'
                     ? clonedCwd === undefined &&
                       (!gitUrl.trim() || !gitTarget.trim())
@@ -1415,7 +1549,8 @@ export function AddWorkspaceDialog({
               >
                 {submitting
                   ? t('sidebar.addWorkspaceAdding')
-                  : t(
+                  : (submitLabel ??
+                    t(
                       source === 'git'
                         ? clonedCwd
                           ? 'sidebar.addWorkspaceRegister'
@@ -1423,7 +1558,7 @@ export function AddWorkspaceDialog({
                         : browseDirectories
                           ? 'workspaceHost.addFolder'
                           : 'sidebar.addWorkspaceRegister',
-                    )}
+                    ))}
               </Button>
             </div>
           </>

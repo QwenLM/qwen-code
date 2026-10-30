@@ -11,13 +11,14 @@ export function useManagedSessionRename(
   sessionId: string | undefined,
   summary: ManagedAgentSessionSummary | undefined,
   interactive: boolean,
-  onRenamed: (displayName: string) => void,
+  onRenamed: (sessionId: string, displayName: string) => void,
 ) {
   const [editor, setEditor] = useState<{
     value: string;
     busy: boolean;
     error?: string;
   }>();
+  const target = useRef<ManagedAgentSessionSummary | undefined>(undefined);
   const intent = useRef<
     | {
         displayName: string;
@@ -27,27 +28,34 @@ export function useManagedSessionRename(
     | undefined
   >(undefined);
   const lifetime = useRef<AbortController | undefined>(undefined);
-  const supported = Boolean(
-    interactive &&
-      provider.renameSession &&
-      summary?.sessionId === sessionId &&
-      summary?.capabilities.canRename === true,
-  );
+  const currentTarget =
+    target.current?.sessionId === sessionId ? summary : target.current;
+  const supportsRename = (session: ManagedAgentSessionSummary | undefined) =>
+    Boolean(
+      interactive &&
+        provider.renameSession &&
+        session?.capabilities.canRename === true,
+    );
 
   useEffect(() => {
     const abort = new AbortController();
     lifetime.current = abort;
     intent.current = undefined;
+    target.current = undefined;
     setEditor(undefined);
     return () => abort.abort();
   }, [provider, clientId, sessionId]);
 
   return {
-    supported,
-    editor: supported ? editor : undefined,
-    open() {
-      if (supported && summary && !intent.current?.busy) {
-        setEditor({ value: summary.title, busy: false });
+    supported: summary?.sessionId === sessionId && supportsRename(summary),
+    editor: supportsRename(currentTarget) ? editor : undefined,
+    open(session = summary) {
+      if (supportsRename(session) && session && !intent.current?.busy) {
+        if (target.current?.sessionId !== session.sessionId) {
+          intent.current = undefined;
+        }
+        target.current = session;
+        setEditor({ value: session.title, busy: false });
       }
     },
     close() {
@@ -61,8 +69,8 @@ export function useManagedSessionRename(
     async submit(displayName: string) {
       const abort = lifetime.current;
       if (
-        !supported ||
-        !sessionId ||
+        !supportsRename(currentTarget) ||
+        !currentTarget ||
         !provider.renameSession ||
         !abort ||
         abort.signal.aborted ||
@@ -86,13 +94,17 @@ export function useManagedSessionRename(
         current ? { value: displayName, busy: true } : undefined,
       );
       try {
-        const result = await provider.renameSession(sessionId, displayName, {
-          clientId,
-          idempotencyKey: attempt.idempotencyKey,
-          signal: abort.signal,
-        });
+        const result = await provider.renameSession(
+          currentTarget.sessionId,
+          displayName,
+          {
+            clientId,
+            idempotencyKey: attempt.idempotencyKey,
+            signal: abort.signal,
+          },
+        );
         if (abort.signal.aborted) return;
-        onRenamed(result.displayName);
+        onRenamed(currentTarget.sessionId, result.displayName);
         setEditor(undefined);
         intent.current = undefined;
       } catch (error) {
