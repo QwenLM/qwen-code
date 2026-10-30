@@ -10,6 +10,7 @@ import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../i18n';
+import { MAX_SPLIT_PANES } from '../utils/splitUrl';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -779,6 +780,30 @@ describe('SplitView', () => {
     render({ sessionIds: sessionsState.map((s) => s.sessionId) });
     // Eight requested, but only six live panes mount.
     expect(panes()).toHaveLength(6);
+    // At the cap there is no room left, so the entry point is disabled.
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    expect(addButton.disabled).toBe(true);
+  });
+
+  it('keeps the add button enabled one below MAX_PANES', () => {
+    sessionsState = Array.from({ length: MAX_SPLIT_PANES + 2 }, (_, i) => ({
+      sessionId: `x${i}`,
+      workspaceCwd: '/w',
+      displayName: `Pane ${i}`,
+    }));
+    // One slot spare and a session left to add, so the entry point must work.
+    render({
+      sessionIds: sessionsState
+        .slice(0, MAX_SPLIT_PANES - 1)
+        .map((session) => session.sessionId),
+    });
+    expect(panes()).toHaveLength(MAX_SPLIT_PANES - 1);
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    expect(addButton.disabled).toBe(false);
   });
 
   it('isolates a crashing pane so the rest of the split survives', () => {
@@ -1072,6 +1097,45 @@ describe('SplitView', () => {
     expect(hiddenSlots()).toHaveLength(0);
   });
 
+  it('keeps the add button enabled when the catalog has no other sessions', () => {
+    sessionsState = [
+      { sessionId: 's3', workspaceCwd: '/w', displayName: 'Three' },
+    ];
+    render({ sessionIds: ['s3'] });
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    // The cached catalog is not authoritative: another session may exist
+    // elsewhere, so an empty list must not disable the entry point.
+    expect(addButton.disabled).toBe(false);
+    openPicker();
+    expect(pickerOptions()).toEqual([]);
+    expect(container!.querySelector('[role="listbox"]')?.textContent).toContain(
+      'No other sessions',
+    );
+  });
+
+  it('picks up a session created elsewhere after opening the empty picker', () => {
+    sessionsState = [
+      { sessionId: 's3', workspaceCwd: '/w', displayName: 'Three' },
+    ];
+    render({ sessionIds: ['s3'] });
+    openPicker();
+    expect(pickerOptions()).toEqual([]);
+    // A session is created elsewhere while the picker was open.
+    sessionsState = [
+      ...sessionsState,
+      { sessionId: 's6', workspaceCwd: '/w', displayName: 'Six' },
+    ];
+    act(() =>
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      ),
+    );
+    openPicker();
+    expect(pickerOptions()).toEqual(['Six']);
+  });
+
   it('reloads the session list when the picker opens (never a stale list)', () => {
     render({ sessionIds: ['s1'] });
     // `useSessions` only fetches on mount; nothing reloads until the user acts.
@@ -1104,6 +1168,11 @@ describe('SplitView', () => {
     );
     openPicker();
     expect(pickerOptions()).toEqual(['Two', 'Three', 'Four', 'Five']);
+    // The empty row is `role="presentation"`, so only a text read sees it: a
+    // populated picker must not keep advertising "No other sessions".
+    expect(
+      container!.querySelector('[role="listbox"]')?.textContent,
+    ).not.toContain('No other sessions');
   });
 
   it('mirrors the live pane set up to the parent as panes change', () => {
