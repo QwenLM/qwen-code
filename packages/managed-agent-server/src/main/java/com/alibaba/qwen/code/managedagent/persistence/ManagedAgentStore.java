@@ -41,7 +41,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationComma
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
@@ -107,14 +106,8 @@ public class ManagedAgentStore implements AgentStateStore {
     private static final TypeReference<Map<String, Object>> MAP_TYPE =
             new TypeReference<>() {
             };
-    private static final TypeReference<List<ItemRecord>> ITEMS_TYPE =
-            new TypeReference<>() {
-            };
     private static final TypeReference<List<ItemPartRecord>> PARTS_TYPE = new TypeReference<>() {};
-    // Between full rewrites the snapshot may lag the projection by this many
-    // events or this long; the batch that ends a Turn rewrites it anyway.
-    public static final int SNAPSHOT_REFRESH_EVENTS = 1000;
-    private static final long SNAPSHOT_REFRESH_MILLIS = 5000;
+    private static final long MESSAGE_PAGE_BYTES = 8L * 1024 * 1024;
     private static final String INSERT_EVENT = "INSERT INTO ma_public_event"
             + " (tenant_id, session_id, sequence_id, event_id, turn_id,"
             + " event_type, data_json, terminal, source_key, gmt_create,"
@@ -148,7 +141,6 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private final ObjectMapper objectMapper;
     private final Clock clock;
-    private final ManagedSnapshotStore snapshots;
     private final String approvalMode;
     private final CommittedEventPublisher eventPublisher;
     private final ManagedWorkspaceRegistry workspaces;
@@ -158,7 +150,23 @@ public class ManagedAgentStore implements AgentStateStore {
     private final List<WebShellModelOption> modelCatalog;
     private ManagedAgentDefinitionStore definitions;
     private ManagedSessionSkills creationSkills;
+    private SessionWorktreeStore sessionWorktrees;
     private com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService extensionPackages;
+
+    @org.springframework.beans.factory.annotation.Autowired(required = false)
+    public void setSessionWorktrees(SessionWorktreeStore value) {
+        this.sessionWorktrees = value;
+    }
+
+    @Override
+    public SessionWorktreeStore.Descriptor findSessionWorktree(String tenantId, String sessionId) {
+        return SessionWorktreeStore.descriptor(jdbc, tenantId, sessionId);
+    }
+
+    @Override
+    public Map<String, SessionWorktreeStore.Descriptor> findSessionWorktrees(String tenantId, List<String> sessionIds) {
+        return SessionWorktreeStore.descriptors(jdbc, tenantId, sessionIds);
+    }
 
     @org.springframework.beans.factory.annotation.Autowired
     public void setExtensionPackages(com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackageService value) {
@@ -336,7 +344,6 @@ public class ManagedAgentStore implements AgentStateStore {
         this.creationSkills = new ManagedSessionSkills(jdbc, objectMapper,
                 new RequestDigests(), null);
         this.clock = clock;
-        this.snapshots = new ManagedSnapshotStore(jdbc, objectMapper, clock, this::snapshotItems);
         this.approvalMode =
                 properties.getHarness().getApprovalMode().toLowerCase(Locale.ROOT);
         this.eventPublisher = eventPublisher;
@@ -481,6 +488,21 @@ public class ManagedAgentStore implements AgentStateStore {
             boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
             List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins,
             Set<String> extensionLifecycleProfiles) {
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, requestedApprovalMode,
+                approvalSelectionSupported, requestedPlanMode, planModeSupported, skills, publicChildrenSupported,
+                modelId, extensionPins, extensionLifecycleProfiles, null);
+    }
+
+    @Override
+    @Transactional
+    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String requestedApprovalMode, boolean approvalSelectionSupported, Boolean requestedPlanMode,
+            boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
+            List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins,
+            Set<String> extensionLifecycleProfiles, SessionWorktreeStore.Plan worktree) {
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
@@ -553,9 +575,16 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         merged.addAll(skills);
         var effectiveSkills = AgentDefinitionExtensions.sessionSkills(merged);
+        if (worktree != null && sessionWorktrees == null) {
+            throw new ManagedAgentException(HttpStatus.CONFLICT, "worktree_unavailable", "Session worktrees are unavailable.");
+        }
+        ResolvedBinding target = worktree == null ? workspace : worktree.target(workspace);
         Admission admission = insertSession(tenantId, "CREATE_SESSION", idempotencyKey,
                 requestDigest, agentId, title, input, payloadDigest,
-                workspace, actorId, pin, null, planMode, modelId);
+                target, actorId, pin, null, planMode, modelId);
+        if (worktree != null) {
+            sessionWorktrees.admit(tenantId, actorId, admission.sessionId(), worktree, workspace);
+        }
         if (workspaceChildAgentsEnabled && publicChildrenSupported && !resident && (!sshWorkspace || managedExtensionExecutionEnabled)
                 && (managedExtensionExecutionEnabled || "qwen-code".equals(agentId) && pin.digest() == null)
                 && WorkspaceToolProfiles.SHELL.equals(pin.toolProfile())) {
@@ -1621,6 +1650,7 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "session_not_active",
                     "The Session does not accept new Turns.");
         }
+        SessionWorktreeStore.requireReady(jdbc, tenantId, sessionId);
         ManagedConfigInstall.requireOpen(jdbc, tenantId, sessionId);
         if (hasActiveTurn(tenantId, sessionId)) {
             throw new ManagedAgentException(HttpStatus.CONFLICT, "turn_active",
@@ -3389,6 +3419,14 @@ public class ManagedAgentStore implements AgentStateStore {
                 operation)) {
             failure = "workspace_unavailable";
         }
+        if (failure == null) {
+            try {
+                SessionWorktreeStore.requireReady(jdbc, tenantId, sessionId);
+                SessionWorktreeStore.requireCwd(jdbc, tenantId, sessionId, operation.targetCwdRelative());
+            } catch (ManagedAgentException error) {
+                failure = error.getCode();
+            }
+        }
         if (failure != null) {
             jdbc.update(
                     "UPDATE ma_operation SET phase = 'FAILED', state ="
@@ -3936,6 +3974,7 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     private void requireCwdChangeRegistryFacts(SessionRecord session) {
+        SessionWorktreeStore.requireReady(jdbc, session.tenantId(), session.sessionId());
         if (!hasExecutionRegistryFacts(session.tenantId(),
                 session.sessionId())) {
             throw workspaceExecutionUnavailable();
@@ -4642,13 +4681,26 @@ public class ManagedAgentStore implements AgentStateStore {
             arguments.add(beforeSessionId);
         }
         arguments.add(limit + 1);
+        Map<String, SessionWorktreeStore.Row> worktrees = new LinkedHashMap<>();
         List<SessionRecord> rows =
                 jdbc.query(
                         "SELECT " + ManagedSchemaProjection.SESSION.columns("ma_session") + ", COALESCE(es.last_sequence, 0) AS list_last_sequence,"
-                            + " COALESCE(es.replay_floor_sequence, 0) AS list_floor_sequence FROM"
+                            + " COALESCE(es.replay_floor_sequence, 0) AS list_floor_sequence,"
+                            + " w.tenant_id AS worktree_tenant_id, w.session_id AS worktree_session_id,"
+                            + " w.workspace_id AS worktree_workspace_id, w.worktree_id AS worktree_worktree_id,"
+                            + " w.state AS worktree_state, w.plan_json AS worktree_plan_json,"
+                            + " w.identity_json AS worktree_identity_json, w.operation_id AS worktree_operation_id,"
+                            + " w.revision AS worktree_revision, w.failure_code AS worktree_failure_code,"
+                            + " w.owner_actor_key AS worktree_owner_actor_key, o.claim_owner AS worktree_claim_owner,"
+                            + " o.claim_generation AS worktree_claim_generation, o.claim_until AS worktree_claim_until,"
+                            + " o.phase AS worktree_phase, o.attempt_count AS worktree_attempt_count FROM"
                             + " ma_session LEFT JOIN ma_event_stream es ON es.tenant_id ="
                             + " ma_session.tenant_id AND es.session_id = ma_session.session_id AND"
-                            + " es.stream_kind = 'SESSION' AND es.stream_id = X'' WHERE"
+                            + " es.stream_kind = 'SESSION' AND es.stream_id = X''"
+                            + " LEFT JOIN ma_session_worktree w ON w.tenant_id = ma_session.tenant_id"
+                            + " AND w.session_id = ma_session.session_id LEFT JOIN ma_operation o"
+                            + " ON o.operation_kind = 'SESSION_WORKTREE' AND o.tenant_id = w.tenant_id"
+                            + " AND o.operation_id = w.operation_id WHERE"
                             + " ma_session.session_kind = 'PUBLIC' AND ma_session.tenant_id = ? AND"
                             + " ma_session.status <> 'DELETED' AND (ma_session.workspace_id IS NULL OR EXISTS (SELECT 1"
                             + " FROM ma_workspace_access wa WHERE wa.tenant_id ="
@@ -4658,13 +4710,21 @@ public class ManagedAgentStore implements AgentStateStore {
                                 + archiveClause + titleClause + cursorClause
                                 + " ORDER BY ma_session.gmt_create DESC, ma_session.session_id DESC"
                                 + " LIMIT ?",
-                        sessionListMapper,
+                        (result, index) -> {
+                            SessionRecord session = sessionListMapper.mapRow(result, index);
+                            if (result.getString("worktree_worktree_id") != null) {
+                                worktrees.put(session.sessionId(), SessionWorktreeStore.readRow(result, "worktree_"));
+                            }
+                            return session;
+                        },
                         arguments.toArray());
         boolean hasMore = rows.size() > limit;
         if (hasMore) {
             rows = new ArrayList<>(rows.subList(0, limit));
         }
-        return new SessionPage(List.copyOf(rows), hasMore);
+        var selectedWorktrees = rows.stream().map(row -> worktrees.get(row.sessionId()))
+                .filter(java.util.Objects::nonNull).toList();
+        return new SessionPage(List.copyOf(rows), hasMore, SessionWorktreeStore.descriptors(jdbc, selectedWorktrees));
     }
 
     public Map<String, WebShellLifecycleOperation>
@@ -5250,22 +5310,189 @@ public class ManagedAgentStore implements AgentStateStore {
         return new EventPage(List.copyOf(rows), hasMore);
     }
 
-    public Optional<SnapshotRecord> findSnapshot(String tenantId,
-            String sessionId) {
-        requireSession(tenantId, sessionId);
-        return snapshots.latest(tenantId, sessionId);
+    @Override
+    @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true,
+            isolation = org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
+    public StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
+            String cursor, int limit, boolean backward) {
+        return findMessagePage(tenantId, sessionId, cursor, limit, backward, 0);
     }
 
     @Override
-    public StoreModels.SnapshotPage findSnapshotPage(String tenantId, String sessionId,
-            String cursor, long afterSequence, int limit) {
+    @Transactional(transactionManager = "managedAgentTransactionManager", readOnly = true,
+            isolation = org.springframework.transaction.annotation.Isolation.REPEATABLE_READ)
+    public StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
+            String cursor, int limit, boolean backward, long afterSequence) {
         requireSession(tenantId, sessionId);
-        ManagedSnapshotStore.Page page = snapshots.page(tenantId, sessionId, cursor, afterSequence, limit);
-        return new StoreModels.SnapshotPage(page.items(), page.hasMore(), page.nextCursor(), page.coveredSequence());
+        ManagedLegacySessionGuard.requireLegacyMutation(Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT csi_guard FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                Boolean.class, tenantId, sessionId)));
+        if (limit < 1 || limit > 100) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "invalid_limit",
+                    "Limit must be between 1 and 100.");
+        }
+        if (afterSequence < 0) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "invalid_event_cursor",
+                    "Item sequence must be non-negative.");
+        }
+        var progress = jdbc.queryForMap("SELECT covered_sequence, projection_version, last_sequence, replay_floor_sequence FROM ma_event_stream"
+                        + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                tenantId, sessionId);
+        long covered = ((Number) progress.get("covered_sequence")).longValue();
+        int projection = ((Number) progress.get("projection_version")).intValue();
+        if (covered < ((Number) progress.get("replay_floor_sequence")).longValue()
+                || (!backward && org.apache.commons.lang3.StringUtils.isBlank(cursor)
+                && covered < ((Number) progress.get("last_sequence")).longValue())) {
+            throw new ManagedAgentException(HttpStatus.SERVICE_UNAVAILABLE, "message_projection_pending",
+                    "Retry after pending messages have been projected.");
+        }
+        String scope = ManagedSessionStore.sessionScopeKey(tenantId, sessionId);
+        MessagePosition position = new MessagePosition(1, scope, backward, projection, covered,
+                backward ? covered + 1 : -1, "");
+        if (org.apache.commons.lang3.StringUtils.isNotBlank(cursor)) {
+            position = messagePosition(cursor, scope, backward, covered, projection);
+        }
+        String comparison = backward ? "<" : ">";
+        String order = backward ? " DESC" : " ASC";
+        boolean numericBoundary = afterSequence > 0 && org.apache.commons.lang3.StringUtils.isBlank(cursor);
+        List<Object> pageArguments = new ArrayList<>(List.of(scope, tenantId, sessionId, position.through()));
+        if (numericBoundary) {
+            pageArguments.add(afterSequence);
+        }
+        pageArguments.addAll(List.of(position.sequence(), position.sequence(),
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(position.item()), limit + 1));
+        List<MessageSize> candidates = jdbc.query(
+                "SELECT m.item_id, m.first_sequence, OCTET_LENGTH(m.attributes_json) +"
+                        + " OCTET_LENGTH(m.parts_json) + COALESCE(OCTET_LENGTH(r.inline_bytes), 0) AS byte_length"
+                        + " FROM ma_message m LEFT JOIN ma_resource r ON r.resource_key = m.body_resource_key"
+                        + " AND r.session_scope_key = ? AND r.tenant_id = m.tenant_id AND r.session_id = m.session_id"
+                        + " WHERE m.tenant_id = ? AND m.session_id = ? AND m.first_sequence <= ?"
+                        + (numericBoundary ? " AND m.first_sequence > ?" : "")
+                        + " AND (m.first_sequence " + comparison + " ? OR (m.first_sequence = ? AND m.item_id "
+                        + comparison + " ?)) ORDER BY m.first_sequence" + order + ", m.item_id" + order + " LIMIT ?",
+                (row, index) -> new MessageSize(row.getString("item_id"), row.getLong("first_sequence"),
+                        row.getLong("byte_length")),
+                pageArguments.toArray());
+        long bytes = 0;
+        List<MessageSize> selected = new ArrayList<>();
+        for (MessageSize candidate : candidates) {
+            if (selected.size() == limit || bytes + candidate.bytes() > MESSAGE_PAGE_BYTES) {
+                if (selected.isEmpty()) {
+                    throw messagePageTooLarge();
+                }
+                break;
+            }
+            if (candidate.bytes() < 0) {
+                throw new IllegalStateException("Message byte length is invalid.");
+            }
+            bytes += candidate.bytes();
+            selected.add(candidate);
+        }
+        if (selected.isEmpty()) {
+            return new StoreModels.MessagePage(List.of(), List.of(), false, null, covered, position.through());
+        }
+        List<Object> arguments = new ArrayList<>(List.of(tenantId, sessionId));
+        selected.forEach(item -> arguments.add(
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(item.id())));
+        // Bodies are fetched only after the metadata-only lookahead has selected a bounded page.
+        List<ItemRecord> rows = withParts(jdbc.query(
+                "SELECT " + ManagedSchemaProjection.MESSAGE.columns() + " FROM ma_message WHERE tenant_id = ?"
+                        + " AND session_id = ? AND item_id IN (" + placeholders(selected.size())
+                        + ") ORDER BY first_sequence ASC, item_id ASC", itemMapper, arguments.toArray()));
+        if (rows.size() != selected.size() || rows.stream().anyMatch(item -> item.lastSequence() > covered)) {
+            throw new IllegalStateException("Message projection differs from its progress.");
+        }
+        List<EventRecord> events = backward ? messageTurnEvents(tenantId, sessionId, rows, covered, bytes) : List.of();
+        boolean more = selected.size() < candidates.size();
+        MessageSize last = selected.getLast();
+        String next = more ? messageCursor(new MessagePosition(1, scope, backward, projection,
+                position.through(), last.sequence(), last.id())) : null;
+        return new StoreModels.MessagePage(rows, events, more, next, covered, position.through());
     }
 
-    /** The snapshot's covered sequence of each given Session, in one read. */
-    public Map<String, Long> findSnapshotCoveredSequences(String tenantId,
+    private List<EventRecord> messageTurnEvents(String tenantId, String sessionId,
+            List<ItemRecord> items, long covered, long itemBytes) {
+        List<String> turns = items.stream().map(ItemRecord::turnId).distinct().toList();
+        List<Object> arguments = new ArrayList<>(List.of(tenantId, sessionId, covered));
+        turns.forEach(turn -> arguments.add(
+                com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaKeys.identity(turn)));
+        arguments.add(tenantId);
+        arguments.add(sessionId);
+        var sizes = jdbc.query("SELECT e.sequence_id, OCTET_LENGTH(e.data_json) AS byte_length FROM ma_public_event e"
+                        + " JOIN (SELECT turn_id, event_type, MAX(sequence_id) AS seq FROM ma_public_event"
+                        + " WHERE tenant_id = ? AND session_id = ? AND sequence_id <= ?"
+                        + " AND stream_kind = 'SESSION' AND stream_id = X'' AND turn_id IN ("
+                        + placeholders(turns.size()) + ") AND event_type IN ('turn.started', 'turn.completed',"
+                        + " 'turn.failed', 'turn.cancelled', 'turn.cancel.requested', 'environment.provisioning',"
+                        + " 'environment.ready', 'environment.failed') GROUP BY turn_id, event_type) latest"
+                        + " ON e.turn_id = latest.turn_id AND e.event_type = latest.event_type AND e.sequence_id = latest.seq"
+                        + " WHERE e.tenant_id = ? AND e.session_id = ? AND e.stream_kind = 'SESSION' AND e.stream_id = X''",
+                (row, index) -> new EventSize(row.getLong("sequence_id"), row.getLong("byte_length")), arguments.toArray());
+        if (sizes.stream().mapToLong(EventSize::bytes).sum() + itemBytes > MESSAGE_PAGE_BYTES) {
+            throw messagePageTooLarge();
+        }
+        if (sizes.isEmpty()) {
+            return List.of();
+        }
+        List<Object> eventArguments = new ArrayList<>(List.of(tenantId, sessionId));
+        sizes.forEach(event -> eventArguments.add(event.sequence()));
+        return jdbc.query("SELECT " + ManagedSchemaProjection.PUBLIC_EVENT.columns() + " FROM ma_public_event"
+                        + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''"
+                        + " AND sequence_id IN (" + placeholders(sizes.size()) + ") ORDER BY sequence_id ASC",
+                eventMapper, eventArguments.toArray());
+    }
+
+    private MessagePosition messagePosition(String cursor, String scope, boolean backward,
+            long covered, int projection) {
+        try {
+            if (cursor.length() > 4096) {
+                throw new IllegalArgumentException();
+            }
+            MessagePosition position = objectMapper.readValue(
+                    java.util.Base64.getUrlDecoder().decode(cursor), MessagePosition.class);
+            if (position.version() != 1 || !scope.equals(position.scope()) || position.backward() != backward
+                    || position.projection() < 1 || position.through() < 0 || position.sequence() < 0
+                    || position.sequence() > position.through() || position.item() == null
+                    || position.item().isEmpty() || position.item().length() > 512) {
+                throw new IllegalArgumentException();
+            }
+            if (position.projection() != projection) {
+                throw new ManagedAgentException(HttpStatus.CONFLICT, "message_projection_changed",
+                        "Reload message history after its projection changed.");
+            }
+            if (position.through() > covered) {
+                throw new IllegalArgumentException();
+            }
+            return position;
+        } catch (java.io.IOException | IllegalArgumentException invalid) {
+            throw new ManagedAgentException(HttpStatus.BAD_REQUEST, "invalid_message_cursor",
+                    "The message cursor is invalid for this Session and direction.");
+        }
+    }
+
+    private String messageCursor(MessagePosition position) {
+        try {
+            return java.util.Base64.getUrlEncoder().withoutPadding()
+                    .encodeToString(objectMapper.writeValueAsBytes(position));
+        } catch (java.io.IOException failure) {
+            throw new IllegalStateException("Message cursor serialization failed.", failure);
+        }
+    }
+
+    private static ManagedAgentException messagePageTooLarge() {
+        return new ManagedAgentException(HttpStatus.PAYLOAD_TOO_LARGE, "message_page_too_large",
+                "The message page exceeds its byte budget.");
+    }
+
+    private record MessagePosition(int version, String scope, boolean backward, int projection,
+            long through, long sequence, String item) {}
+
+    private record MessageSize(String id, long sequence, long bytes) {}
+
+    private record EventSize(long sequence, long bytes) {}
+
+    /** The message projection coverage of each Session, in one read. */
+    public Map<String, Long> findMessageCoveredSequences(String tenantId,
             List<String> sessionIds) {
         if (sessionIds.isEmpty()) {
             return Map.of();
@@ -5277,9 +5504,8 @@ public class ManagedAgentStore implements AgentStateStore {
         RowCallbackHandler reader = row -> result.put(
                 row.getString("session_id"), row.getLong("covered_sequence"));
         jdbc.query(
-                "SELECT s.session_id, p.covered_sequence FROM ma_event_stream s JOIN ma_snapshot p"
-                    + " ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND"
-                    + " p.snapshot_id = s.current_snapshot_id WHERE s.stream_kind = 'SESSION' AND"
+                "SELECT s.session_id, s.covered_sequence FROM ma_event_stream s"
+                    + " WHERE s.stream_kind = 'SESSION' AND"
                     + " s.stream_id = X'' AND s.tenant_id = ? AND s.session_id IN ("
                         + placeholders(sessionIds.size())
                         + ")",
@@ -5291,10 +5517,8 @@ public class ManagedAgentStore implements AgentStateStore {
     public ReplayWindow findReplayWindow(String tenantId, String sessionId) {
         List<ReplayWindow> rows =
                 jdbc.query(
-                        "SELECT s.replay_floor_sequence, p.covered_sequence FROM ma_event_stream s"
-                            + " LEFT JOIN ma_snapshot p ON p.tenant_id = s.tenant_id AND"
-                            + " p.session_id = s.session_id AND p.snapshot_id ="
-                            + " s.current_snapshot_id WHERE s.tenant_id = ? AND s.session_id = ?"
+                        "SELECT s.replay_floor_sequence, s.covered_sequence FROM ma_event_stream s"
+                            + " WHERE s.tenant_id = ? AND s.session_id = ?"
                             + " AND s.stream_kind = 'SESSION' AND s.stream_id = X''",
                         (result, row) ->
                                 new ReplayWindow(
@@ -5311,36 +5535,30 @@ public class ManagedAgentStore implements AgentStateStore {
 
     public List<ReplayFloorTarget> findReplayFloorTargets(int limit) {
         return jdbc.query(
-                "SELECT s.tenant_id, s.session_id FROM ma_event_stream s JOIN ma_snapshot p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.snapshot_id = s.current_snapshot_id WHERE s.stream_kind = 'SESSION' AND s.stream_id = X'' AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = s.tenant_id AND private_scope.session_id = s.session_id AND private_scope.csi_guard = FALSE) AND p.covered_sequence > s.replay_floor_sequence AND NOT EXISTS (SELECT 1 FROM ma_snapshot older WHERE older.tenant_id = s.tenant_id AND older.session_id = s.session_id AND older.state = 'PUBLISHED' AND older.retain_until > ? AND older.covered_sequence <= s.replay_floor_sequence) AND NOT EXISTS (SELECT 1 FROM ma_turn t JOIN ma_public_event e ON e.tenant_id = t.tenant_id AND e.session_id = t.session_id AND e.turn_id = t.turn_id WHERE t.tenant_id = s.tenant_id AND t.session_id = s.session_id AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND e.stream_kind = 'SESSION' AND e.stream_id = X'' AND e.event_type = 'turn.accepted' AND e.sequence_id <= s.replay_floor_sequence + 1) ORDER BY s.gmt_modified ASC LIMIT ?",
-                (row, index) ->
-                        new ReplayFloorTarget(
-                                row.getString("tenant_id"), row.getString("session_id")),
-                clock.millis(),
+                "SELECT s.tenant_id, s.session_id FROM ma_event_stream s"
+                    + " WHERE s.stream_kind = 'SESSION' AND s.stream_id = X''"
+                    + " AND s.covered_sequence > s.replay_floor_sequence"
+                    + " AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE"
+                    + " private_scope.tenant_id = s.tenant_id AND private_scope.session_id = s.session_id"
+                    + " AND private_scope.csi_guard = FALSE)"
+                    + " AND NOT EXISTS (SELECT 1 FROM ma_turn t JOIN ma_public_event e ON"
+                    + " e.tenant_id = t.tenant_id AND e.session_id = t.session_id AND e.turn_id = t.turn_id"
+                    + " WHERE t.tenant_id = s.tenant_id AND t.session_id = s.session_id"
+                    + " AND t.status IN ('ACCEPTED', 'RUNNING', 'CANCELLING')"
+                    + " AND e.stream_kind = 'SESSION' AND e.stream_id = X''"
+                    + " AND e.event_type = 'turn.accepted' AND e.sequence_id <= s.replay_floor_sequence + 1)"
+                    + " ORDER BY s.gmt_modified ASC LIMIT ?",
+                (row, index) -> new ReplayFloorTarget(row.getString("tenant_id"), row.getString("session_id")),
                 limit);
     }
 
-    /**
-     * Raises the replay floor, never above the Snapshot's covered sequence, so that a client told
-     * to resync can resume from the Snapshot. Nothing prunes events yet; the retention work will
-     * call this before pruning.
-     */
+    /** Advances only through readable message coverage, retaining active-Turn evidence. */
     @Transactional
     public ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
             long floorSequence) {
         requireLegacySessionForUpdate(tenantId, sessionId);
         ReplayWindow window = findReplayWindow(tenantId, sessionId);
-        Long protectedSequence =
-                jdbc.queryForObject(
-                        "SELECT MIN(covered_sequence) FROM ma_snapshot WHERE tenant_id = ? AND"
-                            + " session_id = ? AND state = 'PUBLISHED' AND retain_until > ?",
-                        Long.class,
-                        tenantId,
-                        sessionId,
-                        clock.millis());
         long floor = Math.min(floorSequence, window.snapshotThroughSequence());
-        if (protectedSequence != null) {
-            floor = Math.min(floor, protectedSequence);
-        }
         Long activeStart =
                 jdbc.queryForObject(
                         "SELECT MIN(e.sequence_id) FROM ma_public_event e JOIN ma_turn t ON"
@@ -5368,16 +5586,11 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     public List<MaterializationTarget> findMaterializationTargets(int limit) {
-        // The second disjunct re-selects a session whose drained batch
-        // deferred the snapshot rewrite, once the deferral marker is old
-        // enough; without it a caught-up idle session would stay stale
-        // forever.
         return jdbc.query(
-                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND s.csi_guard = FALSE AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.projection_pending = TRUE AND (p.last_sequence > p.covered_sequence OR (p.snapshot_stale_since IS NOT NULL AND p.snapshot_stale_since <= ?)) ORDER BY p.gmt_modified ASC LIMIT ?",
+                "SELECT s.tenant_id, s.session_id FROM ma_session s JOIN ma_event_stream p ON p.tenant_id = s.tenant_id AND p.session_id = s.session_id AND p.stream_kind = 'SESSION' AND p.stream_id = X'' WHERE s.session_kind = 'PUBLIC' AND s.csi_guard = FALSE AND s.retired_at IS NULL AND s.status <> 'DELETED' AND p.projection_pending = TRUE ORDER BY p.gmt_modified ASC LIMIT ?",
                 (result, row) ->
                         new MaterializationTarget(
                                 result.getString("tenant_id"), result.getString("session_id")),
-                clock.millis() - SNAPSHOT_REFRESH_MILLIS,
                 limit);
     }
 
@@ -5405,9 +5618,6 @@ public class ManagedAgentStore implements AgentStateStore {
                         covered,
                         limit);
         if (events.isEmpty()) {
-            if (snapshotRefreshRequired(tenantId, sessionId, covered, clock.millis(), false)) {
-                snapshots.afterCommit(tenantId, sessionId);
-            }
             return new MaterializationResult(false, covered);
         }
         long expected = covered + 1;
@@ -5477,20 +5687,13 @@ public class ManagedAgentStore implements AgentStateStore {
         flushParts(tenantId, sessionId, projectedParts);
         long nextCovered = events.get(events.size() - 1).sequence();
         long now = clock.millis();
-        boolean refresh = snapshotRefreshRequired(tenantId, sessionId, nextCovered, now,
-                events.stream().anyMatch(EventRecord::terminal));
         jdbc.update(
-                "UPDATE ma_event_stream SET covered_sequence = ?, gmt_modified = ?,"
-                    + " snapshot_stale_since = COALESCE(snapshot_stale_since, ?) WHERE tenant_id ="
-                    + " ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
+                "UPDATE ma_event_stream SET covered_sequence = ?, gmt_modified = ?"
+                    + " WHERE tenant_id = ? AND session_id = ? AND stream_kind = 'SESSION' AND stream_id = X''",
                 nextCovered,
-                now,
                 now,
                 tenantId,
                 sessionId);
-        if (refresh) {
-            snapshots.afterCommit(tenantId, sessionId);
-        }
         return new MaterializationResult(true, nextCovered);
     }
 
@@ -5508,7 +5711,7 @@ public class ManagedAgentStore implements AgentStateStore {
         // Harness park enters only the coordinator's read-only observation
         // branch; cancellation still uses the normal dispatch lane.
         return jdbc.query(
-                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
+                "SELECT tenant_id, session_id, turn_id FROM ma_turn WHERE status IN ('ACCEPTED', 'RUNNING', 'CANCELLING') AND (dispatch_lease_until IS NULL OR dispatch_lease_until < ?) AND (retry_after IS NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR error_code IS NULL OR error_code NOT IN ('" + AgentStateStore.WORKFLOW_RECOVERY_BLOCKED + "', '" + AgentStateStore.RUNTIME_RECOVERY_BLOCKED + "')) AND (status = 'CANCELLING' OR NOT EXISTS (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id AND w.session_id = ma_turn.session_id AND w.state <> 'READY')) AND EXISTS (SELECT 1 FROM ma_session private_scope WHERE private_scope.tenant_id = ma_turn.tenant_id AND private_scope.session_id = ma_turn.session_id AND private_scope.csi_guard = FALSE) ORDER BY gmt_modified ASC LIMIT ?",
                 (result, row) -> new DispatchTarget(
                         result.getString("tenant_id"),
                         result.getString("session_id"),
@@ -5541,7 +5744,9 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " AND status IN ('ACCEPTED', 'RUNNING',"
                         + " 'CANCELLING') AND (dispatch_lease_until IS NULL"
                         + " OR dispatch_lease_until < ?) AND (retry_after IS"
-                        + " NULL OR retry_after <= ?)",
+                        + " NULL OR retry_after <= ?) AND (status = 'CANCELLING' OR NOT EXISTS"
+                        + " (SELECT 1 FROM ma_session_worktree w WHERE w.tenant_id = ma_turn.tenant_id"
+                        + " AND w.session_id = ma_turn.session_id AND w.state <> 'READY'))",
                 owner, now + leaseDuration.toMillis(), now, tenantId,
                 sessionId, turnId, now, now);
         return updated == 0 ? Optional.empty()
@@ -6158,15 +6363,11 @@ public class ManagedAgentStore implements AgentStateStore {
         flushParts(tenantId, sessionId, parts);
         jdbc.update(
                 "UPDATE ma_event_stream SET projection_version = projection_version + 1,"
-                    + " snapshot_stale_since = ?, gmt_modified = ? WHERE tenant_id = ? AND session_id"
-                    + " = ? AND stream_kind = 'SESSION' AND stream_id = X''",
-                now,
+                    + " gmt_modified = ? WHERE tenant_id = ? AND session_id = ?"
+                    + " AND stream_kind = 'SESSION' AND stream_id = X''",
                 now,
                 tenantId,
                 sessionId);
-        if (covered > 0) {
-            snapshots.afterCommit(tenantId, sessionId);
-        }
     }
 
     // A Harness source key ends in the journal sequence of its journal event;
@@ -6419,6 +6620,27 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Transactional
+    public void failWorktreeInitialTurns(String tenantId, String sessionId, String code) {
+        requireLegacySessionForUpdate(tenantId, sessionId);
+        if (jdbc.queryForList("SELECT 1 FROM ma_session_worktree WHERE tenant_id = ? AND session_id = ?"
+                + " AND state IN ('FAILED', 'BLOCKED') FOR UPDATE", Integer.class, tenantId, sessionId).isEmpty()) {
+            return;
+        }
+        long now = clock.millis();
+        String message = "The Session worktree could not be prepared.";
+        List<String> turns = jdbc.queryForList("SELECT turn_id FROM ma_turn WHERE tenant_id = ? AND session_id = ?"
+                + " AND status = 'ACCEPTED' AND submission_attempted = FALSE FOR UPDATE", String.class, tenantId, sessionId);
+        for (String turnId : turns) {
+            jdbc.update("UPDATE ma_turn SET status = 'FAILED', error_code = ?, error_message = ?, completed_at = ?,"
+                    + " gmt_modified = ?, dispatch_owner = NULL, dispatch_lease_until = NULL, version = version + 1"
+                    + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ? AND status = 'ACCEPTED'"
+                    + " AND submission_attempted = FALSE", code, message, now, now, tenantId, sessionId, turnId);
+            appendEvent(tenantId, sessionId, turnId, "turn.failed", Map.of("code", code, "message", message), true, null, now);
+            settleTurnCommands(tenantId, sessionId, turnId, now);
+        }
+    }
+
+    @Transactional
     public boolean failRecoveryBlockedTurn(String tenantId, String sessionId,
             String turnId, String owner, String message) {
         return settleFailedTurn(tenantId, sessionId, turnId, owner,
@@ -6508,37 +6730,6 @@ public class ManagedAgentStore implements AgentStateStore {
         return findSession(tenantId, sessionId).orElseThrow(() ->
                 new ManagedAgentException(HttpStatus.NOT_FOUND, "session_not_found",
                         "The Session was not found."));
-    }
-
-    private boolean snapshotRefreshRequired(String tenantId, String sessionId, long covered, long now, boolean terminal) {
-        var published =
-                jdbc.query(
-                        "SELECT p.published_at, p.covered_sequence, p.projection_version,"
-                            + " s.projection_version AS current_projection FROM ma_event_stream s"
-                            + " LEFT JOIN ma_snapshot p ON p.tenant_id = s.tenant_id AND"
-                            + " p.session_id = s.session_id AND p.snapshot_id ="
-                            + " s.current_snapshot_id WHERE s.tenant_id = ? AND s.session_id = ?"
-                            + " AND s.stream_kind = 'SESSION' AND s.stream_id = X''",
-                        (row, index) ->
-                                new Long[] {
-                                    nullableLong(row, "published_at"),
-                                    nullableLong(row, "covered_sequence"),
-                                    nullableLong(row, "projection_version"),
-                                    nullableLong(row, "current_projection")
-                                },
-                        tenantId,
-                        sessionId);
-        if (published.isEmpty() || published.getFirst()[0] == null) {
-            return true;
-        }
-        Long[] current = published.getFirst();
-        if (covered <= current[1] && java.util.Objects.equals(current[2], current[3])) {
-            return false;
-        }
-        return terminal
-                || !java.util.Objects.equals(current[2], current[3])
-                || now - current[0] >= SNAPSHOT_REFRESH_MILLIS
-                || covered - current[1] >= SNAPSHOT_REFRESH_EVENTS;
     }
 
     private void materializeEvent(EventRecord event, Map<String, List<ItemPartRecord>> projectedParts) {
@@ -6898,21 +7089,6 @@ public class ManagedAgentStore implements AgentStateStore {
         } catch (java.io.IOException failure) {
             throw new IllegalStateException("Stored message parts are invalid.", failure);
         }
-    }
-
-    private List<ItemRecord> snapshotItems(String tenantId, String sessionId, Runnable checkLease) {
-        return withParts(
-                jdbc.query(
-                        "SELECT " + ManagedSchemaProjection.MESSAGE.columns() + " FROM ma_message WHERE tenant_id = ? AND session_id = ?"
-                                + " ORDER BY first_sequence ASC, item_id ASC",
-                        (row, index) -> {
-                            if (index % 100 == 0 || row.getString("body_resource_key") != null) {
-                                checkLease.run();
-                            }
-                            return itemMapper.mapRow(row, index);
-                        },
-                        tenantId,
-                        sessionId));
     }
 
     private List<ItemRecord> allItems(String tenantId, String sessionId) {
@@ -7472,15 +7648,6 @@ public class ManagedAgentStore implements AgentStateStore {
         }
     }
 
-    private List<ItemRecord> readItems(String value) {
-        try {
-            return objectMapper.readValue(value, ITEMS_TYPE);
-        } catch (JsonProcessingException error) {
-            throw new IllegalStateException("Stored snapshot is invalid",
-                    error);
-        }
-    }
-
     public static ContextBinding readBinding(java.sql.ResultSet result)
             throws java.sql.SQLException {
         String workspaceId = result.getString("workspace_id");
@@ -7548,10 +7715,6 @@ public class ManagedAgentStore implements AgentStateStore {
 
     private static String placeholders(int count) {
         return String.join(", ", Collections.nCopies(count, "?"));
-    }
-
-    private record SnapshotState(long version, long coveredSequence,
-            long updatedAt) {
     }
 
     private record ItemRow(String tenantId, String sessionId, String itemId,

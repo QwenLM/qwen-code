@@ -34,12 +34,23 @@ import {
   MAX_WORKSPACE_SKILL_NAME_LENGTH,
   WorkspaceSkillManagementError,
   validateWorkspaceSkillName,
+  workspaceSkillBaseDir,
   type WorkspaceSkillInstallRequest,
   type WorkspaceSkillMutationResult,
   type WorkspaceSkillScope,
 } from '../workspace-skill-management.js';
 const MAX_WORKSPACE_SKILL_BATCH_SIZE = 100;
 const skillConfigMutationLocks = new PathMutexRegistry();
+
+// Keying on the resolved base directory serializes aliased scopes
+// (QWEN_HOME inside the workspace) that mutate the same skills directory.
+function skillMutationLockKey(
+  workspace: string,
+  scope: WorkspaceSkillScope,
+  name: string,
+): string {
+  return `${workspaceSkillBaseDir(workspace, scope)}\0${name.trim().toLowerCase()}`;
+}
 
 interface RegisterWorkspaceSkillsRoutesDeps {
   workspaceRuntime: WorkspaceRuntime;
@@ -488,7 +499,7 @@ export function registerWorkspaceSkillsRoutes(
       const configRoute = 'POST /workspace/config/skills/install';
       try {
         const result = await skillConfigMutationLocks.runExclusive(
-          `global\0${input.name.trim().toLowerCase()}`,
+          skillMutationLockKey(owner.workspaceCwd, 'global', input.name),
           () => deps.installSkillConfig(owner.workspaceCwd, input),
         );
         invalidateGlobalConfigStatus(owner.workspaceCwd);
@@ -525,7 +536,7 @@ export function registerWorkspaceSkillsRoutes(
       try {
         const skillName = validateWorkspaceSkillName(rawSkillName);
         const result = await skillConfigMutationLocks.runExclusive(
-          `global\0${skillName.toLowerCase()}`,
+          skillMutationLockKey(owner.workspaceCwd, scope, skillName),
           () =>
             deleteConfiguredSkill(
               deps,
@@ -589,9 +600,11 @@ export function registerWorkspaceSkillsRoutes(
       const installRoute = 'POST /workspace/skills/install';
       try {
         const result = await skillConfigMutationLocks.runExclusive(
-          input.scope === 'global'
-            ? `global\0${input.name.trim().toLowerCase()}`
-            : `workspace\0${deps.workspaceRuntime.workspaceCwd}\0${input.name.trim().toLowerCase()}`,
+          skillMutationLockKey(
+            deps.workspaceRuntime.workspaceCwd,
+            input.scope,
+            input.name,
+          ),
           () =>
             deps.workspaceRuntime.workspaceService.installWorkspaceSkill(
               buildWorkspaceCtx(installRoute, clientId),
@@ -627,9 +640,11 @@ export function registerWorkspaceSkillsRoutes(
       const deleteRoute = 'DELETE /workspace/skills/:name';
       try {
         const result = await skillConfigMutationLocks.runExclusive(
-          scope === 'global'
-            ? `global\0${skillName.toLowerCase()}`
-            : `workspace\0${deps.workspaceRuntime.workspaceCwd}\0${skillName.toLowerCase()}`,
+          skillMutationLockKey(
+            deps.workspaceRuntime.workspaceCwd,
+            scope,
+            skillName,
+          ),
           () =>
             deps.workspaceRuntime.workspaceService.deleteWorkspaceSkill(
               buildWorkspaceCtx(deleteRoute, clientId),
@@ -970,7 +985,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       const configRoute = 'POST /workspaces/:workspace/config/skills/install';
       try {
         const result = await skillConfigMutationLocks.runExclusive(
-          `workspace\0${runtime.workspaceCwd}\0${input.name.trim().toLowerCase()}`,
+          skillMutationLockKey(runtime.workspaceCwd, 'workspace', input.name),
           () =>
             coordinator.runManagementOperation(() =>
               runtime.workspaceService.installWorkspaceSkill(
@@ -1014,7 +1029,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       try {
         const skillName = validateWorkspaceSkillName(rawSkillName);
         const result = await skillConfigMutationLocks.runExclusive(
-          `workspace\0${runtime.workspaceCwd}\0${skillName.toLowerCase()}`,
+          skillMutationLockKey(runtime.workspaceCwd, 'workspace', skillName),
           () =>
             coordinator.runManagementOperation(() =>
               runtime.workspaceService.deleteWorkspaceSkill(
@@ -1108,9 +1123,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       const installRoute = 'POST /workspaces/:workspace/skills/install';
       try {
         const result = await skillConfigMutationLocks.runExclusive(
-          input.scope === 'global'
-            ? `global\0${input.name.trim().toLowerCase()}`
-            : `workspace\0${runtime.workspaceCwd}\0${input.name.trim().toLowerCase()}`,
+          skillMutationLockKey(runtime.workspaceCwd, input.scope, input.name),
           () =>
             runtime.workspaceService.installWorkspaceSkill(
               createBuildWorkspaceCtx(runtime.workspaceCwd)(
@@ -1158,9 +1171,7 @@ export function registerWorkspaceQualifiedSkillsRoutes(
       const deleteRoute = 'DELETE /workspaces/:workspace/skills/:name';
       try {
         const result = await skillConfigMutationLocks.runExclusive(
-          scope === 'global'
-            ? `global\0${skillName.toLowerCase()}`
-            : `workspace\0${runtime.workspaceCwd}\0${skillName.toLowerCase()}`,
+          skillMutationLockKey(runtime.workspaceCwd, scope, skillName),
           () =>
             runtime.workspaceService.deleteWorkspaceSkill(
               createBuildWorkspaceCtx(runtime.workspaceCwd)(

@@ -597,6 +597,92 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
   const preflight = workflow.jobs.release.steps.find(
     (item) => item.id === 'publication',
   ).run;
+  const repair = workflow.jobs.release.steps.find(
+    (item) => item.name === 'Repair the 0.26.3 ownership test fixture',
+  );
+  const repairSource = 'eeee1443a7e36ab22b2f1dcded8dec64b621a7ee';
+  const repairedTest =
+    'packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/Issue13180HardenedVerificationTest.java';
+  const repairPatch = 'scripts/patches/managed-runtime-v0.26.3-tests.patch';
+
+  function repairFixture() {
+    const fixed = fs.readFileSync(path.join(root, repairedTest), 'utf8');
+    const target = path.join(temporary, repairedTest);
+    const patch = path.join(
+      temporary,
+      '.qwen/managed-release-tools',
+      repairPatch,
+    );
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    fs.mkdirSync(path.dirname(patch), { recursive: true });
+    fs.writeFileSync(target, fixed);
+    fs.copyFileSync(path.join(root, repairPatch), patch);
+    const git = (...args) => {
+      const result = spawnSync(
+        'git',
+        [
+          '-c',
+          'core.hooksPath=/dev/null',
+          '-c',
+          'commit.gpgsign=false',
+          '-c',
+          'user.name=Release test',
+          '-c',
+          'user.email=release-test@example.invalid',
+          ...args,
+        ],
+        { cwd: temporary, encoding: 'utf8' },
+      );
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git('init', '--quiet');
+    git('apply', '--reverse', patch);
+    const original = fs.readFileSync(target, 'utf8');
+    fs.writeFileSync(path.join(temporary, 'product.java'), 'original product');
+    git('add', repairedTest, 'product.java');
+    git('commit', '--quiet', '-m', 'Release test fixture');
+    return { fixed, original, target, patch };
+  }
+
+  it('repairs only the 0.26.3 test while retaining the original ownership assertions and product bytes', () => {
+    expect(repair.if).toBe("${{ env.RELEASE_TAG == 'v0.26.3' }}");
+    const { fixed, target } = repairFixture();
+    const result = run(repair.run, {
+      RELEASE_TAG: 'v0.26.3',
+      SOURCE_SHA: repairSource,
+      GITHUB_STEP_SUMMARY: path.join(temporary, 'summary'),
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(fs.readFileSync(target, 'utf8')).toBe(fixed);
+    expect(fs.readFileSync(path.join(temporary, 'product.java'), 'utf8')).toBe(
+      'original product',
+    );
+  });
+
+  it.each(['wrong source', 'production patch'])(
+    'refuses the 0.26.3 repair with %s before changing files',
+    (failure) => {
+      const { original, target, patch } = repairFixture();
+      if (failure === 'production patch') {
+        fs.writeFileSync(
+          patch,
+          fs
+            .readFileSync(patch, 'utf8')
+            .replaceAll(repairedTest, 'product.java'),
+        );
+      }
+      const result = run(repair.run, {
+        RELEASE_TAG: 'v0.26.3',
+        SOURCE_SHA: failure === 'wrong source' ? 'other-sha' : repairSource,
+        GITHUB_STEP_SUMMARY: path.join(temporary, 'summary'),
+      });
+      expect(result.status).not.toBe(0);
+      expect(fs.readFileSync(target, 'utf8')).toBe(original);
+      expect(
+        fs.readFileSync(path.join(temporary, 'product.java'), 'utf8'),
+      ).toBe('original product');
+    },
+  );
 
   it('requires both credentials before creating a private shared OSS configuration', () => {
     const configure = workflow.jobs.release.steps.find(
@@ -611,7 +697,17 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
       ALIYUN_OSS_ACCESS_KEY_SECRET: '',
       ALIYUN_OSS_ENDPOINT: 'https://example.invalid',
     };
-    expect(run(configure, env).status).not.toBe(0);
+    for (const missing of [
+      'ALIYUN_OSS_ACCESS_KEY_ID',
+      'ALIYUN_OSS_ACCESS_KEY_SECRET',
+    ]) {
+      const result = run(configure, {
+        ...env,
+        ALIYUN_OSS_ACCESS_KEY_SECRET: 'fixture-secret',
+        [missing]: '',
+      });
+      expect(result.status, result.stderr).not.toBe(0);
+    }
     expect(fs.existsSync(path.join(temporary, 'oss-called'))).toBe(false);
     expect(
       run(configure, { ...env, ALIYUN_OSS_ACCESS_KEY_SECRET: 'fixture-secret' })

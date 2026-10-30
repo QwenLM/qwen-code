@@ -121,6 +121,7 @@ class ManagedSessionLifecycleTest {
     private RecordingRuntimeWarmer runtime;
 
     @Autowired
+    @Qualifier("managedAgentTransactionManager")
     private PlatformTransactionManager transactionManager;
 
     @Autowired

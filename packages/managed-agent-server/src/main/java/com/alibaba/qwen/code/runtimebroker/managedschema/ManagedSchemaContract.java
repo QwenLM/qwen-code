@@ -7,6 +7,7 @@ public final class ManagedSchemaContract {
     public static final Set<String> TABLES =
             Set.of(
                     "ma_session",
+                    "ma_session_worktree",
                     "ma_session_head",
                     "ma_turn",
                     "ma_user_message_queue",
@@ -16,7 +17,6 @@ public final class ManagedSchemaContract {
                     "ma_event_stream",
                     "ma_public_event",
                     "ma_message",
-                    "ma_snapshot",
                     "ma_session_record",
                     "ma_agent_definition",
                     "ma_extension_package",
@@ -60,6 +60,7 @@ public final class ManagedSchemaContract {
         CHILD_SESSION_START,
         CHILD_SESSION_CLOSE,
         CHILD_WORKSPACE,
+        SESSION_WORKTREE,
         OUTPUT_UPLOAD,
         OUTPUT_VERIFY,
         OUTPUT_FINISH,
@@ -110,7 +111,6 @@ public final class ManagedSchemaContract {
 
     public enum ResourceOwnerKind {
         JOURNAL,
-        SNAPSHOT,
         NATIVE_SNAPSHOT,
         CAPTURE,
         ARTIFACT,

@@ -18,6 +18,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
@@ -26,13 +27,15 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 class WorkspaceFileControllerTest {
+    WorkspaceFileStore files;
     WorkspaceFileUploadStore uploads;
     MockMvc mvc;
 
     @BeforeEach
     void setup() {
         uploads = mock(WorkspaceFileUploadStore.class);
-        mvc = MockMvcBuilders.standaloneSetup(new WorkspaceFileController(mock(WorkspaceFileStore.class), uploads))
+        files = mock(WorkspaceFileStore.class);
+        mvc = MockMvcBuilders.standaloneSetup(new WorkspaceFileController(files, uploads))
                 .setControllerAdvice(new ApiExceptionHandler())
                 .setCustomArgumentResolvers(new TenantContextArgumentResolver()).build();
     }
@@ -41,11 +44,12 @@ class WorkspaceFileControllerTest {
     void rawUploadPreservesBinaryBytesAndReturnsTheScopedResult() throws Exception {
         byte[] bytes = new byte[] {0, (byte) 0xff, 1};
         String id = UUID.randomUUID().toString();
-        when(uploads.upload(anyString(), anyString(), anyString(), anyString(), anyString(), anyString(), anyString(), any(), anyLong()))
+        when(uploads.upload(anyString(), anyString(), any(WorkspaceFileStore.Locator.class), anyString(), anyString(), anyString(), any(), anyLong()))
                 .thenAnswer(call -> {
                     assertThat(call.<String>getArgument(0)).isEqualTo("tenant");
                     assertThat(call.<String>getArgument(1)).isEqualTo("actor");
-                    assertThat(call.<InputStream>getArgument(7).readAllBytes()).isEqualTo(bytes);
+                    assertThat(call.<WorkspaceFileStore.Locator>getArgument(2)).isEqualTo(new WorkspaceFileStore.Locator(null, "workspace", "."));
+                    assertThat(call.<InputStream>getArgument(6).readAllBytes()).isEqualTo(bytes);
                     return new WorkspaceFileUploadStore.UploadResult("a".repeat(64), id, "binary.bin", bytes.length, DigestUtils.sha256Hex(bytes));
                 });
         mvc.perform(post("/api/agent/web-shell/v1/workspaces/files/upload")
@@ -55,6 +59,29 @@ class WorkspaceFileControllerTest {
                 .contentType(MediaType.APPLICATION_OCTET_STREAM).content(bytes))
                 .andExpect(status().isOk()).andExpect(header().string("Cache-Control", "no-store"))
                 .andExpect(jsonPath("$.uploadId").value(id)).andExpect(jsonPath("$.sizeBytes").value(3));
+    }
+
+    @Test
+    void sessionLocatorDoesNotAcceptCallerWorkspaceOrDirectory() throws Exception {
+        mvc.perform(post("/api/agent/web-shell/v1/workspaces/files/query")
+                .requestAttr(TenantContextFilter.ATTRIBUTE, new TenantContext("tenant", "actor"))
+                .contentType(MediaType.APPLICATION_JSON).content("{\"sessionId\":\"session\",\"directory\":\".\"}"))
+                .andExpect(status().isOk());
+        verify(files).query("tenant", "actor", new WorkspaceFileStore.Locator("session", null, null), ".", "", null);
+        for (String locator : new String[] {"", "\"workspaceId\":\"workspace\",", "\"sessionId\":\"session\",\"cwdRelative\":\".\",",
+                "\"sessionId\":\"session\",\"workspaceId\":\"workspace\",\"cwdRelative\":\".\","}) {
+            mvc.perform(post("/api/agent/web-shell/v1/workspaces/files/read")
+                    .requestAttr(TenantContextFilter.ATTRIBUTE, new TenantContext("tenant", "actor"))
+                    .contentType(MediaType.APPLICATION_JSON).content("{" + locator + "\"path\":\"a.txt\",\"expectedScopeRevision\":\"" + "a".repeat(64) + "\"}"))
+                    .andExpect(status().isBadRequest());
+        }
+        mvc.perform(post("/api/agent/web-shell/v1/workspaces/files/upload")
+                .requestAttr(TenantContextFilter.ATTRIBUTE, new TenantContext("tenant", "actor"))
+                .param("sessionId", "session").param("workspaceId", "workspace").param("cwdRelative", ".").param("path", "file.bin")
+                .param("expectedScopeRevision", "a".repeat(64)).param("uploadId", UUID.randomUUID().toString())
+                .contentType(MediaType.APPLICATION_OCTET_STREAM).content(new byte[0]))
+                .andExpect(status().isBadRequest());
+        verifyNoInteractions(uploads);
     }
 
     @Test
