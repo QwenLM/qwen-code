@@ -7,7 +7,10 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, waitFor } from '@testing-library/react';
-import { renderWithProviders } from '../../../test-utils/render.js';
+import {
+  renderWithProviders,
+  withProviders,
+} from '../../../test-utils/render.js';
 import {
   BaseSelectionList,
   type BaseSelectionListProps,
@@ -484,7 +487,11 @@ describe('BaseSelectionList', () => {
       expect(lastFrame()).not.toContain('Item 5');
 
       await act(async () => {
-        rerender(<BaseSelectionList {...componentProps} maxItemsToShow={6} />);
+        rerender(
+          withProviders(
+            <BaseSelectionList {...componentProps} maxItemsToShow={6} />,
+          ),
+        );
       });
 
       await waitFor(() => {

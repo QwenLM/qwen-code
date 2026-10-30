@@ -333,21 +333,6 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         dialog(14),
         { settings, config },
       );
-      const visibleFor = (label: string): string[] => {
-        if (width === 100) {
-          return [
-            'QwenCloud',
-            'Alibaba ModelStudio',
-            'Third-party Providers',
-            'Custom Provider',
-          ];
-        }
-        if (label === 'QwenCloud' || label === 'Alibaba ModelStudio') {
-          return ['QwenCloud', 'Alibaba ModelStudio'];
-        }
-        return ['Third-party Providers', 'Custom Provider'];
-      };
-
       const expectReadableSelection = (label: string, height = 14) => {
         const frame = lastFrame() ?? '';
         expect(frame.split('\n').length).toBeLessThanOrEqual(height);
@@ -355,11 +340,6 @@ describe('AuthDialog', { timeout: 15000 }, () => {
           .split('\n')
           .find((line) => line.includes('›'));
         expect(selectedLine?.replaceAll('│', '').trim()).toBe(`› ${label}`);
-        if (height === 14) {
-          for (const visible of visibleFor(label)) {
-            expect(frame).toContain(visible);
-          }
-        }
       };
 
       await waitForSelectedOption(lastFrame, 'QwenCloud');

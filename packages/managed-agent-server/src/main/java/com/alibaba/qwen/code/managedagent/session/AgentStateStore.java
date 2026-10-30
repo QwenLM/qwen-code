@@ -840,6 +840,11 @@ public interface AgentStateStore {
 
     StoreModels.SnapshotPage findSnapshotPage(String tenantId, String sessionId, String cursor, long afterSequence, int limit);
 
+    StoreModels.SnapshotPage findRecentSnapshotPage(String tenantId, String sessionId, String cursor, int limit);
+
+    StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
+            String cursor, int limit, boolean backward);
+
     Optional<SnapshotRecord> findSnapshot(String tenantId,
             String sessionId);
 
