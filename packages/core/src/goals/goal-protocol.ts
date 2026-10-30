@@ -391,10 +391,12 @@ export function isRepeatedBlockerProposal(
 }
 
 /**
- * Appended to `lastReason` when an `infeasible` blocker is accepted, so the
- * stopped Goal tells the user what to do rather than only what went wrong.
- * The verifier's reason says why the objective cannot hold; this says that
- * resuming as-is will not change that.
+ * The next-step guidance for a stopped Goal whose `infeasible` blocker was
+ * accepted, so the Goal tells the user what to do rather than only what went
+ * wrong. The verifier's reason says why the objective cannot hold; this says
+ * that resuming as-is will not change that. The verifier's system prompt
+ * spells it into the (localized) verdict reason, so the stored `lastReason`
+ * stays in one language.
  */
 export const GOAL_INFEASIBLE_NEXT_STEP =
   'The objective cannot be satisfied as written; edit or replace the Goal with an objective the evidence allows before resuming it.';
