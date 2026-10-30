@@ -161,18 +161,6 @@ const proxy = createServer(async (req, res) => {
           `/session/${config.sessionId}/managed-runtime/continue`
       )
         report.continuationsAfterFailure++;
-      if (injected && target.pathname.endsWith('/load')) {
-        report.postFailureLoads.push(fields.cancellationTakeover === true);
-        report.postFailureLoadOrigins.push(
-          [
-            `takeover=${fields.cancellationTakeover === true}`,
-            `passive=${fields.passiveManagedRuntimeRecovery === true}`,
-            `drive=${fields.driveRuntimeRecovery === true}`,
-            `mcpOnly=${fields.mcpManagementOnly === true}`,
-            `promptId=${typeof fields.cancellationPromptId === 'string'}`,
-          ].join(' '),
-        );
-      }
       const headers = Object.fromEntries(
         Object.entries(req.headers)
           .filter(
@@ -196,6 +184,24 @@ const proxy = createServer(async (req, res) => {
         headers,
         ...(body.length ? { body } : {}),
       });
+      // Recorded after the response, not at request time: a load the daemon
+      // refused changed nothing, and #15898 needs the status to tell that apart
+      // from the admitted plain re-attach the assertion exists to forbid.
+      if (injected && target.pathname.endsWith('/load')) {
+        report.postFailureLoads.push(fields.cancellationTakeover === true);
+        report.postFailureLoadOrigins.push(
+          [
+            `status=${upstream.status}`,
+            `takeover=${fields.cancellationTakeover === true}`,
+            `passive=${fields.passiveManagedRuntimeRecovery === true}`,
+            `drive=${fields.driveRuntimeRecovery === true}`,
+            `mcpOnly=${fields.mcpManagementOnly === true}`,
+            `lifecycle=${fields.lifecycleAuthority != null}`,
+            `cleanup=${typeof fields.recoveryCleanupPromptId === 'string'}`,
+            `promptId=${typeof fields.cancellationPromptId === 'string'}`,
+          ].join(' '),
+        );
+      }
       if (target.pathname.endsWith('/events') && upstream.body) {
         res.writeHead(upstream.status, relayedHeaders(upstream.headers));
         const reader = upstream.body.getReader();
