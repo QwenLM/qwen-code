@@ -3079,6 +3079,14 @@ export async function loadCliConfig(
         );
       }
     } catch (err) {
+      // Servers may already be running when a later step (e.g. a sandbox
+      // policy rejecting the client install) throws; stop what we started so
+      // a failed init doesn't leave orphaned language-server processes.
+      try {
+        await lspClient?.stop?.();
+      } catch {
+        debugLogger.warn('Failed to stop LSP client after init failure');
+      }
       try {
         config.setLspInitializationError(
           err instanceof Error ? err : String(err),
