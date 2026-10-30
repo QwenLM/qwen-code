@@ -1977,7 +1977,7 @@ class HostedSessionRelayFaultGatesIT {
                                 .registerSingleton("fg9Authentication",
                                         authentication()))
                         .run(arguments.toArray(String[]::new));
-        jdbc = spring.getBean(JdbcTemplate.class);
+        jdbc = spring.getBean("managedJdbcTemplate", JdbcTemplate.class);
     }
 
     private void startHarness() throws Exception {
