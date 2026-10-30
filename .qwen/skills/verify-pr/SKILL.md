@@ -24,8 +24,11 @@ Two entry paths share the contract below.
   preflight requires the repository explicitly; `origin` is not a fallback).
   It writes the round's coordinates (`repo`, `pr`, `baseRefOid`, `headRefOid`)
   to `context.json` and refuses a tree that is not a clean checkout of the PR
-  head — when it passes, the current tree is the head side of the A/B and its
-  install and build are reused, so stay on the PR branch and keep it clean.
+  head — when it passes, the current tree is the head side of the A/B, so stay
+  on the PR branch and keep it clean. The gate attests the source only:
+  `dist/` and `node_modules/` are gitignored, so reuse the install and build
+  only after establishing they were produced for this head, and otherwise
+  refresh them (the local install strategy below).
   This round executes untrusted PR code, so it needs an isolation boundary
   (see _Local invocation_).
 
@@ -255,9 +258,13 @@ per-PR because a round is per-PR.
 `verify-pr-prepare.mjs` writes `repo`, `pr`, `baseRefOid` and `headRefOid`
 into the round's `tmp/pr<n>-verify-<ts>/context.json`, and only passes when
 the current tree is a clean checkout of `headRefOid` — so the current tree
-**is** the head side of the A/B: reuse its install and build instead of
-checking out a second head tree. Read both OIDs from that file throughout
-the round. `HEAD^1`/`HEAD^2` hold only on the CI merge-ref checkout; on a
+**is** the head side of the A/B: reuse the tree instead of checking out a
+second head tree. Reusing its install and build is a separate question:
+they are gitignored, so a clean checkout can still carry artifacts from an
+earlier commit — reuse them only after establishing they were built for
+this head, and otherwise follow the local install strategy below. Read
+both OIDs from that file throughout the round. `HEAD^1`/`HEAD^2` hold only
+on the CI merge-ref checkout; on a
 plain PR-head checkout `HEAD^1` is just the head's parent and `HEAD^2`
 usually does not exist, so deriving the base from them would silently
 compare the wrong commit. If an OID the round needs is not present locally,
@@ -549,7 +556,12 @@ differs only by the change under test; the verdict is the pair of counts.
   The control must differ by nothing else — name the exact commit/hunk it
   represents.
 - **Local runs start with no pre-built tree — pick the install strategy by
-  verification level before spending the clock.** A dist-level harness needs
+  verification level before spending the clock.** A tree left clean at the
+  head by an earlier round is not pre-built _for this head_ until you can
+  show its artifacts were produced for it; when you cannot, treat it as
+  unbuilt and rebuild the affected workspace before measuring — a stale
+  `dist/` under a clean head is the one staleness the prepare gate cannot
+  see. A dist-level harness needs
   a full `npm ci` at head (the `prepare` build included; measured ~8 min
   warm-cache on a 12-core aarch64 box). A prototype/source-level harness
   whose bundler compiles the TS sources directly (e.g.

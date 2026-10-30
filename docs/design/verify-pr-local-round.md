@@ -200,6 +200,14 @@ A published verification comment ends with the same attribution shape
   marker is not credential-free readiness either: the CLI's own Docker/Podman
   launcher mounts the gcloud config and ADC file and copies model keys, so the
   gate also requires an explicit attestation and refuses on a visible signal.
+- The tree gate attests source identity only. `dist/` and `node_modules/` are
+  gitignored, so a clean checkout of the head can still carry a build from an
+  earlier commit — reproduced in review: prepare exited 0 while the ignored
+  build ran old code under the new head's label. Install/build reuse is
+  therefore conditional on the round establishing the artifacts were produced
+  for this head (otherwise it rebuilds per the local install strategy), and
+  the prepare success line says "verify or refresh its install/build first"
+  instead of advertising unconditional build reuse.
 - Two implementations of the publish rules can drift. A workflow meta-test pins
   the checker verdict vocabulary to the publisher case labels, so a fifth word
   on one side fails the suite. The CI publisher remains authoritative.

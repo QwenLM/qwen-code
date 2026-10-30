@@ -73,7 +73,8 @@ metadata snapshot the round reads as $QWEN_VERIFY_CONTEXT:
   - fetches the PR snapshot with gh, from the repository you name
   - verifies the base and head OIDs exist in this clone
   - refuses a tree that is not a clean checkout of the PR head, so the round
-    can reuse the current tree and its build as the head side of the A/B
+    can reuse the current tree as the head side of the A/B; the gitignored
+    install/build still needs a freshness check before it is reused
   - creates tmp/pr<n>-verify-<YYYYMMDD-HHMMSS>/ with an evidence/ subdirectory
     and a context.json holding repo, pr, baseRefOid and headRefOid
   - reports the isolation signals this process can observe
@@ -412,7 +413,7 @@ function main(argv) {
     `  pr         #${context.pr}${title ? ` ${title}` : ''}`,
     `  base       ${context.base}`,
     `  head       ${context.head}`,
-    '  tree       at PR head, clean — reuse this tree and its build',
+    '  tree       at PR head, clean — reuse this tree; verify or refresh its install/build first',
     `  context    ${contextPath}`,
     `  artifacts  ${artifacts}`,
     `  isolation  ${isolation.isolated ? isolation.signals.join(', ') : 'none detected'}`,

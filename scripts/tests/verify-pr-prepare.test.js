@@ -286,8 +286,12 @@ describe.skipIf(process.platform === 'win32')('prepare (CLI)', () => {
     expect(result.stdout).toContain(`repo       ${REPO}`);
     expect(result.stdout).toContain(`base       ${base}`);
     expect(result.stdout).toContain(`head       ${head}`);
+    // The gate attests source identity only: dist/ and node_modules/ are
+    // gitignored, so the success line must not advertise unconditional
+    // build reuse (PR #15913 review: a stale ignored build under a clean
+    // head measured old code under the new head's label).
     expect(result.stdout).toContain(
-      'tree       at PR head, clean — reuse this tree and its build',
+      'tree       at PR head, clean — reuse this tree; verify or refresh its install/build first',
     );
     expect(result.stdout).toContain('isolation  SANDBOX=docker');
     expect(result.stdout).toContain('--require-isolation');
