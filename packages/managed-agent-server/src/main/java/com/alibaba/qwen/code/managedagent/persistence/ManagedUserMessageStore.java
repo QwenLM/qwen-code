@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
+import com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -83,7 +84,7 @@ public class ManagedUserMessageStore {
         switch (command.action()) {
             case "submit" -> {
                 SessionWorktreeStore.requireReady(jdbc, tenant, session);
-                List<Map<String, Object>> input = agents.userMessageInput(command.input());
+                List<Map<String, Object>> input = input(tenant, session, command.input());
                 Integer count = jdbc.queryForObject("SELECT COUNT(*) FROM ma_user_message WHERE tenant_id = ?"
                         + " AND session_id = ? AND state IN ('queued', 'claimed', 'recovery_blocked')", Integer.class, tenant, session);
                 if (count != null && count >= 32) {
@@ -100,7 +101,7 @@ public class ManagedUserMessageStore {
                         tenant, session);
             }
             case "edit", "withdraw" -> {
-                String input = "edit".equals(command.action()) ? encode(agents.userMessageInput(command.input())) : null;
+                String input = "edit".equals(command.action()) ? encode(input(tenant, session, command.input())) : null;
                 if (input == null && snapshot(tenant, session).messages().stream()
                         .anyMatch(message -> message.id().equals(command.messageId()) && "recovery_blocked".equals(message.state()))) {
                     jdbc.update("UPDATE ma_user_message_queue SET paused = TRUE WHERE tenant_id = ? AND session_id = ?", tenant, session);
@@ -237,6 +238,17 @@ public class ManagedUserMessageStore {
         jdbc.update("UPDATE ma_user_message SET state = 'withdrawn' WHERE state = 'queued' AND EXISTS"
                 + " (SELECT 1 FROM ma_session s WHERE s.tenant_id = ma_user_message.tenant_id"
                 + " AND s.session_id = ma_user_message.session_id AND s.status <> 'ACTIVE')");
+    }
+
+    private List<Map<String, Object>> input(String tenant, String session, List<InputBlock> blocks) {
+        List<Map<String, Object>> input = agents.userMessageInput(blocks);
+        String profile = jdbc.queryForObject("SELECT tool_profile FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenant, session);
+        if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                && input.stream().anyMatch(block -> !"text".equals(block.get("type")))) {
+            throw conflict("workspace_unavailable");
+        }
+        return input;
     }
 
     private String lockSession(String tenant, String session) {
