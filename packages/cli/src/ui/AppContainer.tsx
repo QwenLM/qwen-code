@@ -153,10 +153,7 @@ import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { getInteractiveModSession } from '../services/interactive-mod-session.js';
 import { useModBand } from './hooks/use-mod-band.js';
-import {
-  MOD_BAND_RESERVED_COLUMNS,
-  modBandMaxRows,
-} from './components/ModBand.js';
+import { modBandInput } from './utils/mod-band-tree.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
 import { rewindSession } from './utils/session-rewind.js';
 import { isRewindableUserTurn } from './utils/historyMapping.js';
@@ -972,7 +969,7 @@ export const AppContainer = (props: AppContainerProps) => {
     config.getWorkingDir(),
   );
 
-  const { providerUpdateRequest, dismissProviderUpdate } = useProviderUpdates(
+  const { providerUpdateRequest } = useProviderUpdates(
     settings,
     config,
     historyManager.addItem,
@@ -4366,27 +4363,17 @@ export const AppContainer = (props: AppContainerProps) => {
   // The Mods' band above the prompt: its input, and its tree, whose height
   // the controls measurement below takes in.
   const modBand = useModBand(config);
-  const modBandRows = modBandMaxRows(terminalHeight);
   const isModWorking = streamingState !== StreamingState.Idle;
   useEffect(() => {
-    getInteractiveModSession(config)?.setRenderInput({
-      surface: 'terminal',
-      component: 'AbovePrompt',
-      requestId: 'above-prompt',
-      viewport: {
+    getInteractiveModSession(config)?.setRenderInput(
+      modBandInput({
         columns: terminalWidth,
         rows: terminalHeight,
         isFullscreen: useTerminalBuffer,
-      },
-      props: {
         hasSurvey: isFeedbackDialogOpen,
         isWorking: isModWorking,
-        maxRows: modBandRows,
-        bodyColumns: Math.max(0, terminalWidth - MOD_BAND_RESERVED_COLUMNS),
-        scroll: { offset: 0, bodyRows: Math.max(0, modBandRows - 1) },
-        view: {},
-      },
-    });
+      }),
+    );
   }, [
     config,
     terminalWidth,
@@ -4394,7 +4381,6 @@ export const AppContainer = (props: AppContainerProps) => {
     useTerminalBuffer,
     isFeedbackDialogOpen,
     isModWorking,
-    modBandRows,
   ]);
 
   // Re-measure the footer whenever the LiveAgentPanel's height can change
@@ -5597,7 +5583,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
@@ -5692,7 +5677,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,

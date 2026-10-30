@@ -140,16 +140,23 @@ class SessionRowLockOrderTest {
             "ManagedProjectionResourceCollector.java",
             "ManagedRuntimeRetentionGuard.java",
             "ManagedSessionRetirementStore.java", "ManagedSessionStore.java",
-            "ManagedSnapshotStore.java", "ManagedToolResultStore.java",
+            "ManagedToolResultStore.java",
             "ManagedUserMessageStore.java",
             "ResidentWorkspaceRetirementStore.java", "ResidentWorkspaces.java",
             "ToolPublicationRetentionStore.java",
             "WakeRecoveryStore.java",
+            "WorkspaceFileStore.java",
             "WorkspaceLifecycleStore.java", "WorkspaceRecoveryStore.java");
+    // HostedCleanupDebtStore reads ma_turn only inside a read-only NOT EXISTS
+    // guard that skips Sessions with live work; it takes no row lock and never
+    // writes, so it is a turn reader but not a session locker and stays out of
+    // the session-first order audit below.
     private static final Set<String> SIBLING_TURN_READERS = Set.of(
             "AutomationLedgerStore.java", "ChildResultRelayStore.java",
+            "HostedCleanupDebtStore.java",
             "ManagedActionStore.java", "ManagedToolDetailsStore.java",
             "ManagedToolResultProjector.java", "ManagedUserMessageStore.java",
+            "SessionWorktreeStore.java",
             "WorkspaceCsiApplicationInventory.java",
             "WorkspaceExecutionStore.java", "WorkspaceMigrationStore.java",
             "WorkspaceRecoveryStore.java");
@@ -222,11 +229,6 @@ class SessionRowLockOrderTest {
                                     "ManagedSessionStore.sha256/1",
                                     "ManagedSessionStore.storedTransaction/1",
                                     "ManagedSessionStore.usesDataSource/1")),
-                    Map.entry("ManagedSnapshotStore.java",
-                            Set.of("ItemReader.read/3",
-                                    "ManagedSnapshotStore.decode/1",
-                                    "SnapshotReadLease.check/0",
-                                    "SnapshotReadLease.close/0")),
                     Map.entry("ManagedTaskEventStore.java",
                             Set.of("ManagedTaskEventStore.eventRow/2")),
                     Map.entry("ManagedToolResultProjector.java",
@@ -250,6 +252,11 @@ class SessionRowLockOrderTest {
                             Set.of("SessionMessageRelayStore.pending/2")),
                     Map.entry("SessionResourceCollectionCollector.java",
                             Set.of("SessionResourceCollectionCollector.runOnce/0")),
+                    // Value projections and the JDBC row mapper reach neither
+                    // Session locks nor Turn rows.
+                    Map.entry("SessionWorktreeStore.java",
+                            Set.of("Descriptor.worktreeId/0", "Plan.source/0", "Plan.target/1",
+                                    "Row.descriptor/0", "Row.descriptor/1", "SessionWorktreeStore.row/2")),
                     // D7-2's parked registration asks its record whether it
                     // reserved, through a record accessor the parse cannot
                     // resolve.
@@ -292,7 +299,7 @@ class SessionRowLockOrderTest {
                                     "Cell.isNull/0", "Cell.kind/0", "Cell.text/0",
                                     "Encoder.write/1",
                                     "FrozenOwnerReader.read/2|Inspection.read/2",
-                                    "Inspection.context/2", "Inspection.snapshot/0",
+                                    "Inspection.context/2",
                                     "Kind.accepts/1", "Kind.binary/0", "Kind.integral/0",
                                     "NativeReadEvidence.number/1|Row.number/1",
                                     "NativeReadEvidence.text/1|Row.text/1",
@@ -348,16 +355,7 @@ class SessionRowLockOrderTest {
                             Set.of("IdentityReader.read/1",
                                     "WorkspaceStorageGuard.verify/1")));
 
-    // Held bodies whose invocation the parse cannot see but whose
-    // transaction it can: ManagedSnapshotStore.afterCommit registers a
-    // post-commit synchronization, and the build it runs opens its own
-    // REQUIRES_NEW transaction, so that body's session lock can never
-    // order against a row its registering caller touched. A deferred body
-    // is dropped rather than folded at its declaration, and the set is
-    // asserted exactly per file, so a new held body reaching a side still
-    // fails closed.
-    private static final Set<String> DEFERRED_BODIES = Set.of(
-            "ManagedSnapshotStore.afterCommit/2");
+    private static final Set<String> DEFERRED_BODIES = Set.of();
 
     private record Key(String owner, String name, List<String> paramTypes) {
         int arity() {
@@ -422,7 +420,7 @@ class SessionRowLockOrderTest {
                 "bindRecoveredHarness", "recordAdmission",
                 "recordRecoveryAdmission", "retractContinuationOutput",
                 "retractHarnessTurnOutput", "recordHarnessEvents",
-                "cancelUnadmittedTurn", "cancelBeforeAdmission", "failTurn",
+                "cancelUnadmittedTurn", "cancelBeforeAdmission", "failTurn", "failWorktreeInitialTurns",
                 "failRecoveryBlockedTurn", "markTurnFailureRecovery",
                 "requestRecoveryRecheck",
                 "appendPublicEventIfAbsent", "appendLiveSessionEventIfAbsent",
@@ -468,7 +466,7 @@ class SessionRowLockOrderTest {
                         "bindHarness", "bindRecoveredHarness",
                         "cancelBeforeAdmission", "changeSessionModel", "changeSessionApproval", "claimTurn",
                         "completeCwdChangeOperation", "completeHarnessTurn",
-                        "deferTurnRetry", "failTurn", "failRecoveryBlockedTurn",
+                        "deferTurnRetry", "failTurn", "failRecoveryBlockedTurn", "failWorktreeInitialTurns",
                         "settleFailedTurn", "findActiveTurns",
                         "findDispatchable", "findLatestTurns",
                         "findReplayFloorTargets", "findTurn", "findTurnModelSelection", "findTurnApprovalSelection",
@@ -534,7 +532,7 @@ class SessionRowLockOrderTest {
     // assertion still green. Pin the boundary on the R2 entry points.
     @Test
     void theOrderPinnedEntriesKeepTheirTransactionalBoundary() {
-        for (String name : List.of("recordAdmission", "failTurn", "failRecoveryBlockedTurn",
+        for (String name : List.of("recordAdmission", "failTurn", "failRecoveryBlockedTurn", "failWorktreeInitialTurns",
                 "cancelUnadmittedTurn", "cancelBeforeAdmission",
                 "beginContextCompression", "markContextCompressionSubmitted", "markTurnFailureRecovery",
                 "requestRecoveryRecheck")) {
@@ -614,8 +612,7 @@ class SessionRowLockOrderTest {
                         entry.getValue().deferredBodies());
             }
         }
-        assertThat(deferred).isEqualTo(Map.of("ManagedSnapshotStore.java",
-                DEFERRED_BODIES));
+        assertThat(deferred).isEmpty();
     }
 
     // The derivation must report a writer that reaches the turn row through

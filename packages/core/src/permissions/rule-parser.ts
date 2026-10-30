@@ -569,6 +569,25 @@ export function parseRule(raw: string): PermissionRule {
 }
 
 /**
+ * Report a rule that parsed but will never match.
+ *
+ * Every consumer drops `invalid` rules, so a malformed `deny` or `ask` entry
+ * protects nothing: the control the operator believes exists is absent. The
+ * asymmetry is what makes this worth a terminal warning — a malformed `allow`
+ * rule merely fails closed. `debugLogger.warn` reaches a file that is off in
+ * default runs, so the same reason `tools.eager` reports its unusable entries
+ * applies here.
+ */
+export function warnDroppedPermissionRule(raw: string, kind?: string): void {
+  // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where a dropped rule would otherwise be invisible
+  console.warn(
+    `[permissions] ignoring malformed ${kind ? `${kind} ` : ''}rule ` +
+      `(unbalanced parentheses): ${raw} — it matches nothing, so it ` +
+      `protects nothing. Balance the parentheses to make it take effect.`,
+  );
+}
+
+/**
  * Parse an array of raw rule strings into PermissionRule objects,
  * silently skipping any empty entries.
  */
@@ -581,6 +600,7 @@ export function parseRules(raws: string[]): PermissionRule[] {
         debugLogger.warn(
           `Ignoring malformed rule (unbalanced parentheses): ${r.raw}`,
         );
+        warnDroppedPermissionRule(r.raw);
       }
       return r;
     });

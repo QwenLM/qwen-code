@@ -30,7 +30,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationComma
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
@@ -254,6 +253,33 @@ public interface AgentStateStore {
 
     Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
+
+    default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
+            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
+            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
+            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
+            List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
+            List<com.alibaba.qwen.code.managedagent.extensions.ManagedExtensionPackages.Pin> extensionPins,
+            Set<String> extensionLifecycleProfiles,
+            com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Plan worktree) {
+        if (worktree != null) {
+            throw new UnsupportedOperationException("Session worktrees are unavailable");
+        }
+        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
+                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
+                approvalSelectionSupported, planMode, planModeSupported, skills, publicChildrenSupported,
+                modelId, extensionPins, extensionLifecycleProfiles);
+    }
+
+    default com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Descriptor findSessionWorktree(
+            String tenantId, String sessionId) {
+        return null;
+    }
+
+    default Map<String, com.alibaba.qwen.code.managedagent.persistence.SessionWorktreeStore.Descriptor> findSessionWorktrees(
+            String tenantId, List<String> sessionIds) {
+        return Map.of();
+    }
 
     Admission insertTurnCommand(String tenantId, String operation,
             String idempotencyKey, String requestDigest, String sessionId,
@@ -811,23 +837,23 @@ public interface AgentStateStore {
     EventPage findTranscriptEvents(String tenantId, String sessionId,
             Long beforeSequence, int limit);
 
-    StoreModels.SnapshotPage findSnapshotPage(String tenantId, String sessionId, String cursor, long afterSequence, int limit);
+    StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
+            String cursor, int limit, boolean backward);
 
-    Optional<SnapshotRecord> findSnapshot(String tenantId,
-            String sessionId);
+    StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
+            String cursor, int limit, boolean backward, long afterSequence);
 
-    /** The snapshot's covered sequence of each given Session, in one read. */
-    Map<String, Long> findSnapshotCoveredSequences(String tenantId,
+    /** The message projection coverage of each Session, in one read. */
+    Map<String, Long> findMessageCoveredSequences(String tenantId,
             List<String> sessionIds);
 
     ReplayWindow findReplayWindow(String tenantId, String sessionId);
 
-    /** The Sessions whose Snapshot covers more than their replay floor. */
+    /** The Sessions whose message projection covers more than their replay floor. */
     List<ReplayFloorTarget> findReplayFloorTargets(int limit);
 
     /**
-     * Raises the Session's replay floor, never above the Snapshot's covered
-     * sequence, so a client told to resync can resume from the Snapshot.
+     * Raises the Session's replay floor only through readable message coverage.
      */
     ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
             long floorSequence);

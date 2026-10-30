@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { ChevronRightIcon, InfoIcon, RefreshCwIcon } from 'lucide-react';
+import { ChevronRightIcon, RefreshCwIcon } from 'lucide-react';
 import type {
   DaemonSessionActions,
   DaemonSessionStatsModelMetrics,
@@ -344,7 +344,6 @@ function ModelCard({
   rank: number;
 }) {
   const { t } = useI18n();
-  const [infoOpen, setInfoOpen] = useState(false);
   const m = entry.metrics;
   const total = totalTokens(m.tokens);
   const share = grandTotal > 0 ? (total / grandTotal) * 100 : 0;
@@ -356,7 +355,7 @@ function ModelCard({
       ? {
           ttft: generation.totalTtftMs / generation.timedRequests,
           // Averaged over the same requests as TTFT so the two add up to
-          // their latency; Avg latency above also counts failed, internal
+          // their latency; Avg latency also counts failed, internal
           // and non-streamed requests.
           generation:
             generation.totalGenerationDurationMs / generation.timedRequests,
@@ -367,66 +366,50 @@ function ModelCard({
               : undefined,
         }
       : undefined;
+  const stats = [
+    ...(timing
+      ? [
+          {
+            label: t('tokenUsage.firstToken'),
+            value: formatDuration(timing.ttft),
+          },
+          ...(timing.speed !== undefined
+            ? [
+                {
+                  label: t('tokenUsage.outputSpeed'),
+                  value: t('tokenUsage.tokensPerSecond', {
+                    rate: timing.speed.toFixed(1),
+                  }),
+                },
+                {
+                  label: t('tokenUsage.generation'),
+                  value: formatDuration(timing.generation),
+                },
+              ]
+            : []),
+        ]
+      : []),
+    {
+      label: t('tokenUsage.requests'),
+      value: formatCount(m.api.totalRequests),
+    },
+    { label: t('tokenUsage.avgLatency'), value: formatDuration(avgLatency) },
+  ];
   return (
     <div className={styles.modelCard} data-color={(rank - 1) % 5}>
       <div className={styles.modelHeader}>
-        <div className={styles.modelInfo}>
-          <div className={styles.modelName} title={entry.key}>
-            {entry.label}
-          </div>
-          <Tooltip open={infoOpen} onOpenChange={setInfoOpen}>
-            <TooltipTrigger asChild>
-              <button
-                type="button"
-                className={styles.modelInfoButton}
-                onClick={(event) => {
-                  // Touch focus may open first; prevent Radix's click-close.
-                  event.preventDefault();
-                  setInfoOpen(true);
-                }}
-                aria-label={t('tokenUsage.modelApiMeta', {
-                  model: entry.label,
-                })}
-              >
-                <InfoIcon size={14} aria-hidden="true" />
-              </button>
-            </TooltipTrigger>
-            <TooltipContent side="top" sideOffset={6}>
-              <div className={styles.modelApiMeta}>
-                <span>
-                  {t('tokenUsage.requests')} {formatCount(m.api.totalRequests)}
-                </span>
-                <span>
-                  {t('tokenUsage.avgLatency')} {formatDuration(avgLatency)}
-                </span>
-                {timing && (
-                  <>
-                    <span>
-                      {t('tokenUsage.firstTokenLatency', {
-                        duration: formatDuration(timing.ttft),
-                      })}
-                    </span>
-                    {timing.speed !== undefined && (
-                      <>
-                        <span>
-                          {t('tokenUsage.generationTime', {
-                            duration: formatDuration(timing.generation),
-                          })}
-                        </span>
-                        <span>
-                          {t('tokenUsage.outputSpeed', {
-                            rate: timing.speed.toFixed(1),
-                          })}
-                        </span>
-                      </>
-                    )}
-                  </>
-                )}
-              </div>
-            </TooltipContent>
-          </Tooltip>
+        <div className={styles.modelName} title={entry.key}>
+          {entry.label}
         </div>
       </div>
+      <dl className={styles.modelStats}>
+        {stats.map(({ label, value }) => (
+          <div key={label}>
+            <dt title={label}>{label}</dt>
+            <dd title={value}>{value}</dd>
+          </div>
+        ))}
+      </dl>
       <TokenDetails tokens={m.tokens} />
       <ShareBar share={share} />
     </div>

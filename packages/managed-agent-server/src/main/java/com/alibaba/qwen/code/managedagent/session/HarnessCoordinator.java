@@ -27,6 +27,7 @@ import jakarta.annotation.PreDestroy;
 import org.apache.commons.lang3.StringUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -130,8 +131,8 @@ public class HarnessCoordinator {
 
     public HarnessCoordinator(AgentStateStore store,
             HarnessConnector harness, HarnessEventProjector projector,
-            RuntimeWarmer runtimeWarmer, ExecutorService executor,
-            Clock clock, ManagedAgentProperties properties) {
+            RuntimeWarmer runtimeWarmer, @Qualifier("managedAgentExecutor") ExecutorService executor,
+            @Qualifier("managedAgentClock") Clock clock, ManagedAgentProperties properties) {
         this.store = store;
         this.harness = harness;
         this.projector = projector;
@@ -219,11 +220,14 @@ public class HarnessCoordinator {
 
     public void warmSession(String tenantId, String sessionId) {
         if (!sessionCreateWarm || !runtimeWarmer.isEnabled()
-                || !harness.isWorkspaceFilesAvailable()) {
+                || !harness.isWorkspaceFilesAvailable() || !worktreeReady(tenantId, sessionId)) {
             return;
         }
         executor.execute(() -> {
             try {
+                if (!worktreeReady(tenantId, sessionId)) {
+                    return;
+                }
                 runtimeWarmer.warm(sessionId).whenComplete(
                         (ignored, error) -> {
                             if (error != null) {
@@ -236,13 +240,18 @@ public class HarnessCoordinator {
         });
     }
 
+    private boolean worktreeReady(String tenantId, String sessionId) {
+        var worktree = store.findSessionWorktree(tenantId, sessionId);
+        return worktree == null || "ready".equals(worktree.state());
+    }
+
     private static void sessionWarmFailed(String tenantId, String sessionId,
             Throwable error) {
         LOG.warn("Managed Runtime create warm failed tenant={} session={}",
                 tenantId, sessionId, error);
     }
 
-    @Scheduled(fixedDelayString =
+    @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString =
             "${qwen.managed-agent.dispatch.scan-delay:1s}")
     public void recoverExpiredTurns() {
         if (!harness.isAvailable()) {
@@ -448,6 +457,10 @@ public class HarnessCoordinator {
             AtomicBoolean recoveryPath) {
         SessionRecord session = store.requireSession(claimed.tenantId(),
                 claimed.sessionId());
+        if (!"CANCELLING".equals(claimed.status())
+                && !worktreeReady(claimed.tenantId(), claimed.sessionId())) {
+            return false;
+        }
         if (!"CANCELLING".equals(claimed.status())
                 && AgentStateStore.HARNESS_RECOVERY_BLOCKED.equals(claimed.errorCode())) {
             return observeBlockedHarness(claimed, session, leaseLost);
