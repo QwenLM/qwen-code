@@ -71,6 +71,42 @@ afterEach(async () => {
 });
 
 describe('file-backed Skill ZIP policy', () => {
+  it('accepts repeated trailing directory separators in both ZIP sources', async () => {
+    const file = await archive([
+      { name: 'SKILL.md', content: manifest },
+      { name: 'fooX/' },
+      { name: 'foo/a.txt', content: 'resource' },
+    ]);
+    const bytes = await fs.readFile(file);
+    const originalName = Buffer.from('fooX/');
+    let replacements = 0;
+    for (
+      let offset = bytes.indexOf(originalName);
+      offset !== -1;
+      offset = bytes.indexOf(originalName, offset + originalName.length)
+    ) {
+      bytes.write('foo//', offset);
+      replacements += 1;
+    }
+    expect(replacements).toBe(2);
+    await fs.writeFile(file, bytes);
+    for (const source of [
+      { type: 'zip' as const, contentBase64: bytes.toString('base64') },
+      { type: 'prepared-zip' as const, path: file },
+    ]) {
+      const result = await installWorkspaceSkill(await workspace(), {
+        ...request(file),
+        source,
+      });
+      expect(
+        await fs.readFile(
+          path.join(path.dirname(result.installedPath!), 'foo/a.txt'),
+          'utf8',
+        ),
+      ).toBe('resource');
+    }
+  });
+
   it('restores the old installation even if cleaning an unpublished candidate fails', async () => {
     const root = await workspace();
     const file = await archive([{ name: 'SKILL.md', content: manifest }]);
@@ -361,12 +397,12 @@ describe('file-backed Skill ZIP policy', () => {
     const file = await archive([{ name: 'SKILL.md', content: manifest }]);
     await installWorkspaceSkill(root, request(file));
     const controller = new AbortController();
-    const committed = vi.fn();
+    const events: string[] = [];
+    const committed = vi.fn(() => events.push('committed'));
     const rename = vi.spyOn(fs, 'rename');
     const rm = fs.rm.bind(fs);
     vi.spyOn(fs, 'rm').mockImplementation(async (...args) => {
-      if (String(args[0]).includes('.backup-'))
-        expect(committed).toHaveBeenCalledOnce();
+      if (String(args[0]).includes('.backup-')) events.push('backup cleanup');
       return rm(...args);
     });
     await expect(
@@ -380,5 +416,6 @@ describe('file-backed Skill ZIP policy', () => {
       }),
     ).resolves.toMatchObject({ skillName: 'example' });
     expect(committed).toHaveBeenCalledOnce();
+    expect(events).toEqual(['committed', 'backup cleanup']);
   });
 });

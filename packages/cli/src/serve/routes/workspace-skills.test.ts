@@ -1126,6 +1126,44 @@ describe('native Skill archive routes', () => {
   const sha256 = createHash('sha256').update(payload).digest('hex');
 
   it.each([
+    ['/workspace/config/skills', true],
+    ['/workspaces/workspace-1/config/skills', false],
+  ])(
+    'refreshes the owned runtime inventory after an archive install at %s',
+    async (base, globalScope) => {
+      const h = createHarness();
+      const invalidateInternal = vi.fn();
+      const internal = {
+        ...h.runtime,
+        workspaceId: 'live-conversation',
+        workspaceCwd: '/live-conversation',
+        primary: false,
+        provenance: 'live-conversation' as const,
+        workspaceService: {
+          ...h.runtime.workspaceService,
+          invalidateWorkspaceSkillsStatus: invalidateInternal,
+        },
+      };
+      h.workspaceRegistry.add(internal);
+      expect(h.workspaceRegistry.list()).not.toContain(internal);
+      expect(h.workspaceRegistry.listManaged()).toContain(internal);
+
+      await request(h.app)
+        .post(
+          `${base}/install-archive?name=demo-skill&attemptId=${randomUUID()}`,
+        )
+        .type('application/octet-stream')
+        .send(payload)
+        .expect(200);
+
+      expect(
+        h.runtime.workspaceService.invalidateWorkspaceSkillsStatus,
+      ).toHaveBeenCalledOnce();
+      expect(invalidateInternal).toHaveBeenCalledTimes(globalScope ? 1 : 0);
+    },
+  );
+
+  it.each([
     '/workspace/config/skills',
     '/workspaces/workspace-1/config/skills',
   ])(

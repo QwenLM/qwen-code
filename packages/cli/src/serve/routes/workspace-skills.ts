@@ -619,7 +619,9 @@ export function registerWorkspaceSkillsRoutes(
               }
             },
             reconcile: () =>
-              reconcileSkills(deps.workspaceRegistry?.list() ?? [runtime]),
+              reconcileSkills(
+                deps.workspaceRegistry?.listManaged() ?? [runtime],
+              ),
           });
         } catch (error) {
           sendSkillArchiveError(res, error);

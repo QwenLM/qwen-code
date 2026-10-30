@@ -885,7 +885,7 @@ async function filesFromZip(
         }
         const directory = entry.fileName.endsWith('/') || fileType === 0x4000;
         const normalized = normalizeRelativePath(
-          entry.fileName.replace(/\/$/, ''),
+          entry.fileName.replace(/\/+$/, ''),
         );
         if (fileType !== 0 && fileType !== 0x8000 && fileType !== 0x4000) {
           skillError(
