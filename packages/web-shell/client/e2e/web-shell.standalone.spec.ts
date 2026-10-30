@@ -331,7 +331,16 @@ test('standalone Recents keeps lifecycle actions on exact standalone routes @smo
     page.getByText('Renamed conversation', { exact: true }),
   ).toBeVisible();
 
-  await openSessionAction(page, 'Renamed conversation', 'Restore');
+  const archivedRow = page
+    .locator(
+      '[data-web-shell-archived-sessions] [data-web-shell-session-title]',
+      { hasText: 'Renamed conversation' },
+    )
+    .locator('..');
+  await archivedRow.hover();
+  await archivedRow
+    .getByRole('button', { name: 'Restore', exact: true })
+    .click();
   await expect(
     page.locator('[data-web-shell-archived-sessions]'),
   ).not.toContainText('Renamed conversation');
