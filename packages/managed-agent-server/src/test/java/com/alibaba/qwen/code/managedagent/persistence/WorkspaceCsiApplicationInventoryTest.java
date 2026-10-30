@@ -106,9 +106,6 @@ class WorkspaceCsiApplicationInventoryTest {
         jdbc.update("INSERT INTO ma_message (tenant_id,session_id,item_id,turn_id,item_type,item_status,attributes_json,"
                         + "first_sequence,last_sequence,gmt_create,gmt_modified,parts_json,body_resource_key)"
                         + " VALUES ('foreign','foreign-session','item','turn','message','completed','{}',1,1,1,1,'[]',?)", resource);
-        jdbc.update("INSERT INTO ma_snapshot (tenant_id,session_id,snapshot_id,snapshot_version,covered_sequence,"
-                        + "projection_version,manifest_resource_key,manifest_sha256,item_count,state,gmt_create,retain_until)"
-                        + " VALUES ('foreign','foreign-session','snapshot',1,1,1,?,?,0,'PUBLISHED',1,2)", resource, sha(bytes));
         jdbc.update("INSERT INTO ma_event_stream (tenant_id,session_id,stream_kind,stream_id,artifact_refs_resource_key,gmt_modified)"
                         + " VALUES ('foreign','foreign-session','SESSION','',?,1)", resource);
         String foreignScope = ManagedSessionStore.sessionScopeKey("foreign", "foreign-session");
@@ -116,7 +113,7 @@ class WorkspaceCsiApplicationInventoryTest {
                         + "tenant_id,session_id,resource_id,gmt_create) VALUES (?,'MESSAGE',?,1,?,'foreign',"
                         + "'foreign-session','original-resource'," + ManagedSchemaTime.SQL_NOW + ")", foreignScope, "a".repeat(64), resource);
         var found = inspect();
-        for (String table : List.of("ma_message", "ma_snapshot", "ma_event_stream", "ma_resource_ref")) {
+        for (String table : List.of("ma_message", "ma_event_stream", "ma_resource_ref")) {
             assertThat(found.blockers()).as(table).anyMatch(blocker -> blocker.table().equals(table)
                     && blocker.code().equals("foreign_original_reference"));
             assertThat(found.table(table).rows()).anyMatch(row -> "foreign".equals(row.text("tenant_id")));
@@ -785,7 +782,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(824);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(805);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
