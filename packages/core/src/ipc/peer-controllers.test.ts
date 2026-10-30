@@ -55,6 +55,34 @@ async function readRaw(): Promise<{
   return JSON.parse(await fs.readFile(registryPath, 'utf8'));
 }
 
+const add = (label: string) => addPeerController(label, registryPath);
+const list = () => listPeerControllers(registryPath);
+const remove = (id: string) => removePeerController(id, registryPath);
+const readFile = () => fs.readFile(registryPath, 'utf8');
+const fileMode = async (p: string) => (await fs.stat(p)).mode & 0o777;
+const registry = () => readPeerControllerRegistrySync(registryPath);
+/** The grants the sync reader sees. */
+const grants = () => registry().controllers;
+
+/** A current-schema registry file holding `controllers` (plus `extra` keys). */
+const registryJson = (controllers: unknown, extra: object = {}) =>
+  JSON.stringify({
+    schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION,
+    controllers,
+    ...extra,
+  });
+
+/** Makes registryPath a symlink to `elsewhere.json`, which `fill` creates. */
+async function symlinkRegistry(
+  fill: (real: string) => Promise<unknown> = (real) =>
+    fs.writeFile(real, '{}', 'utf8'),
+): Promise<string> {
+  const real = path.join(tmpDir, 'elsewhere.json');
+  await fill(real);
+  await fs.symlink(real, registryPath);
+  return real;
+}
+
 describe('mintControllerToken', () => {
   it('carries the prefix and 32 bytes of entropy', () => {
     const token = mintControllerToken();
@@ -83,7 +111,7 @@ describe('hashControllerToken', () => {
 
 describe('addPeerController', () => {
   it('returns the token once and stores only its hash', async () => {
-    const { record, token } = await addPeerController('voice', registryPath);
+    const { record, token } = await add('voice');
 
     expect(record.id).toMatch(/^c_[0-9a-f]{8}$/);
     expect(record.label).toBe('voice');
@@ -91,7 +119,7 @@ describe('addPeerController', () => {
 
     // The plaintext must not survive anywhere on disk: this is the whole
     // reason the file holds a hash rather than the credential.
-    const raw = await fs.readFile(registryPath, 'utf8');
+    const raw = await readFile();
     expect(raw).not.toContain(token);
     expect(raw).not.toContain(token.slice(CONTROLLER_TOKEN_PREFIX.length));
     expect(raw).toContain(record.tokenHash);
@@ -100,35 +128,32 @@ describe('addPeerController', () => {
   it.skipIf(isWindows)('creates a private registry directory', async () => {
     const nestedRegistry = path.join(tmpDir, 'qwen-home', 'controllers.json');
     await addPeerController('voice', nestedRegistry);
-    const stats = await fs.stat(path.dirname(nestedRegistry));
-    expect(stats.mode & 0o777).toBe(0o700);
+    expect(await fileMode(path.dirname(nestedRegistry))).toBe(0o700);
   });
 
   it.skipIf(isWindows)('writes the file 0600', async () => {
-    await addPeerController('voice', registryPath);
-    const stats = await fs.stat(registryPath);
-    expect(stats.mode & 0o777).toBe(0o600);
+    await add('voice');
+    expect(await fileMode(registryPath)).toBe(0o600);
   });
 
   it.skipIf(isWindows)('heals an over-permissive file', async () => {
     // A copy restored from a backup at 0644 is a credential file the
     // world can read; the next write must fix it rather than preserve it.
-    await addPeerController('voice', registryPath);
+    await add('voice');
     await fs.chmod(registryPath, 0o644);
-    await addPeerController('second', registryPath);
-    const stats = await fs.stat(registryPath);
-    expect(stats.mode & 0o777).toBe(0o600);
+    await add('second');
+    expect(await fileMode(registryPath)).toBe(0o600);
   });
 
   it('leaves no temp file behind', async () => {
-    await addPeerController('voice', registryPath);
+    await add('voice');
     const entries = await fs.readdir(tmpDir);
     expect(entries).toEqual(['peer-controllers.json']);
   });
 
   it('appends to the existing grants', async () => {
-    const first = await addPeerController('one', registryPath);
-    const second = await addPeerController('two', registryPath);
+    const first = await add('one');
+    const second = await add('two');
     const stored = await readRaw();
     expect(stored.schemaVersion).toBe(PEER_CONTROLLER_SCHEMA_VERSION);
     expect(stored.controllers.map((record) => record.label)).toEqual([
@@ -139,22 +164,19 @@ describe('addPeerController', () => {
   });
 
   it('serializes concurrent additions', async () => {
-    await Promise.all(
-      ['one', 'two', 'three', 'four'].map((label) =>
-        addPeerController(label, registryPath),
-      ),
-    );
-    expect(
-      (await listPeerControllers(registryPath))
-        .map((record) => record.label)
-        .sort(),
-    ).toEqual(['four', 'one', 'three', 'two']);
+    await Promise.all(['one', 'two', 'three', 'four'].map(add));
+    expect((await list()).map((record) => record.label).sort()).toEqual([
+      'four',
+      'one',
+      'three',
+      'two',
+    ]);
   });
 
   it('completes a write after a stale-lock takeover', async () => {
     const { lockSpy, getOnCompromised } = mockCompromisedLock();
     try {
-      const added = await addPeerController('voice', registryPath);
+      const added = await add('voice');
       expect(added.record.label).toBe('voice');
       expect(getOnCompromised()).toBeTypeOf('function');
       expect((await readRaw()).controllers).toContainEqual(added.record);
@@ -165,232 +187,185 @@ describe('addPeerController', () => {
 
   it('refuses to overwrite a malformed registry', async () => {
     await writeRaw('{ not json');
-    await expect(
-      addPeerController('voice', registryPath),
-    ).rejects.toMatchObject({ code: 'invalid-registry' });
-    expect(await fs.readFile(registryPath, 'utf8')).toBe('{ not json');
+    await expect(add('voice')).rejects.toMatchObject({
+      code: 'invalid-registry',
+    });
+    expect(await readFile()).toBe('{ not json');
   });
 
   it('refuses to overwrite a registry with a malformed entry', async () => {
-    const malformed = JSON.stringify({
-      schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION,
-      controllers: [
-        {
-          id: 'c_00000001',
-          label: 'voice',
-          tokenHash: 'f'.repeat(64),
-          createdAt: 'yesterday',
-        },
-      ],
-    });
+    const malformed = registryJson([
+      {
+        id: 'c_00000001',
+        label: 'voice',
+        tokenHash: 'f'.repeat(64),
+        createdAt: 'yesterday',
+      },
+    ]);
     await writeRaw(malformed);
-    await expect(
-      addPeerController('second', registryPath),
-    ).rejects.toMatchObject({ code: 'invalid-registry' });
-    expect(await fs.readFile(registryPath, 'utf8')).toBe(malformed);
+    await expect(add('second')).rejects.toMatchObject({
+      code: 'invalid-registry',
+    });
+    expect(await readFile()).toBe(malformed);
   });
 
   it('refuses to overwrite an oversized or foreign-version registry', async () => {
     const inputs = [
-      JSON.stringify({
-        schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION,
-        controllers: [],
-        padding: 'x'.repeat(64 * 1024),
-      }),
+      registryJson([], { padding: 'x'.repeat(64 * 1024) }),
       JSON.stringify({ schemaVersion: 2, controllers: [] }),
     ];
     for (const raw of inputs) {
       await writeRaw(raw);
-      await expect(
-        addPeerController('voice', registryPath),
-      ).rejects.toMatchObject({ code: 'invalid-registry' });
-      expect(await fs.readFile(registryPath, 'utf8')).toBe(raw);
+      await expect(add('voice')).rejects.toMatchObject({
+        code: 'invalid-registry',
+      });
+      expect(await readFile()).toBe(raw);
     }
   });
 
   it('flattens a label before storing it', async () => {
     // The label is printed into an envelope attribute and a terminal
     // listing, so a newline in it would render as free-standing text.
-    const { record } = await addPeerController(
-      '  voice​bridge\n ',
-      registryPath,
-    );
+    const { record } = await add('  voice​bridge\n ');
     expect(record.label).toBe('voice bridge');
   });
 
   it('refuses a label that is empty once flattened', async () => {
-    await expect(addPeerController('   ', registryPath)).rejects.toMatchObject({
+    await expect(add('   ')).rejects.toMatchObject({
       code: 'invalid-label',
     });
-    await expect(addPeerController('​​', registryPath)).rejects.toBeInstanceOf(
-      PeerControllerError,
-    );
+    await expect(add('​​')).rejects.toBeInstanceOf(PeerControllerError);
   });
 
   it('refuses a label past the length cap', async () => {
     await expect(
-      addPeerController(
-        'x'.repeat(MAX_CONTROLLER_LABEL_CHARS + 1),
-        registryPath,
-      ),
+      add('x'.repeat(MAX_CONTROLLER_LABEL_CHARS + 1)),
     ).rejects.toMatchObject({ code: 'invalid-label' });
     // The boundary itself is allowed.
-    const { record } = await addPeerController(
-      'x'.repeat(MAX_CONTROLLER_LABEL_CHARS),
-      registryPath,
-    );
+    const { record } = await add('x'.repeat(MAX_CONTROLLER_LABEL_CHARS));
     expect(record.label).toHaveLength(MAX_CONTROLLER_LABEL_CHARS);
   });
 
   it('refuses a duplicate label, whatever its case', async () => {
-    await addPeerController('Voice', registryPath);
-    await expect(
-      addPeerController('voice', registryPath),
-    ).rejects.toMatchObject({ code: 'duplicate-label' });
-    expect(await listPeerControllers(registryPath)).toHaveLength(1);
+    await add('Voice');
+    await expect(add('voice')).rejects.toMatchObject({
+      code: 'duplicate-label',
+    });
+    expect(await list()).toHaveLength(1);
   });
 
   it('refuses to grow past the cap', async () => {
     for (let i = 0; i < MAX_CONTROLLERS; i++) {
-      await addPeerController(`c${i}`, registryPath);
+      await add(`c${i}`);
     }
-    await expect(
-      addPeerController('one-too-many', registryPath),
-    ).rejects.toMatchObject({ code: 'too-many' });
-    expect(await listPeerControllers(registryPath)).toHaveLength(
-      MAX_CONTROLLERS,
-    );
+    await expect(add('one-too-many')).rejects.toMatchObject({
+      code: 'too-many',
+    });
+    expect(await list()).toHaveLength(MAX_CONTROLLERS);
   });
 
   it.skipIf(isWindows)('refuses to write through a symlink', async () => {
     // Replacing the link would silently destroy something the user
     // placed on purpose, and the read path ignores a symlinked registry
     // anyway — so say so instead of doing either.
-    const real = path.join(tmpDir, 'elsewhere.json');
-    await fs.writeFile(real, '{}', 'utf8');
-    await fs.symlink(real, registryPath);
-    await expect(
-      addPeerController('voice', registryPath),
-    ).rejects.toMatchObject({ code: 'unsafe-path' });
+    const real = await symlinkRegistry();
+    await expect(add('voice')).rejects.toMatchObject({ code: 'unsafe-path' });
     expect(await fs.readFile(real, 'utf8')).toBe('{}');
   });
 });
 
 describe('removePeerController', () => {
   it('removes by id and reports what went', async () => {
-    const { record } = await addPeerController('voice', registryPath);
-    await addPeerController('other', registryPath);
+    const { record } = await add('voice');
+    await add('other');
 
-    const removed = await removePeerController(record.id, registryPath);
+    const removed = await remove(record.id);
     expect(removed?.label).toBe('voice');
-    expect(
-      (await listPeerControllers(registryPath)).map((r) => r.label),
-    ).toEqual(['other']);
+    expect((await list()).map((r) => r.label)).toEqual(['other']);
   });
 
   it('matches an id whatever its case, and tolerates surrounding space', async () => {
-    const { record } = await addPeerController('voice', registryPath);
-    expect(
-      await removePeerController(` ${record.id.toUpperCase()} `, registryPath),
-    ).not.toBeNull();
-    expect(await listPeerControllers(registryPath)).toHaveLength(0);
+    const { record } = await add('voice');
+    expect(await remove(` ${record.id.toUpperCase()} `)).not.toBeNull();
+    expect(await list()).toHaveLength(0);
   });
 
   it('returns null for an id nothing holds, and writes nothing', async () => {
-    await addPeerController('voice', registryPath);
-    const before = await fs.readFile(registryPath, 'utf8');
-    expect(await removePeerController('c_deadbeef', registryPath)).toBeNull();
-    expect(await fs.readFile(registryPath, 'utf8')).toBe(before);
+    await add('voice');
+    const before = await readFile();
+    expect(await remove('c_deadbeef')).toBeNull();
+    expect(await readFile()).toBe(before);
   });
 
   it('is a no-op on a registry that does not exist', async () => {
-    expect(await removePeerController('c_deadbeef', registryPath)).toBeNull();
+    expect(await remove('c_deadbeef')).toBeNull();
     await expect(fs.stat(registryPath)).rejects.toMatchObject({
       code: 'ENOENT',
     });
   });
 
   it('serializes concurrent revocations without resurrecting a grant', async () => {
-    const first = await addPeerController('one', registryPath);
-    const second = await addPeerController('two', registryPath);
-    await Promise.all([
-      removePeerController(first.record.id, registryPath),
-      removePeerController(second.record.id, registryPath),
-    ]);
-    expect(await listPeerControllers(registryPath)).toEqual([]);
+    const first = await add('one');
+    const second = await add('two');
+    await Promise.all([remove(first.record.id), remove(second.record.id)]);
+    expect(await list()).toEqual([]);
   });
 
   it('revokes every record that carries the same credential', async () => {
     const token = mintControllerToken();
     const tokenHash = hashControllerToken(token);
     await writeRaw(
-      JSON.stringify({
-        schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION,
-        controllers: [
-          { id: 'c_00000001', label: 'first', tokenHash, createdAt: 1 },
-          { id: 'c_00000002', label: 'second', tokenHash, createdAt: 2 },
-        ],
-      }),
+      registryJson([
+        { id: 'c_00000001', label: 'first', tokenHash, createdAt: 1 },
+        { id: 'c_00000002', label: 'second', tokenHash, createdAt: 2 },
+      ]),
     );
 
-    await expect(
-      removePeerController('c_00000001', registryPath),
-    ).resolves.toMatchObject({ id: 'c_00000001' });
+    await expect(remove('c_00000001')).resolves.toMatchObject({
+      id: 'c_00000001',
+    });
     expect(resolveControllerToken(token, registryPath)).toBeUndefined();
-    expect(await listPeerControllers(registryPath)).toEqual([]);
+    expect(await list()).toEqual([]);
   });
 
   it('drops malformed entries while revoking a valid grant', async () => {
-    const { record, token } = await addPeerController('voice', registryPath);
+    const { record, token } = await add('voice');
     await writeRaw(
-      JSON.stringify({
-        schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION,
-        controllers: [{ ...record, createdAt: 'yesterday' }, record],
-      }),
+      registryJson([{ ...record, createdAt: 'yesterday' }, record]),
     );
 
-    expect(await listPeerControllers(registryPath)).toEqual([record]);
-    await expect(
-      removePeerController(record.id, registryPath),
-    ).resolves.toMatchObject({ id: record.id });
+    expect(await list()).toEqual([record]);
+    await expect(remove(record.id)).resolves.toMatchObject({ id: record.id });
     expect(resolveControllerToken(token, registryPath)).toBeUndefined();
     expect((await readRaw()).controllers).toEqual([]);
   });
 
   it.skipIf(isWindows)('still refuses a symlinked registry', async () => {
-    const real = path.join(tmpDir, 'elsewhere.json');
-    await fs.writeFile(real, '{}', 'utf8');
-    await fs.symlink(real, registryPath);
-    await expect(listPeerControllers(registryPath)).rejects.toMatchObject({
+    await symlinkRegistry();
+    await expect(list()).rejects.toMatchObject({ code: 'unsafe-path' });
+    await expect(remove('c_00000001')).rejects.toMatchObject({
       code: 'unsafe-path',
     });
-    await expect(
-      removePeerController('c_00000001', registryPath),
-    ).rejects.toMatchObject({ code: 'unsafe-path' });
   });
 });
 
 describe('readPeerControllerRegistrySync', () => {
   it('reads back what add wrote', async () => {
-    const { record } = await addPeerController('voice', registryPath);
-    expect(readPeerControllerRegistrySync(registryPath)).toEqual({
+    const { record } = await add('voice');
+    expect(registry()).toEqual({
       schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION,
       controllers: [record],
     });
   });
 
   it('treats a missing file as no grants', () => {
-    expect(readPeerControllerRegistrySync(registryPath).controllers).toEqual(
-      [],
-    );
+    expect(grants()).toEqual([]);
   });
 
   it('treats unparseable JSON as no grants', async () => {
     await writeRaw('{ not json');
-    expect(readPeerControllerRegistrySync(registryPath).controllers).toEqual(
-      [],
-    );
-    await expect(listPeerControllers(registryPath)).rejects.toMatchObject({
+    expect(grants()).toEqual([]);
+    await expect(list()).rejects.toMatchObject({
       code: 'invalid-registry',
       message: expect.not.stringContaining('Refusing to modify'),
     });
@@ -399,76 +374,55 @@ describe('readPeerControllerRegistrySync', () => {
   it('treats a schema it does not know as no grants', async () => {
     // Failing closed: a newer build's file may mean something this one
     // would misread, and no grant is the safe reading.
-    await addPeerController('voice', registryPath);
+    await add('voice');
     const stored = await readRaw();
     await writeRaw(JSON.stringify({ ...stored, schemaVersion: 2 }));
-    expect(readPeerControllerRegistrySync(registryPath).controllers).toEqual(
-      [],
-    );
+    expect(grants()).toEqual([]);
   });
 
   it('treats a non-array controllers field as no grants', async () => {
-    await writeRaw(
-      JSON.stringify({
-        schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION,
-        controllers: { id: 'c_00000000' },
-      }),
-    );
-    expect(readPeerControllerRegistrySync(registryPath).controllers).toEqual(
-      [],
-    );
+    await writeRaw(registryJson({ id: 'c_00000000' }));
+    expect(grants()).toEqual([]);
   });
 
   it.skipIf(isWindows)('ignores a symlinked registry', async () => {
-    const real = path.join(tmpDir, 'elsewhere.json');
-    await addPeerController('voice', real);
-    await fs.symlink(real, registryPath);
-    expect(readPeerControllerRegistrySync(registryPath).controllers).toEqual(
-      [],
-    );
+    await symlinkRegistry((real) => addPeerController('voice', real));
+    expect(grants()).toEqual([]);
   });
 
   it('ignores a file past the size cap', async () => {
-    await addPeerController('voice', registryPath);
+    await add('voice');
     const stored = await readRaw();
     await writeRaw(
       JSON.stringify({ ...stored, padding: 'x'.repeat(64 * 1024) }),
     );
-    expect(readPeerControllerRegistrySync(registryPath).controllers).toEqual(
-      [],
-    );
+    expect(grants()).toEqual([]);
   });
 
   it('skips a malformed entry and keeps the rest', async () => {
     // Discarding the whole file would silently revoke the good grants;
     // the cost of the bad one is that its controller is re-added.
-    const { record } = await addPeerController('voice', registryPath);
+    const { record } = await add('voice');
     await writeRaw(
-      JSON.stringify({
-        schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION,
-        controllers: [
-          { ...record, id: 'not-an-id' },
-          { ...record, tokenHash: 'zz' },
-          { ...record, label: '' },
-          { ...record, createdAt: 'yesterday' },
-          null,
-          record,
-        ],
-      }),
+      registryJson([
+        { ...record, id: 'not-an-id' },
+        { ...record, tokenHash: 'zz' },
+        { ...record, label: '' },
+        { ...record, createdAt: 'yesterday' },
+        null,
+        record,
+      ]),
     );
-    expect(readPeerControllerRegistrySync(registryPath).controllers).toEqual([
-      record,
-    ]);
+    expect(grants()).toEqual([record]);
   });
 });
 
 describe('matchControllerToken', () => {
   it('names the grant a token belongs to, and nothing else', async () => {
-    const { record, token } = await addPeerController('voice', registryPath);
-    await addPeerController('other', registryPath);
-    const registry = readPeerControllerRegistrySync(registryPath);
+    const { record, token } = await add('voice');
+    await add('other');
 
-    const matched = matchControllerToken(registry, token);
+    const matched = matchControllerToken(registry(), token);
     expect(matched).toEqual({ id: record.id, label: 'voice' });
     // The hash is a credential's shadow and has no business travelling
     // with a message.
@@ -476,22 +430,19 @@ describe('matchControllerToken', () => {
   });
 
   it('rejects a token no grant holds', async () => {
-    await addPeerController('voice', registryPath);
-    const registry = readPeerControllerRegistrySync(registryPath);
+    await add('voice');
     expect(
-      matchControllerToken(registry, mintControllerToken()),
+      matchControllerToken(registry(), mintControllerToken()),
     ).toBeUndefined();
   });
 
   it('matches a grant after the first registry entry', async () => {
-    await addPeerController('first', registryPath);
-    const second = await addPeerController('second', registryPath);
-    expect(
-      matchControllerToken(
-        readPeerControllerRegistrySync(registryPath),
-        second.token,
-      ),
-    ).toEqual({ id: second.record.id, label: 'second' });
+    await add('first');
+    const second = await add('second');
+    expect(matchControllerToken(registry(), second.token)).toEqual({
+      id: second.record.id,
+      label: 'second',
+    });
   });
 
   it('scans every record and returns the last matching identity', () => {
@@ -512,11 +463,10 @@ describe('matchControllerToken', () => {
   });
 
   it('rejects a token without the prefix', async () => {
-    const { token } = await addPeerController('voice', registryPath);
-    const registry = readPeerControllerRegistrySync(registryPath);
+    const { token } = await add('voice');
     expect(
       matchControllerToken(
-        registry,
+        registry(),
         token.slice(CONTROLLER_TOKEN_PREFIX.length),
       ),
     ).toBeUndefined();
@@ -525,20 +475,16 @@ describe('matchControllerToken', () => {
   it('rejects an oversized presentation without hashing it', async () => {
     const presented = CONTROLLER_TOKEN_PREFIX + 'x'.repeat(4096);
     await writeRaw(
-      JSON.stringify({
-        schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION,
-        controllers: [
-          {
-            id: 'c_0123abcd',
-            label: 'voice',
-            tokenHash: hashControllerToken(presented),
-            createdAt: Date.now(),
-          },
-        ],
-      }),
+      registryJson([
+        {
+          id: 'c_0123abcd',
+          label: 'voice',
+          tokenHash: hashControllerToken(presented),
+          createdAt: Date.now(),
+        },
+      ]),
     );
-    const registry = readPeerControllerRegistrySync(registryPath);
-    expect(matchControllerToken(registry, presented)).toBeUndefined();
+    expect(matchControllerToken(registry(), presented)).toBeUndefined();
   });
 
   it('matches nothing against an empty registry', () => {
@@ -553,13 +499,13 @@ describe('matchControllerToken', () => {
 
 describe('resolveControllerToken', () => {
   it('reads the current file, so a revocation takes effect at once', async () => {
-    const { record, token } = await addPeerController('voice', registryPath);
+    const { record, token } = await add('voice');
     expect(resolveControllerToken(token, registryPath)).toEqual({
       id: record.id,
       label: 'voice',
     });
 
-    await removePeerController(record.id, registryPath);
+    await remove(record.id);
     expect(resolveControllerToken(token, registryPath)).toBeUndefined();
   });
 

@@ -37,28 +37,33 @@ const options = {
   ],
 };
 
+/** `{ id }` entries, one per id. */
+const ids = (...values: string[]) => values.map((id) => ({ id }));
+
+/** Serves `{ data }` from the catalog endpoint and runs discovery. */
+function discoverFrom(data: unknown[]) {
+  fetchWithPolicyMock.mockResolvedValue(response({ data }));
+  return discoverProviderModels(options);
+}
+
 describe('discoverProviderModels', () => {
   beforeEach(() => {
     fetchWithPolicyMock.mockReset();
   });
 
   it('returns every served id uncurated and preserves provider order without dates', async () => {
-    fetchWithPolicyMock.mockResolvedValue(
-      response({
-        data: [
-          { id: 'known-b' },
-          { id: 'new-model' },
-          { id: 'known-a' },
-          { id: 'new-model' },
-          { id: ' padded-model ' },
-          { id: 'qwen2-audio-instruct' },
-          { id: 'qwen-vl-ocr-latest' },
-          { id: 'wan2.7-t2v-plus' },
-        ],
-      }),
-    );
-
-    await expect(discoverProviderModels(options)).resolves.toEqual([
+    await expect(
+      discoverFrom([
+        { id: 'known-b' },
+        { id: 'new-model' },
+        { id: 'known-a' },
+        { id: 'new-model' },
+        { id: ' padded-model ' },
+        { id: 'qwen2-audio-instruct' },
+        { id: 'qwen-vl-ocr-latest' },
+        { id: 'wan2.7-t2v-plus' },
+      ]),
+    ).resolves.toEqual([
       { id: 'known-b', enableThinking: true },
       { id: 'new-model' },
       { id: 'known-a', contextWindowSize: 1000 },
@@ -82,18 +87,14 @@ describe('discoverProviderModels', () => {
   });
 
   it('sorts served models by creation time with newest first', async () => {
-    fetchWithPolicyMock.mockResolvedValue(
-      response({
-        data: [
-          { id: 'older-model', created: 100 },
-          { id: 'newest-model', created: 300 },
-          { id: 'same-age-model', created: 200 },
-          { id: 'known-a', created: 200 },
-        ],
-      }),
-    );
-
-    await expect(discoverProviderModels(options)).resolves.toEqual([
+    await expect(
+      discoverFrom([
+        { id: 'older-model', created: 100 },
+        { id: 'newest-model', created: 300 },
+        { id: 'same-age-model', created: 200 },
+        { id: 'known-a', created: 200 },
+      ]),
+    ).resolves.toEqual([
       { id: 'newest-model' },
       { id: 'same-age-model' },
       { id: 'known-a', contextWindowSize: 1000 },
@@ -102,36 +103,24 @@ describe('discoverProviderModels', () => {
   });
 
   it('preserves provider order when creation dates are incomplete', async () => {
-    fetchWithPolicyMock.mockResolvedValue(
-      response({
-        data: [
-          { id: 'older-model', created: 100 },
-          { id: 'undated-model' },
-          { id: 'newer-model', created: 200 },
-        ],
-      }),
-    );
-
-    await expect(discoverProviderModels(options)).resolves.toEqual([
-      { id: 'older-model' },
-      { id: 'undated-model' },
-      { id: 'newer-model' },
-    ]);
+    await expect(
+      discoverFrom([
+        { id: 'older-model', created: 100 },
+        { id: 'undated-model' },
+        { id: 'newer-model', created: 200 },
+      ]),
+    ).resolves.toEqual(ids('older-model', 'undated-model', 'newer-model'));
   });
 
   it('preserves provider order when creation dates are invalid', async () => {
-    fetchWithPolicyMock.mockResolvedValue(
-      response({
-        data: [
-          { id: 'string-dated', created: '100' },
-          { id: 'newest-model', created: 300 },
-          { id: 'null-dated', created: null },
-          { id: 'negative-dated', created: -1 },
-        ],
-      }),
-    );
-
-    await expect(discoverProviderModels(options)).resolves.toEqual([
+    await expect(
+      discoverFrom([
+        { id: 'string-dated', created: '100' },
+        { id: 'newest-model', created: 300 },
+        { id: 'null-dated', created: null },
+        { id: 'negative-dated', created: -1 },
+      ]),
+    ).resolves.toEqual([
       { id: 'string-dated' },
       { id: 'newest-model' },
       { id: 'null-dated' },
@@ -152,105 +141,61 @@ describe('discoverProviderModels', () => {
     await expect(discoverProviderModels(options)).resolves.toBeNull();
   });
 
-  it('keeps valid ids and skips ones with structural or control bytes', async () => {
-    fetchWithPolicyMock.mockResolvedValue(
-      response({
-        data: [
-          { id: 'a, b' },
-          { id: 'bad\u001b[31mid' },
-          { id: 'del\u007fete' },
-          { id: 'good-model' },
-        ],
-      }),
-    );
-
-    await expect(discoverProviderModels(options)).resolves.toEqual([
-      { id: 'good-model' },
-    ]);
-  });
-
-  it('skips ids with invisible or formatting characters', async () => {
-    fetchWithPolicyMock.mockResolvedValue(
-      response({
-        data: [
-          { id: 'qwen3.7-plus' },
-          { id: 'qwen3.7\u200b-plus' },
-          { id: '\u200bqwen-lookalike' },
-          { id: 'qwen\u202e3.7' },
-          { id: 'soft\u00adhyphen' },
-          { id: 'a\ufeffb' },
-          { id: 'qwen\u20663' },
-          { id: 'line\u2028sep' },
-          { id: 'para\u2029sep' },
-          { id: 'arabic\u061cmark' },
-          { id: 'mongolian\u180evs' },
-        ],
-      }),
-    );
-
-    await expect(discoverProviderModels(options)).resolves.toEqual([
-      { id: 'qwen3.7-plus' },
-    ]);
-  });
-
-  it('skips ids with unassigned, private-use, or surrogate code points', async () => {
-    fetchWithPolicyMock.mockResolvedValue(
-      response({
-        data: [
-          { id: 'unassigned\u2065point' },
-          { id: 'private\ue000use' },
-          { id: 'surrogate\ud800point' },
-          { id: 'good-model' },
-        ],
-      }),
-    );
-
-    await expect(discoverProviderModels(options)).resolves.toEqual([
-      { id: 'good-model' },
-    ]);
-  });
-
-  it('skips ids with C1 control bytes', async () => {
-    fetchWithPolicyMock.mockResolvedValue(
-      response({
-        data: [
-          { id: 'csi\u009b31m' },
-          { id: 'nel\u0085line' },
-          { id: 'dcs\u0090string' },
-          { id: 'st\u009cterm' },
-          { id: 'good-model' },
-        ],
-      }),
-    );
-
-    await expect(discoverProviderModels(options)).resolves.toEqual([
-      { id: 'good-model' },
-    ]);
-  });
-
-  it('skips ids longer than a plausible model name', async () => {
-    fetchWithPolicyMock.mockResolvedValue(
-      response({
-        data: [
-          { id: 'a'.repeat(257) },
-          { id: 'b'.repeat(256) },
-          { id: 'good-model' },
-        ],
-      }),
-    );
-
-    await expect(discoverProviderModels(options)).resolves.toEqual([
-      { id: 'b'.repeat(256) },
-      { id: 'good-model' },
-    ]);
+  it.each([
+    [
+      'keeps valid ids and skips ones with structural or control bytes',
+      ids('a, b', 'bad\u001b[31mid', 'del\u007fete', 'good-model'),
+      ids('good-model'),
+    ],
+    [
+      'skips ids with invisible or formatting characters',
+      ids(
+        'qwen3.7-plus',
+        'qwen3.7\u200b-plus',
+        '\u200bqwen-lookalike',
+        'qwen\u202e3.7',
+        'soft\u00adhyphen',
+        'a\ufeffb',
+        'qwen\u20663',
+        'line\u2028sep',
+        'para\u2029sep',
+        'arabic\u061cmark',
+        'mongolian\u180evs',
+      ),
+      ids('qwen3.7-plus'),
+    ],
+    [
+      'skips ids with unassigned, private-use, or surrogate code points',
+      ids(
+        'unassigned\u2065point',
+        'private\ue000use',
+        'surrogate\ud800point',
+        'good-model',
+      ),
+      ids('good-model'),
+    ],
+    [
+      'skips ids with C1 control bytes',
+      ids(
+        'csi\u009b31m',
+        'nel\u0085line',
+        'dcs\u0090string',
+        'st\u009cterm',
+        'good-model',
+      ),
+      ids('good-model'),
+    ],
+    [
+      'skips ids longer than a plausible model name',
+      ids('a'.repeat(257), 'b'.repeat(256), 'good-model'),
+      ids('b'.repeat(256), 'good-model'),
+    ],
+  ])('%s', async (_title, data, expected) => {
+    await expect(discoverFrom(data)).resolves.toEqual(expected);
   });
 
   it('falls back when every served id is unsafe', async () => {
-    fetchWithPolicyMock.mockResolvedValue(
-      response({ data: [{ id: 'a, b' }, { id: '\u0007bell' }] }),
-    );
-
-    await expect(discoverProviderModels(options)).resolves.toBeNull();
+    await expect(discoverFrom(ids('a, b', '\u0007bell'))).resolves.toBeNull();
   });
 
   it.each([

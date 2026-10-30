@@ -44,14 +44,23 @@ function mockPermissionManager(): {
   };
 }
 
+/** Asserts exactly `rules` were added, in order, none trust-gated. */
+function expectUngatedRules(
+  addSessionAllowRule: ReturnType<typeof vi.fn>,
+  rules: string[],
+) {
+  expect(addSessionAllowRule).toHaveBeenCalledTimes(rules.length);
+  rules.forEach((rule, i) =>
+    expect(addSessionAllowRule).toHaveBeenNthCalledWith(i + 1, rule, {
+      trustGated: false,
+    }),
+  );
+}
+
 describe('applySkillAllowedTools', () => {
   it("marks the grants trust-gated when told to — a project skill's rules apply only while the folder is trusted", () => {
-    const addSessionAllowRule = vi.fn();
-    applySkillAllowedTools(
-      { addSessionAllowRule } as unknown as PermissionManager,
-      ['Bash(git *)'],
-      { trustGated: true },
-    );
+    const { pm, addSessionAllowRule } = mockPermissionManager();
+    applySkillAllowedTools(pm, ['Bash(git *)'], { trustGated: true });
     expect(addSessionAllowRule).toHaveBeenCalledWith('Bash(git *)', {
       trustGated: true,
     });
@@ -59,23 +68,9 @@ describe('applySkillAllowedTools', () => {
 
   it('adds one session allow rule per entry, verbatim and in order', () => {
     const { pm, addSessionAllowRule } = mockPermissionManager();
-
-    applySkillAllowedTools(pm, ['Bash(git *)', 'Edit', 'mcp__server__tool']);
-
-    expect(addSessionAllowRule).toHaveBeenCalledTimes(3);
-    expect(addSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(git *)', {
-      trustGated: false,
-    });
-    expect(addSessionAllowRule).toHaveBeenNthCalledWith(2, 'Edit', {
-      trustGated: false,
-    });
-    expect(addSessionAllowRule).toHaveBeenNthCalledWith(
-      3,
-      'mcp__server__tool',
-      {
-        trustGated: false,
-      },
-    );
+    const rules = ['Bash(git *)', 'Edit', 'mcp__server__tool'];
+    applySkillAllowedTools(pm, rules);
+    expectUngatedRules(addSessionAllowRule, rules);
   });
 
   it('no-ops when allowedTools is undefined', () => {
@@ -98,18 +93,12 @@ describe('applySkillAllowedTools', () => {
   });
 
   it('delegates malformed-entry handling to the permission manager (does not pre-filter)', () => {
-    // The permission manager is the single authority on rule validity; the
+    // The permission manager is the single authority on rule validity: the
     // helper forwards every entry and lets addSessionAllowRule log/skip bad
-    // ones. This keeps validation in one place.
+    // ones, keeping validation in one place.
     const { pm, addSessionAllowRule } = mockPermissionManager();
     applySkillAllowedTools(pm, ['Bash(unbalanced', 'Read']);
-    expect(addSessionAllowRule).toHaveBeenCalledTimes(2);
-    expect(addSessionAllowRule).toHaveBeenNthCalledWith(1, 'Bash(unbalanced', {
-      trustGated: false,
-    });
-    expect(addSessionAllowRule).toHaveBeenNthCalledWith(2, 'Read', {
-      trustGated: false,
-    });
+    expectUngatedRules(addSessionAllowRule, ['Bash(unbalanced', 'Read']);
   });
 });
 
@@ -134,9 +123,8 @@ describe('canApplySkillSideEffects', () => {
 
 describe('applySkillSideEffects', () => {
   beforeEach(() => {
-    // Module-scoped spies: without clearing, each case sees the previous
-    // case's log calls and both the positive and negative assertions below
-    // stop meaning anything.
+    // Module-scoped spies: uncleared, each case sees earlier cases' log calls
+    // and the positive and negative assertions below stop meaning anything.
     debugLoggerSpies.warn.mockClear();
     debugLoggerSpies.debug.mockClear();
   });
@@ -159,10 +147,19 @@ describe('applySkillSideEffects', () => {
     },
   } as unknown as SkillConfig;
 
+  const expectGatedResolves = (config: Config | null | undefined) =>
+    expect(applySkillSideEffects(config, gatedSkill)).resolves.toBeUndefined();
+  const expectEditAllowed = (addSessionAllowRule: ReturnType<typeof vi.fn>) =>
+    expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
+      trustGated: false,
+    });
+
   function makeConfig(
     overrides: Partial<{
+      isTrustedFolder: () => boolean;
       getHookSystem: () => unknown;
       getSessionId: () => string | undefined;
+      isWorkspaceAgentSession: () => boolean;
     }> = {},
   ) {
     const { pm, addSessionAllowRule } = mockPermissionManager();
@@ -186,28 +183,21 @@ describe('applySkillSideEffects', () => {
   it('applies both allowedTools and hooks', async () => {
     const { config, addSessionAllowRule, addSessionHook } = makeConfig();
     await applySkillSideEffects(config, gatedSkill);
-    expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
-      trustGated: false,
-    });
+    expectEditAllowed(addSessionAllowRule);
     expect(addSessionHook).toHaveBeenCalledTimes(1);
   });
 
-  // Hooks can be disabled session-wide (`disableAllHooks`, safe mode, bare
-  // mode, the ACP agent's `skipHooks`), so no hook system is built. Dropping
-  // the guard would call getSessionHooksManager() on undefined and crash every
-  // skill invocation in those sessions.
+  // Hooks can be disabled session-wide (`disableAllHooks`, safe/bare mode, ACP
+  // `skipHooks`), so no hook system is built; without the guard,
+  // getSessionHooksManager() on undefined crashes every skill invocation.
   it('registers nothing and does not throw when there is no hook system', async () => {
     const { config, addSessionAllowRule, addSessionHook } = makeConfig({
       getHookSystem: () => undefined,
     });
-    await expect(
-      applySkillSideEffects(config, gatedSkill),
-    ).resolves.toBeUndefined();
+    await expectGatedResolves(config);
     expect(addSessionHook).not.toHaveBeenCalled();
     // The allowedTools half still applies — only the hooks are skipped.
-    expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
-      trustGated: false,
-    });
+    expectEditAllowed(addSessionAllowRule);
     // Pinned at `warn`: a promised gate is being dropped, and at `debug` the
     // only trace of that would sit below the level anyone reads.
     expect(debugLoggerSpies.warn).toHaveBeenCalledWith(
@@ -218,11 +208,10 @@ describe('applySkillSideEffects', () => {
     );
   });
 
-  // Pins `applySkillHooks`'s `if (!skill.hooks) return;`. That early return is
-  // what lets the no-hook-system branch below it be a `warn`: it fires only
-  // for a skill that actually declares a gate. Without it, every hookless
-  // skill invoked in a hooks-disabled session emits a warning, which is the
-  // steady-state noise the level was chosen to avoid.
+  // Pins `applySkillHooks`'s `if (!skill.hooks) return;`, which lets the
+  // no-hook-system branch below it be a `warn` that fires only for a skill
+  // declaring a gate. Without it, every hookless skill in a hooks-disabled
+  // session warns: the steady-state noise the level was chosen to avoid.
   it('stays silent for a skill that declares no hooks, even with no hook system', async () => {
     const { config, addSessionAllowRule } = makeConfig({
       getHookSystem: () => undefined,
@@ -233,9 +222,7 @@ describe('applySkillSideEffects', () => {
 
     expect(debugLoggerSpies.warn).not.toHaveBeenCalled();
     // The allowedTools half is unaffected by the hooks early return.
-    expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
-      trustGated: false,
-    });
+    expectEditAllowed(addSessionAllowRule);
   });
 
   it('stays silent for a skill whose hooks block parses to nothing', async () => {
@@ -250,43 +237,38 @@ describe('applySkillSideEffects', () => {
     await applySkillSideEffects(config, emptyHooks);
 
     expect(debugLoggerSpies.warn).not.toHaveBeenCalled();
-    expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
-      trustGated: false,
-    });
+    expectEditAllowed(addSessionAllowRule);
   });
 
   it('registers nothing and does not throw when there is no session id', async () => {
     const { config, addSessionAllowRule, addSessionHook } = makeConfig({
       getSessionId: () => undefined,
     });
-    await expect(
-      applySkillSideEffects(config, gatedSkill),
-    ).resolves.toBeUndefined();
+    await expectGatedResolves(config);
     expect(addSessionHook).not.toHaveBeenCalled();
-    // Same asymmetry as the no-hook-system case: only the hooks half is
-    // skipped. Without this, hoisting the session-id guard above
-    // `applySkillAllowedTools` would ship untested.
-    expect(addSessionAllowRule).toHaveBeenCalledWith('Edit', {
-      trustGated: false,
-    });
+    // Same asymmetry as the no-hook-system case: only hooks are skipped. Else
+    // hoisting the session-id guard above `applySkillAllowedTools` goes
+    // untested.
+    expectEditAllowed(addSessionAllowRule);
   });
 
   it('applies neither for a project skill in an untrusted folder', async () => {
-    const { config, addSessionAllowRule, addSessionHook } = makeConfig();
+    const { config, addSessionAllowRule, addSessionHook } = makeConfig({
+      isTrustedFolder: () => false,
+    });
     const projectSkill = {
       ...gatedSkill,
       level: 'project',
     } as unknown as SkillConfig;
-    await applySkillSideEffects(
-      { ...config, isTrustedFolder: () => false } as unknown as Config,
-      projectSkill,
-    );
+    await applySkillSideEffects(config, projectSkill);
     expect(addSessionAllowRule).not.toHaveBeenCalled();
     expect(addSessionHook).not.toHaveBeenCalled();
   });
 
   it('warns for a project skill in an untrusted folder that declares only hooks', async () => {
-    const { config, addSessionAllowRule, addSessionHook } = makeConfig();
+    const { config, addSessionAllowRule, addSessionHook } = makeConfig({
+      isTrustedFolder: () => false,
+    });
     // The sibling test above uses a skill carrying both halves, so it passes
     // on the `allowedTools` operand alone. This one pins the `|| skill.hooks`
     // half: a skill whose only side effect is a gate must still say so.
@@ -296,10 +278,7 @@ describe('applySkillSideEffects', () => {
       allowedTools: undefined,
     } as unknown as SkillConfig;
 
-    await applySkillSideEffects(
-      { ...config, isTrustedFolder: () => false } as unknown as Config,
-      hooksOnly,
-    );
+    await applySkillSideEffects(config, hooksOnly);
 
     expect(addSessionAllowRule).not.toHaveBeenCalled();
     expect(addSessionHook).not.toHaveBeenCalled();
@@ -308,13 +287,30 @@ describe('applySkillSideEffects', () => {
     );
   });
 
+  // A workspace agent's capability boundary is read-only, and a skill hook
+  // spawns a command before the invocation guard ever runs.
+  it('applies no side effects in a workspace-agent session', async () => {
+    const { config, addSessionAllowRule, addSessionHook } = makeConfig({
+      isWorkspaceAgentSession: () => true,
+    });
+    await applySkillSideEffects(config, gatedSkill);
+    expect(addSessionAllowRule).not.toHaveBeenCalled();
+    expect(addSessionHook).not.toHaveBeenCalled();
+    expect(debugLoggerSpies.warn).toHaveBeenCalledWith(
+      expect.stringContaining('workspace-agent session'),
+    );
+
+    await applySkillSideEffects(config, {
+      ...gatedSkill,
+      name: 'review',
+      level: 'bundled',
+    } as SkillConfig);
+    expect(config.enableReviewWorkflow).not.toHaveBeenCalled();
+  });
+
   it('is a no-op without a config', async () => {
-    await expect(
-      applySkillSideEffects(null, gatedSkill),
-    ).resolves.toBeUndefined();
-    await expect(
-      applySkillSideEffects(undefined, gatedSkill),
-    ).resolves.toBeUndefined();
+    await expectGatedResolves(null);
+    await expectGatedResolves(undefined);
   });
   it.each([
     ['review', 'bundled', true],
@@ -378,15 +374,18 @@ describe('collectAvailableSkillEntries memoize cache', () => {
     } as unknown as Config;
   }
 
+  function setup() {
+    vi.useFakeTimers();
+    return { sm: mockSkillManager(), cfg: mockConfig() };
+  }
+
   afterEach(() => {
     clearCollectedSkillEntriesCache();
     vi.useRealTimers();
   });
 
   it('returns the same promise on cache hit within TTL', async () => {
-    vi.useFakeTimers();
-    const sm = mockSkillManager();
-    const cfg = mockConfig();
+    const { sm, cfg } = setup();
 
     const r1 = collectAvailableSkillEntries(sm, cfg);
     const r2 = collectAvailableSkillEntries(sm, cfg);
@@ -399,9 +398,7 @@ describe('collectAvailableSkillEntries memoize cache', () => {
   });
 
   it('rescans after TTL expires', async () => {
-    vi.useFakeTimers();
-    const sm = mockSkillManager();
-    const cfg = mockConfig();
+    const { sm, cfg } = setup();
 
     await collectAvailableSkillEntries(sm, cfg);
     vi.advanceTimersByTime(2001);
@@ -411,9 +408,7 @@ describe('collectAvailableSkillEntries memoize cache', () => {
   });
 
   it('evicts cache entry on rejection so next caller retries', async () => {
-    vi.useFakeTimers();
-    const sm = mockSkillManager();
-    const cfg = mockConfig();
+    const { sm, cfg } = setup();
 
     (sm.listSkills as ReturnType<typeof vi.fn>)
       .mockRejectedValueOnce(new Error('boom'))
@@ -431,9 +426,7 @@ describe('collectAvailableSkillEntries memoize cache', () => {
   });
 
   it('clearCollectedSkillEntriesCache evicts the entry', async () => {
-    vi.useFakeTimers();
-    const sm = mockSkillManager();
-    const cfg = mockConfig();
+    const { sm, cfg } = setup();
 
     await collectAvailableSkillEntries(sm, cfg);
     clearCollectedSkillEntriesCache(sm);

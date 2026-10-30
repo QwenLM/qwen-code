@@ -83,6 +83,14 @@ beforeAll(async () => {
   await preloadRuntimeFetchModule();
 });
 
+type DispatcherResult = {
+  fetchOptions?: { dispatcher?: { options?: UndiciOptions } };
+};
+const getDispatcherOptions = (result: unknown): UndiciOptions | undefined =>
+  (result as DispatcherResult).fetchOptions?.dispatcher?.options;
+const fetchOf = (result: unknown) => (result as { fetch?: unknown }).fetch;
+const containing = (text: string) => expect.stringContaining(text);
+
 describe('buildRuntimeFetchOptions (node runtime)', () => {
   beforeEach(() => {
     resetDispatcherCache();
@@ -94,68 +102,57 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
-  it('returns Agent with disabled timeouts for OpenAI when no proxy is set', () => {
-    const result = buildRuntimeFetchOptions('openai');
+
+  // Asserts the result carries fetchOptions and returns its dispatcher options.
+  const dispatcherOptionsOf = (result: object | undefined) => {
     expect(result).toBeDefined();
     expect(result && 'fetchOptions' in result).toBe(true);
-    const dispatcher = (
-      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
-    ).fetchOptions?.dispatcher;
-    expect(dispatcher?.options).toMatchObject({
-      headersTimeout: 0,
-      bodyTimeout: 0,
-      keepAliveTimeout: 60_000,
-    });
-    expect((result as { fetch?: unknown }).fetch).toBe(mockUndiciFetch);
+    return getDispatcherOptions(result);
+  };
+  const noProxyTimeouts = {
+    headersTimeout: 0,
+    bodyTimeout: 0,
+    keepAliveTimeout: 60_000,
+  };
+  const proxiedTimeouts = {
+    httpProxy: 'http://proxy.local',
+    httpsProxy: 'http://proxy.local',
+    headersTimeout: 0,
+    bodyTimeout: 0,
+  };
+  // A dispatcher failure logs once to the debug log and once to
+  // console.error for production visibility.
+  const expectFailureLoggedOnce = () => {
+    expect(mockWarn).toHaveBeenCalledOnce();
+    expect(mockWarn).toHaveBeenCalledWith(
+      containing('Failed to create proxy dispatcher'),
+    );
+    expect(mockConsoleError).toHaveBeenCalledOnce();
+    expect(mockConsoleError).toHaveBeenCalledWith(
+      containing('[RUNTIME_FETCH]'),
+    );
+  };
+
+  it('returns Agent with disabled timeouts for OpenAI when no proxy is set', () => {
+    const result = buildRuntimeFetchOptions('openai');
+    expect(dispatcherOptionsOf(result)).toMatchObject(noProxyTimeouts);
+    expect(fetchOf(result)).toBe(mockUndiciFetch);
   });
 
   it('returns Agent with disabled timeouts for Anthropic when no proxy is set', () => {
     const result = buildRuntimeFetchOptions('anthropic');
-    expect(result).toBeDefined();
-    expect(result && 'fetchOptions' in result).toBe(true);
-    const dispatcher = (
-      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
-    ).fetchOptions?.dispatcher;
-    expect(dispatcher?.options).toMatchObject({
-      headersTimeout: 0,
-      bodyTimeout: 0,
-      keepAliveTimeout: 60_000,
-    });
-    expect((result as { fetch?: unknown }).fetch).toBe(mockUndiciFetch);
+    expect(dispatcherOptionsOf(result)).toMatchObject(noProxyTimeouts);
+    expect(fetchOf(result)).toBe(mockUndiciFetch);
   });
 
   it('uses EnvHttpProxyAgent with disabled timeouts when proxy is set', () => {
     const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
-
-    expect(result).toBeDefined();
-    expect(result && 'fetchOptions' in result).toBe(true);
-
-    const dispatcher = (
-      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
-    ).fetchOptions?.dispatcher;
-    expect(dispatcher?.options).toMatchObject({
-      httpProxy: 'http://proxy.local',
-      httpsProxy: 'http://proxy.local',
-      headersTimeout: 0,
-      bodyTimeout: 0,
-    });
+    expect(dispatcherOptionsOf(result)).toMatchObject(proxiedTimeouts);
   });
 
   it('returns fetchOptions with EnvHttpProxyAgent for Anthropic with proxy', () => {
     const result = buildRuntimeFetchOptions('anthropic', 'http://proxy.local');
-
-    expect(result).toBeDefined();
-    expect(result && 'fetchOptions' in result).toBe(true);
-
-    const dispatcher = (
-      result as { fetchOptions?: { dispatcher?: { options?: UndiciOptions } } }
-    ).fetchOptions?.dispatcher;
-    expect(dispatcher?.options).toMatchObject({
-      httpProxy: 'http://proxy.local',
-      httpsProxy: 'http://proxy.local',
-      headersTimeout: 0,
-      bodyTimeout: 0,
-    });
+    expect(dispatcherOptionsOf(result)).toMatchObject(proxiedTimeouts);
   });
 
   it('pins fetch to undici when proxy is set so dispatcher and fetch share a version', () => {
@@ -163,97 +160,53 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     // undici) cannot accept a dispatcher built from a different undici major.
     // The function must hand back the bundled undici's fetch alongside the
     // dispatcher.
-    const openaiResult = buildRuntimeFetchOptions(
-      'openai',
-      'http://proxy.local',
-    );
-    expect((openaiResult as { fetch?: unknown }).fetch).toBe(mockUndiciFetch);
-
-    const anthropicResult = buildRuntimeFetchOptions(
-      'anthropic',
-      'http://proxy.local',
-    );
-    expect((anthropicResult as { fetch?: unknown }).fetch).toBe(
-      mockUndiciFetch,
-    );
+    const proxy = 'http://proxy.local';
+    const openaiResult = buildRuntimeFetchOptions('openai', proxy);
+    expect(fetchOf(openaiResult)).toBe(mockUndiciFetch);
+    const anthropicResult = buildRuntimeFetchOptions('anthropic', proxy);
+    expect(fetchOf(anthropicResult)).toBe(mockUndiciFetch);
   });
 
   it('injects undiciFetch when no proxy is set', () => {
     // No-proxy path uses a bundled undici Agent with disabled timeouts,
     // so it also pins undiciFetch to avoid version-mismatch between the
     // bundled undici and Node.js built-in undici.
-    const openaiResult = buildRuntimeFetchOptions('openai');
-    expect((openaiResult as { fetch?: unknown }).fetch).toBe(mockUndiciFetch);
-
-    const anthropicResult = buildRuntimeFetchOptions('anthropic');
-    expect((anthropicResult as { fetch?: unknown }).fetch).toBe(
+    expect(fetchOf(buildRuntimeFetchOptions('openai'))).toBe(mockUndiciFetch);
+    expect(fetchOf(buildRuntimeFetchOptions('anthropic'))).toBe(
       mockUndiciFetch,
     );
   });
 
   it('returns undefined for OpenAI when dispatcher creation fails', () => {
-    const result = buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
-    // Should fallback to undefined (no dispatcher) on error
-    expect(result).toBeUndefined();
-    // Should log the failure for visibility
-    expect(mockWarn).toHaveBeenCalledOnce();
-    expect(mockWarn).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to create proxy dispatcher'),
-    );
-    // Should also log to console.error for production visibility
-    expect(mockConsoleError).toHaveBeenCalledOnce();
-    expect(mockConsoleError).toHaveBeenCalledWith(
-      expect.stringContaining('[RUNTIME_FETCH]'),
-    );
+    // Falls back to no dispatcher.
+    expect(
+      buildRuntimeFetchOptions('openai', 'http://invalid-proxy'),
+    ).toBeUndefined();
+    expectFailureLoggedOnce();
   });
 
   it('returns empty object for Anthropic when dispatcher creation fails', () => {
-    const result = buildRuntimeFetchOptions(
-      'anthropic',
-      'http://invalid-proxy',
-    );
-    // Should fallback to empty object on error
-    expect(result).toEqual({});
-    // Should log the failure for visibility
-    expect(mockWarn).toHaveBeenCalledOnce();
-    expect(mockWarn).toHaveBeenCalledWith(
-      expect.stringContaining('Failed to create proxy dispatcher'),
-    );
-    // Should also log to console.error for production visibility
-    expect(mockConsoleError).toHaveBeenCalledOnce();
-    expect(mockConsoleError).toHaveBeenCalledWith(
-      expect.stringContaining('[RUNTIME_FETCH]'),
-    );
+    expect(
+      buildRuntimeFetchOptions('anthropic', 'http://invalid-proxy'),
+    ).toEqual({});
+    expectFailureLoggedOnce();
   });
 
   it('redacts credentials from proxy URL in error message', () => {
     // http://invalid-proxy triggers dispatcher failure whose error message
-    // contains credentials that should be redacted
+    // contains credentials that should be redacted in both logs.
     const result = buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
     expect(result).toBeUndefined();
-    // Should redact credentials in the log message
-    expect(mockWarn).toHaveBeenCalledWith(
-      expect.stringContaining('<redacted>'),
-    );
-    expect(mockWarn).not.toHaveBeenCalledWith(
-      expect.stringContaining('secret'),
-    );
-    expect(mockConsoleError).toHaveBeenCalledWith(
-      expect.stringContaining('<redacted>'),
-    );
-    expect(mockConsoleError).not.toHaveBeenCalledWith(
-      expect.stringContaining('secret'),
-    );
+    for (const log of [mockWarn, mockConsoleError]) {
+      expect(log).toHaveBeenCalledWith(containing('<redacted>'));
+      expect(log).not.toHaveBeenCalledWith(containing('secret'));
+    }
   });
 
   it('logs hostname (without credentials) in failure message', () => {
     buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
-    expect(mockWarn).toHaveBeenCalledWith(
-      expect.stringContaining('invalid-proxy'),
-    );
-    expect(mockWarn).not.toHaveBeenCalledWith(
-      expect.stringContaining('secret'),
-    );
+    expect(mockWarn).toHaveBeenCalledWith(containing('invalid-proxy'));
+    expect(mockWarn).not.toHaveBeenCalledWith(containing('secret'));
   });
 
   it('logs each failure separately (no deduplication)', () => {
@@ -262,21 +215,11 @@ describe('buildRuntimeFetchOptions (node runtime)', () => {
     buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
     buildRuntimeFetchOptions('openai', 'http://invalid-proxy');
     buildRuntimeFetchOptions('anthropic', 'http://invalid-proxy');
-    // Should log each failure (no dedup)
     expect(mockWarn).toHaveBeenCalledTimes(3);
     expect(mockConsoleError).toHaveBeenCalledTimes(3);
-    expect(mockWarn).toHaveBeenNthCalledWith(
-      1,
-      expect.stringContaining('(first failure)'),
-    );
-    expect(mockWarn).toHaveBeenNthCalledWith(
-      2,
-      expect.stringContaining('(failure #2)'),
-    );
-    expect(mockWarn).toHaveBeenNthCalledWith(
-      3,
-      expect.stringContaining('(failure #3)'),
-    );
+    expect(mockWarn).toHaveBeenNthCalledWith(1, containing('(first failure)'));
+    expect(mockWarn).toHaveBeenNthCalledWith(2, containing('(failure #2)'));
+    expect(mockWarn).toHaveBeenNthCalledWith(3, containing('(failure #3)'));
   });
 });
 
@@ -302,10 +245,7 @@ describe('getOrCreateSharedDispatcher', () => {
   it('shares the same EnvHttpProxyAgent dispatcher with buildRuntimeFetchOptions when proxy is set', () => {
     const shared = getOrCreateSharedDispatcher('http://proxy.local');
     const result = buildRuntimeFetchOptions('openai', 'http://proxy.local');
-    const sdkDispatcher = (
-      result as { fetchOptions?: { dispatcher?: unknown } }
-    ).fetchOptions?.dispatcher;
-    expect(sdkDispatcher).toBe(shared);
+    expect((result as DispatcherResult).fetchOptions?.dispatcher).toBe(shared);
   });
 });
 
@@ -353,63 +293,43 @@ describe('TLS verification opt-out (insecure)', () => {
   });
 
   afterEach(() => {
-    if (savedEnv.QWEN_TLS_INSECURE === undefined) {
-      delete process.env['QWEN_TLS_INSECURE'];
-    } else {
-      process.env['QWEN_TLS_INSECURE'] = savedEnv.QWEN_TLS_INSECURE;
-    }
-    if (savedEnv.NODE_TLS_REJECT_UNAUTHORIZED === undefined) {
-      delete process.env['NODE_TLS_REJECT_UNAUTHORIZED'];
-    } else {
-      process.env['NODE_TLS_REJECT_UNAUTHORIZED'] =
-        savedEnv.NODE_TLS_REJECT_UNAUTHORIZED;
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
     }
   });
 
-  const getDispatcherOptions = (result: unknown): UndiciOptions | undefined =>
-    (
-      result as {
-        fetchOptions?: { dispatcher?: { options?: UndiciOptions } };
-      }
-    ).fetchOptions?.dispatcher?.options;
+  const noProxyConnect = () =>
+    getDispatcherOptions(buildRuntimeFetchOptions('openai'))?.['connect'];
+  const noVerify = { rejectUnauthorized: false };
 
   it('does not set connect options on the no-proxy Agent by default', () => {
-    const options = getDispatcherOptions(buildRuntimeFetchOptions('openai'));
-    expect(options?.['connect']).toBeUndefined();
+    expect(noProxyConnect()).toBeUndefined();
   });
 
   it('disables verification on the no-proxy Agent via QWEN_TLS_INSECURE', () => {
     process.env['QWEN_TLS_INSECURE'] = '1';
-    const options = getDispatcherOptions(buildRuntimeFetchOptions('openai'));
-    expect(options?.['connect']).toEqual({ rejectUnauthorized: false });
+    expect(noProxyConnect()).toEqual(noVerify);
   });
 
   it('honors NODE_TLS_REJECT_UNAUTHORIZED=0 for parity', () => {
     process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
-    const options = getDispatcherOptions(buildRuntimeFetchOptions('openai'));
-    expect(options?.['connect']).toEqual({ rejectUnauthorized: false });
+    expect(noProxyConnect()).toEqual(noVerify);
   });
 
   it('ignores falsy QWEN_TLS_INSECURE values', () => {
     process.env['QWEN_TLS_INSECURE'] = '0';
-    const options = getDispatcherOptions(buildRuntimeFetchOptions('openai'));
-    expect(options?.['connect']).toBeUndefined();
+    expect(noProxyConnect()).toBeUndefined();
   });
 
   it('configures TLS opt-out for direct and proxied requests', () => {
     process.env['QWEN_TLS_INSECURE'] = '1';
-    const dispatcher = getOrCreateSharedDispatcher(
+    const { options } = getOrCreateSharedDispatcher(
       'http://proxy.local',
     ) as unknown as { options: UndiciOptions };
-    expect(dispatcher.options['requestTls']).toEqual({
-      rejectUnauthorized: false,
-    });
-    expect(dispatcher.options['proxyTls']).toEqual({
-      rejectUnauthorized: false,
-    });
-    expect(dispatcher.options['connect']).toEqual({
-      rejectUnauthorized: false,
-    });
+    expect(options['requestTls']).toEqual(noVerify);
+    expect(options['proxyTls']).toEqual(noVerify);
+    expect(options['connect']).toEqual(noVerify);
   });
 
   it('keeps secure and insecure dispatchers in separate cache entries', () => {
@@ -453,116 +373,97 @@ describe('TLS verification opt-out (insecure)', () => {
 });
 
 describe('redactProxyCredentials', () => {
-  it('redacts credentials from a single proxy URL', () => {
-    const msg = 'Failed to connect: http://user:secret@proxy.local';
-    expect(redactProxyCredentials(msg)).toBe(
+  it.each([
+    [
+      'redacts credentials from a single proxy URL',
+      'Failed to connect: http://user:secret@proxy.local',
       'Failed to connect: http://<redacted>@proxy.local',
-    );
-  });
-
-  it('redacts every credential occurrence in a multi-URL error message', () => {
-    const msg = 'Failed: http://a:b@p1; cause: http://c:d@p2';
-    expect(redactProxyCredentials(msg)).toBe(
+    ],
+    [
+      'redacts every credential occurrence in a multi-URL error message',
+      'Failed: http://a:b@p1; cause: http://c:d@p2',
       'Failed: http://<redacted>@p1; cause: http://<redacted>@p2',
-    );
-  });
-
-  it('does not over-redact non-userinfo @ characters past the hostname', () => {
-    const msg = 'http://user:pass@proxy.local/contact@example.com';
-    expect(redactProxyCredentials(msg)).toBe(
+    ],
+    [
+      'does not over-redact non-userinfo @ characters past the hostname',
+      'http://user:pass@proxy.local/contact@example.com',
       'http://<redacted>@proxy.local/contact@example.com',
-    );
-  });
-
-  it('preserves messages without proxy URLs unchanged', () => {
-    const msg = 'Network timeout occurred';
-    expect(redactProxyCredentials(msg)).toBe(msg);
-  });
-
-  it('does not redact ordinary email addresses', () => {
-    const msg = 'Contact support@example.com or set email=user@example.com';
-    expect(redactProxyCredentials(msg)).toBe(msg);
-  });
-
-  it('redacts credentials in Node.js native error format (no scheme)', () => {
-    const msg = 'connect ECONNREFUSED user:pass@proxy.local:8080';
-    expect(redactProxyCredentials(msg)).toBe(
+    ],
+    [
+      'redacts credentials in Node.js native error format (no scheme)',
+      'connect ECONNREFUSED user:pass@proxy.local:8080',
       'connect ECONNREFUSED <redacted>@proxy.local:8080',
-    );
-  });
-
-  it('redacts token-only credentials in Node.js native error format', () => {
-    const msg = 'connect ECONNREFUSED token@proxy.local:8080';
-    expect(redactProxyCredentials(msg)).toBe(
+    ],
+    [
+      'redacts token-only credentials in Node.js native error format',
+      'connect ECONNREFUSED token@proxy.local:8080',
       'connect ECONNREFUSED <redacted>@proxy.local:8080',
-    );
-  });
-
-  it('redacts token-only credentials for localhost proxy endpoints', () => {
-    const msg = 'connect ECONNREFUSED token@localhost:8080';
-    expect(redactProxyCredentials(msg)).toBe(
+    ],
+    [
+      'redacts token-only credentials for localhost proxy endpoints',
+      'connect ECONNREFUSED token@localhost:8080',
       'connect ECONNREFUSED <redacted>@localhost:8080',
-    );
-  });
-
-  it('redacts token-only credentials for IP proxy endpoints', () => {
-    const msg = 'connect ECONNREFUSED token@10.0.0.5:8080';
-    expect(redactProxyCredentials(msg)).toBe(
+    ],
+    [
+      'redacts token-only credentials for IP proxy endpoints',
+      'connect ECONNREFUSED token@10.0.0.5:8080',
       'connect ECONNREFUSED <redacted>@10.0.0.5:8080',
-    );
-  });
-
-  it('redacts token-only credentials for corporate proxy endpoints', () => {
-    const msg = 'connect ECONNREFUSED token@gateway.corp.local:8080';
-    expect(redactProxyCredentials(msg)).toBe(
+    ],
+    [
+      'redacts token-only credentials for corporate proxy endpoints',
+      'connect ECONNREFUSED token@gateway.corp.local:8080',
       'connect ECONNREFUSED <redacted>@gateway.corp.local:8080',
-    );
-  });
-
-  it('does not redact SSH-style host and port strings', () => {
-    const msg = 'ssh failed for git@github.com:22';
-    expect(redactProxyCredentials(msg)).toBe(msg);
-  });
-
-  it('does not redact email-like strings followed by numeric suffixes', () => {
-    const msg = 'see user@example.com:42 for line reference';
-    expect(redactProxyCredentials(msg)).toBe(msg);
-  });
-
-  it('does not redact email-like strings followed by larger line numbers', () => {
-    const msg = 'see user@example.com:123 for line reference';
-    expect(redactProxyCredentials(msg)).toBe(msg);
-  });
-
-  it('does not redact email-like strings near ordinary request prose', () => {
-    const msg = 'request mentions user@example.com:123 in prose';
-    expect(redactProxyCredentials(msg)).toBe(msg);
-  });
-
-  it('does not redact email-like strings near ordinary fetch prose', () => {
-    const msg = 'fetch the owner from user@example.local:123';
-    expect(redactProxyCredentials(msg)).toBe(msg);
-  });
-
-  it('redacts token-only credentials for public hosts in network error context', () => {
-    const msg = 'connect ECONNREFUSED token@public.example.com:8080';
-    expect(redactProxyCredentials(msg)).toBe(
+    ],
+    [
+      'redacts token-only credentials for public hosts in network error context',
+      'connect ECONNREFUSED token@public.example.com:8080',
       'connect ECONNREFUSED <redacted>@public.example.com:8080',
-    );
-  });
-
-  it('redacts bare credentials when the password contains colons', () => {
-    const msg = 'connect ECONNREFUSED user:pass:word@proxy.local:8080';
-    expect(redactProxyCredentials(msg)).toBe(
+    ],
+    [
+      'redacts bare credentials when the password contains colons',
+      'connect ECONNREFUSED user:pass:word@proxy.local:8080',
       'connect ECONNREFUSED <redacted>@proxy.local:8080',
-    );
+    ],
+    [
+      'preserves labels and delimiters around bare proxy credentials',
+      'cause=(user:pass@proxy.local:8080)',
+      'cause=(<redacted>@proxy.local:8080)',
+    ],
+  ])('%s', (_title, msg, redacted) => {
+    expect(redactProxyCredentials(msg)).toBe(redacted);
   });
 
-  it('preserves labels and delimiters around bare proxy credentials', () => {
-    const msg = 'cause=(user:pass@proxy.local:8080)';
-    expect(redactProxyCredentials(msg)).toBe(
-      'cause=(<redacted>@proxy.local:8080)',
-    );
+  it.each([
+    [
+      'preserves messages without proxy URLs unchanged',
+      'Network timeout occurred',
+    ],
+    [
+      'does not redact ordinary email addresses',
+      'Contact support@example.com or set email=user@example.com',
+    ],
+    [
+      'does not redact SSH-style host and port strings',
+      'ssh failed for git@github.com:22',
+    ],
+    [
+      'does not redact email-like strings followed by numeric suffixes',
+      'see user@example.com:42 for line reference',
+    ],
+    [
+      'does not redact email-like strings followed by larger line numbers',
+      'see user@example.com:123 for line reference',
+    ],
+    [
+      'does not redact email-like strings near ordinary request prose',
+      'request mentions user@example.com:123 in prose',
+    ],
+    [
+      'does not redact email-like strings near ordinary fetch prose',
+      'fetch the owner from user@example.local:123',
+    ],
+  ])('%s', (_title, msg) => {
+    expect(redactProxyCredentials(msg)).toBe(msg);
   });
 
   it('does not double-redact when both patterns are present', () => {
@@ -576,17 +477,21 @@ describe('redactProxyCredentials', () => {
 });
 
 describe('redactProxyError', () => {
+  const TOKEN_MSG = 'connect ECONNREFUSED token@proxy.local:8080';
+  const REDACTED_TOKEN_MSG = 'connect ECONNREFUSED <redacted>@proxy.local:8080';
+  const makeReadOnly = (target: object, key: string, value: unknown) =>
+    Object.defineProperty(target, key, {
+      value,
+      writable: false,
+      configurable: false,
+    });
+
   it('redacts proxy credentials from Error message and stack in-place', () => {
-    const error = new Error('connect ECONNREFUSED token@proxy.local:8080');
-    error.stack =
-      'Error: connect ECONNREFUSED token@proxy.local:8080\n    at test';
+    const error = new Error(TOKEN_MSG);
+    error.stack = `Error: ${TOKEN_MSG}\n    at test`;
 
-    const result = redactProxyError(error);
-
-    expect(result).toBe(error);
-    expect(error.message).toBe(
-      'connect ECONNREFUSED <redacted>@proxy.local:8080',
-    );
+    expect(redactProxyError(error)).toBe(error);
+    expect(error.message).toBe(REDACTED_TOKEN_MSG);
     expect(error.stack).toContain('<redacted>@proxy.local:8080');
     expect(error.stack).not.toContain('token@');
   });
@@ -604,9 +509,7 @@ describe('redactProxyError', () => {
       { status: 407, code: 'proxy_auth_required', cause },
     );
 
-    const result = redactProxyError(error);
-
-    expect(result).toBe(error);
+    expect(redactProxyError(error)).toBe(error);
     expect(error.status).toBe(407);
     expect(error.code).toBe('proxy_auth_required');
     expect(error.message).toBe(
@@ -618,28 +521,18 @@ describe('redactProxyError', () => {
   });
 
   it('does not throw on circular causes', () => {
-    const error = new Error(
-      'connect ECONNREFUSED token@proxy.local:8080',
-    ) as Error & { cause?: unknown };
+    const error = new Error(TOKEN_MSG) as Error & { cause?: unknown };
     error.cause = error;
 
     expect(() => redactProxyError(error)).not.toThrow();
-    expect(error.message).toBe(
-      'connect ECONNREFUSED <redacted>@proxy.local:8080',
-    );
+    expect(error.message).toBe(REDACTED_TOKEN_MSG);
     expect(error.cause).toBe(error);
   });
 
   it('returns a redacted clone when an error-like object has read-only fields', () => {
     const error: { message?: string; stack?: string } = {};
-    Object.defineProperty(error, 'message', {
-      value: 'connect ECONNREFUSED token@proxy.local:8080',
-      writable: false,
-    });
-    Object.defineProperty(error, 'status', {
-      value: 407,
-      enumerable: true,
-    });
+    makeReadOnly(error, 'message', TOKEN_MSG);
+    Object.defineProperty(error, 'status', { value: 407, enumerable: true });
 
     const result = redactProxyError(error) as {
       message?: string;
@@ -647,11 +540,9 @@ describe('redactProxyError', () => {
     };
 
     expect(result).not.toBe(error);
-    expect(result.message).toBe(
-      'connect ECONNREFUSED <redacted>@proxy.local:8080',
-    );
+    expect(result.message).toBe(REDACTED_TOKEN_MSG);
     expect(result.status).toBe(407);
-    expect(error.message).toBe('connect ECONNREFUSED token@proxy.local:8080');
+    expect(error.message).toBe(TOKEN_MSG);
   });
 
   it('preserves Error subclass prototype when cloning read-only fields', () => {
@@ -659,23 +550,15 @@ describe('redactProxyError', () => {
       status = 407;
     }
 
-    const error = new ProxySdkError(
-      'connect ECONNREFUSED token@proxy.local:8080',
-    );
-    Object.defineProperty(error, 'message', {
-      value: error.message,
-      writable: false,
-      configurable: false,
-    });
+    const error = new ProxySdkError(TOKEN_MSG);
+    makeReadOnly(error, 'message', error.message);
 
     const result = redactProxyError(error) as ProxySdkError;
 
     expect(result).not.toBe(error);
     expect(result).toBeInstanceOf(ProxySdkError);
     expect(result.status).toBe(407);
-    expect(result.message).toBe(
-      'connect ECONNREFUSED <redacted>@proxy.local:8080',
-    );
+    expect(result.message).toBe(REDACTED_TOKEN_MSG);
   });
 
   it('keeps read-only circular causes on the redacted clone', () => {
@@ -684,36 +567,22 @@ describe('redactProxyError', () => {
       override cause?: unknown;
     }
 
-    const error = new ProxySdkError(
-      'connect ECONNREFUSED token@proxy.local:8080',
-    );
-    Object.defineProperty(error, 'message', {
-      value: error.message,
-      writable: false,
-      configurable: false,
-    });
-    Object.defineProperty(error, 'cause', {
-      value: error,
-      writable: false,
-      configurable: false,
-    });
+    const error = new ProxySdkError(TOKEN_MSG);
+    makeReadOnly(error, 'message', error.message);
+    makeReadOnly(error, 'cause', error);
 
     const result = redactProxyError(error) as ProxySdkError;
 
     expect(result).not.toBe(error);
     expect(result).toBeInstanceOf(ProxySdkError);
     expect(result.status).toBe(407);
-    expect(result.message).toBe(
-      'connect ECONNREFUSED <redacted>@proxy.local:8080',
-    );
+    expect(result.message).toBe(REDACTED_TOKEN_MSG);
     expect(result.cause).toBe(result);
     expect((result.cause as Error).message).not.toContain('token@');
   });
 
   it('redacts nested AggregateError errors', () => {
-    const nestedError = new Error(
-      'connect ECONNREFUSED token@proxy.local:8080',
-    );
+    const nestedError = new Error(TOKEN_MSG);
     const aggregateError = new AggregateError(
       [nestedError],
       'fetch failed via http://user:pass@proxy.local',
@@ -727,9 +596,7 @@ describe('redactProxyError', () => {
       'fetch failed via http://<redacted>@proxy.local',
     );
     expect(redactedNestedError).toBe(nestedError);
-    expect(redactedNestedError.message).toBe(
-      'connect ECONNREFUSED <redacted>@proxy.local:8080',
-    );
+    expect(redactedNestedError.message).toBe(REDACTED_TOKEN_MSG);
   });
 });
 

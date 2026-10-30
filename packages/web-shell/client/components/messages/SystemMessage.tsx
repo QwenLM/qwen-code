@@ -21,6 +21,7 @@ import {
   parseContextCompressionMeta,
 } from '../../utils/contextCompression';
 import { useCopiedFlash } from '../../hooks/useCopiedFlash';
+import { formatTurnDuration } from '../../utils/turnDuration';
 import {
   ContextUsageMessage,
   parseContextUsageMessage,
@@ -287,14 +288,16 @@ export const SystemMessage = memo(function SystemMessage({
           {typeof elapsedMs === 'number' &&
           Number.isFinite(elapsedMs) &&
           elapsedMs >= 0
-            ? t('turn.stoppedAfter', { seconds: Math.ceil(elapsedMs / 1000) })
+            ? t('turn.stoppedAfter', {
+                duration: formatTurnDuration(elapsedMs),
+              })
             : t('turn.stopped')}
         </span>
       </div>
     );
   }
   const contextUsage =
-    variant === 'info' ? parseContextUsageMessage(content) : null;
+    variant === 'info' ? parseContextUsageMessage(content, data) : null;
   if (contextUsage) {
     return (
       <div className={styles.flushMessage}>
@@ -306,7 +309,8 @@ export const SystemMessage = memo(function SystemMessage({
     );
   }
 
-  const statsData = variant === 'info' ? parseStatsMessage(content) : null;
+  const statsData =
+    variant === 'info' ? parseStatsMessage(content, data) : null;
   if (statsData) {
     return (
       <div className={styles.flushMessage}>

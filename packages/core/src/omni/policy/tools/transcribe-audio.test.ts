@@ -10,7 +10,6 @@ import path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MediaProbeResult } from '../../ffmpeg.js';
 import type { ToolResult } from '../../../tools/tools.js';
-import type { MediaPolicyToolConfigView } from './media-policy-tool.js';
 import {
   OMNI_TRANSCRIBE_AUDIO_TOOL_NAME,
   OmniTranscribeAudioTool,
@@ -45,6 +44,16 @@ const sse = (...contents: string[]): string =>
     )
     .concat(['data: [DONE]'])
     .join('\n\n') + '\n';
+
+/** A fetch Response stand-in; `ok` follows the status. */
+const httpResponse = (status: number, body: string) => ({
+  ok: status < 300,
+  status,
+  text: async () => body,
+});
+
+/** Space-separated argv tokens as an array. */
+const argv = (tokens: string): string[] => tokens.split(' ');
 
 describe('parseSseTranscript', () => {
   it('concatenates delta content across data lines and stops at [DONE]', () => {
@@ -139,12 +148,29 @@ describe('OmniTranscribeAudioTool', () => {
   };
 
   const fetchReturnsSse = (...contents: string[]): void => {
-    fetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      text: async () => sse(...contents),
-    });
+    fetchMock.mockResolvedValue(httpResponse(200, sse(...contents)));
   };
+
+  /** A tool whose policyTools entry for this tool is `entry`. */
+  const configuredTool = (entry: Record<string, unknown>) =>
+    new OmniTranscribeAudioTool({
+      getOmniPolicyToolsSettings: () => ({
+        [OMNI_TRANSCRIBE_AUDIO_TOOL_NAME]: entry,
+      }),
+    });
+
+  /** The `n`th fetch call's [url, init]. */
+  const fetchCall = (n = 0) => fetchMock.mock.calls[n] as [string, RequestInit];
+
+  /** The parsed JSON body of a fetch call. */
+  const bodyOf = (init: RequestInit) => JSON.parse(init.body as string);
+
+  const readTranscript = () =>
+    fs.readFile(path.join(outputDir, 'speech-transcript.txt'), 'utf-8');
+
+  /** The transcript artifact's omniDisclosure metadata. */
+  const disclosureOf = (result: ToolResult) =>
+    result.artifacts?.[0]?.metadata?.['omniDisclosure'];
 
   const run = async (
     params: Record<string, unknown> = {},
@@ -219,7 +245,7 @@ describe('OmniTranscribeAudioTool', () => {
       signal,
     );
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const [url, init] = fetchCall();
     expect(url).toBe(
       'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions',
     );
@@ -228,8 +254,7 @@ describe('OmniTranscribeAudioTool', () => {
       Authorization: 'Bearer test-key-123',
       'Content-Type': 'application/json',
     });
-    const body = JSON.parse(init.body as string);
-    expect(body).toEqual({
+    expect(bodyOf(init)).toEqual({
       model: 'qwen3.5-omni-plus',
       modalities: ['text'],
       stream: true,
@@ -268,51 +293,41 @@ describe('OmniTranscribeAudioTool', () => {
         metadata: { omniDisclosure: disclosure, omniRole: 'transcript' },
       },
     ]);
-    await expect(
-      fs.readFile(path.join(outputDir, 'speech-transcript.txt'), 'utf-8'),
-    ).resolves.toBe('你好，世界');
+    await expect(readTranscript()).resolves.toBe('你好，世界');
   });
 
   it('appends the language hint to the prompt when provided', async () => {
     await run({ language: 'zh' });
-    const body = JSON.parse(
-      (fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string,
-    );
-    expect(body.messages[0].content[1].text).toBe(
+    expect(bodyOf(fetchCall()[1]).messages[0].content[1].text).toBe(
       '请逐字转写这段音频的内容，只输出转写文本，不要添加任何解释。音频语言：zh。',
     );
   });
 
   it('falls back to policyTools settings for backend values, with params overriding', async () => {
     vi.stubEnv('MY_ASR_KEY', 'settings-key');
-    const view: MediaPolicyToolConfigView = {
-      getOmniPolicyToolsSettings: () => ({
-        [OMNI_TRANSCRIBE_AUDIO_TOOL_NAME]: {
-          settings: {
-            model: 'settings-model',
-            baseUrl: 'https://example.com/v1/',
-            apiKeyEnv: 'MY_ASR_KEY',
-            maxInputBytes: 5000,
-          },
-        },
-      }),
-    };
-    const configured = new OmniTranscribeAudioTool(view);
+    const configured = configuredTool({
+      settings: {
+        model: 'settings-model',
+        baseUrl: 'https://example.com/v1/',
+        apiKeyEnv: 'MY_ASR_KEY',
+        maxInputBytes: 5000,
+      },
+    });
 
     await run({}, configured);
-    let [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    let [url, init] = fetchCall();
     // Trailing slash on baseUrl is normalized away.
     expect(url).toBe('https://example.com/v1/chat/completions');
     expect((init.headers as Record<string, string>)['Authorization']).toBe(
       'Bearer settings-key',
     );
-    expect(JSON.parse(init.body as string).model).toBe('settings-model');
+    expect(bodyOf(init).model).toBe('settings-model');
 
     fetchMock.mockClear();
     fetchReturnsSse('嗯');
     await run({ model: 'param-model' }, configured);
-    [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(JSON.parse(init.body as string).model).toBe('param-model');
+    [url, init] = fetchCall();
+    expect(bodyOf(init).model).toBe('param-model');
   });
 
   it('fails without a network call when the API key env is unset', async () => {
@@ -333,11 +348,9 @@ describe('OmniTranscribeAudioTool', () => {
   });
 
   it('reports only the HTTP status on a non-2xx response (no body leak)', async () => {
-    fetchMock.mockResolvedValue({
-      ok: false,
-      status: 429,
-      text: async () => '{"error":{"message":"secret internal detail"}}',
-    });
+    fetchMock.mockResolvedValue(
+      httpResponse(429, '{"error":{"message":"secret internal detail"}}'),
+    );
     const { result } = await run();
     expect(result.error?.message).toBe(
       'transcription request failed: HTTP 429',
@@ -345,11 +358,7 @@ describe('OmniTranscribeAudioTool', () => {
   });
 
   it('fails when the stream yields an empty transcript', async () => {
-    fetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      text: async () => 'data: [DONE]\n',
-    });
+    fetchMock.mockResolvedValue(httpResponse(200, 'data: [DONE]\n'));
     const { result } = await run();
     expect(result.error?.message).toBe('transcription returned empty text');
   });
@@ -369,19 +378,15 @@ describe('OmniTranscribeAudioTool', () => {
   });
 
   it('maps an AbortSignal.timeout expiry to a timeout error', async () => {
-    const view: MediaPolicyToolConfigView = {
-      getOmniPolicyToolsSettings: () => ({
-        [OMNI_TRANSCRIBE_AUDIO_TOOL_NAME]: {
-          runtime: { timeoutMs: 123 },
-        },
-      }),
-    };
     fetchMock.mockRejectedValue(
       Object.assign(new Error('The operation timed out'), {
         name: 'TimeoutError',
       }),
     );
-    const { result } = await run({}, new OmniTranscribeAudioTool(view));
+    const { result } = await run(
+      {},
+      configuredTool({ runtime: { timeoutMs: 123 } }),
+    );
     expect(result.error?.message).toBe('transcription timed out after 123ms');
   });
 
@@ -390,10 +395,8 @@ describe('OmniTranscribeAudioTool', () => {
     const { result } = await run();
 
     expect(result.error).toBeUndefined();
-    await expect(
-      fs.readFile(path.join(outputDir, 'speech-transcript.txt'), 'utf-8'),
-    ).resolves.toBe('你好。再见！');
-    expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toBe(
+    await expect(readTranscript()).resolves.toBe('你好。再见！');
+    expect(disclosureOf(result)).toBe(
       '原 63s 音频 → 转写文本 6 字，检测到重复退化已截断，语气/音色/非语音信息丢失，识别可能有误',
     );
   });
@@ -411,9 +414,8 @@ describe('OmniTranscribeAudioTool', () => {
 
     /** Decode the `-ss` seek tag back out of a fetch call's audio payload. */
     const seekTagOf = (init: RequestInit): string => {
-      const body = JSON.parse(init.body as string);
-      const dataUri = body.messages[0].content[0].input_audio.data as string;
-      return Buffer.from(dataUri.split(',')[1], 'base64').toString();
+      const { data } = bodyOf(init).messages[0].content[0].input_audio;
+      return Buffer.from((data as string).split(',')[1], 'base64').toString();
     };
 
     beforeEach(() => {
@@ -423,11 +425,9 @@ describe('OmniTranscribeAudioTool', () => {
     });
 
     it('cuts equal 16kHz-mono-AAC segments, transcribes each, and assembles time-labeled lines', async () => {
-      fetchMock.mockImplementation(async (_url: string, init: RequestInit) => ({
-        ok: true,
-        status: 200,
-        text: async () => sse(`片段@${seekTagOf(init)}`),
-      }));
+      fetchMock.mockImplementation(async (_url: string, init: RequestInit) =>
+        httpResponse(200, sse(`片段@${seekTagOf(init)}`)),
+      );
       const { result, signal } = await run();
 
       // One cut per segment, seeking to the segment start.
@@ -435,22 +435,9 @@ describe('OmniTranscribeAudioTool', () => {
       expect(mocks.runFfmpeg).toHaveBeenNthCalledWith(
         1,
         [
-          '-y',
-          '-ss',
-          '0.000',
-          '-t',
-          '133.333',
-          '-i',
+          ...argv('-y -ss 0.000 -t 133.333 -i'),
           inputPath,
-          '-vn',
-          '-c:a',
-          'aac',
-          '-b:a',
-          '32k',
-          '-ar',
-          '16000',
-          '-ac',
-          '1',
+          ...argv('-vn -c:a aac -b:a 32k -ar 16000 -ac 1'),
           path.join(outputDir, 'chunk_0001.m4a'),
         ],
         { signal, timeoutMs: expect.any(Number) },
@@ -463,20 +450,18 @@ describe('OmniTranscribeAudioTool', () => {
       // Every chunk request carries the re-encoded m4a payload.
       expect(fetchMock).toHaveBeenCalledTimes(3);
       for (const call of fetchMock.mock.calls) {
-        const body = JSON.parse((call[1] as RequestInit).body as string);
+        const body = bodyOf(call[1] as RequestInit);
         expect(body.messages[0].content[0].input_audio.format).toBe('m4a');
         expect(body.model).toBe('qwen3.5-omni-plus');
       }
 
       expect(result.error).toBeUndefined();
-      await expect(
-        fs.readFile(path.join(outputDir, 'speech-transcript.txt'), 'utf-8'),
-      ).resolves.toBe(
+      await expect(readTranscript()).resolves.toBe(
         '[00:00-02:13] 片段@0.000\n' +
           '[02:13-04:27] 片段@133.333\n' +
           '[04:27-06:40] 片段@266.667',
       );
-      const disclosure = result.artifacts?.[0]?.metadata?.['omniDisclosure'];
+      const disclosure = disclosureOf(result);
       expect(disclosure).toContain('原 400s 音频 → 分 3 段转写文本');
       expect(disclosure).not.toContain('段失败');
 
@@ -492,15 +477,10 @@ describe('OmniTranscribeAudioTool', () => {
       const { result } = await run();
 
       expect(result.error).toBeUndefined();
-      const transcript = await fs.readFile(
-        path.join(outputDir, 'speech-transcript.txt'),
-        'utf-8',
-      );
+      const transcript = await readTranscript();
       expect(transcript).toContain('[0:00:00-0:02:54] 对白');
       expect(transcript).toContain('[1:18:28-1:21:22] 对白');
-      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
-        '分 28 段转写文本',
-      );
+      expect(disclosureOf(result)).toContain('分 28 段转写文本');
     });
 
     it('fails closed on an implausible container duration (segment-count ceiling)', async () => {
@@ -520,29 +500,20 @@ describe('OmniTranscribeAudioTool', () => {
     it('marks individual failed segments inline instead of failing the run', async () => {
       fetchMock.mockImplementation(async (_url: string, init: RequestInit) =>
         seekTagOf(init).startsWith('133')
-          ? { ok: false, status: 500, text: async () => 'secret detail' }
-          : { ok: true, status: 200, text: async () => sse('还行') },
+          ? httpResponse(500, 'secret detail')
+          : httpResponse(200, sse('还行')),
       );
       const { result } = await run();
 
       expect(result.error).toBeUndefined();
-      const transcript = await fs.readFile(
-        path.join(outputDir, 'speech-transcript.txt'),
-        'utf-8',
-      );
+      const transcript = await readTranscript();
       expect(transcript).toContain('[02:13-04:27] （该段转写失败：HTTP 500）');
       expect(transcript).not.toContain('secret detail');
-      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
-        '（1 段失败）',
-      );
+      expect(disclosureOf(result)).toContain('（1 段失败）');
     });
 
     it('errors only when EVERY segment failed', async () => {
-      fetchMock.mockResolvedValue({
-        ok: false,
-        status: 500,
-        text: async () => 'boom',
-      });
+      fetchMock.mockResolvedValue(httpResponse(500, 'boom'));
       const { result } = await run();
       expect(result.error?.message).toBe(
         'transcription failed for all 3 segments (last: HTTP 500)',
@@ -554,26 +525,14 @@ describe('OmniTranscribeAudioTool', () => {
       const { result } = await run();
 
       expect(result.error).toBeUndefined();
-      const transcript = await fs.readFile(
-        path.join(outputDir, 'speech-transcript.txt'),
-        'utf-8',
-      );
+      const transcript = await readTranscript();
       expect(transcript).toContain('大家好。再见！');
       expect(transcript).not.toContain('再见！再见！');
-      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
-        '3 段检测到重复退化已截断',
-      );
+      expect(disclosureOf(result)).toContain('3 段检测到重复退化已截断');
     });
 
     it('marks segments beyond an exhausted budget instead of starting them', async () => {
       probe({ durationMs: 720_000 }); // 4 segments — one more than the pool
-      const view: MediaPolicyToolConfigView = {
-        getOmniPolicyToolsSettings: () => ({
-          [OMNI_TRANSCRIBE_AUDIO_TOOL_NAME]: {
-            runtime: { timeoutMs: 60 },
-          },
-        }),
-      };
       mocks.runFfmpeg.mockImplementation(async (args: string[]) => {
         // Outlive the whole 60ms budget inside the first wave of cuts.
         await new Promise((r) => setTimeout(r, 90));
@@ -581,21 +540,19 @@ describe('OmniTranscribeAudioTool', () => {
         return { code: 0, stderr: '' };
       });
       fetchReturnsSse('还行');
-      const { result } = await run({}, new OmniTranscribeAudioTool(view));
+      const { result } = await run(
+        {},
+        configuredTool({ runtime: { timeoutMs: 60 } }),
+      );
 
       // Segment 4 was never cut — its budget was gone before it started.
       expect(mocks.runFfmpeg).toHaveBeenCalledTimes(3);
       expect(result.error).toBeUndefined();
-      const transcript = await fs.readFile(
-        path.join(outputDir, 'speech-transcript.txt'),
-        'utf-8',
-      );
+      const transcript = await readTranscript();
       expect(transcript).toContain(
         '[09:00-12:00] （该段转写失败：时间预算耗尽）',
       );
-      expect(result.artifacts?.[0]?.metadata?.['omniDisclosure']).toContain(
-        '（1 段失败）',
-      );
+      expect(disclosureOf(result)).toContain('（1 段失败）');
     });
 
     it('marks a failed cut with a short message (no ffmpeg stderr leak)', async () => {
@@ -609,10 +566,7 @@ describe('OmniTranscribeAudioTool', () => {
       const { result } = await run();
 
       expect(result.error).toBeUndefined();
-      const transcript = await fs.readFile(
-        path.join(outputDir, 'speech-transcript.txt'),
-        'utf-8',
-      );
+      const transcript = await readTranscript();
       expect(transcript).toContain(
         '[00:00-02:13] （该段转写失败：切片失败（ffmpeg exit 187））',
       );
@@ -620,30 +574,23 @@ describe('OmniTranscribeAudioTool', () => {
     });
   });
 
+  const valid = { inputPath: '/tmp/a.wav', outputDir: '/tmp/x' };
   it.each([
-    [
-      'relative inputPath',
-      { inputPath: 'rel/a.wav', outputDir: '/tmp/x' },
-      /absolute/,
-    ],
-    [
-      'relative outputDir',
-      { inputPath: '/tmp/a.wav', outputDir: 'staging' },
-      /absolute/,
-    ],
+    ['relative inputPath', { ...valid, inputPath: 'rel/a.wav' }, /absolute/],
+    ['relative outputDir', { ...valid, outputDir: 'staging' }, /absolute/],
     [
       'unknown parameter',
-      { inputPath: '/tmp/a.wav', outputDir: '/tmp/x', volume: 2 },
+      { ...valid, volume: 2 },
       /additional properties|not allowed/i,
     ],
     [
       'maxInputBytes below minimum',
-      { inputPath: '/tmp/a.wav', outputDir: '/tmp/x', maxInputBytes: 0 },
+      { ...valid, maxInputBytes: 0 },
       /minimum|>= 1/i,
     ],
     [
       'chunkSeconds below minimum',
-      { inputPath: '/tmp/a.wav', outputDir: '/tmp/x', chunkSeconds: 10 },
+      { ...valid, chunkSeconds: 10 },
       /minimum|>= 30/i,
     ],
   ])('build rejects %s', (_name, params, message) => {

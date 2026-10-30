@@ -14,6 +14,7 @@ import {
   getUserAutoMemoryRoot,
 } from './paths.js';
 import { runForkedAgent, getCacheSafeParams } from '../agents/forkedAgent.js';
+import { slimCompactionInput } from '../services/compactionInputSlimming.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { formatDateForContext } from '../core/environmentContext.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
@@ -53,7 +54,32 @@ describe('runAutoMemoryExtractionByAgent', () => {
     getMemoryAgentTimeoutMinutes: vi.fn().mockReturnValue(undefined),
     getMemoryAgentMaxTurns: vi.fn().mockReturnValue(undefined),
     getAutoMemoryPrompt: vi.fn().mockReturnValue('session routing contract'),
+    getEffectiveInputModalities: vi.fn().mockReturnValue({}),
   } as unknown as Config;
+
+  // Runs extraction after a completed forked run that touched `files`; the run
+  // also reports them as `filesWritten` unless `written` is false.
+  function extract(files: string[], { written = true } = {}) {
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: '',
+      filesTouched: files,
+      ...(written ? { filesWritten: files } : { filesRead: files }),
+    });
+    return runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+  }
+
+  const forkedCall = () => vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+
+  function expectScopes(
+    result: Awaited<ReturnType<typeof runAutoMemoryExtractionByAgent>>,
+    topics: string[],
+    scopes: { project: boolean; user: boolean },
+  ) {
+    expect(result.touchedTopics).toEqual(expect.arrayContaining(topics));
+    expect(result.touchedProjectScope).toBe(scopes.project);
+    expect(result.touchedUserScope).toBe(scopes.user);
+  }
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -85,20 +111,14 @@ describe('runAutoMemoryExtractionByAgent', () => {
   });
 
   it('derives touchedTopics from filesTouched and returns systemMessage', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: ['/tmp/auto-memory/user/prefs.md'],
-      filesWritten: ['/tmp/auto-memory/user/prefs.md'],
-    });
-
-    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    const result = await extract(['/tmp/auto-memory/user/prefs.md']);
 
     expect(result).toEqual({
       touchedTopics: ['user'],
       touchedProjectScope: true,
       touchedUserScope: false,
       hasToolActivity: true,
+      extractorEngaged: true,
       systemMessage: 'Managed auto-memory updated: user.md',
     });
     expect(getCacheSafeParams).toHaveBeenCalledWith('session-1');
@@ -118,6 +138,13 @@ describe('runAutoMemoryExtractionByAgent', () => {
       expect(systemPrompt).toContain(category);
     }
     expect(systemPrompt).toContain('at most 64 characters');
+    expect(systemPrompt).toContain(
+      'When editing an existing memory file, preserve its existing emphasis delimiter style',
+    );
+    expect(systemPrompt).toContain(
+      'For new files, follow the format reference and keep emphasis style consistent within each file.',
+    );
+    expect(systemPrompt).toContain('Keep a blank line before and after lists.');
   });
 
   it('strips runtime reminders and hidden reasoning from inherited history', async () => {
@@ -404,99 +431,288 @@ describe('runAutoMemoryExtractionByAgent', () => {
     expect(call?.systemPrompt).toContain('Memory file format reference:');
   });
 
-  it('threads the configured memory agent timeout into the forked agent', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [],
-      filesWritten: [],
-    });
-    vi.mocked(mockConfig.getMemoryAgentTimeoutMinutes).mockReturnValueOnce(30);
+  it.each([
+    [
+      'threads the configured memory agent timeout into the forked agent',
+      'getMemoryAgentTimeoutMinutes',
+      'maxTimeMinutes',
+      30,
+    ],
+    [
+      'passes 0 through to disable the time limit',
+      'getMemoryAgentTimeoutMinutes',
+      'maxTimeMinutes',
+      0,
+    ],
+    [
+      'threads the configured memory agent turn limit into the forked agent',
+      'getMemoryAgentMaxTurns',
+      'maxTurns',
+      25,
+    ],
+    [
+      'passes the zero turn-limit sentinel through to the forked agent',
+      'getMemoryAgentMaxTurns',
+      'maxTurns',
+      0,
+    ],
+  ] as const)('%s', async (_title, getter, param, value) => {
+    vi.mocked(mockConfig[getter]).mockReturnValueOnce(value);
 
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
-
-    expect(runForkedAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ maxTimeMinutes: 30 }),
-    );
-  });
-
-  it('passes 0 through to disable the time limit', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [],
-      filesWritten: [],
-    });
-    vi.mocked(mockConfig.getMemoryAgentTimeoutMinutes).mockReturnValueOnce(0);
-
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
-
-    expect(runForkedAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ maxTimeMinutes: 0 }),
-    );
-  });
-
-  it('threads the configured memory agent turn limit into the forked agent', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [],
-      filesWritten: [],
-    });
-    vi.mocked(mockConfig.getMemoryAgentMaxTurns).mockReturnValueOnce(25);
-
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    await extract([]);
 
     expect(runForkedAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ maxTurns: 25 }),
-    );
-  });
-
-  it('passes the zero turn-limit sentinel through to the forked agent', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [],
-      filesWritten: [],
-    });
-    vi.mocked(mockConfig.getMemoryAgentMaxTurns).mockReturnValueOnce(0);
-
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
-
-    expect(runForkedAgent).toHaveBeenCalledWith(
-      expect.objectContaining({ maxTurns: 0 }),
+      expect.objectContaining({ [param]: value }),
     );
   });
 
   it('returns empty touchedTopics when agent touches no files', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [],
-      filesWritten: [],
-    });
-
-    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    const result = await extract([]);
     expect(result).toEqual({
       touchedTopics: [],
       touchedProjectScope: false,
       touchedUserScope: false,
       hasToolActivity: false,
+      extractorEngaged: false,
       systemMessage: undefined,
     });
   });
 
-  it('uses a scoped config that denies shell and outside writes', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [],
+  it.each([
+    { filesRead: [], engaged: false },
+    { filesRead: ['/tmp/outside.md'], engaged: false },
+    { filesRead: ['/tmp/auto-memory/user/prefs.md'], engaged: true },
+  ])(
+    'counts only successful memory-scoped reads as engagement: %j',
+    async ({ filesRead, engaged }) => {
+      vi.mocked(runForkedAgent).mockResolvedValue({
+        status: 'completed',
+        filesTouched: ['/tmp/auto-memory/user/missing.md'],
+        filesRead,
+        filesWritten: [],
+      });
+      const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+      expect(result.hasToolActivity).toBe(true);
+      expect(result.extractorEngaged).toBe(engaged);
+      expect(result.touchedTopics).toEqual([]);
+    },
+  );
+
+  it('preserves skipped history when the live captured tail no longer contains it', async () => {
+    const skipped = {
+      role: 'user',
+      parts: [{ text: 'Remember that I prefer reviews in Chinese.' }],
+    };
+    await extract([]);
+    vi.mocked(runForkedAgent).mockClear();
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [skipped]);
+    expect(forkedCall()?.extraHistory?.[0]).toEqual(skipped);
+    expect(forkedCall()?.extraHistory).toContainEqual({
+      role: 'user',
+      parts: [{ text: 'I prefer terse responses.' }],
     });
+  });
 
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+  it('forwards only the skipped entries the captured tail no longer holds', async () => {
+    // The parked slice and the captured tail are separate copies of the same
+    // live history, so their shared entries are equal by value, not identity.
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'turn 2' }] },
+        { role: 'model', parts: [{ text: 'reply 2' }] },
+        { role: 'user', parts: [{ text: 'turn 3' }] },
+        { role: 'model', parts: [{ text: 'reply 3' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'user', parts: [{ text: 'turn 1' }] },
+      { role: 'model', parts: [{ text: 'reply 1' }] },
+      { role: 'user', parts: [{ text: 'turn 2' }] },
+      { role: 'model', parts: [{ text: 'reply 2' }] },
+    ]);
+    const texts = (forkedCall()?.extraHistory ?? []).flatMap((entry) =>
+      (entry.parts ?? []).map((part) => part.text),
+    );
+    expect(texts).toEqual([
+      'turn 1',
+      'reply 1',
+      'turn 2',
+      'reply 2',
+      'turn 3',
+      'reply 3',
+    ]);
+  });
 
-    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
-    const permissionManager = call?.config.getPermissionManager?.();
+  it('drops a parked slice the captured tail covers from before it', async () => {
+    // The close-flush shape: the tail is the whole short history, so it starts
+    // before the parked slice instead of inside it. Whole-slice contiguity is
+    // the only proof that the slice is covered, and it must drop it entirely.
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'turn 0' }] },
+        { role: 'model', parts: [{ text: 'reply 0' }] },
+        { role: 'user', parts: [{ text: 'turn 1' }] },
+        { role: 'model', parts: [{ text: 'reply 1' }] },
+        { role: 'user', parts: [{ text: 'turn 2' }] },
+        { role: 'model', parts: [{ text: 'reply 2' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'user', parts: [{ text: 'turn 2' }] },
+      { role: 'model', parts: [{ text: 'reply 2' }] },
+    ]);
+    const texts = (forkedCall()?.extraHistory ?? []).flatMap((entry) =>
+      (entry.parts ?? []).map((part) => part.text),
+    );
+    expect(texts.filter((text) => text === 'turn 2')).toHaveLength(1);
+    expect(texts).toEqual([
+      'turn 0',
+      'reply 0',
+      'turn 1',
+      'reply 1',
+      'turn 2',
+      'reply 2',
+    ]);
+  });
+
+  it('drops a parked slice whose captured copy was slimmed and curated', async () => {
+    // The tail is the curated, slimmed rendering of raw history: media became
+    // placeholder text and adjacent user entries merged. The slice is still
+    // covered, so it must neither come first again nor re-ship the media.
+    const image = { inlineData: { mimeType: 'image/png', data: 'AAAA' } };
+    const [placeholder] = slimCompactionInput([
+      { role: 'user', parts: [image] },
+    ]).slimmedHistory[0].parts!;
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'turn 0' }] },
+        { role: 'model', parts: [{ text: 'reply 0' }] },
+        {
+          role: 'user',
+          parts: [{ text: 'Remember: target release/2.6.' }, placeholder],
+        },
+        { role: 'model', parts: [{ text: 'reply 1' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'user', parts: [{ text: 'Remember: target release/2.6.' }] },
+      { role: 'user', parts: [image] },
+      { role: 'model', parts: [{ text: 'reply 1' }] },
+    ]);
+    const history = forkedCall()?.extraHistory ?? [];
+    expect(history[0]?.parts?.[0]?.text).toBe('turn 0');
+    expect(
+      history.flatMap((entry) => entry.parts ?? []).some((p) => p.inlineData),
+    ).toBe(false);
+    expect(
+      history
+        .flatMap((entry) => (entry.parts ?? []).map((part) => part.text))
+        .filter((text) => text === 'reply 1'),
+    ).toHaveLength(1);
+  });
+
+  it('ships a supported image once when the captured tail kept it', async () => {
+    const image = { inlineData: { mimeType: 'image/png', data: 'AAAA' } };
+    vi.mocked(mockConfig.getEffectiveInputModalities).mockReturnValueOnce({
+      image: true,
+    });
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'user', parts: [{ text: 'turn 0' }] },
+        { role: 'model', parts: [{ text: 'reply 0' }] },
+        { role: 'user', parts: [image] },
+        { role: 'model', parts: [{ text: 'reply 1' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'user', parts: [image] },
+      { role: 'model', parts: [{ text: 'reply 1' }] },
+    ]);
+    const parts = (forkedCall()?.extraHistory ?? []).flatMap(
+      (entry) => entry.parts ?? [],
+    );
+    expect(parts.filter((part) => part.inlineData)).toHaveLength(1);
+  });
+
+  it('forwards parked turns when the tail only shares their first entry', async () => {
+    // The tail begins after the slice, and only the slice's first entry
+    // happens to equal the tail's first one. A single equal entry is not
+    // proof of coverage: dropping the rest would lose the skipped turn.
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        { role: 'model', parts: [{ text: 'reply 2' }] },
+        { role: 'user', parts: [{ text: 'turn 3' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      { role: 'model', parts: [{ text: 'reply 2' }] },
+      { role: 'user', parts: [{ text: 'turn 2' }] },
+    ]);
+    const texts = (forkedCall()?.extraHistory ?? []).flatMap((entry) =>
+      (entry.parts ?? []).map((part) => part.text),
+    );
+    expect(texts).toContain('turn 2');
+  });
+
+  it('does not treat two tool calls with the same name as the same turn', async () => {
+    // Two `read_file` calls on different paths compare equal by name alone,
+    // which would drop the parked instruction behind the unrelated call.
+    vi.mocked(getCacheSafeParams).mockReturnValue({
+      generationConfig: {},
+      history: [
+        {
+          role: 'model',
+          parts: [
+            {
+              functionCall: {
+                name: 'read_file',
+                args: { path: '/repo/OTHER.ts' },
+              },
+            },
+          ],
+        },
+        { role: 'user', parts: [{ text: 'turn 4' }] },
+      ],
+      model: 'qwen3-coder-plus',
+      version: 1,
+    });
+    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp', [
+      {
+        role: 'model',
+        parts: [
+          { functionCall: { name: 'read_file', args: { path: '/repo/a.ts' } } },
+        ],
+      },
+      {
+        role: 'user',
+        parts: [{ text: 'Remember: every release PR targets release/2.6.' }],
+      },
+    ]);
+    const texts = (forkedCall()?.extraHistory ?? []).flatMap((entry) =>
+      (entry.parts ?? []).map((part) => part.text),
+    );
+    expect(texts).toContain('Remember: every release PR targets release/2.6.');
+  });
+
+  it('uses a scoped config that denies shell and outside writes', async () => {
+    await extract([], { written: false });
+
+    const permissionManager = forkedCall()?.config.getPermissionManager?.();
     expect(permissionManager).toBeDefined();
     expect(await permissionManager!.isToolEnabled(ToolNames.SHELL)).toBe(false);
     expect(
@@ -569,77 +785,32 @@ describe('runAutoMemoryExtractionByAgent', () => {
   });
 
   it('protects pinned memory in both managed-memory scopes', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [],
-    });
+    await extract([], { written: false });
 
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
-
-    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
-    const permissionManager = call?.config.getPermissionManager?.();
+    const permissionManager = forkedCall()?.config.getPermissionManager?.();
     expect(permissionManager).toBeDefined();
-    await expect(
-      permissionManager!.evaluate({
-        toolName: ToolNames.WRITE_FILE,
-        filePath: `/tmp/auto-memory/${AUTO_MEMORY_PINNED_DIRNAME}/architecture.md`,
-      }),
-    ).resolves.toBe('deny');
-    await expect(
-      permissionManager!.evaluate({
-        toolName: ToolNames.EDIT,
-        filePath: `/tmp/auto-memory/${AUTO_MEMORY_PINNED_DIRNAME}/architecture.md`,
-      }),
-    ).resolves.toBe('deny');
-    await expect(
-      permissionManager!.evaluate({
-        toolName: ToolNames.WRITE_FILE,
-        filePath: `/tmp/user-memory/${AUTO_MEMORY_PINNED_DIRNAME}/preferences.md`,
-      }),
-    ).resolves.toBe('deny');
-    await expect(
-      permissionManager!.evaluate({
-        toolName: ToolNames.EDIT,
-        filePath: `/tmp/user-memory/${AUTO_MEMORY_PINNED_DIRNAME}/preferences.md`,
-      }),
-    ).resolves.toBe('deny');
-    await expect(
-      permissionManager!.evaluate({
-        toolName: ToolNames.WRITE_FILE,
-        filePath: '/tmp/auto-memory/project/ordinary.md',
-      }),
-    ).resolves.toBe('allow');
-    await expect(
-      permissionManager!.evaluate({
-        toolName: ToolNames.EDIT,
-        filePath: '/tmp/user-memory/user/ordinary.md',
-      }),
-    ).resolves.toBe('allow');
-    await expect(
-      permissionManager!.evaluate({
-        toolName: ToolNames.WRITE_FILE,
-        filePath: `/tmp/auto-memory/project/${AUTO_MEMORY_PINNED_DIRNAME}/notes.md`,
-      }),
-    ).resolves.toBe('allow');
-    await expect(
-      permissionManager!.evaluate({
-        toolName: ToolNames.EDIT,
-        filePath: `/tmp/auto-memory/${AUTO_MEMORY_PINNED_DIRNAME}-notes/notes.md`,
-      }),
-    ).resolves.toBe('allow');
+    const pinned = AUTO_MEMORY_PINNED_DIRNAME;
+    const { WRITE_FILE, EDIT } = ToolNames;
+    for (const [toolName, filePath, decision] of [
+      [WRITE_FILE, `/tmp/auto-memory/${pinned}/architecture.md`, 'deny'],
+      [EDIT, `/tmp/auto-memory/${pinned}/architecture.md`, 'deny'],
+      [WRITE_FILE, `/tmp/user-memory/${pinned}/preferences.md`, 'deny'],
+      [EDIT, `/tmp/user-memory/${pinned}/preferences.md`, 'deny'],
+      [WRITE_FILE, '/tmp/auto-memory/project/ordinary.md', 'allow'],
+      [EDIT, '/tmp/user-memory/user/ordinary.md', 'allow'],
+      [WRITE_FILE, `/tmp/auto-memory/project/${pinned}/notes.md`, 'allow'],
+      [EDIT, `/tmp/auto-memory/${pinned}-notes/notes.md`, 'allow'],
+    ] as const) {
+      await expect(
+        permissionManager!.evaluate({ toolName, filePath }),
+      ).resolves.toBe(decision);
+    }
   });
 
   it('instructs the extraction agent to preserve pinned memory', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [],
-    });
+    await extract([], { written: false });
 
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
-
-    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    const call = forkedCall();
     expect(call?.taskPrompt).toContain(
       `top-level \`${AUTO_MEMORY_PINNED_DIRNAME}/\` directory`,
     );
@@ -655,15 +826,9 @@ describe('runAutoMemoryExtractionByAgent', () => {
   });
 
   it('does not advertise unregistered tools to the extraction agent', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [],
-    });
+    await extract([], { written: false });
 
-    await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
-
-    const call = vi.mocked(runForkedAgent).mock.calls[0]?.[0];
+    const call = forkedCall();
     expect(call?.taskPrompt).toContain('Available tools in this run');
     // list_directory is disabled by default, so the prompt must not steer this
     // turn-budgeted background agent toward an unregistered tool.
@@ -695,90 +860,47 @@ describe('runAutoMemoryExtractionByAgent', () => {
   });
 
   it('ignores non-memory file paths in filesTouched', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [
-        '/tmp/auto-memory/project/arch.md',
-        '/tmp/auto-memory/reference/api.md',
-        '/tmp/some/other/file.ts',
-      ],
-      filesWritten: [
-        '/tmp/auto-memory/project/arch.md',
-        '/tmp/auto-memory/reference/api.md',
-        '/tmp/some/other/file.ts',
-      ],
+    const result = await extract([
+      '/tmp/auto-memory/project/arch.md',
+      '/tmp/auto-memory/reference/api.md',
+      '/tmp/some/other/file.ts',
+    ]);
+    expectScopes(result, ['project', 'reference'], {
+      project: true,
+      user: false,
     });
-
-    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
-    expect(result.touchedTopics).toEqual(
-      expect.arrayContaining(['project', 'reference']),
-    );
     expect(result.touchedTopics).not.toContain('user');
-    expect(result.touchedProjectScope).toBe(true);
-    expect(result.touchedUserScope).toBe(false);
   });
 
   it('attributes user-rooted writes to the user scope (not project)', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [
-        '/tmp/user-memory/user/role.md',
-        '/tmp/user-memory/feedback/terse.md',
-      ],
-      filesWritten: [
-        '/tmp/user-memory/user/role.md',
-        '/tmp/user-memory/feedback/terse.md',
-      ],
-    });
-
-    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
-    expect(result.touchedTopics).toEqual(
-      expect.arrayContaining(['user', 'feedback']),
-    );
-    expect(result.touchedUserScope).toBe(true);
-    expect(result.touchedProjectScope).toBe(false);
+    const result = await extract([
+      '/tmp/user-memory/user/role.md',
+      '/tmp/user-memory/feedback/terse.md',
+    ]);
+    expectScopes(result, ['user', 'feedback'], { project: false, user: true });
   });
 
   it('classifies file paths when the root is backslash-native (Windows) but agent reports forward slashes', async () => {
-    // On Windows the roots returned by getAutoMemoryRoot/getUserAutoMemoryRoot
-    // are backslash-separated (`C:\Users\foo\...\memory`). The model's tool
-    // calls (and the writes the agent reports as `filesTouched`) commonly
-    // come back forward-slash-normalized. The classification must succeed in
-    // that case — otherwise user-scope writes silently fail to rebuild the
-    // index on Windows.
-    //
-    // sticky mockReturnValue (not Once) — the production code calls each
-    // helper twice per extraction (prompt builder + touched-topics
-    // classifier) so a Once-mock only covers the first call. Restored
-    // below to keep subsequent tests on the suite's POSIX defaults.
+    // Windows roots are backslash-separated (`C:\Users\foo\...\memory`) while
+    // the agent's reported `filesTouched` commonly come back forward-slashed;
+    // classification must still succeed, or user-scope writes silently fail
+    // to rebuild the index on Windows.
+    // Sticky mockReturnValue (not Once): production calls each helper twice
+    // per extraction (prompt builder + touched-topics classifier). Restored
+    // below to keep later tests on the suite's POSIX defaults.
     vi.mocked(getAutoMemoryRoot).mockReturnValue(
       'C:\\Users\\foo\\.qwen\\projects\\proj\\memory',
     );
     vi.mocked(getUserAutoMemoryRoot).mockReturnValue(
       'C:\\Users\\foo\\.qwen\\memories',
     );
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [
-        'C:/Users/foo/.qwen/projects/proj/memory/project/release.md',
-        'C:/Users/foo/.qwen/memories/user/role.md',
-      ],
-      filesWritten: [
-        'C:/Users/foo/.qwen/projects/proj/memory/project/release.md',
-        'C:/Users/foo/.qwen/memories/user/role.md',
-      ],
-    });
 
     try {
-      const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
-      expect(result.touchedTopics).toEqual(
-        expect.arrayContaining(['project', 'user']),
-      );
-      expect(result.touchedProjectScope).toBe(true);
-      expect(result.touchedUserScope).toBe(true);
+      const result = await extract([
+        'C:/Users/foo/.qwen/projects/proj/memory/project/release.md',
+        'C:/Users/foo/.qwen/memories/user/role.md',
+      ]);
+      expectScopes(result, ['project', 'user'], { project: true, user: true });
     } finally {
       vi.mocked(getAutoMemoryRoot).mockReturnValue('/tmp/auto-memory');
       vi.mocked(getUserAutoMemoryRoot).mockReturnValue('/tmp/user-memory');
@@ -786,70 +908,34 @@ describe('runAutoMemoryExtractionByAgent', () => {
   });
 
   it('classifies file paths regardless of which separator the agent reported', async () => {
-    // Roots come back from the mocked getAutoMemoryRoot/getUserAutoMemoryRoot
-    // as POSIX paths (`/tmp/...`). The agent's filesTouched may use either
-    // separator on Windows hosts — the check must accept both.
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [
-        '/tmp/auto-memory\\project\\arch.md',
-        '/tmp/user-memory\\user\\role.md',
-      ],
-      filesWritten: [
-        '/tmp/auto-memory\\project\\arch.md',
-        '/tmp/user-memory\\user\\role.md',
-      ],
-    });
-
-    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
-    expect(result.touchedTopics).toEqual(
-      expect.arrayContaining(['project', 'user']),
-    );
-    expect(result.touchedProjectScope).toBe(true);
-    expect(result.touchedUserScope).toBe(true);
+    // Mocked roots are POSIX (`/tmp/...`); on Windows hosts the agent's
+    // filesTouched may use either separator, and the check must accept both.
+    const result = await extract([
+      '/tmp/auto-memory\\project\\arch.md',
+      '/tmp/user-memory\\user\\role.md',
+    ]);
+    expectScopes(result, ['project', 'user'], { project: true, user: true });
   });
 
   it('rejects sibling directories that share a root prefix (no startsWith collision)', async () => {
-    // getAutoMemoryRoot mocked → /tmp/auto-memory.
-    // A path inside /tmp/auto-memory-other/ shares the string prefix but is
-    // a different directory entirely; the trailing-separator guard must keep
-    // it out of both scopes.
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [
-        '/tmp/auto-memory-other/user/x.md',
-        '/tmp/user-memory-backup/user/y.md',
-      ],
-    });
-
-    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
+    // /tmp/auto-memory-other/ shares the mocked root's string prefix but is a
+    // different directory; the trailing-separator guard must keep it out of
+    // both scopes.
+    const result = await extract(
+      ['/tmp/auto-memory-other/user/x.md', '/tmp/user-memory-backup/user/y.md'],
+      { written: false },
+    );
     expect(result.touchedTopics).toEqual([]);
     expect(result.touchedProjectScope).toBe(false);
     expect(result.touchedUserScope).toBe(false);
   });
 
   it('reports both scopes when the agent writes to both roots in one run', async () => {
-    vi.mocked(runForkedAgent).mockResolvedValue({
-      status: 'completed',
-      finalText: '',
-      filesTouched: [
-        '/tmp/user-memory/user/role.md',
-        '/tmp/auto-memory/project/release.md',
-      ],
-      filesWritten: [
-        '/tmp/user-memory/user/role.md',
-        '/tmp/auto-memory/project/release.md',
-      ],
-    });
-
-    const result = await runAutoMemoryExtractionByAgent(mockConfig, '/tmp');
-    expect(result.touchedTopics).toEqual(
-      expect.arrayContaining(['user', 'project']),
-    );
-    expect(result.touchedProjectScope).toBe(true);
-    expect(result.touchedUserScope).toBe(true);
+    const result = await extract([
+      '/tmp/user-memory/user/role.md',
+      '/tmp/auto-memory/project/release.md',
+    ]);
+    expectScopes(result, ['user', 'project'], { project: true, user: true });
   });
 
   it('includes the existing keyword vocabulary in the agent task prompt', async () => {

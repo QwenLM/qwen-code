@@ -29,6 +29,12 @@
           "type": "boolean",
           "default": false
         },
+        "maxSessions": {
+          "description": "Per-workspace cap on concurrent live sessions. New spawn requests beyond this return 503; attaching to an existing session still works. Set to 0 to disable. Honored from user, system, and system-defaults settings only — a workspace settings file must not raise a daemon-wide resource cap; qwen serve --max-sessions wins when passed.",
+          "type": "integer",
+          "default": 32,
+          "minimum": 0
+        },
         "maxConcurrentSubSessionsPerCaller": {
           "description": "Per-session ceiling on concurrent in-flight sub-sessions spawned via the create_sub_session tool.",
           "type": "integer",
@@ -285,6 +291,20 @@
         }
       }
     },
+    "verifyPr": {
+      "description": "Coordinates for a manual /verify-pr publish round. Each value is surfaced at startup as the environment variable the skill already reads, so the host does not have to be repeated per round. Only honored from User, System, and SystemDefaults settings scopes.",
+      "type": "object",
+      "properties": {
+        "assetsRepo": {
+          "description": "The `owner/repo` that hosts the screenshots a `--publish` round links from its PR comment, surfaced as `QWEN_VERIFY_ASSETS_REPO`; `--assets-repo` still overrides it. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored, so a repository cannot choose where its own verification evidence is published.",
+          "type": "string"
+        },
+        "assetsBranch": {
+          "description": "The branch inside that repository, surfaced as `QWEN_VERIFY_ASSETS_BRANCH`; without it a round publishes to `assets/pr<n>-validation`. Only honored from User, System, and SystemDefaults settings scopes, for the same reason as `verifyPr.assetsRepo`.",
+          "type": "string"
+        }
+      }
+    },
     "output": {
       "description": "Settings for the CLI output.",
       "type": "object",
@@ -323,6 +343,19 @@
       "description": "User interface settings.",
       "type": "object",
       "properties": {
+        "allowedApprovalModes": {
+          "description": "Execution approval modes offered by Web Shell. Omit to show default, auto-edit, auto and yolo; an empty list offers none. Host allowedApprovalModes overrides this setting. Presentation only: does not change the current mode or enforce backend permissions. Only honored from User, System, and SystemDefaults settings scopes; values set in Workspace settings are ignored with a warning. Edit settings.json directly.",
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "default",
+              "auto-edit",
+              "auto",
+              "yolo"
+            ]
+          }
+        },
         "theme": {
           "description": "The color theme for the UI.",
           "type": "string",
@@ -370,7 +403,7 @@
           "default": false
         },
         "disableWorkflowKeywordTrigger": {
-          "description": "When true, mentioning the word `workflow` in a prompt no longer softly steers the turn toward the Workflow tool (and the Footer `workflow active` indicator is suppressed). Only applies when workflows are enabled.",
+          "description": "When true, human submissions containing `workflow` or `ultracode` no longer softly steer the current turn toward the Workflow tool. Applies across terminal, IDE, Web and explicitly human-origin SDK messages when workflows are enabled. Plain headless prompts and automated messages do not trigger this reminder.",
           "type": "boolean",
           "default": false
         },
@@ -495,6 +528,11 @@
           "description": "Enable in-app SGR mouse tracking. While enabled, Qwen Code captures mouse events for text selection, click-to-position in text inputs, row hover, history-item toggling, and viewport scrolling. Because the terminal forwards all mouse events to the app, Qwen Code supplies its own equivalents for what the terminal can no longer do natively: a single click opens an http(s) hyperlink under the pointer (other link schemes are copied to the clipboard), and right-click over a link or a text selection opens an in-app context menu with Open Link / Copy Link Address / Copy Selection. Disable to hand the mouse fully back to the terminal (native right-click menu and link clicks); this turns off all in-app mouse interaction, and in Virtualized History the wheel no longer scrolls the transcript — use Shift+↑/↓, PgUp/PgDn, or Ctrl+Home/End instead (pair with ui.useTerminalBuffer: false to restore native terminal scrollback).",
           "type": "boolean",
           "default": true
+        },
+        "arrowKeysScrollTranscript": {
+          "description": "Let a bare ↑/↓ scroll the transcript while the composer is empty in Virtualized History, instead of recalling input history. Off by default: ↑/↓ walk your previous prompts, and the transcript scrolls with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Turn it on only for a terminal or multiplexer that does not pass mouse reporting through and turns wheel/trackpad scrolling into ↑/↓ key presses, where that burst of ↑/↓ would otherwise silently replace the composer with an older prompt. While it is on, use Ctrl+P / Ctrl+N for input history from an empty composer.",
+          "type": "boolean",
+          "default": false
         },
         "showToolCallDetails": {
           "description": "Show tool arguments and results inline. Disable to render ordinary tool calls as a one-line summary; click a summary in Virtualized History or press Ctrl+O to expand its details. Approval prompts, user-initiated shell commands, and focused interactive shells remain expanded.",
@@ -708,6 +746,53 @@
       "default": 0,
       "minimum": 0
     },
+    "pluginConfigs": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "toolDialect": {
+            "type": "string",
+            "enum": [
+              "native",
+              "claude"
+            ],
+            "description": "Mod tool input dialect. Defaults to native; claude exposes the supported Bash/Edit/Write input subset."
+          },
+          "unsupportedEvents": {
+            "type": "string",
+            "enum": [
+              "skip",
+              "reject"
+            ],
+            "description": "Hooks for Claude Code events Qwen Code does not support. Defaults to skip, which reports them at startup; reject fails initialization instead."
+          },
+          "options": {
+            "type": "object",
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "number"
+                },
+                {
+                  "type": "boolean"
+                },
+                {
+                  "type": "array",
+                  "items": {
+                    "type": "string"
+                  }
+                }
+              ]
+            }
+          }
+        }
+      },
+      "description": "Mod options, tool dialect and unsupported-event policy keyed by plugin name or name@marketplace. Only user and system settings apply; restart after changes."
+    },
     "advisorModel": {
       "description": "Model selector for the Advisor tool. Leave empty to disable Advisor. Enabling it sends the active conversation to that model, even when it uses another provider.",
       "type": "string",
@@ -840,12 +925,21 @@
           "default": false
         },
         "skipLoopDetection": {
-          "description": "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. Daemon/ACP sessions run none of the other detectors; setting this to false also enables a global-duplicate tool-call halt there. Core-client sessions keep a minimal always-on guard regardless of this setting (consecutive identical tool calls, shell inspection-command stagnation, and a per-turn tool-call cap, see model.maxToolCallsPerTurn); daemon/ACP sessions keep the per-turn tool-call cap and an invalid-tool-params stagnation guard.",
+          "description": "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. Daemon/ACP sessions run none of the other detectors; setting this to false also enables a global-duplicate tool-call halt there. Core-client sessions keep a minimal always-on guard regardless of this setting (consecutive identical tool calls, shell inspection-command stagnation, and a per-turn tool-call cap, see model.maxToolCallsPerTurn); daemon/ACP sessions keep the per-turn tool-call cap and an invalid-tool-params stagnation guard. Whether these guards remind or stop is set by model.loopProtection.",
           "type": "boolean",
           "default": true
         },
+        "loopProtection": {
+          "description": "What a loop detector does when it fires. \"warn\" (default) reminds the model once and does not stop the turn, except for content and thought repetition, which happens mid-stream where no reminder can be delivered; \"stop\" keeps every stop point: the always-on guards (identical calls, shell inspection, invalid tool parameters, and stuck repetition past the adaptive cap) remind the model once when the turn reaches their reminder point before the stop, and the opt-in heuristics stop without a reminder; \"off\" neither reminds nor stops and only records telemetry. Budgets (an explicit model.maxToolCallsPerTurn and the 1000-call backstop of the adaptive default) and the duplicate provider tool-call id guard stop in every mode, so under \"warn\" and \"off\" a stuck turn runs until a budget stops it. Applies to the CLI, subagents and daemon/ACP sessions; model.skipLoopDetection still decides whether the heuristic detectors run. Options: warn, stop, off",
+          "enum": [
+            "warn",
+            "stop",
+            "off"
+          ],
+          "default": "warn"
+        },
         "maxToolCallsPerTurn": {
-          "description": "Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations and runtime-scheduled Goal turns each start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it halts only when the model keeps repeating the same call (a stuck loop); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
+          "description": "Per-turn tool-call cap (one model turn plus its tool-result continuations; blocking Stop-hook continuations and runtime-scheduled Goal turns each start a fresh budget). When set explicitly, this value is a hard cap: the turn halts on the next tool call after it is reached (the released behavior). When left unset (default 100), the cap is adaptive: once the turn exceeds 100 it acts only when the model repeats the same call (a stuck loop; see model.loopProtection); a productive turn (diverse calls) continues up to a hard backstop of 1000, which always halts. The adaptive default applies to the interactive TUI, non-interactive (-p / JSON / stream-JSON) core-client runs, and daemon/ACP sessions alike. Daemon/ACP sessions evaluate the cap once per tool batch, before execution: a batch that would cross an explicit cap or the hard backstop is skipped whole, so a turn never executes past either (it can halt up to one batch short), while the adaptive soft cap is exceeded by design, up to the backstop. They also have no in-session disable. An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
           "type": "integer",
           "default": 100
         },
@@ -903,7 +997,7 @@
               "default": true
             },
             "forceGlobalCacheScope": {
-              "description": "Force scope:'global' on Anthropic cache_control entries even when the base URL is not an Anthropic-native origin (e.g. proxy providers like Routify, OpenRouter). Requires the proxy to forward cache_control fields and the prompt-caching-scope-2026-01-05 beta.",
+              "description": "Opt in to scope:'global' on Anthropic cache_control entries. Off by default for every base URL, api.anthropic.com included: the API only accepts a global breakpoint when every preceding block is globally scoped too, which a real tool list cannot satisfy within the four-breakpoint cap. Turn on only for a backend whose validation differs and that forwards cache_control fields plus the prompt-caching-scope-2026-01-05 beta.",
               "type": "boolean",
               "default": false
             },
@@ -1083,6 +1177,79 @@
       "description": "Settings for managed auto-memory.",
       "type": "object",
       "properties": {
+        "mem0": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "baseUrl"
+          ],
+          "properties": {
+            "baseUrl": {
+              "type": "string",
+              "format": "uri"
+            },
+            "envKey": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "default": "MEM0_API_KEY",
+              "description": "Credential environment variable name. Its value may come from the process environment, .env, or the top-level settings env field."
+            },
+            "credentialEnv": {
+              "type": "string",
+              "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+              "deprecated": true,
+              "description": "Legacy alias for envKey. If both are set, their values must match."
+            },
+            "protocol": {
+              "type": "string",
+              "enum": [
+                "mem0-v2",
+                "mem0-v3",
+                "mem0-oss-2026-08",
+                "aliyun-polardb-mysql-2026-08",
+                "mem0-platform-v3",
+                "mem0-oss-rest-2026-08"
+              ],
+              "default": "mem0-v2"
+            },
+            "scope": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "userId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "agentId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                },
+                "appId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              }
+            },
+            "enableWrites": {
+              "type": "boolean",
+              "default": false
+            },
+            "allowInsecureHttp": {
+              "type": "boolean",
+              "default": false
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 30000,
+              "default": 5000
+            }
+          },
+          "description": "Bundled Mem0 connection. Configure in user or system settings."
+        },
         "enableManagedAutoMemory": {
           "description": "Enable background extraction of memories from conversations.",
           "type": "boolean",
@@ -1104,12 +1271,12 @@
           "default": true
         },
         "agentTimeoutMinutes": {
-          "description": "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults.",
+          "description": "Max runtime in minutes for background memory agents (extraction, dream, remember, skill review, memory metadata migration). Unset uses each agent's built-in default (2–5 minutes); 0 disables the time limit. Useful for slow local models that need longer than the defaults. User/System/SystemDefaults scopes only; Workspace values are ignored with a warning.",
           "type": "number",
           "minimum": 0
         },
         "agentMaxTurns": {
-          "description": "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); 0 disables the turn limit.",
+          "description": "Max turns for background memory agents (extraction, dream, remember, skill review). Unset uses each agent's built-in default (5–8); 0 disables the turn limit. User/System/SystemDefaults scopes only; Workspace values are ignored with a warning.",
           "type": "number",
           "minimum": 0
         },
@@ -1353,6 +1520,11 @@
           "type": "boolean",
           "default": false
         },
+        "freeform": {
+          "description": "Use raw text input for the Code Mode exec tool on OpenAI Responses models. Effective only when tools.codeModeOnly is true and the selected model uses wireApi \"responses\". Enable only for endpoints that support Responses Custom Tools.",
+          "type": "boolean",
+          "default": false
+        },
         "sandbox": {
           "anyOf": [
             {
@@ -1369,7 +1541,7 @@
           "type": "string"
         },
         "webSearch": {
-          "description": "Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR, WEB_SEARCH_TIMEOUT_MS, WEB_SEARCH_MAX_PER_SESSION. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.",
+          "description": "Settings for the built-in WebSearch tool (DashScope Responses API backend). On by default at startup for Alibaba ModelStudio Standard API Key / Token Plan and OpenAI-compatible entries on recognized DashScope Responses hosts with a direct key; set enabled=false to turn it off. Which providers can activate the tool is decided at startup; once active, the search backend follows the currently selected model on the next search. Fully env-configurable for environments without settings.json: ENABLE_WEB_SEARCH, WEB_SEARCH_MODEL, WEB_SEARCH_BASE_URL, WEB_SEARCH_API_KEY (falls back to DASHSCOPE_API_KEY), WEB_SEARCH_EXTRACTOR, WEB_SEARCH_TIMEOUT_MS, WEB_SEARCH_MAX_PER_SESSION, WEB_SEARCH_ALLOWED_HOSTS. Note: baseUrl and API key are env-only (WEB_SEARCH_BASE_URL / WEB_SEARCH_API_KEY) and cannot be set in settings.json.",
           "type": "object",
           "properties": {
             "enabled": {
@@ -1396,6 +1568,13 @@
               "type": "integer",
               "minimum": 1,
               "maximum": 10000
+            },
+            "allowedHosts": {
+              "description": "Extra host suffixes trusted for an explicitly configured search backend, for gateways that serve the DashScope Responses API under their own domain (exact host, or any subdomain of a listed suffix). Empty by default, so behaviour is unchanged unless set. Automatic derivation never uses this list, so a custom host is only used when WEB_SEARCH_BASE_URL or a modelProviders entry names it. The configured host receives the API key. Env override: WEB_SEARCH_ALLOWED_HOSTS (comma-separated).",
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
             }
           }
         },
@@ -1807,7 +1986,7 @@
         "maxParallelAgents": {
           "type": "integer",
           "minimum": 1,
-          "description": "Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Use maxParallelAgentsByModel to cap a specific model below this global limit."
+          "description": "Global maximum number of background sub-agents that can run concurrently. Additional background agents wait in a queue until a slot is available. Foreground per-model launches are bounded by maxParallelAgentsByModel and do not consume this global background budget. Use maxParallelAgentsByModel to cap a specific model below this global limit."
         },
         "maxParallelAgentsByModel": {
           "type": "object",
@@ -1815,7 +1994,7 @@
             "type": "integer",
             "minimum": 1
           },
-          "description": "Per-model maximum number of background sub-agents that can run concurrently, keyed by model ID (e.g. { \"qwen3-max\": 2 }). Useful when a model has a lower concurrency capacity. Takes precedence over the global maxParallelAgents for the matched model; models not listed here fall back to the global limit."
+          "description": "Per-model maximum number of top-level sub-agents that can run concurrently on a given model, keyed by model ID (e.g. { \"qwen3-max\": 2 }). Bounds both background and foreground launches: a foreground launch on a capped model queues inline (showing \"Waiting for a model slot\") until a slot frees. Applies to top-level launches only — nested sub-agents, teammate fan-out, foreground interactive forks, external-executor subagents, and agents dispatched by a workflow script are not capped by this setting. For background launches the tighter of this cap and the global maxParallelAgents binds; foreground launches are bounded by this cap alone. Models not listed here fall back to the global maxParallelAgents for background launches and are uncapped for foreground launches — list a model here to bound its foreground fan-out."
         },
         "displayMode": {
           "description": "Display mode for multi-agent sessions. Currently only \"in-process\" is supported. Options: in-process",
@@ -4343,6 +4522,16 @@
       "description": "Settings to enable experimental features.",
       "type": "object",
       "properties": {
+        "generatedUi": {
+          "description": "Show interactive views from bundled Generated UI in supported local sessions, such as Web Shell. Enabled by default; set to false to turn it off. Restart the owning session to apply changes.",
+          "type": "boolean",
+          "default": true
+        },
+        "mods": {
+          "description": "Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.",
+          "type": "boolean",
+          "default": false
+        },
         "liveVoice": {
           "description": "Experimental realtime voice conversations through Qwen Live Host on macOS WebShell.",
           "type": "object",
@@ -4409,6 +4598,28 @@
           "description": "Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.",
           "type": "boolean",
           "default": false
+        },
+        "unifiedAgentLoop": {
+          "description": "Run headless sessions (`-p` and stream-json) and the model rounds of ACP user prompts (Zed, VS Code, Web Shell) on the shared agent loop (experimental). Other turns and surfaces keep their current loop for now. Can also be enabled via QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 environment variable.",
+          "type": "boolean",
+          "default": false
+        },
+        "agentCollaboration": {
+          "description": "Enable persistent workspace Agents that you can @-mention in a chat session (experimental). Each mentioned Agent answers in the same session from its own native session. Independent of Agent Team: neither flag implies the other. Enabling permits collaboration; opening an Agent to outside callers, trusting a connection and registering a host each still require their own explicit configuration. Can also be enabled via QWEN_CODE_ENABLE_AGENT_COLLABORATION=1.",
+          "type": "boolean",
+          "default": false
+        },
+        "agentChainLimit": {
+          "description": "Maximum number of agent-to-agent hops when Agents @-mention each other in a chat session (experimental). A message from you resets the count. 0 means unlimited; every hop is a separate paid Agent run, and \"Stop all agents\" is always available.",
+          "type": "number",
+          "default": 0,
+          "minimum": 0
+        },
+        "agentTokenBudget": {
+          "description": "Tokens Agents may spend in one chat session between two of your messages before they stop waking each other (experimental). Agents still answer what they were asked; your next message resets the budget. 0 means unlimited.",
+          "type": "number",
+          "default": 1000000,
+          "minimum": 0
         },
         "artifact": {
           "description": "Enable artifact tools. Enabled by default. In interactive, non-SDK sessions, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Non-SDK daemon sessions can use the metadata-only record_artifact tool. Set this to false or use QWEN_CODE_DISABLE_ARTIFACT=1 to disable both.",

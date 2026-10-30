@@ -46,3 +46,14 @@ describe('boot.preAuthHostGate', () => {
     expect(zh).toMatch(/一致/);
   });
 });
+
+describe('composer.editIdentityUnavailable', () => {
+  it('distinguishes missing checkpoint identities in both locales', () => {
+    expect(
+      createChromeStrings('en')('composer.editIdentityUnavailable'),
+    ).toContain('no prompt identity');
+    expect(
+      createChromeStrings('zh-CN')('composer.editIdentityUnavailable'),
+    ).toContain('身份');
+  });
+});

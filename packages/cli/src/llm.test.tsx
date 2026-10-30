@@ -67,6 +67,7 @@ const mockStartNonInteractiveOpenAILogHousekeeping = vi.hoisted(() => vi.fn());
 const mockStopNonInteractiveOpenAILogHousekeeping = vi.hoisted(() =>
   vi.fn(async () => {}),
 );
+const mockAssertFullIcuAvailable = vi.hoisted(() => vi.fn());
 const mockUpdateBeforeRelaunch = vi.hoisted(() => vi.fn());
 const mockGetInstallationInfo = vi.hoisted(() => vi.fn());
 const mockRegisterSession = vi.hoisted(
@@ -226,6 +227,7 @@ vi.mock('./utils/stdioHelpers.js', () => ({
 }));
 
 vi.mock('./utils/relaunch.js', () => ({
+  exitWhenSupervisorExits: vi.fn(),
   relaunchAppInChildProcess: vi.fn(),
   relaunchOnExitCode: vi.fn((fn: () => Promise<number>) => fn()),
 }));
@@ -286,6 +288,10 @@ vi.mock('./services/housekeeping/scheduler.js', async (importOriginal) => {
       mockStopNonInteractiveOpenAILogHousekeeping(),
   };
 });
+
+vi.mock('./startup/icu-check.js', () => ({
+  assertFullIcuAvailable: mockAssertFullIcuAvailable,
+}));
 
 vi.mock('./commands/extensions/list.js', () => ({
   handleList: mockHandleListExtensions,
@@ -429,6 +435,95 @@ describe('llm.tsx main function', () => {
     }
     vi.restoreAllMocks();
   });
+
+  it.each([
+    [false, undefined, undefined],
+    [true, undefined, undefined],
+    [false, 'private-parent', undefined],
+    [true, 'private-parent', undefined],
+    [false, '', undefined],
+    [true, '', undefined],
+    [false, undefined, false],
+    [false, undefined, true],
+  ] as const)(
+    'H01 opts into ancestor trust at sandbox=%s from provenance=%s with workspace override=%s',
+    async (sandbox, capability, workspaceTrustOverride) => {
+      const originalArgv = process.argv;
+      process.argv = ['node', 'script.js', '--acp'];
+      vi.stubEnv('QWEN_CODE_PRIVATE_ACP_CAPABILITY', capability);
+      vi.stubEnv('QWEN_CODE_NO_RELAUNCH', '1');
+      const { loadCliConfig, parseArguments } = await import(
+        './config/config.js'
+      );
+      const { loadSettings } = await import('./config/settings.js');
+      const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+      vi.mocked(parseArguments).mockResolvedValue({
+        acp: true,
+        extensions: [],
+      } as unknown as CliArgs);
+      vi.mocked(loadSandboxConfig).mockResolvedValue(
+        sandbox ? { command: 'sandbox-exec', image: 'fixture' } : undefined,
+      );
+      vi.mocked(loadSettings).mockImplementation(() => {
+        if (capability === undefined) {
+          process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'] =
+            'forged-by-settings';
+        } else {
+          delete process.env['QWEN_CODE_PRIVATE_ACP_CAPABILITY'];
+        }
+        return {
+          errors: [],
+          merged: {
+            advanced: {},
+            security: {
+              auth: {},
+              ...(workspaceTrustOverride !== undefined
+                ? { folderTrust: { enabled: workspaceTrustOverride } }
+                : {}),
+            },
+            ui: {},
+          },
+          setValue: vi.fn(),
+          forScope: (scope: string) => ({
+            settings:
+              workspaceTrustOverride !== undefined && scope === 'User'
+                ? {
+                    security: {
+                      folderTrust: { enabled: !workspaceTrustOverride },
+                    },
+                  }
+                : {},
+            originalSettings: {},
+            path: '',
+          }),
+          migrationWarnings: [],
+          getSystemHooks: () => undefined,
+          getUserHooks: () => undefined,
+          getProjectHooks: () => undefined,
+        } as never;
+      });
+      const reachedConfig = new Error('ancestor-config-construction');
+      vi.mocked(loadCliConfig).mockClear();
+      vi.mocked(loadCliConfig).mockRejectedValueOnce(reachedConfig);
+      try {
+        await expect(main()).rejects.toBe(reachedConfig);
+        const provider =
+          vi.mocked(loadCliConfig).mock.calls[0]?.[9]
+            ?.workflowAncestorTrustProvider;
+        if (capability === undefined) {
+          expect(provider).toBeTypeOf('function');
+          await expect(
+            provider?.([llmTestHome], join(llmTestHome, 'project')),
+          ).resolves.toEqual([workspaceTrustOverride !== false]);
+        } else {
+          expect(provider).toBeUndefined();
+        }
+      } finally {
+        process.argv = originalArgv;
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('relaunches before config load and preserves only private managed ACP activation', async () => {
     const processExitSpy = vi
@@ -728,6 +823,41 @@ describe('llm.tsx main function', () => {
     expect(relaunchAppInChildProcess).toHaveBeenCalled();
     processExitSpy.mockRestore();
   });
+
+  const managedHost = { acp: true, acpExecutionEngine: 'managed' };
+  const privateParent = {
+    QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
+  };
+  it.each([
+    ['without the private capability', managedHost, {}],
+    ['outside ACP mode', { acpExecutionEngine: 'managed' }, privateParent],
+    [
+      'in the Conversations runtime',
+      managedHost,
+      { ...privateParent, QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1' },
+    ],
+    [
+      'given twice',
+      { acp: true, acpExecutionEngine: ['managed', 'managed'] },
+      privateParent,
+    ],
+  ])(
+    'refuses a Managed engine host %s',
+    async (_label, args, env: Record<string, string>) => {
+      const { loadSettings } = await import('./config/settings.js');
+      const { parseArguments } = await import('./config/config.js');
+      vi.mocked(parseArguments).mockResolvedValue(args as unknown as CliArgs);
+      for (const [key, value] of Object.entries(env)) vi.stubEnv(key, value);
+      try {
+        await expect(main()).rejects.toThrow(
+          '--acp-execution-engine is reserved for hosts spawned by qwen serve.',
+        );
+        expect(loadSettings).not.toHaveBeenCalled();
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    },
+  );
 
   it('rejects a Conversations marker whose value is not the exact enable value', async () => {
     const processExitSpy = vi
@@ -1045,6 +1175,29 @@ describe('llm.tsx main function', () => {
       QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
       QWEN_CODE_PRIVATE_CONVERSATIONS_RUNTIME: '1',
     });
+  });
+
+  it('follows its relaunch supervisor before reading any arguments', async () => {
+    vi.clearAllMocks();
+    vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new MockProcessExitError(code);
+    });
+    const { parseArguments } = await import('./config/config.js');
+    const { exitWhenSupervisorExits } = await import('./utils/relaunch.js');
+    vi.mocked(parseArguments).mockRejectedValueOnce(
+      new MockProcessExitError(1),
+    );
+
+    try {
+      await main();
+    } catch (e) {
+      if (!(e instanceof MockProcessExitError)) throw e;
+    }
+
+    expect(exitWhenSupervisorExits).toHaveBeenCalledOnce();
+    expect(
+      vi.mocked(exitWhenSupervisorExits).mock.invocationCallOrder[0],
+    ).toBeLessThan(vi.mocked(parseArguments).mock.invocationCallOrder[0]!);
   });
 
   it('handles --list-extensions before sandbox and app config startup', async () => {
@@ -1672,7 +1825,7 @@ describe('llm.tsx main function', () => {
       // settingsWatcher: not started in bare mode
       undefined,
       undefined,
-      undefined,
+      { workflowAncestorTrustProvider: expect.any(Function) },
       expect.any(Function),
     );
   });
@@ -2800,6 +2953,7 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
       telemetryLogPrompts: undefined,
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
+      disableMcpServer: undefined,
       mcpConfig: undefined,
       allowedTools: undefined,
       acp: undefined,
@@ -2877,6 +3031,58 @@ describe('llm.tsx OpenTUI renderer dispatch', () => {
     await main();
 
     expect(mockStartPostRenderPrefetches).toHaveBeenCalled();
+  });
+
+  it('probes ICU on the interactive path before the UI renders', async () => {
+    await interactiveMainSetup();
+    mockAssertFullIcuAvailable.mockClear();
+    mockStartPostRenderPrefetches.mockClear();
+
+    await main();
+
+    expect(mockAssertFullIcuAvailable).toHaveBeenCalledTimes(1);
+    const probeOrder = mockAssertFullIcuAvailable.mock.invocationCallOrder[0]!;
+    const renderOrder =
+      mockStartPostRenderPrefetches.mock.invocationCallOrder[0]!;
+    expect(probeOrder).toBeLessThan(renderOrder);
+  });
+
+  it('never probes ICU on the headless path', async () => {
+    const { loadCliConfig } = await import('./config/config.js');
+    await interactiveMainSetup();
+    // Same fully-mocked setup as the interactive case, one bit flipped: the
+    // non-interactive branch must stay untouched by the ICU gate.
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      ...sessionRegistryConfigStub,
+      isInteractive: () => false,
+      getQuestion: () => '',
+      getSandbox: () => false,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      getModelProvidersConfig: () => undefined,
+      initialize: vi.fn(),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getMemoryFileCount: () => 0,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getUsageStatisticsEnabled: () => true,
+      getSessionId: () => 'test-session-id',
+      isTelemetryInitializationDeferred: () => true,
+    } as unknown as Config);
+    mockAssertFullIcuAvailable.mockClear();
+    try {
+      await main();
+    } catch {
+      // The headless tail (auth validation, session plumbing) is not the
+      // subject here; the gate sits at configConstructionEnd, before it.
+    }
+    expect(mockAssertFullIcuAvailable).not.toHaveBeenCalled();
   });
 
   it('hands the screen-reader flag to the renderer gate', async () => {
@@ -3029,6 +3235,7 @@ describe('llm.tsx main function kitty protocol', () => {
       telemetryLogPrompts: undefined,
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
+      disableMcpServer: undefined,
       mcpConfig: undefined,
       allowedTools: undefined,
       acp: undefined,
@@ -3159,6 +3366,7 @@ describe('llm.tsx main function kitty protocol', () => {
       telemetryLogPrompts: undefined,
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
+      disableMcpServer: undefined,
       mcpConfig: undefined,
       allowedTools: undefined,
       acp: undefined,
@@ -3288,6 +3496,7 @@ describe('llm.tsx main function kitty protocol', () => {
       telemetryLogPrompts: undefined,
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
+      disableMcpServer: undefined,
       mcpConfig: undefined,
       allowedTools: undefined,
       acp: undefined,
@@ -3413,6 +3622,7 @@ describe('llm.tsx main function kitty protocol', () => {
       telemetryLogPrompts: undefined,
       telemetryOutfile: undefined,
       allowedMcpServerNames: undefined,
+      disableMcpServer: undefined,
       mcpConfig: undefined,
       allowedTools: undefined,
       acp: undefined,

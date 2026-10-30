@@ -28,6 +28,21 @@ const FRESH: AutoModeDenialState = {
   totalBlock: 0,
   totalUnavailable: 0,
 };
+// Total-denial cap and consecutive-block cap reached at the same time.
+const BOTH_CAPS: AutoModeDenialState = {
+  consecutiveBlock: AUTO_MODE_DENIAL_LIMITS.maxConsecutiveBlock,
+  consecutiveUnavailable: 0,
+  totalBlock: AUTO_MODE_DENIAL_LIMITS.maxTotalDenials,
+  totalUnavailable: 0,
+};
+const NO_FALLBACK = { fallback: false };
+const fallbackFor = (reason: string) => ({ fallback: true, reason });
+const RETRY = fallbackFor('classifier_blocked_retry');
+
+/** Applies each transition in order, starting from FRESH. */
+const apply = (
+  ...steps: Array<(s: AutoModeDenialState) => AutoModeDenialState>
+) => steps.reduce((s, step) => step(s), FRESH);
 
 describe('createDenialState', () => {
   it('starts with all counters at zero', () => {
@@ -73,13 +88,11 @@ describe('recordBlock', () => {
   });
 
   it('cross-resets consecutiveUnavailable', () => {
-    let s: AutoModeDenialState = FRESH;
-    s = recordUnavailable(s);
+    const s = apply(recordUnavailable);
     expect(s.consecutiveUnavailable).toBe(1);
-    s = recordBlock(s);
-    expect(s.consecutiveUnavailable).toBe(0);
-    // Total counters are independent.
-    expect(s.totalUnavailable).toBe(1);
+    const next = recordBlock(s);
+    expect(next.consecutiveUnavailable).toBe(0);
+    expect(next.totalUnavailable).toBe(1); // totals are independent
   });
 
   it('records only a digest for the exact action eligible for manual retry', () => {
@@ -97,27 +110,20 @@ describe('recordUnavailable', () => {
   });
 
   it('cross-resets consecutiveBlock', () => {
-    let s: AutoModeDenialState = FRESH;
-    s = recordBlock(s);
-    s = recordBlock(s);
+    const s = apply(recordBlock, recordBlock);
     expect(s.consecutiveBlock).toBe(2);
-    s = recordUnavailable(s);
-    expect(s.consecutiveBlock).toBe(0);
-    // Total counters are independent.
-    expect(s.totalBlock).toBe(2);
+    const next = recordUnavailable(s);
+    expect(next.consecutiveBlock).toBe(0);
+    expect(next.totalBlock).toBe(2); // totals are independent
   });
 });
 
 describe('recordAllow', () => {
   it('resets both consecutive counters', () => {
-    let s: AutoModeDenialState = FRESH;
-    s = recordBlock(s);
-    s = recordBlock(s);
-    s = recordAllow(s);
+    const s = apply(recordBlock, recordBlock, recordAllow);
     expect(s.consecutiveBlock).toBe(0);
     expect(s.consecutiveUnavailable).toBe(0);
-    // Totals stay (telemetry only).
-    expect(s.totalBlock).toBe(2);
+    expect(s.totalBlock).toBe(2); // totals stay (telemetry only)
   });
 
   it('returns the same reference when nothing changes', () => {
@@ -128,31 +134,22 @@ describe('recordAllow', () => {
 
 describe('shouldFallback', () => {
   it('returns no fallback for fresh state', () => {
-    expect(shouldFallback(FRESH)).toEqual({ fallback: false });
+    expect(shouldFallback(FRESH)).toEqual(NO_FALLBACK);
   });
 
   it('triggers fallback after 3 consecutive blocks', () => {
-    let s: AutoModeDenialState = FRESH;
-    s = recordBlock(s);
-    s = recordBlock(s);
-    expect(shouldFallback(s)).toEqual({ fallback: false });
-    s = recordBlock(s);
-    expect(shouldFallback(s)).toEqual({
-      fallback: true,
-      reason: 'consecutive_block',
-    });
+    const s = apply(recordBlock, recordBlock);
+    expect(shouldFallback(s)).toEqual(NO_FALLBACK);
+    expect(shouldFallback(recordBlock(s))).toEqual(
+      fallbackFor('consecutive_block'),
+    );
   });
 
   it('routes only an exact retry of the last blocked action to manual approval', () => {
     const blocked = recordBlock(FRESH, 'blocked-action');
 
-    expect(shouldFallback(blocked, 'blocked-action')).toEqual({
-      fallback: true,
-      reason: 'classifier_blocked_retry',
-    });
-    expect(shouldFallback(blocked, 'changed-action')).toEqual({
-      fallback: false,
-    });
+    expect(shouldFallback(blocked, 'blocked-action')).toEqual(RETRY);
+    expect(shouldFallback(blocked, 'changed-action')).toEqual(NO_FALLBACK);
   });
 
   it('consumes the exact-action retry before manual confirmation', () => {
@@ -160,28 +157,21 @@ describe('shouldFallback', () => {
     const consumed = consumePendingManualRetry(blocked);
 
     expect(consumed.pendingManualRetryFingerprint).toBeUndefined();
-    expect(shouldFallback(consumed, 'blocked-action')).toEqual({
-      fallback: false,
-    });
+    expect(shouldFallback(consumed, 'blocked-action')).toEqual(NO_FALLBACK);
   });
 
   it('preserves an exact-action retry across unrelated allowed work', () => {
     const blocked = recordBlock(FRESH, 'blocked-action');
     const allowed = recordAllow(blocked, 'allowed-action');
 
-    expect(shouldFallback(allowed, 'blocked-action')).toEqual({
-      fallback: true,
-      reason: 'classifier_blocked_retry',
-    });
+    expect(shouldFallback(allowed, 'blocked-action')).toEqual(RETRY);
   });
 
   it('clears the retry when that exact action is allowed', () => {
     const blocked = recordBlock(FRESH, 'blocked-action');
     const allowed = recordAllow(blocked, 'blocked-action');
 
-    expect(shouldFallback(allowed, 'blocked-action')).toEqual({
-      fallback: false,
-    });
+    expect(shouldFallback(allowed, 'blocked-action')).toEqual(NO_FALLBACK);
   });
 
   it.each([
@@ -191,21 +181,17 @@ describe('shouldFallback', () => {
   ])('preserves an exact-action retry across %s', (_name, transition) => {
     const blocked = recordBlock(FRESH, 'blocked-action');
 
-    expect(shouldFallback(transition(blocked), 'blocked-action')).toEqual({
-      fallback: true,
-      reason: 'classifier_blocked_retry',
-    });
+    expect(shouldFallback(transition(blocked), 'blocked-action')).toEqual(
+      RETRY,
+    );
   });
 
   it('triggers fallback after 2 consecutive unavailable', () => {
-    let s: AutoModeDenialState = FRESH;
-    s = recordUnavailable(s);
-    expect(shouldFallback(s)).toEqual({ fallback: false });
-    s = recordUnavailable(s);
-    expect(shouldFallback(s)).toEqual({
-      fallback: true,
-      reason: 'consecutive_unavailable',
-    });
+    const s = apply(recordUnavailable);
+    expect(shouldFallback(s)).toEqual(NO_FALLBACK);
+    expect(shouldFallback(recordUnavailable(s))).toEqual(
+      fallbackFor('consecutive_unavailable'),
+    );
   });
 
   it('triggers fallback after 20 total denials even when they are not consecutive', () => {
@@ -215,64 +201,45 @@ describe('shouldFallback', () => {
       s = recordAllow(s); // cycle block→allow so consecutive resets each round
     }
     expect(s.totalBlock + s.totalUnavailable).toBe(19);
-    expect(shouldFallback(s)).toEqual({ fallback: false });
+    expect(shouldFallback(s)).toEqual(NO_FALLBACK);
     s = recordBlock(s);
     expect(s.totalBlock + s.totalUnavailable).toBe(20);
-    expect(shouldFallback(s)).toEqual({
-      fallback: true,
-      reason: 'total_denial',
-    });
+    expect(shouldFallback(s)).toEqual(fallbackFor('total_denial'));
   });
 
   it('gives total-denial fallback precedence over consecutive thresholds', () => {
-    const s: AutoModeDenialState = {
-      consecutiveBlock: AUTO_MODE_DENIAL_LIMITS.maxConsecutiveBlock,
-      consecutiveUnavailable: 0,
-      totalBlock: AUTO_MODE_DENIAL_LIMITS.maxTotalDenials,
-      totalUnavailable: 0,
-    };
-
-    expect(shouldFallback(s)).toEqual({
-      fallback: true,
-      reason: 'total_denial',
-    });
+    expect(shouldFallback(BOTH_CAPS)).toEqual(fallbackFor('total_denial'));
   });
 });
 
 describe('recordFallbackApprove', () => {
   it('resets consecutiveBlock so AUTO flow can resume', () => {
-    let s: AutoModeDenialState = FRESH;
-    s = recordBlock(s);
-    s = recordBlock(s);
-    s = recordBlock(s);
+    const s = apply(recordBlock, recordBlock, recordBlock);
     expect(shouldFallback(s).fallback).toBe(true);
-    s = recordFallbackApprove(s);
-    expect(s.consecutiveBlock).toBe(0);
-    expect(shouldFallback(s).fallback).toBe(false);
+    const next = recordFallbackApprove(s);
+    expect(next.consecutiveBlock).toBe(0);
+    expect(shouldFallback(next).fallback).toBe(false);
   });
 
   it('resets consecutiveUnavailable so AUTO flow can resume after a transient classifier blip', () => {
-    // Regression guard: a transient classifier API outage would push
-    // consecutiveUnavailable to its threshold and trigger fallback. Before
-    // this fix, recordFallbackApprove only reset consecutiveBlock, so
-    // every subsequent call kept seeing shouldFallback === true and the
-    // session was permanently downgraded to manual approval until the
-    // user toggled ApprovalMode. Symmetric reset matches recordAllow.
-    let s: AutoModeDenialState = FRESH;
-    s = recordUnavailable(s);
-    s = recordUnavailable(s);
+    // Regression guard: a transient classifier outage pushed
+    // consecutiveUnavailable to its threshold, and recordFallbackApprove used
+    // to reset only consecutiveBlock, so the session stayed on manual approval
+    // until the user toggled ApprovalMode. Symmetric reset matches recordAllow.
+    const s = apply(recordUnavailable, recordUnavailable);
     expect(shouldFallback(s).fallback).toBe(true);
-    s = recordFallbackApprove(s);
-    expect(s.consecutiveUnavailable).toBe(0);
-    expect(shouldFallback(s).fallback).toBe(false);
+    const next = recordFallbackApprove(s);
+    expect(next.consecutiveUnavailable).toBe(0);
+    expect(shouldFallback(next).fallback).toBe(false);
   });
 
   it('preserves total counters below the total denial cap', () => {
-    let s: AutoModeDenialState = FRESH;
-    s = recordBlock(s);
-    s = recordUnavailable(s);
-    s = recordUnavailable(s);
-    s = recordFallbackApprove(s);
+    const s = apply(
+      recordBlock,
+      recordUnavailable,
+      recordUnavailable,
+      recordFallbackApprove,
+    );
     expect(s.totalBlock).toBe(1);
     expect(s.totalUnavailable).toBe(2);
   });
@@ -280,13 +247,9 @@ describe('recordFallbackApprove', () => {
   it('resets total counters after the user approves a total-cap fallback prompt', () => {
     let s: AutoModeDenialState = FRESH;
     for (let i = 0; i < AUTO_MODE_DENIAL_LIMITS.maxTotalDenials; i++) {
-      s = recordBlock(s);
-      s = recordAllow(s);
+      s = recordAllow(recordBlock(s));
     }
-    expect(shouldFallback(s)).toEqual({
-      fallback: true,
-      reason: 'total_denial',
-    });
+    expect(shouldFallback(s)).toEqual(fallbackFor('total_denial'));
 
     s = recordFallbackApprove(s);
 
@@ -294,7 +257,7 @@ describe('recordFallbackApprove', () => {
     expect(s.consecutiveUnavailable).toBe(0);
     expect(s.totalBlock).toBe(0);
     expect(s.totalUnavailable).toBe(0);
-    expect(shouldFallback(s)).toEqual({ fallback: false });
+    expect(shouldFallback(s)).toEqual(NO_FALLBACK);
   });
 
   it('preserves an unrelated retry when resetting the total denial cap', () => {
@@ -306,56 +269,40 @@ describe('recordFallbackApprove', () => {
 
     expect(
       shouldFallback(recordFallbackApprove(state), 'blocked-action'),
-    ).toEqual({
-      fallback: true,
-      reason: 'classifier_blocked_retry',
-    });
+    ).toEqual(RETRY);
   });
 
   it('resets all counters when total and consecutive caps overlap', () => {
-    const s: AutoModeDenialState = {
-      consecutiveBlock: AUTO_MODE_DENIAL_LIMITS.maxConsecutiveBlock,
-      consecutiveUnavailable: 0,
-      totalBlock: AUTO_MODE_DENIAL_LIMITS.maxTotalDenials,
-      totalUnavailable: 0,
-    };
-
-    expect(recordFallbackApprove(s)).toEqual(FRESH);
+    expect(recordFallbackApprove(BOTH_CAPS)).toEqual(FRESH);
   });
 
   it('is a no-op when both consecutive counters are already zero', () => {
-    const s: AutoModeDenialState = FRESH;
-    expect(recordFallbackApprove(s)).toBe(s);
+    expect(recordFallbackApprove(FRESH)).toBe(FRESH);
   });
 });
 
 describe('resetDenialState', () => {
   it('clears every counter (e.g. when user switches ApprovalMode)', () => {
-    let s: AutoModeDenialState = FRESH;
-    s = recordBlock(s);
-    s = recordUnavailable(s);
-    s = recordBlock(s, 'blocked-action');
-    s = resetDenialState();
-    expect(s).toEqual(FRESH);
+    apply(recordBlock, recordUnavailable, (s) =>
+      recordBlock(s, 'blocked-action'),
+    );
+    expect(resetDenialState()).toEqual(FRESH);
   });
 });
 
 describe('isApproveOutcome', () => {
-  // Single source of truth for "user said yes" — shared between the CLI
-  // scheduler and the ACP Session. Drift between them was a previous
-  // round's bug; this test guards both call sites at once.
-  // Enumerated from the enum rather than hand-listed. The hand-written list
-  // had drifted from it -- `proceed_always_server` and `proceed_always_tool`
-  // were missing while the test claimed to cover "every proceed_* outcome" --
-  // so a future addition to the enum now fails here instead of silently
-  // reading as a denial.
+  // Single source of truth for "user said yes", shared by the CLI scheduler
+  // and the ACP Session (drift between them was an earlier bug). Enumerated
+  // from the enum because the hand-written list had drifted (it missed
+  // `proceed_always_server` and `proceed_always_tool`); a new enum value now
+  // fails here instead of silently reading as a denial.
   const proceedOutcomes = Object.values(ToolConfirmationOutcome).filter(
     (outcome) => outcome.startsWith('proceed_'),
   );
 
   it('covers every proceed_* value the enum declares', () => {
-    // Guards the filter itself: if the naming convention changes, the
-    // parametrised test below would silently shrink to nothing.
+    // Guards the filter: if the naming convention changes, the table below
+    // would silently shrink to nothing.
     expect(proceedOutcomes.length).toBeGreaterThanOrEqual(7);
   });
 

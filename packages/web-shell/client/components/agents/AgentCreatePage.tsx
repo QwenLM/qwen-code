@@ -44,12 +44,50 @@ import {
   selectBuiltInTools,
   selectDiscoverableMcpServerNames,
 } from './agent-tool-options';
+import {
+  AGENT_PROGRAMS,
+  programLabel,
+  runtimePrograms,
+  type AgentProgramView,
+} from '../workspace-agents/agents-view-logic';
 
 interface AgentCreatePageProps {
+  workspaceCwd?: string;
   initialScope?: 'workspace' | 'global';
   agent?: DaemonWorkspaceAgentDetail;
   onCancel: () => void;
   onCreated: (name: string) => void;
+  executionHosts?: readonly {
+    id: string;
+    label: string;
+    status: 'online' | 'offline';
+    provider?: string;
+    /** Program ids the runtime reported it can run. */
+    programs?: readonly string[];
+    workspaceCwd?: string;
+  }[];
+  /** Preselects the runtime, e.g. right after it joined. */
+  initialHostId?: string;
+  /**
+   * Program ids this computer's daemon reported it can run. Absent (an older
+   * daemon) means Qwen Code only.
+   */
+  localPrograms?: readonly string[];
+  onSaveWorkspaceAgent?: (input: {
+    name: string;
+    description?: string;
+    instructions?: string;
+    agentType?: string;
+    model?: string;
+    maxConcurrentRuns: number;
+    execution?:
+      | { mode: 'local'; provider?: AgentProgramView }
+      | {
+          mode: 'managed-host';
+          hostIds: string[];
+          provider?: AgentProgramView;
+        };
+  }) => Promise<void>;
 }
 
 type Translate = ReturnType<typeof useI18n>['t'];
@@ -86,6 +124,7 @@ function toggleSelection(
 }
 
 const approvalModes = ['inherit', ...DAEMON_APPROVAL_MODES];
+const NO_ROLE = '__none__';
 const MCP_DISCOVERY_POLL_MS = 1_500;
 const MCP_DISCOVERY_MAX_ATTEMPTS = 40;
 
@@ -94,14 +133,28 @@ export function AgentCreatePage({
   agent,
   onCancel,
   onCreated,
+  executionHosts = [],
+  workspaceCwd,
+  initialHostId,
+  localPrograms,
+  onSaveWorkspaceAgent,
 }: AgentCreatePageProps) {
   const { t } = useI18n();
-  const { createAgent, updateAgent, generateContent } = useAgents({
-    autoLoad: false,
+  const workspaceAgentMode = onSaveWorkspaceAgent !== undefined;
+  const {
+    createAgent,
+    updateAgent,
+    generateContent,
+    agents: roles,
+  } = useAgents({
+    // The role list is only offered when creating a workspace Agent.
+    autoLoad: workspaceAgentMode,
   });
   const toolsResource = useTools({ autoLoad: false });
   const mcpResource = useMcp({ autoLoad: false });
-  const settingsResource = useSettings({ autoLoad: true });
+  const settingsResource = useSettings({
+    autoLoad: !workspaceAgentMode,
+  });
   const loadMcpTools = mcpResource.loadTools;
   const initializeMcp = mcpResource.initialize;
   const reloadMcpConfig = mcpResource.reloadConfig;
@@ -128,6 +181,26 @@ export function AgentCreatePage({
   const selectableApprovalModes =
     approvalMode === 'bubble' ? [...approvalModes, 'bubble'] : approvalModes;
   const [maxTurns, setMaxTurns] = useState(agent?.maxTurns?.toString() ?? '');
+  const [maxConcurrentRuns, setMaxConcurrentRuns] = useState('1');
+  // What this computer can run; Qwen Code when the daemon reported nothing.
+  const localRuntimePrograms = runtimePrograms({ programs: localPrograms });
+  // Undefined when the chosen runtime offers no program at all: nothing is
+  // selected and Save stays disabled, rather than asserting Qwen Code.
+  const [executionProvider, setExecutionProvider] = useState<
+    AgentProgramView | undefined
+  >(() => {
+    const initialHost = executionHosts.find(
+      (host) => host.id === initialHostId,
+    );
+    const offered = initialHost
+      ? runtimePrograms(initialHost)
+      : localRuntimePrograms;
+    return offered[0];
+  });
+  const [executionHostIds, setExecutionHostIds] = useState(
+    () => new Set<string>(initialHostId ? [initialHostId] : []),
+  );
+  const [role, setRole] = useState('');
   const [color, setColor] = useState(agent?.color ?? 'inherit');
   const [selectedMcpServers, setSelectedMcpServers] = useState(
     () => new Set(Object.keys(agent?.mcpServers ?? {})),
@@ -190,8 +263,12 @@ export function AgentCreatePage({
   );
   const activeMcpServerKey = activeMcpServerNames.join('\0');
 
+  // A workspace Agent needs only a name: a role or the defaults cover the rest.
   const canSave = Boolean(
-    name.trim() && description.trim() && systemPrompt.trim(),
+    name.trim() &&
+      (workspaceAgentMode || (description.trim() && systemPrompt.trim())) &&
+      // A runtime that offers no program cannot run the agent.
+      (!workspaceAgentMode || executionProvider !== undefined),
   );
 
   useEffect(
@@ -204,6 +281,10 @@ export function AgentCreatePage({
   );
 
   useEffect(() => {
+    if (workspaceAgentMode) {
+      setCatalogLoading(false);
+      return;
+    }
     let active = true;
     const initializeCatalogs = async () => {
       setCatalogLoading(true);
@@ -271,9 +352,18 @@ export function AgentCreatePage({
     return () => {
       active = false;
     };
-  }, [initializeMcp, preheatAcp, reloadMcp, reloadMcpConfig, reloadTools, t]);
+  }, [
+    initializeMcp,
+    preheatAcp,
+    reloadMcp,
+    reloadMcpConfig,
+    reloadTools,
+    t,
+    workspaceAgentMode,
+  ]);
 
   useEffect(() => {
+    if (workspaceAgentMode) return;
     if (catalogLoading) return;
     if (!activeMcpServerKey) {
       setMcpTools({});
@@ -319,7 +409,13 @@ export function AgentCreatePage({
     return () => {
       active = false;
     };
-  }, [activeMcpServerKey, activeMcpServerNames, catalogLoading, loadMcpTools]);
+  }, [
+    activeMcpServerKey,
+    activeMcpServerNames,
+    catalogLoading,
+    loadMcpTools,
+    workspaceAgentMode,
+  ]);
 
   function setGenerationDialogOpen(open: boolean): void {
     if (!open) {
@@ -368,8 +464,8 @@ export function AgentCreatePage({
     try {
       const suffix =
         field === 'description'
-          ? 'Return only a concise one-sentence subagent description explaining when this subagent should be used. Do not return JSON, Markdown, a label, or commentary.'
-          : 'Return only the complete subagent system prompt. Do not return JSON, a Markdown code block, a name, a description, or commentary.';
+          ? `Return only a concise one-sentence ${workspaceAgentMode ? 'persistent Agent' : 'subagent'} description explaining when this agent should be used. Do not return JSON, Markdown, a label, or commentary.`
+          : `Return only the complete ${workspaceAgentMode ? 'persistent Agent' : 'subagent'} system prompt. Do not return JSON, a Markdown code block, a name, a description, or commentary.`;
       let generated = '';
       for await (const event of generateContent(`${request}\n\n${suffix}`, {
         signal: controller.signal,
@@ -438,6 +534,44 @@ export function AgentCreatePage({
     setBusy(true);
     setError(null);
     try {
+      if (onSaveWorkspaceAgent) {
+        const concurrency = Number(maxConcurrentRuns);
+        if (
+          !Number.isInteger(concurrency) ||
+          concurrency < 1 ||
+          concurrency > 8
+        ) {
+          throw new Error(t('collab.agent.concurrencyInvalid'));
+        }
+        const trimmedName = name.trim();
+        await onSaveWorkspaceAgent({
+          name: trimmedName,
+          ...(description.trim() ? { description: description.trim() } : {}),
+          ...(systemPrompt.trim() ? { instructions: systemPrompt.trim() } : {}),
+          ...(role ? { agentType: role } : {}),
+          ...(model.trim() ? { model: model.trim() } : {}),
+          maxConcurrentRuns: concurrency,
+          ...(executionHostIds.size > 0
+            ? {
+                execution: {
+                  mode: 'managed-host' as const,
+                  hostIds: [...executionHostIds],
+                  ...(executionProvider ? { provider: executionProvider } : {}),
+                },
+              }
+            : executionProvider && executionProvider !== 'qwen'
+              ? {
+                  // Claude Code or Codex on this computer.
+                  execution: {
+                    mode: 'local' as const,
+                    provider: executionProvider,
+                  },
+                }
+              : {}),
+        });
+        onCreated(trimmedName);
+        return;
+      }
       const parsedMaxTurns = maxTurns.trim()
         ? Number(maxTurns.trim())
         : undefined;
@@ -505,7 +639,11 @@ export function AgentCreatePage({
     <div className="flex w-full max-w-5xl flex-col gap-6">
       <div className="flex items-start justify-between gap-4">
         <h1 className="text-xl font-semibold text-balance">
-          {agent ? t('agent.edit') : t('agent.create')}
+          {workspaceAgentMode
+            ? t('collab.agent.new')
+            : agent
+              ? t('agent.edit')
+              : t('agent.create')}
         </h1>
         <Button type="button" variant="outline" onClick={openGenerationDialog}>
           <SparklesIcon data-icon="inline-start" />
@@ -524,45 +662,56 @@ export function AgentCreatePage({
         </ManagementNotice>
       ) : null}
 
+      {workspaceAgentMode && (
+        <p className="text-sm text-muted-foreground">
+          {t('collab.agent.joins', {
+            project: workspaceCwd?.split(/[\\/]/).filter(Boolean).at(-1) ?? '',
+          })}
+        </p>
+      )}
       <Tabs defaultValue="overview">
-        <TabsList className="max-w-full overflow-x-auto">
-          <TabsTrigger value="overview">
-            {t('agent.detail.overview')}
-          </TabsTrigger>
-          <TabsTrigger value="prompt">
-            {t('agent.detail.systemPrompt')}
-          </TabsTrigger>
-          <TabsTrigger value="tools">{t('agent.detail.tools')}</TabsTrigger>
-          <TabsTrigger value="mcp">{t('agent.detail.mcp')}</TabsTrigger>
-          <TabsTrigger value="hooks">{t('agent.detail.hooks')}</TabsTrigger>
-        </TabsList>
+        {!workspaceAgentMode && (
+          <TabsList className="max-w-full overflow-x-auto">
+            <TabsTrigger value="overview">
+              {t('agent.detail.overview')}
+            </TabsTrigger>
+            <TabsTrigger value="prompt">
+              {t('agent.detail.systemPrompt')}
+            </TabsTrigger>
+            <TabsTrigger value="tools">{t('agent.detail.tools')}</TabsTrigger>
+            <TabsTrigger value="mcp">{t('agent.detail.mcp')}</TabsTrigger>
+            <TabsTrigger value="hooks">{t('agent.detail.hooks')}</TabsTrigger>
+          </TabsList>
+        )}
 
         <TabsContent value="overview" className="pt-4">
           <FieldGroup className="grid grid-cols-1 gap-5 lg:grid-cols-2">
-            <Field>
-              <FieldLabel htmlFor="agent-scope">
-                {t('agent.create.scope')}
-              </FieldLabel>
-              <Select
-                value={scope}
-                disabled={Boolean(agent)}
-                onValueChange={(value) =>
-                  setScope(value as 'workspace' | 'global')
-                }
-              >
-                <SelectTrigger id="agent-scope" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="workspace">
-                    {t('agent.create.project.cli')}
-                  </SelectItem>
-                  <SelectItem value="global">
-                    {t('agent.create.user.cli')}
-                  </SelectItem>
-                </SelectContent>
-              </Select>
-            </Field>
+            {!workspaceAgentMode ? (
+              <Field>
+                <FieldLabel htmlFor="agent-scope">
+                  {t('agent.create.scope')}
+                </FieldLabel>
+                <Select
+                  value={scope}
+                  disabled={Boolean(agent)}
+                  onValueChange={(value) =>
+                    setScope(value as 'workspace' | 'global')
+                  }
+                >
+                  <SelectTrigger id="agent-scope" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="workspace">
+                      {t('agent.create.project.cli')}
+                    </SelectItem>
+                    <SelectItem value="global">
+                      {t('agent.create.user.cli')}
+                    </SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+            ) : null}
 
             <Field>
               <FieldLabel htmlFor="agent-name">
@@ -575,12 +724,63 @@ export function AgentCreatePage({
                 placeholder={t('agent.create.namePlaceholder')}
                 disabled={Boolean(agent)}
               />
-              <FieldDescription>{t('agent.create.nameHelp')}</FieldDescription>
+              <FieldDescription>
+                {workspaceAgentMode
+                  ? t('collab.agent.nameHelp')
+                  : t('agent.create.nameHelp')}
+              </FieldDescription>
             </Field>
 
+            {workspaceAgentMode && (
+              <Field>
+                <FieldLabel htmlFor="agent-role">
+                  {t('collab.agent.role')}
+                </FieldLabel>
+                <Select
+                  value={role || NO_ROLE}
+                  disabled={executionHostIds.size > 0}
+                  onValueChange={(value) =>
+                    setRole(value === NO_ROLE ? '' : value)
+                  }
+                >
+                  <SelectTrigger id="agent-role" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value={NO_ROLE}>
+                      {t('collab.agent.roleNone')}
+                    </SelectItem>
+                    {roles.map((entry) => (
+                      <SelectItem key={entry.name} value={entry.name}>
+                        {entry.name}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <FieldDescription>
+                  {t('collab.agent.roleHint')}
+                </FieldDescription>
+              </Field>
+            )}
+            {workspaceAgentMode && (
+              <Field className="lg:col-span-2">
+                <FieldLabel htmlFor="agent-workspace-prompt">
+                  {t('collab.agent.instructions')}
+                </FieldLabel>
+                <Textarea
+                  id="agent-workspace-prompt"
+                  value={systemPrompt}
+                  onChange={(event) => setSystemPrompt(event.target.value)}
+                  rows={6}
+                  placeholder={t('collab.agent.instructionsHint')}
+                />
+              </Field>
+            )}
             <Field className="lg:col-span-2">
               <FieldLabel htmlFor="agent-description">
-                {t('agent.create.description')}
+                {workspaceAgentMode
+                  ? t('collab.agent.description')
+                  : t('agent.create.description')}
               </FieldLabel>
               <Textarea
                 id="agent-description"
@@ -597,101 +797,249 @@ export function AgentCreatePage({
               </FieldLabel>
               <Input
                 id="agent-model"
+                disabled={workspaceAgentMode && executionHostIds.size > 0}
                 value={model}
                 onChange={(event) => setModel(event.target.value)}
                 placeholder="inherit / fast / provider:model"
               />
             </Field>
 
-            <Field>
-              <FieldLabel htmlFor="agent-approval">
-                {t('agent.create.approvalMode')}
-              </FieldLabel>
-              <Select value={approvalMode} onValueChange={setApprovalMode}>
-                <SelectTrigger id="agent-approval" className="w-full">
-                  <SelectValue>
-                    {approvalModeLabel(approvalMode, t)}
-                  </SelectValue>
-                </SelectTrigger>
-                <SelectContent>
-                  {selectableApprovalModes.map((value) => (
-                    <SelectItem
-                      key={value}
-                      value={value}
-                      disabled={value === 'bubble'}
-                    >
-                      {approvalModeLabel(value, t)}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-              <FieldDescription>
-                {approvalModeDescription(approvalMode, t)}
-              </FieldDescription>
-            </Field>
+            {workspaceAgentMode ? (
+              <>
+                <Field>
+                  <FieldLabel htmlFor="agent-concurrency">
+                    {t('collab.agent.concurrency')}
+                  </FieldLabel>
+                  <Input
+                    id="agent-concurrency"
+                    type="number"
+                    min="1"
+                    max="8"
+                    step="1"
+                    value={maxConcurrentRuns}
+                    onChange={(event) =>
+                      setMaxConcurrentRuns(event.target.value)
+                    }
+                  />
+                </Field>
+                <Field className="lg:col-span-2">
+                  <FieldLabel>{t('collab.agent.runsOn')}</FieldLabel>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <label className="flex items-start gap-2 rounded-md border border-border p-3 text-sm">
+                      <input
+                        type="radio"
+                        name="agent-execution-location"
+                        checked={executionHostIds.size === 0}
+                        onChange={() => {
+                          setExecutionHostIds(new Set());
+                          setExecutionProvider(localRuntimePrograms[0]);
+                        }}
+                      />
+                      <span>
+                        {t('collab.agent.thisComputer')}
+                        <span className="block break-all text-xs text-muted-foreground">
+                          {workspaceCwd}
+                        </span>
+                      </span>
+                    </label>
+                    {executionHosts.map((host) => (
+                      <label
+                        key={host.id}
+                        className="flex items-start gap-2 rounded-md border border-border p-3 text-sm"
+                      >
+                        <input
+                          type="radio"
+                          name="agent-execution-location"
+                          checked={executionHostIds.has(host.id)}
+                          onChange={() => {
+                            setExecutionHostIds(new Set([host.id]));
+                            // The first program this runtime runs; a runtime
+                            // that offers only Claude Code or Codex has no
+                            // Qwen Code to fall back to.
+                            setExecutionProvider(runtimePrograms(host)[0]);
+                            setRole('');
+                            setModel('');
+                          }}
+                        />
+                        <span>
+                          {host.label}
+                          {host.status === 'offline' && (
+                            <span className="ml-2 text-xs text-muted-foreground">
+                              {t('collab.agentStatus.offline')}
+                            </span>
+                          )}
+                          <span className="block break-all text-xs text-muted-foreground">
+                            {host.workspaceCwd ?? t('collab.agent.cwdUnknown')}
+                          </span>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                  <FieldDescription>
+                    {t(
+                      executionHostIds.size > 0
+                        ? 'collab.agent.hostPersona'
+                        : 'collab.agent.runsOnHint',
+                    )}
+                  </FieldDescription>
+                </Field>
+                {(() => {
+                  // Only what the chosen runtime reported it can run is
+                  // selectable; the rest say why not.
+                  const host = executionHosts.find((entry) =>
+                    executionHostIds.has(entry.id),
+                  );
+                  // This computer offers what its daemon's probe found; an
+                  // older daemon that reports nothing runs Qwen Code only.
+                  const offered = host
+                    ? runtimePrograms(host)
+                    : localRuntimePrograms;
+                  const missing = (provider: AgentProgramView) =>
+                    offered.includes(provider)
+                      ? undefined
+                      : host || localPrograms !== undefined
+                        ? t('collab.agent.programMissing')
+                        : t('collab.agent.programLocal');
+                  return (
+                    <Field className="lg:col-span-2">
+                      <FieldLabel>{t('collab.runtime.program')}</FieldLabel>
+                      <div
+                        role="radiogroup"
+                        aria-label={t('collab.runtime.program')}
+                        className="grid gap-2 sm:grid-cols-2"
+                      >
+                        {AGENT_PROGRAMS.map((provider) => {
+                          const reason = missing(provider);
+                          return (
+                            <label
+                              key={provider}
+                              className="flex items-start gap-2 rounded-md border border-border p-3 text-sm has-[:disabled]:opacity-60"
+                            >
+                              <input
+                                type="radio"
+                                name="agent-execution-provider"
+                                disabled={reason !== undefined}
+                                checked={executionProvider === provider}
+                                onChange={() => setExecutionProvider(provider)}
+                              />
+                              <span>
+                                {programLabel(provider)}
+                                {reason && (
+                                  <span className="block text-xs text-muted-foreground">
+                                    {reason}
+                                  </span>
+                                )}
+                              </span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    </Field>
+                  );
+                })()}
+                <Field className="lg:col-span-2">
+                  <FieldDescription>
+                    {t('collab.agent.afterCreate')}
+                  </FieldDescription>
+                </Field>
+              </>
+            ) : (
+              <>
+                <Field>
+                  <FieldLabel htmlFor="agent-approval">
+                    {t('agent.create.approvalMode')}
+                  </FieldLabel>
+                  <Select value={approvalMode} onValueChange={setApprovalMode}>
+                    <SelectTrigger id="agent-approval" className="w-full">
+                      <SelectValue>
+                        {approvalModeLabel(approvalMode, t)}
+                      </SelectValue>
+                    </SelectTrigger>
+                    <SelectContent>
+                      {selectableApprovalModes.map((value) => (
+                        <SelectItem
+                          key={value}
+                          value={value}
+                          disabled={value === 'bubble'}
+                        >
+                          {approvalModeLabel(value, t)}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                  <FieldDescription>
+                    {approvalModeDescription(approvalMode, t)}
+                  </FieldDescription>
+                </Field>
 
-            <Field>
-              <FieldLabel htmlFor="agent-max-turns">
-                {t('agent.create.maxTurns')}
-              </FieldLabel>
-              <Input
-                id="agent-max-turns"
-                type="number"
-                min="1"
-                step="1"
-                value={maxTurns}
-                onChange={(event) => setMaxTurns(event.target.value)}
-              />
-              <FieldDescription>
-                {t('agent.create.maxTurnsHelp')}
-              </FieldDescription>
-            </Field>
+                <Field>
+                  <FieldLabel htmlFor="agent-max-turns">
+                    {t('agent.create.maxTurns')}
+                  </FieldLabel>
+                  <Input
+                    id="agent-max-turns"
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={maxTurns}
+                    onChange={(event) => setMaxTurns(event.target.value)}
+                  />
+                  <FieldDescription>
+                    {t('agent.create.maxTurnsHelp')}
+                  </FieldDescription>
+                </Field>
 
-            <Field>
-              <FieldLabel htmlFor="agent-color">
-                {t('agent.create.color')}
-              </FieldLabel>
-              <Select value={color} onValueChange={setColor}>
-                <SelectTrigger id="agent-color" className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {[
-                    'inherit',
-                    'auto',
-                    'red',
-                    'blue',
-                    'green',
-                    'yellow',
-                    'purple',
-                    'orange',
-                    'pink',
-                    'cyan',
-                  ].map((value) => (
-                    <SelectItem key={value} value={value}>
-                      {value}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </Field>
+                <Field>
+                  <FieldLabel htmlFor="agent-color">
+                    {t('agent.create.color')}
+                  </FieldLabel>
+                  <Select value={color} onValueChange={setColor}>
+                    <SelectTrigger id="agent-color" className="w-full">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {[
+                        'inherit',
+                        'auto',
+                        'red',
+                        'blue',
+                        'green',
+                        'yellow',
+                        'purple',
+                        'orange',
+                        'pink',
+                        'cyan',
+                      ].map((value) => (
+                        <SelectItem key={value} value={value}>
+                          {value}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </Field>
+              </>
+            )}
           </FieldGroup>
         </TabsContent>
 
-        <TabsContent value="prompt" className="pt-4">
-          <Field>
-            <Textarea
-              id="agent-prompt"
-              aria-label={t('agent.create.prompt')}
-              value={systemPrompt}
-              onChange={(event) => setSystemPrompt(event.target.value)}
-              placeholder={t('agent.create.promptPlaceholder.cli')}
-              rows={16}
-              className="min-h-80 max-h-[60vh] overflow-y-auto"
-            />
-            <FieldDescription>{t('agent.create.promptHelp')}</FieldDescription>
-          </Field>
-        </TabsContent>
+        {!workspaceAgentMode && (
+          <TabsContent value="prompt" className="pt-4">
+            <Field>
+              <Textarea
+                id="agent-prompt"
+                aria-label={t('agent.create.prompt')}
+                value={systemPrompt}
+                onChange={(event) => setSystemPrompt(event.target.value)}
+                placeholder={t('agent.create.promptPlaceholder.cli')}
+                rows={16}
+                className="min-h-80 max-h-[60vh] overflow-y-auto"
+              />
+              <FieldDescription>
+                {t('agent.create.promptHelp')}
+              </FieldDescription>
+            </Field>
+          </TabsContent>
+        )}
 
         <TabsContent value="tools" className="pt-4">
           <FieldGroup>

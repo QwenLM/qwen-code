@@ -51,9 +51,14 @@ import {
 } from '../openaiContentGenerator/constants.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
 import { buildSessionAwareFetch } from '../outbound-session-id.js';
+import {
+  withDashScopeSourceConfig,
+  withoutDashScopeSourceConfig,
+} from '../dashscope-source-config.js';
 import { createHash } from 'node:crypto';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { ResponsesHttpError } from '../../utils/responses-http-error.js';
+import { applyResponsesPromptCaching } from './prompt-caching.js';
 
 const debugLogger = createDebugLogger('RESPONSES_PIPELINE');
 
@@ -405,9 +410,10 @@ export class ResponsesPipeline {
     request: GenerateContentParameters,
     userPromptId: string,
   ): ResponsesApiRequest {
-    const { instructions, input } =
-      convertGeminiContentsToResponsesInput(request);
-    const tools = convertGeminiToolsToResponsesTools(request);
+    const freeformExec = this.cliConfig.getFreeform();
+    const { instructions, input, cacheBoundary } =
+      convertGeminiContentsToResponsesInput(request, freeformExec);
+    const tools = convertGeminiToolsToResponsesTools(request, freeformExec);
 
     // History is always re-derived in full from this app's own Content[]
     // (matching every other content generator in this codebase) rather than
@@ -418,7 +424,7 @@ export class ResponsesPipeline {
 
     const apiRequest: ResponsesApiRequest = {
       model: this.config.model,
-      input: cleanOrphanedFunctionCalls(input),
+      input,
       instructions,
       tools,
       stream: true,
@@ -525,7 +531,15 @@ export class ResponsesPipeline {
       }
     }
 
-    return apiRequest;
+    const cachedRequest = applyResponsesPromptCaching(
+      apiRequest,
+      this.config,
+      cacheBoundary,
+    );
+    return {
+      ...cachedRequest,
+      input: cleanOrphanedFunctionCalls(cachedRequest.input),
+    };
   }
 
   private buildReasoning(
@@ -645,7 +659,11 @@ export class ResponsesPipeline {
 
     const fetchOpts: RequestInit & { dispatcher?: unknown } = {
       method: 'POST',
-      headers,
+      headers: withDashScopeSourceConfig(
+        headers,
+        this.config.baseUrl,
+        this.cliConfig.getChannel?.(),
+      ),
       body,
       signal: connectController.signal,
     };
@@ -674,7 +692,7 @@ export class ResponsesPipeline {
     const fetchFn = buildSessionAwareFetch(
       pinnedFetch,
       this.cliConfig,
-      this.config.customHeaders,
+      withoutDashScopeSourceConfig(this.config.customHeaders),
     );
 
     // Connect-phase timeout: fetch() resolves once response headers arrive, so

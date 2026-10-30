@@ -21,6 +21,8 @@ export function parseBwrapStatus(
   if (Buffer.byteLength(wire) > MAX_STATUS_BYTES || !wire.endsWith('\n')) {
     return { state: 'unconfirmed' };
   }
+  if (wire === '{"state":"stdio-setup-failed"}\n' && exitCode === 125)
+    return { state: 'unconfirmed', payloadExitObserved: false };
   // Whether the wire carries any well-formed bwrap exit-code record,
   // independent of correlation — bwrap only emits it once the payload is
   // past exec, so its presence is proof the payload process ran to an exit.
@@ -41,6 +43,25 @@ export function parseBwrapStatus(
         return false;
       }
     });
+  if (
+    wire
+      .trim()
+      .split('\n')
+      .some((line) => {
+        try {
+          return (
+            (JSON.parse(line) as Record<string, unknown> | null)?.['state'] ===
+            'stdio-failed'
+          );
+        } catch {
+          return false;
+        }
+      })
+  ) {
+    return payloadExitObserved
+      ? { state: 'unconfirmed', payloadExitObserved: true }
+      : { state: 'unconfirmed' };
+  }
   try {
     const lines = wire.trim().split('\n');
     if (lines.length !== 2)

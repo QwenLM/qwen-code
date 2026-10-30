@@ -4,6 +4,8 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { I18nProvider } from '../../i18n';
 import { dp } from './dialogStyles';
+import { DialogShell } from './DialogShell';
+import { ThemeProvider } from '../../themeContext';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -80,6 +82,77 @@ describe('ModelDialog current marker', () => {
 });
 
 describe('ModelDialog keyboard confirmation', () => {
+  it('focuses the model list and confirms its selection when refresh is available', () => {
+    const onSelect = vi.fn();
+    const refresh = vi.fn();
+    mount(
+      <ThemeProvider value="dark">
+        <DialogShell title="Select model" onClose={vi.fn()}>
+          <ModelDialog
+            models={[{ id: 'a' }, { id: 'b' }]}
+            currentModelId="b"
+            onSelect={onSelect}
+            modelRefresh={{ refresh, refreshing: false }}
+          />
+        </DialogShell>
+      </ThemeProvider>,
+    );
+    expect.soft(document.activeElement?.getAttribute('role')).toBe('listbox');
+    const refreshButton = document.querySelector<HTMLButtonElement>(
+      'button[aria-label="Refresh models"]',
+    );
+    expect(refreshButton).not.toBeNull();
+    expect(refreshButton!.textContent).toBe('');
+    expect(refreshButton!.querySelector('svg')).not.toBeNull();
+    act(() =>
+      document.activeElement!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+    expect(onSelect).toHaveBeenCalledWith('b');
+    expect(refresh).not.toHaveBeenCalled();
+  });
+
+  it('keeps the exact ACP route when confirming a fast model', () => {
+    const onSelect = vi.fn();
+    const models = [
+      { id: 'qwen-route:v1:a', baseModelId: 'shared', label: 'Endpoint A' },
+      { id: 'qwen-route:v1:b', baseModelId: 'shared', label: 'Endpoint B' },
+    ];
+    mount(
+      <ModelDialog
+        mode="fast"
+        onSelect={onSelect}
+        models={models}
+        currentModelId="qwen-route:v1:b"
+      />,
+    );
+    act(() =>
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })),
+    );
+    expect(onSelect).toHaveBeenCalledWith('qwen-route:v1:b');
+  });
+
+  it('does not replace an unresolved fast-model pin on Enter', () => {
+    const onSelect = vi.fn();
+    mount(
+      <ModelDialog
+        mode="fast"
+        onSelect={onSelect}
+        models={[{ id: 'qwen-route:v1:a', baseModelId: 'shared' }]}
+        currentModelId={'openai:shared\0https://removed.example/v1'}
+      />,
+    );
+    act(() =>
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' })),
+    );
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   it.each([
     { currentModelId: 'removed', models: [{ id: '', name: 'Use main model' }] },
     { currentModelId: 'current', models: [], loading: true },

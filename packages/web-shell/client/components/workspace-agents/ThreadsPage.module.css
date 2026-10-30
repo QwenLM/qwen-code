@@ -1,0 +1,315 @@
+/* The Agents page, in the same frame as the role templates it swaps with:
+   cards for the agents, cards for the runtimes they run on. */
+
+.formActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* Native selects and plain fields, dressed as the shared Input. */
+.field {
+  width: 100%;
+  min-height: 32px;
+  padding: 5px 10px;
+  border: 1px solid var(--input);
+  border-radius: var(--radius-lg, 8px);
+  background: transparent;
+  color: var(--foreground);
+  font: inherit;
+  font-size: 14px;
+}
+
+.field:focus-visible {
+  border-color: var(--ring);
+  outline: 3px solid color-mix(in srgb, var(--ring) 50%, transparent);
+  outline-offset: 0;
+}
+
+:global(.dark) .field {
+  background: color-mix(in srgb, var(--input) 30%, transparent);
+}
+
+.roster {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.agentCard {
+  padding-block: 0;
+  gap: 0;
+}
+
+.agentRow {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px;
+}
+
+.agentRowDisabled {
+  opacity: 0.6;
+}
+
+.agentMain {
+  display: flex;
+  min-width: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.agentTitleLine {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 8px;
+}
+
+.statusBadge {
+  font-size: 10px;
+}
+
+.statusBadge[data-status='working'] {
+  background: var(--status-running-bg);
+  color: var(--status-running-fg);
+}
+
+.statusBadge[data-status='error'] {
+  background: var(--status-attention-bg);
+  color: var(--status-attention-fg);
+}
+
+.agentActions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+/* Settings open inside the card they belong to, under a rule, so they read
+   as that agent's and not as a second panel. */
+.agentConfig {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px 16px 16px;
+  border-top: 1px solid var(--border);
+}
+
+.configLabel {
+  display: grid;
+  gap: 6px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.configNote {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* Runtimes */
+
+.runtimeCard {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 20px;
+  align-items: center;
+  padding: 16px;
+  border-radius: var(--radius-xl, 12px);
+  background: var(--card);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+
+.runtimeHeader {
+  min-width: 0;
+}
+
+.runtimeTitle {
+  margin: 0 0 4px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.runtimeStatus {
+  color: var(--status-running-fg);
+  font-size: 12px;
+  text-transform: capitalize;
+}
+
+.runtimeStatus[data-runtime-status='offline'] {
+  color: var(--muted-foreground);
+}
+
+.runtimeFacts {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 20px;
+  margin: 10px 0 0;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.runtimeFacts div {
+  min-width: 0;
+}
+
+.runtimeFacts dt {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.runtimeFacts dd {
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.runtimeFacts code {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* Squads */
+
+.fieldHint {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* The squad's tile, in the place and size of an agent card's avatar. */
+.squadTile {
+  display: inline-flex;
+  width: 36px;
+  height: 36px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+  color: var(--foreground);
+}
+
+.squadTile svg {
+  width: 18px;
+  height: 18px;
+}
+
+/* The roster as a chain of command: the leader, then the members hanging off
+   it on a rail. One grid, so every role starts at the same x; each row is a
+   subgrid of it. */
+.squadRoster {
+  --squad-rail-x: 9px; /* under the centre of the 20px leader avatar */
+  /* --border is near-invisible on the card in both themes. */
+  --squad-rail-color: color-mix(in srgb, var(--foreground) 28%, transparent);
+  --squad-row-gap: 4px;
+  display: grid;
+  grid-template-columns: fit-content(16rem) minmax(0, 1fr);
+  column-gap: 16px;
+  row-gap: var(--squad-row-gap);
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 12px;
+}
+
+.squadRosterRow {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: subgrid;
+  min-height: 24px;
+  align-items: center;
+}
+
+.squadRosterWho {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-self: stretch;
+  align-items: center;
+  gap: 8px;
+}
+
+.squadRosterRow[data-squad-role='member'] .squadRosterWho {
+  padding-left: 22px;
+}
+
+/* The elbow: from the row above down to this row's middle, then across. */
+.squadRosterRow[data-squad-role='member'] .squadRosterWho::before {
+  position: absolute;
+  top: calc(-1 * var(--squad-row-gap));
+  left: var(--squad-rail-x);
+  width: 8px;
+  height: calc(50% + var(--squad-row-gap));
+  border-bottom: 1px solid var(--squad-rail-color);
+  border-left: 1px solid var(--squad-rail-color);
+  content: '';
+}
+
+/* The rail carries on past a member that is not the last. */
+.squadRosterRow[data-squad-role='member']:not(:last-child)
+  .squadRosterWho::after {
+  position: absolute;
+  top: 50%;
+  bottom: 0;
+  left: var(--squad-rail-x);
+  border-left: 1px solid var(--squad-rail-color);
+  content: '';
+}
+
+.squadRosterName {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.squadRosterRole {
+  min-width: 0;
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}
+
+/* Members in the form: same left edge as the other labels, no indent. */
+.squadMemberPicker {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.squadMemberLegend {
+  margin-bottom: 4px;
+  padding: 0;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+/* Checkbox, avatar, name, role (once checked). A fixed height keeps the
+   rows still when a role field appears. */
+.squadMemberRow {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 10rem) minmax(0, 1fr);
+  min-height: 36px;
+  align-items: center;
+  gap: 8px;
+}
+
+.squadMemberName {
+  overflow: hidden;
+  color: var(--foreground);
+  font-size: 14px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

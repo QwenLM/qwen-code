@@ -40,6 +40,31 @@
   flex-shrink: 0;
 }
 
+/* The command/content region absorbs the sheet's overflow and scrolls itself,
+   so the 300px caps on .content/.codeBlock apply to the inline variant only and
+   the decision buttons stay pinned at the bottom of the sheet. Each region keeps
+   the 3.5em floor of the inline variant: a warning block rendered next to the
+   diff, or a short command next to its warnings, must stay readable instead of
+   being squeezed to a sliver. The sheet's own overflow-y: auto above is only a
+   fallback for the degenerate case where the unshrinkable chrome plus these
+   floors exceed the sheet cap (short viewports): the decision buttons then stay
+   reachable by scrolling instead of being clipped. */
+.floating > .content:not(.planContent),
+.floating > .code {
+  flex: 1 1 auto;
+  min-height: 3.5em;
+  overflow-y: auto;
+}
+
+/* The base .codeBlock keeps min-height: 0 and overflow-y: auto: lifting only
+   the cap would leave the <pre> as its own scroller — squeezed, it shrinks to
+   the region's content box and scrolls inside the padding while the region's
+   own overflow-y: auto never engages. */
+.floating .codeBlock {
+  max-height: none;
+  overflow-y: visible;
+}
+
 .floatingWorkflow {
   display: flex;
   flex-direction: column;
@@ -264,6 +289,11 @@
 
 .option:hover {
   opacity: 0.85;
+}
+
+.option:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .optionActive {

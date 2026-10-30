@@ -11,6 +11,8 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { relayUpstream } from './hosted-relay-headers.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -47,6 +49,7 @@ const reports = config.sessions.map((session) => ({
   faults: 0,
   operations: [] as string[],
   target: undefined as Transaction | undefined,
+  targetDigest: '',
   receipt: undefined as Receipt | undefined,
   restoreTransactions: [] as Transaction[],
 }));
@@ -67,16 +70,24 @@ function events(transaction: Transaction): Event[] {
 
 function selected(transaction: Transaction, fault: string) {
   const committed = events(transaction);
-  if (fault === 'arguments' || fault === 'intent') {
+  if (fault === 'arguments') {
+    return transaction.resources.some(
+      (resource) =>
+        resource.kind === 'managed-tool-input' && resource.bytesBase64,
+    );
+  }
+  if (fault === 'intent') {
     const intent = committed.find((event) => event.kind === 'tool.intent');
     if (!intent) return false;
-    const argument = transaction.resources.find(
-      (resource) => resource.kind === 'managed-tool-input',
-    );
-    assert(argument?.bytesBase64);
-    assert.equal(
-      (intent.payload['argsRef'] as { resourceId: string }).resourceId,
-      argument.resourceId,
+    const argument = intent.payload['argsRef'] as {
+      kind: string;
+      resourceId: string;
+    };
+    assert.equal(argument.kind, 'managed-tool-input');
+    assert(
+      transaction.resources.some(
+        (resource) => resource.resourceId === argument.resourceId,
+      ),
     );
     return true;
   }
@@ -135,15 +146,20 @@ const proxy = createServer(async (req, res) => {
       ...(body.length ? { body } : {}),
       signal: AbortSignal.timeout(30_000),
     };
-    const commit = store && url.pathname.endsWith('/transactions:commit');
+    const commit =
+      store &&
+      (url.pathname.endsWith('/transactions:commit') ||
+        url.pathname.endsWith('/transactions:commit-v2'));
     const target = commit && !restoring && selected(fields, report.fault);
     if (target) {
-      assert.equal(
-        report.faults++,
-        0,
-        'Harness must not retry the failed write',
-      );
-      report.target = fields;
+      assert(report.faults < 3, 'Harness exceeded the commit retry budget');
+      report.faults++;
+      const digest = createHash('sha256').update(body).digest('hex');
+      if (report.target) assert.equal(digest, report.targetDigest);
+      else {
+        report.target = fields;
+        report.targetDigest = digest;
+      }
     }
     const upstream = await fetch(url, init);
     const bytes = Buffer.from(await upstream.arrayBuffer());
@@ -155,24 +171,44 @@ const proxy = createServer(async (req, res) => {
     if (target) {
       if (report.fault.endsWith('-reply')) {
         assert.equal(upstream.status, 200, bytes.toString());
-        assert.equal(json.replayed, false);
-        report.receipt = json;
-        // Probe the Store's exact-request replay contract without retrying the Harness write.
-        const replay = await fetch(url, init);
-        assert.equal(replay.status, 200, await replay.clone().text());
-        assert.deepEqual(await replay.json(), { ...json, replayed: true });
+        assert.equal(json.replayed, report.faults > 1);
+        if (report.receipt)
+          assert.deepEqual(json, { ...report.receipt, replayed: true });
+        else {
+          report.receipt = json;
+          const replay = await fetch(url, init);
+          assert.equal(replay.status, 200, await replay.clone().text());
+          assert.deepEqual(await replay.json(), { ...json, replayed: true });
+        }
+        // Lose every bounded retry's reply to retain the unknown-write probe.
         res.destroy();
         return;
       }
       assert.equal(upstream.status, 500, bytes.toString());
+    } else if (url.pathname.endsWith(':release-mount')) {
+      assert(
+        isLegitimateMountRelease(upstream.status, json?.code),
+        `${upstream.status} ${url}: ${bytes}`,
+      );
     } else assert.equal(upstream.status, 200, `${url}: ${bytes}`);
     if (restoring && store && url.pathname.endsWith('/transactions'))
       report.restoreTransactions.push(...json.transactions);
     if (!store) {
-      assert.equal(fields.runtimeSessionId, report.promptId);
       const operation =
         req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
-      report.operations.push(operation);
+      const harnessScoped =
+        req.method === 'POST' &&
+        [
+          '/internal/runtime-broker/v1/runtimes:warm',
+          '/internal/runtime-broker/v1/runtimes:capabilities',
+          '/internal/runtime-broker/v1/tool-sessions:active-holds',
+        ].includes(url.pathname);
+      assert.equal(
+        fields.runtimeSessionId,
+        harnessScoped ? undefined : report.promptId,
+      );
+      if (!(harnessScoped && operation === 'active-holds'))
+        report.operations.push(operation);
       if (operation === 'prepare') {
         assert.equal(report.executionCallId, '');
         report.executionCallId = json.executionCallId;
@@ -184,11 +220,7 @@ const proxy = createServer(async (req, res) => {
         assert.equal(json.executionCallId, report.executionCallId);
       }
     }
-    for (const [name, value] of upstream.headers)
-      if (!['content-length', 'transfer-encoding', 'connection'].includes(name))
-        res.setHeader(name, value);
-    res.writeHead(upstream.status);
-    res.end(bytes);
+    relayUpstream(res, upstream, bytes);
   } catch (cause) {
     proxyFailure = cause;
     res.destroy();
@@ -280,6 +312,10 @@ async function transcript() {
   }
 }
 
+function terminalsOf<T extends { type: string }>(events: T[]) {
+  return events.filter((event) => event.type.startsWith('turn_'));
+}
+
 async function start() {
   await cli.start(model.baseUrl, {
     extraArgs: [
@@ -308,26 +344,53 @@ try {
     await waitUntil(
       async () => !(await json(`${route}/status`)).hasActivePrompt,
     );
-    assert.equal(current.faults, 1, `${current.fault}: fault did not fire`);
-    assert.equal((await json(`${route}/status`)).recoveryBlocked, true);
-    assert.equal(current.modelCalls, current.fault === 'turn-reply' ? 2 : 1);
+    assert.equal(current.faults, 3, `${current.fault}: retries not exhausted`);
+    // A reply-lost commit landed durably before its answer was dropped. The
+    // settle (#14570) applies it once, on its own retry rather than before
+    // the fault loop returns: a result reply becomes the one committed
+    // tool_result while the Turn stays blocked, and a turn reply settles the
+    // Turn itself, so it completes without a cold load. Wait for either
+    // shape instead of pinning the settle's timing.
+    const settles = [
+      'result-checkpoint',
+      'result-reply',
+      'turn-reply',
+    ].includes(current.fault);
+    const settled = current.fault === 'turn-reply';
+    if (settles)
+      // 30 s keeps the three marked faults (at most 90 s) inside the
+      // method's @Timeout(180) with room for the harness boots either side.
+      await waitUntil(async () => {
+        const status = await json(`${route}/status`);
+        const applied = await transcript();
+        return (
+          !status.hasActivePrompt &&
+          applied.filter((event) => event.data.record?.type === 'tool_result')
+            .length === 1 &&
+          terminalsOf(applied).length === (settled ? 1 : 0) &&
+          (settled ? !status.recoveryBlocked : status.recoveryBlocked)
+        );
+      }, 30_000);
+    assert.equal((await json(`${route}/status`)).recoveryBlocked, !settled);
+    assert.equal(current.modelCalls, settled ? 2 : 1);
     const records = await transcript();
-    assert.equal(
-      records.filter((event) => event.type.startsWith('turn_')).length,
-      0,
-    );
+    const terminals = terminalsOf(records);
+    assert.equal(terminals.length, settled ? 1 : 0);
+    if (settled) {
+      assert.equal(terminals[0].type, 'turn_complete');
+      assert.equal(terminals[0].promptId, current.promptId);
+    }
     assert.equal(
       records.filter((event) => event.data.record?.type === 'tool_result')
         .length,
-      ['result-checkpoint', 'turn-reply'].includes(current.fault) ? 1 : 0,
+      settles ? 1 : 0,
     );
-    const started =
-      current.fault.startsWith('result-') || current.fault === 'turn-reply';
+    const started = current.fault.startsWith('result-') || settled;
     for (const [operation, count] of [
       ['acquire', 1],
-      ['prepare', 1],
+      ['prepare', current.fault === 'arguments' ? 0 : 1],
       ['start', started ? 1 : 0],
-      ['release', current.fault === 'turn-reply' ? 1 : 0],
+      ['release', 0],
     ] as const)
       assert.equal(
         current.operations.filter((item) => item === operation).length,
@@ -341,10 +404,12 @@ try {
       await readFile(path.join(cli.root, 'proof.txt'), 'utf8'),
       'decoy',
     );
-    assert.equal(
-      (await json(`${route}/prompt`, input('must remain blocked'), 409)).error,
-      'hosted_turn_recovery_required',
-    );
+    if (!settled)
+      assert.equal(
+        (await json(`${route}/prompt`, input('must remain blocked'), 409))
+          .error,
+        'hosted_turn_recovery_required',
+      );
   }
   await cli.close();
   const leaseDeadline = Date.now() + 5_100;
@@ -388,10 +453,10 @@ try {
         restored[0].recordBytesBase64,
         current.target!.recordBytesBase64,
       );
-    assert.equal(
-      current.operations.length,
-      operations,
-      'Cold load must not contact Broker',
+    assert.deepEqual(
+      current.operations.slice(operations),
+      completed ? ['release'] : [],
+      'Cold load may only release a durably settled Turn',
     );
     assert.equal(
       current.modelCalls,
@@ -408,7 +473,7 @@ try {
       'decoy',
     );
     console.log(
-      `FG6B ${current.fault}: faults=1, modelCalls=${calls}, starts=${started ? 1 : 0}, cold=${completed ? 'committed' : 'blocked'}`,
+      `FG6B ${current.fault}: faults=${current.faults}, modelCalls=${calls}, starts=${started ? 1 : 0}, cold=${completed ? 'committed' : 'blocked'}`,
     );
   }
   if (proxyFailure) throw proxyFailure;

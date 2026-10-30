@@ -77,6 +77,7 @@ test.beforeEach(async ({ page }, testInfo) => {
     baseURL: String(testInfo.project.use.baseURL),
   });
   await page.goto('/');
+  await page.getByRole('button', { name: 'More', exact: true }).click();
   await page
     .getByRole('button', { name: 'Session Overview', exact: true })
     .click();
@@ -296,20 +297,38 @@ test('keeps text selection and rename drafts in the overview @smoke', async ({
   await expect(editor).toHaveCount(0);
 });
 
-test('replaces clicked details when hovering another entry @smoke', async ({
+test('reopened details yield focus when another title replaces them @smoke', async ({
   page,
 }) => {
   const panel = page.locator('[data-web-shell-session-panel]');
-  await panel.getByRole('button', { name: 'Details for Idle fixture' }).click();
+  const detailsButton = panel.getByRole('button', {
+    name: 'Details for Idle fixture',
+  });
+  const outgoing = page.getByRole('dialog', {
+    name: 'Idle fixture',
+    exact: true,
+    includeHidden: true,
+  });
+  await detailsButton.click();
+  await expect(outgoing).toBeVisible();
   await expect(
-    page.getByRole('dialog', { name: 'Idle fixture', exact: true }),
-  ).toBeVisible();
+    outgoing.locator('[data-web-shell-session-id-copy]'),
+  ).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(outgoing).toHaveCount(0);
+  await expect(detailsButton).toBeFocused();
+  await detailsButton.press('Enter');
+  await expect(outgoing).toBeVisible();
+  await expect(
+    outgoing.locator('[data-web-shell-session-id-copy]'),
+  ).toBeFocused();
   await panel
     .getByRole('button', { name: 'Approve fixture', exact: true })
     .hover();
   await expect(
     page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
   ).toBeVisible();
+  await expect(outgoing).toHaveCount(0);
   await expect(page.getByRole('dialog')).toHaveCount(1);
   await expect(
     page.getByRole('dialog', { name: 'Approve fixture', exact: true }),
@@ -361,6 +380,7 @@ for (const count of [4, 11]) {
       localStorage.setItem('qwen-web-shell-session-overview-page-size', '10'),
     );
     await page.goto('/');
+    await page.getByRole('button', { name: 'More', exact: true }).click();
     await page
       .getByRole('button', { name: 'Session Overview', exact: true })
       .click();
@@ -416,6 +436,7 @@ test('shadow portal details keep focus in the overview after hover replacement @
   page,
 }) => {
   await page.goto('/e2e/session-overview-shadow-dom.html');
+  await page.getByRole('button', { name: 'More', exact: true }).click();
   await page
     .getByRole('button', { name: 'Session Overview', exact: true })
     .click();

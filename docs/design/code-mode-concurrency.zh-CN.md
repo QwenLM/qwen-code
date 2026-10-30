@@ -13,11 +13,13 @@ ACP 和 daemon Session 则串行执行所有嵌套调用，相同程序在不同
 ## 行为
 
 建议独立搜索和读取使用 `await Promise.allSettled([...])`。示例逐项检查结果，
-输出成功调用的结果，并用 `String(reason)` 输出失败原因。有依赖的操作、修改和
-审批保持顺序执行。JavaScript 已提供该方法，无需新增运行时 API。
+输出成功调用的结果，并用 `String(reason)` 输出失败原因。模型必须让有依赖的操作、
+修改和审批保持顺序执行。JavaScript 已提供该方法，无需新增运行时 API。
 
 Session 在每个 `exec` 内使用 Core 的 `isToolCallConcurrencySafe` 判定，
-并发执行连续的安全调用。沿用 `QWEN_CODE_MAX_TOOL_CONCURRENCY`，默认上限为
+并发执行连续的安全调用。Code Mode 中的 Bash 调用跳过只读命令判定，由模型判断
+哪些命令相互独立；普通 Bash 调用保留只读检查。沿用
+`QWEN_CODE_MAX_TOOL_CONCURRENCY`，默认上限为
 10。不安全调用等待之前的调用结束，后续调用再等待它结束。JavaScript 中显式的
 逐项 await 保留原有顺序。队列按提交顺序接纳调用，无需通过定时器收集批次。
 

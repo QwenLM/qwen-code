@@ -10,7 +10,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import { maybeOpenWebShellBrowser, serveCommand } from './serve.js';
+import {
+  maybeOpenWebShellBrowser,
+  serveCommand,
+  validateManagedLocalFlags,
+} from './serve.js';
 
 const mockOpenBrowserSecurely = vi.hoisted(() => vi.fn());
 const mockShouldLaunchBrowser = vi.hoisted(() => vi.fn(() => true));
@@ -54,12 +58,59 @@ function buildParser(): Argv {
 }
 
 describe('serve command args', () => {
+  it('refuses flags whose ordinary-daemon behavior is unavailable in Managed mode', () => {
+    expect(() =>
+      validateManagedLocalFlags(['--managed', '--port=0', '--no-open']),
+    ).not.toThrow();
+    for (const flag of [
+      '--workspace',
+      '--max-sessions=2',
+      '--profile=hosted-harness',
+      '--token=secret',
+      '--no-require-auth',
+    ]) {
+      expect(() => validateManagedLocalFlags(['--managed', flag])).toThrow(
+        'not supported with --managed',
+      );
+    }
+  });
+  it('parses the isolated Managed mode and private data directory', () => {
+    const parsed = buildParser().parseSync(
+      '--managed --managed-data-dir /private/data --port 0',
+    );
+    expect(parsed['managed']).toBe(true);
+    expect(parsed['managed-data-dir']).toBe('/private/data');
+    expect(parsed['port']).toBe(0);
+    expect(buildParser().parseSync('')['managed']).toBe(false);
+    expect(() => buildParser().parseSync('--managed-data-dir')).toThrow(
+      /Not enough arguments/u,
+    );
+  });
   it('documents the complete IPv4 loopback range', async () => {
     // Remove whitespace before checking so a long option name forcing yargs
     // to wrap the description does not split the CIDR literal across lines.
     expect((await buildParser().getHelp()).replace(/\s/g, '')).toContain(
       '127.0.0.0/8',
     );
+  });
+
+  it('documents Hosted Runtime Broker options and does not declare them unimplemented', async () => {
+    // yargs hard-wraps the description column mid-word at its 80-column
+    // default, so compare with whitespace and type hints removed. The next
+    // row starts with "--", so stale text appended to a row cannot hide.
+    const squash = (text: string) => text.replace(/\[string\]|\s+/g, '');
+    const help = squash(await buildParser().getHelp());
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-url Private Broker URL for --profile hosted-harness; required together with token for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_URL. --',
+      ),
+    );
+    expect(help).toContain(
+      squash(
+        '--managed-runtime-broker-token Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN; prefer the variable, since this option puts the credential in the process list. --',
+      ),
+    );
+    expect(help).not.toContain('ReservedBroker');
   });
 
   it('defaults authenticated open to disabled', () => {
@@ -89,9 +140,14 @@ describe('serve command args', () => {
     expect(parsed['enable-session-shell']).toBe(false);
   });
 
-  it('defaults max sessions to 32', () => {
+  it('leaves max sessions unset when the flag is omitted', () => {
     const parsed = buildParser().parseSync('');
-    expect(parsed['max-sessions']).toBe(32);
+    expect(parsed['max-sessions']).toBeUndefined();
+  });
+
+  it('parses --max-sessions as a number', () => {
+    const parsed = buildParser().parseSync('--max-sessions 64');
+    expect(parsed['max-sessions']).toBe(64);
   });
 
   it('accepts --experimental-lsp in strict parser mode', () => {
@@ -940,6 +996,71 @@ describe('serve rate limit env parsing', () => {
       handler(argv as Parameters<typeof handler>[0]),
     ).rejects.toThrow('process.exit(1) called');
     expect(mockRunQwenServe).not.toHaveBeenCalled();
+  });
+
+  it('takes the Broker pair from the environment and removes it', async () => {
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'] = 'http://127.0.0.1:4182';
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'] = 'env-broker-secret';
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    // The runtime snapshots process.env for every process it starts, so the
+    // pair must already be gone when it begins.
+    let brokerEnvAtRuntimeStart: Array<string | undefined> = [];
+    mockRunQwenServe.mockImplementationOnce(async () => {
+      brokerEnvAtRuntimeStart = [
+        process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'],
+        process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'],
+      ];
+      return { url: 'http://127.0.0.1:4170/', webShellMounted: false };
+    });
+
+    await startServeHandlerWithArgs('--profile hosted-harness --no-web');
+
+    expect(brokerEnvAtRuntimeStart).toEqual([undefined, undefined]);
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
+      managedRuntimeBrokerUrl: 'http://127.0.0.1:4182',
+      managedRuntimeBrokerToken: 'env-broker-secret',
+    });
+    expect(process.env['QWEN_MANAGED_RUNTIME_BROKER_URL']).toBeUndefined();
+    expect(process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN']).toBeUndefined();
+    expect(stderrWrites.join('')).not.toContain(
+      '--managed-runtime-broker-token',
+    );
+  });
+
+  it('prefers the Broker options and warns about the token on the command line', async () => {
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_URL'] = 'http://127.0.0.1:4182';
+    process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN'] = 'env-broker-secret';
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    mockRunQwenServe.mockResolvedValueOnce({
+      url: 'http://127.0.0.1:4170/',
+      webShellMounted: false,
+    });
+
+    await startServeHandlerWithArgs(
+      '--profile hosted-harness --no-web' +
+        ' --managed-runtime-broker-url http://127.0.0.1:4200' +
+        ' --managed-runtime-broker-token flag-broker-secret',
+    );
+
+    expect(mockRunQwenServe.mock.calls[0]?.[0]).toMatchObject({
+      managedRuntimeBrokerUrl: 'http://127.0.0.1:4200',
+      managedRuntimeBrokerToken: 'flag-broker-secret',
+    });
+    // The unused environment copy is removed too.
+    expect(process.env['QWEN_MANAGED_RUNTIME_BROKER_TOKEN']).toBeUndefined();
+    const stderr = stderrWrites.join('');
+    expect(stderr).toContain(
+      'qwen serve: --managed-runtime-broker-token is visible in the process command line; prefer the QWEN_MANAGED_RUNTIME_BROKER_TOKEN env var.',
+    );
+    expect(stderr).not.toContain('flag-broker-secret');
   });
 });
 

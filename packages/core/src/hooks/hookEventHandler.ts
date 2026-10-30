@@ -91,6 +91,15 @@ const debugLogger = createDebugLogger('TRUSTED_HOOKS');
  */
 let hookInvocationSerial = 0;
 
+export interface ManagedHookDispatcher {
+  hasHooksForEvent(eventName: string): boolean;
+  execute(
+    eventName: HookEventName,
+    input: HookInput,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult>;
+}
+
 /** Longest prompt text used as a hook's display name. */
 const HOOK_DISPLAY_NAME_MAX_LENGTH = 80;
 
@@ -216,6 +225,7 @@ export class HookEventHandler {
     sessionHooksManager: SessionHooksManager,
     messagesProvider?: MessagesProvider,
     private readonly runtimeId: string = randomUUID(),
+    private readonly managedDispatcher?: ManagedHookDispatcher,
   ) {
     this.config = config;
     this.hookPlanner = hookPlanner;
@@ -935,6 +945,17 @@ export class HookEventHandler {
     context?: HookEventContext,
     signal?: AbortSignal,
   ): Promise<AggregatedHookResult> {
+    if (this.managedDispatcher) {
+      if (!this.managedDispatcher.hasHooksForEvent(eventName)) {
+        return { success: true, allOutputs: [], errors: [], totalDuration: 0 };
+      }
+      const messages = this.messagesProvider?.();
+      const managedInput = {
+        ...input,
+        ...(messages ? { messages: structuredClone(messages) } : {}),
+      };
+      return this.managedDispatcher.execute(eventName, managedInput, signal);
+    }
     const failClosedResult: AggregatedHookResult = {
       success: false,
       allOutputs: [],

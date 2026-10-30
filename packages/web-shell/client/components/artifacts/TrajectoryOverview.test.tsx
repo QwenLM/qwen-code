@@ -21,6 +21,7 @@ import type {
   TimelineSpan,
 } from '../../trajectory/buildTimeline';
 import type { TrajectoryRow } from '../../trajectory/types';
+import { useTimelineViewport } from '../../trajectory/useTimelineViewport';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -49,18 +50,26 @@ function render(props: Partial<TrajectoryOverviewProps>): HTMLElement {
   return container;
 }
 
+function ControlledOverview(props: Partial<TrajectoryOverviewProps>) {
+  const viewportControl = useTimelineViewport(props.model);
+  return (
+    <TrajectoryOverview
+      model={undefined}
+      viewportControl={viewportControl}
+      onSelect={() => {}}
+      onRangeChange={() => {}}
+      onModeChange={() => {}}
+      describe={(span) => `about ${span.rowKey}`}
+      {...props}
+    />
+  );
+}
+
 function draw(root: Root, props: Partial<TrajectoryOverviewProps>) {
   act(() => {
     root.render(
       <I18nProvider language="en">
-        <TrajectoryOverview
-          model={undefined}
-          onSelect={() => {}}
-          onRangeChange={() => {}}
-          onModeChange={() => {}}
-          describe={(span) => `about ${span.rowKey}`}
-          {...props}
-        />
+        <ControlledOverview {...props} />
       </I18nProvider>,
     );
   });

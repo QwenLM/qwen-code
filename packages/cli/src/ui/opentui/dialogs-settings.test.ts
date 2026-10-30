@@ -116,6 +116,19 @@ describe('settings row rendering contract', () => {
 });
 
 describe('buildSettingsListItems', () => {
+  it('finds the experimental Mods toggle by label and setting key', () => {
+    const items = buildSettingsListItems();
+    for (const query of ['Mods', 'experimental.mods']) {
+      expect(filterSettingsItems(items, query, () => '')).toEqual([
+        expect.objectContaining({
+          key: 'experimental.mods',
+          label: 'Mods (Experimental)',
+          type: 'boolean',
+        }),
+      ]);
+    }
+  });
+
   it('sources rows from the settings schema, in dialog order', () => {
     const items = buildSettingsListItems();
     expect(items.length).toBeGreaterThan(0);
@@ -124,6 +137,7 @@ describe('buildSettingsListItems', () => {
     expect(keys.indexOf('tools.codeModeOnly')).toBe(
       keys.indexOf('tools.approvalMode') + 1,
     );
+    expect(keys).not.toContain('tools.freeform');
     // Labels are resolved from the schema definitions.
     const themeItem = items.find((item) => item.key === 'ui.theme');
     expect(themeItem?.label).toBeTruthy();

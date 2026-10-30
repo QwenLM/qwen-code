@@ -84,6 +84,7 @@ const useSessionCatalogQueries = vi.hoisted(() => vi.fn(() => []));
 const loadSession = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useConnection: () => connection,
   useActions: () => ({ renameSession: vi.fn() }),
   useWorkspace: () => workspace,
@@ -214,7 +215,12 @@ let root: Root;
 let container: HTMLDivElement;
 
 function renderSidebar(
-  props: { onError?: (error: unknown, message?: string) => void } = {},
+  props: {
+    onError?: (error: unknown, message?: string) => void;
+    sessionActions?: React.ComponentProps<
+      typeof WebShellSidebar
+    >['sessionActions'];
+  } = {},
 ): void {
   const onError = props.onError ?? (() => {});
   act(() => {
@@ -232,6 +238,7 @@ function renderSidebar(
           onNewSession={() => false}
           onLoadSession={loadSession}
           onError={onError}
+          sessionActions={props.sessionActions}
         />
       </I18nProvider>,
     );
@@ -1764,5 +1771,246 @@ describe('WebShellSidebar content-search ghosts', () => {
     ).toBe(1);
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+});
+
+describe('WebShellSidebar PR badge rows', () => {
+  function metaSlotFor(displayName: string): HTMLElement {
+    const title = Array.from(
+      container.querySelectorAll('[data-web-shell-session-title]'),
+    ).find((node) => node.textContent === displayName);
+    const slot = title
+      ?.closest('[role="button"]')
+      ?.querySelector<HTMLElement>('[class*="sessionMetaSlot"]');
+    if (!slot) throw new Error(`No meta slot found for ${displayName}`);
+    return slot;
+  }
+
+  it('keeps the hover actions width reserved on rows that show a PR badge', async () => {
+    active.sessions = [
+      makeSession('with-pr', {
+        displayName: 'With PR',
+        prs: [{ number: 14990, url: 'https://github.com/o/r/pull/14990' }],
+      }),
+      makeSession('unsafe-pr', {
+        displayName: 'Unsafe PR',
+        prs: [{ number: 1, url: 'javascript:alert(1)' }],
+      }),
+      makeSession('plain', { displayName: 'Plain session' }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    // Revealing Pin + More on hover must not slide the badge under the
+    // pointer, so the slot already holds both buttons' width at rest.
+    const withPr = metaSlotFor('With PR');
+    expect(withPr.className).toMatch(/sessionMetaSlotReserved/);
+    expect(withPr.style.getPropertyValue('--session-actions-width')).toBe(
+      '52px',
+    );
+    // A filtered binding renders no badge, so there is nothing to hold still.
+    expect(metaSlotFor('Unsafe PR').className).not.toMatch(
+      /sessionMetaSlotReserved/,
+    );
+    expect(metaSlotFor('Plain session').className).not.toMatch(
+      /sessionMetaSlotReserved/,
+    );
+  });
+
+  it('reserves nothing on a row without actions', async () => {
+    active.sessions = [
+      makeSession('with-pr', {
+        displayName: 'With PR',
+        prs: [{ number: 14990, url: 'https://github.com/o/r/pull/14990' }],
+      }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar({ sessionActions: { items: [] } });
+    await flushSidebar();
+
+    // Unset, the variable falls back to the stylesheet's 78px and the row
+    // grows on hover for buttons it never shows.
+    expect(
+      metaSlotFor('With PR').style.getPropertyValue('--session-actions-width'),
+    ).toBe('0px');
+  });
+});
+
+describe('WebShellSidebar session tree', () => {
+  const flatCapabilities = { qwenCodeVersion: '1.2.3', features: [] };
+
+  function primeDerived() {
+    connection.capabilities = flatCapabilities;
+    workspace.capabilities = flatCapabilities;
+    active.sessions = [
+      makeSession('parent', { displayName: 'Parent session' }),
+      makeSession('child', {
+        displayName: 'Derived session',
+        parentSessionId: 'parent',
+      }),
+    ];
+    active.data = active.sessions;
+  }
+
+  function toggleOf(sessionTitle: string): HTMLElement | null {
+    const row = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ].find((candidate) => candidate.textContent?.includes(sessionTitle));
+    return (
+      row?.querySelector<HTMLElement>('[class*="sessionTreeToggle"]') ?? null
+    );
+  }
+
+  it('collapses a derived session under its parent in the main list', async () => {
+    primeDerived();
+    renderSidebar();
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Parent session');
+    expect(container.textContent).not.toContain('Derived session');
+    const toggle = toggleOf('Parent session');
+    expect(toggle).not.toBeNull();
+    expect(toggle?.getAttribute('aria-expanded')).toBe('false');
+    expect(toggle?.getAttribute('aria-label')).toBe('1 sub-session');
+  });
+
+  it('expands the derived session and persists the toggle', async () => {
+    primeDerived();
+    renderSidebar();
+    await flushSidebar();
+
+    act(() => click(toggleOf('Parent session')!));
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Derived session');
+    const childRow = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ].find((candidate) => candidate.textContent?.includes('Derived session'));
+    expect(childRow?.getAttribute('data-session-tree-depth')).toBe('1');
+    expect(
+      window.localStorage.getItem(
+        'qwen.web-shell.sidebar.session-tree-expanded:primary:/tmp/project',
+      ),
+    ).toContain('parent');
+  });
+
+  it('nests a derived session inside its group section', async () => {
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    active.sessions = [
+      makeSession('group-parent', {
+        displayName: 'Group parent',
+        groupId: 'design-group',
+      }),
+      makeSession('group-child', {
+        displayName: 'Group child',
+        groupId: 'design-group',
+        parentSessionId: 'group-parent',
+      }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    expect(group?.textContent).toContain('Group parent');
+    expect(group?.textContent).not.toContain('Group child');
+    expect(
+      group
+        ?.querySelector('[class*="sessionTreeToggle"]')
+        ?.getAttribute('aria-expanded'),
+    ).toBe('false');
+
+    act(() =>
+      click(group!.querySelector<HTMLElement>('[class*="sessionTreeToggle"]')!),
+    );
+    await flushSidebar();
+
+    expect(
+      container.querySelector('section[aria-label="Design"]')?.textContent,
+    ).toContain('Group child');
+  });
+
+  it('keeps an unarchived child reachable after its parent is archived', async () => {
+    // Archiving only the parent removes it from the active page; the child is
+    // still active and must stay reachable from the sidebar.
+    active.sessions = [
+      makeSession('orphaned-child', {
+        displayName: 'Archived parent child',
+        parentSessionId: 'archived-parent',
+      }),
+    ];
+    active.data = active.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Archived parent child');
+    const row = [
+      ...container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ].find((candidate) =>
+      candidate.textContent?.includes('Archived parent child'),
+    );
+    expect(row?.getAttribute('data-session-tree-depth')).toBe('0');
+  });
+
+  it('does not open the session when Enter is pressed on the chevron', async () => {
+    primeDerived();
+    renderSidebar();
+    await flushSidebar();
+
+    const toggle = toggleOf('Parent session')!;
+    act(() => {
+      toggle.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+      );
+    });
+    await flushSidebar();
+
+    expect(loadSession).not.toHaveBeenCalled();
+  });
+
+  it('keeps the child flat when its parent is pinned into the Pinned section', async () => {
+    connection.capabilities = flatCapabilities;
+    workspace.capabilities = flatCapabilities;
+    const pinnedParent = makeSession('pinned-parent', {
+      displayName: 'Pinned parent',
+      isPinned: true,
+    });
+    // The daemon's all-sessions page keeps a pinned row in place (isPinned),
+    // while the project list lifts it into the Pinned section.
+    active.sessions = [
+      pinnedParent,
+      makeSession('child', {
+        displayName: 'Derived session',
+        parentSessionId: 'pinned-parent',
+      }),
+    ];
+    active.data = active.sessions;
+    pinned.sessions = [pinnedParent];
+    pinned.data = pinned.sessions;
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(container.textContent).toContain('Derived session');
   });
 });

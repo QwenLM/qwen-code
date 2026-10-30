@@ -16,11 +16,14 @@ program behave differently across entry points.
 
 Recommend `await Promise.allSettled([...])` for independent searches and reads.
 Examples inspect every result, printing fulfilled output and `String(reason)`
-for rejections. Dependent actions, mutations, and approvals remain sequential.
+for rejections. The model must keep dependent actions, mutations, and approvals
+sequential.
 JavaScript already provides this method; no new runtime API is needed.
 
 Within each Session `exec`, dispatch consecutive safe calls concurrently using
-Core's `isToolCallConcurrencySafe` classification. Respect
+Core's `isToolCallConcurrencySafe` classification. Code Mode Bash calls bypass
+the read-only command classifier; the model decides which commands are independent.
+Ordinary Bash calls retain the read-only check. Respect
 `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). An unsafe call waits for earlier
 calls to settle, and later calls wait for it. Explicit sequential JavaScript
 awaits retain their ordering. Queue admission follows submission order and

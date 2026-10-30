@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/web-shell",
-  "version": "0.24.6",
+  "version": "0.26.4",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/QwenLM/qwen-code.git",
@@ -29,17 +29,20 @@
     }
   },
   "files": [
+    "NOTICES.txt",
     "dist/*.js",
-    "dist/types"
+    "dist/types",
+    "!dist/types/components/artifacts/pierre-*.d.ts"
   ],
   "scripts": {
     "dev": "vite",
-    "build": "vite build && vite build --config vite.lib.config.ts && vite build --config vite.lib.config.ts --mode transcript && tsc -p tsconfig.lib.json",
+    "build": "vite build && vite build --config vite.lib.config.ts && vite build --config vite.lib.config.ts --mode transcript && tsc -p tsconfig.lib.json && npm run generate:notices",
     "lint": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx",
     "lint:fix": "cd ../.. && eslint packages/web-shell --ext .ts,.tsx --fix",
     "format:check": "cd ../.. && prettier --experimental-cli --check packages/web-shell",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "generate:managed-agent-api": "node scripts/generate-managed-agent-api.mjs",
+    "generate:notices": "node ../vscode-ide-companion/scripts/generate-notices.js --bundled .",
     "test": "vitest run --config vitest.config.ts",
     "test:ci": "vitest run --config vitest.config.ts",
     "test:coverage": "vitest run --config vitest.config.ts --coverage",
@@ -49,7 +52,7 @@
     "test:e2e:visuals": "playwright test --config playwright.visuals.config.ts",
     "test:e2e:report": "playwright show-report client/e2e/playwright-report",
     "verify": "npm run lint && npm run format:check && npm run typecheck && npm run test:ci",
-    "prepublishOnly": "node scripts/verify-publish-artifacts.mjs"
+    "prepublishOnly": "npm run generate:notices && node scripts/verify-publish-artifacts.mjs"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.18.0",
@@ -64,24 +67,30 @@
     "@modelcontextprotocol/ext-apps": "^1.7.5",
     "@tanstack/react-table": "^8.21.3",
     "@tanstack/react-virtual": "^3.13.26",
+    "@types/hast": "^3.0.5",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "codemirror": "^6.0.0",
+    "docx-preview": "0.4.1",
     "echarts": "^6.0.0",
+    "exceljs": "4.4.0",
     "fzf": "^0.5.2",
     "katex": "^0.16.47",
     "lucide-react": "^1.24.0",
     "mermaid": "^11.15.0",
     "radix-ui": "^1.6.2",
     "react-markdown": "^9.0.0",
+    "react-resizable-panels": "4.14.3",
     "rehype-katex": "^7.0.1",
     "remark-cjk-friendly": "^2.3.1",
     "remark-gfm": "^4.0.0",
     "remark-math": "^6.0.0",
     "shiki": "^1.29.2",
+    "ssf": "0.11.2",
     "tailwind-merge": "^3.6.0",
+    "turndown": "^7.2.4",
     "vaul": "^1.1.2"
   },
   "peerDependencies": {
@@ -89,22 +98,33 @@
     "react": "^18.0.0 || ^19.0.0",
     "react-dom": "^18.0.0 || ^19.0.0"
   },
+  "bundledDevDependencies": [
+    "@pierre/diffs",
+    "@pierre/trees",
+    "docx-preview",
+    "shiki-files"
+  ],
   "devDependencies": {
+    "@pierre/diffs": "1.5.2",
+    "@pierre/trees": "1.0.0-beta.6",
     "@playwright/test": "1.61.1",
+    "@qwen-code/acp-bridge": "file:../acp-bridge",
     "@qwen-code/sdk": "file:../sdk-typescript",
     "@tailwindcss/vite": "^4.3.2",
-    "@types/hast": "^3.0.5",
     "@types/node": "^22.0.0",
     "@types/react": "^19.2.0",
     "@types/react-dom": "^19.0.0",
+    "@types/turndown": "^5.0.6",
     "@vitejs/plugin-react": "^4.2.0",
     "jsdom": "^26.1.0",
+    "jszip": "3.10.2",
     "openapi-typescript": "^7.13.0",
     "postcss": "^8.5.17",
     "postcss-selector-parser": "^7.1.4",
     "react": "^19.2.0",
     "react-dom": "^19.0.0",
     "shadcn": "^4.13.0",
+    "shiki-files": "npm:shiki@4.5.0",
     "tailwindcss": "^4.3.2",
     "tw-animate-css": "^1.4.0",
     "typescript": "^5.3.3",

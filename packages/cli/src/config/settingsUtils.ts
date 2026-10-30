@@ -276,6 +276,9 @@ export function validateSettingValue(
  * runtime import cycle.
  */
 export const WORKSPACE_RESTRICTED_SETTINGS = [
+  { section: 'memory', key: 'mem0' },
+  { section: 'memory', key: 'agentMaxTurns' },
+  { section: 'memory', key: 'agentTimeoutMinutes' },
   { section: 'tools', key: 'executionSandbox' },
   { section: 'tools', key: 'workflowsEnabled' },
   { section: 'security', key: 'allowPrivateNetworkHooks' },
@@ -283,6 +286,8 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'goals', key: 'modelProposed' },
   { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },
   { section: 'serve', key: 'tokenQr' },
+  { section: 'serve', key: 'maxSessions' },
+  { section: 'ui', key: 'allowedApprovalModes' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
   readonly key: string;
@@ -297,6 +302,10 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
 export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = [
   'advisorModel',
   'advisorMaxUses',
+  'pluginConfigs',
+  // Where verification evidence gets published is the operator's call: a
+  // cloned repository must not redirect it to another fork.
+  'verifyPr',
 ] as const;
 
 /**

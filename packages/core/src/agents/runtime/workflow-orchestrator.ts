@@ -22,6 +22,8 @@ import {
 import {
   createWorkflowSandbox,
   debugLogger,
+  describeOversizedBatch,
+  WORKFLOW_BATCH_LIMIT,
   type WorkflowSandbox,
 } from './workflow-sandbox.js';
 import type {
@@ -54,11 +56,15 @@ import {
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT,
   WORKFLOW_SUBAGENT_SYSTEM_PROMPT_WITH_SCHEMA,
 } from './workflow-prompts.js';
-import { AgentTerminateMode } from './agent-types.js';
+import { AgentTerminateMode, type ToolConfig } from './agent-types.js';
 import type { ContextState } from './agent-headless.js';
 import {
   attachJsonlTranscriptWriter,
   buildAgentTranscriptAttach,
+  getAgentMetaPath,
+  readAgentMeta,
+  writeAgentMeta,
+  type AgentMeta,
 } from '../agent-transcript.js';
 import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
@@ -85,7 +91,12 @@ import { rebuildToolRegistryOnOverride } from '../../tools/agent/agent.js';
 import { resolveExternalWorktreeDir } from '../worktree-pin.js';
 import { toModelVisibleSubagentResult } from '../subagent-result.js';
 import { SUBAGENT_PLAN_LIFECYCLE_TOOLS } from './subagent-plan-tool-policy.js';
-import { runWithAgentContext } from './agent-context.js';
+import {
+  backgroundFixAt,
+  backgroundFixHolding,
+  settleBackgroundFix,
+} from '../../tools/autofix-pr-grants.js';
+import { getCurrentAgentId, runWithAgentContext } from './agent-context.js';
 import { WorkflowDispatchScheduler } from './workflow-dispatch-scheduler.js';
 import {
   canonicalAgentToolName,
@@ -554,6 +565,21 @@ export function createProductionDispatch(
     dispatchId?: string,
   ) => () => void,
   subagentBounds?: WorkflowSubagentBounds,
+  /**
+   * When true, the run's `agent()` subagents carry no tools at all
+   * (hosted harness's managed workflow child): a text-only `agent()` runs
+   * against an empty declaration list, while a tool-bearing `agent()` is
+   * refused by narrowing — never letting a tool dispatch reach the wrong
+   * tree or host.
+   */
+  refuseSubagentTools?: boolean,
+  /**
+   * The Workflow tool call that started this run. Suffixed onto each
+   * subagent id the way the Agent tool suffixes its own call id, so readers
+   * that resolve a subagent's spawning call from its id (the trajectory)
+   * can nest workflow agents under this call.
+   */
+  parentToolCallId?: string,
 ): WorkflowAgentDispatch {
   return async (prompt, opts, dispatchId) => {
     // An empty or non-string prompt seeds no `user` record, so the
@@ -562,6 +588,21 @@ export function createProductionDispatch(
     // `agent_retry` marker. Reject at the boundary instead.
     if (typeof prompt !== 'string' || prompt.length === 0) {
       throw new Error('agent() requires a non-empty string prompt.');
+    }
+    // A host refusing this run's tools (the managed workflow child) also
+    // refuses every option that reaches its own filesystem or processes:
+    // an agentType resolves (and may start the MCP servers of) a definition
+    // on this host, and isolation / workingDir provision or bind a worktree
+    // here. They are refused before any of that resolves.
+    if (refuseSubagentTools === true) {
+      const hostBound = HOST_BOUND_AGENT_OPTS.filter(
+        (key) => opts[key] !== undefined,
+      );
+      if (hostBound.length > 0) {
+        throw new Error(
+          `agent({${hostBound.join(', ')}}): unavailable in this workflow — its agents carry no tools and use nothing on this host, so only text-only agent() calls (optionally with model, effort or schema) can run.`,
+        );
+      }
     }
     // P-stall: wrap the single-attempt dispatch in the stall watchdog +
     // retry loop. The wrapper owns the per-attempt AbortController +
@@ -577,7 +618,9 @@ export function createProductionDispatch(
     // Minted per `agent()` call rather than per attempt, so a stall-retried
     // dispatch appends to ONE transcript instead of presenting as two agents
     // to every reader of the subagent transcript dir.
-    const workflowAgentId = `workflow-agent-${randomBytes(8).toString('hex')}`;
+    const workflowAgentId =
+      `workflow-agent-${randomBytes(8).toString('hex')}` +
+      (parentToolCallId ? `-${parentToolCallId}` : '');
     // Resolved once and handed to both the runtime and the transcript so
     // the on-disk records name the same agent that ran. The resolved
     // agentType definition rides along so the override path reuses it
@@ -602,49 +645,67 @@ export function createProductionDispatch(
       );
     }
     let attempt = 0;
-    return runStallResilient(
-      async (attemptSignal, emitter) => {
-        attempt += 1;
-        const cleanupApprovalBridge = bridgeApprovalEvents?.(
-          emitter,
-          dispatchId,
-        );
-        const cleanupTranscript = attachDispatchTranscript(
-          config,
-          workflowAgentId,
-          prompt,
-          agentIdentity.name,
-          emitter,
-          attempt,
-        );
-        try {
-          return await runSingleDispatch(
-            config,
-            prompt,
-            opts,
-            attemptSignal,
+    let finishTranscript: (status: AgentMeta['status']) => void = () => {};
+    let status: AgentMeta['status'] = 'failed';
+    try {
+      const result = await runStallResilient(
+        async (attemptSignal, emitter) => {
+          attempt += 1;
+          const cleanupApprovalBridge = bridgeApprovalEvents?.(
             emitter,
-            workflowAgentId,
-            agentIdentity,
-            onTokens,
-            subagentBounds,
+            dispatchId,
           );
-        } finally {
-          cleanupTranscript();
-          cleanupApprovalBridge?.();
-        }
-      },
-      {
-        stallMs,
-        signal,
-        // The name can carry a model-authored agentType spelling — keep
-        // the stall log / abandoned error single-line the same way the
-        // "not found" throw site sanitizes it.
-        label: sanitizeForErrorMessage(agentIdentity.name),
-      },
-    );
+          const cleanupTranscript = attachDispatchTranscript(
+            config,
+            workflowAgentId,
+            prompt,
+            agentIdentity.name,
+            emitter,
+            attempt,
+          );
+          finishTranscript = cleanupTranscript;
+          try {
+            return await runSingleDispatch(
+              config,
+              prompt,
+              opts,
+              attemptSignal,
+              emitter,
+              workflowAgentId,
+              agentIdentity,
+              onTokens,
+              subagentBounds,
+              refuseSubagentTools,
+            );
+          } finally {
+            cleanupTranscript('running');
+            cleanupApprovalBridge?.();
+          }
+        },
+        {
+          stallMs,
+          signal,
+          // The name can carry a model-authored agentType spelling — keep
+          // the stall log / abandoned error single-line the same way the
+          // "not found" throw site sanitizes it.
+          label: sanitizeForErrorMessage(agentIdentity.name),
+        },
+      );
+      status = 'completed';
+      return result;
+    } finally {
+      finishTranscript(
+        status === 'failed' && signal?.aborted ? 'cancelled' : status,
+      );
+    }
   };
 }
+
+/**
+ * agent() options that reach the dispatching host's own filesystem or
+ * processes; a host refusing its subagents' tools refuses these too.
+ */
+const HOST_BOUND_AGENT_OPTS = ['agentType', 'isolation', 'workingDir'] as const;
 
 /** Identity resolved once per dispatch — see resolveWorkflowAgentIdentity. */
 interface WorkflowAgentIdentity {
@@ -716,7 +777,7 @@ function attachDispatchTranscript(
   emitter: AgentEventEmitter,
   /** 1-based attempt; retries append to the transcript attempt 1 opened. */
   attempt: number,
-): () => void {
+): (status: AgentMeta['status']) => void {
   const append = attempt > 1;
   try {
     const { jsonlPath, options } = buildAgentTranscriptAttach(config, agentId, {
@@ -730,7 +791,36 @@ function attachDispatchTranscript(
       appendToExisting: append,
       retryAttempt: append ? attempt : undefined,
     });
-    return attachJsonlTranscriptWriter(emitter, jsonlPath, options).cleanup;
+    const writer = attachJsonlTranscriptWriter(emitter, jsonlPath, options);
+    const metaPath = getAgentMetaPath(
+      config.storage.getProjectDir(),
+      options.sessionId,
+      agentId,
+    );
+    const now = new Date().toISOString();
+    const meta: AgentMeta = {
+      agentId,
+      agentType:
+        stripAnsiAndControl(agentName).slice(0, 200) || 'workflow-agent',
+      description: stripAnsiAndControl(prompt).slice(0, 4_096),
+      parentSessionId: options.sessionId,
+      parentAgentId: getCurrentAgentId() ?? null,
+      createdAt:
+        (append ? readAgentMeta(metaPath)?.createdAt : undefined) ?? now,
+      lastUpdatedAt: now,
+      status: 'running',
+      isBackgrounded: false,
+      workflowOwner: { pid: process.pid, hostname: os.hostname() },
+    };
+    writeAgentMeta(metaPath, meta);
+    return (status) => {
+      writer.cleanup();
+      writeAgentMeta(metaPath, {
+        ...meta,
+        status,
+        lastUpdatedAt: new Date().toISOString(),
+      });
+    };
   } catch (error) {
     debugLogger.warn(
       `[Workflow] failed to attach transcript for ${agentId}: ${error}`,
@@ -791,11 +881,28 @@ async function runSingleDispatch(
   agentIdentity: WorkflowAgentIdentity,
   onTokens?: (outputTokens: number, opts: WorkflowAgentOpts) => void,
   subagentBounds?: WorkflowSubagentBounds,
+  refuseSubagentTools?: boolean,
 ): Promise<WorkflowAgentResult> {
   const { AgentHeadless, ContextState } = await import('./agent-headless.js');
   const ctx = new ContextState();
   ctx.set('task_prompt', prompt);
   debugLogger.debug(`[workflow] Dispatch ${workflowAgentId}`);
+
+  // In the session's own directory, after a `/cd` into the worktree of a
+  // background fix of /autofix-pr: beside it, on either path below.
+  const ownDir = config.getTargetDir?.();
+  if (opts.workingDir === undefined && ownDir) {
+    await settleBackgroundFix({ within: ownDir });
+  }
+  if (
+    opts.workingDir === undefined &&
+    ownDir &&
+    backgroundFixHolding(ownDir, getCurrentAgentId())
+  ) {
+    throw new Error(
+      `agent(): a background fix agent of /autofix-pr is working in ${ownDir}; its round goes on when it ends.`,
+    );
+  }
 
   // The fast path hands `config` to AgentHeadless untouched, so it has no
   // way to honour a directory rebind — `workingDir` MUST route through the
@@ -824,7 +931,9 @@ async function runSingleDispatch(
       // T11 (PR #4732 R1): disallow SendMessage / ExitPlanMode to align with
       // upstream Tg8 — closes the back-channel that would let a subagent
       // deliver its answer via user message instead of the script's read.
-      { tools: ['*'], disallowedTools: WORKFLOW_SUBAGENT_DISALLOWED_TOOLS },
+      refuseSubagentTools === true
+        ? { tools: [], disallowedTools: [] }
+        : { tools: ['*'], disallowedTools: WORKFLOW_SUBAGENT_DISALLOWED_TOOLS },
       // P-stall: the stall-watchdog emitter observes reasoning-loop events
       // (round/tool/usage) to detect a hang and abort `attemptSignal`.
       emitter,
@@ -847,7 +956,9 @@ async function runSingleDispatch(
       // establishes the ALS frame that isSubagentLikeExecutionContext() reads,
       // so plan lifecycle tools remain blocked if tool filtering changes.
       await runWithAgentContext(workflowAgentId, () =>
-        subagent.execute(ctx, attemptSignal),
+        subagent.execute(ctx, attemptSignal, {
+          enforceTimeLimitDuringRetryWait: true,
+        }),
       );
     } finally {
       reportTokens(subagent, opts, onTokens);
@@ -874,6 +985,7 @@ async function runSingleDispatch(
     onTokens,
     emitter,
     subagentBounds,
+    refuseSubagentTools,
   );
 }
 
@@ -1036,6 +1148,7 @@ async function runOverridePath(
    */
   emitter?: AgentEventEmitter,
   subagentBounds?: WorkflowSubagentBounds,
+  refuseSubagentTools?: boolean,
 ): Promise<WorkflowAgentResult> {
   if (opts.isolation === 'remote') {
     // Error message verbatim from upstream Claude Code 2.1.168 strings.
@@ -1154,6 +1267,10 @@ async function runOverridePath(
         ...(baseConfig.disallowedTools ?? []),
         ...WORKFLOW_SUBAGENT_DISALLOWED_TOOLS,
         ...requestedDenies,
+        // A host refusing this run's tools (the managed workflow child)
+        // has every tool-bearing opts refuse at narrow time, by each
+        // one's own name — never by a lucky miss in the registry.
+        ...(refuseSubagentTools === true ? (requestedAllows ?? []) : []),
       ]),
     ),
   };
@@ -1248,6 +1365,8 @@ async function runOverridePath(
         denies: await subagentMgr.resolveToolNames(
           augmented.disallowedTools ?? [],
         ),
+        getMcpIdentity: (name) =>
+          config.getToolRegistry().getMcpToolIdentity?.(name),
         schema: opts.schema !== undefined,
       });
     } catch (error) {
@@ -1258,6 +1377,20 @@ async function runOverridePath(
       );
     }
   }
+
+  // A host refusing this run's tools hands the manager the runtime tool list
+  // itself. The definition-level allowlist cannot carry it: an empty one is
+  // the manager's "inherit everything" marker, which convertToRuntimeConfig
+  // turns into '*', so a dispatch that names no tools would get this host's
+  // whole registry. Only a schema dispatch keeps structured_output, its one
+  // way to answer.
+  const refusedToolConfig: ToolConfig | undefined =
+    refuseSubagentTools === true
+      ? {
+          tools: opts.schema !== undefined ? [ToolNames.STRUCTURED_OUTPUT] : [],
+          disallowedTools: [],
+        }
+      : undefined;
 
   // Provision worktree BEFORE createAgentHeadless so the derived Config
   // is in place when convertToRuntimeConfig and buildSubagentContextOverride
@@ -1313,6 +1446,15 @@ async function runOverridePath(
       // the same threat the agentType SECURITY note above names.
       throw new Error(
         `agent({workingDir: ${sanitizeForErrorMessage(JSON.stringify(opts.workingDir))}}): ${sanitizeForErrorMessage(resolved.error)}`,
+      );
+    }
+    // Not beside a background fix agent of /autofix-pr, as the agent tool
+    // refuses too. (Only the top-level session dispatches: no subagent runs
+    // a workflow.)
+    await settleBackgroundFix({ worktree: resolved.path });
+    if (backgroundFixAt(resolved.path)) {
+      throw new Error(
+        `agent({workingDir}): a background fix agent of /autofix-pr is working in ${resolved.path}; its round goes on when it ends.`,
       );
     }
     effectiveContext = deriveWorktreeConfig(config, resolved.path, {
@@ -1413,6 +1555,9 @@ async function runOverridePath(
         ...(effort !== undefined
           ? { modelConfigOverrides: { reasoningEffort: effort } }
           : {}),
+        ...(refusedToolConfig !== undefined
+          ? { toolConfigOverride: refusedToolConfig }
+          : {}),
         eventEmitter,
         taskName: String(ctx.get('task_prompt')),
         subagentId: workflowAgentId,
@@ -1435,7 +1580,9 @@ async function runOverridePath(
         // establishes the ALS frame that isSubagentLikeExecutionContext() reads,
         // so plan lifecycle tools remain blocked if tool filtering changes.
         await runWithAgentContext(workflowAgentId, () =>
-          subagent.execute(ctx, dispatchSignal),
+          subagent.execute(ctx, dispatchSignal, {
+            enforceTimeLimitDuringRetryWait: true,
+          }),
         );
       } finally {
         reportTokens(subagent, opts, onTokens);
@@ -2753,8 +2900,9 @@ async function settleToNullArray(
  * function whose agent() calls throttle through the per-run concurrency window
  * at the dispatch layer. A thunk that rejects, or resolves to a non-JSON-
  * serializable value, becomes `null` at its index (errors-as-data). `parallel()`
- * itself rejects when given invalid arguments (non-array / non-function
- * element), when the run is aborted, or when a token/agent-cap or container
+ * itself rejects when given invalid arguments (non-array, more than
+ * `WORKFLOW_BATCH_LIMIT` thunks, non-function element) before any thunk
+ * runs, when the run is aborted, or when a token/agent-cap or container
  * policy gate refuses a dispatch. The sandbox wrapper revives the result array
  * into the vm realm (per-element JSON round-trip) — this host array never
  * reaches the script directly.
@@ -2771,8 +2919,14 @@ function makeParallelImpl(
         ),
       );
     }
-    for (const t of thunks) {
-      if (typeof t !== 'function') {
+    let batch: unknown[];
+    try {
+      batch = snapshotBatch('parallel() thunks', thunks);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    for (let i = 0; i < batch.length; i++) {
+      if (typeof batch[i] !== 'function') {
         return Promise.reject(
           new Error(
             'parallel() expects an array of functions, not values — wrap each ' +
@@ -2783,7 +2937,7 @@ function makeParallelImpl(
     }
     const parent = dependencyContext.getStore();
     const inheritedTails = parent?.tails ?? [];
-    const branches = thunks.map((thunk) => {
+    const branches = (batch as Array<() => Promise<unknown>>).map((thunk) => {
       const store = { tails: [...inheritedTails] };
       return {
         store,
@@ -2815,8 +2969,10 @@ function makeParallelImpl(
  * stage's `prev` is the item itself. An ordinary stage error, a `null`, or a
  * non-JSON-serializable value drops that item to `null` and skips its remaining
  * stages, leaving other items unaffected. A token/agent-cap refusal rejects
- * the batch. Concurrency is bounded at the dispatch layer, and the result array
- * shares parallel()'s per-element vm-realm revival.
+ * the batch. Items and stages are each bounded by `WORKFLOW_BATCH_LIMIT`; a
+ * longer list rejects the call before any stage runs. Concurrency is bounded
+ * at the dispatch layer, and the result array shares parallel()'s
+ * per-element vm-realm revival.
  */
 function makePipelineImpl(
   signal: AbortSignal | undefined,
@@ -2835,6 +2991,13 @@ function makePipelineImpl(
         ),
       );
     }
+    let batch: unknown[];
+    try {
+      batch = snapshotBatch('pipeline() items', items);
+      snapshotBatch('pipeline() stages', stages);
+    } catch (error) {
+      return Promise.reject(error);
+    }
     for (const s of stages) {
       if (typeof s !== 'function') {
         return Promise.reject(
@@ -2847,7 +3010,7 @@ function makePipelineImpl(
     }
     const parent = dependencyContext.getStore();
     const inheritedTails = parent?.tails ?? [];
-    const branches = items.map((item, idx) => {
+    const branches = batch.map((item, idx) => {
       const store = { tails: [...inheritedTails] };
       return {
         store,
@@ -2871,6 +3034,37 @@ function makePipelineImpl(
       return result;
     });
   };
+}
+
+/**
+ * Copy one `parallel()` / `pipeline()` list into a host array after checking
+ * its length against the batch limit. The length is read once and every later
+ * loop runs over the copy, so a Proxy whose length changes, or a custom
+ * iterator or `map`, cannot stretch the batch past the check. Holes stay
+ * holes: the copy is shallow and keeps the input's sparse positions.
+ */
+function snapshotBatch(list: string, input: ArrayLike<unknown>): unknown[] {
+  let length: unknown;
+  try {
+    length = input.length;
+  } catch {
+    length = undefined;
+  }
+  if (
+    typeof length !== 'number' ||
+    !Number.isSafeInteger(length) ||
+    length < 0
+  ) {
+    throw new Error(`${list} must be an array with a readable length.`);
+  }
+  if (length > WORKFLOW_BATCH_LIMIT) {
+    throw new Error(describeOversizedBatch(list, length));
+  }
+  const batch: unknown[] = new Array(length);
+  for (let i = 0; i < length; i++) {
+    if (i in input) batch[i] = input[i];
+  }
+  return batch;
 }
 
 function mergeFanoutTails(

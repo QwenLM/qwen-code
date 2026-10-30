@@ -43,6 +43,7 @@ export const ToolNames = {
   CRON_CREATE: 'cron_create',
   CRON_LIST: 'cron_list',
   CRON_DELETE: 'cron_delete',
+  AUTOFIX_PR: 'autofix_pr',
   LOOP_WAKEUP: 'loop_wakeup',
   CREATE_SUB_SESSION: 'create_sub_session',
   LIST_AGENTS: 'list_agents',
@@ -95,6 +96,17 @@ export const ToolNames = {
 } as const;
 
 /**
+ * The only tools an agent-host session declares and runs. The Host is
+ * read-only and auto-rejects permission prompts, so anything outside this
+ * set would be advertised to the model yet fail every invocation.
+ */
+export const AGENT_HOST_TOOL_NAMES: readonly string[] = [
+  ToolNames.READ_FILE,
+  ToolNames.GREP,
+  ToolNames.LS,
+];
+
+/**
  * Tool display name constants to avoid circular dependencies.
  * These constants are used across multiple files and should be kept in sync
  * with the actual tool display names.
@@ -125,6 +137,7 @@ export const ToolDisplayNames = {
   CRON_CREATE: 'CronCreate',
   CRON_LIST: 'CronList',
   CRON_DELETE: 'CronDelete',
+  AUTOFIX_PR: 'AutofixPr',
   LOOP_WAKEUP: 'LoopWakeup',
   CREATE_SUB_SESSION: 'CreateSubSession',
   LIST_AGENTS: 'ListAgents',

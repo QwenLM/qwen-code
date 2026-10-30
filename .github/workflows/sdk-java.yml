@@ -1,56 +1,23 @@
 name: 'SDK Java'
 
 on:
-  pull_request:
-    branches:
-      - 'main'
-      - 'release/**'
-    paths:
-      - 'packages/sdk-java/**'
-      - '**/.mvn/**'
-      - 'packages/core/src/config/approval-modes.json'
-      - 'packages/core/src/managed-runtime/**'
-      - 'packages/cli/src/config/**'
-      - 'packages/core/src/config/**'
-      - 'packages/core/src/core/**'
-      - 'packages/cli/src/commands/serve.ts'
-      - 'packages/cli/src/serve/**'
-      - 'packages/cli/src/acp-integration/**'
-      - 'packages/acp-bridge/**'
-      - 'integration-tests/fake-openai-server.ts'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'docs/developers/sdk-java.md'
-      - 'docs/design/java-daemon-sdk-alpha.md'
-      - 'scripts/run-java-daemon-sdk-e2e.ts'
-      - 'scripts/check-failsafe-reports.js'
-      - '.github/workflows/sdk-java.yml'
-      - '.github/workflows/release-sdk-java.yml'
-  push:
-    branches:
-      - 'main'
-      - 'release/**'
-    paths:
-      - 'packages/sdk-java/**'
-      - '**/.mvn/**'
-      - 'packages/core/src/config/approval-modes.json'
-      - 'packages/core/src/managed-runtime/**'
-      - 'packages/cli/src/config/**'
-      - 'packages/core/src/config/**'
-      - 'packages/core/src/core/**'
-      - 'packages/cli/src/commands/serve.ts'
-      - 'packages/cli/src/serve/**'
-      - 'packages/cli/src/acp-integration/**'
-      - 'packages/acp-bridge/**'
-      - 'integration-tests/fake-openai-server.ts'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'docs/developers/sdk-java.md'
-      - 'docs/design/java-daemon-sdk-alpha.md'
-      - 'scripts/run-java-daemon-sdk-e2e.ts'
-      - 'scripts/check-failsafe-reports.js'
-      - '.github/workflows/sdk-java.yml'
-      - '.github/workflows/release-sdk-java.yml'
+  schedule:
+    - cron: '47 19 * * *'
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      ref:
+        description: 'Immutable source commit selected by the caller.'
+        required: true
+        type: 'string'
+      # 'fast' keeps the flyway guard, the real-daemon E2E and the Linux
+      # Java 21 leg for managed-agent-gate.yml's push-time tier; anything
+      # else, including no value on the nightly, runs every lane.
+      tier:
+        description: 'fast for the push-time subset; full otherwise.'
+        required: false
+        type: 'string'
+        default: 'full'
 
 permissions:
   contents: 'read'
@@ -60,28 +27,45 @@ env:
   MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
 
 concurrency:
-  group: 'sdk-java-${{ github.event.pull_request.number || github.run_id }}'
-  cancel-in-progress: true
+  # Keyed by event and commit: a Managed Agent gate fast run and a full run
+  # on the same pull request must not queue behind each other, where a newer
+  # pending run would displace the older one.
+  group: 'sdk-java-${{ github.workflow }}-${{ github.event_name }}-${{ inputs.ref || github.ref }}'
+  # Release callers and daily runs must not displace each other's validation.
+  cancel-in-progress: false
 
 jobs:
   test:
     name: '${{ matrix.os }} / Java ${{ matrix.java }}'
-    runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
-    timeout-minutes: 30
+    runs-on: '${{ (matrix.os == ''ubuntu-latest'' && github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || matrix.os }}'
+    # One per-host lock wait plus the bounded write-back it guards, and the
+    # unlocked Maven work the job runs outside it. The only hold is the
+    # 300-second write-back: the suite runs before the acquisition and holds
+    # nothing. The 9600-second wait is carried from the pre-split topology
+    # where a test lane could queue behind several suite holds; with the
+    # suite unlocked it is a conservative bound (about 32 queued copies),
+    # not a measured need, and no constant budget bounds the queue itself
+    # (#14566, #15031). The 2026-10-22 run 39754359013 burned the then
+    # 5400-second budget behind the MariaDB lane's verify hold — the shape
+    # #15128 removed (qwen-code#15243). The ticketed queue in
+    # .github/scripts/sdk-java-lock.sh serves the fast class first: a
+    # fast-tier leg waits for the running hold, at most one parked full-tier
+    # head and older fast-class tickets, overtaking only full-tier tickets
+    # younger than SDK_JAVA_LOCK_PROMOTE_AFTER (under a longer hold the
+    # queue is plain sequence order), while a full-tier leg (the default)
+    # keeps its FIFO position among the other rank-1 tickets.
+    # The ceiling is that wait plus the worst measured whole-step suite
+    # (1205 s; the 925 s suite-alone figure from #14801 is a lower bound),
+    # the write-back and ~11 minutes of setup and margin: 200. Hosted lanes
+    # never take the lock and inherit this ceiling as a bound, not as an
+    # expected duration.
+    timeout-minutes: 200
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - os: 'ubuntu-latest'
-            java: '11'
-          - os: 'ubuntu-latest'
-            java: '17'
-          - os: 'ubuntu-latest'
-            java: '21'
-          - os: 'macos-latest'
-            java: '21'
-          - os: 'windows-latest'
-            java: '21'
+        include: >-
+          ${{ fromJSON(inputs.tier == 'fast' && '[{"os":"ubuntu-latest","java":"21"}]' ||
+          '[{"os":"ubuntu-latest","java":"11"},{"os":"ubuntu-latest","java":"17"},{"os":"ubuntu-latest","java":"21"},{"os":"macos-latest","java":"21"},{"os":"windows-latest","java":"21"}]') }}
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -93,37 +77,132 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
+
+      # ci.yml's pre-checkout sweep, byte-identical to the ci.yml copies
+      # (pinned in scripts/tests/sdk-java-workflow.test.js): residue left by
+      # review/autofix jobs on the shared ECS pool fails actions/checkout's
+      # clean — the #13506 failure. Hosted legs skip it on fresh VMs.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: "${{ (runner.environment == 'self-hosted' && github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
-
-      - name: 'Verify checkout includes expected head commit'
-        if: "${{ runner.environment == 'self-hosted' && github.event_name == 'pull_request' }}"
-        env:
-          EXPECTED_SHA: '${{ github.event.pull_request.head.sha }}'
-        run: |-
-          if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
-            echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
-            git log --oneline --decorate -5
-            exit 1
-          fi
+          ref: '${{ inputs.ref || github.sha }}'
 
       # setup-java updates Maven files non-atomically. Keep them job-local
       # because runner instances on one ECS host share HOME.
+      #
+      # The Maven cache is hosted-only. An ECS host keeps ~/.m2 between jobs,
+      # and the post-job save tars that whole shared repository — 14 to 37
+      # minutes per job on 2026-10-16 — only to lose the reservation race to
+      # a parallel job and discard the archive.
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
           distribution: 'temurin'
           java-version: '${{ matrix.java }}'
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
-            packages/sdk-java/runtime-broker/pom.xml
+            packages/managed-agent-server/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
-      # The runtime-broker process tests spawn the Node fixture worker.
+      # The Broker process tests spawn the Node fixture worker.
       # Self-hosted keeps relying on the runner's own Node, matching the
       # daemon-e2e job's stance.
       - name: 'Set up Node.js 22 (hosted)'
@@ -133,12 +212,62 @@ jobs:
           node-version: '22'
           package-manager-cache: false
 
+      # The fast tier runs the full module suite below, which loads the built
+      # Core and CLI JavaScript, as mysql-integration's suite does.
+      - name: 'Build Managed Agent JavaScript prerequisites (fast tier)'
+        if: "${{ inputs.tier == 'fast' }}"
+        run: |-
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
@@ -146,20 +275,166 @@ jobs:
         if: "${{ runner.environment == 'self-hosted' }}"
         working-directory: 'packages/sdk-java/qwencode'
         env:
-          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
           MATRIX_JAVA: '${{ matrix.java }}'
+          TIER: '${{ inputs.tier }}'
         run: |-
-          mkdir -p "${HOME}/.cache/qwen-code-ci"
-          exec 9>"${HOME}/.cache/qwen-code-ci/sdk-java-tests.lock"
-          if ! flock --wait 1200 9; then
-            echo "::error::sdk-java host lock not acquired within 20 minutes"
-            exit 1
+          # Seed from the host-shared repo so a warm host still starts warm.
+          # The seed only reads the host cache and is best-effort, so it takes
+          # no lock and cannot delay the lane.
+          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          # Maven truncates and rewrites its resolver tracking markers in
+          # place, so a seeded hardlink would let the unlocked runs mutate
+          # the host cache. Drop them; Maven recreates them job-locally.
+          find "${RUNNER_TEMP}/m2-repo" \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
+            -delete 2>/dev/null || true
+          # Both in-house coordinates are fixed release versions this job
+          # builds locally, so a seeded copy is only a hardlink the unlocked
+          # Maven runs would rewrite through into the host cache. Drop them
+          # so the install writes fresh inodes.
+          rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
+          # The suite resolves from the job-local copy above, so it does not
+          # touch host-shared state and must not hold the per-host lock.
+          # On 2026-10-22 run 39771949573's fast tier failed at its
+          # 5400-second budget on two hosts; the full-tier Java 21 leg of
+          # run 39754414693 ran 89 minutes on a third, itself mostly one
+          # lock wait after its own attempt 1 starved at 5400 seconds. A
+          # suite hold measures in tens of minutes to hours; the write-back
+          # is bounded at 300 seconds, whoever holds it.
+          # A red suite still reaches the write-back: its downloads were
+          # already made, and dropping them makes the next leg re-pay for
+          # them. Only the exit is deferred — a failure still stops the
+          # remaining suites, and the step ends with Maven's status.
+          mvn_status=0
+          mvn_stage='sdk-java test'
+          mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?
+          if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]; then
+            mvn_stage='sdk-java install'
+            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install || mvn_status=$?
+            if [ "${mvn_status}" -eq 0 ]; then
+              cd ../../managed-agent-server
+              # The fast tier skips mysql-integration, which owns the full H2 unit suite.
+              if [ "${TIER}" = "fast" ]; then
+                mvn_stage='runtime-broker H2 suite'
+                mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?
+              else
+                mvn_stage='runtime-broker suite'
+                mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test || mvn_status=$?
+              fi
+            fi
           fi
-          mvn --batch-mode --no-transfer-progress clean test
-          if [ "${MATRIX_JAVA}" = "21" ]; then
-            cd ../runtime-broker
-            mvn --batch-mode --no-transfer-progress clean test
+          # Only the write-back mutates host-shared state, so only it takes
+          # the per-host lock. The ticketed queue orders that one wait, and
+          # the tier argument keeps the fast class ahead of waiting full-tier
+          # tickets — see the sourced helper. The gate result is final before
+          # this runs, so an expired wait warns and skips the copy instead of
+          # reddening a green suite.
+          # A host fault takes the same warn-and-skip path as an expired wait.
+          # A tolerated skip still reports the deferred suite status.
+          # A red leg publishes downloads only, so it does not spend the green
+          # lane's queue budget delaying a failure that is already decided: it
+          # waits no longer than the copy itself is allowed to run.
+          lock_wait=9600
+          if [ "${mvn_status:-0}" -ne 0 ]; then
+            lock_wait=300
           fi
+          # Name the deferred failure at every exit that can end a red step:
+          # the copy's output is the log tail, and every Maven failure exits 1,
+          # so the tail alone cannot tell the three suites apart.
+          mvn_report_failed_suite() {
+            if [ "${mvn_status:-0}" -ne 0 ]; then
+              echo "::error::Maven suite '${mvn_stage}' failed with status ${mvn_status}"
+            fi
+          }
+          lock_setup_fault() {
+            echo "::warning::Maven cache write-back skipped: $1; the gate result above is unaffected"
+            mvn_report_failed_suite
+            exit "${mvn_status}"
+          }
+          cache_dir="${HOME}/.cache/qwen-code-ci"
+          if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
+            source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
+            # The helper runs on the left of `||`, where bash suppresses
+            # errexit for its whole body, so probe the setup it depends on
+            # before it can spin out the whole wait budget.
+            command -v flock >/dev/null 2>&1 ||
+              lock_setup_fault 'flock is unavailable'
+            queue_dir="${cache_dir}/sdk-java-tests.lock.queue"
+            [ ! -d "${cache_dir}/sdk-java-tests.lock" ] ||
+              lock_setup_fault 'the write-back lock path is a directory'
+            mkdir -p "${queue_dir}" ||
+              lock_setup_fault 'the write-back queue directory cannot be created'
+            [ -w "${cache_dir}" ] ||
+              lock_setup_fault "${cache_dir} is not writable"
+            [ -w "${queue_dir}" ] ||
+              lock_setup_fault "${queue_dir} is not writable"
+            # The rerun classifiers match `lock not acquired within` in the
+            # annotations of a failed run; rewrite the helper's timeout line
+            # so this tolerated path cannot misattribute a later genuine
+            # failure in the same job to infrastructure.
+            exec 7> >(sed -u -e 's/^::error::/::warning::/' -e 's/lock not acquired within/lock wait exhausted/I')
+            lock_filter=$!
+            lock_rc=0
+            sdk_java_lock_acquire "${lock_wait}" "${TIER}" >&7 2>&1 || lock_rc=$?
+            exec 7>&-
+            wait "${lock_filter}" 2>/dev/null || true
+            if [ "${lock_rc}" -ne 0 ]; then
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
+              mvn_report_failed_suite
+              exit "${mvn_status}"
+            fi
+          else
+            # release-sdk-java.yml resumes an existing tag by checking out
+            # that immutable commit, which may predate this helper. Fall
+            # back to the bare lock this queue replaced rather than dying
+            # before the write-back and wedging the release.
+            command -v flock >/dev/null 2>&1 ||
+              lock_setup_fault 'flock is unavailable'
+            [ ! -d "${cache_dir}/sdk-java-tests.lock" ] ||
+              lock_setup_fault 'the write-back lock path is a directory'
+            mkdir -p "${cache_dir}" ||
+              lock_setup_fault "${cache_dir} cannot be created"
+            [ -w "${cache_dir}" ] ||
+              lock_setup_fault "${cache_dir} is not writable"
+            exec 9>"${cache_dir}/sdk-java-tests.lock"
+            lock_rc=0
+            flock --wait "${lock_wait}" 9 || lock_rc=$?
+            if [ "${lock_rc}" -eq 1 ]; then
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
+              mvn_report_failed_suite
+              exit "${mvn_status}"
+            elif [ "${lock_rc}" -ne 0 ]; then
+              echo "::error::Maven cache write-back setup failed: flock exited ${lock_rc}"
+              mvn_report_failed_suite
+              exit 1
+            fi
+          fi
+          # Publish only this job's downloads: seeded files are hardlinks
+          # (nlink >= 2), so the delta is nlink == 1. Each link is atomic and
+          # -n never replaces a host file, so the backstop can leave an
+          # artifact missing for the next job to re-resolve, never truncated.
+          # No write-back child inherits fd 9, or a cancelled job's survivor
+          # would hold the host lock until it exits.
+          # The seed drops Maven's resolver tracking markers because they
+          # record a resolution outcome, and a hard-killed transfer leaves
+          # *.tmp fragments behind; a red suite can leave both in the
+          # job-local copy, and publishing either would make the failure
+          # stick for every reader of the host cache, so skip the same names.
+          mkdir -p "${HOME}/.m2/repository" 9>&-
+          cd "${RUNNER_TEMP}/m2-repo"
+          write_back=0
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          if [ "${write_back}" -eq 124 ]; then
+            echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
+          elif [ "${write_back}" -ne 0 ]; then
+            echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+          fi
+          # Deferred so a failed suite still reaches the write-back; the
+          # step's status is the suite's, not the copy's.
+          mvn_report_failed_suite
+          exit "${mvn_status}"
 
       - name: 'Run Java SDK tests (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
@@ -170,10 +445,31 @@ jobs:
 
       - name: 'Run Runtime Broker state tests'
         if: "${{ runner.environment == 'github-hosted' && matrix.java == '21' }}"
-        working-directory: 'packages/sdk-java/runtime-broker'
+        working-directory: 'packages/managed-agent-server'
+        shell: 'bash'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
-        run: 'mvn --batch-mode --no-transfer-progress clean test'
+          TIER: '${{ inputs.tier }}'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f ../sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+          if [ "${TIER}" = "fast" ]; then
+            mvn --batch-mode --no-transfer-progress clean test
+          else
+            mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
+          fi
+
+      - name: 'Upload Maven test reports on failure'
+        if: 'failure() || cancelled()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'sdk-java-test-reports-${{ matrix.os }}-java-${{ matrix.java }}'
+          path: |
+            packages/sdk-java/qwencode/target/surefire-reports/*.txt
+            packages/sdk-java/qwencode/target/surefire-reports/*.dumpstream
+            packages/managed-agent-server/target/surefire-reports/*.txt
+            packages/managed-agent-server/target/surefire-reports/*.dumpstream
+          if-no-files-found: 'ignore'
+          retention-days: 7
 
       - name: 'Run Java SDK Checkstyle'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
@@ -182,12 +478,12 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
 
-      - name: 'Run Runtime Broker state Checkstyle'
+      - name: 'Run Managed Agent Server Checkstyle'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '21' }}"
-        working-directory: 'packages/sdk-java/runtime-broker'
+        working-directory: 'packages/managed-agent-server'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
-        run: 'mvn --batch-mode --no-transfer-progress checkstyle:check'
+        run: 'mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle'
 
       - name: 'Build release artifacts'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
@@ -196,73 +492,676 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: 'mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true package'
 
-  mysql-integration:
-    name: 'Runtime Broker and Managed Agent MariaDB / Java 21'
-    runs-on: 'ubuntu-latest'
-    timeout-minutes: 15
-    services:
-      mariadb:
-        image: 'mariadb:10.11.18'
-        env:
-          MARIADB_DATABASE: 'runtime_broker_test'
-          MARIADB_ROOT_PASSWORD: 'runtime-broker'
-        ports:
-          - '3306:3306'
-        options: >-
-          --health-cmd "healthcheck.sh --connect --innodb_initialized"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 20
+  # The Flyway duplicate-version guard is the fast filename scan. Server
+  # resources and Java migrations share one version sequence, including any
+  # migrations supplied by its compile-scope SDK dependency.
+  #
+  # Trusted triggers run on the ECS pool (#13245): a five-second scan sat 26
+  # minutes in the hosted queue. Untrusted fork PRs stay hosted, and the
+  # default merge-ref checkout is kept on both — the merge result is the point.
+  flyway-migrations:
+    name: 'Flyway migration version uniqueness'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    timeout-minutes: 5
     steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
+
+      # ci.yml's pre-checkout sweep, byte-identical to the ci.yml copies
+      # (pinned in scripts/tests/sdk-java-workflow.test.js): residue left by
+      # review/autofix jobs on the shared ECS pool fails actions/checkout's
+      # clean — the #13506 failure. Hosted legs skip it on fresh VMs.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ inputs.ref || github.sha }}'
+
+      - name: 'Check Flyway migration versions are unique'
+        run: 'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode'
+
+  mysql-integration:
+    name: 'Runtime Broker and Managed Agent MySQL / Java 21'
+    if: "${{ inputs.tier != 'fast' }}"
+    # Pool routing per the flyway job (#13245): hosted queue starvation fails
+    # a zero-step job outright (#13623), the pool does not. The job is
+    # pool-safe: the database is a per-leg container on a random host port,
+    # both Maven runs use a job-local repository, and only the shared cache
+    # write-back holds the test job's per-host sdk-java lock.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # On the pool this job takes the per-host sdk-java lock only for its
+    # shared Maven cache write-back: both Maven runs resolve from a job-local
+    # repository, so holding the lock across the whole integration suite
+    # serialized the fast tier behind a multi-hour hold (run 39628985638 held
+    # it 15:54-18:57 while run 39627609266's fast-tier job burned its full
+    # 90-minute wait). The ceiling absorbs that wait, the ~3-hour Maven run,
+    # the 5-minute write-back backstop and 30 minutes of uncapped setup: 310.
+    # Hosted lanes never take the lock and inherit this ceiling as a bound,
+    # not as an expected duration.
+    timeout-minutes: 310
+    env:
+      MYSQL_CONTAINER: 'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
+
+      # ci.yml's pre-checkout sweep, byte-identical to the ci.yml copies
+      # (pinned in scripts/tests/sdk-java-workflow.test.js): residue left by
+      # review/autofix jobs on the shared ECS pool fails actions/checkout's
+      # clean — the #13506 failure. Hosted legs skip it on fresh VMs.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      # Deliberately the default merge-ref checkout on both legs — the
+      # flyway guard's stance, not the build lanes' head-ref checkout: this
+      # gate certifies what merging would produce, cancel-in-progress
+      # re-runs a displaced head, and the pool queue is seconds short.
+      # Pinned in scripts/tests/sdk-java-workflow.test.js.
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ inputs.ref || github.sha }}'
 
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
           distribution: 'temurin'
           java-version: '21'
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
-            packages/sdk-java/runtime-broker/pom.xml
-            packages/sdk-java/managed-agent-server/pom.xml
+            packages/managed-agent-server/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
-      - name: 'Run Runtime Broker MySQL integration tests'
-        working-directory: 'packages/sdk-java/runtime-broker'
-        env:
-          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
-        run: >-
-          mvn --batch-mode --no-transfer-progress -Pmysql-integration
-          -Dmysql.url='jdbc:mysql://127.0.0.1:3306/runtime_broker_test?allowPublicKeyRetrieval=true&useSSL=false'
-          -Dmysql.user=root -Dmysql.password=runtime-broker clean verify
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
 
-      - name: 'Install Managed Agent dependencies'
-        env:
-          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+      - name: 'Set up Maven (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
-          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
-          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
+          archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
-      - name: 'Run Managed Agent tests, Checkstyle, and MySQL integration'
-        working-directory: 'packages/sdk-java/managed-agent-server'
+      # Pool hosts share one host-wide fs.aio-nr budget across concurrent
+      # jobs, and a mysqld that reserves native AIO contexts can exhaust it
+      # and fail to boot with `io_setup() failed with EAGAIN` (#14416).
+      # Service containers cannot take a command, so the database starts here
+      # instead, with native AIO disabled and its datadir on tmpfs. The MySQL
+      # server binary-logs by default into that uncapped tmpfs, and this
+      # disposable container has no replica and nothing reads the log.
+      # Each fork needs its own instance: lock tests assert server-wide
+      # InnoDB deadlock counters, which separate schemas cannot isolate.
+      - name: 'Start the database without native AIO'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          for fork in 1 2; do
+            container="${MYSQL_CONTAINER}-${fork}"
+            docker run --detach --name "${container}" \
+              --publish '127.0.0.1::3306' \
+              --mount type=tmpfs,destination=/var/lib/mysql \
+              --env MYSQL_ROOT_PASSWORD='runtime-broker' \
+              mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin
+            # A probe that is itself broken (image bump, missing mysqladmin)
+            # is otherwise indistinguishable from a server still starting.
+            probe_out="${RUNNER_TEMP:-/tmp}/readiness-probe-${fork}.out"
+            for attempt in {1..60}; do
+              if docker exec "${container}" mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent >"${probe_out}" 2>&1; then
+                break
+              fi
+              if ! docker inspect --format '{{.State.Running}}' "${container}" | grep -qx true; then
+                docker logs "${container}" || true
+                echo "::error::MySQL container stopped during startup; last mysqladmin readiness probe said: $(cat "${probe_out}")"
+                exit 1
+              fi
+              if [[ "${attempt}" == '60' ]]; then
+                docker logs "${container}" || true
+                echo "::error::MySQL not ready after 60 probes; last mysqladmin readiness probe said: $(cat "${probe_out}")"
+                exit 1
+              fi
+              sleep 2
+            done
+            port="$(docker inspect --format '{{(index (index .NetworkSettings.Ports "3306/tcp") 0).HostPort}}' "${container}")"
+            echo "MYSQL_PORT_${fork}=${port}" >> "${GITHUB_ENV}"
+          done
+      - name: 'Configure the database packet budget for large-object tests'
+        run: |-
+          # Connector/J hex-encodes the 32 MiB LONGBLOB fixture into a ~67 MiB
+          # query, so the budget must sit above it: the inventory's byte-limit
+          # gate, not the server packet limit, is what the test exercises.
+          # Set both disposable containers before their first JDBC connections.
+          for fork in 1 2; do
+            docker exec "${MYSQL_CONTAINER}-${fork}" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
+          done
+      - name: 'Set up Node.js 22 (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          if ! command -v node >/dev/null 2>&1; then
+            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set MAINTAINER_ECS_RUNNER_DISABLED=true."
+            exit 1
+          fi
+          echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
+
+      - name: 'Build native producer prerequisites'
+        run: |-
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+
+      - name: 'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration'
         env:
-          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
-        run: >-
-          mvn --batch-mode --no-transfer-progress -Pmysql-integration
-          -Dmysql.url='jdbc:mysql://127.0.0.1:3306/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false'
-          -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check
+          # Job-local repo: the host-shared ~/.m2 can already hold another
+          # run's same-coordinate fixed release jars, so both Maven runs
+          # resolve from this job's seeded copy (pinned in
+          # scripts/tests/sdk-java-workflow.test.js).
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
+        run: |-
+          set -o pipefail
+          # Seed from the host-shared repo (cache-restored on hosted runners)
+          # so it and the egress proxy keep paying off for the job-local copy.
+          # The seed only reads the host cache and is best-effort, so it takes
+          # no lock and cannot delay the lane.
+          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          # Maven truncates and rewrites its resolver tracking markers in
+          # place, so a seeded hardlink would let the unlocked runs mutate
+          # the host cache. Drop them; Maven recreates them job-locally.
+          find "${RUNNER_TEMP}/m2-repo" \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
+            -delete 2>/dev/null || true
+          # Both in-house coordinates are fixed release versions this job
+          # builds locally, so a seeded copy is only a hardlink the unlocked
+          # Maven runs would rewrite through into the host cache. Drop them
+          # so the install writes fresh inodes.
+          rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
+          # Both Maven runs resolve from the job-local copy above, so they do
+          # not touch host-shared state and must not hold the per-host lock:
+          # a MySQL verify can run for hours under pool contention, and the
+          # fast tier's wait expires behind it (run 39627609266 waited
+          # 17:38-19:15, burning its then-90-minute budget, behind run
+          # 39628985638's integration hold).
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+          cd packages/managed-agent-server
+          # Keep mysql.url for release runs that check out an older tag.
+          mvn --batch-mode --no-transfer-progress -Pmysql-integration \
+            -Dmysql.integration.forks=2 \
+            -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dmysql.url.1="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dmysql.url.2="jdbc:mysql://127.0.0.1:${MYSQL_PORT_2}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check
+          # Only the write-back mutates host-shared state, so only it takes
+          # the per-host lock. One acquisition spans the write-back: run
+          # 39353663670's verify step waited the full 90 minutes after the
+          # install step released the lock, so a per-step lock let this job
+          # lose its place in the host queue between installing and verifying.
+          # The ticketed queue in sdk-java-lock.sh orders that one wait (fast
+          # PR legs overtake it until it parks or is promoted) instead of a
+          # wake-up race against sibling holds (qwen-code#14743). The gate
+          # result is final before this runs, so an expired wait warns and
+          # skips the copy instead of reddening a green suite.
+          # A host fault takes the same warn-and-skip path as an expired wait.
+          lock_setup_fault() {
+            echo "::warning::Maven cache write-back skipped: $1; the gate result above is unaffected"
+            exit 0
+          }
+          cache_dir="${HOME}/.cache/qwen-code-ci"
+          if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
+            source "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh"
+            # The helper runs on the left of `||`, where bash suppresses
+            # errexit for its whole body, so probe the setup it depends on
+            # before it can spin out the whole wait budget.
+            command -v flock >/dev/null 2>&1 ||
+              lock_setup_fault 'flock is unavailable'
+            queue_dir="${cache_dir}/sdk-java-tests.lock.queue"
+            [ ! -d "${cache_dir}/sdk-java-tests.lock" ] ||
+              lock_setup_fault 'the write-back lock path is a directory'
+            mkdir -p "${queue_dir}" ||
+              lock_setup_fault 'the write-back queue directory cannot be created'
+            [ -w "${cache_dir}" ] ||
+              lock_setup_fault "${cache_dir} is not writable"
+            [ -w "${queue_dir}" ] ||
+              lock_setup_fault "${queue_dir} is not writable"
+            # The rerun classifiers match `lock not acquired within` in the
+            # annotations of a failed run; rewrite the helper's timeout line
+            # so this tolerated path cannot misattribute a later genuine
+            # failure in the same job to infrastructure.
+            exec 7> >(sed -u -e 's/^::error::/::warning::/' -e 's/lock not acquired within/lock wait exhausted/I')
+            lock_filter=$!
+            lock_rc=0
+            sdk_java_lock_acquire 5400 >&7 2>&1 || lock_rc=$?
+            exec 7>&-
+            wait "${lock_filter}" 2>/dev/null || true
+            if [ "${lock_rc}" -ne 0 ]; then
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
+              exit 0
+            fi
+          else
+            # release-sdk-java.yml resumes an existing tag by checking out
+            # that immutable commit, which may predate this helper. Fall
+            # back to the bare lock this queue replaced rather than dying
+            # before the write-back and wedging the release.
+            command -v flock >/dev/null 2>&1 ||
+              lock_setup_fault 'flock is unavailable'
+            [ ! -d "${cache_dir}/sdk-java-tests.lock" ] ||
+              lock_setup_fault 'the write-back lock path is a directory'
+            mkdir -p "${cache_dir}" ||
+              lock_setup_fault "${cache_dir} cannot be created"
+            [ -w "${cache_dir}" ] ||
+              lock_setup_fault "${cache_dir} is not writable"
+            exec 9>"${cache_dir}/sdk-java-tests.lock"
+            lock_rc=0
+            flock --wait 5400 9 || lock_rc=$?
+            if [ "${lock_rc}" -eq 1 ]; then
+              echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
+              exit 0
+            elif [ "${lock_rc}" -ne 0 ]; then
+              echo "::error::Maven cache write-back setup failed: flock exited ${lock_rc}"
+              exit 1
+            fi
+          fi
+          # Close the cache loop inside that lock: the one-way seed above
+          # alone does not recapture the Server dependency tree after a pom
+          # key rotation. The excludes name the two in-house fixed release
+          # coordinates rather than the whole com/alibaba group, so
+          # third-party artifacts under it (druid) still recapture into the
+          # host-shared ~/.m2. Best-effort like the seed: the warning arms
+          # keep a copy failure from reddening the gate after mvn has already
+          # passed.
+          # On a fresh ECS host nothing creates ~/.m2/repository anymore
+          # (the hosted-only cache no longer restores it), so create it
+          # before the write-back or every job re-resolves through the
+          # egress proxy instead of bootstrapping the shared repository.
+          # Publish only this job's downloads: seeded files are hardlinks
+          # (nlink >= 2), so the delta is nlink == 1. Taring the whole tree
+          # took up to 61 minutes (run 39563394993). Each link is atomic and
+          # -n never replaces a host file, so the backstop can leave an
+          # artifact missing for the next job to re-resolve, never truncated.
+          # No write-back child inherits fd 9, or a cancelled job's survivor
+          # would hold the host lock until it exits.
+          # This lane's Maven runs fail inline, so only a green run reaches
+          # this copy: a marker here can only come from a green run's own
+          # resolution, and the seed drops the same names so a seeded copy
+          # never republishes a stale outcome.
+          mkdir -p "${HOME}/.m2/repository" 9>&-
+          cd "${RUNNER_TEMP}/m2-repo"
+          write_back=0
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          if [ "${write_back}" -eq 124 ]; then
+            echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
+          elif [ "${write_back}" -ne 0 ]; then
+            echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
+          fi
 
       # Maven passes a selection narrowed by a profile, MAVEN_ARGS or
       # .mvn/maven.config, so compare what ran with the source tree.
       - name: 'Check that every non-Hosted integration test class ran'
-        run: 'node scripts/check-failsafe-reports.js non-hosted packages/sdk-java/runtime-broker packages/sdk-java/managed-agent-server'
+        run: 'node scripts/check-failsafe-reports.js non-hosted packages/managed-agent-server'
+
+      - name: 'Upload Maven test reports on failure'
+        if: 'failure() || cancelled()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'sdk-java-test-reports-mysql-integration-java-21'
+          path: |
+            packages/managed-agent-server/target/surefire-reports/*.txt
+            packages/managed-agent-server/target/surefire-reports/*.dumpstream
+            packages/managed-agent-server/target/failsafe-reports/*.txt
+            packages/managed-agent-server/target/failsafe-reports/*.dumpstream
+          if-no-files-found: 'ignore'
+          retention-days: 7
+
+      # The host's docker cleanup service fires once a day and reaps qwen-code-*
+      # containers only past a strict 24h age gate, so a cancelled job can strand
+      # a running database server on the shared pool for up to ~48h.
+      - name: 'Remove the database containers'
+        if: '${{ always() }}'
+        shell: 'bash'
+        run: |-
+          set -uo pipefail
+          for fork in 1 2; do
+            container="${MYSQL_CONTAINER}-${fork}"
+            if docker inspect "${container}" >/dev/null 2>&1; then
+              docker rm --force "${container}" ||
+                echo "::warning::could not remove ${container}; the host cleanup service reaps it within ~48h"
+            fi
+          done
 
   hosted-harness-mysql:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
+    if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 30
+    # The step ceilings today (162 + 20 + 50 + 20 = 252 — the FG8 letters
+    # grew the shared failsafe fork to 3600 s, FG9 slice 3 to 3990 s, the
+    # FG10b–f workflow relay letters to 4484 s, the FG12a MCP reply-loss
+    # letter to 4499 s, the FG12c restart matrix to 4548 s, the FG13c Hook
+    # owner-restart cells to 4848 s, the FG13d cancel/timeout cells to
+    # 5048 s, the FG11a automation lost-reply letter to 5218 s, which moved
+    # Verify to 100 minutes, the FG13d worker-stop cell to 5368 s and the
+    # FG11b store faults to 5498 s, which moved Verify to 105 minutes,
+    # FG11b slice 2 to 5643 s, still inside them, the event-stream
+    # liveness gates to 6083 s, which moves Verify to 115 minutes, the
+    # FG13d dropped-reply cancel cell to 6233 s, still inside those 115
+    # minutes, and the FG12b store-failure class to 6353 s; the FG12f
+    # stream-gap class adds 242 s, so the fork moves to 6585 s; the FG13a
+    # execute lost-reply cell adds 150 s and the FG13a status lost-reply
+    # cell another 150 s, moving the fork to 6885 s and Verify to 125
+    # minutes; the FG11c Harness-crash method (144.8 s measured) is budgeted
+    # at 550 s, so the fork moves to 7435 s; the FG13d DELETE-drain cell adds
+    # 150 s, moving the fork to 7585 s and Verify to 137 minutes; the FG11c
+    # Spring-crash class (262.0 s measured) is budgeted at 524 s, so the fork
+    # moves to 8109 s and Verify to 146 minutes, and the FG13a catalog
+    # lost-reply cell adds 150 s, so the fork moves to 8259 s and Verify to
+    # 148 minutes, and the FG13a HTTP lost-reply cell adds 150 s, so the fork
+    # moves to 8409 s and Verify to 151 minutes, and the FG13f deny
+    # lost-reply cell adds 150 s, so the fork moves to 8559 s and Verify to
+    # 153 minutes; the FG11d disabled-automation span adds 336 s, so the fork
+    # moves to 8895 s and Verify to 159 minutes, and the FG13f failClosed
+    # lost-reply cell adds 150 s, so the fork moves to 9045 s and Verify to
+    # 161 minutes; the FG12d refused-release cell adds 6 s, moving the fork
+    # to 9051 s; cleanup retention adds 60 s, moving the fork to 9111 s and
+    # Verify to 162 minutes; the FG13b Hook intent store-rejection cell adds
+    # 150 s, moving the fork to 9261 s and Verify to 165 minutes; the FG13b
+    # Hook dispatch store-rejection cell adds 150 s, moving the fork to
+    # 9411 s and Verify to 167 minutes; the FG11f publication cell adds 82 s, so
+    # the fork moves to 9493 s and Verify to 169 minutes; the FG12f delivery
+    # cell adds 30 s, moving the fork to 9523 s and Verify to 169 minutes; the
+    # FG11f refusing-arms cells add 242 s, moving the fork to 9765 s and
+    # Verify to 173 minutes; the FG13b Hook result store-rejection cell adds
+    # 150 s, moving the fork to 9915 s and Verify to 176 minutes; the FG13b
+    # Hook plan-result store-rejection cell adds 150 s, moving the fork to
+    # 10065 s and Verify to 178 minutes; the FG11d cancel cell adds 15 s,
+    # moving the fork to 10080 s and Verify to 179 minutes; the FG12f delivery
+    # entry moves from 30 s to 50 s, moving the fork to 10100 s; the FG11d
+    # retire-at-intent cell adds 18 s, moving the fork to 10118 s;
+    # Class-boundary cleanup and its regression add 60 s, moving the fork to
+    # 10178 s and Verify to 180 minutes; the FG13e Hook stream-gap cell adds
+    # 150 s, moving the fork to 10328 s and Verify to 183 minutes; the FG11d
+    # close-queued cell adds 134 s, moving the fork to 10462 s and Verify to
+    # 185 minutes; the FG11d close-in-flight refusal cell adds 9 s, moving the
+    # fork to 10471 s; the FG13f MessageDisplay reload cell adds 150 s, moving
+    # the fork to 10621 s and Verify to 188 minutes; the FG12d
+    # cancel-before-dispatch cell adds 18 s, moving the fork to 10639 s; the
+    # FG11d retry-reuse cell adds 11 s, moving the fork to 10650 s; the FG12d
+    # Spring-restart owner-release cell adds 24 s, moving the fork to 10674 s;
+    # the FG11d settled-outcome cell adds 9 s, moving the fork to 10683 s; the
+    # FG13a result store ack-loss cell adds 150 s, moving the fork to 10833 s
+    # and Verify to 191 minutes; the FG13a dispatch ack-loss cell adds 150 s,
+    # moving the fork to 10983 s and Verify to 194 minutes; the FG13a
+    # registration-settle ack-loss cell adds 150 s, moving the fork to
+    # 11133 s and Verify to 196 minutes; the FG11e stream cells add 42 s,
+    # moving the fork to 11175 s and Verify to 197 minutes; the FG11d
+    # cancel-retry cell adds 12 s, moving the fork to 11187 s; the FG11d
+    # second-fire refusal cell adds 25 s, moving the fork to 11212 s; the FG11d
+    # cancel-isolation cell adds 11 s, moving the fork to 11223 s and raising
+    # Verify to 198 minutes, wrapping fork + 600 s plus margin (11823 s of fork
+    # plus wrap); the FG11d queue-one cell adds 13 s, moving the fork to
+    # 11236 s and leaving Verify at 198 minutes, wrapping fork + 600 s plus
+    # margin (11836 s of fork plus wrap); the FG12e Runtime connection
+    # replacement cell adds 28 s, moving the fork to 11264 s and leaving
+    # Verify at 198 minutes, wrapping fork + 600 s plus margin (11864 s of
+    # fork plus wrap, 16 s left). The pool fixture provisionally reserves
+    # 180 s (its 120 s method ceiling plus 60 s for process/context cleanup),
+    # pending CI measurement: fork 11444 s, Verify 201 minutes, and 12044 s
+    # of fork plus wrap with the same 16 s left;
+    # the Broker fault gates use 20,
+    # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
+    # uncapped setup steps (Checkout.. cgroup delegation, the report
+    # checks): 291 + 13. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 304
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -279,13 +1178,17 @@ jobs:
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ inputs.ref || github.sha }}'
       - name: 'Set up Java'
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
           distribution: 'temurin'
           java-version: '21'
-          cache: 'maven'
-          cache-dependency-path: 'packages/sdk-java/**/pom.xml'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
+          cache-dependency-path: |-
+            packages/sdk-java/**/pom.xml
+            packages/managed-agent-server/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -296,54 +1199,389 @@ jobs:
         run: 'corepack enable'
       - name: 'Install, build and bundle CLI'
         run: |-
-          corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
       - name: 'Install Managed Agent dependencies'
+        id: 'managed_dependencies'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: |-
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
-          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml -DskipTests install
+      # The drivers' proxy header filter only shows up in the gates below as
+      # an intermittent socket-reuse failure, so pin it directly first.
+      - name: 'Check Hosted proxy header relay'
+        run: |-
+          cd integration-tests
+          npx vitest run helpers/hosted-relay-headers.test.ts
+      # The FG8 monitor/run gates admit real background shells and watches,
+      # whose supervision needs a delegated cgroup v2 root; ubuntu-latest's
+      # kernel has the interface, and the job delegates one subtree to
+      # itself (the supervisor uses the core cgroup v2 files only, so no
+      # controller delegation is needed). Delegation containment: a process
+      # outside the subtree cannot migrate into it — the write to a unit's
+      # cgroup.procs needs the common ancestor's cgroup.procs writable, and
+      # that ancestor is root-owned here — so the Verify step's shell first
+      # moves itself in through the privileged write this step smoke-tests.
+      - name: 'Delegate a cgroup v2 root for the process gates'
+        run: |-
+          sudo mkdir -p /sys/fs/cgroup/fg8
+          sudo chown -R "$(id -u):$(id -g)" /sys/fs/cgroup/fg8
+          test -f /sys/fs/cgroup/fg8/cgroup.kill
+          # Smoke-test admission the way the gates exercise it: this shell
+          # enters the delegated root through the privileged move, then a
+          # child joins a unit by a non-root write — cgroup.kill existing
+          # alone proves nothing about migration. The sleep's fds point at
+          # /dev/null so a failing line below never leaves it holding the
+          # step's stdout open for the rest of its 600 s.
+          echo $$ | sudo tee /sys/fs/cgroup/fg8/cgroup.procs
+          mkdir /sys/fs/cgroup/fg8/smoke
+          sleep 600 </dev/null >/dev/null 2>&1 & smoke=$!
+          echo "$smoke" > /sys/fs/cgroup/fg8/smoke/cgroup.procs
+          grep -q "^$smoke\$" /sys/fs/cgroup/fg8/smoke/cgroup.procs
+          echo 1 > /sys/fs/cgroup/fg8/smoke/cgroup.kill
+          wait "$smoke" || true
+          rmdir /sys/fs/cgroup/fg8/smoke
       - name: 'Verify Hosted Java, Spring and MySQL processes'
-        timeout-minutes: 12
+        # Must outlive the hosted-harness-mysql failsafe fork timeout
+        # (3600 s — 900→1200 for the FG7 channel classes, 1200→1800 for the
+        # L4 recovery class after its #14125 per-commit kill, 1800→2100
+        # with the FG9 session/relay letters, then 2100→3600 in #14334
+        # when the FG8 monitor/run letters outgrew it) plus the wrapped
+        # compile/spotbugs/checkstyle work: a step killed before its
+        # fork leaves no per-test failure lines, so the main-CI failure
+        # analyzer can only file an undiagnosable per-commit issue (#13503).
+        # hosted-process-ci.test.js pins this ordering; the fork budget is
+        # 11444 s, so the step wraps to fork + 600 s plus margin (201 min,
+        # 16 s left before the step must move), including the provisional
+        # 180 s pool-fixture reservation pending CI measurement.
+        timeout-minutes: 201
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
+          QWEN_MANAGED_HOOK_CGROUP_ROOT: '/sys/fs/cgroup/fg8'
         run: >-
-          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/managed-agent-server/pom.xml
+          echo $$ | sudo tee /sys/fs/cgroup/fg8/cgroup.procs &&
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml
           -Phosted-harness-mysql
           -Dnode.executable="$(command -v node)"
           -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js"
           -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false"
           -Dmysql.user=root -Dmysql.password=hosted-fixture clean verify checkstyle:check
       - name: 'Check that every Hosted integration test class ran'
-        run: 'node scripts/check-failsafe-reports.js hosted packages/sdk-java/managed-agent-server'
+        run: 'node scripts/check-failsafe-reports.js hosted packages/managed-agent-server'
+      - name: 'Check Hosted latency measurements'
+        run: |-
+          test -s packages/managed-agent-server/target/hosted-latency-baseline.json
+          cd integration-tests
+          npx vitest run cli/hosted-latency-baseline.test.ts
       - name: 'Run Runtime Broker fault gates'
-        timeout-minutes: 10
+        # The gates need only the CLI bundle and the installed SDK, so a red
+        # Hosted verify above must not skip them: without this it did on 11
+        # of the 14 nights to 10-27. A failed setup step still does.
+        if: "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}"
+        # Outlive the 600 s surefire fork plus compilation and report teardown.
+        timeout-minutes: 20
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
         run: >-
-          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/runtime-broker/pom.xml
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml
           -Pfault-gates -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js" test
       - name: 'Upload Hosted process reports'
         if: 'always()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'hosted-harness-mysql-reports'
-          path: 'packages/sdk-java/managed-agent-server/target/failsafe-reports/'
+          path: |
+            packages/managed-agent-server/target/failsafe-reports/
+            packages/managed-agent-server/target/hosted-latency-baseline.json
+            packages/managed-agent-server/target/fg7-cases/
+            packages/managed-agent-server/target/fg8-cases/
+            packages/managed-agent-server/target/fg9-cases/
+            packages/managed-agent-server/target/fg10-cases/
+            packages/managed-agent-server/target/fg11-cases/
+            packages/managed-agent-server/target/fg12-cases/
+            packages/managed-agent-server/target/fg13-cases/
+            packages/managed-agent-server/target/l4-shell-lifecycle/
           retention-days: 7
 
-  daemon-e2e:
-    name: 'Real daemon E2E / Java 11'
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name == ''push'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
-    # 45, not 30: this job is ~90% setup. A quiet run is 12.2 min end to end --
-    # npm ci 5.9 + build 5.2 -- and the Java daemon E2E it exists for costs
-    # about a minute. On the shared pool that setup is what stretches: npm ci
-    # measured 4.0-5.9 min across 11 green runs and 19.9/22.6 min on the two
-    # that died, which is the whole difference between them. At that factor the
-    # setup alone needs ~44 min, so 30 cancelled the job before a single
-    # assertion ran. Matches the release.yml quality_build tier
-    # (QWEN_RELEASE_BUILD_TIMEOUT_MINUTES, default 45).
-    timeout-minutes: 45
+      - name: 'Verify Hosted admission gates'
+        # Its clean would otherwise discard the hosted lane's failsafe
+        # reports and the fg7-cases evidence the hosts upload above, so it
+        # runs after the fixture. The hosted-harness-gates profile carries a
+        # 2400 s failsafe fork budget for both admission witness classes
+        # (@Timeout(1800) each); the same killed-after-timeout pattern as the
+        # hosted-harness-mysql verify applies.
+        timeout-minutes: 50
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
+        run: >-
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml
+          -Phosted-harness-gates
+          -Dnode.executable="$(command -v node)"
+          -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js"
+          -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false"
+          -Dmysql.user=root -Dmysql.password=hosted-fixture clean verify checkstyle:check
+      - name: 'Check that every Hosted admission gate class ran'
+        run: 'node scripts/check-failsafe-reports.js hosted-gates packages/managed-agent-server'
+
+      - name: 'Verify O4 filesystem process and capacity gates'
+        id: 'o4_mysql'
+        if: "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}"
+        # Must outlive the o4-mysql-gates failsafe fork timeout (600 s) plus
+        # the wrapped compile/spotbugs/checkstyle work — the same
+        # ordering the Hosted verify step needed at #13503: killed at 12
+        # minutes on a loaded runner, the step left no per-test failure
+        # lines (#13684). hosted-process-ci.test.js pins this ordering.
+        timeout-minutes: 20
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+          MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
+          MYSQL_PWD: 'hosted-fixture'
+          QWEN_O4_MYSQL_PASSWORD: 'hosted-fixture'
+        run: |-
+          mysql --no-defaults --protocol=TCP --host=127.0.0.1 --port="${MYSQL_PORT}" --user=root -e 'CREATE DATABASE qwen_o4_ci'
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml \
+            -Po4-mysql-gates \
+            -Dqwen.o4.mysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/qwen_o4_ci?allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dqwen.o4.mysql.user=root clean verify checkstyle:check && \
+            node scripts/check-failsafe-reports.js o4-mysql packages/managed-agent-server
+
+      - name: 'Upload O4 gate reports'
+        if: "${{ always() && steps.o4_mysql.outcome != 'skipped' }}"
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'o4-mysql-gate-reports'
+          path: 'packages/managed-agent-server/target/failsafe-reports/'
+          retention-days: 7
+
+  hosted-failover-e2e:
+    name: 'Hosted failover E2E / Java 21'
+    if: "${{ inputs.tier != 'fast' }}"
+    runs-on: 'ubuntu-latest'
+    # The packaged-stack failover arms, apart from the Hosted MySQL job so
+    # that a failing integration test there no longer skips them: they need
+    # only the bundled CLI, the server jar and a runner-private mysqld, not
+    # its MySQL service or cgroup root. Each arm also runs when an earlier
+    # one failed. Ceilings: 24 arms × 10 = 240 plus ~13 minutes for the
+    # uncapped setup steps (Checkout.. Install MySQL binaries): 253 + 2.
+    timeout-minutes: 255
+    env:
+      QWEN_E2E_REGISTER_STORAGE: '1'
+    steps:
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ inputs.ref || github.sha }}'
+      - name: 'Set up Java'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
+          cache-dependency-path: |-
+            packages/sdk-java/**/pom.xml
+            packages/managed-agent-server/pom.xml
+          settings-path: '${{ runner.temp }}/setup-java-m2'
+      - name: 'Set up Node.js'
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: 'Enable Corepack'
+        run: 'corepack enable'
+      - name: 'Install, build and bundle CLI'
+        run: |-
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+      - name: 'Install Managed Agent dependencies'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+      - name: 'Package the Managed Agent server'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
+        run: >-
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml
+          -DskipTests package
+      - name: 'Install MySQL binaries for the failover E2E'
+        id: 'failover_prerequisites'
+        run: |-
+          if ! command -v mysqld >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends mysql-server mysql-client
+          fi
+      - name: 'Run session owner failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-session-failover
+      - name: 'Run in-flight owner failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-inflight-failover
+      - name: 'Run continuation owner failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-continuation-failover
+      - name: 'Run long-answer persistence E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-big-output
+      - name: 'Run Harness-restart session failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-failover
+      - name: 'Run Harness-restart in-flight failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-inflight-failover
+      - name: 'Run Harness-restart continuation failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-continuation-failover
+      - name: 'Run frozen former-owner fencing E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-continuation-frozen-owner-failover
+      # G3 Step 3's packaged gates: a replaced Harness finishes a parked
+      # approval wait (Allow, Deny, Cancel, expiry) or model continuation on
+      # its original identities, then the original cleanup, a next Turn and
+      # close complete. Evidence lands under .qwen/investigations.
+      - name: 'Run Harness-restart approval Allow recovery E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-allow
+      - name: 'Run Harness-restart approval Deny recovery E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-deny
+      - name: 'Run Harness-restart approval Cancel recovery E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-cancel
+      - name: 'Run Harness-restart approval expiry recovery E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-expiry
+      # #14481 step 2: the approval path's fault points. Each arm crashes or
+      # loses one reply after a durable barrier the five mode arms above only
+      # cross without a fault, and the next generation must resume that stage.
+      - name: 'Run approval post-decision crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-after-decision
+      - name: 'Run approval partial-prepare crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-after-prepare
+      - name: 'Run approval result-commit crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-after-result
+      - name: 'Run approval decision reply-loss E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-decision-reply-lost
+      - name: 'Run Turn admission reply-loss E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
+      - name: 'Run takeover load reply-loss E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-load-reply-lost
+      - name: 'Run committed terminal reply-loss E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-terminal-reply-lost
+      - name: 'Run missing terminal write E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-terminal-write-failed
+      - name: 'Run refused cleanup release E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-cleanup-failed
+      - name: 'Run Harness-restart continuation closeout E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-continuation-closeout
+      # The first model round of a no-tool Session survives two Harness
+      # replacements; the frozen arm wakes a still-alive former control
+      # plane after its Turn moved on (#12952 Q2, binding half).
+      - name: 'Run Harness-restart model-round failover E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-model-round-failover
+      - name: 'Run frozen former control-plane fencing E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-frozen-control-plane-failover
+      - name: 'Upload G3 Step 3 gate evidence'
+        if: 'always()'
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'hosted-harness-g3-step3-evidence'
+          path: '.qwen/investigations/g3-step3-implementation/'
+          # upload-artifact skips hidden paths such as .qwen/ unless asked.
+          include-hidden-files: true
+          retention-days: 7
+
+  event-transport-broker:
+    name: 'EventTransport broker gates / RocketMQ 5.5.1 / Java 21'
+    if: "${{ inputs.tier != 'fast' }}"
+    # Pool routing per the mysql-integration lane. Pool-safe: the cluster
+    # binds this job's own ports, and its work dir and the job's Maven
+    # repository live under runner.temp.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # 10 + 20 capped minutes plus the uncapped setup, which a loaded pool
+    # host stretches (daemon-e2e measured its setup at up to 4x).
+    timeout-minutes: 60
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -355,22 +1593,729 @@ jobs:
             chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
           fi
           chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
+
+      # ci.yml's pre-checkout sweep, byte-identical to the ci.yml copies
+      # (pinned in scripts/tests/sdk-java-workflow.test.js): residue left by
+      # review/autofix jobs on the shared ECS pool fails actions/checkout's
+      # clean — the #13506 failure. Hosted legs skip it on fresh VMs.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
 
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: "${{ (runner.environment == 'self-hosted' && github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+          ref: '${{ inputs.ref || github.sha }}'
+      - name: 'Set up Java'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          # 17 runs the broker; 21, last, is the default.
+          java-version: |-
+            17
+            21
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
+          cache-dependency-path: |-
+            packages/sdk-java/**/pom.xml
+            packages/managed-agent-server/pom.xml
+          settings-path: '${{ runner.temp }}/setup-java-m2'
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
 
-      - name: 'Verify checkout includes expected head commit'
-        if: "${{ runner.environment == 'self-hosted' && github.event_name == 'pull_request' }}"
-        env:
-          EXPECTED_SHA: '${{ github.event.pull_request.head.sha }}'
+      - name: 'Set up Maven (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
-          if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
-            echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
-            git log --oneline --decorate -5
+          archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
+      - name: 'Install Managed Agent dependencies'
+        id: 'managed_dependencies'
+        env:
+          # Job-local repo, shared with the verify step (the mysql-integration
+          # stance): the fixed 0.1.0-alpha SDK coordinates installed here must
+          # not round-trip through the host-shared ~/.m2 of a pool host.
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
+        run: |-
+          # Seed from the host-shared repo (cache-restored on hosted runners).
+          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          # Maven truncates and rewrites its resolver tracking markers in
+          # place, so a seeded hardlink would let the unlocked runs mutate
+          # the host cache. Drop them; Maven recreates them job-locally.
+          find "${RUNNER_TEMP}/m2-repo" \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
+            -delete 2>/dev/null || true
+          # Both in-house coordinates are fixed release versions this job
+          # builds locally, so a seeded copy is only a hardlink the unlocked
+          # Maven runs would rewrite through into the host cache. Drop them
+          # so the install writes fresh inodes.
+          rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+      - name: 'Cache the RocketMQ distribution'
+        uses: 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' # v6.1.0
+        with:
+          # The script checks the zip against a pinned SHA-512.
+          path: '${{ runner.temp }}/rocketmq-dist'
+          key: 'rocketmq-5.5.1-bin-release'
+      # A pool host runs many jobs at once, so the cluster binds this job's
+      # own free ports; the broker script and the gate read them from the
+      # job environment.
+      - name: 'Choose RocketMQ ports'
+        run: 'node .github/scripts/choose-rocketmq-ports.mjs | tee -a "${GITHUB_ENV}"'
+      - name: 'Start the RocketMQ LiteTopic cluster'
+        id: 'broker'
+        # Runs the broker on setup-java's JAVA_HOME_17_X64.
+        timeout-minutes: 10
+        env:
+          RMQ_WORK_DIR: '${{ runner.temp }}/rocketmq'
+          RMQ_CACHE_DIR: '${{ runner.temp }}/rocketmq-dist'
+          RMQ_EXTRA_GROUPS: 'qwen-transport-gate-oracle'
+          RMQ_NORMAL_TOPIC: 'qwen-managed-events-normal'
+          RMQ_NORMAL_GROUPS: 'qwen-transport-gate-normal-probe'
+        run: 'scripts/rocketmq-lite-broker.sh start'
+      - name: 'Verify the EventTransport broker gates'
+        id: 'event_transport'
+        # Outlives the 900 s failsafe fork (#13503).
+        timeout-minutes: 20
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml \
+            -Pevent-transport-broker-gates \
+            -Dqwen.gate.rocketmq.endpoints=127.0.0.1:${RMQ_PROXY_GRPC_PORT} \
+            -Dqwen.gate.rocketmq.topic=qwen-managed-events \
+            -Dqwen.gate.rocketmq.normal-topic=qwen-managed-events-normal clean verify && \
+            node scripts/check-failsafe-reports.js event-transport packages/managed-agent-server
+      - name: 'Upload broker gate reports'
+        if: "${{ always() && steps.broker.outcome != 'skipped' }}"
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'event-transport-broker-gate-reports'
+          path: |-
+            packages/managed-agent-server/target/failsafe-reports/
+            packages/managed-agent-server/target/event-transport-latency*.json
+            packages/managed-agent-server/target/event-transport-latency.jfr
+            ${{ runner.temp }}/rocketmq/logs/
+            ${{ runner.temp }}/rocketmq/home/logs/
+          retention-days: 7
+      - name: 'Stop the RocketMQ cluster'
+        if: "${{ always() && steps.broker.outcome != 'skipped' }}"
+        env:
+          RMQ_WORK_DIR: '${{ runner.temp }}/rocketmq'
+        run: 'scripts/rocketmq-lite-broker.sh stop'
+
+  event-transport-multi-node:
+    name: 'EventTransport multi-node gates / RocketMQ 5.5.1 + MySQL 8.4 / Java 21'
+    if: "${{ inputs.tier != 'fast' }}"
+    # Pool routing per the mysql-integration lane. Pool-safe: the cluster
+    # binds this job's own ports, the control-plane nodes take free ports,
+    # MySQL is a job-owned container on a random host port, and the work
+    # dir and the job's Maven repository live under runner.temp.
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    # 10 + 60 capped minutes plus ~15 for the uncapped setup (the CLI
+    # bundle, the module installs, libfaketime), which a loaded pool host
+    # stretches (daemon-e2e measured its setup at up to 4x).
+    timeout-minutes: 130
+    env:
+      MYSQL_CONTAINER: 'qwen-code-mq3-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
+
+      # ci.yml's pre-checkout sweep, byte-identical to the ci.yml copies
+      # (pinned in scripts/tests/sdk-java-workflow.test.js): residue left by
+      # review/autofix jobs on the shared ECS pool fails actions/checkout's
+      # clean — the #13506 failure. Hosted legs skip it on fresh VMs.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ inputs.ref || github.sha }}'
+      - name: 'Set up Java'
+        uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
+        with:
+          distribution: 'temurin'
+          # 17 runs the broker; 21, last, is the default.
+          java-version: |-
+            17
+            21
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
+          cache-dependency-path: |-
+            packages/sdk-java/**/pom.xml
+            packages/managed-agent-server/pom.xml
+          settings-path: '${{ runner.temp }}/setup-java-m2'
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
+      - name: 'Set up Maven (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
+          tar -xzf "${archive}" -C "${RUNNER_TEMP}"
+          echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
+      - name: 'Set up Node.js (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22'
+          package-manager-cache: false
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        uses: './.github/actions/self-hosted-node'
+      - name: 'Install, build and bundle CLI'
+        run: |-
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step also runs prepare's build, so check the failure class before counting it toward #11726."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
+      - name: 'Install Managed Agent dependencies'
+        env:
+          # Job-local repo, shared with the verify step (the mysql-integration
+          # stance): the fixed 0.1.0-alpha SDK coordinates installed here must
+          # not round-trip through the host-shared ~/.m2 of a pool host.
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
+        run: |-
+          # Seed from the host-shared repo (cache-restored on hosted runners).
+          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          # Maven truncates and rewrites its resolver tracking markers in
+          # place, so a seeded hardlink would let the unlocked runs mutate
+          # the host cache. Drop them; Maven recreates them job-locally.
+          find "${RUNNER_TEMP}/m2-repo" \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
+            -delete 2>/dev/null || true
+          # Both in-house coordinates are fixed release versions this job
+          # builds locally, so a seeded copy is only a hardlink the unlocked
+          # Maven runs would rewrite through into the host cache. Drop them
+          # so the install writes fresh inodes.
+          rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
+      - name: 'Install libfaketime'
+        # The clock-skew row moves one node's whole wall clock. A pool host
+        # keeps the package between jobs, so install only when it is missing;
+        # sudo -n fails fast instead of prompting. The multiarch directory is
+        # resolved rather than assumed: the aarch64 pool hosts run this lane
+        # too, and libfaketime lands under aarch64-linux-gnu there.
+        run: |-
+          set -uo pipefail
+          lib="$(find /usr/lib -maxdepth 3 -name libfaketimeMT.so.1 -print -quit 2>/dev/null || true)"
+          if [[ -z "${lib}" ]]; then
+            sudo -n apt-get -o DPkg::Lock::Timeout=300 update -q
+            sudo -n apt-get -o DPkg::Lock::Timeout=300 install -y -q faketime
+            lib="$(find /usr/lib -maxdepth 3 -name libfaketimeMT.so.1 -print -quit 2>/dev/null || true)"
+          fi
+          if [[ -z "${lib}" ]]; then
+            echo "::error::libfaketime is not installed for this architecture"
             exit 1
           fi
+          echo "FAKETIME_LIB=${lib}" >> "${GITHUB_ENV}"
+      # Pool hosts share one host-wide fs.aio-nr budget across concurrent
+      # jobs, and a mysqld that reserves native AIO contexts can exhaust it
+      # and fail to boot with `io_setup() failed with EAGAIN` (#14416).
+      # Service containers cannot take a command, so MySQL starts here
+      # instead, with native AIO disabled and its datadir on tmpfs.
+      - name: 'Start MySQL without native AIO'
+        shell: 'bash'
+        run: |-
+          set -euo pipefail
+          docker run --detach --name "${MYSQL_CONTAINER}" \
+            --publish '127.0.0.1::3306' \
+            --mount type=tmpfs,destination=/var/lib/mysql \
+            --env MYSQL_DATABASE='event_transport_test' \
+            --env MYSQL_ROOT_PASSWORD='multi-node-fixture' \
+            mysql:8.4.6 --innodb-use-native-aio=0
+          for attempt in {1..60}; do
+            if docker exec "${MYSQL_CONTAINER}" mysqladmin ping --host=127.0.0.1 --user=root --password=multi-node-fixture --silent >/dev/null 2>&1; then
+              break
+            fi
+            if ! docker inspect --format '{{.State.Running}}' "${MYSQL_CONTAINER}" | grep -qx true; then
+              docker logs "${MYSQL_CONTAINER}" || true
+              exit 1
+            fi
+            if [[ "${attempt}" == '60' ]]; then
+              docker logs "${MYSQL_CONTAINER}" || true
+              exit 1
+            fi
+            sleep 2
+          done
+          MYSQL_PORT="$(docker inspect --format '{{(index (index .NetworkSettings.Ports "3306/tcp") 0).HostPort}}' "${MYSQL_CONTAINER}")"
+          echo "MYSQL_PORT=${MYSQL_PORT}" >> "${GITHUB_ENV}"
+      - name: 'Cache the RocketMQ distribution'
+        uses: 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' # v6.1.0
+        with:
+          # The script checks the zip against a pinned SHA-512.
+          path: '${{ runner.temp }}/rocketmq-dist'
+          key: 'rocketmq-5.5.1-bin-release'
+      # A pool host runs many jobs at once, so the cluster binds this job's
+      # own free ports; the broker script and the gate read them from the
+      # job environment.
+      - name: 'Choose RocketMQ ports'
+        run: 'node .github/scripts/choose-rocketmq-ports.mjs | tee -a "${GITHUB_ENV}"'
+      - name: 'Start the RocketMQ LiteTopic cluster'
+        id: 'broker'
+        # Runs the broker on setup-java's JAVA_HOME_17_X64.
+        timeout-minutes: 10
+        env:
+          RMQ_WORK_DIR: '${{ runner.temp }}/rocketmq'
+          RMQ_CACHE_DIR: '${{ runner.temp }}/rocketmq-dist'
+          RMQ_EXTRA_GROUPS: 'qwen-transport-gate-oracle'
+        run: 'scripts/rocketmq-lite-broker.sh start'
+      - name: 'Verify the EventTransport multi-node gates'
+        # Outlives the 3000 s failsafe fork plus the compile and SpotBugs
+        # around it (#13503).
+        timeout-minutes: 60
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
+        run: |-
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml \
+            -Pevent-transport-multi-node-gates \
+            -Dnode.executable="$(command -v node)" \
+            -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js" \
+            -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/event_transport_test?allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dmysql.user=root -Dmysql.password=multi-node-fixture \
+            -Dqwen.gate.rocketmq.endpoints=127.0.0.1:${RMQ_PROXY_GRPC_PORT} \
+            -Dqwen.gate.rocketmq.topic=qwen-managed-events \
+            -Dqwen.gate.rocketmq.work-dir="${RUNNER_TEMP}/rocketmq" \
+            -Dqwen.gate.faketime.library="${FAKETIME_LIB}" \
+            clean verify && \
+            node scripts/check-failsafe-reports.js event-transport-multi-node packages/managed-agent-server
+      - name: 'Upload multi-node gate reports'
+        if: "${{ always() && steps.broker.outcome != 'skipped' }}"
+        uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
+        with:
+          name: 'event-transport-multi-node-gate-reports'
+          path: |-
+            packages/managed-agent-server/target/failsafe-reports/
+            packages/managed-agent-server/target/mq3-multi-node/
+            ${{ runner.temp }}/rocketmq/logs/
+            ${{ runner.temp }}/rocketmq/home/logs/
+          retention-days: 7
+      - name: 'Stop the RocketMQ cluster'
+        if: "${{ always() && steps.broker.outcome != 'skipped' }}"
+        env:
+          RMQ_WORK_DIR: '${{ runner.temp }}/rocketmq'
+        run: 'scripts/rocketmq-lite-broker.sh stop'
+      # The host's docker cleanup service reaps qwen-code-* containers only
+      # after a strict >24h age gate. It fires once a day, and its 30m jitter
+      # spaces consecutive fires 23.5-24.5h apart, so a container the gate
+      # skips at one fire waits for a later one: a cancelled job can strand a
+      # running mysqld for up to ~48.5h.
+      - name: 'Remove the MySQL container'
+        if: '${{ always() }}'
+        shell: 'bash'
+        run: |-
+          set -uo pipefail
+          if docker inspect "${MYSQL_CONTAINER}" >/dev/null 2>&1; then
+            docker rm --force "${MYSQL_CONTAINER}" ||
+              echo "::warning::could not remove ${MYSQL_CONTAINER}; the host cleanup service reaps it within ~48.5h"
+          fi
+
+  daemon-e2e:
+    name: 'Real daemon E2E / Java 11'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || ''ubuntu-latest'' }}'
+    # 45, not 30: this job is ~90% setup. A quiet run is 12.2 min end to end --
+    # npm ci 5.9 + build 5.2 -- and the Java daemon E2E it exists for costs
+    # about a minute. On the shared pool that setup is what stretches: npm ci
+    # measured 4.0-5.9 min across 11 green runs and 19.9/22.6 min on the two
+    # that died, which is the whole difference between them. At that factor the
+    # setup alone needs ~44 min, so 30 cancelled the job before a single
+    # assertion ran. Matches the release.yml quality_build tier
+    # (QWEN_RELEASE_BUILD_TIMEOUT_MINUTES, default 45).
+    # The fast tier keeps 90 rather than 45. This budget was originally sized
+    # for the post-job Maven cache save, which added 14-37 minutes on the
+    # saturated pool AFTER the assertions passed; a job killed there concludes
+    # cancelled and reddens the gate of a green suite (run 38936748280, and 4
+    # of the 8 sdk-java.yml runs before it). #14396 has since suppressed that
+    # save on self-hosted runners, so the save is no longer the reason. What
+    # still justifies the headroom is frequency: the fast tier runs this leg on
+    # every touched PR push instead of nightly only, so it meets the ~44 min
+    # stretched-setup tail above far more often than a 45 ceiling leaves room
+    # for.
+    timeout-minutes: "${{ inputs.tier == 'fast' && 90 || 45 }}"
+    steps:
+      - name: 'Restore workspace ownership'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          RUNNER_UID="$(id -u)"
+          RUNNER_GID="$(id -g)"
+          if [ "$RUNNER_UID" != "0" ]; then
+            chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace ownership; checkout may fail on leftover root-owned files"
+          fi
+          chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE" || echo "::warning::could not restore workspace write permissions; checkout may fail on leftover read-only files"
+          # A leftover workspace owned by a different uid than the step user
+          # (e.g. a runner-user checkout under root-run steps) makes every git
+          # call fail with "detected dubious ownership". The pinned
+          # actions/checkout adds safe.directory only to its own temporary
+          # global config, so later steps are uncovered; trust the workspace
+          # here instead. The --get-all guard keeps a persistent runner's
+          # gitconfig from accumulating a duplicate entry per job.
+          git config --global --get-all safe.directory 2>/dev/null | grep -qxF "$GITHUB_WORKSPACE" || git config --global --add safe.directory "$GITHUB_WORKSPACE" || echo "::warning::could not mark the workspace as a git safe.directory; git steps may fail on a mismatched-ownership checkout"
+
+      # ci.yml's pre-checkout sweep, byte-identical to the ci.yml copies
+      # (pinned in scripts/tests/sdk-java-workflow.test.js): residue left by
+      # review/autofix jobs on the shared ECS pool fails actions/checkout's
+      # clean — the #13506 failure. Hosted legs skip it on fresh VMs.
+      - name: 'Clean stale .qwen before checkout'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          set -uo pipefail
+          for stale_qwen in "$GITHUB_WORKSPACE/.qwen" "$GITHUB_WORKSPACE/.qwen.root-orig" "$GITHUB_WORKSPACE/trusted-ci-classifier"; do
+            if [ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              continue
+            fi
+            if [ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]; then
+              chmod -R u+w "$stale_qwen" 2>/dev/null || true
+            fi
+            # A foreign-owned directory cannot always be renamed to a
+            # different parent: updating its .. entry can fail even when the
+            # workspace parent is writable. If that individual move fails,
+            # quarantine the runner-owned workspace itself, then recreate the
+            # empty checkout root. Warm contents are lost only on this
+            # otherwise unrecoverable path.
+            rm -rf -- "$stale_qwen" 2>/dev/null ||
+              sudo -n rm -rf -- "$stale_qwen" 2>/dev/null ||
+              {
+                quarantine="$(dirname -- "$GITHUB_WORKSPACE")/_qwen-quarantine"
+                mkdir -p "$quarantine" 2>/dev/null || true
+                stale_name="$(basename -- "$stale_qwen")"
+                if mv -- "$stale_qwen" "$quarantine/${stale_name#\.}-$(date -u +%Y%m%dT%H%M%SZ)-$$" 2>/dev/null; then
+                  echo "::warning::could not delete leaked $stale_name; moved it to $quarantine so this checkout can proceed — that directory needs manual cleanup"
+                else
+                  workspace_quarantine="$quarantine/workspace-$(date -u +%Y%m%dT%H%M%SZ)-$$"
+                  if mv -- "$GITHUB_WORKSPACE" "$workspace_quarantine" 2>/dev/null &&
+                     mkdir -p "$GITHUB_WORKSPACE" 2>/dev/null &&
+                     cd "$GITHUB_WORKSPACE"; then
+                    echo "::warning::could not delete leaked $stale_name; moved the whole workspace to $workspace_quarantine so this checkout can proceed — that directory needs manual cleanup"
+                    break
+                  else
+                    echo "::warning::leaked $stale_name survived every recovery; runner needs manual cleanup"
+                  fi
+                fi
+              }
+          done
+          # Interrupted reviews leave worktree registrations under .qwen/tmp/
+          # and qwen-review/* branches behind. prune drops registrations whose
+          # directories the rm above removed; worktree remove --force then
+          # clears any still-registered leftover directory (--force tolerates
+          # dirty contents), since a branch checked out in a live worktree
+          # cannot be deleted. If removal still fails, the registration
+          # survives and the branch delete below warns. The sweep deletes all
+          # review artifacts, not just the current PR's: safe because a runner
+          # executes one job at a time. Kept inline rather than a shared
+          # script: this runs pre-checkout on shared runners, where leftover
+          # workspace files are untrusted.
+          if [ -e "$GITHUB_WORKSPACE/.git" ]; then
+            GIT_SAFE=(git -c core.hooksPath=/dev/null -c core.fsmonitor= -C "$GITHUB_WORKSPACE")
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" worktree list --porcelain \
+              | awk '$1 == "worktree" && index($0, "/.qwen/tmp/review-pr-") > 0 { sub(/^worktree /, ""); print }' \
+              | while read -r worktree; do
+                  [ -n "$worktree" ] || continue
+                  # Registered paths come from leftover git metadata and are
+                  # untrusted: the awk filter above matched by substring, so reject
+                  # `..` traversal and re-anchor to the review prefix before the
+                  # destructive remove.
+                  case "$worktree" in
+                    */../*|../*|*/..)
+                      echo "::warning::skipping suspicious review worktree path: $worktree"
+                      continue
+                      ;;
+                    "$GITHUB_WORKSPACE/.qwen/tmp/review-pr-"*) : ;;
+                    *)
+                      echo "::warning::skipping unexpected review worktree path: $worktree"
+                      continue
+                      ;;
+                  esac
+                  "${GIT_SAFE[@]}" worktree remove --force "$worktree" ||
+                    echo "::warning::could not remove review worktree: $worktree"
+                done || true
+            "${GIT_SAFE[@]}" worktree prune -v || true
+            "${GIT_SAFE[@]}" for-each-ref --format='%(refname:short)' 'refs/heads/qwen-review/*' \
+              | while read -r stale_ref; do
+                  if [ -n "$stale_ref" ]; then
+                    "${GIT_SAFE[@]}" branch -D "$stale_ref" ||
+                      echo "::warning::could not remove review branch: $stale_ref"
+                  fi
+                done || true
+          fi
+
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
+      - name: 'Checkout'
+        uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
+        with:
+          ref: '${{ inputs.ref || github.sha }}'
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22 (hosted)'
@@ -392,26 +2337,93 @@ jobs:
             echo "::warning::Expected Node 22.x but found $(node -v); daemon E2E will run against the runner's Node."
           fi
 
+      # setup-java resolves the requested version through api.adoptium.net on
+      # every run, even when the tool cache already holds that JDK, and the
+      # lookup has no timeout: on the Hangzhou hosts it stalled and held this
+      # step for close to two hours (run 40262799523). Bound the attempt and
+      # fall back to the pool's own cache or mirror when it does not finish.
       - name: 'Set up Java'
+        id: 'setup_java'
+        timeout-minutes: 3
+        continue-on-error: true
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
           distribution: 'temurin'
           java-version: '11'
-          cache: 'maven'
+          cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
           settings-path: '${{ runner.temp }}/setup-java-m2'
+
+      - name: 'Set up Java (pool fallback)'
+        if: "${{ steps.setup_java.outcome != 'success' }}"
+        # Bounded like the attempt it replaces: a host that reaches neither
+        # Adoptium nor the mirror must not hold a runner for the download
+        # budget.
+        timeout-minutes: 10
+        env:
+          JAVA_SPEC: '11'
+        run: 'bash .github/scripts/install-pool-jdk.sh'
+
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
 
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
+      # prepare would build and bundle here, then the two steps below build and
+      # bundle the same tree again. Keep this an install: the fast-tier lane
+      # that failed (#14861) died inside prepare's build.
       - name: 'Install Node.js dependencies'
-        run: 'corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only'
+        env:
+          QWEN_SKIP_PREPARE: '1'
+        run: |-
+          for attempt in 1 2 3; do
+            if corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only; then
+              if [[ "${attempt}" != "1" ]]; then
+                echo "::warning::corepack pnpm install failed $((attempt - 1)) time(s) before the retry absorbed it — this step skips prepare's build, so check the failure class before counting it toward #11726."
+              fi
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
 
       - name: 'Build Qwen Code'
         run: 'npm run build'

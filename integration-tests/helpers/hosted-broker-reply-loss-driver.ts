@@ -11,6 +11,7 @@ import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { isLegitimateMountRelease } from './hosted-mount-release.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -67,8 +68,16 @@ async function upstream(route: string, body?: Buffer) {
     signal: AbortSignal.timeout(30_000),
   });
   const text = await response.text();
-  assert.equal(response.status, 200, `${route}: ${text}`);
-  return { text, reply: JSON.parse(text) as Reply };
+  if (new URL(route, config.brokerUrl).pathname.endsWith(':release-mount')) {
+    const replyBody = JSON.parse(text) as { code?: unknown };
+    assert(
+      isLegitimateMountRelease(response.status, replyBody.code),
+      `${response.status} ${route}: ${text}`,
+    );
+  } else {
+    assert.equal(response.status, 200, `${route}: ${text}`);
+  }
+  return { text, reply: JSON.parse(text) as Reply, status: response.status };
 }
 
 const proxy = createServer(async (req, res) => {
@@ -82,17 +91,39 @@ const proxy = createServer(async (req, res) => {
       : Object.fromEntries(route.searchParams);
     const operation =
       req.method === 'GET' ? 'status' : route.pathname.split(':').at(-1)!;
+    const harnessScoped =
+      req.method === 'POST' &&
+      [
+        '/internal/runtime-broker/v1/runtimes:warm',
+        '/internal/runtime-broker/v1/runtimes:capabilities',
+        '/internal/runtime-broker/v1/tool-sessions:active-holds',
+      ].includes(route.pathname);
     const executionCallId = route.pathname.match(/\/executions\/([^/:]+)/)?.[1];
+    if (
+      operation === 'release-mount' &&
+      fields['harnessSessionId'] !== sessionId
+    ) {
+      // An earlier case's owed handback (#13800) keeps retrying on its own
+      // clock: forward it outside this case's ledger.
+      const { text, status } = await upstream(req.url!, body);
+      res.writeHead(status, { 'Content-Type': 'application/json' });
+      res.end(text);
+      return;
+    }
     assert.equal(fields['harnessSessionId'], sessionId);
-    assert.equal(fields['runtimeSessionId'], promptId);
+    assert.equal(
+      fields['runtimeSessionId'],
+      harnessScoped ? undefined : promptId,
+    );
     if (fault === 'release-before-forward' && operation === 'release') {
       dropped++;
       exchanges.push({ operation, fields, reply: {} });
       res.destroy();
       return;
     }
-    const { text, reply } = await upstream(req.url!, body);
-    exchanges.push({ operation, executionCallId, fields, reply });
+    const { text, reply, status } = await upstream(req.url!, body);
+    if (!(harnessScoped && operation === 'active-holds'))
+      exchanges.push({ operation, executionCallId, fields, reply });
     if (fault === 'cancel' && operation === 'prepare')
       await json(`/session/${sessionId}/cancel`, {}, 204);
     const lose =
@@ -116,7 +147,9 @@ const proxy = createServer(async (req, res) => {
       res.destroy();
       return;
     }
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(route.pathname.endsWith(':release-mount') ? status : 200, {
+      'Content-Type': 'application/json',
+    });
     res.end(text);
   } catch (cause) {
     proxyFailure = cause;
@@ -210,6 +243,7 @@ try {
       `${fault}: fault did not fire`,
     );
     const blocked = !['prepare', 'start'].includes(fault);
+    const retryRelease = ['release', 'release-before-forward'].includes(fault);
     assert.equal(
       (await json(`/session/${sessionId}/status`)).recoveryBlocked,
       blocked,
@@ -238,8 +272,13 @@ try {
     const terminals = events.filter(
       (event) => event.promptId === promptId && event.type.startsWith('turn_'),
     );
-    assert.equal(terminals.length, blocked ? 0 : 1, JSON.stringify(events));
-    if (!blocked) assert.equal(terminals[0].type, 'turn_complete');
+    assert.equal(
+      terminals.length,
+      blocked && !retryRelease ? 0 : 1,
+      JSON.stringify(events),
+    );
+    if (!blocked || retryRelease)
+      assert.equal(terminals[0].type, 'turn_complete');
     const results = events.filter(
       (event) => event.data.record?.type === 'tool_result',
     );
@@ -305,6 +344,8 @@ try {
       assert.equal(rejected.error, 'hosted_turn_recovery_required');
     }
     const traffic = exchanges.length;
+    const callsBeforeReload = modelCalls;
+    const rejectLoad = blocked && !retryRelease;
     await json(`/session/${sessionId}/detach`, {}, 204);
     const loaded = await json(
       `/session/${sessionId}/load`,
@@ -312,17 +353,69 @@ try {
         managedSessionStore: connection,
         toolProfile: 'hosted-workspace-files/1',
       },
-      blocked ? 409 : 200,
+      rejectLoad ? 409 : 200,
     );
-    if (blocked) assert.equal(loaded.error, 'hosted_turn_recovery_required');
+    if (rejectLoad) assert.equal(loaded.error, 'hosted_turn_recovery_required');
     else {
       clientId = loaded.clientId;
+      if (retryRelease) {
+        await waitUntil(async () => {
+          if (proxyFailure) throw proxyFailure;
+          return !(await json(`/session/${sessionId}/status`)).hasActivePrompt;
+        });
+        assert.equal(
+          (await json(`/session/${sessionId}/status`)).recoveryBlocked,
+          fault === 'release-before-forward',
+          cli.output,
+        );
+        const page = await json(
+          `/session/${sessionId}/transcript?cursor=0&limit=256`,
+        );
+        assert.equal(page.hasMore, false);
+        const recoveredEvents: typeof events = page.events;
+        assert.deepEqual(
+          recoveredEvents
+            .filter(
+              (event) =>
+                event.promptId === promptId && event.type.startsWith('turn_'),
+            )
+            .map((event) => event.type),
+          ['turn_complete'],
+        );
+        assert.equal(
+          recoveredEvents.filter(
+            (event) => event.data.record?.type === 'tool_result',
+          ).length,
+          1,
+        );
+      }
       await json(`/session/${sessionId}/detach`, {}, 204);
     }
+    // A blocked turn's owed mount handback (#13800) keeps retrying on its
+    // own clock and is not reload traffic.
+    const cleanupRetries = exchanges
+      .slice(traffic)
+      .filter((entry) => entry.operation !== 'release-mount');
+    if (retryRelease) {
+      assert(cleanupRetries.length > 0, 'Original cleanup must be retried');
+      const original = exchanges.find((entry) => entry.operation === 'release');
+      assert(original);
+      for (const entry of cleanupRetries) {
+        assert.equal(
+          entry.operation,
+          'release',
+          'Reload may only retry the original runtime release',
+        );
+        assert.deepEqual(entry.fields, {
+          ...original.fields,
+          requestId: entry.fields['requestId'],
+        });
+      }
+    } else assert.deepEqual(cleanupRetries, []);
     assert.equal(
-      exchanges.length,
-      traffic,
-      'Reload must not replay Broker work',
+      modelCalls,
+      callsBeforeReload,
+      'Reload must not call the model',
     );
     reports.push({ fault, promptId, executionCallId, idempotencyKey });
     console.log(

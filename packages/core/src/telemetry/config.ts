@@ -33,6 +33,60 @@ export function parseBooleanEnvFlag(
 }
 
 /**
+ * Resolve the usage-statistics opt-in with the same precedence as the main
+ * session config: `QWEN_USAGE_STATISTICS_ENABLED` env, then
+ * `settings.privacy.usageStatisticsEnabled`, then default true.
+ *
+ * Standalone entrypoints (extension CLI commands, the serve daemon's
+ * extension controller) do not build a session Config; they must route
+ * through this so the opt-out reaches `QwenLogger.getInstance` (#12770).
+ */
+export function resolveUsageStatisticsEnabled(
+  settingsValue: boolean | undefined,
+  env: Record<string, string | undefined> = process.env,
+): boolean {
+  return (
+    parseBooleanEnvFlag(env['QWEN_USAGE_STATISTICS_ENABLED']) ??
+    settingsValue ??
+    true
+  );
+}
+
+/**
+ * Resolve the proxy for extension lifecycle telemetry uploads with the
+ * settings-then-env precedence of the main session chain
+ * (`settings.proxy`, then `HTTPS_PROXY` / `https_proxy` / `HTTP_PROXY` /
+ * `http_proxy`), minus the leading CLI-flag term: `--proxy` is deprecated
+ * in favor of `settings.proxy` and never reaches the extension command
+ * handlers (`qwen extensions ...` exits before `loadCliConfig`).
+ *
+ * Returns the RAW first match; normalization (and the SOCKS rejection a
+ * session would fail on at startup) happens in
+ * `ExtensionManager.getTelemetryConfig`, which drops an unsupported value
+ * instead of aborting the extension mutation.
+ *
+ * `env` is injectable so a long-lived host (the `qwen serve` daemon) can pass
+ * the resolved environment of the runtime that owns the workspace being
+ * resolved, rather than an ambient `process.env` that per-workspace settings
+ * loads may have polluted. A host that cannot attribute an env to the
+ * workspace in hand must pass `{}` rather than fall back to the ambient one —
+ * the daemon's extensions controller does exactly that for every workspace
+ * other than the one it is bound to.
+ */
+export function resolveExtensionTelemetryProxy(
+  settingsProxy: string | undefined,
+  env: Record<string, string | undefined> = process.env,
+): string | undefined {
+  return (
+    settingsProxy ||
+    env['HTTPS_PROXY'] ||
+    env['https_proxy'] ||
+    env['HTTP_PROXY'] ||
+    env['http_proxy']
+  );
+}
+
+/**
  * Normalize a telemetry target value into TelemetryTarget or undefined.
  */
 export function parseTelemetryTargetValue(

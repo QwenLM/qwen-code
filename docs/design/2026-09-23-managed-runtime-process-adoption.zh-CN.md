@@ -2,7 +2,7 @@
 
 [English](2026-09-23-managed-runtime-process-adoption.md) | [简体中文](2026-09-23-managed-runtime-process-adoption.zh-CN.md)
 
-状态：已实现。更新日期：2026-09-24。承接[attestation 客户端](2026-09-23-java-runtime-attestation-client.zh-CN.md)。
+状态：已实现。更新日期：2026-10-02。承接[attestation 客户端](2026-09-23-java-runtime-attestation-client.zh-CN.md)。
 
 ## 本切片
 
@@ -18,4 +18,4 @@ Java 客户端提供工具 HTTP（`POST /internal/managed-runtime/v2/execute`）
 
 ## 不在本切片
 
-session 级动词上的按调用 HTTP 重新证明：只有 binding 入口做 attestation，动词只做本地存活检查。Broker 进程崩溃仍可能让 worker 变成孤儿，这需要 worker 侧监视父进程。`stop` 和 `close` 仍然只发送 SIGTERM，不会升级到 SIGKILL。Spring 配置和 Flyway 跟 Java 控制面模块走，那个模块还不在 `main` 上。Kubernetes provisioner 不包含在内。本切片使用现有的内存和 JDBC Repository，不新增服务器。
+session 级动词上的按调用 HTTP 重新证明：只有 binding 入口做 attestation，动词只做本地存活检查。Broker 进程崩溃仍可能让 worker 变成孤儿，这需要 worker 侧监视父进程。`stop` 和 `close` 发送 SIGTERM——并且自 [2026-10-02 加固](2026-10-02-runtime-broker-hardening.zh-CN.md) 起，忽略它的非 durable worker 会在 5 秒有界宽限后被升级为 `destroyForcibly()`，在 release、`close()` 与 JVM 退出钩子三处都是如此。Spring 配置和 Flyway 跟 Java 控制面模块走，那个模块还不在 `main` 上。Kubernetes provisioner 不包含在内。本切片使用现有的内存和 JDBC Repository，不新增服务器。

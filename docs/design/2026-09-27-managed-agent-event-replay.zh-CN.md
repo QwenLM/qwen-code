@@ -42,7 +42,8 @@ resync。
 
 ## 3. 非目标
 
-- 清理事件。生产环境中目前没有任何路径提升下限，这属于保留策略的工作。
+- 清理事件。现在有一个受开关控制的定时过程会提升下限（见 4.4），但它不删除
+  任何内容；清理仍属于保留策略的工作。
 - WebShell Session 的 `replayFloorSequence` 与 `snapshotThroughSequence`，仍为
   `planned`。
 - `listItems`，在 Snapshot 版本分页之前仍为 `partial`。
@@ -65,14 +66,15 @@ resync。
 - `content_part_id` 与 `contentPartId` 允许 128 个字符，与
   `PublicContentPart.part_id` 一致。Part id 以 sequence 结尾，sequence 达到十位数
   时就会超过 64 个字符。
-- `replay_floor_sequence` 增加说明：不超过它的事件可能被清理，低于它的游标已
-  过期。
+- `replay_floor_sequence` 增加说明：不超过它的事件可能被清理，低于它的游标在
+  Snapshot 支撑下限时才过期。
 - `SessionResyncRequired` 要求客户端从 Items 列表返回的 `snapshot_through_sequence`
   之后继续，因为帧中的值可能比客户端随后读到的 Snapshot 更旧。
 - WebShell transcript 写明它原本的返回内容：没有游标时，有 Snapshot 的 Session
   返回全部 Items、Snapshot 之前除 `turn.accepted`、`item.output_text.delta`、
-  `item.reasoning.delta` 与 `item.tool_call.updated`（Items 已包含其内容）以外的
-  事件，以及之后的所有事件；其他情况下由 `limit` 限定事件分页。
+  `item.reasoning.delta`、`item.tool_call.updated` 与 `item.tool_result.updated`
+  （Items 已包含其内容）以外的事件，以及之后的所有事件；其他情况下由 `limit`
+  限定事件分页。
 - `PublicEvent` 与 `WebShellEvent` 写明事件以被接受时的版本与身份回放，唯一的例外
   是 `stream.reconciled` 事件之后；此前契约并未提及该事件（见 4.2）。由于 Snapshot
   在它之后重建，公共客户端要重新读取 Items，直到其 `snapshot_through_sequence`
@@ -93,7 +95,7 @@ Flyway V14 为 `managed_agent_event` 新增默认值为 `1` 的 `schema_version`
 | `turn.accepted`                                             | `data.itemId`，否则为 `item_<turn>_input`                                         | 无；该事件填充多个 Part                                                                                   |
 | 带文本的 `item.output_text.delta` 与 `item.reasoning.delta` | `data.itemId`，否则为 `item_<turn>_assistant`                                     | 如果紧邻的上一条事件是同一类型、同一 Item 的增量，则沿用它的 Part；否则为 `part_<turn>_<type>_<sequence>` |
 | 文本为空的文本增量                                          | 无                                                                                | 无；投影会跳过它                                                                                          |
-| `item.tool_call.updated`                                    | `data.itemId`，否则由工具调用 id 推导；没有工具调用 id 时由 turn 与 sequence 推导 | 无                                                                                                        |
+| `item.tool_call.updated` 与 `item.tool_result.updated`      | `data.itemId`，否则由工具调用 id 推导；没有工具调用 id 时由 turn 与 sequence 推导 | 无                                                                                                        |
 | 其他事件                                                    | 无                                                                                | 无                                                                                                        |
 
 这正是物化器构建 Items 时已经采用的规则，物化器现在也通过同一组辅助方法命名。
@@ -124,7 +126,8 @@ Snapshot。
 
 ### 4.4 回放下限
 
-- 游标低于下限即为过期。等于下限的游标有效，因为下一条事件仍被保留。
+- 游标低于下限且 Snapshot 支撑下限时即为过期。等于下限的游标有效，因为下一条
+  事件仍被保留。
 - 读取在读完事件之后才检查下限。下限只会上升，保留策略也只清理下限以下的事件，
   因此读取之后不高于游标的下限，在读取期间也不高于游标。
 - JSON 查询对过期游标返回 `409 cursor_expired`，错误信封带有契约早已定义的
@@ -135,13 +138,20 @@ Snapshot。
   `id`，因此客户端的 `Last-Event-ID` 不会越过它缺失的事件。
 - `ManagedAgentStore.advanceReplayFloor` 只提升、不降低下限，并且不超过 Snapshot
   已覆盖的 sequence，保证重新读取 Snapshot 的客户端可以从
-  `snapshot_through_sequence` 之后继续。测试调用它；保留策略的工作将在删除事件之前
-  调用它。
+  `snapshot_through_sequence` 之后继续。测试调用它；定时的 `ReplayFloorAdvancer`
+  过程以该上限调用它，因此开启开关的部署会把每个 Session 的下限提升到 Snapshot
+  所证明的安全位置；保留策略的工作将在删除事件之前调用它。该过程由
+  `qwen.managed-agent.events.replay-floor-enabled`
+  （`QWEN_MANAGED_AGENT_REPLAY_FLOOR_ENABLED`，默认 `false`）控制，每
+  `qwen.managed-agent.events.replay-floor-interval`
+  （`QWEN_MANAGED_AGENT_REPLAY_FLOOR_INTERVAL`，默认 60 秒）运行一次。
 - `PublicSession.replay_floor_sequence` 返回已存储的下限。
-- 事件流重整会丢弃 Snapshot，因此在 Items 重建之前，其已覆盖的 sequence 为 `0`。
-  如果下限已被提升，这段时间内收到 resync 的公共客户端会发现游标再次过期（得到
-  `409` 或又一帧 resync），直到重建完成。生产环境中目前没有任何路径提升下限；保留策略的工作必须在提升下限之前消除
-  这段窗口。
+- 事件流重整会丢弃 Snapshot，因此在 Items 重建之前，其已覆盖的 sequence 为 `0`；
+  而下限从不降低，所以重建期间下限可能超过覆盖位置。只有当 Snapshot 能支撑下限
+  （`floor <= snapshot_through_sequence`）时，读取才会判定低于下限的游标过期；由于
+  尚无任何路径清理事件，重建期间这样的游标仍从保留的事件中读出，而不是循环返回
+  `409` 或又一帧 resync。一旦保留策略开始删除已存储下限之下的行，它必须重新评估
+  这个条件：届时被放行的游标可能指向已不存在的事件。
 - WebShell transcript 不检查下限。事件被清理之后，它的更早分页必须止于下限；这同样
   属于保留策略的工作。
 
@@ -155,8 +165,28 @@ Snapshot，两个事件流都会发送 resync 帧。Items 列表的每一页都�
 ### 4.6 WebShell 客户端
 
 客户端根据事件名与缺失的 id 识别 resync 帧。provider 把它转换为已有的
-`stream_gap` 事件，于是会话 hook 重新读取 transcript 并从其 `lastSequence` 之后
-继续，与收到 `stream.reconciled` 后的处理相同。
+`stream_gap` 事件，于是会话 hook 重新读取 transcript 并从其头部之后继续，与收到
+`stream.reconciled` 后的处理相同。
+
+hook 的 gap 恢复会把新 transcript 合并进当前展示的事件，而不是整体替换。快照对其
+覆盖区间（[首个事件, lastSequence]）是权威的：区间内的实时事件若不在快照中——例如
+服务端已将其组装进 Item 的流式 delta——会被丢弃而不是重复渲染；比快照头更新的实时
+事件会在读取滞后时存活。窗口之下，用户翻页载入的事件仅在与窗口保持连续时才保留——
+一旦出现空洞，空洞两侧的 delta 会被渲染器拼成同一条 assistant 消息，因此有空洞时翻页
+内容会被丢弃、并采纳窗口的游标以便重新翻回——而 item 投影一律不保留：撤回之后服务端
+以原始事件为准。分页游标跟随被保留的内容：非空快照携带全量历史时清空；客户端没有游标、
+或被保留页与窗口之间出现空洞时采纳快照的游标；其余情况保留用户的游标。gap 重同步若未能
+推进游标则记为一次停滞；连续第三次停滞会显示持续存在的错误，任何投递的事件或推进的
+快照都会清零计数。
+
+流客户端容忍损坏帧。data 载荷无法解析、解析结果没有字符串 `type`、或（流中间）没有
+`data:` 行的帧都计为损坏。默认失败即关（fail closed）：只有文本可由快照重新组装的
+delta 类型（`item.output_text.delta`、`item.reasoning.delta`）会被跳过并记录限流警告，
+后续帧会把消费者的游标推过它；其余任何损坏帧——包括事件名不可用的帧——都会产出
+resync。连续损坏超过三帧（即第四帧起，其间的心跳不打断计数，只有成功投递的事件才
+清零）时同样产出 resync；整条连接只有跳过没有投递时也产出 resync。流末尾的残缺缓冲
+是帧中断连：按断连记录，且不计入损坏预算。合成的 resync 帧携带占位水位
+（`replayFloorSequence: 0`、`snapshotThroughSequence: 0`），客户端没有任何代码读取它们。
 
 ## 5. 测试
 
@@ -179,13 +209,22 @@ Snapshot，两个事件流都会发送 resync 帧。Items 列表的每一页都�
   非零游标续传。该测试集把轮询间隔与心跳间隔都设为一分钟，因此空闲的事件流在测试期间不会读取
   存储，实时事件只能经由 hub 到达事件流。
 
+- `ReplayFloorRetractionTest` 暂停物化器，把下限提升到 Snapshot 并撤回
+  continuation 输出，然后验证：Snapshot 缺失期间低于下限的游标仍可读取、已存储的
+  下限从不回退、重建后的 Snapshot 重新支撑下限后该游标再次过期。
+
 - `EventIdentityTest` 固定该规则。集成测试在以下情形后把每条事件的身份与物化后的
   Snapshot 对照：分两批追加、且有一个 reasoning Part 跨越两批的增量；逐条追加的
   增量；以及撤回，包括接续了被撤回增量的保留增量。
 - 一个升级测试在 H2 的 MySQL 模式下于 V1 写入事件、执行迁移，并按规则与 Snapshot
   检查补上的身份。`ManagedAgentMySqlIT` 在 MySQL 上执行同样的升级，并在其上检查回放下限。
 - web-shell 测试解码 resync 帧，检查 provider 只产出一个 `stream_gap` 后停止，并检查
-  会话 hook 随后重新读取 transcript，从其 `lastSequence` 之后重新订阅。
+  会话 hook 随后重新读取 transcript，从其头部之后重新订阅。hook 的 gap 合并测试钉住
+  窗口语义：与窗口连续的翻页历史存活、被取代的 delta 被丢弃、游标跟随被保留的内容、
+  连续无法推进的重同步会上报错误。流客户端的测试钉住坏帧策略：只有可重组装的 delta
+  会被跳过（告警速率有界），其余任何损坏帧——包括事件名不可用的帧——都触发 resync；
+  连续损坏超过三帧（即第四帧起）且其间没有成功解码事件时触发 resync（心跳不稀释计数）；
+  帧中断连单独记录且不占预算；只有跳过的连接以 resync 结束。
 
 ## 6. 兼容性
 
@@ -197,15 +236,15 @@ Snapshot，两个事件流都会发送 resync 帧。Items 列表的每一页都�
 - 所有副本需要一起升级。V14 之后仍运行旧版本的副本写入的事件没有身份，新副本在
   其后追加的文本增量会开始一个 Items 中没有的 Part。
 - 忽略 resync 帧的客户端会看到事件流结束，用同一个游标重连后再次收到该帧。
-  web-shell 客户端会处理它。在保留策略的工作提升下限之前，生产环境中的事件流不会
-  发送它。
+  web-shell 客户端会处理它。只有选择开启回放下限过程的部署，其生产环境的事件流
+  才会发送它。
 - 生成的 `@qwen-code/web-shell` 类型新增 `WebShellResyncRequired`，事件流
   operation 不再列出 `409`。可选的事件字段原本就在 WebShell 事件 schema 中。
 
 ## 7. 验证
 
 - Managed Agent 服务的完整测试与 Checkstyle 通过。
-- `ManagedAgentMySqlIT` 在 CI 所用的 `mariadb:10.11.18` 以及 `mysql:8.4` 上通过。
+- `ManagedAgentMySqlIT` 已在 `mariadb:10.11.18` 与 `mysql:8.4` 上通过。
 - 打包后的 Spring Boot jar 把 MariaDB 数据库迁移到 V15，说明 Flyway 能在 jar 中
   找到这个 Java 迁移。
 - 以下变更分别使对应测试失败：忽略 `Last-Event-ID`、跳过下限检查、hub 隐瞒溢出、
@@ -217,8 +256,9 @@ Snapshot，两个事件流都会发送 resync 帧。Items 列表的每一页都�
 
 ## 8. 后续工作
 
-- 保留策略：清理事件，在清理之前提升下限，在事件流重整重建 Items 期间把下限保持
-  在 Snapshot 之下或与之相等，并让 WebShell transcript 的更早分页止于下限。
+- 保留策略：清理上述过程已提升的下限之下的事件，并让 WebShell transcript 的更早
+  分页止于下限。上述 Snapshot 丢弃窗口只在尚不清理事件时于读取侧关闭；清理那一半
+  在删除行之前必须重新决策生效下限。
 - WebShell Session 的下限与 Snapshot 水位。
 - 带 Snapshot 版本分页的 `listItems`。
 - 生命周期工作：剩余的三行差异。

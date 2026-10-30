@@ -52,6 +52,14 @@ const conversationHistory: Content[] = [
   { role: 'model', parts: [{ text: 'You could run tests.' }] },
 ];
 
+const cacheSafeParams = () => ({
+  generationConfig: {},
+  history: conversationHistory,
+  model: 'main-model',
+  version: 1,
+  sessionId: 'test-session',
+});
+
 describe('generatePromptSuggestion', () => {
   beforeEach(() => {
     mockGetCacheSafeParams.mockReset();
@@ -61,29 +69,49 @@ describe('generatePromptSuggestion', () => {
     mockRunSideQuery.mockReset();
   });
 
-  it('passes cache-safe model in cache mode when no explicit or fast model exists', async () => {
-    mockGetCacheSafeParams.mockReturnValue({
-      generationConfig: {},
-      history: conversationHistory,
-      model: 'main-model',
-      version: 1,
-      sessionId: 'test-session',
-    });
+  /** Cache-safe params for this session and a fork that suggests "run tests". */
+  function mockCacheFork(): void {
+    mockGetCacheSafeParams.mockReturnValue(cacheSafeParams());
     mockRunForkedAgent.mockResolvedValue({
       text: null,
       jsonResult: { suggestion: 'run tests' },
       usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 5 },
     });
-    const config = {
-      getFastModel: vi.fn(() => undefined),
-      getModel: vi.fn(() => 'main-model'),
-      getSessionId: vi.fn(() => 'test-session'),
-    } as unknown as Config;
+  }
 
-    const signal = new AbortController().signal;
-    await generatePromptSuggestion(config, conversationHistory, signal, {
-      enableCacheSharing: true,
+  function mockBaseLlm(): void {
+    mockRunSideQuery.mockResolvedValue({
+      text: '{"suggestion":"from base llm"}',
+      usage: { inputTokens: 1, outputTokens: 1 },
     });
+  }
+
+  /** Runs the generator with a config whose main model is `main-model`. */
+  function suggest({
+    fastModel,
+    sessionId = 'test-session',
+    enableCacheSharing = true,
+    signal = new AbortController().signal,
+  }: {
+    fastModel?: string;
+    sessionId?: string;
+    enableCacheSharing?: boolean;
+    signal?: AbortSignal;
+  } = {}) {
+    const config = {
+      getFastModel: vi.fn(() => fastModel),
+      getModel: vi.fn(() => 'main-model'),
+      getSessionId: vi.fn(() => sessionId),
+    } as unknown as Config;
+    return generatePromptSuggestion(config, conversationHistory, signal, {
+      enableCacheSharing,
+    });
+  }
+
+  it('passes cache-safe model in cache mode when no explicit or fast model exists', async () => {
+    mockCacheFork();
+    const signal = new AbortController().signal;
+    await suggest({ signal });
 
     expect(mockGetCacheSafeParams).toHaveBeenCalledWith('test-session');
     expect(mockRunForkedAgent).toHaveBeenCalledWith(
@@ -92,60 +120,16 @@ describe('generatePromptSuggestion', () => {
   });
 
   it('passes the fast model in cache mode when one is configured', async () => {
-    mockGetCacheSafeParams.mockReturnValue({
-      generationConfig: {},
-      history: conversationHistory,
-      model: 'main-model',
-      version: 1,
-      sessionId: 'test-session',
-    });
-    mockRunForkedAgent.mockResolvedValue({
-      text: null,
-      jsonResult: { suggestion: 'run tests' },
-      usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 5 },
-    });
-    const config = {
-      getFastModel: vi.fn(() => 'openai:fast-model'),
-      getModel: vi.fn(() => 'main-model'),
-      getSessionId: vi.fn(() => 'test-session'),
-    } as unknown as Config;
-
-    await generatePromptSuggestion(
-      config,
-      conversationHistory,
-      new AbortController().signal,
-      { enableCacheSharing: true },
-    );
+    mockCacheFork();
+    await suggest({ fastModel: 'openai:fast-model' });
 
     expect(mockRunForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ model: 'openai:fast-model' }),
     );
   });
   it('passes preserveTools: true for Anthropic prompt-cache sharing', async () => {
-    mockGetCacheSafeParams.mockReturnValue({
-      generationConfig: {},
-      history: conversationHistory,
-      model: 'main-model',
-      version: 1,
-      sessionId: 'test-session',
-    });
-    mockRunForkedAgent.mockResolvedValue({
-      text: null,
-      jsonResult: { suggestion: 'run tests' },
-      usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 5 },
-    });
-    const config = {
-      getFastModel: vi.fn(() => undefined),
-      getModel: vi.fn(() => 'main-model'),
-      getSessionId: vi.fn(() => 'test-session'),
-    } as unknown as Config;
-
-    await generatePromptSuggestion(
-      config,
-      conversationHistory,
-      new AbortController().signal,
-      { enableCacheSharing: true },
-    );
+    mockCacheFork();
+    await suggest();
 
     expect(mockRunForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ preserveTools: true }),
@@ -159,22 +143,9 @@ describe('generatePromptSuggestion', () => {
     // content leak) — it falls back to the session-safe base-LLM path
     // (#9233).
     mockGetCacheSafeParamsSessionId.mockReturnValue('session-B');
-    mockRunSideQuery.mockResolvedValue({
-      text: '{"suggestion":"from base llm"}',
-      usage: { inputTokens: 1, outputTokens: 1 },
-    });
-    const config = {
-      getFastModel: vi.fn(() => undefined),
-      getModel: vi.fn(() => 'main-model'),
-      getSessionId: vi.fn(() => 'session-A'), // this session is different
-    } as unknown as Config;
+    mockBaseLlm();
 
-    const result = await generatePromptSuggestion(
-      config,
-      conversationHistory,
-      new AbortController().signal,
-      { enableCacheSharing: true },
-    );
+    const result = await suggest({ sessionId: 'session-A' }); // this session is different
 
     // The cache API rejects the foreign slot before cloning its payload.
     expect(mockGetCacheSafeParams).toHaveBeenCalledWith('session-A');
@@ -186,29 +157,10 @@ describe('generatePromptSuggestion', () => {
   });
 
   it('does not use the cache-safe fork when cache sharing is disabled', async () => {
-    mockGetCacheSafeParams.mockReturnValue({
-      generationConfig: {},
-      history: conversationHistory,
-      model: 'main-model',
-      version: 1,
-      sessionId: 'test-session',
-    });
-    mockRunSideQuery.mockResolvedValue({
-      text: '{"suggestion":"from base llm"}',
-      usage: { inputTokens: 1, outputTokens: 1 },
-    });
-    const config = {
-      getFastModel: vi.fn(() => undefined),
-      getModel: vi.fn(() => 'main-model'),
-      getSessionId: vi.fn(() => 'test-session'),
-    } as unknown as Config;
+    mockGetCacheSafeParams.mockReturnValue(cacheSafeParams());
+    mockBaseLlm();
 
-    const result = await generatePromptSuggestion(
-      config,
-      conversationHistory,
-      new AbortController().signal,
-      { enableCacheSharing: false },
-    );
+    const result = await suggest({ enableCacheSharing: false });
 
     expect(mockGetCacheSafeParamsSessionId).not.toHaveBeenCalled();
     expect(mockGetCacheSafeParams).not.toHaveBeenCalled();
@@ -218,30 +170,8 @@ describe('generatePromptSuggestion', () => {
   });
 
   it('passes preserveTools: false when fast model differs from cache-safe model', async () => {
-    mockGetCacheSafeParams.mockReturnValue({
-      generationConfig: {},
-      history: conversationHistory,
-      model: 'main-model',
-      version: 1,
-      sessionId: 'test-session',
-    });
-    mockRunForkedAgent.mockResolvedValue({
-      text: null,
-      jsonResult: { suggestion: 'run tests' },
-      usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 5 },
-    });
-    const config = {
-      getFastModel: vi.fn(() => 'different-fast-model'),
-      getModel: vi.fn(() => 'main-model'),
-      getSessionId: vi.fn(() => 'test-session'),
-    } as unknown as Config;
-
-    await generatePromptSuggestion(
-      config,
-      conversationHistory,
-      new AbortController().signal,
-      { enableCacheSharing: true },
-    );
+    mockCacheFork();
+    await suggest({ fastModel: 'different-fast-model' });
 
     expect(mockRunForkedAgent).toHaveBeenCalledWith(
       expect.objectContaining({ preserveTools: false }),

@@ -14,10 +14,10 @@ import {
   useState,
 } from 'react';
 import {
+  ArrowDownIcon,
   ChevronRightIcon,
+  ChevronDownIcon,
   CornerDownRightIcon,
-  RefreshCwIcon,
-  XIcon,
 } from 'lucide-react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type {
@@ -25,6 +25,7 @@ import type {
   DaemonTurnUsage,
 } from '@qwen-code/sdk/daemon';
 import { useI18n } from '../../i18n';
+import { isFocusUnclaimed } from '../../utils/dom';
 import { formatDuration } from '../messages/StatsMessage';
 import {
   useTrajectoryWindow,
@@ -47,12 +48,73 @@ import {
   type TimelineRange,
 } from '../../trajectory/timelineRange';
 import { summarizeTrajectory } from '../../trajectory/summarizeTrajectory';
-import { TrajectoryOverview } from './TrajectoryOverview';
-import { TrajectoryInspector } from './TrajectoryInspector';
+import { formatTimelinePoint, TrajectoryOverview } from './TrajectoryOverview';
+import { TrajectoryDetail } from './TrajectoryDetail';
+import {
+  ResizableHandle,
+  ResizablePanel,
+  ResizablePanelGroup,
+} from '../ui/resizable';
+import { TrajectoryExecutions } from './TrajectoryExecutions';
+import { projectTrajectoryExecutions } from '../../trajectory/project-trajectory-executions';
+import { trajectoryLoaderIdentity } from '../../trajectory/transcriptPageLoader';
 import styles from './TrajectoryPanel.module.css';
+import {
+  buildTrajectoryLayout,
+  type TrajectoryLayout,
+  trajectoryRowsInRange,
+  visibleTrajectoryRows,
+  visibleTrajectoryAncestor,
+} from '../../trajectory/buildTrajectoryLayout';
+import { useTimelineViewport } from '../../trajectory/useTimelineViewport';
+import { TrajectoryWaterfallCell } from './TrajectoryWaterfallCell';
+import { TrajectoryToolbar } from './TrajectoryToolbar';
+import { TrajectorySummaryBar, compactTokens } from './TrajectorySummaryBar';
+import {
+  isRetryableFailure,
+  trajectoryFailureText,
+  trajectoryPillState,
+  trajectoryTopBoundary,
+  trajectoryWarnings,
+} from '../../trajectory/trajectory-status';
+import {
+  buildTrajectorySearchIndex,
+  filterTrajectory,
+  type TrajectoryFilter,
+} from '../../trajectory/filterTrajectory';
+
+const EMPTY_FILTER: TrajectoryFilter = {
+  query: '',
+  type: 'all',
+  status: 'all',
+};
+function filtering(filter: TrajectoryFilter) {
+  return (
+    filter.query.trim() !== '' ||
+    filter.type !== 'all' ||
+    filter.status !== 'all'
+  );
+}
+function filterSignature(
+  filter: TrajectoryFilter,
+  range: TimelineRange | undefined,
+  mode: TimelineMode,
+) {
+  return JSON.stringify([
+    filter.query.trim().toLowerCase(),
+    filter.type,
+    filter.status,
+    range?.start,
+    range?.end,
+    mode,
+  ]);
+}
 
 /** Every row is one line and every row is this tall, turn headers included. */
 const ROW_HEIGHT = 34;
+
+/** From this panel width details sit beside the list instead of over it. */
+const SIDE_DETAIL_MIN_WIDTH = 960;
 
 export interface TrajectoryPanelProps {
   /**
@@ -60,20 +122,7 @@ export interface TrajectoryPanelProps {
    * tab is waiting to be rewired, which renders as the loading state.
    */
   loadPage?: TrajectoryPageLoader;
-}
-
-type VisualRow =
-  | { kind: 'turn'; key: string; turn: TrajectoryTurn }
-  | { kind: 'row'; key: string; row: TrajectoryRow };
-
-/**
- * Thresholds are the rounded boundary, not the raw one: 999,950 tokens is
- * `1.0M`, because `999.9k` is what the next unit down rounds away from.
- */
-function compactTokens(value: number): string {
-  if (value >= 999_950) return `${(value / 1_000_000).toFixed(1)}M`;
-  if (value >= 1_000) return `${(value / 1_000).toFixed(1)}k`;
-  return String(value);
+  historyGapRevision?: number;
 }
 
 function usageSummary(usage: DaemonTurnUsage): string {
@@ -152,7 +201,7 @@ function metricsOf(
 function toolStatusTone(row: TrajectoryToolRow): string | undefined {
   const status = row.toolStatus ?? row.block.status;
   if (status === 'error' || status === 'failed') return styles.toneError;
-  if (status === 'cancelled') return styles.toneMuted;
+  if (status === 'cancelled' || status === 'canceled') return styles.toneMuted;
   return undefined;
 }
 
@@ -277,27 +326,227 @@ function hasAnyTiming(trajectory: Trajectory): boolean {
   );
 }
 
-export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
-  const { t } = useI18n();
+export function TrajectoryPanel({
+  loadPage,
+  historyGapRevision = 0,
+}: TrajectoryPanelProps) {
+  const { t, language } = useI18n();
+  const panelRef = useRef<HTMLDivElement>(null);
+  // The same tier the container queries pick, for the code that has to choose
+  // between covering the list and sitting beside it.
+  const [wide, setWide] = useState(false);
+  useLayoutEffect(() => {
+    const element = panelRef.current;
+    if (!element) return;
+    const update = () => setWide(element.clientWidth >= SIDE_DETAIL_MIN_WIDTH);
+    update();
+    if (typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(update);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  const committedLoaderRef = useRef(loadPage);
+  useLayoutEffect(() => {
+    committedLoaderRef.current = loadPage;
+  }, [loadPage]);
+  const focusRecentExecutions = useCallback(() => {
+    if (committedLoaderRef.current !== loadPage) return;
+    const section = panelRef.current?.querySelector<HTMLElement>(
+      '[data-testid="trajectory-executions"]',
+    );
+    // The strip is empty once its executions are gone; the records are the
+    // nearest place left to land.
+    (
+      section?.querySelector<HTMLElement>('[role="grid"]') ??
+      section?.querySelector<HTMLButtonElement>('button') ??
+      scrollRef.current
+    )?.focus({ preventScroll: true });
+  }, [loadPage]);
   const {
     trajectory,
+    lifecycle,
     status,
     error,
     loadedPages,
+    windowPages,
     truncated,
     olderFailure,
-    refresh,
+    refresh: refreshWindow,
+    retry,
+    older,
+    newer,
+    mode: windowMode,
+    navigationVersion,
+    navigationError,
+    loadingKind,
+    canRefresh,
+    canOlder,
+    canNewer,
+    historyReleased,
   } = useTrajectoryWindow(loadPage);
+  const [followState, setFollowState] = useState<{
+    loader: typeof loadPage;
+    paused: boolean;
+    pending?: { of: typeof trajectory };
+  }>({ loader: loadPage, paused: false });
+  if (followState.loader !== loadPage)
+    setFollowState({ loader: loadPage, paused: false });
+  const pauseFollowing = useCallback(() => {
+    setFollowState((current) =>
+      current.loader !== loadPage || (current.paused && !current.pending)
+        ? current
+        : { loader: loadPage, paused: true },
+    );
+  }, [loadPage]);
+  const previousLive = useRef({ loader: loadPage, status: lifecycle.status });
+  useLayoutEffect(() => {
+    const previous = previousLive.current;
+    previousLive.current = { loader: loadPage, status: lifecycle.status };
+    if (
+      previous.loader === loadPage &&
+      previous.status === 'live' &&
+      lifecycle.status !== 'live'
+    )
+      pauseFollowing();
+  }, [loadPage, lifecycle.status, pauseFollowing]);
+  const following =
+    followState.loader === loadPage &&
+    !followState.paused &&
+    windowMode === 'latest';
+  const returning = followState.loader === loadPage && !!followState.pending;
+  const [refreshedGap, setRefreshedGap] = useState({
+    loader: loadPage,
+    revision: 0,
+  });
+  const pendingGapRefresh = useRef<
+    { revision: number; trajectory: typeof trajectory } | undefined
+  >(undefined);
+  const refresh = useCallback(() => {
+    pendingGapRefresh.current = { revision: historyGapRevision, trajectory };
+    refreshWindow();
+  }, [historyGapRevision, trajectory, refreshWindow]);
+  const returnToLatest = useCallback(() => {
+    if (!canRefresh) return;
+    setFollowState({
+      loader: loadPage,
+      paused: true,
+      pending: { of: trajectory },
+    });
+    refresh();
+  }, [canRefresh, loadPage, trajectory, refresh]);
+  useEffect(() => {
+    pendingGapRefresh.current = undefined;
+  }, [loadPage]);
+  useEffect(() => {
+    const pending = pendingGapRefresh.current;
+    if (pending && status !== 'loading' && error) {
+      pendingGapRefresh.current = undefined;
+    } else if (
+      pending &&
+      status === 'ready' &&
+      trajectory !== pending.trajectory
+    ) {
+      setRefreshedGap({ loader: loadPage, revision: pending.revision });
+      pendingGapRefresh.current = undefined;
+    }
+  }, [status, trajectory, error, loadPage]);
+  const historyStale =
+    historyGapRevision >
+    (refreshedGap.loader === loadPage ? refreshedGap.revision : 0);
+  const pendingWindowScrollRef = useRef(false);
+  const [windowScope, setWindowScope] = useState({
+    loader: loadPage,
+    version: navigationVersion,
+    selectionLost: false,
+  });
+  const [executionsUpdated, setExecutionsUpdated] = useState(false);
+  // Jump to latest floats over the rows, so it only appears once the reader
+  // has moved away from the tail: shown at the tail, it would land under the
+  // very click that paused following.
+  const [awayFromTail, setAwayFromTail] = useState(false);
+
+  const [filterState, setFilterState] = useState({
+    loader: loadPage,
+    value: EMPTY_FILTER,
+    scope: 0,
+  });
+  if (filterState.loader !== loadPage) {
+    setFilterState({
+      loader: loadPage,
+      value: EMPTY_FILTER,
+      scope: filterState.scope + 1,
+    });
+  }
+  const filter =
+    filterState.loader === loadPage ? filterState.value : EMPTY_FILTER;
+  const changeFilter = useCallback(
+    (value: TrajectoryFilter) => {
+      pauseFollowing();
+      setFilterState((current) =>
+        current.loader === loadPage &&
+        current.value.query === value.query &&
+        current.value.type === value.type &&
+        current.value.status === value.status
+          ? current
+          : { loader: loadPage, value, scope: current.scope },
+      );
+    },
+    [loadPage, pauseFollowing],
+  );
+  const clearFilter = useCallback(
+    () => changeFilter(EMPTY_FILTER),
+    [changeFilter],
+  );
+  const filterActive = filtering(filter);
+  const searchIndex = useMemo(
+    () => (trajectory ? buildTrajectorySearchIndex(trajectory) : undefined),
+    [trajectory],
+  );
+  const matches = useMemo(
+    () => (searchIndex ? filterTrajectory(searchIndex, filter) : []),
+    [searchIndex, filter],
+  );
+  const matchKeys = useMemo(() => new Set(matches), [matches]);
 
   const [selectedKey, setSelectedKey] = useState<string | undefined>(undefined);
   const [inspectorSelection, setInspectorSelection] = useState<
-    { of: Trajectory; loader: TrajectoryPageLoader; key: string } | undefined
+    | { of: Trajectory | undefined; loader: TrajectoryPageLoader; key: string }
+    | undefined
   >();
+  const executions = useMemo(
+    () =>
+      projectTrajectoryExecutions(
+        lifecycle,
+        trajectoryLoaderIdentity(loadPage),
+      ),
+    [lifecycle, loadPage],
+  );
+  const [executionSelection, setExecutionSelection] = useState<{
+    loader: TrajectoryPageLoader | undefined;
+    key: string;
+  }>();
+  const selectedExecution =
+    executionSelection?.loader === loadPage
+      ? executions.rows.find((row) => row.key === executionSelection?.key)
+      : undefined;
   const [inspectorOpen, setInspectorOpen] = useState(false);
+  useEffect(() => {
+    if (executionSelection && !selectedExecution)
+      setExecutionSelection(undefined);
+  }, [executionSelection, selectedExecution]);
   useEffect(() => {
     setInspectorOpen(false);
     setInspectorSelection(undefined);
+    setExecutionSelection(undefined);
   }, [loadPage]);
+  useEffect(() => {
+    if (
+      inspectorSelection?.of &&
+      trajectory &&
+      inspectorSelection.of !== trajectory
+    )
+      setInspectorSelection({ ...inspectorSelection, of: undefined });
+  }, [inspectorSelection, trajectory]);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const settledOnceRef = useRef(false);
   /** Last offset this panel knows the reader at; see the resize effect. */
@@ -318,10 +567,19 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     scrollTopRef.current = element.scrollTop;
   }, []);
 
+  const pendingAnchorRef = useRef<{ key: string; offset: number } | undefined>(
+    undefined,
+  );
   const [mode, setMode] = useState<TimelineMode>('active');
   const timeline = useMemo(
     () => (trajectory ? buildTimeline(trajectory, { mode }) : undefined),
     [trajectory, mode],
+  );
+
+  const viewportControl = useTimelineViewport(timeline);
+  const spansByKey = useMemo(
+    () => new Map(timeline?.spans.map((span) => [span.row.key, span])),
+    [timeline],
   );
 
   // The selection belongs to the axis it was drawn on. A refresh, another
@@ -343,14 +601,23 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
       : undefined;
   const setRange = useCallback(
     (next: TimelineRange | undefined) => {
+      pauseFollowing();
       setRangeState(
         next !== undefined && trajectory !== undefined
           ? { range: next, of: trajectory, mode }
           : undefined,
       );
     },
-    [trajectory, mode],
+    [trajectory, mode, pauseFollowing],
   );
+
+  useEffect(() => {
+    if (
+      rangeState &&
+      (rangeState.of !== trajectory || rangeState.mode !== mode)
+    )
+      setRangeState(undefined);
+  }, [rangeState, trajectory, mode]);
 
   /** Rows running in the selected time, or undefined when nothing is selected. */
   const inRange = useMemo(
@@ -358,40 +625,205 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     [range, timeline],
   );
 
-  const visualRows = useMemo<VisualRow[]>(() => {
-    if (!trajectory) return [];
-    const byKey = new Map(trajectory.rows.map((row) => [row.key, row]));
-    const out: VisualRow[] = [];
-    for (const turn of trajectory.turns) {
-      // Under a time selection a turn stays only if something in it ran in
-      // that time, and then keeps its header and prompt so the rows that
-      // survive still say which turn and which ask they answered.
-      if (inRange && !turn.rowKeys.some((key) => inRange.has(key))) continue;
-      // Named after the prompt that opened the turn, so a refresh that adds
-      // newer turns leaves the selection on the turn it was on. Turn numbers
-      // are window-relative and shift under exactly that. A turn the window
-      // starts in the middle of has no prompt to name it and falls back to its
-      // number, which is the case the fallback exists for.
-      const turnKey = turn.userRowKey ?? `ordinal:${turn.index}`;
-      out.push({ kind: 'turn', key: `turn:${turnKey}`, turn });
-      for (const rowKey of turn.rowKeys) {
-        if (inRange && !inRange.has(rowKey) && rowKey !== turn.userRowKey) {
-          continue;
-        }
-        const row = byKey.get(rowKey);
-        if (row) out.push({ kind: 'row', key: rowKey, row });
-      }
+  const layout = useMemo(
+    () => (trajectory ? buildTrajectoryLayout(trajectory) : undefined),
+    [trajectory],
+  );
+  const turnsByKey = useMemo(
+    () =>
+      new Map(
+        (layout?.rows ?? []).flatMap((entry) =>
+          entry.kind === 'turn' ? [[entry.key, entry.turn] as const] : [],
+        ),
+      ),
+    [layout],
+  );
+  const [collapseState, setCollapseState] = useState<{
+    of: TrajectoryLayout;
+    loader: TrajectoryPageLoader | undefined;
+    keys: Set<string>;
+  }>();
+  const baseCollapsed = useMemo(() => {
+    if (!layout || !collapseState || collapseState.loader !== loadPage)
+      return new Set<string>();
+    if (collapseState.of === layout) return collapseState.keys;
+    return new Set(
+      [...collapseState.keys].filter((key) => {
+        const identity = layout.groupIdentities.get(key);
+        return (
+          identity !== undefined &&
+          identity === collapseState.of.groupIdentities.get(key)
+        );
+      }),
+    );
+  }, [collapseState, layout, loadPage]);
+  useEffect(() => {
+    if (
+      collapseState &&
+      (collapseState.of !== layout || collapseState.loader !== loadPage)
+    )
+      setCollapseState(
+        layout
+          ? { of: layout, loader: loadPage, keys: baseCollapsed }
+          : undefined,
+      );
+  }, [collapseState, layout, loadPage, baseCollapsed]);
+  const resultKeys = useMemo(
+    () => matches.filter((key) => !inRange || inRange.has(key)),
+    [matches, inRange],
+  );
+  const hits = useMemo(
+    () => (filterActive ? new Set(resultKeys) : inRange),
+    [filterActive, resultKeys, inRange],
+  );
+  const signature = filterSignature(filter, range, mode);
+  const [temporaryFolds, setTemporaryFolds] = useState<{
+    of: Trajectory;
+    loader: TrajectoryPageLoader | undefined;
+    signature: string;
+    overrides: Map<string, boolean>;
+  }>();
+  const currentOverrides = useMemo(
+    () =>
+      temporaryFolds?.of === trajectory &&
+      temporaryFolds?.loader === loadPage &&
+      temporaryFolds?.signature === signature
+        ? temporaryFolds.overrides
+        : new Map<string, boolean>(),
+    [temporaryFolds, trajectory, loadPage, signature],
+  );
+  useEffect(() => {
+    if (
+      temporaryFolds &&
+      (!filterActive ||
+        temporaryFolds.of !== trajectory ||
+        temporaryFolds.loader !== loadPage ||
+        temporaryFolds.signature !== signature)
+    )
+      setTemporaryFolds(undefined);
+  }, [temporaryFolds, filterActive, trajectory, loadPage, signature]);
+  const collapsed = useMemo(() => {
+    if (!filterActive) return baseCollapsed;
+    const keys = new Set(baseCollapsed);
+    for (const key of resultKeys)
+      for (const parent of layout?.ancestors.get(key) ?? [])
+        keys.delete(parent);
+    for (const [key, folded] of currentOverrides) {
+      if (folded) keys.add(key);
+      else keys.delete(key);
     }
-    return out;
-  }, [trajectory, inRange]);
+    return keys;
+  }, [filterActive, baseCollapsed, resultKeys, layout, currentOverrides]);
+  const rangeRows = useMemo(
+    () => (layout ? trajectoryRowsInRange(layout, hits) : []),
+    [layout, hits],
+  );
+  const rangeKeys = useMemo(
+    () => new Set(rangeRows.map((entry) => entry.key)),
+    [rangeRows],
+  );
+  const visualRows = useMemo(
+    () => (layout ? visibleTrajectoryRows(layout, rangeRows, collapsed) : []),
+    [layout, rangeRows, collapsed],
+  );
+  const visibleKeys = useMemo(
+    () => new Set(visualRows.map((entry) => entry.key)),
+    [visualRows],
+  );
+  const activeVisualKey =
+    layout && selectedKey
+      ? visibleTrajectoryAncestor(layout, selectedKey, visibleKeys)
+      : undefined;
+  const hiddenCounts = useMemo(() => {
+    const counts = new Map<string, number>();
+    for (const entry of rangeRows) {
+      if (entry.kind !== 'row') continue;
+      for (const parent of layout?.ancestors.get(entry.key) ?? [])
+        counts.set(parent, (counts.get(parent) ?? 0) + 1);
+    }
+    return counts;
+  }, [layout, rangeRows]);
 
+  // The boundary rows sit in the virtualizer's padding rather than in its
+  // items, so keyboard selection and the grid's row indices skip them. The top
+  // one is always there while records are, so its height never moves a row.
+  const bottomBoundary = windowMode === 'history';
   const virtualizer = useVirtualizer({
     count: visualRows.length,
     getScrollElement: () => scrollRef.current,
     getItemKey: (index) => visualRows[index]?.key ?? index,
     estimateSize: () => ROW_HEIGHT,
+    paddingStart: ROW_HEIGHT,
+    paddingEnd: bottomBoundary ? ROW_HEIGHT : 0,
     overscan: 12,
   });
+  // The first row's start is below the top boundary, so aligning to it would
+  // scroll that boundary, and the way to earlier records, out of view.
+  const scrollRowIntoView = useCallback(
+    (index: number) => {
+      if (index === 0) virtualizer.scrollToOffset(0);
+      else virtualizer.scrollToIndex(index, { align: 'auto' });
+    },
+    [virtualizer],
+  );
+
+  const toggleGroup = useCallback(
+    (key: string) => {
+      if (!trajectory || !layout?.groups.has(key)) return;
+      pauseFollowing();
+      const element = scrollRef.current;
+      if (element) {
+        // Negative while the top boundary is in view, so restoring the anchor
+        // keeps that boundary where it was rather than scrolling past it.
+        const top = element.scrollTop - ROW_HEIGHT;
+        const index = Math.max(
+          0,
+          Math.min(visualRows.length - 1, Math.floor(top / ROW_HEIGHT)),
+        );
+        const entry = visualRows[index];
+        if (entry)
+          pendingAnchorRef.current = {
+            key: entry.key,
+            offset: top - index * ROW_HEIGHT,
+          };
+      }
+      const keys = new Set(collapsed);
+      if (keys.has(key)) keys.delete(key);
+      else keys.add(key);
+      if (filterActive) {
+        const overrides = new Map(currentOverrides);
+        overrides.set(key, keys.has(key));
+        setTemporaryFolds({
+          of: trajectory,
+          loader: loadPage,
+          signature,
+          overrides,
+        });
+      } else setCollapseState({ of: layout, loader: loadPage, keys });
+      scrollRef.current?.focus({ preventScroll: true });
+    },
+    [
+      trajectory,
+      layout,
+      visualRows,
+      collapsed,
+      loadPage,
+      filterActive,
+      signature,
+      currentOverrides,
+      pauseFollowing,
+    ],
+  );
+
+  useLayoutEffect(() => {
+    const anchor = pendingAnchorRef.current;
+    if (!anchor || !layout || !scrollRef.current) return;
+    pendingAnchorRef.current = undefined;
+    const key = visibleTrajectoryAncestor(layout, anchor.key, visibleKeys);
+    const index = visualRows.findIndex((entry) => entry.key === key);
+    if (index >= 0)
+      scrollTo(scrollRef.current, (index + 1) * ROW_HEIGHT + anchor.offset);
+  }, [layout, visualRows, visibleKeys, scrollTo]);
 
   // Hiding an element resets its scroll offset to zero without a scroll event,
   // and the right panel's fullscreen toggle does exactly that to the dock on
@@ -435,32 +867,44 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
 
   const selectedIndex = useMemo(
     () =>
-      selectedKey === undefined
+      activeVisualKey === undefined
         ? -1
-        : visualRows.findIndex((row) => row.key === selectedKey),
-    [selectedKey, visualRows],
+        : visualRows.findIndex((row) => row.key === activeVisualKey),
+    [activeVisualKey, visualRows],
   );
 
+  const activeIndexRef = useRef(selectedIndex);
+  activeIndexRef.current = selectedIndex;
   useLayoutEffect(() => {
+    const selectedIndex = activeIndexRef.current;
     if (!inspectorOpen || selectedIndex < 0) return;
     const frame = requestAnimationFrame(() => {
-      virtualizer.scrollToIndex(selectedIndex, { align: 'auto' });
+      scrollRowIntoView(selectedIndex);
     });
     return () => cancelAnimationFrame(frame);
-  }, [inspectorOpen, selectedIndex, virtualizer]);
+  }, [inspectorOpen, scrollRowIntoView]);
 
   const moveSelection = useCallback(
     (nextIndex: number) => {
       if (visualRows.length === 0) return;
+      pauseFollowing();
       const clamped = Math.min(Math.max(nextIndex, 0), visualRows.length - 1);
       const key = visualRows[clamped]!.key;
+      setExecutionSelection(undefined);
       setSelectedKey(key);
       if (inspectorOpen && trajectory && loadPage) {
         setInspectorSelection({ of: trajectory, loader: loadPage, key });
       }
-      virtualizer.scrollToIndex(clamped, { align: 'auto' });
+      scrollRowIntoView(clamped);
     },
-    [inspectorOpen, loadPage, trajectory, virtualizer, visualRows],
+    [
+      inspectorOpen,
+      loadPage,
+      trajectory,
+      scrollRowIntoView,
+      visualRows,
+      pauseFollowing,
+    ],
   );
 
   /**
@@ -469,35 +913,87 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
    * and leaving focus on the document would strand the arrow keys.
    */
   const selectRow = useCallback(
-    (key: string) => {
+    (key: string, focus = true) => {
+      pauseFollowing();
+      setExecutionSelection(undefined);
       setSelectedKey(key);
       if (inspectorOpen && trajectory && loadPage) {
         setInspectorSelection({ of: trajectory, loader: loadPage, key });
       }
-      scrollRef.current?.focus({ preventScroll: true });
+      if (focus) scrollRef.current?.focus({ preventScroll: true });
     },
-    [inspectorOpen, trajectory, loadPage],
+    [inspectorOpen, trajectory, loadPage, pauseFollowing],
   );
 
-  const openInspector = useCallback(() => {
-    if (!trajectory || !loadPage || !selectedKey) return;
-    if (!trajectory.rowIndexByKey.has(selectedKey)) return;
-    setInspectorSelection({
-      of: trajectory,
-      loader: loadPage,
-      key: selectedKey,
-    });
-    setInspectorOpen(true);
-  }, [trajectory, loadPage, selectedKey]);
+  const openInspector = useCallback(
+    (key = selectedKey) => {
+      if (!trajectory || !loadPage || !key) return;
+      if (!trajectory.rowIndexByKey.has(key) && !turnsByKey.has(key)) return;
+      pauseFollowing();
+      setExecutionSelection(undefined);
+      setInspectorSelection({
+        of: trajectory,
+        loader: loadPage,
+        key,
+      });
+      setSelectedKey(key);
+      setInspectorOpen(true);
+    },
+    [trajectory, loadPage, selectedKey, pauseFollowing, turnsByKey],
+  );
+
+  /** A click selects the row and opens its details. */
+  const openRow = useCallback(
+    (key: string) => {
+      selectRow(key);
+      openInspector(key);
+    },
+    [selectRow, openInspector],
+  );
+
+  // Docked, details cover the records and the records are inert beneath them,
+  // so focus can only go back once they are live again.
+  const recordsRef = useRef<HTMLDivElement>(null);
+  const pendingRecordsFocusRef = useRef<(() => void) | undefined>(undefined);
+  const detailOpen = inspectorOpen || !!selectedExecution;
+  const detailPresentation = wide ? 'side' : 'drill-in';
+  const recordsInert = detailOpen && detailPresentation === 'drill-in';
+  useLayoutEffect(() => {
+    // An attribute rather than the prop: React 18 does not know `inert`.
+    recordsRef.current?.toggleAttribute('inert', recordsInert);
+    const focus = pendingRecordsFocusRef.current;
+    if (recordsInert || !focus) return;
+    pendingRecordsFocusRef.current = undefined;
+    focus();
+  }, [recordsInert, detailOpen]);
+  const focusRecords = useCallback((focus: () => void) => {
+    pendingRecordsFocusRef.current = focus;
+  }, []);
+  const focusGrid = useCallback(() => {
+    scrollRef.current?.focus({ preventScroll: true });
+  }, []);
 
   const closeInspector = useCallback(() => {
     setInspectorOpen(false);
     setInspectorSelection(undefined);
-    scrollRef.current?.focus({ preventScroll: true });
-  }, []);
+    focusRecords(focusGrid);
+  }, [focusRecords, focusGrid]);
 
   const handleKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
+      // Keys pressed on a control inside the grid, such as a boundary row's
+      // button, belong to that control, except the ones that move through the
+      // records: those hand focus back to the grid. A row's own buttons are out
+      // of the tab order and only hold focus because they were clicked; the
+      // grid keeps their keys.
+      if (
+        event.target !== event.currentTarget &&
+        (event.target as HTMLElement).tabIndex >= 0
+      ) {
+        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key))
+          return;
+        event.currentTarget.focus({ preventScroll: true });
+      }
       if (event.key === 'Escape') {
         // Only claimed when there is a selection to drop; otherwise Escape is
         // left to whatever encloses the panel.
@@ -510,7 +1006,20 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
       if (visualRows.length === 0) return;
       if (event.key === 'Enter') {
         event.preventDefault();
-        openInspector();
+        if (activeVisualKey) openRow(activeVisualKey);
+        return;
+      }
+      if (
+        (event.key === 'ArrowLeft' || event.key === 'ArrowRight') &&
+        activeVisualKey &&
+        layout?.groups.has(activeVisualKey) &&
+        (hiddenCounts.get(activeVisualKey) ?? 0) > 0
+      ) {
+        const wantsCollapsed = event.key === 'ArrowLeft';
+        if (collapsed.has(activeVisualKey) !== wantsCollapsed) {
+          event.preventDefault();
+          toggleGroup(activeVisualKey);
+        }
         return;
       }
       const current = selectedIndex < 0 ? -1 : selectedIndex;
@@ -526,16 +1035,34 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
       } else if (event.key === 'End') {
         event.preventDefault();
         moveSelection(visualRows.length - 1);
+      } else if (
+        event.key === 'PageUp' ||
+        event.key === 'PageDown' ||
+        event.key === ' '
+      ) {
+        pauseFollowing();
       }
     },
-    [moveSelection, openInspector, range, selectedIndex, setRange, visualRows],
+    [
+      moveSelection,
+      openRow,
+      range,
+      selectedIndex,
+      setRange,
+      visualRows,
+      activeVisualKey,
+      layout,
+      hiddenCounts,
+      collapsed,
+      toggleGroup,
+      pauseFollowing,
+    ],
   );
 
   const summary = useMemo(
     () => (trajectory ? summarizeTrajectory(trajectory) : undefined),
     [trajectory],
   );
-  const selectedEntry = visualRows.find((entry) => entry.key === selectedKey);
   const inspectorCurrent =
     inspectorSelection !== undefined &&
     inspectorSelection.of === trajectory &&
@@ -543,39 +1070,23 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
   const inspectorIndex = inspectorCurrent
     ? trajectory?.rowIndexByKey.get(inspectorSelection.key)
     : undefined;
-  const inspectorRow =
-    inspectorIndex === undefined ? undefined : trajectory?.rows[inspectorIndex];
-  const selectedTitle = selectedEntry
-    ? selectedEntry.kind === 'turn'
-      ? t('trajectory.turn', { index: selectedEntry.turn.index })
-      : labelOf(selectedEntry.row, t).text
-    : t('trajectory.selected.none');
-  const selectedTiming =
-    selectedEntry?.kind === 'row' &&
-    (selectedEntry.row.kind === 'request' || selectedEntry.row.kind === 'tool')
-      ? selectedEntry.row.timing
-      : undefined;
-  const selectedTtft =
-    selectedEntry?.kind === 'row' && selectedEntry.row.kind === 'request'
-      ? selectedTiming?.ttftMs
-      : undefined;
-  const selectedMeta = selectedEntry
-    ? selectedEntry.kind === 'turn'
-      ? t('trajectory.turnSummary', {
-          requests: selectedEntry.turn.requestCount,
-          tools: selectedEntry.turn.toolCount,
-          duration:
-            selectedEntry.turn.requestCount > 0
-              ? formatDuration(selectedEntry.turn.requestMs)
-              : t('trajectory.unrecorded'),
-        })
-      : selectedEntry.row.kind === 'request' ||
-          selectedEntry.row.kind === 'tool'
-        ? `${selectedTiming === undefined ? t('trajectory.unrecorded') : formatDuration(selectedTiming.durationMs)}${selectedTtft === undefined ? '' : ` · ${t('trajectory.ttft', { duration: formatDuration(selectedTtft) })}`}`
-        : t('trajectory.selected.noTiming')
+  const inspectorTurn = inspectorCurrent
+    ? turnsByKey.get(inspectorSelection.key)
     : undefined;
-
-  const empty = status === 'ready' && visualRows.length === 0;
+  const inspectorRow = inspectorTurn
+    ? inspectorTurn.userRowKey === undefined
+      ? undefined
+      : trajectory?.rows[
+          trajectory.rowIndexByKey.get(inspectorTurn.userRowKey) ?? -1
+        ]
+    : inspectorIndex === undefined
+      ? undefined
+      : trajectory?.rows[inspectorIndex];
+  // A refresh that failed keeps the window it replaced, so an empty one is
+  // still empty rather than loading.
+  const empty =
+    (status === 'ready' || (status === 'error' && trajectory !== undefined)) &&
+    visualRows.length === 0;
   const timingAbsent =
     trajectory !== undefined &&
     trajectory.rows.length > 0 &&
@@ -585,19 +1096,22 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     summary.plottedCount === 0 &&
     summary.missingStartCount > 0;
   const rangeCounts = useMemo(() => {
-    if (!range || !trajectory) return undefined;
+    if (!trajectory || (!range && !filterActive && collapsed.size === 0))
+      return undefined;
     return {
       shown: visualRows.filter((row) => row.kind === 'row').length,
       total: trajectory.rows.length,
     };
-  }, [range, trajectory, visualRows]);
+  }, [range, trajectory, visualRows, collapsed, filterActive]);
 
   const olderFailureText =
     olderFailure === undefined
       ? undefined
       : olderFailure.kind === 'partial'
         ? t('trajectory.olderPartial')
-        : t('trajectory.olderFailed', { message: olderFailure.message });
+        : olderFailure.kind === 'unreadable'
+          ? t('trajectory.olderFailed', { message: olderFailure.message })
+          : t(`trajectory.window.${olderFailure.kind}`);
 
   /**
    * A span pressed outside the selected time: the selection is dropped so its
@@ -605,21 +1119,221 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
    */
   const pendingRevealRef = useRef<string | undefined>(undefined);
 
+  if (
+    windowScope.loader !== loadPage ||
+    windowScope.version !== navigationVersion
+  ) {
+    const changedSession = windowScope.loader !== loadPage;
+    pendingWindowScrollRef.current = !changedSession;
+    setWindowScope({
+      loader: loadPage,
+      version: navigationVersion,
+      selectionLost: !changedSession && selectedKey !== undefined,
+    });
+    setSelectedKey(undefined);
+    setInspectorSelection(undefined);
+    setInspectorOpen(false);
+    setCollapseState(undefined);
+    setTemporaryFolds(undefined);
+    setRangeState(undefined);
+    pendingAnchorRef.current = undefined;
+    pendingRevealRef.current = undefined;
+    scrollTopRef.current = 0;
+    settledOnceRef.current = !changedSession;
+  }
+
+  useLayoutEffect(() => {
+    if (pendingWindowScrollRef.current && scrollRef.current) {
+      pendingWindowScrollRef.current = false;
+      virtualizer.scrollToOffset(0);
+      scrollTo(scrollRef.current, 0);
+    }
+  }, [navigationVersion, hasRows, virtualizer, scrollTo]);
+
+  const pendingLatestScroll = useRef(false);
+  useEffect(() => {
+    const pending = followState.loader === loadPage && followState.pending;
+    if (!pending || status === 'loading') return;
+    if (error || olderFailure || navigationError) {
+      pauseFollowing();
+    } else if (
+      status === 'ready' &&
+      trajectory !== pending.of &&
+      windowMode === 'latest'
+    ) {
+      pendingLatestScroll.current = true;
+      setFollowState({ loader: loadPage, paused: false });
+      setSelectedKey(undefined);
+      setExecutionSelection(undefined);
+      setInspectorOpen(false);
+      setInspectorSelection(undefined);
+      setFilterState((current) => ({ ...current, value: EMPTY_FILTER }));
+      setRangeState(undefined);
+    }
+  }, [
+    followState,
+    loadPage,
+    status,
+    error,
+    olderFailure,
+    navigationError,
+    trajectory,
+    windowMode,
+    pauseFollowing,
+  ]);
+  useLayoutEffect(() => {
+    if (!pendingLatestScroll.current) return;
+    pendingLatestScroll.current = false;
+    const element = scrollRef.current;
+    if (!element) return;
+    scrollTo(element, element.scrollHeight);
+    // The control that asked for the return may be gone with the state it
+    // showed; the records are where the reader lands.
+    if (isFocusUnclaimed(element.getRootNode()))
+      element.focus({ preventScroll: true });
+  }, [following, visualRows, scrollTo]);
+
+  // Moving the window re-renders the boundary rows, and when a filter empties
+  // the list they move out of the grid; focus follows the button pressed.
+  const pendingBoundaryFocusRef = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    const testId = pendingBoundaryFocusRef.current;
+    const panel = panelRef.current;
+    if (!testId || !panel || status === 'loading') return;
+    pendingBoundaryFocusRef.current = undefined;
+    if (!isFocusUnclaimed(panel.getRootNode())) return;
+    // At the start of the session there is nothing earlier to load, and the
+    // button is gone; the records take focus instead.
+    (
+      panel.querySelector<HTMLElement>(`[data-testid="${testId}"]`) ??
+      scrollRef.current
+    )?.focus({ preventScroll: true });
+  }, [navigationVersion, status, hasRows]);
+
+  // Measured again whenever the rows grow or the grid comes and goes, since
+  // neither fires a scroll event: rows added below a paused reader move the
+  // tail away, and a grid replaced by a placeholder has no tail at all.
+  const measureTail = useCallback(() => {
+    const element = scrollRef.current;
+    setAwayFromTail(
+      !!element &&
+        element.scrollHeight - element.clientHeight - element.scrollTop >
+          ROW_HEIGHT,
+    );
+  }, []);
+  const totalSize = virtualizer.getTotalSize();
+  const gridShown = visualRows.length > 0;
+  useLayoutEffect(() => {
+    measureTail();
+  }, [measureTail, totalSize, gridShown]);
+
   /** A span stands for one row: select it and bring it into view. */
   const selectSpan = useCallback(
     (rowKey: string) => {
       const index = visualRows.findIndex((row) => row.key === rowKey);
-      if (index < 0) {
-        if (range === undefined) return;
+      if (index < 0 && trajectory && layout) {
         pendingRevealRef.current = rowKey;
-        setRange(undefined);
+        const dropFilter =
+          filterActive && !rangeKeys.has(rowKey) && !matchKeys.has(rowKey);
+        const dropRange =
+          range !== undefined &&
+          !rangeKeys.has(rowKey) &&
+          !inRange?.has(rowKey);
+        if (dropFilter) clearFilter();
+        if (dropRange) setRange(undefined);
+        const parents = layout.ancestors.get(rowKey) ?? [];
+        if (filterActive && !dropFilter) {
+          const overrides = new Map(dropRange ? [] : currentOverrides);
+          for (const parent of parents) overrides.set(parent, false);
+          setTemporaryFolds({
+            of: trajectory,
+            loader: loadPage,
+            signature: filterSignature(
+              filter,
+              dropRange ? undefined : range,
+              mode,
+            ),
+            overrides,
+          });
+        } else {
+          const keys = new Set(baseCollapsed);
+          for (const parent of parents) keys.delete(parent);
+          setCollapseState({ of: layout, loader: loadPage, keys });
+        }
         selectRow(rowKey);
         return;
       }
       selectRow(rowKey);
-      virtualizer.scrollToIndex(index, { align: 'auto' });
+      if (index >= 0) scrollRowIntoView(index);
     },
-    [range, selectRow, setRange, virtualizer, visualRows],
+    [
+      trajectory,
+      layout,
+      matchKeys,
+      rangeKeys,
+      inRange,
+      filterActive,
+      clearFilter,
+      currentOverrides,
+      filter,
+      range,
+      mode,
+      baseCollapsed,
+      loadPage,
+      selectRow,
+      setRange,
+      scrollRowIntoView,
+      visualRows,
+    ],
+  );
+
+  const navigateResult = useCallback(
+    (direction: 1 | -1, nextFilter = filter) => {
+      if (!filtering(nextFilter) || !searchIndex || !trajectory || !layout)
+        return;
+      changeFilter(nextFilter);
+      const keys = filterTrajectory(searchIndex, nextFilter).filter(
+        (key) => !inRange || inRange.has(key),
+      );
+      if (!keys.length) return;
+      const current = selectedKey ? keys.indexOf(selectedKey) : -1;
+      const next =
+        current < 0
+          ? direction === 1
+            ? 0
+            : keys.length - 1
+          : (current + direction + keys.length) % keys.length;
+      const key = keys[next]!;
+      const parents = layout.ancestors.get(key) ?? [];
+      const nextSignature = filterSignature(nextFilter, range, mode);
+      const overrides = new Map(
+        nextSignature === signature ? currentOverrides : [],
+      );
+      for (const parent of parents) overrides.set(parent, false);
+      setTemporaryFolds({
+        of: trajectory,
+        loader: loadPage,
+        signature: nextSignature,
+        overrides,
+      });
+      pendingRevealRef.current = key;
+      selectRow(key, false);
+    },
+    [
+      searchIndex,
+      trajectory,
+      layout,
+      changeFilter,
+      filter,
+      inRange,
+      selectedKey,
+      range,
+      mode,
+      signature,
+      currentOverrides,
+      loadPage,
+      selectRow,
+    ],
   );
 
   useLayoutEffect(() => {
@@ -630,8 +1344,8 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     // change, long after the press that asked for it.
     pendingRevealRef.current = undefined;
     const index = visualRows.findIndex((row) => row.key === key);
-    if (index >= 0) virtualizer.scrollToIndex(index, { align: 'auto' });
-  }, [virtualizer, visualRows]);
+    if (index >= 0) scrollRowIntoView(index);
+  }, [scrollRowIntoView, visualRows]);
 
   // Named the way the row reads, which already says a failed request failed
   // in words — the red of the span is never the only signal.
@@ -660,96 +1374,272 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
     [t],
   );
 
-  return (
-    <div className={styles.panel} data-testid="trajectory-panel">
-      <div className={styles.header}>
-        <div className={styles.summary}>
-          {summary ? (
-            <span data-testid="trajectory-totals">
-              {t('trajectory.totals', {
-                turns: summary.turnCount,
-                requests: summary.requestCount,
-                tools: summary.toolCount,
-              })}
-            </span>
-          ) : (
-            <span>{t('trajectory.title')}</span>
-          )}
-        </div>
-        <div className={styles.headerActions}>
-          {range !== undefined && (
-            <button
-              type="button"
-              className={styles.iconButton}
-              onClick={() => setRange(undefined)}
-              title={t('trajectory.range.clear')}
-              aria-label={t('trajectory.range.clear')}
-              data-testid="trajectory-range-clear"
-            >
-              <XIcon size={14} strokeWidth={1.6} />
-            </button>
-          )}
+  // The strip stays mounted while it has nothing to show, so the first
+  // execution of a session still counts as news; a list that has since
+  // emptied has no news left to jump to.
+  const newExecutions = executionsUpdated && executions.rows.length > 0;
+  const pill = trajectoryPillState({
+    windowMode,
+    following,
+    returning,
+    liveStatus: lifecycle.status,
+  });
+  const warnings = trajectoryWarnings({
+    hasTrajectory: trajectory !== undefined,
+    error,
+    navigationError,
+    historyStale,
+    // Without a live stream there is no lifecycle to be incomplete: the
+    // projection reports that case as incomplete, and saying so on every
+    // finished session would be noise.
+    lifecycleIncomplete:
+      (lifecycle.incomplete && lifecycle.status !== 'unavailable') ||
+      lifecycle.truncated,
+  });
+  const topBoundary = trajectoryTopBoundary({
+    truncated,
+    // A refresh of the latest window leaves the start of it where it is.
+    loading: status === 'loading' && loadingKind !== 'latest',
+    olderFailure,
+  });
+  const rangeLabel =
+    range && timeline
+      ? `${formatTimelinePoint(timeline, range.start, range.end - range.start, language)} – ${formatTimelinePoint(timeline, range.end, range.end - range.start, language)}`
+      : undefined;
+  const boundaryRow = (
+    // A live region rather than role="status": inside the grid, a role other
+    // than row would break the grid's ownership rules.
+    <div
+      className={styles.boundary}
+      aria-live="polite"
+      data-testid="trajectory-older-bar"
+      data-state={topBoundary}
+    >
+      {topBoundary === 'failed' ? (
+        <>
+          <span
+            className={`${styles.boundaryText} ${styles.toneError}`}
+            data-testid="trajectory-older-failed"
+            title={olderFailureText}
+          >
+            {olderFailureText}
+          </span>
           <button
             type="button"
-            className={styles.iconButton}
-            onClick={refresh}
-            disabled={!loadPage || status === 'loading'}
-            title={t('common.refresh')}
-            aria-label={t('common.refresh')}
+            className={styles.boundaryButton}
+            onClick={() => {
+              if (status !== 'loading') retry();
+            }}
+            // Not `disabled`: a disabled button drops the focus of a reader
+            // who just pressed it, and this one goes busy as it is pressed.
+            aria-disabled={
+              status === 'loading' ||
+              (olderFailure !== undefined && !isRetryableFailure(olderFailure))
+            }
+            data-testid="trajectory-older-retry"
           >
-            <RefreshCwIcon size={14} strokeWidth={1.6} />
+            {t('common.retry')}
           </button>
-        </div>
-      </div>
-
-      <div className={styles.overviewMetrics} data-testid="trajectory-metrics">
-        {(
-          [
-            ['elapsed', summary?.elapsedMs],
-            ['active', summary?.activeMs],
-            ['main', summary?.mainRequestMs],
-          ] as const
-        ).map(([key, value]) => (
-          <div className={styles.metric} key={key}>
-            <span>{t(`trajectory.metric.${key}`)}</span>
-            <strong
-              aria-label={
-                value === undefined ? t('trajectory.unrecorded') : undefined
-              }
-              title={
-                value === undefined ? t('trajectory.unrecorded') : undefined
-              }
+        </>
+      ) : topBoundary === 'loading' || topBoundary === 'earlier' ? (
+        <>
+          <span
+            className={styles.boundaryText}
+            {...(topBoundary === 'earlier'
+              ? { 'data-testid': 'trajectory-truncated' }
+              : {})}
+          >
+            {topBoundary === 'loading'
+              ? t('trajectory.loadingPages', { pages: loadedPages })
+              : windowMode === 'history'
+                ? t('trajectory.window.outside')
+                : t('trajectory.boundary.earlier')}
+          </span>
+          {truncated && (
+            <button
+              type="button"
+              className={styles.boundaryButton}
+              aria-disabled={!canOlder}
+              onClick={() => {
+                if (!canOlder) return;
+                pauseFollowing();
+                pendingBoundaryFocusRef.current = 'trajectory-window-older';
+                older();
+              }}
+              data-testid="trajectory-window-older"
             >
-              {value === undefined ? '—' : formatDuration(value)}
-            </strong>
-          </div>
-        ))}
-        <div
-          className={styles.failureCounts}
-          data-has-failures={
-            summary && summary.requestFailures + summary.toolFailures > 0
-              ? 'true'
-              : undefined
-          }
-        >
-          {summary
-            ? t('trajectory.failures', {
-                requests: summary.requestFailures,
-                tools: summary.toolFailures,
-              })
-            : '—'}
-        </div>
-        <details className={styles.metricHelp}>
-          <summary>{t('trajectory.metric.help')}</summary>
-          <div className={styles.metricHelpContent}>
-            <p>{t('trajectory.metric.scope')}</p>
-            <p>{t('trajectory.metric.elapsed.help')}</p>
-            <p>{t('trajectory.metric.active.help')}</p>
-            <p>{t('trajectory.metric.main.help')}</p>
-            <p>{t('trajectory.metric.missing.help')}</p>
-          </div>
-        </details>
-      </div>
+              {t('trajectory.boundary.loadEarlier')}
+            </button>
+          )}
+        </>
+      ) : (
+        <span className={styles.boundaryText}>
+          {t('trajectory.boundary.start')}
+        </span>
+      )}
+    </div>
+  );
+
+  const newerRow = (
+    <div className={styles.boundary}>
+      <button
+        type="button"
+        className={styles.boundaryButton}
+        aria-disabled={!canNewer}
+        onClick={() => {
+          if (!canNewer) return;
+          pauseFollowing();
+          pendingBoundaryFocusRef.current = 'trajectory-window-newer';
+          newer();
+        }}
+        data-testid="trajectory-window-newer"
+      >
+        {t('trajectory.boundary.newer')}
+      </button>
+      {/* Newer stops a window short of the latest, at the first bookmark or
+          once bookmarks are released, so the way back sits beside it. */}
+      <button
+        type="button"
+        className={styles.boundaryButton}
+        aria-disabled={!canRefresh}
+        onClick={() => {
+          if (!canRefresh) return;
+          pendingBoundaryFocusRef.current = 'trajectory-window-latest';
+          returnToLatest();
+        }}
+        data-testid="trajectory-window-latest"
+      >
+        {t('trajectory.window.return')}
+      </button>
+      {historyReleased &&
+        !canNewer &&
+        status !== 'loading' &&
+        !navigationError &&
+        !error &&
+        !olderFailure && (
+          <span className={styles.boundaryText}>
+            {t('trajectory.window.released')}
+          </span>
+        )}
+    </div>
+  );
+
+  const inspectorHidden = inspectorRow && !inspectorTurn;
+  const detail = selectedExecution ? (
+    <TrajectoryDetail
+      key={selectedExecution.key}
+      presentation={detailPresentation}
+      execution={selectedExecution}
+      title={selectedExecution.name}
+      onClose={() => {
+        setExecutionSelection(undefined);
+        focusRecords(focusRecentExecutions);
+      }}
+      onFocusedUnmount={focusRecentExecutions}
+      onLocateExecution={
+        selectedExecution.historyRowKey
+          ? () => {
+              const key = selectedExecution.historyRowKey!;
+              selectSpan(key);
+              openInspector(key);
+            }
+          : undefined
+      }
+    />
+  ) : inspectorOpen &&
+    inspectorSelection !== undefined &&
+    inspectorSelection.loader === loadPage ? (
+    <TrajectoryDetail
+      presentation={detailPresentation}
+      row={inspectorRow}
+      turn={inspectorTurn}
+      lifecycle={
+        inspectorCurrent && inspectorRow && !inspectorTurn
+          ? lifecycle.byRowKey.get(inspectorRow.key)
+          : undefined
+      }
+      stale={!inspectorCurrent}
+      title={
+        inspectorTurn
+          ? t(
+              inspectorTurn.partial
+                ? 'trajectory.turnPartial'
+                : 'trajectory.turn',
+              {
+                index: inspectorTurn.index,
+              },
+            )
+          : inspectorRow
+            ? labelOf(inspectorRow, t).text
+            : undefined
+      }
+      hiddenByRange={
+        !!(
+          range &&
+          inspectorHidden &&
+          !rangeKeys.has(inspectorRow.key) &&
+          !inRange?.has(inspectorRow.key)
+        )
+      }
+      hiddenByFilter={
+        !!(
+          filterActive &&
+          inspectorHidden &&
+          !rangeKeys.has(inspectorRow.key) &&
+          !matchKeys.has(inspectorRow.key)
+        )
+      }
+      onClearFilter={clearFilter}
+      hiddenByCollapse={
+        !!(
+          inspectorHidden &&
+          layout?.ancestors
+            .get(inspectorRow.key)
+            ?.some((key) => collapsed.has(key))
+        )
+      }
+      onReveal={() => {
+        if (inspectorRow) selectSpan(inspectorRow.key);
+      }}
+      onClearRange={() => setRange(undefined)}
+      onClose={closeInspector}
+      onStep={(direction) => moveSelection(selectedIndex + direction)}
+      onFocusedUnmount={focusGrid}
+    />
+  ) : undefined;
+
+  return (
+    <div ref={panelRef} className={styles.panel} data-testid="trajectory-panel">
+      <TrajectorySummaryBar
+        summary={summary}
+        pill={pill}
+        onPill={() => {
+          if (pill === 'paused' || pill === 'history') returnToLatest();
+          else pauseFollowing();
+        }}
+        warnings={warnings}
+        onRetry={retry}
+        onRefresh={() => {
+          pauseFollowing();
+          refresh();
+        }}
+        onReturnToLatest={returnToLatest}
+        canRefresh={canRefresh}
+        history={windowMode === 'history'}
+        failuresOn={filter.status === 'error'}
+        onToggleFailures={() =>
+          changeFilter({
+            ...filter,
+            status: filter.status === 'error' ? 'all' : 'error',
+          })
+        }
+        about={{
+          pages: windowPages,
+          searchExcluded: searchIndex?.truncatedCount ?? 0,
+          executionsOmitted: executions.omitted,
+          executionsOutside: lifecycle.outsideWindow.length,
+        }}
+      />
 
       {/* Mounted from the start at a fixed height, whatever it holds: it is a
           flex sibling of the scrolled rows, so a box that appeared or grew
@@ -757,6 +1647,13 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
           inside it for the same reason. */}
       <TrajectoryOverview
         model={timeline}
+        viewportControl={{
+          ...viewportControl,
+          applyViewport: (next) => {
+            pauseFollowing();
+            viewportControl.applyViewport(next);
+          },
+        }}
         {...(timingAbsent || allStartsMissing
           ? {
               notice: t(
@@ -769,278 +1666,313 @@ export function TrajectoryPanel({ loadPage }: TrajectoryPanelProps) {
         describe={describeSpan}
         {...(range !== undefined ? { range } : {})}
         onRangeChange={setRange}
-        onModeChange={setMode}
+        onModeChange={(next) => {
+          pauseFollowing();
+          setMode(next);
+        }}
       />
 
-      <div className={styles.context}>
-        <div className={styles.selectedLine}>
-          <div
-            className={styles.selectedInfo}
-            data-testid="trajectory-selected"
-            aria-live="polite"
-          >
-            <span className={styles.selectedLabel}>
-              {t('trajectory.selected.label')}
-            </span>
-            <span className={styles.selectedName} title={selectedTitle}>
-              {selectedTitle}
-            </span>
-            {selectedMeta && (
-              <span className={styles.selectedMeta} title={selectedMeta}>
-                {selectedMeta}
-              </span>
-            )}
-          </div>
-          <button
-            type="button"
-            className={styles.detailsButton}
-            onClick={openInspector}
-            disabled={
-              !trajectory ||
-              !loadPage ||
-              !selectedKey ||
-              !trajectory.rowIndexByKey.has(selectedKey)
-            }
-          >
-            {t('trajectory.inspector.open')}
-            <ChevronRightIcon size={13} aria-hidden="true" />
-          </button>
-        </div>
-        <div
-          className={styles.contextNotice}
-          data-testid="trajectory-context-notice"
-          title={[
-            summary?.missingStartCount
-              ? t('trajectory.missingStart', {
-                  count: summary.missingStartCount,
-                })
-              : '',
-            summary?.missingTimingCount
-              ? t('trajectory.missingTiming', {
-                  count: summary.missingTimingCount,
-                })
-              : '',
-            truncated ? t('trajectory.truncated') : '',
-            error && trajectory ? t('trajectory.refreshStale') : '',
-          ]
-            .filter(Boolean)
-            .join(' · ')}
-        >
-          {rangeCounts && (
-            <span data-testid="trajectory-range-status" role="status">
-              {t('trajectory.range.status', rangeCounts)}
-            </span>
-          )}
-          {rangeCounts ? ' · ' : ''}
-          {[
-            olderFailureText,
-            error && trajectory ? t('trajectory.refreshStale') : '',
-            truncated && !olderFailureText ? t('trajectory.truncated') : '',
-            summary &&
-            (summary.missingStartCount > 0 || summary.missingTimingCount > 0)
-              ? t('trajectory.unplotted', {
-                  starts: summary.missingStartCount,
-                  timing: summary.missingTimingCount,
-                })
-              : '',
-          ]
-            .filter(Boolean)
-            .join(' · ') || (rangeCounts ? '' : '\u00a0')}
-        </div>
-      </div>
-      <div className={styles.errorSlot}>
-        {error !== undefined && (
-          <div className={styles.error} role="alert">
-            <span>
-              {trajectory ? `${t('trajectory.refreshStale')} · ` : ''}
-              {error.kind === 'partial'
-                ? t('trajectory.partial')
-                : t('trajectory.loadFailed', { message: error.message })}
-            </span>
-            <button
-              type="button"
-              className={styles.headerButton}
-              onClick={refresh}
-              disabled={status === 'loading'}
-            >
-              {t('common.retry')}
-            </button>
-          </div>
-        )}
-      </div>
-
-      <div
-        className={`${styles.tableWrap} ${inspectorOpen ? styles.tableWrapWithInspector : ''}`}
+      <ResizablePanelGroup
+        className={styles.split}
+        orientation="horizontal"
+        data-testid="trajectory-split"
       >
-        {visualRows.length === 0 ? (
-          // An error with nothing folded is already stated by the alert above;
-          // repeating it here as a placeholder would say it twice.
-          status === 'error' ? null : range !== undefined ? (
-            // Real time keeps the gaps between turns on the axis, and a
-            // stretch dragged inside one has nothing in it. Said here, with
-            // the way back beside it, rather than left as a blank table. Not
-            // a live region: the header's row count, which changes in the
-            // same render, already says it, and two would say it twice.
-            <div
-              className={styles.placeholder}
-              data-testid="trajectory-range-empty"
-            >
-              <span>{t('trajectory.range.empty')}</span>{' '}
-              <button
-                type="button"
-                className={styles.headerButton}
-                onClick={() => setRange(undefined)}
-              >
-                {t('trajectory.range.clear')}
-              </button>
-            </div>
-          ) : (
-            <div className={styles.placeholder} role="status">
-              {empty
-                ? t('trajectory.empty')
-                : loadedPages > 0
-                  ? t('trajectory.loadingPages', { pages: loadedPages })
-                  : t('common.loading')}
-            </div>
-          )
-        ) : (
-          <>
-            {/* Outside the scrolled box on purpose: inside it, its height
-                would offset every virtual row from the coordinates the
-                virtualizer computes. And always here, at one fixed height,
-                whatever it says: it is a flex sibling of the scrolled box, so
-                a bar that came and went with `truncated` would move every row
-                the moment a refresh changed its answer. */}
-            <div
-              className={styles.olderBar}
-              role="status"
-              data-testid="trajectory-older-bar"
-            >
-              {olderFailure !== undefined ? (
-                <>
-                  <span
-                    className={`${styles.olderNotice} ${styles.toneError}`}
-                    data-testid="trajectory-older-failed"
-                    title={olderFailureText}
-                  >
-                    {olderFailureText}
-                  </span>
-                  <button
-                    type="button"
-                    className={styles.headerButton}
-                    onClick={() => {
-                      if (status !== 'loading') refresh();
-                    }}
-                    // Not `disabled`: a disabled button drops the focus of a
-                    // reader who just pressed it, and this one is pressed
-                    // exactly when it is about to go busy.
-                    aria-disabled={status === 'loading' ? true : undefined}
-                    data-testid="trajectory-older-retry"
-                  >
-                    {t('common.retry')}
-                  </button>
-                </>
-              ) : truncated ? (
-                <span
-                  className={styles.olderNotice}
-                  data-testid="trajectory-truncated"
-                >
-                  {t('trajectory.truncated')}
-                </span>
-              ) : null}
-            </div>
-            <div
-              ref={scrollRef}
-              className={styles.scroll}
-              role="grid"
-              tabIndex={0}
-              aria-label={t('trajectory.title')}
-              aria-rowcount={visualRows.length}
-              aria-activedescendant={
-                selectedIndex >= 0 ? rowDomId(selectedIndex) : undefined
+        <ResizablePanel
+          id="trajectory-records"
+          className={styles.recordsPanel}
+          minSize={320}
+        >
+          <div ref={recordsRef} className={styles.records}>
+            {trajectory && trajectory.rows.length > 0 && (
+              <TrajectoryToolbar
+                key={filterState.scope}
+                value={filter}
+                onChange={changeFilter}
+                onNavigate={navigateResult}
+                onClear={clearFilter}
+                count={filterActive ? resultKeys.length : 0}
+                position={
+                  filterActive && selectedKey
+                    ? resultKeys.indexOf(selectedKey) + 1
+                    : 0
+                }
+                truncatedCount={searchIndex?.truncatedCount ?? 0}
+                {...(rangeLabel !== undefined ? { range: rangeLabel } : {})}
+                onClearRange={() => setRange(undefined)}
+                {...(rangeCounts
+                  ? { status: t('trajectory.range.status', rangeCounts) }
+                  : {})}
+              />
+            )}
+
+            <TrajectoryExecutions
+              key={`executions-${filterState.scope}`}
+              rows={executions.rows}
+              selectedKey={selectedExecution?.key}
+              following={following}
+              liveStatus={lifecycle.status}
+              historySnapshot={trajectory}
+              onPause={pauseFollowing}
+              onUpdatedChange={setExecutionsUpdated}
+              onFocusLost={() =>
+                scrollRef.current?.focus({ preventScroll: true })
               }
-              onKeyDown={handleKeyDown}
-              onScroll={(event) => {
-                scrollTopRef.current = event.currentTarget.scrollTop;
+              onSelect={(key) => {
+                pauseFollowing();
+                setSelectedKey(undefined);
+                setInspectorOpen(false);
+                setExecutionSelection({ loader: loadPage, key });
               }}
-              data-testid="trajectory-rows"
-            >
-              <div
-                className={styles.virtualBody}
-                style={{ height: `${virtualizer.getTotalSize()}px` }}
+            />
+
+            <div className={styles.tableWrap}>
+              {/* Moving the window drops the selection and closes its
+                  details; a reader who cannot see that happen is told here.
+                  Outside the grid, which a filter can replace with a
+                  placeholder. */}
+              <span
+                className={styles.srOnly}
+                role="status"
+                data-testid="trajectory-window-changed"
               >
-                {virtualizer.getVirtualItems().map((item) => {
-                  const entry = visualRows[item.index]!;
-                  return (
-                    <div
-                      key={item.key}
-                      id={rowDomId(item.index)}
-                      className={styles.virtualRow}
-                      style={{
-                        height: `${ROW_HEIGHT}px`,
-                        transform: `translateY(${item.start}px)`,
-                      }}
-                      role="row"
-                      aria-rowindex={item.index + 1}
-                    >
-                      {entry.kind === 'turn' ? (
-                        <TurnHeaderRow
-                          turn={entry.turn}
-                          selected={entry.key === selectedKey}
-                          onSelect={() => selectRow(entry.key)}
-                        />
-                      ) : (
-                        <RecordRow
-                          row={entry.row}
-                          selected={entry.key === selectedKey}
-                          onSelect={() => selectRow(entry.key)}
-                        />
+                {windowScope.selectionLost && !selectedKey
+                  ? t('trajectory.window.changed')
+                  : ''}
+              </span>
+              {visualRows.length === 0 ? (
+                <>
+                  {trajectory && boundaryRow}
+                  {status === 'error' && error && !trajectory ? (
+                    <div className={styles.placeholder} role="alert">
+                      <span>{trajectoryFailureText(error, t)}</span>{' '}
+                      {isRetryableFailure(error) && (
+                        <button
+                          type="button"
+                          className={styles.headerButton}
+                          onClick={retry}
+                        >
+                          {t('common.retry')}
+                        </button>
                       )}
                     </div>
-                  );
-                })}
-              </div>
+                  ) : filterActive ? (
+                    <div
+                      className={styles.placeholder}
+                      data-testid="trajectory-filter-empty"
+                    >
+                      <span>{t('trajectory.filter.empty')}</span>{' '}
+                      <button
+                        type="button"
+                        className={styles.headerButton}
+                        onClick={clearFilter}
+                      >
+                        {t('trajectory.filter.clear')}
+                      </button>
+                    </div>
+                  ) : range !== undefined ? (
+                    // Real time keeps the gaps between turns on the axis, and a
+                    // stretch dragged inside one has nothing in it. Said here, with
+                    // the way back beside it, rather than left as a blank table.
+                    <div
+                      className={styles.placeholder}
+                      data-testid="trajectory-range-empty"
+                    >
+                      <span>{t('trajectory.range.empty')}</span>{' '}
+                      <button
+                        type="button"
+                        className={styles.headerButton}
+                        onClick={() => setRange(undefined)}
+                      >
+                        {t('trajectory.range.clear')}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className={styles.placeholder} role="status">
+                      {empty
+                        ? t('trajectory.empty')
+                        : loadedPages > 0
+                          ? t('trajectory.loadingPages', { pages: loadedPages })
+                          : t('common.loading')}
+                    </div>
+                  )}
+                  {trajectory && bottomBoundary && newerRow}
+                </>
+              ) : (
+                <div
+                  ref={scrollRef}
+                  className={styles.scroll}
+                  role="grid"
+                  tabIndex={0}
+                  aria-label={t('trajectory.title')}
+                  aria-rowcount={visualRows.length}
+                  aria-activedescendant={
+                    virtualizer
+                      .getVirtualItems()
+                      .some((item) => item.index === selectedIndex)
+                      ? rowDomId(selectedIndex)
+                      : undefined
+                  }
+                  onKeyDown={handleKeyDown}
+                  onWheel={pauseFollowing}
+                  onPointerDown={pauseFollowing}
+                  onScroll={(event) => {
+                    scrollTopRef.current = event.currentTarget.scrollTop;
+                    measureTail();
+                  }}
+                  data-testid="trajectory-rows"
+                >
+                  <div
+                    className={styles.virtualBody}
+                    style={{ height: `${virtualizer.getTotalSize()}px` }}
+                  >
+                    <div className={styles.virtualBoundary}>{boundaryRow}</div>
+                    {virtualizer.getVirtualItems().map((item) => {
+                      const entry = visualRows[item.index]!;
+                      return (
+                        <div
+                          key={item.key}
+                          id={rowDomId(item.index)}
+                          className={styles.virtualRow}
+                          style={{
+                            height: `${ROW_HEIGHT}px`,
+                            transform: `translateY(${item.start}px)`,
+                          }}
+                          role="row"
+                          aria-rowindex={item.index + 1}
+                        >
+                          {entry.kind === 'turn' ? (
+                            <TurnHeaderRow
+                              turn={entry.turn}
+                              prompt={
+                                entry.turn.userRowKey
+                                  ? trajectory?.rows[
+                                      trajectory.rowIndexByKey.get(
+                                        entry.turn.userRowKey,
+                                      ) ?? -1
+                                    ]
+                                  : undefined
+                              }
+                              collapsed={collapsed.has(entry.key)}
+                              hiddenCount={hiddenCounts.get(entry.key) ?? 0}
+                              onToggle={() => toggleGroup(entry.key)}
+                              selected={entry.key === activeVisualKey}
+                              onSelect={() => openRow(entry.key)}
+                            />
+                          ) : (
+                            <RecordRow
+                              row={entry.row}
+                              grouped={
+                                (layout?.ancestors.get(entry.key)?.length ??
+                                  0) > 1
+                              }
+                              unresolvedParent={
+                                layout?.unresolvedParents.has(entry.key) ??
+                                false
+                              }
+                              fold={
+                                layout?.groups.has(entry.key) &&
+                                (hiddenCounts.get(entry.key) ?? 0) > 0
+                                  ? {
+                                      collapsed: collapsed.has(entry.key),
+                                      hiddenCount:
+                                        hiddenCounts.get(entry.key) ?? 0,
+                                      onToggle: () => toggleGroup(entry.key),
+                                    }
+                                  : undefined
+                              }
+                              span={spansByKey.get(entry.key)}
+                              total={timeline?.total ?? 0}
+                              viewport={viewportControl.viewport}
+                              range={range}
+                              context={!!hits && !hits.has(entry.key)}
+                              selected={entry.key === activeVisualKey}
+                              onSelect={() => openRow(entry.key)}
+                            />
+                          )}
+                        </div>
+                      );
+                    })}
+                    {bottomBoundary && (
+                      <div
+                        className={styles.virtualBoundary}
+                        style={{
+                          transform: `translateY(${virtualizer.getTotalSize() - ROW_HEIGHT}px)`,
+                        }}
+                      >
+                        {newerRow}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+              {pill === 'paused' && (awayFromTail || newExecutions) && (
+                <button
+                  type="button"
+                  className={styles.jumpLatest}
+                  aria-disabled={!canRefresh}
+                  onClick={() => {
+                    if (canRefresh) returnToLatest();
+                  }}
+                  data-testid="trajectory-jump-latest"
+                >
+                  <ArrowDownIcon size={13} aria-hidden="true" />
+                  {t('trajectory.jumpLatest')}
+                  {newExecutions && (
+                    <span
+                      className={styles.updatedDot}
+                      role="img"
+                      aria-label={t('trajectory.jumpLatest.updated')}
+                    />
+                  )}
+                </button>
+              )}
             </div>
+          </div>
+          {detailPresentation === 'drill-in' && detail}
+        </ResizablePanel>
+        {detailPresentation === 'side' && detailOpen && (
+          <>
+            <ResizableHandle
+              className={styles.splitHandle}
+              aria-label={t('trajectory.detail.resize')}
+            />
+            <ResizablePanel
+              id="trajectory-detail-panel"
+              className={styles.detailPanel}
+              defaultSize="40%"
+              minSize={320}
+              maxSize="60%"
+            >
+              {detail}
+            </ResizablePanel>
           </>
         )}
-      </div>
-      {inspectorOpen &&
-        inspectorSelection !== undefined &&
-        inspectorSelection.loader === loadPage && (
-          <TrajectoryInspector
-            row={inspectorRow}
-            stale={!inspectorCurrent}
-            turnSelected={selectedEntry?.kind === 'turn'}
-            title={inspectorRow ? labelOf(inspectorRow, t).text : undefined}
-            hiddenByRange={
-              !!(
-                range &&
-                inspectorRow &&
-                !visualRows.some((entry) => entry.key === inspectorRow.key)
-              )
-            }
-            onClearRange={() => setRange(undefined)}
-            onClose={closeInspector}
-          />
-        )}
+      </ResizablePanelGroup>
     </div>
   );
 }
 
 function TurnHeaderRow({
   turn,
+  prompt,
+  collapsed,
+  hiddenCount,
+  onToggle,
   selected,
   onSelect,
 }: {
   turn: TrajectoryTurn;
+  prompt?: TrajectoryRow;
+  collapsed: boolean;
+  hiddenCount: number;
+  onToggle: () => void;
   selected: boolean;
   onSelect: () => void;
 }) {
   const { t } = useI18n();
-  // A header has no action of its own — it states what the turn cost. The
-  // click only moves the selection, which is what every other row does, and
-  // deliberately not a <button>: the grid keeps a single tab stop, and a
-  // focusable header would let DOM focus and the selection drift apart.
+  // A click selects the turn and opens its details, as on every other row,
+  // and is deliberately not a <button>: the grid keeps a single tab stop, and
+  // a focusable header would let DOM focus and the selection drift apart.
   return (
     <div
       className={`${styles.turnHeader} ${selected ? styles.selected : ''}`}
@@ -1050,11 +1982,29 @@ function TurnHeaderRow({
       role="gridcell"
       data-testid="trajectory-turn"
     >
+      <FoldButton
+        collapsed={collapsed}
+        name={t('trajectory.turn', { index: turn.index })}
+        onToggle={onToggle}
+      />
       <span className={styles.turnTitle}>
         {turn.partial
           ? t('trajectory.turnPartial', { index: turn.index })
           : t('trajectory.turn', { index: turn.index })}
       </span>
+      {prompt?.kind === 'user' && (
+        <span
+          className={styles.turnPrompt}
+          title={firstLine(prompt.block.text)}
+        >
+          {firstLine(prompt.block.text).slice(0, 160)}
+        </span>
+      )}
+      {collapsed && hiddenCount > 0 && (
+        <span className={styles.foldCount}>
+          {t('trajectory.collapsed', { count: hiddenCount })}
+        </span>
+      )}
       <span className={styles.turnSummary}>
         {t('trajectory.turnSummary', {
           requests: turn.requestCount,
@@ -1069,10 +2019,26 @@ function TurnHeaderRow({
 
 function RecordRow({
   row,
+  grouped,
+  unresolvedParent,
+  fold,
+  span,
+  total,
+  viewport,
+  range,
+  context,
   selected,
   onSelect,
 }: {
   row: TrajectoryRow;
+  grouped: boolean;
+  unresolvedParent: boolean;
+  fold?: { collapsed: boolean; hiddenCount: number; onToggle: () => void };
+  span?: TimelineSpan;
+  total: number;
+  viewport?: { start: number; end: number };
+  range?: TimelineRange;
+  context: boolean;
   selected: boolean;
   onSelect: () => void;
 }) {
@@ -1088,7 +2054,19 @@ function RecordRow({
       onClick={onSelect}
       data-testid={`trajectory-row-${row.kind}`}
       data-depth={row.depth}
+      data-grouped={grouped || undefined}
+      data-context={context || undefined}
+      data-row-key={row.key}
     >
+      {fold ? (
+        <FoldButton
+          collapsed={fold.collapsed}
+          name={label.text}
+          onToggle={fold.onToggle}
+        />
+      ) : (
+        <span className={styles.foldSpacer} />
+      )}
       {row.depth > 0 && (
         <CornerDownRightIcon
           size={12}
@@ -1103,6 +2081,31 @@ function RecordRow({
       <span className={`${styles.text} ${label.faint ? styles.faint : ''}`}>
         {label.text}
       </span>
+      {unresolvedParent && (
+        <span
+          className={styles.parentNotice}
+          title={t('trajectory.parentUnresolved')}
+        >
+          {t('trajectory.parentUnresolved')}
+        </span>
+      )}
+      {context && (
+        <span className={styles.foldCount}>{t('trajectory.contextRow')}</span>
+      )}
+      {fold?.collapsed && (
+        <span className={styles.foldCount}>
+          {t('trajectory.collapsed', { count: fold.hiddenCount })}
+        </span>
+      )}
+      <span className={styles.waterfallSlot}>
+        <TrajectoryWaterfallCell
+          span={span}
+          total={total}
+          viewport={viewport}
+          range={range}
+          title={metrics.join(' · ')}
+        />
+      </span>
       <span
         className={styles.rowMetrics}
         data-testid="trajectory-row-metrics"
@@ -1111,5 +2114,38 @@ function RecordRow({
         {metrics.length > 0 ? metrics.join(' · ') : '—'}
       </span>
     </div>
+  );
+}
+
+function FoldButton({
+  collapsed,
+  name,
+  onToggle,
+}: {
+  collapsed: boolean;
+  name: string;
+  onToggle: () => void;
+}) {
+  const { t } = useI18n();
+  return (
+    <button
+      type="button"
+      tabIndex={-1}
+      className={styles.foldButton}
+      aria-expanded={!collapsed}
+      aria-label={t(collapsed ? 'trajectory.expand' : 'trajectory.collapse', {
+        name,
+      })}
+      onClick={(event) => {
+        event.stopPropagation();
+        onToggle();
+      }}
+    >
+      {collapsed ? (
+        <ChevronRightIcon size={13} aria-hidden="true" />
+      ) : (
+        <ChevronDownIcon size={13} aria-hidden="true" />
+      )}
+    </button>
   );
 }

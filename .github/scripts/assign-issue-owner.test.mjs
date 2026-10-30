@@ -403,6 +403,15 @@ describe('assign-issue-owner: workflow invariants', () => {
     assert.equal(checkoutStep.with['persist-credentials'], false);
   });
 
+  it('sparse-checks out a cone directory, not individual files', () => {
+    // The directory carries the script, and cone mode adds issue-owners.json
+    // as a direct child of .github/. File entries fail cone mode on a reused
+    // self-hosted workspace, and non-cone mode leaves the workspace sparse
+    // for the next job; see the matching pin in assign-pr-owner.test.mjs.
+    assert.equal(checkoutStep.with['sparse-checkout'], '.github/scripts');
+    assert.equal(checkoutStep.with['sparse-checkout-cone-mode'], undefined);
+  });
+
   it('never runs a model or reads issue text', () => {
     const serialized = JSON.stringify(doc);
     assert.doesNotMatch(

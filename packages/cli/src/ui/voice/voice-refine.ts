@@ -6,6 +6,7 @@
 
 import { createDebugLogger, runSideQuery } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 
 const debugLogger = createDebugLogger('VOICE_REFINE');
 
@@ -54,8 +55,22 @@ export async function refineVoiceTranscript(
   const onExternalAbort = () => controller.abort();
   signal.addEventListener('abort', onExternalAbort, { once: true });
   const timer = setTimeout(() => controller.abort(), REFINE_TIMEOUT_MS);
+  let onReadinessAbort: (() => void) | undefined;
 
   try {
+    const mods = getInteractiveModSession(config);
+    if (mods) {
+      await Promise.race([
+        mods.ready,
+        new Promise<never>((_, reject) => {
+          onReadinessAbort = () => reject(controller.signal.reason);
+          controller.signal.addEventListener('abort', onReadinessAbort, {
+            once: true,
+          });
+        }),
+      ]);
+    }
+    if (controller.signal.aborted) return raw;
     const { text } = await runSideQuery(config, {
       contents: [{ role: 'user', parts: [{ text: raw }] }],
       systemInstruction: REFINE_SYSTEM_INSTRUCTION,
@@ -91,6 +106,9 @@ export async function refineVoiceTranscript(
     return raw;
   } finally {
     clearTimeout(timer);
+    if (onReadinessAbort) {
+      controller.signal.removeEventListener('abort', onReadinessAbort);
+    }
     signal.removeEventListener('abort', onExternalAbort);
   }
 }

@@ -4,7 +4,18 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonSessionContextUsageStatus } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
-import { ContextUsageMessage } from './ContextUsageMessage';
+import {
+  ContextUsageMessage,
+  createContextUsageMessageData,
+  parseContextUsageMessage,
+  serializeContextUsageMessage,
+} from './ContextUsageMessage';
+import {
+  createDaemonTranscriptState,
+  reduceDaemonTranscriptEvents,
+} from '@qwen-code/sdk/daemon';
+import { transcriptBlocksToDaemonMessages } from '../../adapters/transcriptToMessages';
+import { SystemMessage } from './SystemMessage';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -74,6 +85,88 @@ function render(
 }
 
 describe('ContextUsageMessage', () => {
+  it.each(['en', 'zh-CN'] as const)(
+    'renders a large detail snapshot through the real transcript pipeline (%s)',
+    (language) => {
+      const status = makeStatus(1000, false);
+      status.usage.contextWindowSize = 2000;
+      status.usage.breakdown.mcpTools = 800;
+      status.usage.breakdown.messages = 160;
+      status.usage.breakdown.freeSpace = 990;
+      status.usage.showDetails = true;
+      status.usage.mcpTools = Array.from({ length: 800 }, (_, i) => ({
+        name: `server_${i}__查询资源_${'lookup_resource_description_'.repeat(2)}`,
+        tokens: 1,
+      }));
+      status.formattedText = status.usage.mcpTools
+        .map(({ name }) => name)
+        .join('\n');
+      expect(serializeContextUsageMessage(status).length).toBeGreaterThan(
+        100000,
+      );
+      const state = reduceDaemonTranscriptEvents(
+        createDaemonTranscriptState(),
+        [
+          {
+            type: 'status',
+            text: 'Context Usage',
+            data: createContextUsageMessageData(status),
+            clearActiveText: false,
+          },
+        ],
+      );
+      const message = transcriptBlocksToDaemonMessages(state.blocks)[0];
+      expect(message.role).toBe('system');
+      if (message.role !== 'system') throw new Error('Expected system message');
+      const parsed = parseContextUsageMessage(message.content, message.data);
+      expect(parsed).toEqual(status);
+      expect(parsed?.usage.mcpTools).toHaveLength(800);
+      const container = document.createElement('div');
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      act(() => {
+        root.render(
+          <I18nProvider language={language}>
+            <SystemMessage
+              content={message.content}
+              data={message.data}
+              variant={message.variant}
+            />
+          </I18nProvider>,
+        );
+      });
+      mounted.push({ root, container });
+      expect(container.textContent).toContain(status.usage.mcpTools[0].name);
+      expect(container.textContent).toContain(status.usage.mcpTools[799].name);
+      expect(container.textContent).not.toContain(
+        'web-shell:context-usage:v1:',
+      );
+      expect(container.textContent).not.toContain('[truncated]');
+      expect(container.textContent).not.toContain('�');
+    },
+  );
+
+  it('still parses legacy context snapshots and ignores unrelated data', () => {
+    const status = makeStatus(60, false);
+    const legacy = serializeContextUsageMessage(status);
+    expect(parseContextUsageMessage(legacy)).toEqual(status);
+    expect(parseContextUsageMessage(legacy, { type: 'other' })).toEqual(status);
+    expect(
+      parseContextUsageMessage('plain status', { type: 'other', status }),
+    ).toBeNull();
+    expect(
+      parseContextUsageMessage('plain status', {
+        type: 'web-shell:context-usage:v1:',
+      }),
+    ).toBeNull();
+    expect(
+      parseContextUsageMessage('plain status', {
+        type: 'web-shell:context-usage:v1:',
+        status: { usage: { totalTokens: 'invalid' } },
+      }),
+    ).toBeNull();
+  });
+
   it.each(['en', 'zh-CN'] as const)(
     'keeps the skill listing row separate from its loaded body cost (%s)',
     (language) => {

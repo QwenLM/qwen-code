@@ -5,15 +5,29 @@
  */
 
 import { spawn } from 'node:child_process';
+import { isatty } from 'node:tty';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import type { JsInterpreterCommand } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import {
   RELAUNCH_EXIT_CODE,
   UPDATE_ON_EXIT_MESSAGE,
   UPDATE_RELAUNCH_EXIT_CODE,
   getRelaunchExecArgv,
 } from './processUtils.js';
+import { runExitCleanup } from './cleanup.js';
+import { RELAUNCH_SUPERVISED_ENV } from './env-provenance.js';
 import { writeStderrLine } from './stdioHelpers.js';
 
+const debugLogger = createDebugLogger('RELAUNCH');
+
+// How long a supervised child may run on once its supervisor is gone: longer
+// than ACP's own shutdown (SessionEnd hooks, MCP pool and session drains, exit
+// cleanup), which the host starts by signalling the process group or closing
+// the child's input.
+const ORPHAN_GRACE_MS = 120_000;
+
 interface RelaunchOptions {
+  interpreter?: JsInterpreterCommand;
   afterSpawn?: () => void;
   childEnv?: Readonly<Record<string, string>>;
   onUpdateRelaunch?: (relaunchOnFailure: boolean) => Promise<number> | number;
@@ -51,6 +65,55 @@ export async function relaunchOnExitCode(
   }
 }
 
+/**
+ * Makes a supervised child exit once its supervisor is gone. A host stops the
+ * CLI by signalling the process it started, which is the supervisor, so the
+ * child watches the IPC channel it was spawned with and, when that closes,
+ * exits after a grace period instead of running on indefinitely. `graceMs` is
+ * for tests.
+ */
+export function exitWhenSupervisorExits(graceMs = ORPHAN_GRACE_MS): void {
+  const supervision = process.env[RELAUNCH_SUPERVISED_ENV];
+  if (supervision !== '1' && supervision !== 'terminal') {
+    return;
+  }
+  // Tools and subagents this process spawns are not the supervisor's children.
+  delete process.env[RELAUNCH_SUPERVISED_ENV];
+  // A process that never had a channel was not spawned by a supervisor, and
+  // the marker it carries is not one (a disconnected channel keeps `send`).
+  if (typeof process.send !== 'function') {
+    return;
+  }
+  // The npm Bun handoff keeps a terminal child alive behind Node even when
+  // only Node is killed. Other terminal relaunches keep their existing policy.
+  const onTerminal = isatty(0);
+  if (onTerminal && supervision !== 'terminal') {
+    return;
+  }
+  // 129, as for SIGHUP: the side that started this process hung up.
+  const exit = () => void runExitCleanup().finally(() => process.exit(129));
+  if (!process.connected || !process.channel) {
+    debugLogger.debug('Supervisor gone before startup; exiting.');
+    exit();
+    return;
+  }
+  process.once('disconnect', () => {
+    if (onTerminal) {
+      debugLogger.debug('Terminal supervisor gone; exiting.');
+      exit();
+      return;
+    }
+    debugLogger.debug('Supervisor gone; exiting after the grace period.');
+    // Nothing is signalled here: a host that signals the process group, or
+    // closes this process's input, starts the mode's own shutdown, and a
+    // second signal would kill the SessionEnd hooks it runs. This only bounds
+    // how long the process may run on.
+    setTimeout(exit, graceMs).unref();
+  });
+  // The listener would otherwise hold the channel, and so this process, open.
+  process.channel.unref();
+}
+
 export async function relaunchAppInChildProcess(
   additionalNodeArgs: string[],
   additionalScriptArgs: string[],
@@ -62,9 +125,11 @@ export async function relaunchAppInChildProcess(
 
   const script = process.argv[1];
   const scriptArgs = process.argv.slice(2);
+  const command = options?.interpreter?.command ?? process.execPath;
   const nodeArgs = [
-    ...getRelaunchExecArgv(),
-    ...additionalNodeArgs,
+    ...(options?.interpreter?.runtime === 'bun'
+      ? ['--expose-gc']
+      : [...getRelaunchExecArgv(), ...additionalNodeArgs]),
     script,
     ...additionalScriptArgs,
     ...scriptArgs,
@@ -75,6 +140,8 @@ export async function relaunchAppInChildProcess(
       ...options?.childEnv,
       QWEN_CODE_NO_RELAUNCH: 'true',
     };
+    // Only the supervised spawn below marks its child.
+    delete env[RELAUNCH_SUPERVISED_ENV];
     if (env['QWEN_CODE_SCRUB_ELECTRON_RUN_AS_NODE'] === '1') {
       env['ELECTRON_RUN_AS_NODE'] = '1';
     }
@@ -88,6 +155,7 @@ export async function relaunchAppInChildProcess(
   // nothing for the hook to protect on this path.
   if (
     options?.replaceProcess &&
+    !options.interpreter &&
     typeof process.execve === 'function' &&
     !['win32', 'os400'].includes(process.platform)
   ) {
@@ -125,15 +193,27 @@ export async function relaunchAppInChildProcess(
 
   const runner = () => {
     let updateOnExitRequested = false;
-    const newEnv = createChildEnv();
+    const terminalHandoff =
+      options?.interpreter?.runtime === 'bun' && isatty(0);
+    const newEnv = {
+      ...createChildEnv(),
+      [RELAUNCH_SUPERVISED_ENV]: terminalHandoff ? 'terminal' : '1',
+    };
 
     // The parent process should not be reading from stdin while the child is running.
     process.stdin.pause();
 
-    const child = spawn(process.execPath, nodeArgs, {
+    const child = spawn(command, nodeArgs, {
       stdio: ['inherit', 'inherit', 'inherit', 'ipc'],
       env: newEnv,
     });
+    // The terminal sends SIGINT to both processes; the interactive child owns
+    // its confirmation window. Exiting Node on the first signal would orphan it.
+    const keepSupervisor = () => {};
+    if (terminalHandoff) process.on('SIGINT', keepSupervisor);
+    const removeSignalHandler = () => {
+      if (terminalHandoff) process.removeListener('SIGINT', keepSupervisor);
+    };
 
     child.on('message', (message) => {
       if (
@@ -151,13 +231,18 @@ export async function relaunchAppInChildProcess(
     try {
       options?.afterSpawn?.();
     } catch (err) {
+      removeSignalHandler();
       child.kill();
       throw err;
     }
 
     return new Promise<number>((resolve, reject) => {
-      child.on('error', reject);
+      child.on('error', (error) => {
+        removeSignalHandler();
+        reject(error);
+      });
       child.on('close', (code) => {
+        removeSignalHandler();
         // Resume stdin before the parent process exits.
         process.stdin.resume();
         const exitCode = code ?? 1;

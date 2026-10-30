@@ -2,7 +2,7 @@
 
 [English](2026-09-27-managed-agent-api-contract.md) | [简体中文](2026-09-27-managed-agent-api-contract.zh-CN.md)
 
-Status: D1 implemented; D2 implemented in [Session query](2026-09-27-managed-agent-session-query.md); D3 implemented in [Event replay](2026-09-27-managed-agent-event-replay.md); the lifecycle work implemented as D4 of [#12867](https://github.com/QwenLM/qwen-code/issues/12867) in [Durable lifecycle](2026-09-28-managed-agent-durable-lifecycle.md); D5 implemented in [Turn queries](2026-09-28-managed-agent-turn-queries.md)
+Status: D1 implemented; D2 implemented in [Session query](2026-09-27-managed-agent-session-query.md); D3 implemented in [Event replay](2026-09-27-managed-agent-event-replay.md); the lifecycle work implemented as D4 of [#12867](https://github.com/QwenLM/qwen-code/issues/12867) in [Durable lifecycle](2026-09-28-managed-agent-durable-lifecycle.md); D5 implemented in [Turn queries](2026-09-28-managed-agent-turn-queries.md); D6 designed in [Actions](2026-09-30-managed-agent-actions.md), with its Hosted Harness part (D6a) implemented
 Date: 2026-09-27
 Issue: [#12793](https://github.com/QwenLM/qwen-code/issues/12793), part of [#12380](https://github.com/QwenLM/qwen-code/issues/12380)
 
@@ -49,7 +49,7 @@ the checks that D2 and D3 build on.
 ### 4.1 Spec location and format
 
 The spec moves into
-`packages/sdk-java/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json`
+`packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json`
 and becomes the single source; the design repository points here from now on.
 
 It is stored as JSON rather than YAML. The repository's yamllint rules require
@@ -62,6 +62,23 @@ and 4.5.
 
 D1 introduced `1.13.0` for the lifecycle routes (4.3). Integrating W0d adds
 the workspace lookup route and advances the version to `1.14.0` (4.5).
+
+The version is allocated by hand and consumers key capability detection on
+it, so monotonicity is enforced in CI (#13804). On every pull request the
+SDK Java workflow's fast guard lane compares the merge result's document
+with the base branch's head copy and fails when a changed document declares
+an equal or lower `info.version`, numeric per segment, naming whether the
+number stalled or regressed; a pull request arriving at the base ref's own
+bytes owes no bump. After every push to `main` that changes the document,
+and every 30 minutes, a re-check reads each open pull request's changed
+paths and document through the API — no pull request code is fetched,
+checked out or run — and sets the
+`API contract version uniqueness (latest main)` status: failure when the
+declared version no longer advances past `main`'s, success otherwise,
+naming the other open pull requests claiming the same version, and error
+when a file list or head document could not be read in full. A head that
+already carries the status is re-evaluated even after it stops changing the
+document, so a stale failure is cleared.
 
 ### 4.2 Generate TypeScript, validate Java
 
@@ -90,9 +107,11 @@ so v1.13 records all four as `partial`:
 
 ### 4.4 `agent_revision` before AgentDefinition
 
-`PublicSession.agent_revision` is required, but `/v1/agents` is still
-`planned`. Until AgentDefinition lands, D2 returns a fixed revision taken from
-the server's agent configuration. D1 only records the missing field.
+`PublicSession.agent_revision` is required. D2 returns a fixed revision taken
+from the server's agent configuration, and D1 only records the missing field.
+D8a (v1.29) implements the `/v1/agents` routes as stored, immutable revisions;
+Sessions keep the configured revision until D8b pins a stored one. See
+[AgentDefinition revisions](2026-10-01-managed-agent-definitions.md).
 
 ### 4.5 W0d discovery and empty-session binding
 
@@ -237,7 +256,7 @@ WebShell client sends `text`, so both must change together in D2.
 
 ## 9. Validation
 
-- `mvn test` in `packages/sdk-java/managed-agent-server` runs the three
+- `mvn test` in `packages/managed-agent-server` runs the three
   contract tests with the recorded gaps.
 - Mutations each fail the matching test: a new field on a record, a new mapped
   route, a removed gap line, and a spec change without regenerating the

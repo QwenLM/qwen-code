@@ -9,6 +9,17 @@ import { hooksCommand } from './hooksCommand.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
 
 import { SettingScope } from '../../config/settings.js';
+import { createBundledMem0Server } from '../../config/mem0-settings.js';
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...actual,
+    existsSync: (path: string) =>
+      path.replaceAll('\\', '/').endsWith('/mem0/main.js') ||
+      actual.existsSync(path),
+  };
+});
 
 describe('hooksCommand', () => {
   let mockContext: ReturnType<typeof createMockCommandContext>;
@@ -17,6 +28,7 @@ describe('hooksCommand', () => {
     setHooksFromSettings: ReturnType<typeof vi.fn>;
     getBareMode: ReturnType<typeof vi.fn>;
     isSafeMode: ReturnType<typeof vi.fn>;
+    getTopTierMcpServers: ReturnType<typeof vi.fn>;
   };
 
   beforeEach(() => {
@@ -26,6 +38,7 @@ describe('hooksCommand', () => {
       setHooksFromSettings: vi.fn(),
       getBareMode: vi.fn().mockReturnValue(false),
       isSafeMode: vi.fn().mockReturnValue(false),
+      getTopTierMcpServers: vi.fn(),
       getHookSystem: vi.fn().mockReturnValue({
         reload: vi.fn().mockResolvedValue(undefined),
         getRegistry: vi.fn().mockReturnValue({
@@ -53,6 +66,25 @@ describe('hooksCommand', () => {
   });
 
   describe('basic functionality', () => {
+    it('does not promote a repository MCP lookalike to system hooks on reload', async () => {
+      mockConfig.getTopTierMcpServers.mockReturnValue({
+        'external-context': {
+          command: 'node',
+          args: ['/repo/shim/loader.js'],
+          env: { QWEN_BUNDLED_MEM0_CONFIG: '{}' },
+          includeTools: ['context_search', 'context_remember'],
+          scope: 'project',
+        },
+      });
+      await hooksCommand.action!(mockContext, '');
+      expect(mockConfig.setHooksFromSettings).toHaveBeenCalledWith({
+        systemHooks: undefined,
+        userHooks: undefined,
+        projectHooks: undefined,
+        hooks: undefined,
+      });
+    });
+
     it('should open hooks management dialog in interactive mode', async () => {
       const result = await hooksCommand.action!(mockContext, '');
 
@@ -131,6 +163,7 @@ describe('hooksCommand', () => {
         setHooksFromSettings: vi.fn(),
         getBareMode: vi.fn().mockReturnValue(opts.bareMode ?? false),
         isSafeMode: vi.fn().mockReturnValue(opts.safeMode ?? false),
+        getTopTierMcpServers: vi.fn(),
         getWorkingDir: vi.fn().mockReturnValue('/work/dir'),
         getSessionId: vi.fn().mockReturnValue('session-1'),
       };
@@ -175,6 +208,59 @@ describe('hooksCommand', () => {
       expect(
         config.setHooksFromSettings.mock.invocationCallOrder[0],
       ).toBeLessThan(hookSystem.reload.mock.invocationCallOrder[0]);
+    });
+
+    it('does not file a repository-authored external-context server under system hooks', async () => {
+      const { context, config } = makeReloadContext();
+      // The startup binding still owns its confirmation hook while an MCP
+      // allow-list temporarily hides the server from discovery.
+      config.getTopTierMcpServers.mockReturnValue({
+        'external-context': createBundledMem0Server(
+          { baseUrl: 'https://mem0.example', enableWrites: true },
+          process.cwd(),
+        ),
+      });
+
+      await hooksCommand.action!(context, '');
+
+      expect(config.setHooksFromSettings).toHaveBeenCalledWith({
+        systemHooks: {
+          ...systemHooks,
+          PreToolUse: [
+            expect.objectContaining({
+              matcher: 'mcp__external-context__context_remember',
+            }),
+          ],
+        },
+        userHooks,
+        projectHooks,
+        hooks: undefined,
+      });
+
+      // Negative arm: the same duck-typed entry carrying a provenance scope,
+      // i.e. one a checked-in `.mcp.json` ('project') or workspace settings
+      // ('workspace') contributed. systemHooks is the one hook source folder
+      // trust does not gate, so a repository-authored command must never be
+      // presented there as administrator configuration.
+      config.setHooksFromSettings.mockClear();
+      config.getTopTierMcpServers.mockReturnValue({
+        'external-context': {
+          command: 'node',
+          args: ['/repo/.qwen/shim/loader.js'],
+          env: { QWEN_BUNDLED_MEM0_CONFIG: '{}' },
+          includeTools: ['context_search', 'context_remember'],
+          scope: 'project',
+        },
+      });
+
+      await hooksCommand.action!(context, '');
+
+      expect(config.setHooksFromSettings).toHaveBeenCalledWith({
+        systemHooks,
+        userHooks,
+        projectHooks,
+        hooks: undefined,
+      });
     });
 
     it.each([

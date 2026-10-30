@@ -7,6 +7,12 @@
 import fs from 'node:fs';
 import fsPromises from 'node:fs/promises';
 import type { FileHandle } from 'node:fs/promises';
+import {
+  readFileHandleBytes,
+  type DescriptorFileReadSource,
+  type FileReadSource,
+} from './file-read-source.js';
+import type { ReadTextFileResponse } from '../services/fileSystemService.js';
 import path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
 import mime from 'mime/lite';
@@ -19,6 +25,11 @@ import { createDebugLogger } from './debugLogger.js';
 import { getErrorMessage, isAbortError, isNodeError } from './errors.js';
 import type { InputModalities } from '../core/contentGenerator.js';
 import { detectEncodingFromBuffer } from './systemEncoding.js';
+import {
+  base64ByteLength,
+  readFileWithinBase64Limit,
+  type ReadFileMediaLimits,
+} from './inline-media.js';
 import type { PDFRenderedImage } from './pdf.js';
 import {
   buildLargePDFGuidance,
@@ -41,9 +52,13 @@ import {
   looksLikeText,
   sniffFileKind,
 } from './binary-content.js';
-import { readNotebookWithMetadata } from './notebook.js';
+import {
+  formatNotebookWithMetadata,
+  readNotebookWithMetadata,
+} from './notebook.js';
 import {
   readTextRange,
+  readTextContentRangeFromHandle,
   type ReadTextRangeResult,
   detectLineEndingFromContent,
 } from './read-text-range.js';
@@ -55,6 +70,7 @@ import {
   IMAGE_MAX_SOURCE_BYTES,
   ImageViewError,
   renderImageOverview,
+  renderImageBufferOverview,
 } from './image-view.js';
 import { PIPELINE_IMAGE_MIME_TYPES } from './request-tokenizer/supportedImageFormats.js';
 
@@ -356,8 +372,11 @@ export async function readFileWithEncodingInfo(
  * to detect encoding (e.g. GBK, Big5, Shift_JIS) and iconv-lite to decode.
  * Falls back to utf8 when detection fails.
  */
-export async function readFileWithEncoding(filePath: string): Promise<string> {
-  const result = await readFileWithEncodingInfo(filePath);
+export async function readFileWithEncoding(
+  filePath: string,
+  signal?: AbortSignal,
+): Promise<string> {
+  const result = await readFileWithEncodingInfo(filePath, signal);
   return result.content;
 }
 
@@ -462,7 +481,8 @@ export async function detectFileEncoding(
     }
 
     return 'utf-8';
-  } catch {
+  } catch (error) {
+    if (typeof source !== 'string') throw error;
     // If file can't be read, default to UTF-8
     return 'utf-8';
   } finally {
@@ -519,7 +539,20 @@ export function isWithinRoot(
  * Now BOM-aware: if a Unicode BOM is detected, we treat it as text.
  * For non-BOM files, retain the existing null-byte and non-printable ratio checks.
  */
-export async function isBinaryFile(filePath: string): Promise<boolean> {
+export async function isBinaryFile(
+  filePath: string,
+  source?: DescriptorFileReadSource,
+  signal?: AbortSignal,
+): Promise<boolean> {
+  if (source) {
+    return isBinarySample(
+      await readFileHandleBytes(
+        source.fileHandle,
+        Math.min(4096, source.stats.size),
+        signal,
+      ),
+    );
+  }
   let fh: fs.promises.FileHandle | null = null;
   try {
     fh = await fs.promises.open(filePath, 'r');
@@ -533,19 +566,7 @@ export async function isBinaryFile(filePath: string): Promise<boolean> {
     const { bytesRead } = await fh.read(buf, 0, sampleSize, 0);
     if (bytesRead === 0) return false;
 
-    // BOM → text (avoid false positives for UTF‑16/32 with nulls)
-    const bom = detectBOM(buf.subarray(0, Math.min(4, bytesRead)));
-    if (bom) return false;
-
-    let nonPrintableCount = 0;
-    for (let i = 0; i < bytesRead; i++) {
-      if (buf[i] === 0) return true; // strong indicator of binary when no BOM
-      if (buf[i] < 9 || (buf[i] > 13 && buf[i] < 32)) {
-        nonPrintableCount++;
-      }
-    }
-    // If >30% non-printable characters, consider it binary
-    return nonPrintableCount / bytesRead > 0.3;
+    return isBinarySample(buf.subarray(0, bytesRead));
   } catch (error) {
     debugLogger.warn(
       `Failed to check if file is binary: ${filePath}`,
@@ -564,6 +585,16 @@ export async function isBinaryFile(filePath: string): Promise<boolean> {
       }
     }
   }
+}
+
+function isBinarySample(bytes: Buffer): boolean {
+  if (bytes.length === 0 || detectBOM(bytes.subarray(0, 4))) return false;
+  let nonPrintableCount = 0;
+  for (const byte of bytes) {
+    if (byte === 0) return true;
+    if (byte < 9 || (byte > 13 && byte < 32)) nonPrintableCount++;
+  }
+  return nonPrintableCount / bytes.length > 0.3;
 }
 
 export type FileType =
@@ -838,8 +869,22 @@ const MIME_LITE_MISSING_MEDIA_TYPES: ReadonlyMap<string, string> = new Map([
 async function classifyImageContent(
   filePath: string,
   mimeType: string,
+  source?: DescriptorFileReadSource,
+  signal?: AbortSignal,
 ): Promise<FileType> {
   if (!SNIFFABLE_IMAGE_MIME_TYPES.has(mimeType)) return 'image';
+  if (source) {
+    if (source.stats.size > IMAGE_MAX_SOURCE_BYTES) return 'image';
+    return classifyImageSample(
+      await readFileHandleBytes(
+        source.fileHandle,
+        Math.min(IMAGE_SNIFF_BYTES, source.stats.size),
+        signal,
+      ),
+      filePath,
+      mimeType,
+    );
+  }
 
   let handle: fs.promises.FileHandle | undefined;
   try {
@@ -854,28 +899,7 @@ async function classifyImageContent(
     const sample = Buffer.alloc(IMAGE_SNIFF_BYTES);
     const { bytesRead } = await handle.read(sample, 0, sample.length, 0);
     const bytes = sample.subarray(0, bytesRead);
-    if (bytes.length === 0) return 'image';
-
-    const sniffed = sniffFileKind(bytes, mimeType, '', `file://${filePath}`);
-    let result: FileType;
-    if (sniffed.magicMatched) {
-      result =
-        sniffed.extension === extensionForMimeType(mimeType) ||
-        CANONICAL_IMAGE_EXTENSIONS.has(sniffed.extension)
-          ? 'image'
-          : 'binary';
-    } else {
-      result =
-        bytes.length < 3 || !(detectBOM(bytes) || looksLikeText(bytes))
-          ? 'binary'
-          : 'text';
-    }
-    if (result !== 'image') {
-      debugLogger.debug(
-        `classifyImageContent: ${filePath} -> ${result} (mime ${mimeType})`,
-      );
-    }
-    return result;
+    return classifyImageSample(bytes, filePath, mimeType);
   } catch (error) {
     debugLogger.debug(
       `Unable to sniff image content for ${filePath}; preserving extension classification`,
@@ -887,13 +911,42 @@ async function classifyImageContent(
   }
 }
 
+function classifyImageSample(
+  bytes: Buffer,
+  filePath: string,
+  mimeType: string,
+): FileType {
+  if (bytes.length === 0) return 'image';
+  const sniffed = sniffFileKind(bytes, mimeType, '', `file://${filePath}`);
+  const result: FileType = sniffed.magicMatched
+    ? sniffed.extension === extensionForMimeType(mimeType) ||
+      CANONICAL_IMAGE_EXTENSIONS.has(sniffed.extension)
+      ? 'image'
+      : 'binary'
+    : bytes.length < 3 || !(detectBOM(bytes) || looksLikeText(bytes))
+      ? 'binary'
+      : 'text';
+  if (result !== 'image') {
+    debugLogger.debug(
+      `classifyImageContent: ${filePath} -> ${result} (mime ${mimeType})`,
+    );
+  }
+  return result;
+}
+
 /**
  * Detects the type of file based on extension and content.
  * @param filePath Path to the file.
  * @returns Promise that resolves to a FileType string.
  */
-export async function detectFileType(filePath: string): Promise<FileType> {
+export async function detectFileType(
+  filePath: string,
+  source?: FileReadSource,
+  signal?: AbortSignal,
+): Promise<FileType> {
   const ext = path.extname(filePath).toLowerCase();
+  const contentPath = source?.kind === 'path' ? source.path : filePath;
+  const descriptor = source?.kind === 'descriptor' ? source : undefined;
 
   // The mimetype for various TypeScript extensions (ts, mts, cts, tsx) can be
   // MPEG transport stream (a video format), but we want to assume these are
@@ -921,7 +974,12 @@ export async function detectFileType(filePath: string): Promise<FileType> {
     mime.getType(filePath) ?? MIME_LITE_MISSING_MEDIA_TYPES.get(ext) ?? null;
   if (lookedUpMimeType) {
     if (lookedUpMimeType.startsWith('image/')) {
-      return classifyImageContent(filePath, lookedUpMimeType);
+      return classifyImageContent(
+        contentPath,
+        lookedUpMimeType,
+        descriptor,
+        signal,
+      );
     }
     if (lookedUpMimeType.startsWith('audio/')) {
       return 'audio';
@@ -982,7 +1040,7 @@ export async function detectFileType(filePath: string): Promise<FileType> {
 
   // Fall back to content-based check if mime type wasn't conclusive for image/pdf
   // and it's not a known binary or known text extension.
-  if (await isBinaryFile(filePath)) {
+  if (await isBinaryFile(contentPath, descriptor, signal)) {
     return 'binary';
   }
 
@@ -1076,12 +1134,14 @@ export interface ProcessSingleFileContentOptions {
    */
   preparePdfForVisionBridge?: boolean;
   signal?: AbortSignal;
+  mediaLimits?: ReadFileMediaLimits;
   /**
    * Large full-PDF text fallback returns a tool error by default. `@`-attached
    * PDFs use `reference` so the model gets guidance without a failed read.
    */
   largePdfBehavior?: 'error' | 'reference';
   displayPath?: string;
+  readSource?: FileReadSource;
   textFileHandle?: FileHandle;
   textFileStats?: import('node:fs').Stats;
   textFileMaxScanBytes?: number;
@@ -1162,15 +1222,54 @@ export async function processSingleFileContent(
     preserveUnsupportedImage = false,
     preparePdfForVisionBridge = false,
     signal,
+    mediaLimits,
     largePdfBehavior = 'error',
     displayPath = filePath,
   } = options;
   const rootDirectory = config.getTargetDir();
+  const source = options.readSource;
+  const descriptor = source?.kind === 'descriptor' ? source : undefined;
+  const contentPath = source?.kind === 'path' ? source.path : filePath;
+  const pdfSource = descriptor?.fileHandle ?? contentPath;
+  let contentBytes: Promise<Buffer> | undefined;
+  const readBytes = () =>
+    (contentBytes ??= descriptor
+      ? readFileHandleBytes(
+          descriptor.fileHandle,
+          descriptor.stats.size,
+          signal,
+        )
+      : fs.promises.readFile(contentPath, signal ? { signal } : undefined));
+  const readMediaBytes = async () => {
+    if (!mediaLimits) return readBytes();
+    if (!descriptor) {
+      return readFileWithinBase64Limit(
+        contentPath,
+        mediaLimits.maxInlineMediaBase64Bytes,
+        signal,
+      );
+    }
+    if (
+      base64ByteLength(descriptor.stats.size) >
+      mediaLimits.maxInlineMediaBase64Bytes
+    ) {
+      return undefined;
+    }
+    return readBytes();
+  };
   const relativePathForDisplay = (
     path.isAbsolute(displayPath)
       ? path.relative(rootDirectory, displayPath)
       : displayPath
   ).replace(/\\/g, '/');
+  const mediaTooLarge = (
+    message = "File exceeds the inline media byte limit. For PDFs, use 'pages' with a narrower range; otherwise use a smaller file.",
+  ): ProcessedFileReadResult => ({
+    llmContent: message,
+    returnDisplay: message,
+    error: message,
+    errorType: ToolErrorType.FILE_TOO_LARGE,
+  });
   try {
     signal?.throwIfAborted();
     let stats: import('node:fs').Stats;
@@ -1178,16 +1277,13 @@ export async function processSingleFileContent(
       // Async stat doubles as the existence check — ENOENT is handled below
       // and surfaces the same FILE_NOT_FOUND error type as the old explicit
       // existsSync gate, with one fewer sync syscall on the hot path.
-      stats = options.textFileStats ?? (await fs.promises.stat(filePath));
+      stats =
+        descriptor?.stats ??
+        options.textFileStats ??
+        (await fs.promises.stat(contentPath));
     } catch (error: unknown) {
       if (isNodeError(error) && error.code === 'ENOENT') {
-        return {
-          llmContent:
-            'Could not read file because no file was found at the specified path.',
-          returnDisplay: 'File not found.',
-          error: `File not found: ${displayPath}`,
-          errorType: ToolErrorType.FILE_NOT_FOUND,
-        };
+        return getFileReadErrorResult(error, displayPath, rootDirectory);
       }
       throw error;
     }
@@ -1229,7 +1325,9 @@ export async function processSingleFileContent(
     const fileType = options.textFileHandle
       ? 'text'
       : (options.fileType ??
-        (bridgePreservesImage ? 'image' : await detectFileType(filePath)));
+        (bridgePreservesImage
+          ? 'image'
+          : await detectFileType(filePath, source, signal)));
     if (fileType === 'pdf' && config.getShellExecutionSandbox?.()) {
       const message =
         'PDF processing is unavailable in this sandbox mode. Use a PDF utility through the sandboxed Shell tool.';
@@ -1243,10 +1341,11 @@ export async function processSingleFileContent(
     const shouldRenderImageOverview =
       fileType === 'image' && CANONICAL_IMAGE_MIME_TYPES.has(mediaMimeType);
     const displayName = path.basename(displayPath);
-    // Use optional call (`?.()`) so mock Configs that don't implement
-    // getContentGeneratorConfig still work for non-media file types.
+    // An empty effective view is authoritative; only legacy mocks fall back.
     const modalities: InputModalities =
-      config.getContentGeneratorConfig?.()?.modalities ?? {};
+      typeof config.getEffectiveInputModalities === 'function'
+        ? config.getEffectiveInputModalities()
+        : (config.getContentGeneratorConfig?.()?.modalities ?? {});
 
     // Vision-capable main model, explicit read (not `@`-reference): when text
     // extraction overflows or fails, render pages to images for the model
@@ -1334,7 +1433,8 @@ export async function processSingleFileContent(
       };
     }
     if (willExtractPdfText && !pageRange) {
-      pdfPageCount = await getPDFPageCount(filePath);
+      pdfPageCount = await getPDFPageCount(pdfSource, signal);
+      signal?.throwIfAborted();
       const requirement = shouldRequirePDFPageRange(pdfPageCount, stats.size);
       // A vision render can hold up to PDF_MAX_PAGES_PER_READ pages, so only
       // require an explicit range past that ceiling; the text path keeps the
@@ -1347,7 +1447,11 @@ export async function processSingleFileContent(
         `PDF full-text fallback gate: file=${relativePathForDisplay}, sizeMB=${fileSizeInMB.toFixed(2)}, pageCount=${pdfPageCount ?? 'unknown'}, required=${requirement.required}, rangeRequired=${rangeRequired}, effectivePageCount=${requirement.effectivePageCount}, hadPdfInfo=${requirement.hadPdfInfo}, behavior=${largePdfBehavior}`,
       );
       if (rangeRequired) {
-        if (largePdfBehavior === 'error' && !(await isPdftotextAvailable())) {
+        const textAvailable =
+          largePdfBehavior !== 'error' ||
+          (await isPdftotextAvailable(descriptor?.fileHandle, signal));
+        signal?.throwIfAborted();
+        if (largePdfBehavior === 'error' && !textAvailable) {
           return {
             llmContent: `[Cannot extract text from PDF: "${displayName}". ${PDF_TEXT_EXTRACTION_UNAVAILABLE_MESSAGE}]`,
             returnDisplay: `Failed to read pdf: ${relativePathForDisplay}`,
@@ -1394,6 +1498,11 @@ export async function processSingleFileContent(
       // suites and wastes a module load for every non-omni user.
       config.isOmniEnabled?.()
     ) {
+      if (descriptor) {
+        throw new Error(
+          'Descriptor-bound file reads cannot use Omni pathname delivery.',
+        );
+      }
       const omni = await config.loadOmniMediaReader();
       if (omni.isOmniDeliveryActive(config)) {
         // Cheap content pre-sniff decides omni-vs-legacy BEFORE committing
@@ -1403,7 +1512,7 @@ export async function processSingleFileContent(
         // whose bytes sniff as a DIFFERENT modality than its extension
         // suggests also falls back (the legacy path sends it inline under
         // its extension-derived type, exactly as before omni).
-        const sniffedModality = await omni.sniffFileModality(filePath);
+        const sniffedModality = await omni.sniffFileModality(contentPath);
         if (sniffedModality === fileType) {
           omniModule = omni;
         }
@@ -1490,7 +1599,9 @@ export async function processSingleFileContent(
             stats,
           };
         }
-        const content = await readFileWithEncoding(filePath);
+        const content = descriptor
+          ? (await decodeBufferWithEncodingInfoAsync(await readBytes())).content
+          : await readFileWithEncoding(contentPath, signal);
         // Populate `originalLineCount` and `isTruncated` so the
         // ReadFile cache treats this exactly like a successful text
         // read: ReadFileToolInvocation derives `cacheable` from
@@ -1513,24 +1624,41 @@ export async function processSingleFileContent(
         const fileSystemService = config.getFileSystemService();
         const maxOutputBytes = getRangeReadByteLimit(config);
         const readTextFileFromHandle = fileSystemService.readTextFileFromHandle;
-        const { content, _meta } = options.textFileHandle
-          ? await readTextFileFromHandle!.call(fileSystemService, {
-              fileHandle: options.textFileHandle,
+        let readResult: ReadTextFileResponse;
+        if (descriptor) {
+          const { content, ...metadata } = await readTextContentRangeFromHandle(
+            descriptor.fileHandle,
+            {
               fileSize: stats.size,
+              offset,
               limit: limit ?? config.getTruncateToolOutputLines(),
-              line: offset,
               maxOutputBytes,
-              maxScanBytes: options.textFileMaxScanBytes ?? maxOutputBytes,
-              ...(signal !== undefined ? { signal } : {}),
-            })
-          : await fileSystemService.readTextFile({
-              path: filePath,
-              limit: limit ?? config.getTruncateToolOutputLines(),
-              line: offset,
-              maxOutputBytes,
-              stats,
-              ...(signal !== undefined ? { signal } : {}),
-            });
+              maxScanBytes: stats.size,
+              signal,
+            },
+          );
+          readResult = { content, _meta: metadata };
+        } else if (options.textFileHandle) {
+          readResult = await readTextFileFromHandle!.call(fileSystemService, {
+            fileHandle: options.textFileHandle,
+            fileSize: stats.size,
+            limit: limit ?? config.getTruncateToolOutputLines(),
+            line: offset,
+            maxOutputBytes,
+            maxScanBytes: options.textFileMaxScanBytes ?? maxOutputBytes,
+            ...(signal !== undefined ? { signal } : {}),
+          });
+        } else {
+          readResult = await fileSystemService.readTextFile({
+            path: contentPath,
+            limit: limit ?? config.getTruncateToolOutputLines(),
+            line: offset,
+            maxOutputBytes,
+            stats,
+            ...(signal !== undefined ? { signal } : {}),
+          });
+        }
+        const { content, _meta } = readResult;
         const selectedLines = content.split('\n').map((line) => line.trimEnd());
         const startLine = offset || 0;
         const selectedLineCount =
@@ -1540,7 +1668,7 @@ export async function processSingleFileContent(
           _meta?.originalLineCount ??
           (stats.size >= TEXT_RANGE_FAST_PATH_MAX_SIZE
             ? startLine + selectedLineCount
-            : await countFileLines(filePath));
+            : await countFileLines(contentPath));
         const originalLineCountExact =
           _meta?.originalLineCountExact === false
             ? false
@@ -1639,7 +1767,7 @@ export async function processSingleFileContent(
           // lossy transform reserved for omni policies with disclosure).
           // renderImageOverview is skipped entirely on this path.
           return await omniModule.readMediaViaOmniDelivery({
-            filePath,
+            filePath: contentPath,
             config,
             displayName,
             relativePathForDisplay,
@@ -1649,10 +1777,22 @@ export async function processSingleFileContent(
         }
         if (shouldRenderImageOverview) {
           try {
-            const view = await renderImageOverview(
-              filePath,
-              signal ?? new AbortController().signal,
-            );
+            const viewSignal = signal ?? new AbortController().signal;
+            const view = descriptor
+              ? await renderImageBufferOverview(
+                  await readBytes(),
+                  filePath,
+                  viewSignal,
+                )
+              : await renderImageOverview(contentPath, viewSignal);
+            signal?.throwIfAborted();
+            if (
+              mediaLimits &&
+              base64ByteLength(view.bytes.length) >
+                mediaLimits.maxInlineMediaBase64Bytes
+            ) {
+              return mediaTooLarge();
+            }
             const registry = config.getToolRegistry?.();
             const codeModeOnly = config.getCodeModeOnly?.();
             const declaredTools = new Set(
@@ -1678,8 +1818,9 @@ export async function processSingleFileContent(
                     .some((tool) => tool.name === 'zoom_image'));
             let zoomHint = '';
             if (zoomAvailable) {
-              // CodeModeOnly binds zoom_image into `exec` and hides the bridge,
-              // so neither discovery nor `tool_call` applies there.
+              // CodeModeOnly calls zoom_image through `exec`, never `tool_call`;
+              // if its schema is deferred, exec's own guidance points the model
+              // at tool_search.
               const toolName = codeModeOnly ? 'tools.zoom_image' : 'zoom_image';
               zoomHint =
                 codeModeOnly || zoomDeclared
@@ -1768,7 +1909,9 @@ export async function processSingleFileContent(
             returnDisplay: `Omitted unsupported image format: ${relativePathForDisplay} (${mediaMimeType})`,
           };
         }
-        const contentBuffer = await fs.promises.readFile(filePath);
+        const contentBuffer = await readMediaBytes();
+        if (contentBuffer === undefined) return mediaTooLarge();
+        signal?.throwIfAborted();
         if (mediaMimeType === 'image/gif') {
           // GIFs skip the overview renderer, so nothing has validated the
           // bytes yet: a corrupt or mislabeled .gif would reach the provider
@@ -1827,7 +1970,7 @@ export async function processSingleFileContent(
           // DashScope upload channel; user aborts are rethrown and land in
           // this function's outer abort handling.
           return await omniModule.readMediaViaOmniDelivery({
-            filePath,
+            filePath: contentPath,
             config,
             displayName,
             relativePathForDisplay,
@@ -1835,7 +1978,7 @@ export async function processSingleFileContent(
             signal,
           });
         }
-        const contentBuffer = await fs.promises.readFile(filePath);
+        const contentBuffer = await readBytes();
         const base64Data = contentBuffer.toString('base64');
         const base64SizeInMB = base64Data.length / (1024 * 1024);
         // Use 9.9MB instead of 10MB to leave margin for small overhead (#1880)
@@ -1864,7 +2007,9 @@ export async function processSingleFileContent(
         // Otherwise, fall back to pdftotext for text extraction.
         if (!pageRange && modalities.pdf) {
           // Model supports PDF natively — send as base64
-          const contentBuffer = await fs.promises.readFile(filePath);
+          const contentBuffer = await readMediaBytes();
+          if (contentBuffer === undefined) return mediaTooLarge();
+          signal?.throwIfAborted();
           const base64Data = contentBuffer.toString('base64');
           const base64SizeInMB = base64Data.length / (1024 * 1024);
           if (base64SizeInMB > 9.9) {
@@ -1891,7 +2036,11 @@ export async function processSingleFileContent(
         // without native PDF support). Only when the text overflows the token
         // budget or extraction fails (scanned / no text layer) do we fall back
         // to rendering pages as images.
-        const pdfResult = await extractPDFText(filePath, pageRange);
+        const pdfResult = await extractPDFText(pdfSource, {
+          ...pageRange,
+          signal,
+        });
+        signal?.throwIfAborted();
         const estimatedTokens = pdfResult.success
           ? estimatePDFTextOutputTokens(pdfResult.text)
           : 0;
@@ -1928,12 +2077,59 @@ export async function processSingleFileContent(
         //     page range, render from the start up to the per-read ceiling.
         if (willRenderPdfImages) {
           const startPage = pageRange?.firstPage ?? 1;
-          const render = await renderPDFPagesToImages(
-            filePath,
-            pageRange ?? { firstPage: 1, lastPage: PDF_MAX_PAGES_PER_READ },
-          );
+          const render = await renderPDFPagesToImages(pdfSource, {
+            ...(pageRange ?? {
+              firstPage: 1,
+              lastPage: PDF_MAX_PAGES_PER_READ,
+            }),
+            signal,
+            ...(mediaLimits && {
+              maxTotalBase64Bytes: mediaLimits.maxInlineMediaBase64Bytes,
+            }),
+          });
+          signal?.throwIfAborted();
+          if (
+            (!render.success && render.tooLarge) ||
+            (mediaLimits &&
+              pageRange &&
+              render.success &&
+              render.bytesTruncated)
+          ) {
+            return mediaTooLarge(!render.success ? render.error : undefined);
+          }
           if (render.success && render.images.length > 0) {
+            if (
+              mediaLimits &&
+              pageRange &&
+              render.images.length !== pageRange.lastPage - startPage + 1
+            ) {
+              pdfPageCount = await getPDFPageCount(pdfSource, signal);
+              signal?.throwIfAborted();
+              const lastPage = Math.min(
+                pageRange.lastPage,
+                pdfPageCount ?? pageRange.lastPage,
+              );
+              if (render.images.length !== lastPage - startPage + 1) {
+                const message =
+                  'The requested PDF page range was not fully rendered. Use a range within the document.';
+                return {
+                  llmContent: message,
+                  returnDisplay: message,
+                  error: message,
+                  errorType: ToolErrorType.READ_CONTENT_FAILURE,
+                };
+              }
+            }
             const parts = toImageParts(render.images, startPage);
+            if (
+              pageRange &&
+              pdfPageCount != null &&
+              pageRange.lastPage > pdfPageCount
+            ) {
+              parts.push({
+                text: `[The document has ${pdfPageCount} pages; rendered pages ${startPage}-${startPage + render.images.length - 1}.]`,
+              });
+            }
             // Never drop pages silently. Two ways a no-page-range read can be
             // partial: the byte cap kicked in, or the render filled the page
             // ceiling (the page count was unknown/underestimated upstream, so
@@ -1980,7 +2176,8 @@ export async function processSingleFileContent(
           isSinglePageRead;
         if (renderForBridge && (!pdfResult.success || singlePageTextOverflow)) {
           if (pageRange && pdfPageCount === undefined) {
-            pdfPageCount = await getPDFPageCount(filePath);
+            pdfPageCount = await getPDFPageCount(pdfSource, signal);
+            signal?.throwIfAborted();
           }
           const firstPage = pageRange?.firstPage ?? 1;
           const requestedLastPage =
@@ -1997,14 +2194,28 @@ export async function processSingleFileContent(
           );
           const render =
             lastPage >= firstPage
-              ? await renderPDFPagesToImages(filePath, {
+              ? await renderPDFPagesToImages(pdfSource, {
                   firstPage,
                   lastPage,
+                  signal,
+                  ...(mediaLimits && {
+                    maxTotalBase64Bytes: mediaLimits.maxInlineMediaBase64Bytes,
+                  }),
                 })
               : {
                   success: false as const,
                   error: 'The requested page range is outside the PDF.',
                 };
+          signal?.throwIfAborted();
+          if (
+            (!render.success && 'tooLarge' in render && render.tooLarge) ||
+            (mediaLimits &&
+              pageRange &&
+              render.success &&
+              render.bytesTruncated)
+          ) {
+            return mediaTooLarge(!render.success ? render.error : undefined);
+          }
           if (render.success && render.images.length > 0) {
             const parts = toImageParts(render.images, firstPage);
             const renderedLastPage = firstPage + render.images.length - 1;
@@ -2155,8 +2366,9 @@ export async function processSingleFileContent(
       }
       case 'notebook': {
         try {
-          const { content, isTruncated } =
-            await readNotebookWithMetadata(filePath);
+          const { content, isTruncated } = descriptor
+            ? formatNotebookWithMetadata((await readBytes()).toString('utf8'))
+            : await readNotebookWithMetadata(contentPath);
           return {
             llmContent: content,
             returnDisplay: `Read notebook: ${relativePathForDisplay}`,
@@ -2195,6 +2407,32 @@ export async function processSingleFileContent(
       errorType: ToolErrorType.READ_CONTENT_FAILURE,
     };
   }
+}
+
+export function getFileReadErrorResult(
+  error: unknown,
+  displayPath: string,
+  rootDirectory: string,
+): ProcessedFileReadResult & { error: string } {
+  if (isNodeError(error) && error.code === 'ENOENT') {
+    return {
+      llmContent:
+        'Could not read file because no file was found at the specified path.',
+      returnDisplay: 'File not found.',
+      error: `File not found: ${displayPath}`,
+      errorType: ToolErrorType.FILE_NOT_FOUND,
+    };
+  }
+  const relativePath = path
+    .relative(rootDirectory, displayPath)
+    .replace(/\\/g, '/');
+  const message = `Error reading file ${relativePath}: ${getErrorMessage(error)}`;
+  return {
+    llmContent: message,
+    returnDisplay: message,
+    error: message,
+    errorType: ToolErrorType.READ_CONTENT_FAILURE,
+  };
 }
 
 export function getRangeReadByteLimit(config: Config): number {

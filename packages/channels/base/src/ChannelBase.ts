@@ -3033,6 +3033,11 @@ export abstract class ChannelBase {
     _messageId?: string,
   ): void {}
 
+  // Queue waits and bridge recovery can outlive an adapter connection.
+  protected canStartInboundTurn(): boolean {
+    return true;
+  }
+
   protected onPromptBuffered(
     _chatId: string,
     _sessionId: string,
@@ -3120,6 +3125,10 @@ export abstract class ChannelBase {
 
   protected getResponseSenderId(sessionId: string): string | undefined {
     return this.activePrompts.get(sessionId)?.senderId;
+  }
+
+  protected getResponseIsGroup(sessionId: string): boolean | undefined {
+    return this.activePrompts.get(sessionId)?.isGroup;
   }
 
   protected getResponseMetadata(sessionId: string): string | undefined {
@@ -7231,6 +7240,7 @@ export abstract class ChannelBase {
         if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
           return;
         }
+        if (!this.canStartInboundTurn()) return;
         if (
           !shouldPrependSessionContext &&
           !this.instructedSessions.has(sessionId)
@@ -7428,6 +7438,9 @@ export abstract class ChannelBase {
 
         let taskResultPartial = false;
         try {
+          if (!this.canStartInboundTurn()) {
+            throw new ChannelPromptCancelledError();
+          }
           const response = await promptBridge.prompt(sessionId, promptToSend, {
             ...(this.config.outputMode === 'per_task'
               ? {

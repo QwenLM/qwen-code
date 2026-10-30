@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import postcss, { type Rule } from 'postcss';
+import { FILES_MESSAGES_EN } from './components/artifacts/files-messages';
 import { LIVE_MESSAGES_EN } from './live/messages';
+import { COLLAB_MESSAGES_EN } from './components/workspace-agents/messages';
 
 const DIST_DIR = resolve(__dirname, '../dist');
 const DIST_PATH = resolve(DIST_DIR, 'index.js');
@@ -42,6 +44,91 @@ function enclosingLayer(rule: Rule): string | undefined {
 }
 
 describe('build artifact — package boundary', () => {
+  it('keeps Generated UI retention out of the read-only transcript runtime', () => {
+    const withoutCss = (javascript: string) =>
+      javascript.replace(/^const __qwenWebShellCss=.*\n/gm, '');
+    expect(withoutCss(readTranscriptBundle())).not.toContain(
+      'data-generated-ui-slot',
+    );
+    expect(withoutCss(readPackageJavascript())).toContain(
+      'data-generated-ui-slot',
+    );
+  });
+
+  it('keeps deletion-only copy out of the read-only transcript', () => {
+    for (const copy of [
+      'Delete permanently',
+      '所选原始消息将从历史中永久删除。已有摘要、命令执行效果和项目文件保持不变。已进入摘要的信息仍可能影响后续回复。',
+      'Session history changed. Select the messages again before deleting.',
+    ]) {
+      expect(
+        readPackageJavascript().includes(copy),
+        `Interactive copy: ${copy}`,
+      ).toBe(true);
+      expect(
+        readTranscriptBundle().includes(copy),
+        `Read-only copy: ${copy}`,
+      ).toBe(false);
+    }
+  });
+
+  it.each(['.', 'assets'])(
+    'ships the spreadsheet worker in a lazy chunk in dist/%s',
+    (directory) => {
+      const chunkDir = resolve(DIST_DIR, directory);
+      const files = readdirSync(chunkDir).filter((name) =>
+        name.endsWith('.js'),
+      );
+      const previewName = files.find((name) =>
+        /^SpreadsheetPreview-.*\.js$/.test(name),
+      );
+      expect(previewName).toBeDefined();
+      const preview = readFileSync(resolve(chunkDir, previewName!), 'utf8');
+      expect(preview).toContain('data-web-shell-excel-preview');
+      expect(preview).toContain('new Worker(');
+      expect(preview).toContain('createObjectURL');
+      const otherChunks = files
+        .filter((name) => name !== previewName)
+        .map((name) => readFileSync(resolve(chunkDir, name), 'utf8'))
+        .join('\n');
+      expect(otherChunks.includes(`import("./${previewName}")`)).toBe(true);
+      expect(
+        /(?:from|import)\s*["']\.\/SpreadsheetPreview-[^"']+\.js["']/.test(
+          otherChunks,
+        ),
+      ).toBe(false);
+      expect(otherChunks.includes('data-web-shell-excel-preview')).toBe(false);
+      const workerCode = preview.match(/["']([A-Za-z0-9+/=]{1000,})["']/)?.[1];
+      expect(workerCode).toBeDefined();
+      const decodedWorker = Buffer.from(workerCode!, 'base64').toString();
+      // Parser code must stay inside the worker, even if the UI remains lazy.
+      for (const marker of [
+        'Worksheet index is outside the preview range.',
+        'Cannot merge already merged cells',
+      ]) {
+        expect(
+          decodedWorker.includes(marker),
+          `Worker contains ${marker}`,
+        ).toBe(true);
+        expect(
+          preview.includes(marker),
+          `Parser leaked into preview: ${marker}`,
+        ).toBe(false);
+        expect(
+          otherChunks.includes(marker),
+          `Parser leaked outside worker: ${marker}`,
+        ).toBe(false);
+      }
+      expect(otherChunks.includes(workerCode!)).toBe(false);
+      // Embedded hosts must not resolve external ExcelJS/SSF packages themselves.
+      expect(
+        /(?:from|import)\s*["'](?:exceljs|ssf)["']/.test(
+          `${preview}\n${otherChunks}\n${decodedWorker}`,
+        ),
+      ).toBe(false);
+    },
+  );
+
   it('does not depend on @qwen-code/webui', () => {
     const bundle = readPackageJavascript();
     expect(bundle).not.toContain('@qwen-code/webui');
@@ -61,7 +148,7 @@ describe('build artifact — package boundary', () => {
   });
 
   it('externalizes react and react-dom', () => {
-    const bundle = readBundle();
+    const bundle = readPackageJavascript();
     expect(bundle).toContain('from "react"');
     expect(bundle).toContain('from "react/jsx-runtime"');
     expect(bundle).not.toContain('react/jsx-dev-runtime');
@@ -69,10 +156,47 @@ describe('build artifact — package boundary', () => {
     expect(bundle).not.toContain('fileName:');
   });
 
+  it('uses the host React DOM server renderer for conversation exports', () => {
+    expect(readPackageJavascript()).toContain('from "react-dom/server"');
+  });
+
   it('externalizes @qwen-code/sdk subpaths', () => {
     const bundle = readPackageJavascript();
     // Should not contain raw SDK implementation
     expect(bundle).not.toMatch(/DaemonSessionClient\s*\{/);
+  });
+
+  it('bundles Pierre highlighter dependencies instead of resolving the host Shiki major', () => {
+    const notices = readFileSync(resolve(DIST_DIR, '../NOTICES.txt'), 'utf8');
+    for (const name of ['diffs', 'trees', 'theming', 'theme']) {
+      expect(notices).toContain(`@pierre/${name}@`);
+    }
+    const treeAttribution = notices
+      .split('@pierre/trees@')[1]!
+      .split(
+        '============================================================',
+      )[0]!;
+    // This is the bundled tree's NOTICE credit, not a separate dependency entry.
+    expect(treeAttribution).toContain('Original license for');
+    expect(treeAttribution).toContain('headless-tree/core');
+    expect(notices).toContain('shiki@4.');
+    expect(readPackageJavascript()).not.toMatch(
+      /(?:from\s*|import\s*\()\s*["']@pierre\//,
+    );
+    const previews = readdirSync(DIST_DIR).filter((name) =>
+      /^PierreFilePreview-.*\.js$/.test(name),
+    );
+    expect(previews).toHaveLength(1);
+    const preview = readFileSync(resolve(DIST_DIR, previews[0]!), 'utf8');
+    expect(preview).not.toMatch(/from\s+["']shiki["']/);
+    expect(preview).toContain('createJavaScriptRegexEngine');
+    const hostHighlighter = readdirSync(DIST_DIR).find((name) =>
+      /^codeHighlighter-.*\.js$/.test(name),
+    );
+    expect(hostHighlighter).toBeDefined();
+    expect(readFileSync(resolve(DIST_DIR, hostHighlighter!), 'utf8')).toContain(
+      'from "shiki"',
+    );
   });
 
   it('scopes every component CSS rule to a WebShell root', () => {
@@ -386,24 +510,69 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('vaul');
   });
 
-  it('keeps the transcript entry a fraction of the interactive entry', () => {
-    // The daemon hook runtime is NOT absent from this entry — MessageList
-    // renders McpStatusMessage, TasksStatusMessage and the artifact turn
-    // outputs, and those call the strict useDaemonActions /
-    // useDaemonWorkspace hooks, so the provider guards ship. Asserting their
-    // absence would assert something this entry does not deliver (see the
-    // docblock in client/transcript.ts and #11100).
-    //
-    // What the entry does deliver is a bounded payload, so bound it. The JS
-    // remainder measured 1,140,948 bytes at 1d94060f5 (a reviewer's local
-    // build of this branch), against 7,021,715 for dist/index.js in the same
-    // build. The ceiling is that measurement plus headroom; re-measure and
-    // lower it if the entry gets leaner.
+  it('keeps Managed tool-detail transport out of the transcript entry', () => {
+    expect(readPackageJavascript()).toContain('/tool-details/get');
+    expect(readTranscriptBundle()).not.toContain('/tool-details/get');
+  });
+
+  it('keeps Managed MCP management transport and copy out of the transcript entry', () => {
+    const transcript = readTranscriptBundle();
+    const packaged = readPackageJavascript();
+    for (const content of [
+      '/session-mcp/management/submit',
+      'Choose an exact definition published for this Runtime and Workspace.',
+      '原命令仍需确认，请先查询该命令，再开始其他修改。',
+    ]) {
+      expect(packaged).toContain(content);
+      expect(transcript).not.toContain(content);
+    }
+  });
+
+  it('keeps workspace mutations out of the read-only transcript entry', () => {
+    const transcript = readTranscriptBundle();
+    const packaged = readPackageJavascript();
+    for (const method of [
+      'writeWorkspaceFile',
+      'createWorkspaceDirectory',
+      'deleteWorkspaceDirectory',
+      'deleteWorkspaceFile',
+      'uploadWorkspaceFile',
+    ]) {
+      expect(packaged).toContain(method);
+      expect(transcript).not.toContain(method);
+    }
+    expect(transcript).toContain('dirList');
+  });
+
+  it('keeps selection copying and its converter out of the transcript entry', () => {
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js.length).toBeLessThan(1_300_000);
+    expect(js).not.toContain('data-selection-copy-math');
+    expect(js).not.toContain('selectionCopyListWrapper');
+  });
+
+  it('excludes Files-only messages from the transcript entry', () => {
+    const bundle = readTranscriptBundle();
+    for (const key of [
+      'files.description',
+      'files.reloadUnavailable',
+      'files.sourceTooLarge',
+    ] as const)
+      expect(bundle).not.toContain(FILES_MESSAGES_EN[key]);
+    for (const key of Object.keys(FILES_MESSAGES_EN)) {
+      expect(bundle).not.toContain(`"${key}"`);
+      expect(bundle).not.toContain(`'${key}'`);
+    }
+  });
+
+  it('keeps Token Usage copy and lookups in the interactive entry only', () => {
+    expect(readTranscriptBundle()).not.toMatch(/["'`]tokenUsage\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('tokenUsage.inputWithCacheRate');
+    expect(interactive).toContain('Failed to load token usage.');
+    expect(interactive).toContain('Token 消耗加载失败。');
   });
 
   it('carries no Live Voice strings and looks none up', () => {
@@ -426,6 +595,46 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('Talk in this browser');
   });
 
+  it('keeps dictation strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]voice\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('voice.error.noModel');
+    expect(interactive).toContain('Dismiss voice message');
+    expect(interactive).toContain('当前工作区未配置语音模型。');
+  });
+
+  it('carries no collaboration strings and looks none up', () => {
+    // Same arrangement as Live Voice: the collaboration dictionary is stubbed
+    // in this build, which is only safe while no transcript surface asks for
+    // one of its keys.
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    const keys = Object.keys(COLLAB_MESSAGES_EN);
+    expect(keys.length).toBeGreaterThan(50);
+    expect(
+      keys.filter((key) => js.includes(`"${key}"`) || js.includes(`'${key}'`)),
+    ).toEqual([]);
+  });
+
+  it('carries no Managed task-panel strings or lookups', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js.includes('managed.tasks.')).toBe(false);
+  });
+
+  it('keeps remote Workspace registration copy in the interactive entry', () => {
+    expect(readPackageJavascript()).toContain('managed.remoteWorkspaceAdd');
+    expect(readTranscriptBundle()).not.toContain('managed.remoteWorkspace');
+  });
+
   it('carries no settings strings and looks none up', () => {
     // Same contract as the Live Voice stub above, for
     // client/settings/messages.ts: a settings.* lookup here would render as
@@ -436,6 +645,32 @@ describe('build artifact — transcript entry (#11031)', () => {
       '',
     );
     expect(js).not.toMatch(/["'`]settings\./);
+  });
+
+  it('keeps MCP App message review strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(/["'`]mcpApp\.message\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('mcpApp.message.title');
+    expect(interactive).toContain('Review App message');
+    expect(interactive).toContain('审阅 App 消息');
+  });
+
+  it('keeps trajectory chrome strings in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toMatch(
+      /["'`]trajectory\.(filter|window|summary|pill|boundary|about)\./,
+    );
+    expect(readPackageJavascript()).toContain('trajectory.window.return');
+    expect(readPackageJavascript()).toContain('trajectory.pill.live');
+    expect(readPackageJavascript()).toContain('trajectory.filter.search');
+    expect(readPackageJavascript()).toContain('Search loaded records');
   });
 
   it('still carries what a transcript actually renders', () => {

@@ -21,6 +21,18 @@ import {
 } from './execution-worker.js';
 import { ToolNames } from '../tools/tool-names.js';
 
+/** Prepares one tool call and executes it under the same signal. */
+async function run(
+  environment: ExecutionEnvironment,
+  id: string,
+  toolName: string,
+  params: Record<string, unknown>,
+) {
+  const signal = new AbortController().signal;
+  await environment.prepare({ id, toolName, params }, signal);
+  return environment.execute(id, signal);
+}
+
 describe('execution worker protocol', () => {
   it.each([undefined, '1'])(
     'does not claim artifact registration with legacy enable override %s',
@@ -34,23 +46,14 @@ describe('execution worker protocol', () => {
         truncateToolOutputLines: 100,
         fileReadCacheDisabled: false,
       });
-      const signal = new AbortController().signal;
       const file = join(workspace, 'report.html');
       const content = '<h1>Report</h1>';
       try {
-        await environment.prepare(
-          {
-            id: 'write',
-            toolName: ToolNames.WRITE_FILE,
-            params: {
-              file_path: file,
-              content,
-              record_as_artifact: true,
-            },
-          },
-          signal,
-        );
-        const result = await environment.execute('write', signal);
+        const result = await run(environment, 'write', ToolNames.WRITE_FILE, {
+          file_path: file,
+          content,
+          record_as_artifact: true,
+        });
         expect(result.error).toBeUndefined();
         expect(result.llmContent).toContain('Successfully created');
         expect(result.llmContent).not.toContain(
@@ -82,35 +85,23 @@ describe('execution worker protocol', () => {
       },
       defaultFileEncoding: 'utf-8-bom',
     });
-    const signal = new AbortController().signal;
     try {
       await writeFile(join(workspace, '.customignore'), 'hidden.txt\n');
       await writeFile(join(workspace, 'hidden.txt'), 'hidden');
       await writeFile(join(workspace, 'visible.txt'), 'visible');
-      await environment.prepare(
-        {
-          id: 'glob',
-          toolName: ToolNames.GLOB,
-          params: { pattern: '*.txt', path: workspace },
-        },
-        signal,
-      );
-      const glob = await environment.execute('glob', signal);
+      const glob = await run(environment, 'glob', ToolNames.GLOB, {
+        pattern: '*.txt',
+        path: workspace,
+      });
       expect(glob.error).toBeUndefined();
       expect(glob.llmContent).toContain('visible.txt');
       expect(glob.llmContent).not.toContain('hidden.txt');
       const file = join(workspace, 'new.txt');
-      await environment.prepare(
-        {
-          id: 'write',
-          toolName: ToolNames.WRITE_FILE,
-          params: { file_path: file, content: 'new content' },
-        },
-        signal,
-      );
-      expect(
-        (await environment.execute('write', signal)).error,
-      ).toBeUndefined();
+      const write = await run(environment, 'write', ToolNames.WRITE_FILE, {
+        file_path: file,
+        content: 'new content',
+      });
+      expect(write.error).toBeUndefined();
       expect((await readFile(file)).subarray(0, 3).toString('hex')).toBe(
         'efbbbf',
       );
@@ -135,20 +126,11 @@ describe('execution worker protocol', () => {
       const environment = createExecutionWorkerEnvironment(
         JSON.parse(JSON.stringify(options)),
       );
-      const signal = new AbortController().signal;
       try {
-        await environment.prepare(
-          {
-            id: 'output',
-            toolName: ToolNames.SHELL,
-            params: {
-              command: `node -e "process.stdout.write('x'.repeat(35000))"`,
-              is_background: false,
-            },
-          },
-          signal,
-        );
-        const result = await environment.execute('output', signal);
+        const result = await run(environment, 'output', ToolNames.SHELL, {
+          command: `node -e "process.stdout.write('x'.repeat(35000))"`,
+          is_background: false,
+        });
         expect(result.error).toBeUndefined();
         if (threshold === undefined) {
           expect(result.persistedOutputFiles).toHaveLength(1);
@@ -185,20 +167,11 @@ describe('execution worker protocol', () => {
       ...options,
       sessionId: 'install-test',
     });
-    const signal = new AbortController().signal;
     try {
-      await install.prepare(
-        {
-          id: 'install-log',
-          toolName: ToolNames.SHELL,
-          params: {
-            command: `node -e "process.stdout.write('log-entry\\n'.repeat(6000))"`,
-            is_background: false,
-          },
-        },
-        signal,
-      );
-      const result = await install.execute('install-log', signal);
+      const result = await run(install, 'install-log', ToolNames.SHELL, {
+        command: `node -e "process.stdout.write('log-entry\\n'.repeat(6000))"`,
+        is_background: false,
+      });
       const outputFile = result.persistedOutputFiles?.[0];
       expect(outputFile).toBeDefined();
       expect(outputFile).toMatch(outputDirectory);
@@ -206,15 +179,9 @@ describe('execution worker protocol', () => {
       expect(await readFile(outputFile!, 'utf8')).toContain(
         'log-entry\n'.repeat(6000),
       );
-      await primary.prepare(
-        {
-          id: 'read-log',
-          toolName: ToolNames.READ_FILE,
-          params: { file_path: outputFile },
-        },
-        signal,
-      );
-      const read = await primary.execute('read-log', signal);
+      const read = await run(primary, 'read-log', ToolNames.READ_FILE, {
+        file_path: outputFile,
+      });
       expect(read.error).toBeUndefined();
       expect(read.llmContent).toContain('log-entry');
     } finally {

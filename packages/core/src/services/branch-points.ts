@@ -6,6 +6,7 @@
 
 import type { Part } from '@google/genai';
 import type { ChatRecord } from './chatRecordingService.js';
+import { isInternalCodeModeToolResult } from '../utils/transcript-records.js';
 
 export type BranchPointRecord = Pick<
   ChatRecord,
@@ -38,6 +39,7 @@ function nonEmptyString(value: unknown): string | undefined {
 }
 
 function parts(record: BranchPointRecord): readonly Part[] {
+  if (isInternalCodeModeToolResult(record)) return [];
   // Transcript JSONL can contain null part elements; validation only checks
   // that parts is an array, so skip non-object entries before dereferencing.
   return ((record.message?.parts ?? []) as unknown[]).filter(
@@ -152,7 +154,11 @@ function resolveCompletedTurnBranchCandidateInRange(input: {
     const record = activeChain[index]!;
     pendingCalls.push(...functionCalls(record));
     const responses = functionResponses(record);
-    if (record.type === 'tool_result' || responses.length > 0) {
+    if (
+      (record.type === 'tool_result' &&
+        !isInternalCodeModeToolResult(record)) ||
+      responses.length > 0
+    ) {
       lastToolResultIndex = index;
     }
     for (const response of responses) {

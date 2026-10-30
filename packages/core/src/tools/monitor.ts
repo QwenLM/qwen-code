@@ -36,6 +36,7 @@ import type {
 import type { PermissionDecision } from '../permissions/types.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
 import { getErrorMessage } from '../utils/errors.js';
+import { ToolErrorType } from '../utils/tool-error-type.js';
 import {
   buildOutsideWorkspaceWarning,
   buildShellExecWarnings,
@@ -96,6 +97,9 @@ const STRUCTURAL_ENVELOPE_TAGS = new Set([
   'event-count',
   'summary',
   'result',
+  // Wrappers of a scheduled task's gate output (services/cron-gate.ts).
+  'gate-output',
+  'gate-stderr',
 ]);
 
 const STRUCTURAL_TAG_REGEX = /<(\/?)([a-zA-Z][a-zA-Z0-9-]*)>/g;
@@ -351,9 +355,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
     // Check concurrent monitor limit before spawning
     const running = registry.getRunning();
     if (running.length >= MAX_CONCURRENT_MONITORS) {
+      const message = `Cannot start monitor: maximum concurrent monitors (${MAX_CONCURRENT_MONITORS}) reached. Stop an existing monitor first.`;
       return {
-        llmContent: `Cannot start monitor: maximum concurrent monitors (${MAX_CONCURRENT_MONITORS}) reached. Stop an existing monitor first.`,
+        llmContent: message,
         returnDisplay: `Monitor rejected: too many concurrent monitors.`,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
 
@@ -407,9 +413,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
           },
         });
     } catch (err) {
+      const message = `Monitor failed to start: ${getErrorMessage(err)}`;
       return {
-        llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
+        llmContent: message,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
 
@@ -549,9 +557,11 @@ class MonitorToolInvocation extends BaseToolInvocation<
       )?.destroy?.();
       child?.removeListener('error', captureEarlySpawnError);
       child?.on('error', () => {});
+      const message = `Monitor failed to start: ${getErrorMessage(err)}`;
       return {
-        llmContent: `Monitor failed to start: ${getErrorMessage(err)}`,
+        llmContent: message,
         returnDisplay: `Monitor failed: ${getErrorMessage(err)}`,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
 
@@ -725,19 +735,22 @@ class MonitorToolInvocation extends BaseToolInvocation<
         );
       } catch (error) {
         onError(error instanceof Error ? error : new Error(String(error)));
+        const message = `Monitor failed to start: ${getErrorMessage(error)}`;
         return {
-          llmContent: `Monitor failed to start: ${getErrorMessage(error)}`,
+          llmContent: message,
           returnDisplay: `Monitor failed: ${getErrorMessage(error)}`,
-          error: { message: getErrorMessage(error) },
+          error: { message, type: ToolErrorType.EXECUTION_FAILED },
         };
       }
     }
 
     if (earlySpawnError) {
       onError(earlySpawnError);
+      const message = `Monitor failed to start: ${getErrorMessage(earlySpawnError)}`;
       return {
-        llmContent: `Monitor failed to start: ${getErrorMessage(earlySpawnError)}`,
+        llmContent: message,
         returnDisplay: `Monitor failed: ${getErrorMessage(earlySpawnError)}`,
+        error: { message, type: ToolErrorType.EXECUTION_FAILED },
       };
     }
 
@@ -767,7 +780,7 @@ export class MonitorTool extends BaseDeclarativeTool<
     super(
       MonitorTool.Name,
       ToolDisplayNames.MONITOR,
-      'Starts a long-running shell command and streams its stdout/stderr as event notifications back to you.\n\n' +
+      'Runs a command and pushes each output line to you as an event (logs, watch builds, polling loops); is_background notifies you only once, when it exits.\n\n' +
         'Use this tool for:\n' +
         '- Watching log files: `tail -f /var/log/app.log`\n' +
         '- Monitoring build output: `npm run build --watch`\n' +

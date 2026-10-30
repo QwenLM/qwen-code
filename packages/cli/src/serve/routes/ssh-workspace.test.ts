@@ -540,6 +540,7 @@ describe.skipIf(process.platform === 'win32')(
         '/voice',
         '/voice/transcribe',
         '/trust/request',
+        '/trust/grant',
         '/permissions',
         '/runtime/ensure',
         '/runtime/stop',
@@ -572,9 +573,9 @@ describe.skipIf(process.platform === 'win32')(
         expect((await supertest(app).get(url(suffix))).status).toBe(501);
       }
       registry.beginDrain(runtime);
-      expect((await supertest(app).post(url('/trust/request'))).status).toBe(
-        599,
-      );
+      for (const suffix of ['/trust/request', '/trust/grant']) {
+        expect((await supertest(app).post(url(suffix))).status).toBe(599);
+      }
       expect(ssh.execute).not.toHaveBeenCalled();
     });
 

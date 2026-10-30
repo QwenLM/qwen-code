@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { registerManagedPackagePreparation } from './managed-package-preparation.js';
 import * as crypto from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
@@ -26,6 +27,7 @@ import {
   qualifySkillName,
   validateSkillName,
 } from '@qwen-code/qwen-code-core';
+import { isNpmPackage } from '@qwen-code/qwen-code-core/extension/npm.js';
 import express, {
   type Application,
   type Request,
@@ -43,7 +45,10 @@ import { createFifoTaskQueue } from '../extension-operation-scheduler.js';
 import { isBlockedAuthProviderHost } from '../server/auth-provider-helpers.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import type { safeBody as safeBodyType } from '../server/request-helpers.js';
-import { MAX_SKILL_NAME_LENGTH } from '../server/request-helpers.js';
+import {
+  MAX_SKILL_NAME_LENGTH,
+  parseRefreshSessionIds,
+} from '../server/request-helpers.js';
 import {
   isPortableAbsolutePath,
   requireTrustedWorkspaceRuntime,
@@ -508,6 +513,12 @@ interface RegisterWorkspaceExtensionRoutesDeps {
   maxExtensionOperationHistory?: number;
   isWorkspaceTrusted?: () => boolean;
   captureGenerationAssertion?: () => (() => void) | undefined;
+  /**
+   * The primary runtime's resolved environment, forwarded to the primary
+   * workspace's controller so its telemetry consent and proxy reads resolve
+   * against that runtime instead of the daemon's shared `process.env`.
+   */
+  env?: Readonly<NodeJS.ProcessEnv>;
   // Enables V2 workspace projection and targeted reconciliation routes.
   workspaceRegistry?: WorkspaceRegistry;
   conversationRuntimeActivity?: ConversationRuntimeActivityGate;
@@ -557,6 +568,18 @@ export function registerWorkspaceExtensionRoutes(
       ...(ws === boundWorkspace && deps.captureGenerationAssertion
         ? { captureGenerationAssertion: deps.captureGenerationAssertion }
         : {}),
+      // `deps.env` is the PRIMARY runtime's environment. Restricting it to the
+      // primary controller is a construction-time guard, not the whole
+      // scoping: that one controller also builds managers for OTHER hosted
+      // workspaces (`createExtensionManager(runtime.workspaceCwd, …)`), and it
+      // re-checks per manager, applying the env only when `workspaceDir ===
+      // boundWorkspace`. A secondary workspace therefore never resolves
+      // anything from the primary's env: its proxy comes from its own settings
+      // alone, and its consent from its own settings plus a daemon-wide
+      // ambient opt-out — an ambient opt-IN is not its choice and is refused
+      // (see `consentEnv` in `workspace-extensions-controller.ts`). It does
+      // not get its own runtime env either, which is not visible from here.
+      ...(ws === boundWorkspace && deps.env ? { env: deps.env } : {}),
       ...(maxExtensionOperationHistory === undefined
         ? {}
         : { maxExtensionOperationHistory }),
@@ -840,6 +863,7 @@ export function registerWorkspaceExtensionRoutes(
   }
 
   const registerFor = (base: string, resolve: ResolveController): void => {
+    registerManagedPackagePreparation(app, base, resolve, mutate);
     // GET {base} — read-only installed extension status.
     app.get(base, async (req, res) => {
       const assertGenerationOpen = deps.captureGenerationAssertion?.();
@@ -852,6 +876,43 @@ export function registerWorkspaceExtensionRoutes(
         res.status(200).json(status);
       } catch (err) {
         sendBridgeError(res, err, { route: `GET ${base}` });
+      }
+    });
+
+    app.get(`${base}/summary`, async (req, res) => {
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
+      const ctrl = resolve(req, res, false);
+      if (!ctrl) return;
+      try {
+        assertGenerationOpen?.();
+        const status = await ctrl.buildLocalExtensionSummaries();
+        assertGenerationOpen?.();
+        res.status(200).json(status);
+      } catch (err) {
+        sendBridgeError(res, err, { route: `GET ${base}/summary` });
+      }
+    });
+
+    app.get(`${base}/:name/details`, async (req, res) => {
+      const assertGenerationOpen = deps.captureGenerationAssertion?.();
+      const ctrl = resolve(req, res, false);
+      if (!ctrl) return;
+      try {
+        assertGenerationOpen?.();
+        const extension = await ctrl.buildLocalExtensionDetails(
+          req.params['name']!,
+        );
+        assertGenerationOpen?.();
+        if (!extension) {
+          res.status(404).json({
+            error: 'Extension not found',
+            code: 'extension_not_found',
+          });
+          return;
+        }
+        res.status(200).json(extension);
+      } catch (err) {
+        sendBridgeError(res, err, { route: `GET ${base}/:name/details` });
       }
     });
 
@@ -1252,7 +1313,8 @@ export function registerWorkspaceExtensionRoutes(
             return;
           }
         }
-        const npmSource = sourceValue.startsWith('@');
+        const npmSource =
+          sourceValue.startsWith('@') || isNpmPackage(sourceValue);
         const remoteSource =
           npmSource ||
           sourceValue.startsWith('https://') ||
@@ -1457,6 +1519,8 @@ export function registerWorkspaceExtensionRoutes(
       const ctrl = resolve(req, res, true);
       if (!ctrl) return;
       try {
+        const input = parseRefreshSessionIds(req.body, res, bridge);
+        if (!input) return;
         if (
           !ctrl.validateExtensionMutationClient(req, res, {
             requireClientId: false,
@@ -1467,7 +1531,9 @@ export function registerWorkspaceExtensionRoutes(
         const releaseOperationSlot = ctrl.acquireOperationSlot(res);
         if (!releaseOperationSlot) return;
         try {
-          const result = await ctrl.refreshExtensionsForAllSessions();
+          const result = await ctrl.refreshExtensionsForAllSessions(
+            input.sessionIds,
+          );
           res.status(200).json(result);
         } finally {
           releaseOperationSlot();
@@ -1810,6 +1876,7 @@ export function registerWorkspaceExtensionRoutes(
         | (() => readonly WorkspaceRuntime[]);
       skipRefresh?: boolean;
       skillsOnly?: boolean;
+      sessionIds?: readonly string[];
       deadlineMs?: number;
       assertGenerationOpen?: () => void;
     } = {},
@@ -2673,6 +2740,16 @@ export function registerWorkspaceExtensionRoutes(
       (req, res) => {
         const runtime = resolveWorkspaceRuntimeFromParam(registry, req, res);
         if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+        let input: { sessionIds?: string[] } | undefined;
+        try {
+          input = parseRefreshSessionIds(req.body, res, runtime.bridge);
+        } catch (error) {
+          sendBridgeError(res, error, {
+            route: 'POST /workspaces/:workspace/extensions/refresh',
+          });
+          return;
+        }
+        if (!input) return;
         const manager = primaryController.createExtensionManager(
           runtime.workspaceCwd,
           true,
@@ -2687,6 +2764,9 @@ export function registerWorkspaceExtensionRoutes(
           async () => ({ status: 'refreshed' }),
           {
             refreshRuntimes: [runtime],
+            ...(input.sessionIds !== undefined
+              ? { sessionIds: input.sessionIds }
+              : {}),
             assertGenerationOpen: () => runtime.generationGuard?.assertOpen(),
           },
         );

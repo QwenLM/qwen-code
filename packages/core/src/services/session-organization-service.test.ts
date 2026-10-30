@@ -12,6 +12,10 @@ import {
   GROUP_COLOR_OPTIONS,
   SessionOrganizationService,
 } from './session-organization-service.js';
+import type {
+  CreateSessionGroupInput,
+  UpdateSessionOrganizationInput,
+} from './session-organization-service.js';
 
 describe('SessionOrganizationService', () => {
   let previousRuntimeDir: string | undefined;
@@ -22,15 +26,44 @@ describe('SessionOrganizationService', () => {
   const cwd = '/workspace/project';
   const sessionIdA = '550e8400-e29b-41d4-a716-446655440000';
   const sessionIdB = '6ba7b810-9dad-11d1-80b4-00c04fd430c8';
+  const T = '2026-01-01T00:00:00.000Z';
+
+  /** A service over the same store that reports into `warnings`. */
+  const newService = () =>
+    new SessionOrganizationService(cwd, (warning) => {
+      warnings.push(warning);
+    });
+  const group = (name: string, color: CreateSessionGroupInput['color']) =>
+    service.createGroup({ name, color });
+  const updateOrg = (id: string, input: UpdateSessionOrganizationInput) =>
+    service.updateSessionOrganization(id, input);
+  const sessionEntry = async (id: string) =>
+    (await service.readSnapshot()).sessions.get(id);
+  const storedGroup = (id: string, name: string, color: string, order = 0) => ({
+    id,
+    name,
+    color,
+    order,
+    createdAt: T,
+    updatedAt: T,
+  });
+
+  async function writeStore(content: string): Promise<void> {
+    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
+    await fs.writeFile(service.getStorePath(), content, 'utf8');
+  }
+  const seedStore = (
+    groups: unknown[],
+    sessions: Record<string, unknown>,
+    schemaVersion = 1,
+  ) => writeStore(JSON.stringify({ schemaVersion, groups, sessions }));
 
   beforeEach(async () => {
     previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
     runtimeDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-org-'));
     process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
     warnings = [];
-    service = new SessionOrganizationService(cwd, (warning) => {
-      warnings.push(warning);
-    });
+    service = newService();
   });
 
   afterEach(async () => {
@@ -50,24 +83,17 @@ describe('SessionOrganizationService', () => {
   });
 
   it('creates, updates, and rejects duplicate group names case-insensitively', async () => {
-    const group = await service.createGroup({
-      name: ' Frontend ',
-      color: 'blue',
-    });
+    const created = await group(' Frontend ', 'blue');
 
-    expect(group).toEqual(
-      expect.objectContaining({
-        name: 'Frontend',
-        color: 'blue',
-        order: 0,
-      }),
+    expect(created).toEqual(
+      expect.objectContaining({ name: 'Frontend', color: 'blue', order: 0 }),
     );
 
-    await expect(
-      service.createGroup({ name: 'frontend', color: 'green' }),
-    ).rejects.toMatchObject({ code: 'group_name_conflict' });
+    await expect(group('frontend', 'green')).rejects.toMatchObject({
+      code: 'group_name_conflict',
+    });
 
-    const renamed = await service.updateGroup(group.id, {
+    const renamed = await service.updateGroup(created.id, {
       name: 'UI',
       color: 'purple',
       order: 5,
@@ -75,7 +101,7 @@ describe('SessionOrganizationService', () => {
 
     expect(renamed).toEqual(
       expect.objectContaining({
-        id: group.id,
+        id: created.id,
         name: 'UI',
         color: 'purple',
         order: 5,
@@ -84,13 +110,10 @@ describe('SessionOrganizationService', () => {
   });
 
   it('accepts and normalizes custom hex colors for named groups', async () => {
-    const group = await service.createGroup({
-      name: 'Custom',
-      color: ' #12ABef ' as never,
-    });
-    expect(group.color).toBe('#12abef');
+    const created = await group('Custom', ' #12ABef ' as never);
+    expect(created.color).toBe('#12abef');
 
-    const updated = await service.updateGroup(group.id, {
+    const updated = await service.updateGroup(created.id, {
       color: ' #FEDCBA ' as never,
     });
     expect(updated.color).toBe('#fedcba');
@@ -104,124 +127,60 @@ describe('SessionOrganizationService', () => {
   });
 
   it('rejects invalid group names and colors', async () => {
-    await expect(
-      service.createGroup({ name: 'Bad\tName', color: 'blue' }),
-    ).rejects.toMatchObject({
-      code: 'invalid_group_name',
-      field: 'name',
-    });
-
-    await expect(
-      service.createGroup({ name: 'Bad\u007fName', color: 'blue' }),
-    ).rejects.toMatchObject({
-      code: 'invalid_group_name',
-      field: 'name',
-    });
-
-    await expect(
-      service.createGroup({ name: '\u200b', color: 'blue' }),
-    ).rejects.toMatchObject({
-      code: 'invalid_group_name',
-      field: 'name',
-    });
-
-    await expect(
-      service.createGroup({ name: 'Bad\u202eName', color: 'blue' }),
-    ).rejects.toMatchObject({
-      code: 'invalid_group_name',
-      field: 'name',
-    });
-
-    await expect(
-      service.createGroup({ name: 'Feature', color: 'pink' as never }),
-    ).rejects.toMatchObject({
-      code: 'invalid_group_color',
-      field: 'color',
-    });
-
-    await expect(
-      service.createGroup({ name: 'Short Hex', color: '#abc' }),
-    ).rejects.toMatchObject({
-      code: 'invalid_group_color',
-      field: 'color',
-    });
+    for (const name of ['Bad\tName', 'Bad\u007fName', '​', 'Bad‮Name']) {
+      await expect(group(name, 'blue')).rejects.toMatchObject({
+        code: 'invalid_group_name',
+        field: 'name',
+      });
+    }
+    for (const [name, color] of [
+      ['Feature', 'pink'],
+      ['Short Hex', '#abc'],
+    ]) {
+      await expect(group(name, color as never)).rejects.toMatchObject({
+        code: 'invalid_group_color',
+        field: 'color',
+      });
+    }
   });
 
   it('assigns new group order after the current maximum order', async () => {
-    const first = await service.createGroup({ name: 'First', color: 'red' });
-    const second = await service.createGroup({
-      name: 'Second',
-      color: 'green',
-    });
+    const first = await group('First', 'red');
+    const second = await group('Second', 'green');
     await service.updateGroup(second.id, { order: 10 });
     await service.deleteGroup(first.id);
 
-    const third = await service.createGroup({ name: 'Third', color: 'blue' });
+    const third = await group('Third', 'blue');
 
     expect(third.order).toBe(11);
   });
 
   it('clamps new group order at the maximum safe integer', async () => {
-    const first = await service.createGroup({ name: 'First', color: 'red' });
+    const first = await group('First', 'red');
     await service.updateGroup(first.id, { order: Number.MAX_SAFE_INTEGER });
 
-    const second = await service.createGroup({
-      name: 'Second',
-      color: 'green',
-    });
+    const second = await group('Second', 'green');
 
     expect(second.order).toBe(Number.MAX_SAFE_INTEGER);
   });
 
   it('rejects creating more than 200 groups', async () => {
-    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
-    await fs.writeFile(
-      service.getStorePath(),
-      JSON.stringify({
-        schemaVersion: 1,
-        groups: Array.from({ length: 200 }, (_, index) => ({
-          id: `group-${index}`,
-          name: `Group ${index}`,
-          color: 'blue',
-          order: index,
-          createdAt: '2026-01-01T00:00:00.000Z',
-          updatedAt: '2026-01-01T00:00:00.000Z',
-        })),
-        sessions: {},
-      }),
-      'utf8',
+    await seedStore(
+      Array.from({ length: 200 }, (_, index) =>
+        storedGroup(`group-${index}`, `Group ${index}`, 'blue', index),
+      ),
+      {},
     );
 
-    await expect(
-      service.createGroup({ name: 'Overflow', color: 'red' }),
-    ).rejects.toMatchObject({ code: 'group_limit_reached' });
+    await expect(group('Overflow', 'red')).rejects.toMatchObject({
+      code: 'group_limit_reached',
+    });
   });
 
   it('keeps groups with unsupported stored colors by falling back and warning once', async () => {
-    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
-    await fs.writeFile(
-      service.getStorePath(),
-      JSON.stringify({
-        schemaVersion: 1,
-        groups: [
-          {
-            id: 'group-future',
-            name: 'Future',
-            color: 'teal',
-            order: 0,
-            createdAt: '2026-01-01T00:00:00.000Z',
-            updatedAt: '2026-01-01T00:00:00.000Z',
-          },
-        ],
-        sessions: {
-          [sessionIdA]: {
-            groupId: 'group-future',
-            updatedAt: '2026-01-01T00:00:00.000Z',
-          },
-        },
-      }),
-      'utf8',
-    );
+    await seedStore([storedGroup('group-future', 'Future', 'teal')], {
+      [sessionIdA]: { groupId: 'group-future', updatedAt: T },
+    });
 
     await expect(service.listGroups()).resolves.toEqual({
       groups: [
@@ -233,15 +192,10 @@ describe('SessionOrganizationService', () => {
       ],
       colorOptions: GROUP_COLOR_OPTIONS,
     });
-    const snapshot = await service.readSnapshot();
-    expect(snapshot.sessions.get(sessionIdA)).toEqual(
-      expect.objectContaining({
-        groupId: 'group-future',
-      }),
+    expect(await sessionEntry(sessionIdA)).toEqual(
+      expect.objectContaining({ groupId: 'group-future' }),
     );
-    await new SessionOrganizationService(cwd, (warning) => {
-      warnings.push(warning);
-    }).listGroups();
+    await newService().listGroups();
 
     expect(warnings).toEqual([
       'Session group "Future" (id: group-future) uses unsupported color "teal"; using "blue"',
@@ -249,41 +203,16 @@ describe('SessionOrganizationService', () => {
   });
 
   it('warns when dropping duplicate group names from the sidecar', async () => {
-    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
-    await fs.writeFile(
-      service.getStorePath(),
-      JSON.stringify({
-        schemaVersion: 1,
-        groups: [
-          {
-            id: 'group-a',
-            name: 'Work',
-            color: 'red',
-            order: 0,
-            createdAt: '2026-01-01T00:00:00.000Z',
-            updatedAt: '2026-01-01T00:00:00.000Z',
-          },
-          {
-            id: 'group-b',
-            name: 'work',
-            color: 'blue',
-            order: 1,
-            createdAt: '2026-01-01T00:00:00.000Z',
-            updatedAt: '2026-01-01T00:00:00.000Z',
-          },
-        ],
-        sessions: {},
-      }),
-      'utf8',
+    await seedStore(
+      [
+        storedGroup('group-a', 'Work', 'red'),
+        storedGroup('group-b', 'work', 'blue', 1),
+      ],
+      {},
     );
 
     await expect(service.listGroups()).resolves.toEqual({
-      groups: [
-        expect.objectContaining({
-          id: 'group-a',
-          name: 'Work',
-        }),
-      ],
+      groups: [expect.objectContaining({ id: 'group-a', name: 'Work' })],
       colorOptions: GROUP_COLOR_OPTIONS,
     });
     expect(warnings).toEqual([
@@ -292,58 +221,42 @@ describe('SessionOrganizationService', () => {
   });
 
   it('pins sessions and assigns them to a single custom group', async () => {
-    const group = await service.createGroup({ name: 'Release', color: 'red' });
+    const release = await group('Release', 'red');
 
-    const org = await service.updateSessionOrganization(sessionIdA, {
+    const org = await updateOrg(sessionIdA, {
       isPinned: true,
-      groupId: group.id,
+      groupId: release.id,
     });
 
     expect(org).toEqual(
-      expect.objectContaining({
-        groupId: group.id,
-        isPinned: true,
-      }),
+      expect.objectContaining({ groupId: release.id, isPinned: true }),
     );
     expect(org.pinnedAt).toEqual(expect.any(String));
-
-    const snapshot = await service.readSnapshot();
-    expect(snapshot.sessions.get(sessionIdA)).toEqual(
-      expect.objectContaining({
-        groupId: group.id,
-        isPinned: true,
-      }),
+    expect(await sessionEntry(sessionIdA)).toEqual(
+      expect.objectContaining({ groupId: release.id, isPinned: true }),
     );
   });
 
   it('unpins a session and clears pinnedAt', async () => {
-    await service.updateSessionOrganization(sessionIdA, { isPinned: true });
+    await updateOrg(sessionIdA, { isPinned: true });
 
-    const org = await service.updateSessionOrganization(sessionIdA, {
-      isPinned: false,
-    });
+    const org = await updateOrg(sessionIdA, { isPinned: false });
 
     expect(org).toEqual(
-      expect.objectContaining({
-        groupId: null,
-        isPinned: false,
-      }),
+      expect.objectContaining({ groupId: null, isPinned: false }),
     );
     expect(org.pinnedAt).toBeUndefined();
-    const snapshot = await service.readSnapshot();
-    expect(snapshot.sessions.get(sessionIdA)).toEqual(
+    expect(await sessionEntry(sessionIdA)).toEqual(
       expect.objectContaining({ isPinned: false }),
     );
   });
 
   it('treats an empty session organization update as a no-op', async () => {
-    const pinned = await service.updateSessionOrganization(sessionIdA, {
-      isPinned: true,
-    });
+    const pinned = await updateOrg(sessionIdA, { isPinned: true });
     const storeBefore = await fs.readFile(service.getStorePath(), 'utf8');
     await new Promise((resolve) => setTimeout(resolve, 5));
 
-    const org = await service.updateSessionOrganization(sessionIdA, {});
+    const org = await updateOrg(sessionIdA, {});
 
     expect(org).toEqual(pinned);
     await expect(fs.readFile(service.getStorePath(), 'utf8')).resolves.toBe(
@@ -357,24 +270,16 @@ describe('SessionOrganizationService', () => {
     ).rejects.toMatchObject({ code: 'group_not_found', field: 'groupId' });
 
     await expect(
-      service.updateSessionOrganization(sessionIdA, {
-        groupId: 'missing-group',
-      }),
+      updateOrg(sessionIdA, { groupId: 'missing-group' }),
     ).rejects.toMatchObject({ code: 'group_not_found', field: 'groupId' });
   });
 
   it('deleting a group clears session references without losing pinned state', async () => {
-    const group = await service.createGroup({
-      name: 'Research',
-      color: 'yellow',
-    });
-    await service.updateSessionOrganization(sessionIdA, {
-      isPinned: true,
-      groupId: group.id,
-    });
-    await service.updateSessionOrganization(sessionIdB, { groupId: group.id });
+    const research = await group('Research', 'yellow');
+    await updateOrg(sessionIdA, { isPinned: true, groupId: research.id });
+    await updateOrg(sessionIdB, { groupId: research.id });
 
-    await service.deleteGroup(group.id);
+    await service.deleteGroup(research.id);
 
     const snapshot = await service.readSnapshot();
     expect(snapshot.groups).toEqual([]);
@@ -387,116 +292,65 @@ describe('SessionOrganizationService', () => {
   });
 
   it('assigns and clears a quick color grouping tag', async () => {
-    const assigned = await service.updateSessionOrganization(sessionIdA, {
-      color: 'green',
-    });
+    const assigned = await updateOrg(sessionIdA, { color: 'green' });
     expect(assigned).toEqual(
       expect.objectContaining({ color: 'green', groupId: null }),
     );
-
-    const snapshot = await service.readSnapshot();
-    expect(snapshot.sessions.get(sessionIdA)).toEqual(
+    expect(await sessionEntry(sessionIdA)).toEqual(
       expect.objectContaining({ color: 'green' }),
     );
 
-    const cleared = await service.updateSessionOrganization(sessionIdA, {
-      color: null,
-    });
+    const cleared = await updateOrg(sessionIdA, { color: null });
     expect(cleared.color).toBeNull();
-    const afterClear = await service.readSnapshot();
-    expect(afterClear.sessions.get(sessionIdA)?.color).toBeNull();
+    expect((await sessionEntry(sessionIdA))?.color).toBeNull();
   });
 
   it('rejects unsupported session colors', async () => {
-    await expect(
-      service.updateSessionOrganization(sessionIdA, {
-        color: 'pink' as never,
-      }),
-    ).rejects.toMatchObject({ code: 'invalid_group_color', field: 'color' });
-
-    await expect(
-      service.updateSessionOrganization(sessionIdA, {
-        color: '#12abef' as never,
-      }),
-    ).rejects.toMatchObject({ code: 'invalid_group_color', field: 'color' });
-
-    await expect(
-      service.updateSessionOrganization(sessionIdA, {
-        color: ' blue ' as never,
-      }),
-    ).rejects.toMatchObject({ code: 'invalid_group_color', field: 'color' });
+    for (const color of ['pink', '#12abef', ' blue ']) {
+      await expect(
+        updateOrg(sessionIdA, { color: color as never }),
+      ).rejects.toMatchObject({ code: 'invalid_group_color', field: 'color' });
+    }
   });
 
   it('keeps color, group, and pin independent in the store', async () => {
-    const group = await service.createGroup({ name: 'Docs', color: 'blue' });
+    const docs = await group('Docs', 'blue');
     // Core records exactly the fields provided; it never auto-clears the other
     // grouping dimension (the UI enforces the single-choice rule explicitly).
-    await service.updateSessionOrganization(sessionIdA, { groupId: group.id });
-    const withColor = await service.updateSessionOrganization(sessionIdA, {
+    await updateOrg(sessionIdA, { groupId: docs.id });
+    const withColor = await updateOrg(sessionIdA, {
       color: 'red',
       isPinned: true,
     });
     expect(withColor).toEqual(
       expect.objectContaining({
         color: 'red',
-        groupId: group.id,
+        groupId: docs.id,
         isPinned: true,
       }),
     );
   });
 
   it('normalizes unknown stored session colors to null', async () => {
-    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
-    await fs.writeFile(
-      service.getStorePath(),
-      JSON.stringify({
-        schemaVersion: 1,
-        groups: [],
-        sessions: {
-          [sessionIdA]: {
-            groupId: null,
-            color: 'teal',
-            updatedAt: '2026-01-01T00:00:00.000Z',
-          },
-        },
-      }),
-      'utf8',
-    );
+    await seedStore([], {
+      [sessionIdA]: { groupId: null, color: 'teal', updatedAt: T },
+    });
 
-    const snapshot = await service.readSnapshot();
-    expect(snapshot.sessions.get(sessionIdA)).toEqual(
+    expect(await sessionEntry(sessionIdA)).toEqual(
       expect.objectContaining({ color: null }),
     );
   });
 
   it('warns once when reading orphaned group references', async () => {
-    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
-    await fs.writeFile(
-      service.getStorePath(),
-      JSON.stringify({
-        schemaVersion: 1,
-        groups: [],
-        sessions: {
-          [sessionIdA]: {
-            groupId: 'missing-group',
-            updatedAt: '2026-01-01T00:00:00.000Z',
-          },
-        },
-      }),
-      'utf8',
-    );
+    await seedStore([], {
+      [sessionIdA]: { groupId: 'missing-group', updatedAt: T },
+    });
 
-    const snapshot = await service.readSnapshot();
-    expect(snapshot.sessions.get(sessionIdA)).toEqual(
-      expect.objectContaining({
-        groupId: null,
-        isPinned: false,
-      }),
+    expect(await sessionEntry(sessionIdA)).toEqual(
+      expect.objectContaining({ groupId: null, isPinned: false }),
     );
     await service.readSnapshot();
-    await new SessionOrganizationService(cwd, (warning) => {
-      warnings.push(warning);
-    }).readSnapshot();
+    await newService().readSnapshot();
 
     expect(warnings).toEqual([
       `Dropped orphaned session group reference: session ${sessionIdA} references missing group missing-group`,
@@ -504,24 +358,11 @@ describe('SessionOrganizationService', () => {
   });
 
   it('warns once when reading malformed session entries', async () => {
-    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
-    await fs.writeFile(
-      service.getStorePath(),
-      JSON.stringify({
-        schemaVersion: 1,
-        groups: [],
-        sessions: {
-          [sessionIdA]: 'bad-entry',
-        },
-      }),
-      'utf8',
-    );
+    await seedStore([], { [sessionIdA]: 'bad-entry' });
 
     const snapshot = await service.readSnapshot();
     expect(snapshot.sessions.has(sessionIdA)).toBe(false);
-    await new SessionOrganizationService(cwd, (warning) => {
-      warnings.push(warning);
-    }).readSnapshot();
+    await newService().readSnapshot();
 
     expect(warnings).toEqual([
       `Dropped malformed session organization entry: ${sessionIdA}`,
@@ -529,8 +370,7 @@ describe('SessionOrganizationService', () => {
   });
 
   it('treats a malformed sidecar as empty for reads and refuses to overwrite it', async () => {
-    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
-    await fs.writeFile(service.getStorePath(), '{not-json', 'utf8');
+    await writeStore('{not-json');
 
     await expect(service.listGroups()).resolves.toEqual({
       groups: [],
@@ -541,14 +381,12 @@ describe('SessionOrganizationService', () => {
     await service.listGroups();
     expect(warnings).toHaveLength(1);
 
-    await expect(
-      service.createGroup({ name: 'Fixed', color: 'orange' }),
-    ).rejects.toMatchObject({
+    await expect(group('Fixed', 'orange')).rejects.toMatchObject({
       code: 'session_organization_store_unreadable',
     });
-    await expect(
-      service.createGroup({ name: 'Fixed Again', color: 'orange' }),
-    ).rejects.toThrow('Delete the file to reset session organization');
+    await expect(group('Fixed Again', 'orange')).rejects.toThrow(
+      'Delete the file to reset session organization',
+    );
 
     await expect(fs.readFile(service.getStorePath(), 'utf8')).resolves.toBe(
       '{not-json',
@@ -556,16 +394,7 @@ describe('SessionOrganizationService', () => {
   });
 
   it('includes schema version details in unreadable store warnings', async () => {
-    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
-    await fs.writeFile(
-      service.getStorePath(),
-      JSON.stringify({
-        schemaVersion: 2,
-        groups: [],
-        sessions: {},
-      }),
-      'utf8',
-    );
+    await seedStore([], {}, 2);
 
     await expect(service.listGroups()).resolves.toEqual({
       groups: [],
@@ -580,14 +409,8 @@ describe('SessionOrganizationService', () => {
   });
 
   it('removes a session organization entry from the sidecar', async () => {
-    const group = await service.createGroup({
-      name: 'Cleanup',
-      color: 'purple',
-    });
-    await service.updateSessionOrganization(sessionIdA, {
-      isPinned: true,
-      groupId: group.id,
-    });
+    const cleanup = await group('Cleanup', 'purple');
+    await updateOrg(sessionIdA, { isPinned: true, groupId: cleanup.id });
 
     await service.removeSession(sessionIdA);
 
@@ -596,7 +419,7 @@ describe('SessionOrganizationService', () => {
   });
 
   it('checks the runtime generation before removing an organization entry', async () => {
-    await service.updateSessionOrganization(sessionIdA, { isPinned: true });
+    await updateOrg(sessionIdA, { isPinned: true });
     const generationClosed = new Error('generation closed');
 
     await expect(
@@ -610,18 +433,9 @@ describe('SessionOrganizationService', () => {
   });
 
   it('removes multiple session organization entries in one call', async () => {
-    const group = await service.createGroup({
-      name: 'Cleanup',
-      color: 'purple',
-    });
-    await service.updateSessionOrganization(sessionIdA, {
-      isPinned: true,
-      groupId: group.id,
-    });
-    await service.updateSessionOrganization(sessionIdB, {
-      isPinned: true,
-      groupId: group.id,
-    });
+    const cleanup = await group('Cleanup', 'purple');
+    await updateOrg(sessionIdA, { isPinned: true, groupId: cleanup.id });
+    await updateOrg(sessionIdB, { isPinned: true, groupId: cleanup.id });
 
     await service.removeSessions([sessionIdA, sessionIdB, sessionIdA]);
 

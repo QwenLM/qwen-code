@@ -44,7 +44,8 @@ issue 为 D2 规定的验收条件是：这六条路由改为 `implemented`；�
   limit、持久化的回放下限、`cursor_expired` 与 resync。这些属于 D3。
 - 持久化的归档与删除 operation（生命周期工作），以及上下文变更（W2）：它会提升
   `context_revision`，并报告 `state` 的其他取值。
-- AgentDefinition。在它落地之前只存在一个 agent revision。
+- AgentDefinition。D8a 已存储定义 revision；在 D8b 让会话固定已存储的
+  revision 之前，会话仍使用配置的 revision。
 
 ## 4. 决策
 

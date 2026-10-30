@@ -30,6 +30,7 @@ import {
   BranchWhilePromptActiveError,
   CdWhilePromptActiveError,
   InvalidClientIdError,
+  InvalidRewindTargetError,
   BridgeChannelQuarantinedError,
   InvalidPermissionOptionError,
   InvalidSessionMetadataError,
@@ -145,9 +146,11 @@ import { MultiClientPermissionMediator } from './permissionMediator.js';
 import {
   REQUESTED_SESSION_ID_META_KEY,
   SESSION_INITIALIZATION_DEADLINE_META_KEY,
+  MID_TURN_SEND_NOW_METHOD,
   MID_TURN_QUEUE_DRAIN_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
+  PROMPT_CANCEL_REASON_META_KEY,
   TODO_STOP_GUARD_CONTINUATION_CLAIM_METHOD,
   TODO_STOP_GUARD_QUEUE_RELEASE_METHOD,
   ACTIVE_WORK_CLOSE_RETRY_BASE_MS,
@@ -169,6 +172,498 @@ function deferred<T>(): {
   });
   return { promise, resolve, reject };
 }
+
+async function seedRewindTarget(
+  bridge: ReturnType<typeof makeBridge>,
+  handle: ChannelHandle,
+  sessionId: string,
+  promptId = 'prompt-1',
+  daemonPromptId = 'daemon-target',
+  supplyDirectory = true,
+): Promise<void> {
+  if (supplyDirectory) {
+    const original = handle.agent.extMethod.bind(handle.agent);
+    vi.spyOn(handle.agent, 'extMethod').mockImplementation((method, params) => {
+      if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+        handle.agent.extMethodCalls.push({ method, params });
+        return Promise.resolve({
+          snapshots: [{ promptId, daemonPromptId, turnIndex: 0 }],
+        });
+      }
+      return original(method, params);
+    });
+  }
+  await handle.agentConnection.sessionUpdate({
+    sessionId,
+    update: {
+      sessionUpdate: 'user_message_chunk',
+      content: { type: 'text', text: 'rewind target' },
+      _meta: { promptId: daemonPromptId },
+    },
+  });
+  await vi.waitFor(() => {
+    expect(
+      JSON.stringify(bridge.getSessionReplaySnapshot(sessionId)),
+    ).toContain(daemonPromptId);
+  });
+}
+
+describe('authoritative rewind replay', () => {
+  it.each(['complete', 'partial', 'repeated cursor', 'oversized'] as const)(
+    'recovers a paged restore before rewind only with a complete bounded prefix: %s',
+    async (failure) => {
+      const nativeRewind = vi.fn(() => ({
+        targetTurnIndex: 1,
+        filesChanged: [],
+        filesFailed: [],
+      }));
+      const frame = (name: string, id: number): BridgeEvent => ({
+        v: 1,
+        id,
+        type: 'session_update',
+        data: {
+          sessionUpdate: 'user_message_chunk',
+          content: { type: 'text', text: name },
+          _meta: { promptId: `daemon-${name}` },
+        },
+      });
+      const handle = makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              hasMore: true,
+              anchorRecordId: 'record-A',
+              updates: [
+                {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'A' },
+                  _meta: { promptId: 'daemon-A' },
+                },
+              ],
+            },
+          },
+        }),
+        extMethodImpl: (method, params) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots)
+            return {
+              snapshots: [
+                {
+                  promptId: 'native-A',
+                  daemonPromptId: 'daemon-A',
+                  turnIndex: 1,
+                },
+              ],
+            };
+          if (method === SERVE_STATUS_EXT_METHODS.sessionTranscript) {
+            if (!params['cursor'])
+              return {
+                v: 1,
+                sessionId: SESS_A,
+                events: [
+                  frame(
+                    failure === 'oversized' ? 'x'.repeat(10_000) : 'ROOT',
+                    1,
+                  ),
+                ],
+                nextCursor: 'next',
+                hasMore: true,
+              };
+            return {
+              v: 1,
+              sessionId: SESS_A,
+              events: [frame('A', 2)],
+              hasMore: failure === 'repeated cursor',
+              nextCursor: 'next',
+              ...(failure === 'partial' ? { partial: true } : {}),
+            };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind)
+            return nativeRewind();
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        compactedReplayMaxBytes: 4096,
+      });
+      try {
+        const session = await bridge.loadSession({
+          sessionId: SESS_A,
+          workspaceCwd: WS_A,
+          historyPageSize: 1,
+          historyReplay: 'response',
+        });
+        const before = bridge.getSessionReplaySnapshot(session.sessionId);
+        const result = bridge.rewindSession(session.sessionId, {
+          promptId: 'native-A',
+        });
+        if (failure === 'complete') {
+          await result;
+          expect(nativeRewind).toHaveBeenCalledOnce();
+          const replay = bridge.getSessionReplaySnapshot(session.sessionId);
+          expect(JSON.stringify(replay)).toContain('ROOT');
+          expect(JSON.stringify(replay)).not.toContain('daemon-A');
+        } else {
+          await expect(result).rejects.toBeInstanceOf(InvalidRewindTargetError);
+          expect(nativeRewind).not.toHaveBeenCalled();
+          expect(bridge.getSessionReplaySnapshot(session.sessionId)).toEqual(
+            before,
+          );
+        }
+      } finally {
+        await bridge.shutdown();
+      }
+    },
+  );
+  it.each([
+    { partial: true },
+    { replayError: 'persisted replay read failed' },
+    { hasMore: true, anchorRecordId: 'older-record' },
+  ])(
+    'refuses an incomplete restored replay before native mutation: %j',
+    async (flags) => {
+      const nativeRewind = vi.fn();
+      const handle = makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              ...flags,
+              updates: [
+                {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: 'restored A' },
+                  _meta: { promptId: 'daemon-A' },
+                },
+              ],
+            },
+          },
+        }),
+        extMethodImpl: (method) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            return {
+              snapshots: [
+                {
+                  promptId: 'native-A',
+                  daemonPromptId: 'daemon-A',
+                  turnIndex: 0,
+                },
+              ],
+            };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind)
+            nativeRewind();
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const session = await bridge.loadSession({
+          sessionId: SESS_A,
+          workspaceCwd: WS_A,
+          historyReplay: 'response',
+        });
+        const before = bridge.getSessionReplaySnapshot(session.sessionId);
+        expect(JSON.stringify(before)).toContain('restored A');
+        await expect(
+          bridge.rewindSession(session.sessionId, { promptId: 'native-A' }),
+        ).rejects.toBeInstanceOf(InvalidRewindTargetError);
+        expect(nativeRewind).not.toHaveBeenCalled();
+        expect(bridge.getSessionReplaySnapshot(session.sessionId)).toEqual(
+          before,
+        );
+      } finally {
+        await bridge.shutdown();
+      }
+    },
+  );
+
+  it.each([{ filesFailed: [] }, { filesFailed: ['locked.txt'] }])(
+    'replaces cached suffixes after conversation rewind (filesFailed=$filesFailed)',
+    async ({ filesFailed }) => {
+      let remaining = ['ROOT', 'A', 'B', 'C'];
+      const handle = makeChannel({
+        extMethodImpl: (method, params) => {
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            return {
+              snapshots: remaining.map((name, turnIndex) => ({
+                promptId: `native-${name}`,
+                daemonPromptId: `daemon-${name}`,
+                turnIndex,
+              })),
+            };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            const name = String(params['promptId']).replace('native-', '');
+            const targetTurnIndex = remaining.indexOf(name);
+            remaining = remaining.slice(0, targetTurnIndex);
+            return { targetTurnIndex, filesChanged: [], filesFailed };
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        for (const name of remaining) {
+          await bridge.sendPrompt(
+            session.sessionId,
+            {
+              sessionId: session.sessionId,
+              prompt: [
+                { type: 'text', text: name },
+                {
+                  type: 'resource_link',
+                  uri: `file:///tmp/${name}`,
+                  name: `${name}.txt`,
+                },
+              ],
+            },
+            undefined,
+            { promptId: `daemon-${name}` },
+          );
+          if (name === 'A') {
+            for (const source of [
+              'background_notification',
+              'mid_turn_message_injected',
+            ]) {
+              await handle.agentConnection.sessionUpdate({
+                sessionId: session.sessionId,
+                update: {
+                  sessionUpdate: 'user_message_chunk',
+                  content: { type: 'text', text: source },
+                  _meta: {
+                    promptId: 'daemon-A',
+                    source,
+                    qwenDiscreteMessage: true,
+                  },
+                },
+              });
+            }
+          }
+        }
+        const beforeId = bridge.getSessionLastEventId(session.sessionId);
+        const abort = new AbortController();
+        const nextRewind = (async () => {
+          for await (const event of bridge.subscribeEvents(session.sessionId, {
+            signal: abort.signal,
+          })) {
+            if (event.type === 'session_rewound') return event;
+          }
+          throw new Error('rewind event missing');
+        })();
+        const response = await bridge.rewindSession(session.sessionId, {
+          promptId: 'native-B',
+        });
+        expect(response.rewound).toBe(filesFailed.length === 0);
+        const first = await nextRewind;
+        abort.abort();
+        expect(first.id).toBeGreaterThan(beforeId);
+        const firstId = first.id!;
+        const firstData = first.data as {
+          replay: BridgeEvent[];
+          daemonPromptId: string;
+        };
+        expect(firstData.daemonPromptId).toBe('daemon-B');
+        expect(firstData.replay.length).toBeGreaterThan(0);
+        expect(
+          firstData.replay.every(
+            (frame) => frame.id !== undefined && frame.id > beforeId,
+          ),
+        ).toBe(true);
+        expect(
+          firstData.replay.every(
+            (frame) => frame.id !== undefined && frame.id < firstId,
+          ),
+        ).toBe(true);
+        const snapshot = bridge.getSessionReplaySnapshot(session.sessionId)!;
+        const cached = [...snapshot.compactedTurns, ...snapshot.liveJournal];
+        expect(cached).toEqual(firstData.replay);
+        const users = (frames: BridgeEvent[]) =>
+          frames
+            .filter((frame) => {
+              const data = frame.data as {
+                update?: {
+                  sessionUpdate?: string;
+                  content?: { text?: string };
+                  _meta?: { source?: string };
+                };
+              };
+              return (
+                data.update?.sessionUpdate === 'user_message_chunk' &&
+                data.update.content?.text &&
+                ![
+                  'background_notification',
+                  'mid_turn_message_injected',
+                ].includes(data.update._meta?.source ?? '')
+              );
+            })
+            .map(
+              (frame) =>
+                (frame.data as { update: { content: { text: string } } }).update
+                  .content.text,
+            );
+        expect(users(cached)).toEqual(['ROOT', 'A']);
+        expect(cached.some((frame) => frame.type === 'session_rewound')).toBe(
+          false,
+        );
+        // Reusing a surviving checkpoint after reseeding must not use stale event IDs.
+        await bridge.rewindSession(session.sessionId, { promptId: 'native-A' });
+        const second = bridge.getSessionReplaySnapshot(session.sessionId)!;
+        expect(
+          users([...second.compactedTurns, ...second.liveJournal]),
+        ).toEqual(['ROOT']);
+        await bridge.rewindSession(session.sessionId, {
+          promptId: 'native-ROOT',
+        });
+        const empty = bridge.getSessionReplaySnapshot(session.sessionId)!;
+        expect(users([...empty.compactedTurns, ...empty.liveJournal])).toEqual(
+          [],
+        );
+        expect(bridge.getSessionLastEventId(session.sessionId)).toBeGreaterThan(
+          firstId,
+        );
+        expect(
+          handle.agent.extMethodCalls.filter(
+            (call) => call.method === SERVE_CONTROL_EXT_METHODS.sessionRewind,
+          ),
+        ).toHaveLength(3);
+      } finally {
+        await bridge.shutdown();
+      }
+    },
+  );
+
+  it.each([
+    'missing mapping',
+    'duplicate mapping',
+    'duplicate daemon mapping',
+    'missing target',
+    'duplicate target',
+    'missing cache',
+    'degraded cache',
+    'truncated cache',
+  ])('refuses %s before native mutation', async (failure) => {
+    const nativeRewind = vi.fn(() => ({
+      targetTurnIndex: 0,
+      filesChanged: [],
+      filesFailed: [],
+    }));
+    const handle = makeChannel({
+      extMethodImpl: (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+          const target = { promptId: 'native-A', daemonPromptId: 'daemon-A' };
+          return {
+            snapshots:
+              failure === 'missing mapping'
+                ? []
+                : failure === 'duplicate mapping'
+                  ? [target, target]
+                  : failure === 'duplicate daemon mapping'
+                    ? [target, { ...target, promptId: 'native-B' }]
+                    : [target],
+          };
+        }
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind)
+          return nativeRewind();
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      for (const name of ['A', 'B']) {
+        await bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: name }],
+          },
+          undefined,
+          {
+            promptId:
+              failure === 'missing target' ? `other-${name}` : `daemon-${name}`,
+          },
+        );
+      }
+      if (failure === 'missing target') {
+        for (const source of [
+          'background_notification',
+          'mid_turn_message_injected',
+        ]) {
+          await handle.agentConnection.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: source },
+              _meta: {
+                promptId: 'daemon-A',
+                source,
+                qwenDiscreteMessage: true,
+              },
+            },
+          });
+        }
+        await vi.waitFor(() =>
+          expect(
+            JSON.stringify(bridge.getSessionReplaySnapshot(session.sessionId)),
+          ).toContain('mid_turn_message_injected'),
+        );
+      }
+      if (failure === 'duplicate target') {
+        await handle.agentConnection.sessionUpdate({
+          sessionId: session.sessionId,
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'duplicate ordinary A' },
+            _meta: { promptId: 'daemon-A' },
+          },
+        });
+        await vi.waitFor(() =>
+          expect(
+            JSON.stringify(bridge.getSessionReplaySnapshot(session.sessionId)),
+          ).toContain('duplicate ordinary A'),
+        );
+      }
+      const before = bridge.getSessionReplaySnapshot(session.sessionId)!;
+      if (
+        failure === 'missing cache' ||
+        failure === 'degraded cache' ||
+        failure === 'truncated cache'
+      ) {
+        const original = EventBus.prototype.snapshotReplay;
+        vi.spyOn(EventBus.prototype, 'snapshotReplay').mockImplementation(
+          function (this: EventBus, mode) {
+            if (failure === 'missing cache') return undefined;
+            const snapshot = original.call(this, mode);
+            if (!snapshot) return snapshot;
+            return failure === 'degraded cache'
+              ? { ...snapshot, degraded: true }
+              : {
+                  ...snapshot,
+                  compactedTurns: [
+                    { id: 0, v: 1, type: 'history_truncated', data: {} },
+                    ...snapshot.compactedTurns,
+                  ],
+                };
+          },
+        );
+      }
+      await expect(
+        bridge.rewindSession(session.sessionId, { promptId: 'native-A' }),
+      ).rejects.toBeInstanceOf(InvalidRewindTargetError);
+      expect(nativeRewind).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+      expect(bridge.getSessionReplaySnapshot(session.sessionId)).toEqual(
+        before,
+      );
+    } finally {
+      vi.restoreAllMocks();
+      await bridge.shutdown();
+    }
+  });
+});
 
 describe('sessionCloseDrainBudgetMs', () => {
   it('stays strictly under the outer wait and clamps to >=1ms', () => {
@@ -729,6 +1224,7 @@ describe('createAcpSessionBridge', () => {
         handle.agent.initializeCalls[0]?.clientCapabilities?._meta,
       ).toEqual({
         'qwen.goalProposals': true,
+        'qwen.mcpAppHost': true,
       });
 
       // No snapshot has arrived yet, so the session is "unknown": busy rather
@@ -856,8 +1352,14 @@ describe('createAcpSessionBridge', () => {
       expect(conditionalCloseCalls).toBe(0);
       expect(bridge.sessionCount).toBe(1);
 
-      // Direct close remains a force operation even when reporting is
-      // incomplete; only ordinary automatic cleanup is fail-closed.
+      await bridge.closeSession(session.sessionId, undefined, {
+        closeIfUnheld: true,
+      });
+      expect(conditionalCloseCalls).toBe(0);
+      expect(bridge.sessionCount).toBe(1);
+
+      // A direct conditional close is fail-closed here too; a plain direct
+      // close remains a force operation even when reporting is incomplete.
       await bridge.closeSession(session.sessionId);
       expect(forcedCloseCalls).toBe(1);
       expect(bridge.sessionCount).toBe(0);
@@ -2640,6 +3142,43 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('starts a workspace-owned channel for import consolidation without a chat session', async () => {
+    const proposal = {
+      decision: 'skip',
+      reason: 'No durable knowledge.',
+      documents: [],
+    };
+    const input = {
+      scope: 'project',
+      source: 'Synthetic historical context',
+      existing: [],
+    };
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan
+          ? proposal
+          : {},
+    });
+    const channelFactory = vi.fn().mockResolvedValue(handle.channel);
+    const bridge = makeBridge({ channelFactory });
+    try {
+      await expect(
+        bridge.invokeWorkspaceCommand(
+          SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan,
+          input,
+        ),
+      ).resolves.toEqual(proposal);
+      expect(channelFactory).toHaveBeenCalledTimes(1);
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.workspaceMemoryImportPlan,
+        params: input,
+      });
+      expect(handle.killed).toBe(true);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('starts a workspace channel when reconnecting an MCP server', async () => {
     const handle = makeChannel({
       extMethodImpl: async (method, params) =>
@@ -4000,6 +4539,43 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('lets the workspace owner remove a client artifact without impersonating its client', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    try {
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        { title: 'Client output', url: 'https://example.com/output' },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      await expect(
+        bridge.removeSessionArtifact(session.sessionId, artifactId),
+      ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
+      await expect(
+        bridge.removeSessionArtifactForWorkspaceOwner(
+          session.sessionId,
+          artifactId,
+        ),
+      ).resolves.toMatchObject({
+        changes: [{ action: 'removed', artifactId }],
+      });
+      await expect(
+        bridge.getSessionArtifacts(session.sessionId),
+      ).resolves.toMatchObject({ artifacts: [] });
+      await expect(
+        bridge.removeSessionArtifactForWorkspaceOwner(
+          session.sessionId,
+          artifactId,
+        ),
+      ).resolves.toMatchObject({ changes: [] });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('rejects invalid client artifact records instead of dropping them', async () => {
     const bridge = makeBridge({
       channelFactory: async () => makeChannel().channel,
@@ -4549,6 +5125,14 @@ describe('createAcpSessionBridge', () => {
                 tasks: [],
               };
             }
+            if (method === 'qwen/status/session/task_runtime') {
+              return {
+                v: 1,
+                sessionId: params['sessionId'],
+                taskId: params['taskId'],
+                runtime: { outputTail: 'ready' },
+              };
+            }
             if (method === 'qwen/status/session/agent_trace') {
               return {
                 v: 1,
@@ -4636,6 +5220,13 @@ describe('createAcpSessionBridge', () => {
       tasks: [],
     });
     await expect(
+      bridge.getSessionTaskRuntime(session.sessionId, 'bg_1'),
+    ).resolves.toMatchObject({
+      sessionId: session.sessionId,
+      taskId: 'bg_1',
+      runtime: { outputTail: 'ready' },
+    });
+    await expect(
       bridge.getSessionAgentsStatus(session.sessionId),
     ).resolves.toMatchObject({
       sessionId: session.sessionId,
@@ -4673,6 +5264,7 @@ describe('createAcpSessionBridge', () => {
       'qwen/status/session/context',
       'qwen/status/session/supported_commands',
       'qwen/status/session/tasks',
+      'qwen/status/session/task_runtime',
       'qwen/status/session/agents',
       'qwen/status/session/agent_trace',
       'qwen/status/session/lsp',
@@ -5859,6 +6451,83 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('refreshes only selected extensions', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const second = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const third = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      await expect(
+        bridge.refreshExtensionsForAllSessions(undefined, { sessionIds: [] }),
+      ).resolves.toEqual({ refreshed: 0, failed: 0 });
+      expect(handle.agent.extMethodCalls).toEqual([]);
+      await expect(
+        bridge.refreshExtensionsForAllSessions(undefined, {
+          sessionIds: [second.sessionId, third.sessionId, second.sessionId],
+        }),
+      ).resolves.toEqual({ refreshed: 2, failed: 0 });
+      expect(handle.agent.extMethodCalls).toEqual([
+        {
+          method: SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+          params: { sessionId: second.sessionId },
+        },
+        {
+          method: SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+          params: { sessionId: third.sessionId, refreshBootstrap: false },
+        },
+      ]);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('refreshes survivors when a selected extension session closes after admission', async () => {
+    const handle = makeChannel();
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const first = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      const second = await bridge.spawnOrAttach({
+        workspaceCwd: WS_A,
+        sessionScope: 'thread',
+      });
+      bridge.getSessionSummary(first.sessionId);
+      bridge.getSessionSummary(second.sessionId);
+      await bridge.killSession(second.sessionId);
+      await expect(
+        bridge.refreshExtensionsForAllSessions(undefined, {
+          sessionIds: [first.sessionId, second.sessionId, second.sessionId],
+        }),
+      ).resolves.toEqual({ refreshed: 1, failed: 1 });
+      expect(
+        handle.agent.extMethodCalls.filter(
+          (call) =>
+            call.method ===
+            SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+        ),
+      ).toEqual([
+        {
+          method: SERVE_CONTROL_EXT_METHODS.workspaceExtensionsRefresh,
+          params: { sessionId: first.sessionId },
+        },
+      ]);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('bounds a hung session extension refresh', async () => {
     vi.useFakeTimers();
     const refreshGate = deferred<Record<string, unknown>>();
@@ -6457,35 +7126,34 @@ describe('createAcpSessionBridge', () => {
 
   it('clears durable artifacts but keeps live ephemerals when rewind returns an empty artifact snapshot', async () => {
     const persistedSnapshots: unknown[] = [];
-    const bridge = makeBridge({
-      channelFactory: async () =>
-        makeChannel({
-          extMethodImpl: (method, params) => {
-            if (method === 'qwen/control/session/artifacts/persist') {
-              if (params['kind'] === 'snapshot') {
-                persistedSnapshots.push(params['payload']);
-              }
-              return {};
-            }
-            expect(method).toBe('qwen/control/session/rewind');
-            return {
-              targetTurnIndex: 0,
-              filesChanged: [],
-              filesFailed: [],
-              artifactSnapshot: {
-                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-                sessionId: SESS_A,
-                sequence: 0,
-                artifacts: [],
-                tombstonedIds: [],
-                stickyEphemeralIds: [],
-                warnings: [],
-              },
-            };
+    const handle = makeChannel({
+      extMethodImpl: (method, params) => {
+        if (method === 'qwen/control/session/artifacts/persist') {
+          if (params['kind'] === 'snapshot') {
+            persistedSnapshots.push(params['payload']);
+          }
+          return {};
+        }
+        expect(method).toBe('qwen/control/session/rewind');
+        return {
+          targetTurnIndex: 0,
+          filesChanged: [],
+          filesFailed: [],
+          artifactSnapshot: {
+            v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+            sessionId: SESS_A,
+            sequence: 0,
+            artifacts: [],
+            tombstonedIds: [],
+            stickyEphemeralIds: [],
+            warnings: [],
           },
-        }).channel,
+        };
+      },
     });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await seedRewindTarget(bridge, handle, session.sessionId);
     const durable = await bridge.addSessionArtifact(
       session.sessionId,
       {
@@ -6542,27 +7210,26 @@ describe('createAcpSessionBridge', () => {
 
   it('keeps durable artifacts when rewind cannot rebuild an artifact snapshot', async () => {
     const persistedSnapshots: unknown[] = [];
-    const bridge = makeBridge({
-      channelFactory: async () =>
-        makeChannel({
-          extMethodImpl: (method, params) => {
-            if (method === 'qwen/control/session/artifacts/persist') {
-              if (params['kind'] === 'snapshot') {
-                persistedSnapshots.push(params['payload']);
-              }
-              return {};
-            }
-            expect(method).toBe('qwen/control/session/rewind');
-            return {
-              targetTurnIndex: 0,
-              filesChanged: [],
-              filesFailed: [],
-              artifactSnapshotUnavailable: 'artifact journal read failed',
-            };
-          },
-        }).channel,
+    const handle = makeChannel({
+      extMethodImpl: (method, params) => {
+        if (method === 'qwen/control/session/artifacts/persist') {
+          if (params['kind'] === 'snapshot') {
+            persistedSnapshots.push(params['payload']);
+          }
+          return {};
+        }
+        expect(method).toBe('qwen/control/session/rewind');
+        return {
+          targetTurnIndex: 0,
+          filesChanged: [],
+          filesFailed: [],
+          artifactSnapshotUnavailable: 'artifact journal read failed',
+        };
+      },
     });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await seedRewindTarget(bridge, handle, session.sessionId);
     const durable = await bridge.addSessionArtifact(
       session.sessionId,
       {
@@ -6599,26 +7266,25 @@ describe('createAcpSessionBridge', () => {
 
   it('keeps durable artifacts when rewind omits artifact snapshot metadata', async () => {
     const persistedSnapshots: unknown[] = [];
-    const bridge = makeBridge({
-      channelFactory: async () =>
-        makeChannel({
-          extMethodImpl: (method, params) => {
-            if (method === 'qwen/control/session/artifacts/persist') {
-              if (params['kind'] === 'snapshot') {
-                persistedSnapshots.push(params['payload']);
-              }
-              return {};
-            }
-            expect(method).toBe('qwen/control/session/rewind');
-            return {
-              targetTurnIndex: 0,
-              filesChanged: [],
-              filesFailed: [],
-            };
-          },
-        }).channel,
+    const handle = makeChannel({
+      extMethodImpl: (method, params) => {
+        if (method === 'qwen/control/session/artifacts/persist') {
+          if (params['kind'] === 'snapshot') {
+            persistedSnapshots.push(params['payload']);
+          }
+          return {};
+        }
+        expect(method).toBe('qwen/control/session/rewind');
+        return {
+          targetTurnIndex: 0,
+          filesChanged: [],
+          filesFailed: [],
+        };
+      },
     });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await seedRewindTarget(bridge, handle, session.sessionId);
     const durable = await bridge.addSessionArtifact(
       session.sessionId,
       {
@@ -6666,64 +7332,63 @@ describe('createAcpSessionBridge', () => {
       `url:${stickyUrl}`,
     );
     const persistedSnapshots: unknown[] = [];
-    const bridge = makeBridge({
-      channelFactory: async () =>
-        makeChannel({
-          extMethodImpl: (method, params) => {
-            if (method === 'qwen/control/session/artifacts/persist') {
-              if (params['kind'] === 'snapshot') {
-                persistedSnapshots.push(params['payload']);
-              }
-              return {};
-            }
-            expect(method).toBe('qwen/control/session/rewind');
-            return {
-              targetTurnIndex: 0,
-              filesChanged: [],
-              filesFailed: [],
-              artifactSnapshot: {
-                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-                sessionId: SESS_A,
-                sequence: 8,
-                artifacts: [
-                  {
-                    id: rewoundArtifactId,
-                    kind: 'link',
-                    storage: 'external_url',
-                    source: 'client',
-                    status: 'available',
-                    title: 'Rewound artifact',
-                    url: rewoundUrl,
-                    retention: 'restorable',
-                    clientRetained: true,
-                    createdAt: '2026-07-04T00:00:00.000Z',
-                    updatedAt: '2026-07-04T00:00:00.000Z',
-                  },
-                ],
-                tombstonedIds: [],
-                stickyEphemeralIds: [stickyArtifactId],
-                markerArtifacts: [
-                  {
-                    id: stickyArtifactId,
-                    kind: 'link',
-                    storage: 'external_url',
-                    source: 'client',
-                    status: 'available',
-                    title: 'Sticky artifact',
-                    url: stickyUrl,
-                    retention: 'restorable',
-                    clientRetained: true,
-                    createdAt: '2026-07-04T00:00:00.000Z',
-                    updatedAt: '2026-07-04T00:00:00.000Z',
-                  },
-                ],
-                warnings: [],
+    const handle = makeChannel({
+      extMethodImpl: (method, params) => {
+        if (method === 'qwen/control/session/artifacts/persist') {
+          if (params['kind'] === 'snapshot') {
+            persistedSnapshots.push(params['payload']);
+          }
+          return {};
+        }
+        expect(method).toBe('qwen/control/session/rewind');
+        return {
+          targetTurnIndex: 0,
+          filesChanged: [],
+          filesFailed: [],
+          artifactSnapshot: {
+            v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+            sessionId: SESS_A,
+            sequence: 8,
+            artifacts: [
+              {
+                id: rewoundArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Rewound artifact',
+                url: rewoundUrl,
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-04T00:00:00.000Z',
+                updatedAt: '2026-07-04T00:00:00.000Z',
               },
-            };
+            ],
+            tombstonedIds: [],
+            stickyEphemeralIds: [stickyArtifactId],
+            markerArtifacts: [
+              {
+                id: stickyArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Sticky artifact',
+                url: stickyUrl,
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-07-04T00:00:00.000Z',
+                updatedAt: '2026-07-04T00:00:00.000Z',
+              },
+            ],
+            warnings: [],
           },
-        }).channel,
+        };
+      },
     });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await seedRewindTarget(bridge, handle, session.sessionId);
     await bridge.addSessionArtifact(
       session.sessionId,
       {
@@ -6815,36 +7480,42 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('surfaces rewind artifact snapshot persistence warnings', async () => {
-    const bridge = makeBridge({
-      channelFactory: async () =>
-        makeChannel({
-          extMethodImpl: (method, params) => {
-            if (method === 'qwen/control/session/artifacts/persist') {
-              if (params['kind'] === 'snapshot') {
-                throw new Error('disk full');
-              }
-              return {};
-            }
-            expect(method).toBe('qwen/control/session/rewind');
-            return {
-              targetTurnIndex: 0,
-              filesChanged: [],
-              filesFailed: [],
-              artifactSnapshot: {
-                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-                sessionId: SESS_A,
-                sequence: 0,
-                artifacts: [],
-                tombstonedIds: [],
-                stickyEphemeralIds: [],
-                warnings: [],
-              },
-            };
+  it('surfaces rewind artifact snapshot persistence warnings and preserves the target identity', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method, params) => {
+        if (method === 'qwen/control/session/artifacts/persist') {
+          if (params['kind'] === 'snapshot') {
+            throw new Error('disk full');
+          }
+          return {};
+        }
+        expect(method).toBe('qwen/control/session/rewind');
+        return {
+          targetTurnIndex: 2,
+          daemonPromptId: 'daemon-echo-must-be-ignored',
+          filesChanged: [],
+          filesFailed: [],
+          artifactSnapshot: {
+            v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+            sessionId: SESS_A,
+            sequence: 0,
+            artifacts: [],
+            tombstonedIds: [],
+            stickyEphemeralIds: [],
+            warnings: [],
           },
-        }).channel,
+        };
+      },
     });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
     const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await seedRewindTarget(
+      bridge,
+      handle,
+      session.sessionId,
+      'prompt-1',
+      'daemon-B',
+    );
     const abort = new AbortController();
     const rewoundEvent = (async () => {
       for await (const event of bridge.subscribeEvents(session.sessionId, {
@@ -6854,24 +7525,40 @@ describe('createAcpSessionBridge', () => {
       }
       return undefined;
     })();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
 
-    await expect(
-      bridge.rewindSession(
-        session.sessionId,
-        { promptId: 'prompt-1' },
-        { clientId: session.clientId },
-      ),
-    ).resolves.toMatchObject({
-      targetTurnIndex: 0,
-      warnings: ['artifact snapshot not persisted'],
-    });
-    await expect(rewoundEvent).resolves.toMatchObject({
-      type: 'session_rewound',
-      data: { warnings: ['artifact snapshot not persisted'] },
-    });
-    abort.abort();
-
-    await bridge.shutdown();
+    try {
+      await expect(
+        bridge.rewindSession(
+          session.sessionId,
+          { promptId: 'prompt-1' },
+          { clientId: session.clientId },
+        ),
+      ).resolves.toMatchObject({
+        targetTurnIndex: 2,
+        warnings: ['artifact snapshot not persisted'],
+      });
+      await expect(rewoundEvent).resolves.toMatchObject({
+        type: 'session_rewound',
+        data: {
+          targetTurnIndex: 2,
+          daemonPromptId: 'daemon-B',
+          warnings: ['artifact snapshot not persisted'],
+        },
+      });
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('action=snapshot_failed'),
+      );
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('action=rewind_snapshot_warning'),
+      );
+    } finally {
+      abort.abort();
+      await bridge.shutdown();
+      stderr.mockRestore();
+    }
   });
 
   it('loads history replay from response metadata when requested', async () => {
@@ -6951,6 +7638,247 @@ describe('createAcpSessionBridge', () => {
     });
     await iterator.return?.();
     await bridge.shutdown();
+  });
+
+  it.each([1, 1025])(
+    'supplements a persisted page with %i unpersisted lifecycle frames',
+    async (count) => {
+      const handle = makeChannel({
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
+            throw new Error(`unexpected ${method}`);
+          return {
+            v: 1,
+            sessionId: params['sessionId'],
+            events: [],
+            hasMore: false,
+          };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        for (let index = 0; index < count; index++) {
+          await handle.agentConnection.sessionUpdate({
+            sessionId: session.sessionId,
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: {
+                type: 'text',
+                text: 'body must not enter lifecycle supplement',
+              },
+              _meta: {
+                executionLifecycle: {
+                  v: 1,
+                  kind: 'request',
+                  executionId: `execution-${index}`,
+                  sessionId: session.sessionId,
+                  promptId: 'prompt',
+                  model: 'model',
+                  phase: 'ended',
+                  startedAt: 1,
+                  endedAt: 2,
+                  durationMs: 1,
+                  outcome: 'success',
+                },
+              },
+            },
+          });
+        }
+        const memory = bridge.getSessionReplaySnapshot(session.sessionId)!;
+        const refreshed = await bridge.loadSession({
+          sessionId: session.sessionId,
+          workspaceCwd: WS_A,
+          clientId: session.clientId,
+          historyReplay: 'response',
+          liveReplayMode: 'summary',
+          historyPageSize: 100,
+        });
+        expect(refreshed.compactedReplay).toEqual([]);
+        expect(refreshed.liveJournal).toEqual([]);
+        expect(refreshed.lifecycleReplay).toHaveLength(Math.min(count, 1024));
+        expect(refreshed.lifecycleReplayIncomplete).toBe(count > 1024);
+        expect(refreshed.lastEventId).toBe(memory.lastEventId);
+        expect(refreshed.eventEpoch).toBe(
+          bridge.getSessionEventEpoch(session.sessionId),
+        );
+        expect(JSON.stringify(refreshed.lifecycleReplay)).not.toContain(
+          'body must not enter',
+        );
+        expect(refreshed.lifecycleReplay?.at(-1)?.data).toMatchObject({
+          _meta: {
+            executionLifecycle: { executionId: `execution-${count - 1}` },
+          },
+        });
+      } finally {
+        await bridge.shutdown();
+      }
+    },
+  );
+
+  it('supplements a persisted page with tool lifecycle metadata only', async () => {
+    const handle = makeChannel({
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
+          throw new Error(`unexpected ${method}`);
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const lifecycle = {
+        v: 1,
+        kind: 'tool',
+        executionId: 'tool-execution',
+        sessionId: session.sessionId,
+        callId: 'tool-call',
+        toolName: 'read_file',
+        phase: 'ended',
+        startedAt: 1,
+        endedAt: 2,
+        executionDurationMs: 1,
+        executionStatus: 'success',
+        outcome: 'success',
+      };
+      await handle.agentConnection.sessionUpdate({
+        sessionId: session.sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'tool-call',
+          content: [
+            {
+              type: 'content',
+              content: { type: 'text', text: 'private tool body' },
+            },
+          ],
+          _meta: { toolLifecycle: lifecycle },
+        },
+      });
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        liveReplayMode: 'summary',
+        historyPageSize: 100,
+      });
+      expect(refreshed.compactedReplay).toEqual([]);
+      expect(refreshed.lifecycleReplay).toEqual([
+        {
+          v: 1,
+          type: 'session_update',
+          id: expect.any(Number),
+          data: { _meta: { toolLifecycle: lifecycle } },
+        },
+      ]);
+      expect(refreshed.lifecycleReplayIncomplete).toBe(false);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('preserves completed request lifecycles before transcript persistence', async () => {
+    const handle = makeChannel({
+      promptImpl: async (params) => {
+        for (const executionId of ['request-one', 'request-two']) {
+          for (const phase of ['started', 'ended'] as const) {
+            await handle.agentConnection.sessionUpdate({
+              sessionId: params.sessionId,
+              update: {
+                sessionUpdate: 'agent_message_chunk',
+                content: { type: 'text', text: '' },
+                _meta: {
+                  executionLifecycle: {
+                    v: 1,
+                    kind: 'request',
+                    executionId,
+                    sessionId: params.sessionId,
+                    promptId: 'prompt',
+                    model: 'model',
+                    phase,
+                    startedAt: 1,
+                    ...(phase === 'ended'
+                      ? { endedAt: 2, durationMs: 1, outcome: 'success' }
+                      : {}),
+                  },
+                },
+              },
+            });
+          }
+        }
+        await handle.agentConnection.sessionUpdate({
+          sessionId: params.sessionId,
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'final visible answer' },
+          },
+        });
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: (method, params) => {
+        if (method !== SERVE_STATUS_EXT_METHODS.sessionTranscript)
+          throw new Error(`unexpected ${method}`);
+        return {
+          v: 1,
+          sessionId: params['sessionId'],
+          events: [],
+          hasMore: false,
+        };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    try {
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.sendPrompt(session.sessionId, {
+        sessionId: session.sessionId,
+        prompt: [{ type: 'text', text: 'two requests' }],
+      });
+      const memory = bridge.getSessionReplaySnapshot(session.sessionId)!;
+      expect(
+        memory.compactedTurns.some((event) => event.type === 'turn_complete'),
+      ).toBe(true);
+      const refreshed = await bridge.loadSession({
+        sessionId: session.sessionId,
+        workspaceCwd: WS_A,
+        clientId: session.clientId,
+        historyReplay: 'response',
+        liveReplayMode: 'summary',
+        historyPageSize: 100,
+      });
+      expect(refreshed.compactedReplay).toEqual([]);
+      expect(refreshed.liveJournal).toEqual([]);
+      expect(refreshed.lifecycleReplayIncomplete).toBe(false);
+      expect(refreshed.lastEventId).toBe(memory.lastEventId);
+      for (const executionId of ['request-one', 'request-two']) {
+        for (const phase of ['started', 'ended']) {
+          expect(refreshed.lifecycleReplay).toEqual(
+            expect.arrayContaining([
+              expect.objectContaining({
+                data: expect.objectContaining({
+                  _meta: expect.objectContaining({
+                    executionLifecycle: expect.objectContaining({
+                      executionId,
+                      phase,
+                    }),
+                  }),
+                }),
+              }),
+            ]),
+          );
+        }
+      }
+      expect(JSON.stringify(refreshed.lifecycleReplay)).not.toContain(
+        'final visible answer',
+      );
+    } finally {
+      await bridge.shutdown();
+    }
   });
 
   it('refreshes an attached load from a bounded persisted page', async () => {
@@ -7416,6 +8344,9 @@ describe('createAcpSessionBridge', () => {
           code: 'LOOP_DETECTED',
           errorKind: 'loop_detected',
           loopType: 'turn_tool_call_cap',
+          loopReason: 'explicit_cap',
+          toolCallCount: 4,
+          toolCallLimit: 3,
         });
       },
       extMethodImpl: (method, params) => {
@@ -7474,6 +8405,8 @@ describe('createAcpSessionBridge', () => {
         content: { type: 'text', text: 'persisted turn content' },
       }),
     });
+    // The loop reason and tool-call numbers survive the refresh too, so Web
+    // Shell can keep showing the cause-specific text after a reload.
     expect(compactedReplay[compactedReplay.length - 1]).toMatchObject({
       type: 'turn_error',
       promptId: 'prompt-loop',
@@ -7481,6 +8414,9 @@ describe('createAcpSessionBridge', () => {
         code: 'LOOP_DETECTED',
         errorKind: 'loop_detected',
         loopType: 'turn_tool_call_cap',
+        loopReason: 'explicit_cap',
+        toolCallCount: 4,
+        toolCallLimit: 3,
       }),
     });
 
@@ -8096,6 +9032,7 @@ describe('createAcpSessionBridge', () => {
         historyPageSize: 100,
       });
 
+      expect(refreshed.lifecycleReplayIncomplete).toBe(true);
       const compactedReplay = refreshed.compactedReplay ?? [];
       expect(compactedReplay).toHaveLength(2);
       expect(compactedReplay[0]).toMatchObject({
@@ -8124,6 +9061,7 @@ describe('createAcpSessionBridge', () => {
     'available_commands_update',
     'current_mode_update',
     'session_info_update',
+    'config_option_update',
   ] as const)(
     'keeps the turn error on refresh when an idle %s session_update lands after it',
     async (subtype) => {
@@ -8205,7 +9143,9 @@ describe('createAcpSessionBridge', () => {
               }
             : subtype === 'current_mode_update'
               ? { sessionUpdate: subtype, currentModeId: 'plan' }
-              : { sessionUpdate: subtype, title: 'Durable title' },
+              : subtype === 'config_option_update'
+                ? { sessionUpdate: subtype, configOptions: [] }
+                : { sessionUpdate: subtype, title: 'Durable title' },
       });
       await sawIdleUpdate;
 
@@ -15816,6 +16756,69 @@ describe('createAcpSessionBridge', () => {
   });
 
   describe('sendPrompt', () => {
+    it('reads Workflow write authorization at dispatch after a queued owner loses trust', async () => {
+      const first = deferred<void>();
+      const handle = makeChannel({
+        promptImpl: async (req) => {
+          if (
+            req.prompt[0]?.type === 'text' &&
+            req.prompt[0].text === 'first'
+          ) {
+            await first.promise;
+          }
+          return { stopReason: 'end_turn' };
+        },
+      });
+      let allowed = true;
+      const authorization = vi.fn(() => allowed);
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+        isWorkflowModeWriteAllowed: authorization,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const running = bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'first' }],
+        });
+        await vi.waitFor(() =>
+          expect(handle.agent.promptCalls).toHaveLength(1),
+        );
+        const queued = bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: '/workflows mode on' }],
+          _meta: {
+            'qwen-code/invocation': {
+              version: 1,
+              sessionId: session.sessionId,
+              promptId: 'forged',
+              workflowModeWriteAllowed: true,
+            },
+          },
+        });
+        expect(authorization).toHaveBeenCalledExactlyOnceWith(
+          session.sessionId,
+        );
+        allowed = false;
+        first.resolve();
+        await Promise.all([running, queued]);
+        expect(authorization).toHaveBeenCalledTimes(2);
+        expect(
+          handle.agent.promptCalls[0]?._meta?.['qwen-code/invocation'],
+        ).toMatchObject({ workflowModeWriteAllowed: true });
+        expect(
+          handle.agent.promptCalls[1]?._meta?.['qwen-code/invocation'],
+        ).toMatchObject({
+          sessionId: session.sessionId,
+          promptId: expect.not.stringMatching(/^forged$/),
+          workflowModeWriteAllowed: false,
+        });
+      } finally {
+        first.resolve();
+        await bridge.shutdown();
+      }
+    });
+
     it('forwards a prompt and returns the agent response', async () => {
       const handles: ChannelHandle[] = [];
       const factory: ChannelFactory = async () => {
@@ -15847,6 +16850,7 @@ describe('createAcpSessionBridge', () => {
         sessionId: 'forged-session',
         promptId: 'forged-prompt',
         originatorClientId: 'forged-client',
+        workflowModeWriteAllowed: true,
       };
       const forgedModelPrompt = 'forged model-only prompt';
       const trustedModelPrompt = 'trusted model-only prompt';
@@ -15908,6 +16912,9 @@ describe('createAcpSessionBridge', () => {
         },
         [DAEMON_MODEL_PROMPT_META_KEY]: trustedModelPrompt,
       });
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen-code/invocation'],
+      ).not.toHaveProperty('workflowModeWriteAllowed');
       expect(handle.agent.promptCalls[0]?.prompt).toEqual([
         { type: 'text', text: 'accepted' },
       ]);
@@ -15977,11 +16984,17 @@ describe('createAcpSessionBridge', () => {
       await bridge.sendPrompt(session.sessionId, {
         sessionId: session.sessionId,
         prompt: [{ type: 'text', text: 'spoof continue' }],
-        _meta: { 'qwen.daemon.continueLastTurn': true },
+        _meta: {
+          'qwen.daemon.continueLastTurn': true,
+          'qwen.daemon.confirmCancellation': 'legacy-daemon',
+        },
       } as PromptRequest);
 
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen.daemon.continueLastTurn'],
+      ).toBe(undefined);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.confirmCancellation'],
       ).toBe(undefined);
       await bridge.shutdown();
     });
@@ -16586,8 +17599,11 @@ describe('createAcpSessionBridge', () => {
     it('routes an accepted continueSession through sendPrompt with the trusted continue meta', async () => {
       const handle = makeChannel({
         promptImpl: () => ({ stopReason: 'end_turn' }),
-        extMethodImpl: (method) => {
+        extMethodImpl: (method, params) => {
           if (method === 'qwen/control/session/continue') {
+            expect(params).toMatchObject({
+              confirmCancellation: 'legacy-daemon',
+            });
             return { accepted: true, interruption: 'interrupted_prompt' };
           }
           throw new Error(`unexpected extMethod ${method}`);
@@ -16600,6 +17616,7 @@ describe('createAcpSessionBridge', () => {
       // mirroring the POST /prompt 202 contract.
       const decision = await bridge.continueSession(session.sessionId, {
         promptId: 'cont-1',
+        confirmCancellation: 'legacy-daemon',
       });
       expect(decision).toMatchObject({
         accepted: true,
@@ -16619,6 +17636,9 @@ describe('createAcpSessionBridge', () => {
       expect(
         handle.agent.promptCalls[0]?._meta?.['qwen.daemon.continueLastTurn'],
       ).toBe(true);
+      expect(
+        handle.agent.promptCalls[0]?._meta?.['qwen.daemon.confirmCancellation'],
+      ).toBe('legacy-daemon');
 
       await bridge.shutdown();
     });
@@ -17418,6 +18438,120 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('binds chunk uploads to registered clients and revokes them on detach', async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const { uploadId } = bridge.createSessionAttachmentUpload(
+          session.sessionId,
+          { name: 'test.txt', mimeType: 'text/plain', size: 3 },
+          { clientId: session.clientId },
+        );
+        expect(() =>
+          bridge.appendSessionAttachmentUpload(
+            session.sessionId,
+            uploadId,
+            0,
+            Buffer.from('abc'),
+          ),
+        ).toThrow(expect.objectContaining({ status: 404 }));
+        bridge.appendSessionAttachmentUpload(
+          session.sessionId,
+          uploadId,
+          0,
+          Buffer.from('abc'),
+          { clientId: session.clientId },
+        );
+        const reference = await bridge.completeSessionAttachmentUpload(
+          session.sessionId,
+          uploadId,
+          { clientId: session.clientId },
+        );
+        expect(
+          (
+            await bridge.readSessionAttachment(
+              session.sessionId,
+              reference.attachmentId,
+            )
+          )?.data.toString(),
+        ).toBe('abc');
+        const pending = bridge.createSessionAttachmentUpload(
+          session.sessionId,
+          { name: 'pending.txt', mimeType: 'text/plain', size: 3 },
+          { clientId: session.clientId },
+        );
+        await bridge.detachClient(session.sessionId, session.clientId);
+        expect(() =>
+          bridge.appendSessionAttachmentUpload(
+            session.sessionId,
+            pending.uploadId,
+            0,
+            Buffer.from('abc'),
+            { clientId: session.clientId },
+          ),
+        ).toThrow();
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it("frees a detached client's staged uploads while another client keeps the session open", async () => {
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        expect(second.sessionId).toBe(first.sessionId);
+        expect(first.clientId).toBeTruthy();
+        expect(second.clientId).toBeTruthy();
+        expect(second.clientId).not.toBe(first.clientId);
+        const create = (clientId: string | undefined) =>
+          bridge.createSessionAttachmentUpload(
+            first.sessionId,
+            {
+              name: 'staged.bin',
+              mimeType: 'application/octet-stream',
+              size: 1,
+            },
+            { clientId },
+          );
+        for (let i = 0; i < 8; i++) create(first.clientId);
+        expect(() => create(second.clientId)).toThrow(
+          expect.objectContaining({ status: 429 }),
+        );
+        await bridge.detachClient(first.sessionId, first.clientId);
+        for (let i = 0; i < 8; i++) {
+          expect(() => create(second.clientId)).not.toThrow();
+        }
+      } finally {
+        await bridge.shutdown();
+      }
+    });
+
+    it('closes captured attachment stores during bridge shutdown', async () => {
+      const close = vi.spyOn(SessionAttachmentStore.prototype, 'close');
+      const bridge = makeBridge({
+        channelFactory: async () => makeChannel().channel,
+      });
+      try {
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        bridge.createSessionAttachmentUpload(session.sessionId, {
+          name: 'test.txt',
+          mimeType: 'text/plain',
+          size: 3,
+        });
+        close.mockClear();
+        await bridge.shutdown();
+        expect(close).toHaveBeenCalled();
+      } finally {
+        close.mockRestore();
+        await bridge.shutdown();
+      }
+    });
+
     it('keeps attachment references on the event bus and resolves bytes for ACP', async () => {
       const prompts: PromptRequest[] = [];
       const factory: ChannelFactory = async () =>
@@ -17459,7 +18593,15 @@ describe('createAcpSessionBridge', () => {
       );
 
       expect(prompts[0]?.prompt).toEqual([
-        { type: 'image', data: 'AQID', mimeType: 'image/png' },
+        {
+          type: 'image',
+          data: 'AQID',
+          mimeType: 'image/png',
+          _meta: {
+            'qwen.daemon.attachmentContext':
+              expect.stringContaining('"absolutePath":'),
+          },
+        },
       ]);
       expect(prompts[0]?._meta?.['qwen.daemon.attachmentReferences']).toEqual([
         reference,
@@ -17589,6 +18731,10 @@ describe('createAcpSessionBridge', () => {
       expect(prompts[0]?.prompt).toEqual([
         {
           type: 'resource',
+          _meta: {
+            'qwen.daemon.attachmentContext':
+              expect.stringContaining('"absolutePath":'),
+          },
           resource: {
             uri: 'attachment:///notes.txt',
             mimeType: 'text/plain',
@@ -17597,6 +18743,10 @@ describe('createAcpSessionBridge', () => {
         },
         {
           type: 'resource',
+          _meta: {
+            'qwen.daemon.attachmentContext':
+              expect.stringContaining('"absolutePath":'),
+          },
           resource: {
             uri: 'attachment:///report.pdf',
             mimeType: 'application/pdf',
@@ -18588,6 +19738,7 @@ describe('createAcpSessionBridge', () => {
           channelFactory: async () => handle.channel,
         });
         const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await seedRewindTarget(bridge, handle, session.sessionId, 'prompt-1');
         const invoke = (operation: 'branch' | 'rewind') =>
           operation === 'branch'
             ? bridge.branchSession(session.sessionId, {
@@ -18616,6 +19767,141 @@ describe('createAcpSessionBridge', () => {
         await bridge.shutdown();
       },
     );
+
+    it('answers the snapshot listing only after a rewind queued behind a branch has run', async () => {
+      const tracked = new Set<string>([
+        SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
+      ]);
+      const calls: string[] = [];
+      let rewound = false;
+      const branchGate = deferred<void>();
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (tracked.has(method)) calls.push(method);
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionBranch) {
+            await branchGate.promise;
+            return { newSessionId: 'branch-session', title: 'Branch' };
+          }
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            rewound = true;
+            return { targetTurnIndex: 1, filesChanged: [], filesFailed: [] };
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            // What the agent lists once the rewind has truncated.
+            return {
+              snapshots: rewound
+                ? [{ promptId: 'session########0', turnIndex: 0 }]
+                : [
+                    {
+                      promptId: 'session########1',
+                      daemonPromptId: 'daemon-target',
+                      turnIndex: 1,
+                    },
+                  ],
+            };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await seedRewindTarget(
+        bridge,
+        handle,
+        session.sessionId,
+        'session########1',
+        'daemon-target',
+        false,
+      );
+
+      const branch = bridge.branchSession(session.sessionId, {});
+      const rewind = bridge.rewindSession(session.sessionId, {
+        promptId: 'session########1',
+      });
+      await vi.waitFor(() =>
+        expect(calls).toEqual([SERVE_CONTROL_EXT_METHODS.sessionBranch]),
+      );
+
+      // Asked while the rewind is still waiting its turn: no answer yet.
+      let listed: { snapshots: unknown[] } | undefined;
+      const listing = bridge
+        .getRewindSnapshots(session.sessionId)
+        .then((result) => {
+          listed = result;
+          return result;
+        });
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(listed).toBeUndefined();
+      expect(calls).toEqual([SERVE_CONTROL_EXT_METHODS.sessionBranch]);
+
+      branchGate.resolve();
+      await branch;
+      await rewind;
+      await expect(listing).resolves.toEqual({
+        snapshots: [{ promptId: 'session########0', turnIndex: 0 }],
+      });
+      expect(calls).toEqual([
+        SERVE_CONTROL_EXT_METHODS.sessionBranch,
+        SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
+        SERVE_CONTROL_EXT_METHODS.sessionRewind,
+        SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots,
+      ]);
+      await bridge.shutdown();
+    });
+
+    it('still answers the snapshot listing after an admitted rewind failed', async () => {
+      let failed = false;
+      const handle = makeChannel({
+        extMethodImpl: async (method) => {
+          if (method === SERVE_CONTROL_EXT_METHODS.sessionRewind) {
+            failed = true;
+            throw new Error('rewind blew up');
+          }
+          if (method === SERVE_STATUS_EXT_METHODS.sessionRewindSnapshots) {
+            return {
+              snapshots: failed
+                ? []
+                : [
+                    {
+                      promptId: 'session########1',
+                      daemonPromptId: 'daemon-target',
+                      turnIndex: 1,
+                    },
+                  ],
+            };
+          }
+          return {};
+        },
+        resumeSessionImpl: () => ({}),
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await seedRewindTarget(
+        bridge,
+        handle,
+        session.sessionId,
+        'session########1',
+        'daemon-target',
+        false,
+      );
+
+      await expect(
+        bridge.rewindSession(session.sessionId, {
+          promptId: 'session########1',
+        }),
+      ).rejects.toThrow();
+      await expect(
+        bridge.getRewindSnapshots(session.sessionId),
+      ).resolves.toEqual({ snapshots: [] });
+      await bridge.shutdown();
+    });
 
     it.each([
       {
@@ -18764,6 +20050,7 @@ describe('createAcpSessionBridge', () => {
           initializeTimeoutMs: 20,
         });
         const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await seedRewindTarget(bridge, handle, session.sessionId, 'prompt-1');
 
         let settled = false;
         const mutation = invoke(bridge, session.sessionId).finally(() => {
@@ -18805,6 +20092,7 @@ describe('createAcpSessionBridge', () => {
           channelFactory: async () => handle.channel,
         });
         const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await seedRewindTarget(bridge, handle, session.sessionId, 'prompt-1');
 
         const mutation = invoke(bridge, session.sessionId);
         await started.promise;
@@ -18839,6 +20127,7 @@ describe('createAcpSessionBridge', () => {
           channelFactory: async () => handle.channel,
         });
         const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        await seedRewindTarget(bridge, handle, session.sessionId, 'prompt-1');
 
         await expect(invoke(bridge, session.sessionId)).rejects.toThrow();
         await expect(
@@ -20221,58 +21510,85 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
-    it('caps live promptText at TURN_RESULT_TEXT_MAX_CHARS', async () => {
-      let resolveTurn: (() => void) | undefined;
-      const turnGate = new Promise<void>((r) => {
-        resolveTurn = r;
-      });
-      const handle = makeChannel({
-        promptImpl: async () => {
-          await turnGate;
-          return { stopReason: 'end_turn' } as PromptResponse;
-        },
-      });
-      const bridge = makeBridge({
-        channelFactory: async () => handle.channel,
-      });
-      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
-      const longText = 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS + 100);
-      const promptPromise = bridge.sendPrompt(
-        session.sessionId,
-        {
-          sessionId: session.sessionId,
-          prompt: [{ type: 'text', text: longText }],
-        },
-        undefined,
-        { promptId: 'prompt-long' },
-      );
+    it.each([
+      {
+        name: 'BMP overflow',
+        text: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS + 100),
+        expected: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS),
+        truncated: true,
+      },
+      {
+        name: 'surrogate pair crossing the cap',
+        text: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS - 1) + '🙂y',
+        expected: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS - 1),
+        truncated: true,
+      },
+      {
+        name: 'surrogate pair ending at the cap',
+        text: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+        expected: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+        truncated: false,
+      },
+      {
+        name: 'complete surrogate pair before overflow',
+        text: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂y',
+        expected: 'x'.repeat(TURN_RESULT_TEXT_MAX_CHARS - 2) + '🙂',
+        truncated: true,
+      },
+    ])(
+      'caps live promptText at TURN_RESULT_TEXT_MAX_CHARS ($name)',
+      async ({ text, expected, truncated }) => {
+        let resolveTurn: (() => void) | undefined;
+        const turnGate = new Promise<void>((r) => {
+          resolveTurn = r;
+        });
+        const handle = makeChannel({
+          promptImpl: async () => {
+            await turnGate;
+            return { stopReason: 'end_turn' } as PromptResponse;
+          },
+        });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const promptPromise = bridge.sendPrompt(
+          session.sessionId,
+          {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text }],
+          },
+          undefined,
+          { promptId: 'prompt-long' },
+        );
 
-      await vi.waitFor(() => {
-        expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
-      });
+        await vi.waitFor(() => {
+          expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1);
+        });
 
-      const status = await bridge.getSessionTurnStatus(
-        session.sessionId,
-        undefined,
-        'prompt-long',
-      );
-      expect(status?.promptText).toHaveLength(TURN_RESULT_TEXT_MAX_CHARS);
-      expect(status?.promptTextTruncated).toBe(true);
+        const status = await bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-long',
+        );
+        expect(status?.promptText).toBe(expected);
+        expect(status?.promptTextTruncated).toBe(truncated ? true : undefined);
 
-      resolveTurn!();
-      await promptPromise;
+        resolveTurn!();
+        await promptPromise;
 
-      const settled = await bridge.getSessionTurnStatus(
-        session.sessionId,
-        undefined,
-        'prompt-long',
-      );
-      expect(settled?.state).toBe('completed');
-      expect(settled?.promptText).toHaveLength(TURN_RESULT_TEXT_MAX_CHARS);
-      expect(settled?.promptTextTruncated).toBe(true);
+        const settled = await bridge.getSessionTurnStatus(
+          session.sessionId,
+          undefined,
+          'prompt-long',
+        );
+        expect(settled?.state).toBe('completed');
+        expect(settled?.promptText).toBe(expected);
+        expect(settled?.promptTextTruncated).toBe(truncated ? true : undefined);
 
-      await bridge.shutdown();
-    });
+        await bridge.shutdown();
+      },
+    );
 
     it('rejects a foreign clientId like /prompt does', async () => {
       const bridge = makeBridge({
@@ -20891,6 +22207,7 @@ describe('createAcpSessionBridge', () => {
       });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await seedRewindTarget(bridge, handle, session.sessionId, 'target');
       await bridge.sendPrompt(
         session.sessionId,
         {
@@ -20941,6 +22258,7 @@ describe('createAcpSessionBridge', () => {
       });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await seedRewindTarget(bridge, handle, session.sessionId, 'target');
       await bridge.sendPrompt(
         session.sessionId,
         {
@@ -21461,6 +22779,7 @@ describe('createAcpSessionBridge', () => {
       });
       const bridge = makeBridge({ channelFactory: async () => handle.channel });
       const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await seedRewindTarget(bridge, handle, session.sessionId, 'target');
       await bridge.sendPrompt(
         session.sessionId,
         {
@@ -21471,9 +22790,13 @@ describe('createAcpSessionBridge', () => {
         { promptId: 'prompt-rewind-overlay' },
       );
 
+      const beforeRewind = bridge.getSessionReplaySnapshot(session.sessionId);
       await expect(
         bridge.rewindSession(session.sessionId, { promptId: 'target' }),
       ).rejects.toThrow();
+      expect(bridge.getSessionReplaySnapshot(session.sessionId)).toEqual(
+        beforeRewind,
+      );
       await expect(
         bridge.getSessionTurnStatus(
           session.sessionId,
@@ -22931,6 +24254,175 @@ describe('createAcpSessionBridge', () => {
         await bridge.shutdown();
       }
     });
+
+    it.each([undefined, 'user', 'remove'] as const)(
+      'upgrades interrupted cancellation to user intent (%s) and drains both handshakes',
+      async (action) => {
+        const userReason = action === 'remove' ? 'user' : action;
+        const prompt = deferred<PromptResponse>();
+        const first = deferred<Record<string, unknown>>();
+        const second = deferred<Record<string, unknown>>();
+        let requests = 0;
+        const handle = makeChannel({ promptImpl: () => prompt.promise });
+        const originalExtMethod = handle.agent.extMethod.bind(handle.agent);
+        vi.spyOn(handle.agent, 'extMethod').mockImplementation(
+          (method, params) => {
+            if (method !== PROMPT_CANCEL_METHOD)
+              return originalExtMethod(method, params);
+            handle.agent.extMethodCalls.push({ method, params });
+            return ++requests === 1 ? first.promise : second.promise;
+          },
+        );
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const running = bridge.sendPrompt(session.sessionId, {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'work' }],
+        });
+        try {
+          await vi.waitFor(() =>
+            expect(handle.agent.promptCalls).toHaveLength(1),
+          );
+          const interrupted = bridge.cancelSession(session.sessionId, {
+            sessionId: session.sessionId,
+            _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+          });
+          await vi.waitFor(() => expect(requests).toBe(1));
+          const user =
+            action === 'remove'
+              ? Promise.resolve(
+                  bridge.removePendingPrompt(
+                    session.sessionId,
+                    bridge.getPendingPrompts(session.sessionId)[0]!.promptId,
+                  ),
+                )
+              : bridge.cancelSession(session.sessionId, {
+                  sessionId: session.sessionId,
+                  ...(userReason
+                    ? { _meta: { [PROMPT_CANCEL_REASON_META_KEY]: userReason } }
+                    : {}),
+                });
+          await vi.waitFor(() => expect(requests).toBe(2));
+          second.resolve({ cancelled: true });
+          const userResult = await user;
+          if (action === 'remove')
+            expect(userResult).toEqual({ removed: true });
+          prompt.resolve({ stopReason: 'cancelled' });
+          await running;
+          const next = bridge.sendPrompt(session.sessionId, {
+            sessionId: session.sessionId,
+            prompt: [{ type: 'text', text: 'next' }],
+          });
+          await new Promise((resolve) => setImmediate(resolve));
+          expect(handle.agent.promptCalls).toHaveLength(1);
+          first.resolve({ cancelled: true });
+          await interrupted;
+          await next;
+          expect(handle.agent.promptCalls).toHaveLength(2);
+          expect(
+            handle.agent.extMethodCalls
+              .filter(({ method }) => method === PROMPT_CANCEL_METHOD)
+              .map(({ params }) => params),
+          ).toEqual([
+            {
+              sessionId: session.sessionId,
+              _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+            },
+            {
+              sessionId: session.sessionId,
+              ...(userReason
+                ? { _meta: { [PROMPT_CANCEL_REASON_META_KEY]: userReason } }
+                : {}),
+            },
+          ]);
+        } finally {
+          first.resolve({ cancelled: true });
+          second.resolve({ cancelled: true });
+          prompt.resolve({ stopReason: 'cancelled' });
+          await bridge.shutdown();
+        }
+      },
+    );
+
+    it.each(['interrupted', 'cancel', 'remove'] as const)(
+      'preserves pre-dispatch cancellation intent via %s',
+      async (action) => {
+        const prompt = deferred<PromptResponse>();
+        const handle = makeChannel({ promptImpl: () => prompt.promise });
+        const bridge = makeBridge({
+          channelFactory: async () => handle.channel,
+        });
+        const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const resolveSpy = vi.spyOn(
+          SessionAttachmentStore.prototype,
+          'resolveContent',
+        );
+        const gate =
+          deferred<
+            Awaited<ReturnType<SessionAttachmentStore['resolveContent']>>
+          >();
+        resolveSpy.mockReturnValueOnce(gate.promise);
+        try {
+          const running = bridge.sendPrompt(
+            session.sessionId,
+            {
+              sessionId: session.sessionId,
+              prompt: [{ type: 'text', text: 'work' }],
+            },
+            undefined,
+            { promptId: 'infra-then-user-1' },
+          );
+          void running.catch(() => {});
+          await vi.waitFor(() =>
+            expect(bridge.getPendingPrompts(session.sessionId)).toHaveLength(1),
+          );
+          await bridge.cancelSession(session.sessionId, {
+            sessionId: session.sessionId,
+            _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'interrupted' },
+          });
+          // The signal is already aborted, so this abort cannot replace its
+          // reason; the explicit Stop must still reach the child as 'user'.
+          if (action === 'cancel') {
+            await bridge.cancelSession(session.sessionId, {
+              sessionId: session.sessionId,
+              _meta: { [PROMPT_CANCEL_REASON_META_KEY]: 'user' },
+            });
+          } else if (action === 'remove') {
+            expect(
+              bridge.removePendingPrompt(
+                session.sessionId,
+                'infra-then-user-1',
+              ),
+            ).toEqual({ removed: true });
+          }
+          gate.resolve([{ type: 'text', text: 'work' }]);
+          await vi.waitFor(() =>
+            expect(
+              handle.agent.extMethodCalls.filter(
+                ({ method }) => method === PROMPT_CANCEL_METHOD,
+              ),
+            ).toEqual([
+              {
+                method: PROMPT_CANCEL_METHOD,
+                params: {
+                  sessionId: session.sessionId,
+                  _meta: {
+                    [PROMPT_CANCEL_REASON_META_KEY]:
+                      action === 'interrupted' ? 'interrupted' : 'user',
+                  },
+                },
+              },
+            ]),
+          );
+        } finally {
+          resolveSpy.mockRestore();
+          prompt.resolve({ stopReason: 'cancelled' });
+          await bridge.shutdown();
+        }
+      },
+    );
   });
 
   describe('permission flow', () => {
@@ -28856,6 +30348,7 @@ describe('createAcpSessionBridge', () => {
         toolCount: 3,
         originatorClientId: 'client-1',
       });
+      expect(bridge.hasRuntimeMcpServers()).toBe(true);
       const next = await it.next();
       expect(next.value?.type).toBe('mcp_server_added');
       expect(next.value?.data).toMatchObject({
@@ -31732,11 +33225,223 @@ describe('createAcpSessionBridge', () => {
       await bridge.shutdown();
     });
 
+    it('keeps the session when a conditional close finds active work', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            return {
+              closed: false,
+              holds: [{ id: 'agent-1', category: 'agent' }],
+            };
+          }
+          return { closed: true };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await bridge.closeSession(session.sessionId, undefined, {
+        closeIfUnheld: true,
+        reason: 'scheduled_task_deleted',
+      });
+
+      expect(bridge.sessionCount).toBe(1);
+      expect(handle.agent.cancelCalls).toHaveLength(0);
+      expect(handle.agent.extMethodCalls).toContainEqual({
+        method: SERVE_CONTROL_EXT_METHODS.sessionClose,
+        params: {
+          sessionId: session.sessionId,
+          [ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]: true,
+          drainTimeoutMs: sessionCloseDrainBudgetMs(10_000),
+        },
+      });
+
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('keeps the session when daemon-owned work is still running', async () => {
+      let conditionalCloseCalls = 0;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          if (params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM] === true) {
+            conditionalCloseCalls++;
+          }
+          return { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const turn = {
+        sessionId: session.sessionId,
+        source: 'background_notification',
+        turnId: 'scheduled-background-1',
+        taskId: 'scheduled-task-1',
+        kind: 'agent',
+        startedAt: 1000,
+      } as const;
+
+      await expect(
+        handle.agentConnection.extMethod('_qwencode/start_turn', turn),
+      ).resolves.toEqual({ accepted: true });
+      await bridge.closeSession(session.sessionId, undefined, {
+        closeIfUnheld: true,
+        reason: 'scheduled_task_deleted',
+      });
+
+      expect(conditionalCloseCalls).toBe(0);
+      expect(bridge.sessionCount).toBe(1);
+      expect(handle.agent.cancelCalls).toHaveLength(0);
+
+      await handle.agentConnection.extNotification('_qwencode/end_turn', {
+        ...turn,
+        reason: 'end_turn',
+      });
+      await bridge.closeSession(session.sessionId);
+      await bridge.shutdown();
+    });
+
+    it('retains a direct conditional close on a condemned channel', async () => {
+      vi.useFakeTimers();
+      const lateRestore = deferred<LoadSessionResponse>();
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        loadSessionImpl: () => lateRestore.promise,
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? { closed: true, holds: [] }
+            : {},
+      });
+      const bridge = makeBridge({
+        sessionScope: 'thread',
+        maxSessions: 5,
+        sessionRestoreTimeoutMs: 20,
+        channelIdleTimeoutMs: 60_000,
+        channelFactory: async () => handle.channel,
+      });
+      try {
+        const sibling = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+        const timedOut = bridge
+          .loadSession({
+            sessionId: 'condemn-for-conditional-close',
+            workspaceCwd: WS_A,
+          })
+          .catch((error: unknown) => error);
+        await advanceRestoreDeadline(20);
+        expect(await timedOut).toBeInstanceOf(SessionRestoreTimeoutError);
+        await vi.advanceTimersByTimeAsync(20);
+
+        await bridge.closeSession(sibling.sessionId, undefined, {
+          closeIfUnheld: true,
+          reason: 'scheduled_task_deleted',
+        });
+
+        expect(bridge.sessionCount).toBe(1);
+        expect(
+          handle.agent.extMethodCalls.filter(
+            (call) =>
+              call.method === SERVE_CONTROL_EXT_METHODS.sessionClose &&
+              call.params['sessionId'] === sibling.sessionId,
+          ),
+        ).toHaveLength(0);
+        expect(handle.killed).toBe(false);
+      } finally {
+        lateRestore.reject(new Error('test cleanup'));
+        await bridge.shutdown();
+        vi.useRealTimers();
+      }
+    });
+
     it('throws SessionNotFoundError for unknown session', async () => {
       const bridge = makeBridge();
       await expect(bridge.closeSession('nonexistent')).rejects.toThrow(
         SessionNotFoundError,
       );
+      await bridge.shutdown();
+    });
+
+    it('atomically refuses a required-idle close until active work settles', async () => {
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? { closed: true, holds: [] }
+            : {},
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        {
+          sessionId: session.sessionId,
+          holds: [agentHold('a1')],
+          hasRunningBackgroundTasks: true,
+        },
+      ]);
+
+      await expect(
+        bridge.closeSession(session.sessionId, undefined, {
+          requireIdle: true,
+        }),
+      ).rejects.toThrow(SessionBusyError);
+      expect(bridge.sessionCount).toBe(1);
+
+      await sendActiveWorkSnapshot(handle, 2, [
+        {
+          sessionId: session.sessionId,
+          holds: [],
+          hasRunningBackgroundTasks: false,
+        },
+      ]);
+      await expect(
+        bridge.closeSession(session.sessionId, undefined, {
+          requireIdle: true,
+        }),
+      ).resolves.toBeUndefined();
+      expect(bridge.sessionCount).toBe(0);
+      await bridge.shutdown();
+    });
+
+    it('keeps a required-idle session when child work starts after the cached snapshot', async () => {
+      let childBusy = true;
+      const handle = makeChannel({
+        initializeImpl: () => activeWorkInitializeResponse(),
+        extMethodImpl: async (method, params) => {
+          if (method !== SERVE_CONTROL_EXT_METHODS.sessionClose) return {};
+          expect(params[ACTIVE_WORK_CLOSE_IF_UNHELD_PARAM]).toBe(true);
+          return childBusy
+            ? { closed: false, holds: [agentHold('late-agent')] }
+            : { closed: true, holds: [] };
+        },
+      });
+      const bridge = makeBridge({ channelFactory: async () => handle.channel });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await sendActiveWorkSnapshot(handle, 1, [
+        {
+          sessionId: session.sessionId,
+          holds: [],
+          hasRunningBackgroundTasks: false,
+        },
+      ]);
+
+      await expect(
+        bridge.closeSession(session.sessionId, undefined, {
+          requireIdle: true,
+        }),
+      ).rejects.toThrow(SessionBusyError);
+      expect(bridge.sessionCount).toBe(1);
+      expect(handle.killed).toBe(false);
+
+      childBusy = false;
+      await expect(
+        bridge.closeSession(session.sessionId, undefined, {
+          requireIdle: true,
+        }),
+      ).resolves.toBeUndefined();
+      expect(bridge.sessionCount).toBe(0);
       await bridge.shutdown();
     });
 
@@ -37008,6 +38713,36 @@ describe('session idle reaper', () => {
     await bridge.shutdown();
   });
 
+  it.each([undefined, 'user'] as const)(
+    'carries only an explicit client close intent to the child: %s',
+    async (cancelReason) => {
+      const handle = makeChannel({
+        extMethodImpl: (method) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionClose
+            ? { closed: true }
+            : {},
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      await bridge.closeSession(
+        session.sessionId,
+        undefined,
+        cancelReason ? { cancelReason } : undefined,
+      );
+      const close = handle.agent.extMethodCalls.find(
+        (call) => call.method === SERVE_CONTROL_EXT_METHODS.sessionClose,
+      );
+      if (cancelReason) {
+        expect(close?.params).toHaveProperty('cancelReason', 'user');
+      } else {
+        expect(close?.params).not.toHaveProperty('cancelReason');
+      }
+      await bridge.shutdown();
+    },
+  );
+
   it('does not cancel a session the agent already closed', async () => {
     const handle = makeChannel({
       extMethodImpl: (method) =>
@@ -37687,6 +39422,54 @@ describe('createAcpSessionBridge — background notifications', () => {
   });
 });
 
+describe('createAcpSessionBridge — session agent records', () => {
+  const request = {
+    kind: 'agent_message' as const,
+    recordKey: 'run-1:result',
+    modelText: '<agent_message from="claude-B">done</agent_message>',
+    payload: {
+      displayText: 'done',
+      author: { agentId: 'agent-1', name: 'claude-B' },
+      runId: 'run-1',
+      status: 'completed' as const,
+    },
+  };
+
+  it('forwards the record to the live session and returns its id', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method, params) =>
+        method === SERVE_CONTROL_EXT_METHODS.sessionExternalRecord
+          ? { sessionId: params['sessionId'], recordId: 'rec-1', created: true }
+          : {},
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+    await expect(
+      bridge.appendExternalRecord(session.sessionId, request),
+    ).resolves.toEqual({
+      sessionId: session.sessionId,
+      recordId: 'rec-1',
+      created: true,
+    });
+    expect(handle.agent.extMethodCalls).toContainEqual({
+      method: SERVE_CONTROL_EXT_METHODS.sessionExternalRecord,
+      params: { sessionId: session.sessionId, ...request },
+    });
+    await bridge.shutdown();
+  });
+
+  it('rejects a record for an unknown session', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    await expect(
+      bridge.appendExternalRecord('missing', request),
+    ).rejects.toBeInstanceOf(SessionNotFoundError);
+    await bridge.shutdown();
+  });
+});
+
 /**
  * `enqueueMidTurnMessage` backs the web-shell mid-turn drain: the browser
  * pushes a message typed during a turn, the ACP child drains it via
@@ -37729,6 +39512,152 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     await vi.waitFor(() =>
       expect(bridge.getPendingPrompts(session.sessionId)).toEqual([]),
     );
+    await bridge.shutdown();
+  });
+
+  it('asks the agent to deliver queued input only on send-now', async () => {
+    const firstTurn = deferred<void>();
+    const handle = makeChannel({
+      promptImpl: async (req: PromptRequest) => {
+        if ((req.prompt[0] as { text?: string }).text === 'work') {
+          await firstTurn.promise;
+        }
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const turn = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'work' }],
+    });
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+    const requests = () =>
+      handle.agent.extMethodCalls.filter(
+        (call) => call.method === MID_TURN_SEND_NOW_METHOD,
+      );
+    const client = { clientId: session.clientId };
+
+    // Nothing waits yet, and queue-only steering is not the user's to send.
+    expect(bridge.sendMidTurnMessagesNow(session.sessionId, client)).toEqual({
+      requested: false,
+    });
+    bridge.enqueueMidTurnMessage(
+      session.sessionId,
+      'delegated',
+      undefined,
+      undefined,
+      { queueOnly: true },
+    );
+    expect(bridge.sendMidTurnMessagesNow(session.sessionId, client)).toEqual({
+      requested: false,
+    });
+    expect(() =>
+      bridge.sendMidTurnMessagesNow(session.sessionId, {
+        clientId: 'not-bound',
+      }),
+    ).toThrow(InvalidClientIdError);
+
+    // Typing alone keeps tool-boundary delivery.
+    expect(
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'steer',
+        client,
+        'typed-1',
+      ),
+    ).toEqual({ accepted: true, messageId: 'typed-1' });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(requests()).toEqual([]);
+
+    expect(bridge.sendMidTurnMessagesNow(session.sessionId, client)).toEqual({
+      requested: true,
+    });
+    await vi.waitFor(() =>
+      expect(requests()).toEqual([
+        {
+          method: MID_TURN_SEND_NOW_METHOD,
+          params: { sessionId: session.sessionId },
+        },
+      ]),
+    );
+
+    // The agent's send-now drain takes the user's message and leaves the
+    // queue-only steering for the tool boundary.
+    await expect(
+      handle.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+        sessionId: session.sessionId,
+        userInputOnly: true,
+      }),
+    ).resolves.toMatchObject({ messages: ['steer'] });
+    await expect(
+      handle.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+        sessionId: session.sessionId,
+      }),
+    ).resolves.toMatchObject({ messages: ['delegated'] });
+
+    firstTurn.resolve();
+    await turn;
+    await bridge.shutdown();
+  });
+
+  it('logs a send-now request an older agent rejects and keeps the queue', async () => {
+    const firstTurn = deferred<void>();
+    const handle = makeChannel({
+      promptImpl: async (req: PromptRequest) => {
+        if ((req.prompt[0] as { text?: string }).text === 'work') {
+          await firstTurn.promise;
+        }
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: (method) => {
+        if (method === MID_TURN_SEND_NOW_METHOD) {
+          throw RequestError.methodNotFound(method);
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const turn = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'work' }],
+    });
+    await vi.waitFor(() => expect(handle.agent.promptCalls).toHaveLength(1));
+    const client = { clientId: session.clientId };
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      bridge.enqueueMidTurnMessage(
+        session.sessionId,
+        'steer',
+        client,
+        'typed-1',
+      );
+      // Advisory: the answer does not wait for the agent.
+      expect(bridge.sendMidTurnMessagesNow(session.sessionId, client)).toEqual({
+        requested: true,
+      });
+      await vi.waitFor(() =>
+        expect(stderrSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            `[mid-turn] session=${JSON.stringify(session.sessionId)} send-now request failed`,
+          ),
+        ),
+      );
+      // The message still waits for the tool boundary.
+      await expect(
+        handle.agentConnection.extMethod(MID_TURN_QUEUE_DRAIN_METHOD, {
+          sessionId: session.sessionId,
+        }),
+      ).resolves.toMatchObject({ messages: ['steer'] });
+    } finally {
+      stderrSpy.mockRestore();
+    }
+
+    firstTurn.resolve();
+    await turn;
     await bridge.shutdown();
   });
 
@@ -38085,6 +40014,84 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     ).toEqual({ data: Buffer.from([1, 2, 3]), mimeType: 'image/png' });
 
     release();
+    await prompt;
+    await bridge.shutdown();
+  });
+
+  it('still delivers a message whose deletion missed while a failing drain held it', async () => {
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await new Promise<void>((r) => {
+          release = r;
+        });
+        return { stopReason: 'end_turn' };
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const context = { clientId: session.clientId };
+    const prompt = bridge
+      .sendPrompt(
+        session.sessionId,
+        {
+          sessionId: session.sessionId,
+          prompt: [{ type: 'text', text: 'go' }],
+        },
+        undefined,
+        context,
+      )
+      .catch(() => {});
+    await new Promise((r) => setTimeout(r, 10));
+    const reference = await bridge.storeSessionAttachment(
+      session.sessionId,
+      Uint8Array.of(1, 2, 3),
+      'image/png',
+      context,
+    );
+    expect(
+      bridge.enqueueMidTurnMessage(session.sessionId, 'first', context, 'u1', {
+        content: [reference],
+      }),
+    ).toEqual({ accepted: true, messageId: 'u1' });
+    expect(
+      bridge.enqueueMidTurnMessage(session.sessionId, 'second', context, 'u2'),
+    ).toEqual({ accepted: true, messageId: 'u2' });
+    let deleteAnswer: unknown;
+    const readFile = vi
+      .spyOn(fsp, 'readFile')
+      .mockImplementationOnce(async () => {
+        // A delete or an edit lands while the drain reads an attachment, and
+        // that read then fails.
+        deleteAnswer = bridge.removeMidTurnMessage(
+          session.sessionId,
+          'u2',
+          context,
+        );
+        throw Object.assign(new Error('too many open files'), {
+          code: 'EMFILE',
+        });
+      });
+    try {
+      await expect(
+        handle.agentConnection.extMethod('craft/drainMidTurnQueue', {
+          sessionId: session.sessionId,
+          userInputOnly: true,
+        }),
+      ).rejects.toBeDefined();
+    } finally {
+      readFile.mockRestore();
+    }
+    // The client was told the message is no longer its to change, so it is
+    // delivered as that answer says rather than dropped.
+    expect(deleteAnswer).toEqual({ removed: false });
+    const next = await handle.agentConnection.extMethod(
+      'craft/drainMidTurnQueue',
+      { sessionId: session.sessionId },
+    );
+    expect(next['messages']).toEqual(['first', 'second']);
+
+    release?.();
     await prompt;
     await bridge.shutdown();
   });
@@ -38767,7 +40774,15 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         type: 'text',
         text: 'two images\n[Attachment is no longer available]',
       },
-      { type: 'image', data: 'AQI=', mimeType: 'image/png' },
+      {
+        type: 'image',
+        data: 'AQI=',
+        mimeType: 'image/png',
+        _meta: {
+          'qwen.daemon.attachmentContext':
+            expect.stringContaining('"absolutePath":'),
+        },
+      },
     ]);
     releases[1]!();
     await vi.waitFor(() =>
@@ -38847,7 +40862,15 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
         type: 'text',
         text: 'm2\n[Attachment is no longer available]',
       },
-      { type: 'image', data: 'AQI=', mimeType: 'image/png' },
+      {
+        type: 'image',
+        data: 'AQI=',
+        mimeType: 'image/png',
+        _meta: {
+          'qwen.daemon.attachmentContext':
+            expect.stringContaining('"absolutePath":'),
+        },
+      },
     ]);
     releases[2]!();
     await vi.waitFor(() =>
@@ -41912,5 +43935,76 @@ describe('background handoff cancellation', () => {
       peerAbort.abort();
       await bridge.shutdown();
     }
+  });
+});
+
+describe('message group deletion', () => {
+  it('rejects at admission while a prompt is active', async () => {
+    const gate = deferred<void>();
+    const ext = vi.fn(async (_method: string) => ({}));
+    const handle = makeChannel({
+      promptImpl: async () => {
+        await gate.promise;
+        return { stopReason: 'end_turn' };
+      },
+      extMethodImpl: ext,
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const prompt = bridge.sendPrompt(session.sessionId, {
+      sessionId: session.sessionId,
+      prompt: [{ type: 'text', text: 'active' }],
+    });
+    await expect(
+      bridge.deleteMessageGroups(session.sessionId, {
+        snapshot: 'v1',
+        groupIds: ['group'],
+      }),
+    ).rejects.toBeInstanceOf(SessionBusyError);
+    expect(
+      ext.mock.calls.some(
+        ([method]) =>
+          method === SERVE_CONTROL_EXT_METHODS.sessionMessagesDelete,
+      ),
+    ).toBe(false);
+    gate.resolve();
+    await prompt;
+    await bridge.shutdown();
+  });
+
+  it('purges deleted replay and publishes invalidation only after the authoritative replacement is seeded', async () => {
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_CONTROL_EXT_METHODS.sessionMessagesDelete)
+          return { deletedGroupIds: ['group'], deletedPromptIds: ['prompt'] };
+        if (method === 'qwen/session/loadUpdates') return { updates: [] };
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await handle.agentConnection.sessionUpdate({
+      sessionId: session.sessionId,
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'deleted content' },
+      },
+    });
+    await expect(
+      bridge.deleteMessageGroups(session.sessionId, {
+        snapshot: 'v1',
+        groupIds: ['group'],
+      }),
+    ).resolves.toEqual({
+      deletedGroupIds: ['group'],
+      deletedPromptIds: ['prompt'],
+    });
+    expect(
+      JSON.stringify(bridge.getSessionReplaySnapshot(session.sessionId)),
+    ).not.toContain('deleted content');
+    expect(
+      JSON.stringify(bridge.getSessionReplaySnapshot(session.sessionId)),
+    ).toContain('session_messages_deleted');
+    await bridge.shutdown();
   });
 });

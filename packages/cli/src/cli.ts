@@ -14,6 +14,7 @@ import {
 } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
+import { FatalError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import {
   DEFAULT_COMMAND,
   DEFAULT_COMMAND_DESC,
@@ -39,12 +40,23 @@ initCpuProfiler();
 type BootstrapRoute =
   | 'serve'
   | 'mcp'
+  | 'memory'
   | 'managed-runtime-worker'
+  | 'session-send-mcp'
   | 'help'
   | 'version'
   | 'default';
 
 export const TOP_LEVEL_COMMANDS = [
+  ['agents <command>', 'Session agents: join a coordinator as a runtime'],
+  [
+    'attach --session <session-id>',
+    'Attach a terminal to a running daemon session',
+  ],
+  [
+    'autofix-pr <command>',
+    'Internal helpers used by the /autofix-pr skill (PR worktree setup, change snapshot and its gate probe, CI logs, guarded push, replies, re-runs, the scheduled task, status, cleanup)',
+  ],
   ['auth', 'Configure authentication (removed)'],
   [
     'batch <command>',
@@ -55,6 +67,7 @@ export const TOP_LEVEL_COMMANDS = [
   ['extensions <command>', 'Manage Qwen Code extensions.'],
   ['hooks', 'Manage Qwen Code hooks (use /hooks in interactive mode).'],
   ['mcp', 'Manage MCP servers'],
+  ['memory', 'Preview and import external memories'],
   [
     'review <command>',
     'Run a review non-interactively (`run`), plus the internal helpers used by the /review skill (PR worktree setup, context fetch, rules loading, presubmit checks, cleanup)',
@@ -67,6 +80,7 @@ export const TOP_LEVEL_COMMANDS = [
     'serve',
     'Run Qwen Code as a local HTTP daemon (Stage 1 experimental: --http-bridge)',
   ],
+  ['daemon <command>', 'Inspect and control local qwen serve daemons'],
   ['sessions <command>', 'Manage Qwen Code sessions'],
   ['update', 'Check for Qwen Code updates and install if available'],
 ] as const;
@@ -387,11 +401,17 @@ export function resolveBootstrapRoute(
   // Version-bearing mcp argv never reaches here: the intercept above owns
   // every exact version token before `--`, and post-`--` tokens are
   // positional data the fast path persists verbatim.
+  if (firstArg === 'memory') return 'memory';
   if (firstArg === 'mcp') {
     return 'mcp';
   }
   if (firstArg === 'managed-runtime-worker') {
     return 'managed-runtime-worker';
+  }
+  // The daemon spawns `agents session-send-mcp --url <endpoint>` per agent
+  // run; its stdout is an MCP stream, so it skips normal startup entirely.
+  if (firstArg === 'agents' && argv[1] === 'session-send-mcp') {
+    return 'session-send-mcp';
   }
 
   return 'default';
@@ -412,6 +432,18 @@ function printMcpHelp(): void {
     ...MCP_COMMANDS.map(
       ([command, description]) => `  qwen mcp ${command}  ${description}`,
     ),
+  ];
+  writeStdoutLine(lines.join('\n'));
+}
+
+function printMemoryHelp(): void {
+  const lines = [
+    'Usage: qwen memory <command>',
+    '',
+    'Preview and import external memories',
+    '',
+    'Commands:',
+    '  qwen memory import codex  Preview Codex memory; explicitly confirm selected sections to consolidate',
   ];
   writeStdoutLine(lines.join('\n'));
 }
@@ -465,6 +497,43 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
   await parseYargsCommand(parser, argv);
 }
 
+async function runMemoryFastPath(rawArgv: readonly string[]): Promise<void> {
+  const argv: readonly string[] = normalizeServeFastPathArgv(rawArgv);
+  const hasSubcommand = argv.slice(1).some((token) => !token.startsWith('-'));
+  if (!hasSubcommand) {
+    printMemoryHelp();
+    return;
+  }
+
+  const [{ default: yargsInstance }, { memoryCommand }] = await Promise.all([
+    import('yargs'),
+    import('./commands/memory.js'),
+  ]);
+
+  const parser = yargsInstance([])
+    .scriptName('qwen')
+    .command(memoryCommand)
+    .version(false)
+    .help()
+    .alias('h', 'help')
+    .strict()
+    .strictCommands()
+    .demandCommand(1, 'You need at least one command before continuing.')
+    .fail((message: string | null, error: Error | undefined, yargs: Argv) => {
+      writeStderrLine(message || error?.message || 'Unknown argument error');
+      yargs.showHelp();
+      process.exitCode = 1;
+    })
+    .exitProcess(false);
+
+  if (hasFlag(argv.slice(2), '--help', '-h')) {
+    await parseYargsHelp(parser, argv);
+    return;
+  }
+
+  await parseYargsCommand(parser, argv);
+}
+
 async function parseYargsHelp(
   parser: Argv,
   argv: readonly string[],
@@ -490,26 +559,68 @@ async function parseYargsCommand(
   parser: Argv,
   argv: readonly string[],
 ): Promise<void> {
-  await new Promise<void>((resolve) => {
-    parser.parse(
-      argv,
-      (error: Error | undefined, _argv: ArgumentsCamelCase, output: string) => {
-        if (output) {
-          writeStdoutLine(output);
-        }
-        if (error) {
-          writeStderrLine(error.message);
-          process.exitCode = 1;
-        }
-        resolve();
-      },
-    );
+  await new Promise<void>((resolve, reject) => {
+    void Promise.resolve(
+      parser.parse(
+        argv,
+        (
+          error: Error | undefined,
+          _argv: ArgumentsCamelCase,
+          output: string,
+        ) => {
+          if (error instanceof FatalError) {
+            reject(error);
+            return;
+          }
+          if (output) writeStdoutLine(output);
+          if (error) {
+            writeStderrLine(error.message);
+            process.exitCode = 1;
+          }
+          resolve();
+        },
+      ),
+    ).catch(reject);
   });
 }
 
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
+  if (
+    rawArgv[0] === 'managed-runtime-bootstrap' &&
+    (rawArgv.length === 1 ||
+      (rawArgv.length === 2 &&
+        ['--help', '--workspace-file-upload'].includes(rawArgv[1]!)))
+  ) {
+    const { runManagedRuntimeBootstrap } = await import(
+      './serve/managed-runtime-bootstrap.js'
+    );
+    await runManagedRuntimeBootstrap(
+      rawArgv[1] === '--help',
+      rawArgv[1] === '--workspace-file-upload',
+    );
+    return;
+  }
+  if (
+    rawArgv.length === 2 &&
+    rawArgv[0] === 'managed-runtime-bootstrap-worker'
+  ) {
+    const { runManagedRuntimeBootstrapWorker } = await import(
+      './serve/managed-runtime-ssh-worker.js'
+    );
+    await runManagedRuntimeBootstrapWorker(rawArgv[1]!);
+    return;
+  }
+  // Bundles enter here directly; the npm wrapper dispatches before loading CLI.
+  if (rawArgv.length === 1 && rawArgv[0] === '--workspace-recovery-worker') {
+    const { runWorkspaceRecoveryWorker } = await import(
+      './serve/workspace-recovery-worker.js'
+    );
+    await runWorkspaceRecoveryWorker();
+    return;
+  }
+
   // Before ANY route can start a child: an inherited messaging pair names
   // an ancestor session's inbox plus a token that authenticates to it, and
   // no route here consumes it — a session that binds its own inbox
@@ -553,11 +664,16 @@ export async function runCliEntry(
     if (await tryRunServeFastPath(argv)) {
       return;
     }
+  } else if (route === 'memory') {
+    await runMemoryFastPath(argv);
+    return;
   } else if (route === 'mcp') {
     await runMcpFastPath(argv);
     return;
   } else if (route === 'managed-runtime-worker') {
-    if (argv.length !== 1) {
+    const containerBoot =
+      argv.length === 3 && argv[1] === '--container-boot' ? argv[2] : undefined;
+    if (argv.length !== 1 && !containerBoot) {
       writeStderrLine('Managed Runtime worker arguments are invalid.');
       process.exitCode = 1;
       return;
@@ -565,7 +681,24 @@ export async function runCliEntry(
     const { runManagedRuntimeAttestationWorker } = await import(
       './serve/managed-runtime-attestation-worker.js'
     );
-    await runManagedRuntimeAttestationWorker();
+    await runManagedRuntimeAttestationWorker(containerBoot);
+    return;
+  } else if (route === 'session-send-mcp') {
+    // Nothing on this path may write to stdout (the MCP stream) or read
+    // settings: Codex starts MCP servers with a minimal environment.
+    const { readSessionSendMcpUrl } = await import(
+      './commands/agents/session-send-mcp.js'
+    );
+    const url = readSessionSendMcpUrl(argv.slice(2));
+    if (!url) {
+      writeStderrLine('Usage: qwen agents session-send-mcp --url <endpoint>');
+      process.exitCode = 1;
+      return;
+    }
+    const { runSessionSendMcp } = await import(
+      './commands/agents/session-send-mcp-server.js'
+    );
+    await runSessionSendMcp(url);
     return;
   } else if (route === 'help') {
     await printTopLevelHelp();

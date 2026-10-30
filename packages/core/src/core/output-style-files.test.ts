@@ -44,9 +44,30 @@ vi.mock('../utils/debugLogger.js', async (importOriginal) => {
   };
 });
 
+type FileSource = Parameters<typeof parseOutputStyleFile>[2];
+type Style = ReturnType<typeof parseOutputStyleFile>;
+
+// parseOutputStyleFile with the most common file path and source.
+const parse = (
+  content: string,
+  filePath = '/styles/x.md',
+  source: FileSource = 'user',
+) => parseOutputStyleFile(content, filePath, source);
+
+// Writes each `files` entry (name → body), in order, into `dir`.
+async function writeFiles(dir: string, files: Record<string, string | Buffer>) {
+  for (const [name, body] of Object.entries(files)) {
+    await fs.writeFile(path.join(dir, name), body);
+  }
+}
+
+const names = (styles: Style[]) => styles.map((s) => s.name);
+const labels = (styles: ReadonlyArray<{ name: string; source: string }>) =>
+  styles.map((s) => `${s.name}:${s.source}`);
+
 describe('parseOutputStyleFile', () => {
   it('reads name, description and keep-coding-instructions from frontmatter', () => {
-    const style = parseOutputStyleFile(
+    const style = parse(
       [
         '---',
         'name: Reviewer',
@@ -57,7 +78,6 @@ describe('parseOutputStyleFile', () => {
         'Review the code; do not edit.',
       ].join('\n'),
       '/styles/reviewer.md',
-      'user',
     );
     expect(style).toEqual({
       name: 'Reviewer',
@@ -69,7 +89,7 @@ describe('parseOutputStyleFile', () => {
   });
 
   it('defaults the name to the file name and the description to the first line', () => {
-    const style = parseOutputStyleFile(
+    const style = parse(
       '# Terse mode\n\nAnswer in **one** line.\n',
       '/styles/terse.md',
       'project',
@@ -81,22 +101,14 @@ describe('parseOutputStyleFile', () => {
   });
 
   it('accepts a file without frontmatter and CRLF line endings', () => {
-    const style = parseOutputStyleFile(
-      '\uFEFFBe brief.\r\nAlways.\r\n',
-      '/styles/brief.md',
-      'user',
-    );
+    const style = parse('﻿Be brief.\r\nAlways.\r\n', '/styles/brief.md');
     expect(style.prompt).toBe('Be brief.\nAlways.');
     expect(style.description).toBe('Be brief.');
   });
 
   it('treats a non-boolean keep-coding-instructions as false and reports it', () => {
     styleDebugLogger.warn.mockClear();
-    const style = parseOutputStyleFile(
-      '---\nkeep-coding-instructions: yes please\n---\nBody',
-      '/styles/x.md',
-      'user',
-    );
+    const style = parse('---\nkeep-coding-instructions: yes please\n---\nBody');
     expect(style.keepCodingInstructions).toBe(false);
     expect(styleDebugLogger.warn).toHaveBeenCalledWith(
       expect.stringContaining('yes please'),
@@ -114,68 +126,46 @@ describe('parseOutputStyleFile', () => {
       'description: a: b\nkeep-coding-instructions: True',
     ],
   ])('reads keep-coding-instructions from %s', (_label, fm) => {
-    const style = parseOutputStyleFile(
-      `---\n${fm}\n---\nBody`,
-      '/styles/x.md',
-      'user',
-    );
+    const style = parse(`---\n${fm}\n---\nBody`);
     expect(style.keepCodingInstructions).toBe(true);
   });
 
   it('inherits keep-coding-instructions from the built-in it shadows', () => {
-    const shadowing = parseOutputStyleFile(
-      'My own brevity wording.',
-      '/styles/concise.md',
-      'user',
-    );
+    const shadowing = parse('My own brevity wording.', '/styles/concise.md');
     expect(shadowing.keepCodingInstructions).toBe(true);
 
-    const declared = parseOutputStyleFile(
+    const declared = parse(
       '---\nkeep-coding-instructions: false\n---\nMy own brevity wording.',
       '/styles/concise.md',
-      'user',
     );
     expect(declared.keepCodingInstructions).toBe(false);
 
-    const unrelated = parseOutputStyleFile(
-      'Body',
-      '/styles/reviewer.md',
-      'user',
-    );
+    const unrelated = parse('Body', '/styles/reviewer.md');
     expect(unrelated.keepCodingInstructions).toBe(false);
   });
 
   it('trims a name derived from the file name so it stays selectable', () => {
-    const style = parseOutputStyleFile('Body', '/dir/Reviewer .md', 'user');
+    const style = parse('Body', '/dir/Reviewer .md');
     expect(style.name).toBe('Reviewer');
     expect(findOutputStyle([style], 'Reviewer')).toBe(style);
   });
 
   it('accepts a name at exactly the 64-character bound', () => {
     const name = 'x'.repeat(64);
-    const style = parseOutputStyleFile(
-      `---\nname: ${name}\n---\nBody`,
-      '/styles/f.md',
-      'user',
-    );
+    const style = parse(`---\nname: ${name}\n---\nBody`, '/styles/f.md');
     expect(style.name).toBe(name);
   });
 
   it('falls back to the file name when the frontmatter name is not a string', () => {
-    const style = parseOutputStyleFile(
+    const style = parse(
       '---\nname:\n  foo: bar\n---\nBody',
       '/styles/fallback.md',
-      'user',
     );
     expect(style.name).toBe('fallback');
   });
 
   it('strips HTML comments from the prompt and the derived description', () => {
-    const style = parseOutputStyleFile(
-      '<!-- team note -->\nAnswer tersely.',
-      '/styles/x.md',
-      'user',
-    );
+    const style = parse('<!-- team note -->\nAnswer tersely.');
     expect(style.prompt).toBe('Answer tersely.');
     expect(style.description).toBe('Answer tersely.');
   });
@@ -187,7 +177,7 @@ describe('parseOutputStyleFile', () => {
     ],
     ['an empty fence pair', '---\n---\nBody text.'],
   ])('tolerates %s', (_label, content) => {
-    const style = parseOutputStyleFile(content, '/styles/x.md', 'user');
+    const style = parse(content);
     expect(style.prompt).toBe('Body text.');
   });
 
@@ -197,38 +187,28 @@ describe('parseOutputStyleFile', () => {
   ])(
     'keeps a block of %s fenced by decorative rules in the prompt',
     (_label, content) => {
-      const style = parseOutputStyleFile(content, '/styles/haiku.md', 'user');
+      const style = parse(content, '/styles/haiku.md');
       expect(style.prompt).toBe(content);
     },
   );
 
   it('reads frontmatter that carries a YAML comment', () => {
-    const style = parseOutputStyleFile(
+    const style = parse(
       '---\n# why this style exists\nname: Commented\n---\nBody',
-      '/styles/x.md',
-      'user',
     );
     expect(style.name).toBe('Commented');
     expect(style.prompt).toBe('Body');
   });
 
   it('caps a long derived description and strips its markdown markers', () => {
-    const style = parseOutputStyleFile(
-      `# **${'ab '.repeat(100)}**`,
-      '/styles/x.md',
-      'user',
-    );
+    const style = parse(`# **${'ab '.repeat(100)}**`);
     expect(style.description).toHaveLength(120);
     expect(style.description.endsWith('…')).toBe(true);
     expect(style.description.startsWith('ab ab')).toBe(true);
   });
 
   it('falls back to a generic description when the body has no prose line', () => {
-    const style = parseOutputStyleFile(
-      '```\ncode only\n```',
-      '/styles/code.md',
-      'user',
-    );
+    const style = parse('```\ncode only\n```', '/styles/code.md');
     expect(style.description).toBe('Custom code output style');
   });
 
@@ -241,12 +221,12 @@ describe('parseOutputStyleFile', () => {
     ['a derived description', '', '%s'],
   ])('strips escape and format characters from %s', (_label, fm, body) => {
     const payload =
-      'Safe \u001b]8;;https://evil.example\u0007link\u001b]8;;\u0007 \u202Etxet';
+      'Safe \u001b]8;;https://evil.example\u0007link\u001b]8;;\u0007 ‮txet';
     const content =
       fm === ''
         ? body.replace('%s', payload)
         : `---\nname: Styled\n${fm.replace('%s', payload)}\n---\nBody`;
-    const style = parseOutputStyleFile(content, '/styles/x.md', 'user');
+    const style = parse(content);
 
     expect(style.description).not.toMatch(/[\p{Cc}\p{Cf}]/u);
     expect(style.description).not.toContain('evil.example');
@@ -254,10 +234,8 @@ describe('parseOutputStyleFile', () => {
   });
 
   it('caps a long declared description at the derived-description limit', () => {
-    const style = parseOutputStyleFile(
+    const style = parse(
       `---\nname: Styled\ndescription: "${'x'.repeat(5000)}"\n---\nBody`,
-      '/styles/x.md',
-      'user',
     );
     expect([...style.description].length).toBe(120);
   });
@@ -284,14 +262,16 @@ describe('parseOutputStyleFile', () => {
       'longer than 64',
     ],
   ])('rejects %s', (_label, content, message) => {
-    expect(() => parseOutputStyleFile(content, '/styles/f.md', 'user')).toThrow(
-      message,
-    );
+    expect(() => parse(content, '/styles/f.md')).toThrow(message);
   });
 });
 
 describe('loadOutputStylesFromDir', () => {
   let dir: string;
+
+  // Loads `dir` as `source` confined to `dir`.
+  const load = (source: FileSource = 'user') =>
+    loadOutputStylesFromDir(dir, source, dir);
 
   beforeEach(async () => {
     dir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-output-styles-'));
@@ -308,56 +288,58 @@ describe('loadOutputStylesFromDir', () => {
   });
 
   it('loads *.md files in name order and skips everything else', async () => {
-    await fs.writeFile(path.join(dir, 'b.md'), 'Style B');
-    await fs.writeFile(path.join(dir, 'a.md'), 'Style A');
-    await fs.writeFile(path.join(dir, 'notes.txt'), 'not a style');
+    await writeFiles(dir, {
+      'b.md': 'Style B',
+      'a.md': 'Style A',
+      'notes.txt': 'not a style',
+    });
     await fs.mkdir(path.join(dir, 'nested.md'));
 
-    const styles = await loadOutputStylesFromDir(dir, 'user', dir);
-    expect(styles.map((s) => s.name)).toEqual(['a', 'b']);
+    const styles = await load();
+    expect(names(styles)).toEqual(['a', 'b']);
     expect(styles.every((s) => s.source === 'user')).toBe(true);
   });
 
   it('skips an invalid file without dropping its neighbours', async () => {
-    await fs.writeFile(path.join(dir, 'bad.md'), '---\nname: default\n---\nx');
-    await fs.writeFile(path.join(dir, 'good.md'), 'Good');
+    await writeFiles(dir, {
+      'bad.md': '---\nname: default\n---\nx',
+      'good.md': 'Good',
+    });
 
-    const styles = await loadOutputStylesFromDir(dir, 'project', dir);
-    expect(styles.map((s) => s.name)).toEqual(['good']);
+    expect(names(await load('project'))).toEqual(['good']);
   });
 
   it('keeps the first file when two files declare the same name', async () => {
-    await fs.writeFile(path.join(dir, 'one.md'), '---\nname: Same\n---\nFirst');
-    await fs.writeFile(
-      path.join(dir, 'two.md'),
-      '---\nname: same\n---\nSecond',
-    );
+    await writeFiles(dir, {
+      'one.md': '---\nname: Same\n---\nFirst',
+      'two.md': '---\nname: same\n---\nSecond',
+    });
 
-    const styles = await loadOutputStylesFromDir(dir, 'user', dir);
+    const styles = await load();
     expect(styles).toHaveLength(1);
     expect(styles[0].prompt).toBe('First');
   });
 
   it('loads a file whose extension is uppercase', async () => {
-    await fs.writeFile(path.join(dir, 'Shouty.MD'), 'Shouty');
+    await writeFiles(dir, { 'Shouty.MD': 'Shouty' });
 
-    const styles = await loadOutputStylesFromDir(dir, 'user', dir);
-    expect(styles.map((s) => s.name)).toEqual(['Shouty']);
+    expect(names(await load())).toEqual(['Shouty']);
   });
 
   it('skips a file over the size limit and keeps one at the bound', async () => {
-    await fs.writeFile(path.join(dir, 'huge.md'), 'x'.repeat(25_001));
-    await fs.writeFile(path.join(dir, 'atbound.md'), 'x'.repeat(25_000));
+    await writeFiles(dir, {
+      'huge.md': 'x'.repeat(25_001),
+      'atbound.md': 'x'.repeat(25_000),
+    });
 
-    const styles = await loadOutputStylesFromDir(dir, 'user', dir);
-    expect(styles.map((s) => s.name)).toEqual(['atbound']);
+    expect(names(await load())).toEqual(['atbound']);
   });
 
   it('reports a skipped file through the debug logger', async () => {
     styleDebugLogger.warn.mockClear();
-    await fs.writeFile(path.join(dir, 'huge.md'), 'x'.repeat(25_001));
+    await writeFiles(dir, { 'huge.md': 'x'.repeat(25_001) });
 
-    await loadOutputStylesFromDir(dir, 'user', dir);
+    await load();
     expect(styleDebugLogger.warn).toHaveBeenCalledWith(
       expect.stringContaining('huge.md'),
     );
@@ -367,33 +349,27 @@ describe('loadOutputStylesFromDir', () => {
   // UTF-8 the frontmatter is silently dropped and NUL-riddled mojibake becomes
   // the prompt.
   it('skips a UTF-16 file without dropping its UTF-8 neighbour', async () => {
-    await fs.writeFile(
-      path.join(dir, 'utf16.md'),
-      Buffer.from('---\nname: X\n---\nBe terse.', 'utf16le'),
-    );
-    await fs.writeFile(path.join(dir, 'utf8.md'), 'Be terse.');
+    await writeFiles(dir, {
+      'utf16.md': Buffer.from('---\nname: X\n---\nBe terse.', 'utf16le'),
+      'utf8.md': 'Be terse.',
+    });
 
-    const styles = await loadOutputStylesFromDir(dir, 'user', dir);
-    expect(styles.map((s) => s.name)).toEqual(['utf8']);
+    expect(names(await load())).toEqual(['utf8']);
   });
 
   it('skips a comment-only file without dropping its neighbour', async () => {
-    await fs.writeFile(
-      path.join(dir, 'template.md'),
-      '<!-- copy this file and uncomment to make a style -->',
-    );
-    await fs.writeFile(path.join(dir, 'real.md'), 'Answer as a reviewer.');
+    await writeFiles(dir, {
+      'template.md': '<!-- copy this file and uncomment to make a style -->',
+      'real.md': 'Answer as a reviewer.',
+    });
 
-    const styles = await loadOutputStylesFromDir(dir, 'user', dir);
-    expect(styles.map((s) => s.name)).toEqual(['real']);
+    expect(names(await load())).toEqual(['real']);
   });
 
   it('skips a file whose padded name is the reserved default', async () => {
-    await fs.writeFile(path.join(dir, ' default.md'), 'Body');
-    await fs.writeFile(path.join(dir, 'ok.md'), 'Fine');
+    await writeFiles(dir, { ' default.md': 'Body', 'ok.md': 'Fine' });
 
-    const styles = await loadOutputStylesFromDir(dir, 'user', dir);
-    expect(styles.map((s) => s.name)).toEqual(['ok']);
+    expect(names(await load())).toEqual(['ok']);
   });
 
   // A style file's body goes into the system prompt verbatim, so a link that
@@ -415,52 +391,49 @@ describe('loadOutputStylesFromDir', () => {
 
     it('refuses a symlinked project style', async () => {
       await fs.symlink(secret, path.join(dir, 'notes.md'));
-      await fs.writeFile(path.join(dir, 'ok.md'), 'Fine');
+      await writeFiles(dir, { 'ok.md': 'Fine' });
 
-      const styles = await loadOutputStylesFromDir(dir, 'project', dir);
-      expect(styles.map((s) => s.name)).toEqual(['ok']);
+      expect(names(await load('project'))).toEqual(['ok']);
     });
 
     it('refuses a project symlink even when its target is in-workspace', async () => {
       // Confinement alone would wave this through: the target is inside the
       // project root. A repo can commit `notes.md -> .env` and read a
       // developer's own secrets out of their checkout.
-      await fs.writeFile(path.join(dir, '.env'), 'API_KEY=hunter2');
+      await writeFiles(dir, { '.env': 'API_KEY=hunter2' });
       await fs.symlink(path.join(dir, '.env'), path.join(dir, 'notes.md'));
 
-      const styles = await loadOutputStylesFromDir(dir, 'project', dir);
-      expect(styles).toEqual([]);
+      expect(await load('project')).toEqual([]);
     });
 
     it('follows a user symlink that stays inside the root', async () => {
       const inside = path.join(dir, 'dotfiles');
       await fs.mkdir(inside);
-      await fs.writeFile(path.join(inside, 'x.md'), 'Dotfile style');
+      await writeFiles(inside, { 'x.md': 'Dotfile style' });
       await fs.symlink(path.join(inside, 'x.md'), path.join(dir, 'linked.md'));
 
-      const styles = await loadOutputStylesFromDir(dir, 'user', dir);
-      expect(styles.map((s) => s.name)).toEqual(['linked']);
+      const styles = await load();
+      expect(names(styles)).toEqual(['linked']);
       expect(styles[0].prompt).toBe('Dotfile style');
     });
 
     it('refuses a user symlink that escapes the root', async () => {
       await fs.symlink(secret, path.join(dir, 'notes.md'));
 
-      const styles = await loadOutputStylesFromDir(dir, 'user', dir);
-      expect(styles).toEqual([]);
+      expect(await load()).toEqual([]);
     });
 
     it('refuses a hard link, which lstat sees as an ordinary file', async () => {
       await fs.link(secret, path.join(dir, 'notes.md'));
 
-      expect(await loadOutputStylesFromDir(dir, 'project', dir)).toEqual([]);
-      expect(await loadOutputStylesFromDir(dir, 'user', dir)).toEqual([]);
+      expect(await load('project')).toEqual([]);
+      expect(await load('user')).toEqual([]);
     });
 
     it('refuses a style reached through a symlinked ancestor', async () => {
       // A checked-in `.qwen -> /outside`: a final-component lstat sees a
       // plain file, so only the canonical path catches it.
-      await fs.writeFile(path.join(outside, 'notes.md'), 'Outside style');
+      await writeFiles(outside, { 'notes.md': 'Outside style' });
       const linkedDir = path.join(dir, 'styles');
       await fs.symlink(outside, linkedDir);
 
@@ -475,13 +448,12 @@ describe('loadOutputStyleCatalog', () => {
   let projectRoot: string;
   let userDir: string;
   let projectDir: string;
-  const originalQwenHome = process.env['QWEN_HOME'];
 
   beforeEach(async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-style-catalog-'));
     fakeHome = path.join(root, 'home');
     projectRoot = path.join(root, 'project');
-    process.env['QWEN_HOME'] = path.join(fakeHome, '.qwen');
+    vi.stubEnv('QWEN_HOME', path.join(fakeHome, '.qwen')); // undone in afterEach
     userDir = path.join(fakeHome, '.qwen', 'output-styles');
     projectDir = path.join(projectRoot, '.qwen', 'output-styles');
     await fs.mkdir(userDir, { recursive: true });
@@ -489,20 +461,16 @@ describe('loadOutputStyleCatalog', () => {
   });
 
   afterEach(async () => {
-    if (originalQwenHome === undefined) {
-      delete process.env['QWEN_HOME'];
-    } else {
-      process.env['QWEN_HOME'] = originalQwenHome;
-    }
+    vi.unstubAllEnvs();
     await fs.rm(root, { recursive: true, force: true });
   });
 
   it('lists built-ins, then user, then project styles', async () => {
-    await fs.writeFile(path.join(userDir, 'mine.md'), 'Mine');
-    await fs.writeFile(path.join(projectDir, 'team.md'), 'Team');
+    await writeFiles(userDir, { 'mine.md': 'Mine' });
+    await writeFiles(projectDir, { 'team.md': 'Team' });
 
     const catalog = await loadOutputStyleCatalog({ projectRoot });
-    expect(catalog.map((s) => `${s.name}:${s.source}`)).toEqual([
+    expect(labels(catalog)).toEqual([
       ...BUILT_IN_OUTPUT_STYLES.map((s) => `${s.name}:built-in`),
       'mine:user',
       'team:project',
@@ -510,12 +478,11 @@ describe('loadOutputStyleCatalog', () => {
   });
 
   it('lets a project style shadow a user style and a built-in name', async () => {
-    await fs.writeFile(path.join(userDir, 'shared.md'), 'User version');
-    await fs.writeFile(path.join(projectDir, 'shared.md'), 'Project version');
-    await fs.writeFile(
-      path.join(projectDir, 'concise.md'),
-      '---\nname: concise\n---\nProject concise',
-    );
+    await writeFiles(userDir, { 'shared.md': 'User version' });
+    await writeFiles(projectDir, {
+      'shared.md': 'Project version',
+      'concise.md': '---\nname: concise\n---\nProject concise',
+    });
 
     const catalog = await loadOutputStyleCatalog({ projectRoot });
     const shared = catalog.filter((s) => s.name === 'shared');
@@ -532,28 +499,26 @@ describe('loadOutputStyleCatalog', () => {
   });
 
   it('omits project styles when no project root is given, keeping user styles', async () => {
-    await fs.writeFile(path.join(projectDir, 'team.md'), 'Team');
-    await fs.writeFile(path.join(userDir, 'mine.md'), 'Mine');
+    await writeFiles(projectDir, { 'team.md': 'Team' });
+    await writeFiles(userDir, { 'mine.md': 'Mine' });
 
     // Positive control: the same fixtures are discoverable when a root is
     // given, so the omission below is the trust gate and not a stray path.
     const withRoot = await loadOutputStyleCatalog({ projectRoot });
-    expect(withRoot.map((s) => `${s.name}:${s.source}`)).toEqual(
+    expect(labels(withRoot)).toEqual(
       expect.arrayContaining(['team:project', 'mine:user']),
     );
 
     const catalog = await loadOutputStyleCatalog();
     expect(catalog.some((s) => s.name === 'team')).toBe(false);
-    expect(
-      catalog.filter((s) => `${s.name}:${s.source}` === 'mine:user'),
-    ).toHaveLength(1);
+    expect(labels(catalog).filter((l) => l === 'mine:user')).toHaveLength(1);
   });
 
   it('skips the project level when the project root is the home directory', async () => {
     await fs.mkdir(path.join(fakeHome, '.qwen', 'output-styles'), {
       recursive: true,
     });
-    await fs.writeFile(path.join(userDir, 'mine.md'), 'Mine');
+    await writeFiles(userDir, { 'mine.md': 'Mine' });
 
     const catalog = await loadOutputStyleCatalog({ projectRoot: fakeHome });
     expect(catalog.filter((s) => s.name === 'mine')).toHaveLength(1);
@@ -564,32 +529,27 @@ describe('loadOutputStyleCatalog', () => {
   // against the project level has to compare the directories actually read.
   it('reads the user level from a relocated QWEN_HOME', async () => {
     const relocated = path.join(root, 'elsewhere', '.qwen');
-    process.env['QWEN_HOME'] = relocated;
+    vi.stubEnv('QWEN_HOME', relocated);
     await fs.mkdir(path.join(relocated, 'output-styles'), { recursive: true });
-    await fs.writeFile(
-      path.join(relocated, 'output-styles', 'qwenhome.md'),
-      'Relocated',
-    );
+    await writeFiles(path.join(relocated, 'output-styles'), {
+      'qwenhome.md': 'Relocated',
+    });
 
     const catalog = await loadOutputStyleCatalog({ projectRoot });
-    expect(catalog.map((s) => `${s.name}:${s.source}`)).toContain(
-      'qwenhome:user',
-    );
+    expect(labels(catalog)).toContain('qwenhome:user');
   });
 
   it('keeps the project level when QWEN_HOME points away from the home directory', async () => {
-    process.env['QWEN_HOME'] = path.join(root, 'elsewhere', '.qwen');
-    await fs.writeFile(path.join(userDir, 'homestyle.md'), 'Home');
+    vi.stubEnv('QWEN_HOME', path.join(root, 'elsewhere', '.qwen'));
+    await writeFiles(userDir, { 'homestyle.md': 'Home' });
 
     const catalog = await loadOutputStyleCatalog({ projectRoot: fakeHome });
-    expect(catalog.map((s) => `${s.name}:${s.source}`)).toContain(
-      'homestyle:project',
-    );
+    expect(labels(catalog)).toContain('homestyle:project');
   });
 
   it('does not relabel user styles when QWEN_HOME is the project .qwen', async () => {
-    process.env['QWEN_HOME'] = path.join(projectRoot, '.qwen');
-    await fs.writeFile(path.join(projectDir, 'mine.md'), 'Mine');
+    vi.stubEnv('QWEN_HOME', path.join(projectRoot, '.qwen'));
+    await writeFiles(projectDir, { 'mine.md': 'Mine' });
 
     const catalog = await loadOutputStyleCatalog({ projectRoot });
     const mine = catalog.filter((s) => s.name === 'mine');
@@ -598,11 +558,11 @@ describe('loadOutputStyleCatalog', () => {
   });
 
   it('inherits keep-coding-instructions from a shadowed built-in', async () => {
-    await fs.writeFile(path.join(userDir, 'concise.md'), 'My own wording.');
-    await fs.writeFile(
-      path.join(projectDir, 'explanatory.md'),
-      '---\nkeep-coding-instructions: false\n---\nMy own wording.',
-    );
+    await writeFiles(userDir, { 'concise.md': 'My own wording.' });
+    await writeFiles(projectDir, {
+      'explanatory.md':
+        '---\nkeep-coding-instructions: false\n---\nMy own wording.',
+    });
 
     const catalog = await loadOutputStyleCatalog({ projectRoot });
     const concise = catalog.find((s) => s.name.toLowerCase() === 'concise');

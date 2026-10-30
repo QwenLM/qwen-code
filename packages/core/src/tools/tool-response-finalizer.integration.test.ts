@@ -14,6 +14,7 @@ import {
   finalizeToolResponses,
   type ToolResponseBudgetEntry,
 } from './tool-response-finalizer.js';
+import { fnResponse } from '../test-utils/model-fixtures.js';
 
 describe('tool response finalization persistence', () => {
   const tempDirs: string[] = [];
@@ -50,13 +51,7 @@ describe('tool response finalization persistence', () => {
       callId,
       toolName: 'shell',
       responseParts: [
-        {
-          functionResponse: {
-            id: callId,
-            name: 'shell',
-            response: { output: contents[index] },
-          },
-        } satisfies Part,
+        fnResponse('shell', { output: contents[index] }, callId) satisfies Part,
       ],
     }));
 
@@ -70,6 +65,51 @@ describe('tool response finalization persistence', () => {
 
     return { bytesWritten, contents, outputFiles, persistedContents };
   }
+
+  it('retains a real artifact across chat reconstruction when persistence later fails', async () => {
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), 'recovery path '));
+    tempDirs.push(dir);
+    let bytesWritten = 0;
+    const config = {
+      getToolOutputBatchBudget: () => 2000,
+      getToolResultBytesWritten: () => bytesWritten,
+      trackToolResultBytes: (bytes: number) => {
+        bytesWritten += bytes;
+      },
+      storage: { getToolResultsDir: () => dir },
+    } as unknown as Config;
+    const original = 'HEAD' + 'x'.repeat(20_000) + 'TAIL';
+    const first = await finalizeToolResponses(config, [
+      {
+        callId: 'original',
+        toolName: 'shell',
+        responseParts: [fnResponse('shell', { output: original }, 'original')],
+      },
+    ]);
+    const artifact = first[0].persistedOutputFiles![0];
+    expect(await fs.readFile(artifact, 'utf8')).toBe(original);
+    bytesWritten = Number.MAX_SAFE_INTEGER;
+    const second = await finalizeToolResponses(
+      config,
+      first.map(({ callId, toolName, responseParts }) => ({
+        callId,
+        toolName,
+        responseParts,
+      })),
+      undefined,
+      false,
+      false,
+      500,
+      false,
+    );
+    const output = second[0].responseParts[0].functionResponse!.response![
+      'output'
+    ] as string;
+    expect(output).toContain(artifact);
+    expect(output.split(artifact).join('')).not.toContain('/');
+    expect(output.length).toBeLessThanOrEqual(500);
+    expect(await fs.readFile(artifact, 'utf8')).toBe(original);
+  });
 
   it('does not overwrite a natural suffix id when duplicate ids are persisted', async () => {
     const result = await run(['call', 'call', 'call-1']);

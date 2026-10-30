@@ -5,7 +5,7 @@
  */
 
 import { ToolNames } from '../../tools/tool-names.js';
-import { matchesMcpPattern } from '../../permissions/rule-parser.js';
+import { matchesToolPattern } from '../../permissions/rule-parser.js';
 import type { ToolResult } from '../../tools/tools.js';
 import type { ToolConfig } from './agent-types.js';
 import { ApprovalMode } from '../../config/approval-mode.js';
@@ -53,6 +53,7 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.AUTOFIX_PR,
   ToolNames.LIST_AGENTS,
   ToolNames.TASK_STOP,
   ToolNames.SEND_MESSAGE,
@@ -111,24 +112,10 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  * omitted this answers `false` for that shape, which would withhold the manager
  * and, through the `config.ts` registration guard, the Skill tool itself.
  *
- * The arm it does not cover: when the registry hides `skill` behind a
- * `tools.eager` allowlist, `prepareTools()` drops it from the code-mode
- * allowlist as well (`isHiddenByEagerAllowList`), so that same agent cannot
- * actually load a skill — yet this predicate, which reads no registry state,
- * still answers `true` for it through the `exec` arm. Two consequences, and
- * they are not equally old:
- * - The dead pointer predates this PR. The resolver's CodeModeOnly branch
- *   short-circuits `isToolDeferredBehindToolSearch` to `false` and answers
- *   `pointer` regardless of the per-agent policy, so `main` handed out the same
- *   unreachable route. Tracked in #12809.
- * - The `<available_skills>` listing does not. `main`'s
- *   `AgentCore.willHaveSkillTool()` was positive-list-only and answered `false`
- *   for a finite `exec`-naming list, so it sent no listing; the `exec` arm makes
- *   it send one. This cell is therefore *not* byte-identical to `main`.
- *
- * Closing it needs exactly the eager/deferred registry state this predicate
- * deliberately does not read, so it is disclosed here and left to #12809 rather
- * than patched per case.
+ * The `exec` arm also holds when a `tools.eager` allowlist demotes `skill`:
+ * `prepareTools()` keeps eager-demoted tools in the code-mode allowlist
+ * (#12898), where they stay callable and discoverable through `tool_search`,
+ * so the pointer this answer leads to can be followed (#12809).
  *
  * Matching is exact, as `prepareTools()`'s is: `SubagentManager` resolves
  * configured names to canonical tool names before they reach a `ToolConfig`.
@@ -180,6 +167,7 @@ export const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.CRON_CREATE,
   ToolNames.CRON_LIST,
   ToolNames.CRON_DELETE,
+  ToolNames.AUTOFIX_PR,
   ToolNames.LIST_AGENTS,
   ToolNames.TASK_STOP,
   ToolNames.TEAM_CREATE,
@@ -254,22 +242,26 @@ export function isSubagentLikeExecutionContext(): boolean {
 /**
  * Whether `toolName` matches a per-agent `disallowedTools` blocklist, with
  * the exact match semantics AgentCore.prepareTools() applies at declaration
- * level: MCP server-level patterns via {@link matchesMcpPattern} for `mcp__`
- * tools, exact match otherwise. Shared so a fork's inherited execution
+ * level: delegates to {@link matchesToolPattern} — exact match for non-MCP
+ * names, MCP patterns via `matchesMcpPattern` with the caller-resolved alias
+ * channel. Shared so a fork's inherited execution
  * allowlist (tools/agent/agent.ts) cannot drift from the parent's own
  * declaration/invocation enforcement.
+ *
+ * `toolAliases` is the tool's own advertised `permissionAliases`; deny lists
+ * are fail-open on a lost match, so callers resolve them from the registry.
  */
 export function matchesAgentToolBlocklist(
   blocklist: readonly string[] | undefined,
   toolName: string,
+  toolAliases?: readonly string[],
+  mcpIdentity?: { serverName: string; serverToolName: string },
 ): boolean {
   if (!blocklist?.length) {
     return false;
   }
   return blocklist.some((pattern) =>
-    toolName.startsWith('mcp__')
-      ? matchesMcpPattern(pattern, toolName)
-      : pattern === toolName,
+    matchesToolPattern(pattern, toolName, toolAliases, mcpIdentity),
   );
 }
 

@@ -5,11 +5,14 @@
  */
 
 import type { ChatRecord } from '../services/chatRecordingService.js';
-import { validateTranscriptRecord } from '../utils/transcript-records.js';
 import {
+  assertManagedSessionDurableRef,
   MANAGED_SESSION_FORMAT_VERSION,
   MANAGED_SESSION_LIMITS,
   ManagedSessionRecordError,
+  managedSessionReaderFacingBody,
+  safeErrorValue,
+  validateManagedReaderFacingRecord,
   type ManagedSessionDurableRef,
   type ManagedSessionEvent,
   type ManagedSessionKey,
@@ -21,6 +24,10 @@ import {
   type ManagedSessionCommand,
   type ManagedSessionCommitReceipt,
 } from './managed-session-authority.js';
+import {
+  publishManagedMessageBody,
+  readManagedMessageBody,
+} from './managed-message-chunks.js';
 import {
   LocalManagedSessionResourceStore,
   readManagedBranchCheckpoint,
@@ -63,7 +70,7 @@ export class ManagedSessionMessageProjection {
       );
     }
     const body = Buffer.from(JSON.stringify(record), 'utf8');
-    const contentRef = await this.resources.publish('managed-message', body);
+    const contentRef = await publishManagedMessageBody(this.resources, body);
     const subject =
       actor.class === 'harness' && actor.activation !== undefined
         ? {
@@ -103,8 +110,26 @@ export class ManagedSessionMessageProjection {
    * order. A content body that cannot be resolved fails the projection rather
    * than silently dropping a record, which would present a short history as a
    * complete one.
+   *
+   * Deliberately narrower than the reader-facing list: this projection
+   * carries branch checkpoints and committed messages only. Turn results,
+   * compaction summaries and record-carrying domains are projected by
+   * `projectManagedSessionRecords` — the reader-facing list used both to
+   * rebuild a session for a reader and by the live recorder's chain view
+   * (`ChatRecordingService.readActiveTranscriptChain`).
    */
-  async project(): Promise<ChatRecord[]> {
+  async project(throughSequence?: number): Promise<ChatRecord[]> {
+    return this.projectRecords(throughSequence, false);
+  }
+
+  async projectModelRecords(throughSequence?: number): Promise<ChatRecord[]> {
+    return this.projectRecords(throughSequence, true);
+  }
+
+  private async projectRecords(
+    throughSequence: number | undefined,
+    includeCompactions: boolean,
+  ): Promise<ChatRecord[]> {
     const records: ChatRecord[] = [];
     const checkpoints = new Map<string, number>();
     let after = 0;
@@ -115,12 +140,14 @@ export class ManagedSessionMessageProjection {
       });
       if (page.length === 0) break;
       for (const event of page) {
+        if (throughSequence !== undefined && event.sequence > throughSequence)
+          return records;
         after = event.sequence;
         const branch = await readManagedBranchCheckpoint(
           event,
           this.resources,
           (id) => checkpoints.get(id),
-          this.authority.committedSequence,
+          throughSequence ?? this.authority.committedSequence,
         );
         if (event.kind === 'checkpoint.committed') {
           checkpoints.set(
@@ -130,9 +157,18 @@ export class ManagedSessionMessageProjection {
         }
         if (branch !== undefined) {
           records.push(branch);
-        } else if (event.kind === 'message.committed') {
+        } else if (
+          event.kind === 'message.committed' ||
+          (includeCompactions && event.kind === 'context.compacted')
+        ) {
           records.push(
-            await readRecordBody(this.resources, event.payload['contentRef']),
+            await readRecordBody(
+              this.resources,
+              event.payload[
+                event.kind === 'context.compacted' ? 'summaryRef' : 'contentRef'
+              ],
+              `${event.kind} event ${event.eventId} body`,
+            ),
           );
         }
       }
@@ -144,9 +180,11 @@ export class ManagedSessionMessageProjection {
 async function readRecordBody(
   resources: ManagedSessionResourceStore,
   ref: ManagedSessionEvent['payload'][string],
+  at: string,
 ): Promise<ChatRecord> {
-  const body = await resources.read(
-    ref as unknown as Parameters<ManagedSessionResourceStore['read']>[0],
+  const body = await readManagedMessageBody(
+    (bodyRef) => resources.read(bodyRef),
+    assertManagedSessionDurableRef(ref, at),
   );
   return JSON.parse(body.toString('utf8')) as ChatRecord;
 }
@@ -170,11 +208,7 @@ export async function readManagedSessionRecords(options: {
   /** Bounds the projection to a frozen snapshot's byte length. */
   readonly maxBytes?: number;
 }): Promise<ChatRecord[]> {
-  const scan = await readManagedSessionLog(
-    options.transcriptPath,
-    options.sessionKey,
-    options.maxBytes,
-  );
+  const scan = await readManagedSessionLog(options);
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: options.runtimeBaseDir,
     sessionKey: options.sessionKey,
@@ -199,11 +233,7 @@ export async function readManagedSessionRecordsAndTitle(options: {
   records: ChatRecord[];
   titleInfo: { title?: string; source?: 'auto' | 'manual' };
 }> {
-  const scan = await readManagedSessionLog(
-    options.transcriptPath,
-    options.sessionKey,
-    options.maxBytes,
-  );
+  const scan = await readManagedSessionLog(options);
   const resources = LocalManagedSessionResourceStore.create({
     runtimeBaseDir: options.runtimeBaseDir,
     sessionKey: options.sessionKey,
@@ -243,19 +273,30 @@ export async function projectManagedSessionRecords(options: {
     }
     if (branch !== undefined) {
       records.push(
-        requireProjectedRecord(branch, scan.header.sessionKey.sessionId),
+        requireProjectedRecord(
+          branch,
+          scan.header.sessionKey.sessionId,
+          `${event.kind} event ${event.eventId} ref`,
+        ),
       );
       continue;
     }
-    const carried = readerFacingBody(event);
+    const carried = managedSessionReaderFacingBody(event);
     if (carried === undefined) continue;
-    const body = await readRecordBody(resources, carried.ref);
+    const body: unknown = await readRecordBody(
+      resources,
+      carried.ref,
+      `${event.kind} event ${event.eventId} ref`,
+    );
     records.push(
       requireProjectedRecord(
         carried.inDomainEnvelope
-          ? (body as unknown as { record: ChatRecord }).record
+          ? body !== null && typeof body === 'object'
+            ? (body as { readonly record?: unknown }).record
+            : undefined
           : body,
         scan.header.sessionKey.sessionId,
+        `${event.kind} event ${event.eventId} ref`,
       ),
     );
   }
@@ -295,63 +336,18 @@ export async function projectManagedSessionTitleInfo(options: {
   };
 }
 
-function requireProjectedRecord(value: unknown, sessionId: string): ChatRecord {
-  const { record, diagnostics } = validateTranscriptRecord(value);
-  if (record === undefined) {
+function requireProjectedRecord(
+  value: unknown,
+  sessionId: string,
+  at: string,
+): ChatRecord {
+  const validated = validateManagedReaderFacingRecord(value, sessionId);
+  if ('error' in validated) {
+    // The reason is bounded the way the writer fence's own message is: the
+    // predicate interpolates values decoded from the stored body.
     throw new ManagedSessionRecordError(
-      'Managed Session resource contains an invalid reader-facing record.',
+      `Managed Session resource contains an invalid reader-facing record: ${safeErrorValue(validated.error)} (${at}).`,
     );
   }
-  const candidate = record as Partial<ChatRecord>;
-  if (
-    record.sessionId !== sessionId ||
-    typeof candidate.cwd !== 'string' ||
-    typeof candidate.version !== 'string' ||
-    typeof candidate.timestamp !== 'string' ||
-    diagnostics.length > 0
-  ) {
-    throw new ManagedSessionRecordError(
-      'Managed Session resource contains an invalid reader-facing record.',
-    );
-  }
-  return candidate as ChatRecord;
-}
-
-/**
- * Domains whose body is a whole reader-facing record. The rest carry their own
- * shape and are not something a reader replays.
- */
-const RECORD_CARRYING_DOMAINS: ReadonlySet<unknown> = new Set([
-  'goal_state',
-  'file_history',
-  'session_source',
-]);
-
-/**
- * Where a whole reader-facing record lives, for the channels that carry one.
- *
- * A domain body is the authority's envelope wrapping the content, so the record
- * sits under its own key there, unlike the event channels whose body is the
- * record itself.
- */
-function readerFacingBody(event: ManagedSessionEvent):
-  | {
-      ref: ManagedSessionEvent['payload'][string];
-      inDomainEnvelope: boolean;
-    }
-  | undefined {
-  switch (event.kind) {
-    case 'message.committed':
-      return { ref: event.payload['contentRef'], inDomainEnvelope: false };
-    case 'turn.settled':
-      return { ref: event.payload['resultRef'], inDomainEnvelope: false };
-    case 'context.compacted':
-      return { ref: event.payload['summaryRef'], inDomainEnvelope: false };
-    case 'domain.committed':
-      return RECORD_CARRYING_DOMAINS.has(event.payload['domain'])
-        ? { ref: event.payload['recordRef'], inDomainEnvelope: true }
-        : undefined;
-    default:
-      return undefined;
-  }
+  return validated.record;
 }

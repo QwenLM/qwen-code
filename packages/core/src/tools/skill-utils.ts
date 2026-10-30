@@ -468,12 +468,27 @@ export class ReviewWorkflowActivationError extends Error {
 export async function applySkillSideEffects(
   config:
     | (Pick<Config, 'getHookSystem' | 'getSessionId' | 'getPermissionManager'> &
-        Pick<Config, 'isTrustedFolder' | 'enableReviewWorkflow'>)
+        Pick<
+          Config,
+          'isTrustedFolder' | 'enableReviewWorkflow' | 'isWorkspaceAgentSession'
+        >)
     | null
     | undefined,
   skill: SkillConfig,
 ): Promise<void> {
   if (!config) {
+    return;
+  }
+  // A workspace agent runs inside a read-only capability boundary. The skill's
+  // body still reaches the model, but its hooks spawn commands (PreToolUse
+  // fires before the invocation guard), and its grants and workflow
+  // registration have no place there.
+  if (config.isWorkspaceAgentSession?.()) {
+    if (skill.allowedTools?.length || skill.hooks) {
+      debugLogger.warn(
+        `Skill "${skill.name}" loaded in a workspace-agent session; ignoring its allowedTools and hooks.`,
+      );
+    }
     return;
   }
   if (!canApplySkillSideEffects(skill, config)) {

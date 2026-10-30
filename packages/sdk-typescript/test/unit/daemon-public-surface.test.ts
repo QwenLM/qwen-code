@@ -239,6 +239,7 @@ describe('continuation compatibility', () => {
 });
 describe('public SDK entry — typed daemon event surface (#4217)', () => {
   it('exports the runtime narrow + reducer surface', () => {
+    expect(typeof Public.DaemonAttachmentUploadError).toBe('function');
     expect(typeof Public.asKnownDaemonEvent).toBe('function');
     expect(typeof Public.isKnownDaemonEvent).toBe('function');
     expect(typeof Public.isDaemonEventType).toBe('function');

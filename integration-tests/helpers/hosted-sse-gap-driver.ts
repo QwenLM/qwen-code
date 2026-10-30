@@ -5,15 +5,14 @@
  */
 
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
 import { createHash, randomUUID } from 'node:crypto';
-import { constants } from 'node:fs';
-import { lstat, open, readFile, unlink, writeFile } from 'node:fs/promises';
-import type { FileHandle } from 'node:fs/promises';
+import { existsSync } from 'node:fs';
+import { lstat, readFile, unlink, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import path from 'node:path';
 import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
+import { SseObserver, projectEvents } from './hosted-sse-observer.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -36,7 +35,6 @@ const operations: string[] = [];
 let clientId = '';
 let modelCalls = 0;
 let proxyFailure: unknown;
-let writer: FileHandle | undefined;
 const headers = {
   'X-Qwen-Tenant-Id': config.tenantId,
   'Content-Type': 'application/json',
@@ -80,118 +78,16 @@ async function evidence(phase: string, body = {}) {
   return JSON.parse(text);
 }
 
-type Frame = { id: number; event: string; data: Record<string, unknown> };
-class Observer {
-  frames: Frame[] = [];
-  controller = new AbortController();
-  task?: Promise<void>;
-  failure?: unknown;
-
-  async start(surface: 'public' | 'web', after?: number) {
-    const response = await fetch(
-      new URL(
-        surface === 'public'
-          ? `/v1/agents/sessions/${sessionId}/events?stream=true&after=0`
-          : '/api/agent/web-shell/v1/events/stream',
-        config.storeUrl,
-      ),
-      {
-        method: surface === 'public' ? 'GET' : 'POST',
-        headers: {
-          ...headers,
-          Accept: 'text/event-stream',
-          ...(surface === 'public' && after !== undefined
-            ? { 'Last-Event-ID': String(after) }
-            : {}),
-        },
-        ...(surface === 'web'
-          ? { body: JSON.stringify({ sessionId, afterSequence: after ?? 0 }) }
-          : {}),
-        signal: AbortSignal.any([
-          this.controller.signal,
-          AbortSignal.timeout(45_000),
-        ]),
-      },
-    );
-    assert.equal(response.status, 200);
-    assert.match(
-      response.headers.get('content-type') ?? '',
-      /text\/event-stream/,
-    );
-    const reader = response
-      .body!.pipeThrough(new TextDecoderStream())
-      .getReader();
-    this.task = (async () => {
-      let pending = '';
-      try {
-        while (true) {
-          const { value, done } = await reader.read();
-          if (done) break;
-          pending += value;
-          let end: number;
-          while ((end = pending.indexOf('\n\n')) >= 0) {
-            const block = pending.slice(0, end);
-            pending = pending.slice(end + 2);
-            const lines = block.split('\n');
-            const data = lines
-              .filter((line) => line.startsWith('data:'))
-              .map((line) => line.slice(5).trimStart())
-              .join('\n');
-            if (!data) continue;
-            const id = lines
-              .find((line) => line.startsWith('id:'))
-              ?.slice(3)
-              .trim();
-            assert.match(id ?? '', /^\d+$/);
-            const frame = {
-              id: Number(id),
-              event:
-                lines
-                  .find((line) => line.startsWith('event:'))
-                  ?.slice(6)
-                  .trim() ?? '',
-              data: JSON.parse(data) as Record<string, unknown>,
-            };
-            assert.equal(
-              frame.id,
-              frame.data['sequence'],
-              'SSE id must equal payload sequence',
-            );
-            assert.equal(frame.event, frame.data['type']);
-            this.frames.push(frame);
-          }
-        }
-      } catch (cause) {
-        if (!this.controller.signal.aborted) this.failure = cause;
-      } finally {
-        reader.releaseLock();
-      }
-    })();
-  }
-
-  async through(sequence: number) {
-    await waitUntil(() => {
-      if (this.failure) throw this.failure;
-      return this.frames.some((frame) => frame.id >= sequence);
-    }, 10_000);
-  }
-
-  async close() {
-    this.controller.abort();
-    await this.task;
-    if (this.failure) throw this.failure;
-  }
-}
-
 const proxy = createServer(async (req, res) => {
   try {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(Buffer.from(chunk));
     const body = Buffer.concat(chunks);
     const url = new URL(req.url!, config.brokerUrl);
-    operations.push(
-      req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!,
-    );
+    const operation =
+      req.method === 'GET' ? 'status' : url.pathname.split(':').at(-1)!;
+    operations.push(operation);
+    if (operation === 'start') await writeFile(`${proof}.read-gate`, '');
     const upstream = await fetch(url, {
       method: req.method,
       headers: {
@@ -233,17 +129,21 @@ const model = await startFakeOpenAIServer(() => {
       }
     : { content: 'FG6e tool finished once.' };
 });
+const observerOpts = {
+  sessionId,
+  storeUrl: config.storeUrl,
+  tenantId: config.tenantId,
+  timeoutMs: 45_000,
+};
 const observers = [
-  new Observer(),
-  new Observer(),
-  new Observer(),
-  new Observer(),
+  new SseObserver({ ...observerOpts, surface: 'public' }),
+  new SseObserver({ ...observerOpts, surface: 'web' }),
+  new SseObserver({ ...observerOpts, surface: 'public' }),
+  new SseObserver({ ...observerOpts, surface: 'web' }),
 ];
 const [publicBefore, webBefore, publicAfter, webAfter] = observers;
 
 try {
-  await unlink(proof);
-  execFileSync('mkfifo', [proof]);
   await cli.start(model.baseUrl, {
     extraArgs: [
       '--managed-runtime-broker-url',
@@ -272,7 +172,7 @@ try {
     bootId: cli.bootId,
     promptId,
   });
-  await Promise.all([publicBefore.start('public'), webBefore.start('web')]);
+  await Promise.all([publicBefore.start(), webBefore.start()]);
   await Promise.all([publicBefore.through(1), webBefore.through(1)]);
   const prompt = [{ type: 'text', text: 'Perform the edit once.' }];
   await privateJson(
@@ -284,33 +184,30 @@ try {
     },
     202,
   );
-  await waitUntil(async () => {
-    try {
-      writer = await open(proof, constants.O_WRONLY | constants.O_NONBLOCK);
-      return true;
-    } catch (cause) {
-      if ((cause as NodeJS.ErrnoException).code !== 'ENXIO') throw cause;
-      return false;
-    }
+  await waitUntil(() => {
+    if (proxyFailure) throw proxyFailure;
+    return existsSync(`${proof}.read-entered`);
   });
-  assert((await lstat(proof)).isFIFO());
+  assert((await lstat(proof)).isFile());
+  assert.equal(await readFile(proof, 'utf8'), 'x');
   assert.equal(
     (await privateJson(`/session/${sessionId}/status`)).hasActivePrompt,
     true,
   );
   await evidence('entered');
+  // The committed tool intent publishes the in-progress tool update before
+  // the tool body runs.
+  await Promise.all([publicBefore.through(2), webBefore.through(2)]);
   await Promise.all([publicBefore.close(), webBefore.close()]);
   assert.deepEqual(
     publicBefore.frames.map((frame) => frame.id),
-    [1],
+    [1, 2],
   );
   assert.deepEqual(
     webBefore.frames.map((frame) => frame.id),
-    [1],
+    [1, 2],
   );
-  await writer!.write('x');
-  await writer!.close();
-  writer = undefined;
+  await unlink(`${proof}.read-gate`);
   await waitUntil(
     async () =>
       !(await privateJson(`/session/${sessionId}/status`)).hasActivePrompt,
@@ -320,64 +217,49 @@ try {
   assert.equal(await readFile(proof, 'utf8'), 'xx');
   assert.equal(modelCalls, 2);
   await Promise.all([
-    publicAfter.start('public', publicBefore.frames.at(-1)!.id),
-    webAfter.start('web', webBefore.frames.at(-1)!.id),
+    publicAfter.start(publicBefore.frames.at(-1)!.id),
+    webAfter.start(webBefore.frames.at(-1)!.id),
   ]);
-  await Promise.all([publicAfter.through(2), webAfter.through(2)]);
+  await Promise.all([publicAfter.through(4), webAfter.through(4)]);
   assert.deepEqual(
     publicAfter.frames.map((frame) => frame.id),
-    [2],
+    [3, 4],
     'Public cursor replay',
   );
   assert.deepEqual(
     webAfter.frames.map((frame) => frame.id),
-    [2],
+    [3, 4],
     'WebShell cursor replay',
   );
   await evidence('release');
-  await Promise.all([publicAfter.through(3), webAfter.through(3)]);
+  await Promise.all([publicAfter.through(5), webAfter.through(5)]);
   await Promise.all([publicAfter.close(), webAfter.close()]);
   const ledger: Array<Record<string, unknown>> = await evidence('ledger');
   const publicFrames = [...publicBefore.frames, ...publicAfter.frames];
   const webFrames = [...webBefore.frames, ...webAfter.frames];
+  const toolProgress = publicFrames
+    .filter((frame) => frame.event === 'item.tool_call.updated')
+    .map((frame) => frame.data['data'] as Record<string, unknown>);
+  assert.deepEqual(
+    toolProgress.map((update) => [
+      update['toolCallId'],
+      update['name'],
+      update['status'],
+    ]),
+    [
+      ['effect', 'edit', 'in_progress'],
+      ['effect', 'edit', 'completed'],
+    ],
+  );
+  assert.equal(toolProgress[0]['itemId'], toolProgress[1]['itemId']);
   for (const [surface, frames] of [
     ['public', publicFrames],
     ['web', webFrames],
   ] as const) {
-    const expected = ledger.map((row) => {
-      const fields: Record<string, unknown> = {
-        schema_version: row['schema_version'],
-        projection_version: row['projection_version'],
-        sequence: row['sequence_id'],
-        event_id: row['event_id'],
-        session_id: row['session_id'],
-        turn_id: row['turn_id'],
-        item_id: row['item_id'],
-        content_part_id: row['content_part_id'],
-        type: row['event_type'],
-        created_at:
-          surface === 'public'
-            ? Math.floor(Number(row['created_at']) / 1000)
-            : row['created_at'],
-        data: JSON.parse(String(row['data_json'])),
-        terminal: Boolean(row['terminal']),
-      };
-      return Object.fromEntries(
-        Object.entries(fields)
-          .filter(([, value]) => value !== null)
-          .map(([key, value]) => [
-            surface === 'web'
-              ? key.replace(/_([a-z])/g, (_, letter: string) =>
-                  letter.toUpperCase(),
-                )
-              : key,
-            value,
-          ]),
-      );
-    });
+    const expected = projectEvents(ledger, surface);
     assert.deepEqual(
       frames.map((frame) => frame.id),
-      [1, 2, 3],
+      [1, 2, 3, 4, 5],
       `${surface} no gaps or duplicates`,
     );
     assert.deepEqual(
@@ -402,23 +284,35 @@ try {
       sessionId,
       limit: 100,
     });
-    return transcript.coveredSequence === 3;
+    return transcript.coveredSequence === 5;
   });
-  assert.equal(transcript.lastSequence, 3);
+  assert.equal(transcript.lastSequence, 5);
   assert.equal(transcript.hasMore, false);
-  assert.equal(transcript.coveredSequence, 3);
+  assert.equal(transcript.coveredSequence, 5);
+  const toolItems = transcript.items.filter(
+    (item: { type: string }) => item.type === 'tool_call',
+  );
+  assert.equal(toolItems.length, 1);
+  assert.equal(toolItems[0].itemId, toolProgress[0]['itemId']);
+  assert.equal(toolItems[0].status, 'completed');
+  assert.equal(toolItems[0].attributes.toolCallId, 'effect');
   assert.equal(
     transcript.items
-      .flatMap((item: { content: Array<{ text: string }> }) =>
-        item.content.map((part) => part.text),
+      .flatMap((item: { content?: Array<{ text?: string }> }) =>
+        (item.content ?? []).map((part) => part.text ?? ''),
       )
       .join(''),
     'FG6e tool finished once.',
   );
+  // Progress frames materialize as transcript items, not transcript events.
+  const itemFrames = new Set([
+    'item.output_text.delta',
+    'item.tool_call.updated',
+  ]);
   assert.deepEqual(
     transcript.events,
     webFrames
-      .filter((frame) => frame.event !== 'item.output_text.delta')
+      .filter((frame) => !itemFrames.has(frame.event))
       .map((frame) => frame.data),
   );
   assert.equal(
@@ -448,7 +342,6 @@ try {
 } finally {
   await Promise.allSettled(observers.map((observer) => observer.close()));
   await cli.close();
-  await writer?.close();
   await model.close();
   proxy.closeAllConnections();
   await new Promise<void>((resolve) => proxy.close(() => resolve()));

@@ -7,6 +7,10 @@
 // Chinese translations for Qwen Code CLI
 
 export default {
+  'Generated UI': 'Generated UI 生成式界面',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    '在受支持的本地会话中启用内置 Generated UI。重新创建所属会话后生效。',
+
   'Cannot disable an extension-provided MCP server here.':
     '无法在此处禁用扩展提供的 MCP 服务器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的认证信息。',
@@ -21,6 +25,8 @@ export default {
   'Project level': '项目级',
   'Clipboard image paste is unavailable because the native clipboard module could not be loaded. Reinstall Qwen Code or use the npm installation method.':
     '剪贴板图片粘贴不可用，因为原生剪贴板模块加载失败。请重新安装 Qwen Code，或改用 npm 安装方式。',
+  'Clipboard image paste is unavailable: no supported clipboard tool was reached. On Linux, install `wl-clipboard` (Wayland) or `xclip` (X11), or set DISPLAY/WAYLAND_DISPLAY if running headless.':
+    '剪贴板图片粘贴不可用：未找到受支持的剪贴板工具。Linux 下请安装 `wl-clipboard`（Wayland）或 `xclip`（X11），无显示器环境下请设置 DISPLAY/WAYLAND_DISPLAY。',
 
   // ==========================================================================
   // Extensions manager dialog (Installed / Discover / Sources tabs)
@@ -204,6 +210,7 @@ export default {
   'toolDisplayName.CronCreate': '创建定时任务',
   'toolDisplayName.CronList': '定时任务列表',
   'toolDisplayName.CronDelete': '删除定时任务',
+  'toolDisplayName.AutofixPr': 'PR 自动修复',
   'toolDisplayName.LoopWakeup': '循环唤醒',
   'toolDisplayName.CreateSubSession': '创建子会话',
   'toolDisplayName.ListAgents': '列出 Agent',
@@ -749,6 +756,9 @@ export default {
   // Settings Labels
   // ============================================================================
   'Code Mode Only (Experimental)': '仅代码模式（实验性）',
+  'Mods (Experimental)': 'Mods（实验性）',
+  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
+    '在受信任的本地交互终端和无界面会话中加载已启用扩展的实验性 Mods。修改后需重启。',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '终端响铃通知',
@@ -2145,6 +2155,10 @@ export default {
   'API key cannot be empty.': 'API Key 不能为空。',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     '无效的 API Key。Coding Plan API Key 以 "sk-sp-" 开头，请检查。',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    '无效的 API Key。按量付费 Key 以 "sk-" 或 "sk-ws-" 开头。Token Plan Key（"sk-sp-"）请使用 Token Plan 入口。',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    '无效的 API Key。Token Plan API Key 以 "sk-sp-" 开头。请从 Token Plan 控制台生成，或使用 Standard API Key 入口绑定按量付费 Key。',
   'You can get your Coding Plan API key here':
     '您可以在这里获取 Coding Plan API Key',
   'You can get your Token Plan API key here':
@@ -2171,6 +2185,17 @@ export default {
   // Auth Dialog - View Titles and Labels
   // ============================================================================
   'Coding Plan': 'Coding Plan',
+  QwenCloud: '千问AI平台',
+  'QwenCloud · Access Method': '千问AI平台 · 接入方式',
+  'Official recommended setup: Token Plan or Standard API Key':
+    '官方推荐配置：Token Plan 或 Standard API Key',
+  'Pay-as-you-go · Connect with an existing platform API key':
+    '按量付费 · 使用已有的平台 API Key 连接',
+  'Subscription with a monthly Credit quota · Dedicated endpoint (Personal and Team editions)':
+    '按月 Credit 额度订阅 · 专用 endpoint（个人版与团队版）',
+  'China — 千问AI平台': '中国 — 千问AI平台',
+  'International — QwenCloud': '国际 — QwenCloud',
+  Platform: '平台',
   Custom: '自定义',
   'Select Region for Coding Plan': '选择 Coding Plan 区域',
   'Choose based on where your account is registered':

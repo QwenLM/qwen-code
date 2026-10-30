@@ -28,6 +28,8 @@ import type { Part, PartListUnion } from '@google/genai';
 
 const debugLogger = createDebugLogger('TOOL_HOOKS');
 const POST_TOOL_BATCH_HOOK_TIMEOUT_MS = 15_000;
+const INVALID_UPDATED_INPUT_REASON =
+  'PreToolUse hook returned an invalid updatedInput: expected a JSON object that replaces the tool input.';
 
 /**
  * Generate a unique tool_use_id for tracking tool executions
@@ -48,6 +50,11 @@ export interface PreToolUseHookResult {
   blockType?: 'denied' | 'ask' | 'stop';
   /** Additional context to add */
   additionalContext?: string;
+  /**
+   * A hook's validated `updatedInput`, which replaces the whole tool input.
+   * Present only on a proceeding or `ask` result.
+   */
+  updatedInput?: Record<string, unknown>;
   /**
    * Set when the hook helper caught and absorbed a transport / dispatch
    * error. The tool execution still proceeds (existing non-blocking
@@ -176,6 +183,8 @@ export async function firePreToolUseHook(
       'PreToolUse',
       response.output,
     ) as PreToolUseHookOutput;
+    // Read once so every decision branch carries the same sanitized value.
+    const additionalContext = preToolOutput.getAdditionalContext();
 
     // Check if execution was denied
     if (preToolOutput.isDenied()) {
@@ -185,7 +194,29 @@ export async function firePreToolUseHook(
           preToolOutput.getPermissionDecisionReason() ||
           preToolOutput.getEffectiveReason(),
         blockType: 'denied',
+        additionalContext,
       };
+    }
+
+    const stopResult = (): PreToolUseHookResult => ({
+      shouldProceed: false,
+      blockReason: preToolOutput.getEffectiveReason(),
+      blockType: 'stop',
+      additionalContext,
+    });
+
+    // An explicit but unusable replacement must not fall back to the
+    // original input; a stop still stops.
+    const updatedInput = preToolOutput.getUpdatedInput();
+    if (updatedInput === null) {
+      return preToolOutput.shouldStopExecution()
+        ? stopResult()
+        : {
+            shouldProceed: false,
+            blockReason: INVALID_UPDATED_INPUT_REASON,
+            blockType: 'denied',
+            additionalContext,
+          };
     }
 
     // Check if user confirmation is required
@@ -196,24 +227,20 @@ export async function firePreToolUseHook(
           preToolOutput.getPermissionDecisionReason() ||
           'User confirmation required',
         blockType: 'ask',
+        additionalContext,
+        ...(updatedInput && { updatedInput }),
       };
     }
 
     // Check if execution should stop
     if (preToolOutput.shouldStopExecution()) {
-      return {
-        shouldProceed: false,
-        blockReason: preToolOutput.getEffectiveReason(),
-        blockType: 'stop',
-      };
+      return stopResult();
     }
-
-    // Get additional context
-    const additionalContext = preToolOutput.getAdditionalContext();
 
     return {
       shouldProceed: true,
       additionalContext,
+      ...(updatedInput && { updatedInput }),
     };
   } catch (error) {
     // Hook errors should not block tool execution
@@ -614,10 +641,21 @@ export async function firePermissionRequestHook(
     }
 
     if (decision.behavior === 'allow') {
+      // An explicit but unusable replacement must not let the current
+      // input run instead.
+      const updatedInput = permissionOutput.getUpdatedToolInput();
+      if (updatedInput === null) {
+        return {
+          hasDecision: true,
+          shouldAllow: false,
+          denyMessage:
+            'PermissionRequest hook returned an invalid updatedInput: expected a JSON object that replaces the tool input.',
+        };
+      }
       return {
         hasDecision: true,
         shouldAllow: true,
-        updatedInput: decision.updatedInput,
+        ...(updatedInput && { updatedInput }),
       };
     }
 

@@ -32,20 +32,29 @@ import type {
   SessionMetrics,
   SkillLevel,
 } from '@qwen-code/qwen-code-core';
-import type { HistoryItemWithoutId } from '../types.js';
+import type { HistoryItem, HistoryItemWithoutId } from '../types.js';
+import { isCollapsibleTool } from '../utils/tool-group-summary.js';
+import { ToolCallStatus } from '../types.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import {
   formatStopHookLoopText,
   formatUserPromptSubmitBlocked,
+  formatToolArgs,
+  toolResultEvent,
 } from './event-adapter.js';
 import { flattenModelsBySource } from '../utils/modelsBySource.js';
-import { calculateCost } from '../../utils/costCalculator.js';
+import {
+  billableOutputTokens,
+  calculateCost,
+} from '../../utils/costCalculator.js';
 import { computeSessionStats } from '../utils/computeStats.js';
 import { formatDuration } from '../utils/formatters.js';
 import { levelLabel } from '../utils/skill-level-label.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { redactProxy } from '../systemInfoFields.js';
+import { formatInlineImageOverflow } from '../utils/inline-image-parts.js';
+import { isSyntheticHistoryItem } from '../utils/historyUtils.js';
 
 /** Runtime state the host supplies for items that read it in ink. */
 export interface ItemProjectionContext {
@@ -205,6 +214,7 @@ export function projectSkillsList(
 }
 
 interface FlatModelEntry {
+  billableOutputTokens?: number;
   /** Structured key (raw model name + optional `::source` suffix). */
   key: string;
   label: string;
@@ -222,7 +232,11 @@ interface FlatModelEntry {
 
 /** Active-model rows; `flattenModelsBySource` already labels + filters. */
 function flattenActiveModels(metrics: SessionMetrics): FlatModelEntry[] {
-  return flattenModelsBySource(metrics.models).map((entry) => ({
+  return flattenModelsBySource(
+    metrics.models,
+    metrics.billableOutputTokens,
+  ).map((entry) => ({
+    billableOutputTokens: entry.billableOutputTokens,
     key: entry.key,
     label: entry.label,
     metrics: entry.metrics as FlatModelEntry['metrics'],
@@ -239,7 +253,7 @@ function entryCost(
   return calculateCost({
     inputTokens: entry.metrics.tokens.prompt,
     outputTokens:
-      entry.metrics.tokens.candidates + entry.metrics.tokens.thoughts,
+      entry.billableOutputTokens ?? billableOutputTokens(entry.metrics.tokens),
     pricing: (modelPricing ?? {})[entry.key.split('::')[0]] as Parameters<
       typeof calculateCost
     >[0]['pricing'],
@@ -463,7 +477,11 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     );
   }
   lines.push('');
-  lines.push('Usage by category');
+  // Parity of views/ContextUsage: without a provider total the estimate
+  // caption above already heads these rows (#12606).
+  if (totalTokens > 0) {
+    lines.push('Usage by category');
+  }
   const categories: Array<[string, string]> = [
     ['System prompt', 'systemPrompt'],
     ['Built-in tools', 'builtinTools'],
@@ -1120,7 +1138,15 @@ export function projectItemToStreamEvent(
 ): OpenTuiStreamEvent | null {
   const viaSpecialText = (): OpenTuiStreamEvent | null => {
     const text = projectSpecialItemText(item, ctx);
-    return text === null ? null : { type: 'info', text };
+    return text === null
+      ? null
+      : {
+          type: 'info',
+          text,
+          ...(isSyntheticHistoryItem(item)
+            ? {}
+            : { historyIsSynthetic: false }),
+        };
   };
   switch (item.type) {
     case 'user':
@@ -1230,4 +1256,128 @@ export function projectItemToStreamEvent(
       return exhaustive;
     }
   }
+}
+
+/** Replays canonical history; live command projection must not duplicate tools. */
+export function projectHistoryToStreamEvents(
+  history: readonly HistoryItem[],
+  ctx: ItemProjectionContext,
+): OpenTuiStreamEvent[] {
+  const events: OpenTuiStreamEvent[] = [];
+  for (const item of history) {
+    const start = events.length;
+    switch (item.type) {
+      case 'user':
+        events.push({
+          type: 'user',
+          historyId: item.id,
+          text: item.text,
+          promptId: item.promptId,
+          sentToModel: item.sentToModel,
+        });
+        break;
+      case 'compression':
+        events.push({
+          type: 'compaction',
+          compression: item.compression,
+        });
+        break;
+      case 'gemini':
+      case 'gemini_content':
+        if (item.type === 'gemini') events.push({ type: 'done' });
+        if (item.text) {
+          events.push({
+            type: 'text',
+            delta: item.text,
+            ...(item.type === 'gemini' && Number.isFinite(item.timestamp)
+              ? { timestamp: item.timestamp }
+              : {}),
+          });
+        }
+        for (const image of item.images ?? []) {
+          events.push({ type: 'image', ...image });
+        }
+        if (item.omittedImageCount) {
+          events.push({
+            type: 'info',
+            text: formatInlineImageOverflow(item.omittedImageCount),
+          });
+        }
+        break;
+      case 'gemini_thought':
+      case 'gemini_thought_content':
+        events.push({ type: 'thinking', delta: item.text });
+        events.push({ type: 'thinking-end' });
+        break;
+      case 'tool_group':
+        for (const tool of item.tools) {
+          events.push({
+            type: 'tool-start',
+            id: tool.callId,
+            tool: tool.name,
+            title: tool.name,
+          });
+          if (tool.description) {
+            events.push({
+              type: 'tool-description',
+              id: tool.callId,
+              description: tool.description,
+            });
+          }
+          const args = formatToolArgs(tool.args);
+          if (args) events.push({ type: 'tool-args', id: tool.callId, args });
+          const result = toolResultEvent(
+            tool.callId,
+            tool.resultDisplay,
+            tool.visionBridgeNotice,
+          );
+          if (result || tool.detailedDisplay)
+            events.push({
+              ...(result ?? {
+                type: 'tool-result',
+                id: tool.callId,
+                display: '',
+              }),
+              ...(isCollapsibleTool(tool.name) &&
+              typeof tool.detailedDisplay === 'string'
+                ? { detailedDisplay: tool.detailedDisplay }
+                : {}),
+            });
+          for (const image of tool.images ?? [])
+            events.push({ type: 'image', ...image });
+          if (tool.omittedImageCount)
+            events.push({
+              type: 'info',
+              text: formatInlineImageOverflow(tool.omittedImageCount),
+            });
+          events.push({
+            type: 'tool-end',
+            id: tool.callId,
+            success: tool.status === ToolCallStatus.Success,
+            summary:
+              tool.status === ToolCallStatus.Success
+                ? 'ok'
+                : tool.status.toLowerCase(),
+          });
+        }
+        break;
+      default: {
+        const event = projectItemToStreamEvent(item, ctx);
+        if (event) events.push(event);
+      }
+    }
+    if (!events.slice(start).some((event) => event.type !== 'done'))
+      events.push({ type: 'canonical-history' });
+    for (let index = start; index < events.length; index++) {
+      if (events[index].type !== 'done')
+        events[index] = {
+          ...events[index],
+          historyId: item.id,
+          canonicalHistoryItem: item,
+          ...(item.display ? { historyDisplay: item.display } : {}),
+        };
+    }
+  }
+  events.push({ type: 'done' });
+  return events;
 }

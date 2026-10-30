@@ -1,8 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, type ReactNode } from 'react';
+import { act, type ReactNode, type ComponentProps } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { WebShellBrand } from '../../brandContext';
+const catalogOptions = vi.hoisted(() => vi.fn());
+const catalogRefresh = vi.hoisted(() => vi.fn());
 
 const { connection, workspace, workspaceActions, active, pinned, archived } =
   vi.hoisted(() => {
@@ -60,6 +62,7 @@ const { connection, workspace, workspaceActions, active, pinned, archived } =
   });
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
+  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
   useConnection: () => connection,
   useActions: () => ({ renameSession: vi.fn() }),
   useWorkspace: () => workspace,
@@ -77,6 +80,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
     archiveState?: string;
     group?: string;
   }) => {
+    catalogOptions(options);
     if (options?.archiveState === 'archived') return archived;
     if (options?.group === 'pinned') return pinned;
     return active;
@@ -84,7 +88,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
   useSessionCatalogController: () => ({
     refreshQueries: vi.fn(),
     invalidateWorkspace: vi.fn(),
-    refreshWorkspace: vi.fn(),
+    refreshWorkspace: catalogRefresh,
     renamed: vi.fn(),
   }),
   useSessionCatalogPolling: () => undefined,
@@ -124,6 +128,10 @@ let container: HTMLDivElement;
 function renderSidebar(
   brand?: WebShellBrand,
   branding?: { render?: () => ReactNode },
+  sessionProps?: Pick<
+    ComponentProps<typeof WebShellSidebar>,
+    'sessionContent' | 'sessionHeader' | 'onNewSession'
+  >,
 ) {
   act(() => {
     root.render(
@@ -144,6 +152,7 @@ function renderSidebar(
             onError={() => {}}
             footer={{ items: ['version'] }}
             branding={branding}
+            {...sessionProps}
           />
         </BrandProvider>
       </I18nProvider>,
@@ -157,10 +166,12 @@ function brandLogoImage(): HTMLImageElement | null {
 
 /** The built-in inline mark — the one every unconfigured deployment sees. */
 function builtInMark(): Element | null {
-  return container.querySelector('svg[viewBox="0 0 141.38 140"]');
+  return container.querySelector('svg[viewBox="17.5 27.7 135.6 135.6"]');
 }
 
 beforeEach(() => {
+  catalogOptions.mockClear();
+  catalogRefresh.mockClear();
   window.localStorage.clear();
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -175,6 +186,53 @@ afterEach(() => {
 });
 
 describe('sidebar brand', () => {
+  it('uses external history without loading or invalidating daemon catalogs, and restores local catalogs when removed', async () => {
+    const onNewSession = vi.fn(() => true);
+    renderSidebar(undefined, undefined, {
+      sessionHeader: <div data-testid="session-modes">Local / Managed</div>,
+      sessionContent: (
+        <nav aria-label="Managed sessions">Managed history navigation</nav>
+      ),
+      onNewSession,
+    });
+    expect(
+      container.querySelector('nav[aria-label="Managed sessions"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-testid="session-modes"]'),
+    ).not.toBeNull();
+    expect(
+      catalogOptions.mock.calls.every(
+        ([options]) => options.enabled === false && options.autoLoad === false,
+      ),
+    ).toBe(true);
+    const create = container.querySelector<HTMLButtonElement>(
+      'button[aria-label="New session"]',
+    );
+    expect(create).not.toBeNull();
+    await act(async () => {
+      create!.click();
+      await Promise.resolve();
+    });
+    expect(onNewSession).toHaveBeenCalledOnce();
+    expect(catalogRefresh).not.toHaveBeenCalled();
+    catalogOptions.mockClear();
+    renderSidebar(undefined, undefined, {
+      sessionHeader: <div data-testid="session-modes">Local / Managed</div>,
+    });
+    expect(
+      container.querySelector('nav[aria-label="Managed sessions"]'),
+    ).toBeNull();
+    expect(
+      container.querySelector('[data-testid="session-modes"]'),
+    ).not.toBeNull();
+    expect(
+      catalogOptions.mock.calls.some(
+        ([options]) => options.enabled === true && options.autoLoad === true,
+      ),
+    ).toBe(true);
+  });
+
   it('renders the built-in name and inline mark when no brand is configured', () => {
     renderSidebar();
 

@@ -1,0 +1,53 @@
+[
+  {
+    "name": "read_file",
+    "description": "Read a file in the remote Workspace. Read before editing an existing file.",
+    "parametersJsonSchema": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Path relative to the saved Session working directory in its remote Workspace. Never use the Harness host path."
+        },
+        "offset": { "type": "integer", "minimum": 0 },
+        "limit": { "type": "integer", "minimum": 1 }
+      },
+      "required": ["file_path"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "write_file",
+    "description": "Write a file in the remote Workspace. Read before overwriting an existing file. Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.",
+    "parametersJsonSchema": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Path relative to the saved Session working directory in its remote Workspace. Never use the Harness host path."
+        },
+        "content": { "type": "string" }
+      },
+      "required": ["file_path", "content"],
+      "additionalProperties": false
+    }
+  },
+  {
+    "name": "edit",
+    "description": "Replace exact text in a remote Workspace file that you have read. Write/Edit preimages are backed up. External or Shell changes to tracked content or permissions block further Write/Edit in the same prompt and block undo. A new Write/Edit prompt must validate a fresh backup before accepting those changes.",
+    "parametersJsonSchema": {
+      "type": "object",
+      "properties": {
+        "file_path": {
+          "type": "string",
+          "description": "Path relative to the saved Session working directory in its remote Workspace. Never use the Harness host path."
+        },
+        "old_string": { "type": "string" },
+        "new_string": { "type": "string" },
+        "replace_all": { "type": "boolean" }
+      },
+      "required": ["file_path", "old_string", "new_string"],
+      "additionalProperties": false
+    }
+  }
+]

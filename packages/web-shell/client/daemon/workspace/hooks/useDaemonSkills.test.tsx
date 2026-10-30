@@ -425,9 +425,9 @@ describe('useDaemonSkills', () => {
 
     await act(async () => vi.advanceTimersByTimeAsync(5_000));
 
-    expect(
-      mocks.workspaceClient.workspaceRuntimeSkills,
-    ).toHaveBeenCalledTimes(2);
+    expect(mocks.workspaceClient.workspaceRuntimeSkills).toHaveBeenCalledTimes(
+      2,
+    );
     expect(result?.skills.map((skill) => skill.name)).toEqual([
       'configured',
       'runtime-only',

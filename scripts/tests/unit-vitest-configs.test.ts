@@ -5,19 +5,21 @@
  */
 
 import { readFileSync, readdirSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it, vi } from 'vitest';
 import { parse } from 'yaml';
 
 import externalContextConfig from '../../integrations/external-context/vitest.config.js';
 import externalContextMem0Config from '../../integrations/external-context-mem0/vitest.config.js';
+import generatedUiConfig from '../../integrations/generated-ui/vitest.config.js';
 import acpBridgeConfig from '../../packages/acp-bridge/vitest.config.js';
 import audioCaptureConfig from '../../packages/audio-capture/vitest.config.js';
 import browserUseConfig from '../../packages/browser-use/vitest.config.js';
 import channelsBaseConfig from '../../packages/channels/base/vitest.config.js';
 import dingtalkConfig from '../../packages/channels/dingtalk/vitest.config.js';
 import dwsConfig from '../../packages/channels/dws/vitest.config.js';
+import emailConfig from '../../packages/channels/email/vitest.config.js';
 import feishuConfig from '../../packages/channels/feishu/vitest.config.js';
 import githubConfig from '../../packages/channels/github/vitest.config.js';
 import gitlabConfig from '../../packages/channels/gitlab/vitest.config.js';
@@ -43,8 +45,10 @@ import scriptsTestsConfig from './vitest.config.js';
 // witness pins the flag in every guarded config so removing it from any
 // one of them fails the scripts suite on every platform.
 type ExemptionConfig = {
+  root?: string;
   test?: {
     dangerouslyIgnoreUnhandledErrors?: boolean;
+    outputFile?: { junit?: string };
     testTimeout?: number;
     pool?: 'threads' | 'forks' | 'vmThreads';
     poolOptions?: { threads?: { maxThreads?: number } };
@@ -54,12 +58,14 @@ type ExemptionConfig = {
 const configs: Record<string, ExemptionConfig> = {
   'integrations/external-context': externalContextConfig,
   'integrations/external-context-mem0': externalContextMem0Config,
+  'integrations/generated-ui': generatedUiConfig,
   'packages/acp-bridge': acpBridgeConfig,
   'packages/audio-capture': audioCaptureConfig,
   'packages/browser-use': browserUseConfig,
   'packages/channels/base': channelsBaseConfig,
   'packages/channels/dingtalk': dingtalkConfig,
   'packages/channels/dws': dwsConfig,
+  'packages/channels/email': emailConfig,
   'packages/channels/feishu': feishuConfig,
   'packages/channels/github': githubConfig,
   'packages/channels/gitlab': gitlabConfig,
@@ -89,6 +95,27 @@ describe('unhandled-error exemption on the platform lanes', () => {
   }
 });
 
+describe('JUnit report upload paths', () => {
+  const repoRoot = fileURLToPath(new URL('../../', import.meta.url));
+  const junitConfigs = Object.entries(configs).filter(
+    ([, config]) => config.test?.outputFile?.junit,
+  );
+
+  it.each(junitConfigs)(
+    '%s writes inside the package upload glob',
+    (name, config) => {
+      expect(
+        resolve(
+          repoRoot,
+          name,
+          config.root ?? '.',
+          config.test!.outputFile!.junit!,
+        ),
+      ).toBe(resolve(repoRoot, name, 'junit.xml'));
+    },
+  );
+});
+
 // Every workspace that `npm run test:ci --workspaces` runs lands on the same
 // shared ECS pool, where the identical suite takes ~5x longer depending only on
 // which host it draws (#10490). Five configs were given a raised ceiling there
@@ -108,6 +135,10 @@ const configModules: Record<
     import('../../integrations/external-context/vitest.config.js'),
   'integrations/external-context-mem0': () =>
     import('../../integrations/external-context-mem0/vitest.config.js'),
+  'integrations/test-failure-explorer': () =>
+    import('../../integrations/test-failure-explorer/vitest.config.js'),
+  'integrations/generated-ui': () =>
+    import('../../integrations/generated-ui/vitest.config.js'),
   'packages/acp-bridge': () =>
     import('../../packages/acp-bridge/vitest.config.js'),
   'packages/audio-capture': () =>
@@ -120,6 +151,8 @@ const configModules: Record<
     import('../../packages/channels/dingtalk/vitest.config.js'),
   'packages/channels/dws': () =>
     import('../../packages/channels/dws/vitest.config.js'),
+  'packages/channels/email': () =>
+    import('../../packages/channels/email/vitest.config.js'),
   'packages/channels/feishu': () =>
     import('../../packages/channels/feishu/vitest.config.js'),
   'packages/channels/github': () =>
@@ -199,12 +232,15 @@ describe('shared-pool test timeout', () => {
   const OFF_POOL_DEFAULT = [
     'integrations/external-context',
     'integrations/external-context-mem0',
+    'integrations/test-failure-explorer',
+    'integrations/generated-ui',
     'packages/acp-bridge',
     'packages/audio-capture',
     'packages/browser-use',
     'packages/channels/base',
     'packages/channels/dingtalk',
     'packages/channels/dws',
+    'packages/channels/email',
     'packages/channels/feishu',
     'packages/channels/github',
     'packages/channels/gitlab',

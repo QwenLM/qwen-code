@@ -16,6 +16,8 @@ import type {
   StartSessionEvent,
   UserPromptEvent,
   ToolCallEvent,
+  ToolResultSizeEvent,
+  ToolResultPersistedEvent,
   ApiRequestEvent,
   ApiResponseEvent,
   ApiErrorEvent,
@@ -23,6 +25,7 @@ import type {
   FileOperationEvent,
   FlashFallbackEvent,
   LoopDetectedEvent,
+  LoopProtectionEvent,
   NextSpeakerCheckEvent,
   SlashCommandEvent,
   MalformedJsonResponseEvent,
@@ -80,7 +83,46 @@ import { AuthType } from '../../core/contentGenerator.js';
 const USAGE_STATS_HOSTNAME = 'gb4w8c3ygj-default-sea.rum.aliyuncs.com';
 const USAGE_STATS_PATH = '/';
 
+/**
+ * Port the upload reaches {@link USAGE_STATS_HOSTNAME} on: the request sets no
+ * explicit port, so `https.request` falls back to the scheme default.
+ */
+const USAGE_STATS_PORT = 443;
+
 const RUN_APP_ID = 'gb4w8c3ygj@851d5d500f08f92';
+
+/**
+ * Whether `NO_PROXY` / `no_proxy` excludes a host from proxying, mirroring
+ * undici's `EnvHttpProxyAgent#shouldProxy` — the dispatcher the session's own
+ * egress installs, and the reason `NO_PROXY` is honored there.
+ * `HttpsProxyAgent` has no such notion, so the rule has to be applied at the
+ * point the agent is chosen or uploads ignore an explicit exclusion.
+ *
+ * Mirrored details: lowercase `no_proxy` wins over `NO_PROXY`; a bare `*`
+ * disables proxying entirely; entries split on comma/whitespace; a leading `.`
+ * or `*.` is stripped so an entry matches the host and its subdomains; a
+ * port-qualified entry only matches that port.
+ */
+function isExcludedByNoProxy(hostname: string, port: number): boolean {
+  const noProxy = process.env['no_proxy'] ?? process.env['NO_PROXY'] ?? '';
+  if (!noProxy) return false;
+  if (noProxy === '*') return true;
+
+  for (const entry of noProxy.split(/[,\s]/)) {
+    if (!entry) continue;
+    const withPort = entry.match(/^(.+):(\d+)$/);
+    const entryPort = withPort ? Number.parseInt(withPort[2], 10) : 0;
+    if (entryPort && entryPort !== port) continue;
+    const entryHost = (withPort ? withPort[1] : entry)
+      .replace(/^\*?\./, '')
+      .toLowerCase();
+    if (hostname === entryHost) return true;
+    if (hostname.slice(-(entryHost.length + 1)) === `.${entryHost}`)
+      return true;
+  }
+
+  return false;
+}
 
 /**
  * Interval in which buffered events are sent to RUM.
@@ -571,6 +613,13 @@ export class QwenLogger {
           permission: event.decision,
           success: event.success ? 1 : 0,
           duration_ms: event.duration_ms,
+          content_length: event.content_length,
+          raw_content_length: event.raw_content_length,
+          raw_estimated_tokens: event.raw_estimated_tokens,
+          processed_estimated_tokens: event.processed_estimated_tokens,
+          truncated: event.truncated,
+          applied_budget: event.applied_budget,
+          budget_source: event.budget_source,
           error_type: event.error_type,
           error_message: event.error,
         },
@@ -578,6 +627,39 @@ export class QwenLogger {
     );
 
     this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logToolResultSizeEvent(event: ToolResultSizeEvent): void {
+    // Field-by-field like logToolCallEvent: call_id/prompt_id stay log-only.
+    const rumEvent = this.createActionEvent('tool', event['event.name'], {
+      properties: {
+        function_name: event.function_name,
+        tool_type: event.tool_type,
+        layer: event.layer,
+        raw_content_length: event.raw_content_length,
+        injected_content_length: event.injected_content_length,
+        raw_estimated_tokens: event.raw_estimated_tokens,
+        injected_estimated_tokens: event.injected_estimated_tokens,
+        truncated: event.truncated,
+        applied_budget: event.applied_budget,
+        budget_source: event.budget_source,
+      },
+    });
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logToolResultPersistedEvent(event: ToolResultPersistedEvent): void {
+    this.enqueueLogEvent(
+      this.createActionEvent('tool', 'tool_result_persisted', {
+        properties: {
+          tool_name: event.tool_name,
+          bytes_written: event.bytes_written,
+          prompt_id: event.prompt_id,
+        },
+      }),
+    );
     this.flushIfNeeded();
   }
 
@@ -791,6 +873,15 @@ export class QwenLogger {
       properties: {
         prompt_id: event.prompt_id,
         error_type: event.loop_type,
+        ...(event.loop_reason !== undefined
+          ? { loop_reason: event.loop_reason }
+          : {}),
+        ...(event.tool_call_count !== undefined
+          ? { tool_call_count: event.tool_call_count }
+          : {}),
+        ...(event.tool_call_limit !== undefined
+          ? { tool_call_limit: event.tool_call_limit }
+          : {}),
       },
     });
 
@@ -960,6 +1051,23 @@ export class QwenLogger {
         },
       },
     );
+
+    this.enqueueLogEvent(rumEvent);
+    this.flushIfNeeded();
+  }
+
+  logLoopProtectionEvent(event: LoopProtectionEvent): void {
+    const rumEvent = this.createActionEvent('misc', 'loop_protection', {
+      properties: {
+        prompt_id: event.prompt_id,
+        loop_type: event.loop_type,
+        decision: event.decision,
+        mode: event.mode,
+        ...(event.loop_reason !== undefined
+          ? { loop_reason: event.loop_reason }
+          : {}),
+      },
+    });
 
     this.enqueueLogEvent(rumEvent);
     this.flushIfNeeded();
@@ -1162,6 +1270,9 @@ export class QwenLogger {
   getProxyAgent() {
     const proxyUrl = this.config?.getProxy();
     if (!proxyUrl) return undefined;
+    if (isExcludedByNoProxy(USAGE_STATS_HOSTNAME, USAGE_STATS_PORT)) {
+      return undefined;
+    }
     // undici which is widely used in the repo can only support http & https proxy protocol,
     // https://github.com/nodejs/undici/issues/2224
     if (/^https?:\/\//i.test(proxyUrl)) {

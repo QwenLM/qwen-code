@@ -23,6 +23,7 @@ import {
 } from '../core/toolHookTriggers.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
 import { runWithInvocationContext } from '../utils/invocation-context.js';
+import { isShellResultDisplay } from '../utils/shell-result.js';
 import {
   ToolConfirmationOutcome,
   type AnyDeclarativeTool,
@@ -59,6 +60,48 @@ function invocationParams(params: unknown): Record<string, unknown> {
   managedToolDigest(projected);
   return projected;
 }
+
+/**
+ * A prepared reference stays bound to its original arguments, so a hook
+ * replacement is refused rather than ignored. A deny or stop keeps its reason.
+ */
+function refuseUpdatedInput(
+  result: PreToolUseHookResult,
+): PreToolUseHookResult {
+  const { updatedInput, ...rest } = result;
+  if (
+    updatedInput === undefined ||
+    (!rest.shouldProceed && rest.blockType !== 'ask')
+  ) {
+    return rest;
+  }
+  return {
+    ...rest,
+    shouldProceed: false,
+    blockType: 'denied',
+    blockReason:
+      'PreToolUse updatedInput is not supported for managed tool invocations; the tool was not run.',
+  };
+}
+
+/**
+ * Hook payloads arrive untyped over the message bus, so the non-cloneable
+ * fallback carries a hook's text fields only when they really are strings:
+ * any other value could be the one that made the clone throw.
+ */
+function hookStringFields<K extends string>(
+  hook: Partial<Record<K, unknown>>,
+  keys: readonly K[],
+): Partial<Record<K, string>> {
+  const fields: Partial<Record<K, string>> = {};
+  for (const key of keys) {
+    const value = hook[key];
+    if (typeof value === 'string') fields[key] = value;
+  }
+  return fields;
+}
+
+export class ManagedToolPreparationError extends Error {}
 
 export type ManagedToolConfirmationPhase = 'permission' | 'preflight';
 
@@ -402,7 +445,10 @@ export class ManagedToolRuntime {
       ? source.hookOwner
       : captureHookExecutionOwner(this.config);
     let tool = this.tools().find((candidate) => candidate.name === toolName);
-    if (!tool) throw new Error('Managed Runtime tool is unavailable.');
+    if (!tool)
+      throw new ManagedToolPreparationError(
+        'Managed Runtime tool is unavailable.',
+      );
     if (mediaContext !== undefined) {
       if (!this.bindMediaTool)
         throw new Error('Managed Runtime tool does not support media context.');
@@ -437,7 +483,16 @@ export class ManagedToolRuntime {
           source.invocation.params,
         ) as Record<string, unknown>;
     }
-    const invocation = tool.build(input);
+    let invocation: AnyToolInvocation;
+    try {
+      invocation = tool.build(input);
+    } catch (error) {
+      throw new ManagedToolPreparationError(
+        error instanceof Error
+          ? error.message
+          : 'Managed Runtime tool input is invalid.',
+      );
+    }
     const aware = invocation as {
       setCallId?: (id: string) => void;
       setPromptId?: (id: string) => void;
@@ -596,8 +651,9 @@ export class ManagedToolRuntime {
         entry.hookOwner,
       );
       this.assertExecutable(entry);
-      entry.preflightResult = structuredClone(result);
-      return result;
+      const settled = refuseUpdatedInput(result);
+      entry.preflightResult = structuredClone(settled);
+      return settled;
     });
     return structuredClone(await entry.preflight);
   }
@@ -625,7 +681,16 @@ export class ManagedToolRuntime {
       this.sharedFileHistory
         ? this.sharedFileHistory.execute(() => this.run(entry))
         : this.run(entry),
-    );
+    ).catch((error: unknown) => {
+      entry.result ??= {
+        executionStatus: 'not_started',
+        error: {
+          message: error instanceof Error ? error.message : String(error),
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      };
+      throw error;
+    });
     void entry.execution.catch(() => {});
     return entry.execution.then((result) => structuredClone(result));
   }
@@ -663,11 +728,15 @@ export class ManagedToolRuntime {
         this.config.getShellExecutionConfig(),
       );
       result = {
-        executionStatus: raw.error
-          ? signal.aborted
+        executionStatus:
+          isShellResultDisplay(raw.returnDisplay) &&
+          raw.returnDisplay.outcome === 'cancelled'
             ? 'cancelled'
-            : 'error'
-          : 'success',
+            : raw.error
+              ? signal.aborted
+                ? 'cancelled'
+                : 'error'
+              : 'success',
       };
       try {
         result.result = structuredClone({
@@ -745,8 +814,47 @@ export class ManagedToolRuntime {
         result.postHook = { shouldStop: false, hookError };
       else result.failureHook = { hookError };
     }
-    entry.result = structuredClone(result);
+    try {
+      entry.result = structuredClone(result);
+    } catch (error) {
+      // A hook payload with non-cloneable values must not wedge the
+      // invocation: replace only the hook that ran, and preserve the stop
+      // directive and the text fields the hook actually issued.
+      const hookError = `Cannot serialize managed tool hooks: ${String(error)}`;
+      entry.result = structuredClone({
+        ...result,
+        ...(result.postHook
+          ? {
+              postHook: {
+                shouldStop: result.postHook.shouldStop === true,
+                ...hookStringFields(result.postHook, [
+                  'stopReason',
+                  'additionalContext',
+                ]),
+                hookError,
+              },
+            }
+          : {}),
+        ...(result.failureHook
+          ? {
+              failureHook: {
+                ...hookStringFields(result.failureHook, ['additionalContext']),
+                hookError,
+              },
+            }
+          : {}),
+      });
+    }
     return entry.result;
+  }
+
+  findStatus(
+    reference: ManagedToolInvocationReference,
+    afterSeq = 0,
+  ): ManagedToolInvocationStatus | undefined {
+    return this.entries.has(reference.invocationId)
+      ? this.status(reference, afterSeq)
+      : undefined;
   }
 
   status(
@@ -808,6 +916,24 @@ export class ManagedToolRuntime {
     );
   }
 
+  async releasePrepared(): Promise<void> {
+    if (
+      this.snapshotPending ||
+      this.pendingPreparations > 0 ||
+      [...this.entries.values()].some(
+        (entry) => entry.execution !== undefined && !entry.result,
+      )
+    ) {
+      throw new Error('Managed Runtime still owns unfinished execution.');
+    }
+    for (const entry of this.entries.values()) {
+      if (!entry.result) this.requestCancel(entry);
+    }
+    await Promise.all(
+      [...this.entries.values()].map((entry) => entry.cancellation),
+    );
+  }
+
   seal(): void {
     this.lifetime.abort(new Error('Managed tool Runtime is closed.'));
     for (const entry of this.entries.values()) this.requestCancel(entry);
@@ -851,6 +977,7 @@ function runtimeLocalOutcome(
     case ToolConfirmationOutcome.ProceedAlwaysTool:
     case ToolConfirmationOutcome.ProceedAlwaysProject:
     case ToolConfirmationOutcome.ProceedAlwaysUser:
+    case ToolConfirmationOutcome.ProceedOnceAndSwitchToDefault:
       return ToolConfirmationOutcome.ProceedOnce;
     default:
       return outcome;

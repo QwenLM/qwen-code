@@ -5,8 +5,8 @@
  */
 
 import type React from 'react';
-import { describe, expect, it, vi } from 'vitest';
-import { render } from 'ink-testing-library';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, render } from 'ink-testing-library';
 import { Text } from 'ink';
 import { MainContent } from './MainContent.js';
 import { UIStateContext, type UIState } from '../contexts/UIStateContext.js';
@@ -18,6 +18,8 @@ import { AppContext } from '../contexts/AppContext.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import { ThoughtExpandedProvider } from '../contexts/ThoughtExpandedContext.js';
 import { ToolCallStatus, StreamingState } from '../types.js';
+
+afterEach(cleanup);
 
 // Global compact mode was removed (#5666); type-based tool rendering no longer
 // consumes a compact-mode context.
@@ -271,6 +273,42 @@ const renderMainContent = (uiState: UIState) =>
   );
 
 describe('<MainContent />', () => {
+  it.each([false, true])(
+    'preserves completed summary state and group identity in pending rows (VP: %s)',
+    (useTerminalBuffer) => {
+      historyItemDisplayPropsSpy.mockClear();
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer,
+          pendingHistoryItems: [
+            { type: 'gemini', text: 'before' },
+            {
+              type: 'gemini_thought',
+              text: 'summary',
+              thoughtGroupId: -7,
+              isStreaming: false,
+            },
+            {
+              type: 'gemini_thought_content',
+              text: 'continuation',
+              thoughtGroupId: -7,
+              isStreaming: false,
+            },
+            { type: 'gemini_content', text: 'after' },
+          ],
+        }),
+      );
+      const thoughtProps = historyItemDisplayPropsSpy.mock.calls
+        .map(([props]) => props)
+        .filter((props) => props.item.thoughtGroupId === -7);
+      expect(thoughtProps).toHaveLength(2);
+      for (const props of thoughtProps) {
+        expect(props.isPending).toBe(true);
+        expect(props.item.isStreaming).toBe(false);
+      }
+    },
+  );
+
   it('renders AppHeader inside Static at the top of the static content', () => {
     staticPropsSpy.mockClear();
     staticItemsSpy.mockClear();

@@ -3,11 +3,12 @@
 ## Context
 
 A daemon ACP session is owned by one bound workspace. The model shell tool
-already rejects an explicit `directory` outside its effective workspace, but a
-Git command can relocate itself with `-C`, `--work-tree`, or `--git-dir` while
-the shell process still starts inside the workspace. This can let a daemon
-agent mutate another checkout or worktree after the direct directory form was
-rejected.
+asks before running with an explicit `directory` outside its effective
+workspace (it rejected it outright when this guard was written; #12927 made it
+ask), but a Git command can relocate itself with `-C`, `--work-tree`, or
+`--git-dir` while the shell process still starts inside the workspace. This can
+let a daemon agent mutate another checkout or worktree that no direct directory
+form ever named.
 
 ## Scope
 
@@ -115,6 +116,13 @@ hold:
 1. its target is outside the session's effective working directory after
    canonical path resolution;
 2. its Git subcommand is mutating or cannot be classified as read-only.
+
+Since [daemon directory approval](daemon-directory-approval.md), a call the
+normal permission flow already admitted (`permissionChecked: true`) that runs
+in the session's own directory skips this containment: whoever admitted it saw
+the command. A sub-agent pinned to its own worktree keeps it even when
+admitted, because nothing in the permission flow re-establishes the worktree
+boundary. Speculative and unmarked calls keep the full policy below.
 
 Relocated commands whose subcommand is in a small verified read-only set
 (`rev-parse`, `cat-file`) remain allowed. `diff`,

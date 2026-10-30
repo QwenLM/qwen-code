@@ -10,7 +10,7 @@
 
 ## 持久身份与启动顺序
 
-显式启用 `runtime-broker.durable-local-process` 后使用配置的状态目录，且目录必须在 Workspace 根目录之外。Linux `/etc/machine-id` 和 `/proc/sys/kernel/random/boot_id` 提供 host 与 boot 身份。检查进程前还必须匹配 `/proc/self/ns/pid` 保存的 PID namespace 和 `/proc/self/ns/time` 保存的 time namespace，因为 [Linux PID 仅在本 namespace 有效](https://docs.kernel.org/admin-guide/namespaces/compatibility-list.html)。要求内核暴露这两种 namespace 身份；不支持或无法读取时启动失败。测试通过包内构造器注入身份；部署配置不接受调用方提供的 boot 证据。
+`runtime-broker.durable-local-process`（默认开启）使用配置的状态目录，且目录必须在 Workspace 根目录之外。Linux `/etc/machine-id` 和 `/proc/sys/kernel/random/boot_id` 提供 host 与 boot 身份。检查进程前还必须匹配 `/proc/self/ns/pid` 保存的 PID namespace 和 `/proc/self/ns/time` 保存的 time namespace，因为 [Linux PID 仅在本 namespace 有效](https://docs.kernel.org/admin-guide/namespaces/compatibility-list.html)。要求内核暴露这两种 namespace 身份；不支持或无法读取时启动失败。测试通过包内构造器注入身份；部署配置不接受调用方提供的 boot 证据。
 
 machine ID 必须非空且稳定。服务管理器必须允许 Broker 退出后 worker 继续存活；默认 systemd `KillMode=control-group` 单元或以 Broker 为主进程的容器也会杀死 worker。配置服务保留子进程（例如 systemd `KillMode=process`），并使用会回收孤儿进程的 init，避免积累僵尸进程。
 
@@ -24,7 +24,7 @@ machine ID 必须非空且稳定。服务管理器必须允许 Broker 退出后 
 
 启动 tick 只在已保存的 boot、PID/time namespace 内比较。Linux 不以 Java 墙钟 `startInstant` 证明死亡，因为校时会改变其使用的 boot epoch。解析时跳过完整括号内的命令名，其中允许空格、括号和换行；读取失败不构成证据。Linux 区分 stat 文件不存在与其他读取错误；后者不能退休 journal 或使缓存 worker 失效。部署必须保持 Broker 用户及其 procfs 可见性稳定。临时 worker 保留原 `Process` 基于 reaper 的存活判断。可移植测试使用的非 Linux 身份不能部署。
 
-匹配原启动 tick 后，任务状态为 `Z` 或 `X` 表示 worker 已退出；这仍不能证明逃逸写入者已停止。
+匹配原启动 tick 后，任务状态为 `Z`、`X` 或 `x` 表示 worker 已退出；这仍不能证明逃逸写入者已停止。启动接管先检查这类缺失证据，再接受 `ProcessHandle.isAlive()`，因为未回收的 Linux 僵尸进程仍可能返回存活。登记 worker 在 ready 发布前退出时，持久化为 `RETIRED` 并及时返回终态冲突，无需等待 30 秒 ready 超时。原 handle 和 placement 继续保持隔离，不启动替代进程。
 
 只有 provisioner 明确支持已存 handle 时，Broker 才能恢复中断的 provisioning。被阻断的启动可以被观察，但观察不能 spawn。现有 SQL operation claim 隔离迟到回调，Session、grant、activation 和 storage lease 校验均继续生效。执行控制沿用[现有取消与对账契约](managed-runtime-broker-service-core.zh-CN.md)：过期 dispatch 使用原 key 隔离，再从原 worker 对账结果；单独 GET 不推进状态。已经处于 `UNKNOWN` 的调用仍不在物理取消契约范围内；此功能不代表 Hosted Turn 接管或重放。
 
@@ -34,11 +34,13 @@ machine ID 必须非空且稳定。服务管理器必须允许 Broker 退出后 
 
 ## 影响组件与兼容性
 
-`LocalProcessRuntimeProvisioner` 的临时与持久模式共用 boot/ready 解析。包内本地 store 负责锁和持久记录。`RuntimeProvisioner` 及 Workspace wrapper 提供范围明确的启动恢复支持；`RuntimeBrokerService` 允许观察受支持的已保存启动记录。嵌入配置显式启用模式，并拒绝落在任何配置 Workspace 根目录下的恢复目录。无需数据库迁移或公共 API 变更。现有构造器与默认配置保持临时模式。
+`LocalProcessRuntimeProvisioner` 的临时与持久模式共用 boot/ready 解析。包内本地 store 负责锁和持久记录。`RuntimeProvisioner` 及 Workspace wrapper 提供范围明确的启动恢复支持；`RuntimeBrokerService` 允许观察受支持的已保存启动记录。嵌入配置默认启用该模式（同时设置 `runtime-broker.durable-local-process=false` 与 `runtime-broker.trusted-local-reboot-recovery=false` 可退出；打包服务把这两个开关分别映射为 `QWEN_MANAGED_AGENT_RUNTIME_DURABLE_LOCAL_PROCESS` 与 `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY`），并拒绝落在任何配置 Workspace 根目录下的恢复目录。无需数据库迁移或公共 API 变更。现有构造器保持临时模式，默认配置使用持久模式。
 
 ## 验证与验收
 
 真实 Broker 进程在 SIGKILL 后必须接管原真实 worker，身份、token、endpoint 与执行回执均不改变。覆盖两种 boot、启动中断（包括未 fork 的失败）、并发 Broker、迟到 lease 丢弃、共享观察者关闭、placement 不匹配、记录缺失或损坏、不安全权限、符号链接、PID 复用、僵尸状态和缺失启动身份。负向案例不能启动第二个 worker 或清除物理 pin。继续执行 Stage F、HTTP、Java SQL 和 CLI 回归，以及 build/typecheck 和两轮干净全量 diff 审计。模拟 boot 身份仅验证决策；真实 Linux 重启验收属于 W0e-3，必须使用专用宿主。
+
+针对 [#12956](https://github.com/QwenLM/qwen-code/issues/12956)，使用真实未回收 Linux 僵尸进程和未发布的 ready 记录覆盖启动接管，断言及时返回不可重试失败、原登记退休、资源身份不变、不启动替代 worker，且不产生写入者停止证据。默认单测使用固定文件系统身份夹具，分别覆盖发现成功和 machine ID 缺失时拒绝。具备全部必要身份来源的 Linux 宿主还执行原生发现测试；缺少这些来源的宿主仅跳过原生成功检查。生产启动仍拒绝缺失或无效的身份，即使可移植单测可以在该宿主运行。
 
 ## 待验证事项
 

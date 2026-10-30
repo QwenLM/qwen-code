@@ -7,6 +7,11 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
+import { LlmChat } from '../core/llm-chat.js';
+import {
+  appendAutoMemorySnapshot,
+  getAutoMemorySnapshot,
+} from '../memory/request-context.js';
 import { wrapUserPromptSubmitContext } from '../utils/transcript-records.js';
 import {
   SYSTEM_REMINDER_CLOSE,
@@ -17,10 +22,12 @@ import {
   sanitizeTitle,
   tryGenerateSessionTitle,
 } from './sessionTitle.js';
+import { content, modelText, userText } from '../test-utils/model-fixtures.js';
 
 interface MockOptions {
   fastModel?: string | undefined;
   history?: Content[];
+  chat?: LlmChat;
   generateJsonResult?:
     | Record<string, unknown>
     | ((...args: unknown[]) => Promise<Record<string, unknown>>);
@@ -40,7 +47,8 @@ function makeConfig(opts: MockOptions): {
     getFastModel: vi.fn(() => opts.fastModel ?? undefined),
     getModel: vi.fn(() => 'qwen-plus'),
     getLlmClient: vi.fn(() => ({
-      getHistoryShallow: () => opts.history ?? [],
+      getHistoryShallow: (curated?: boolean) =>
+        opts.chat?.getHistoryShallow(curated) ?? opts.history ?? [],
       getChat: () => ({
         getHistory: () => opts.history ?? [],
       }),
@@ -53,16 +61,167 @@ function makeConfig(opts: MockOptions): {
 
 const DIALOG_HISTORY: Content[] = [
   { role: 'user', parts: [{ text: 'my login button is broken on mobile' }] },
-  {
-    role: 'model',
-    parts: [{ text: "Let's look at the button handler and the viewport CSS." }],
-  },
+  modelText("Let's look at the button handler and the viewport CSS."),
 ];
 
 const reminder = (body: string) =>
   `${SYSTEM_REMINDER_OPEN}\n${body}\n${SYSTEM_REMINDER_CLOSE}`;
 
 describe('tryGenerateSessionTitle', () => {
+  it.each(['CATALOG_SENTINEL', ''])(
+    'excludes durable catalog and ACP hook context from fallback title input, catalog=%j',
+    async (catalog) => {
+      const history: Content[] = [
+        content(
+          'user',
+          { text: 'Diagnose parser failure' },
+          { text: wrapUserPromptSubmitContext('HOOK_SENTINEL') },
+        ),
+      ];
+      appendAutoMemorySnapshot(
+        history,
+        getAutoMemorySnapshot([], 'CATALOG_SENTINEL')!,
+      );
+      history.push(modelText('The parser needs a fix.'));
+      const original = structuredClone(history);
+      const chat = new LlmChat(
+        { getAutoMemoryContext: () => catalog } as Config,
+        {},
+        history,
+      );
+      const { config, generateJson } = makeConfig({
+        chat,
+        fastModel: 'qwen-turbo',
+        generateJsonResult: { title: 'Repair parser regression' },
+      });
+      // Plain ACP recording has no display payload; its hook is appended later.
+      const outcome = await tryGenerateSessionTitle(
+        config,
+        new AbortController().signal,
+        [undefined],
+      );
+      expect(outcome.ok).toBe(true);
+      expect(generateJson).toHaveBeenCalledTimes(1);
+      const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
+      expect(prompt).toContain('Diagnose parser failure');
+      expect(prompt).toContain('The parser needs a fix.');
+      expect(prompt).not.toContain('HOOK_SENTINEL');
+      expect(prompt).not.toContain('CATALOG_SENTINEL');
+      expect(prompt).not.toContain('Current memory catalog');
+      expect(chat.getHistoryShallow()).toEqual(original);
+    },
+  );
+
+  it('keeps ACP hook boundaries across a failed historical response under suppression', async () => {
+    const history: Content[] = [];
+    for (const [prompt, answer] of [
+      ['First parser request', ''],
+      ['Second parser request', 'Fixed parser'],
+    ]) {
+      history.push(
+        content(
+          'user',
+          { text: prompt },
+          { text: wrapUserPromptSubmitContext('HISTORICAL_HOOK') },
+        ),
+      );
+      const snapshot = getAutoMemorySnapshot(history, 'OLD_CATALOG');
+      if (snapshot) appendAutoMemorySnapshot(history, snapshot);
+      history.push(modelText(answer));
+    }
+    const chat = new LlmChat(
+      { getAutoMemoryContext: () => '' } as Config,
+      {},
+      history,
+    );
+    const { config, generateJson } = makeConfig({
+      chat,
+      fastModel: 'qwen-turbo',
+      generateJsonResult: { title: 'Repair parser regression' },
+    });
+    expect(
+      (
+        await tryGenerateSessionTitle(config, new AbortController().signal, [
+          undefined,
+          undefined,
+        ])
+      ).ok,
+    ).toBe(true);
+    const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
+    expect(prompt).toContain('First parser request');
+    expect(prompt).toContain('Second parser request');
+    expect(prompt).not.toContain('HISTORICAL_HOOK');
+    expect(prompt).not.toContain('OLD_CATALOG');
+  });
+
+  it('keeps the recorded display projection authoritative with a durable snapshot', async () => {
+    const history = [
+      content(
+        'user',
+        { text: 'RAW_INPUT' },
+        { text: wrapUserPromptSubmitContext('RAW_HOOK') },
+        getAutoMemorySnapshot([], 'RAW_CATALOG')!,
+      ),
+      modelText('RAW_ANSWER'),
+    ];
+    const chat = new LlmChat(
+      { getAutoMemoryContext: () => 'RAW_CATALOG' } as Config,
+      {},
+      history,
+    );
+    const { config, generateJson } = makeConfig({
+      chat,
+      fastModel: 'qwen-turbo',
+      generateJsonResult: { title: 'Repair parser regression' },
+    });
+    expect(
+      (
+        await tryGenerateSessionTitle(config, new AbortController().signal, [
+          'Visible parser request',
+        ])
+      ).ok,
+    ).toBe(true);
+    const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
+    expect(prompt).toContain('Visible parser request');
+    expect(prompt).not.toContain('RAW_');
+  });
+
+  it.each([false, true])(
+    'preserves user-authored tagged text before snapshot removal, multipart=%s',
+    async (multipart) => {
+      const parts = [
+        { text: wrapUserPromptSubmitContext('USER_AUTHORED_TAG') },
+      ];
+      if (multipart) parts.push({ text: 'Explain that literal tag' });
+      const history: Content[] = [
+        content(
+          'user',
+          ...parts,
+          getAutoMemorySnapshot([], 'CATALOG_SENTINEL')!,
+        ),
+        modelText('This is a literal tag.'),
+      ];
+      const chat = new LlmChat(
+        { getAutoMemoryContext: () => 'CATALOG_SENTINEL' } as Config,
+        {},
+        history,
+      );
+      const { config, generateJson } = makeConfig({
+        chat,
+        fastModel: 'qwen-turbo',
+        generateJsonResult: { title: 'Explain literal context tags' },
+      });
+      expect(
+        (await tryGenerateSessionTitle(config, new AbortController().signal))
+          .ok,
+      ).toBe(true);
+      const prompt = JSON.stringify(generateJson.mock.calls[0][0]);
+      expect(prompt).toContain('USER_AUTHORED_TAG');
+      if (multipart) expect(prompt).toContain('Explain that literal tag');
+      expect(prompt).not.toContain('CATALOG_SENTINEL');
+    },
+  );
+
   it('returns {ok:false, reason:"no_fast_model"} when fast model is absent', async () => {
     const { config } = makeConfig({
       fastModel: undefined,
@@ -431,22 +590,14 @@ describe('tryGenerateSessionTitle', () => {
           { functionCall: { name: 'grep', args: { q: 'auth' } } } as any,
         ],
       },
-      {
-        role: 'user',
-        parts: [
-          {
-            functionResponse: {
-              name: 'grep',
-              response: { output: 'TEN_THOUSAND_TOKENS_OF_FILE_DUMP' },
-            },
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          } as any,
-        ],
-      },
-      {
-        role: 'model',
-        parts: [{ text: 'The middleware stores tokens unsafely.' }],
-      },
+      content('user', {
+        functionResponse: {
+          name: 'grep',
+          response: { output: 'TEN_THOUSAND_TOKENS_OF_FILE_DUMP' },
+        },
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      } as any),
+      modelText('The middleware stores tokens unsafely.'),
     ];
 
     let capturedContents: Content[] | null = null;
@@ -507,13 +658,11 @@ describe('tryGenerateSessionTitle', () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'start with titles' }] },
       { role: 'model', parts: [{ text: 'Ready.' }] },
-      {
-        role: 'user',
-        parts: [
-          { text: reminder('MID_SESSION_TOOL_METADATA') },
-          { text: 'please add a regression test' },
-        ],
-      },
+      content(
+        'user',
+        { text: reminder('MID_SESSION_TOOL_METADATA') },
+        { text: 'please add a regression test' },
+      ),
       { role: 'model', parts: [{ text: 'I will add the test.' }] },
     ];
 
@@ -535,21 +684,16 @@ describe('tryGenerateSessionTitle', () => {
 
   it('excludes UserPromptSubmit hook context from the title prompt', async () => {
     const history: Content[] = [
-      {
-        role: 'user',
-        parts: [
-          { text: 'Diagnose the parser CI failure.' },
-          {
-            text: wrapUserPromptSubmitContext(
-              'UNRELATED_MEMORY_TOPIC '.repeat(80),
-            ),
-          },
-        ],
-      },
-      {
-        role: 'model',
-        parts: [{ text: 'I will inspect the parser workflow.' }],
-      },
+      content(
+        'user',
+        { text: 'Diagnose the parser CI failure.' },
+        {
+          text: wrapUserPromptSubmitContext(
+            'UNRELATED_MEMORY_TOPIC '.repeat(80),
+          ),
+        },
+      ),
+      modelText('I will inspect the parser workflow.'),
     ];
 
     let captured = '';
@@ -595,14 +739,7 @@ describe('tryGenerateSessionTitle', () => {
     const history: Content[] = [
       { role: 'user', parts: [{ text: 'inspect the selected file' }] },
       { role: 'model', parts: [{ text: 'I will inspect it.' }] },
-      {
-        role: 'user',
-        parts: [
-          {
-            text: `what does this function do?\n${reminder('IDE_SKILL_CONTEXT')}`,
-          },
-        ],
-      },
+      userText(`what does this function do?\n${reminder('IDE_SKILL_CONTEXT')}`),
     ];
 
     let captured = '';

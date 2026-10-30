@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+export type {
+  ManagedPackageManifest,
+  ManagedPackagePreparationRequest,
+  ManagedPackagePreparation,
+} from './managed-extension-package-types.js';
+export { DaemonAttachmentUploadError } from './DaemonAttachmentUploadError.js';
 export {
   DaemonClient,
   DaemonHttpError,
@@ -141,6 +147,8 @@ export {
   extractServerTimestamp,
   extractTranscriptTiming,
   formatBlockTimestamp,
+  findDaemonRewindUserBlock,
+  isDaemonRewindUserBlock,
   getOutputText as getDaemonUiOutputText,
   getSessionUpdatePayload,
   isDaemonUiSensitiveKey,
@@ -181,6 +189,7 @@ export type {
   RunConformanceOptions,
 } from './ui/index.js';
 export type {
+  DaemonLoopStop,
   DaemonShellTranscriptBlock,
   DaemonUserShellTranscriptBlock,
   DaemonPermissionTranscriptBlock,
@@ -294,6 +303,8 @@ export type {
   DaemonSettingsReloadedEvent,
   DaemonSettingsChangedData,
   DaemonSettingsChangedEvent,
+  DaemonSessionMessagesDeletedData,
+  DaemonSessionMessagesDeletedEvent,
   DaemonSessionRewoundData,
   DaemonSessionRewoundEvent,
   DaemonSessionBranchedData,
@@ -464,14 +475,18 @@ export type {
   DaemonChannelManagementOptions,
   DaemonChannelWorkerGroupSnapshot,
   DaemonChannelWorkerSnapshot,
+  DaemonMessageGroupsSnapshot,
+  DaemonDeleteMessageGroupsResult,
   DaemonRewindResult,
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
+  DaemonSessionBtwStreamEvent,
   DaemonSessionGenerationEvent,
   DaemonMidTurnMessageResult,
   DaemonMidTurnMessageSummary,
   DaemonMidTurnMessagesResult,
   DaemonRemoveMidTurnMessageResult,
+  DaemonSendMidTurnMessagesNowResult,
   DaemonPendingPromptSummary,
   DaemonPendingPromptsResult,
   DaemonRemovePendingPromptResult,
@@ -489,6 +504,7 @@ export type {
   DaemonSkillToggleMutation,
   DaemonSkillToggleMutationSkill,
   DaemonSkillToggleResult,
+  DaemonSkillRefreshResult,
   DaemonSkillScope,
   DaemonSkillInstallSource,
   DaemonSkillInstallRequest,
@@ -534,6 +550,8 @@ export type {
   DaemonWorkspaceTrustStatusResponse,
   DaemonWorkspaceTrustStatusV2,
   DaemonWorkspaceTrustReconciliationState,
+  DaemonGitCloneJob,
+  DaemonGitCloneJobStatus,
   DaemonWorkspaceCapability,
   DaemonWorkspaceUpdate,
   DaemonWorkspaceGitStatus,
@@ -608,6 +626,7 @@ export type {
   SideTaskSessionRequest,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonGeneratedUiStatus,
   DaemonSessionArchiveState,
   DaemonWorktreeInfo,
   DaemonBranchInfo,
@@ -688,9 +707,11 @@ export type {
   DaemonPendingUserQuestionInteraction,
   DaemonSessionState,
   DaemonSessionSummary,
+  DaemonSessionShellTaskRuntime,
   DaemonSessionShellTaskStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskLifecycleStatus,
+  DaemonSessionTaskRuntimeStatus,
   DaemonSessionTaskStatus,
   DaemonSessionTaskWithWorkflowStatus,
   DaemonSessionTasksStatus,
@@ -743,6 +764,8 @@ export type {
   DaemonWorkspaceFileWriteRequest,
   DaemonWorkspaceFileWriteResult,
   DaemonWorkspaceMcpServerStatus,
+  DaemonWorkspaceDirectories,
+  DaemonWorkspaceDirectoriesMutation,
   DaemonWorkspaceMcpStatus,
   DaemonWorkspaceMcpConfigStatus,
   DaemonMcpConfigMutationResult,
@@ -781,6 +804,7 @@ export type {
   DaemonWorkspaceProvidersStatus,
   DaemonWorkspaceSkillStatus,
   DaemonWorkspaceSkillsStatus,
+  DaemonWorkspaceSkillsSnapshot,
   DaemonWorkspaceToolStatus,
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
@@ -806,6 +830,8 @@ export type {
   DaemonExtensionEntry,
   DaemonExtensionUpdateState,
   DaemonWorkspaceExtensionsStatus,
+  DaemonExtensionSummary,
+  DaemonWorkspaceExtensionSummaries,
   ExtensionInstallRequest,
   ExtensionArchiveInstallRequest,
   ExtensionManagementInstallRequest,
@@ -893,3 +919,47 @@ export type { DaemonBackgroundTurn } from './types.js';
 
 export { isShellResultDisplay } from './shellResult.js';
 export type { ShellResultDisplay } from './shellResult.js';
+
+export {
+  QWEN_AGENT_MESSAGE_META_KEY,
+  parseQwenAgentMessageMeta,
+} from './session-agents.js';
+export type {
+  QwenAgentMessageMeta,
+  SessionAgentAuthor,
+  SessionAgentChangedFrame,
+  SessionAgentEventFrame,
+  SessionAgentPermissionPrompt,
+  SessionAgentProgram,
+  SessionAgentRunFrame,
+  SessionAgentRunStatus,
+  SessionAgentStep,
+  SessionAgentTerminalStatus,
+  SessionSquad,
+  SessionSquadLeaderIssue,
+  SessionSquadMember,
+  SessionSquadOutcome,
+  SessionSquadView,
+} from './session-agents.js';
+
+export {
+  createExecutionLifecycleState,
+  extractExecutionLifecycle,
+  reduceExecutionLifecycle,
+} from './ui/execution-lifecycle.js';
+export type {
+  DaemonExecutionLifecycle,
+  ExecutionLifecycleEntry,
+  ExecutionLifecycleState,
+} from './ui/execution-lifecycle.js';
+
+export {
+  createToolLifecycleState,
+  extractToolLifecycle,
+  reduceToolLifecycle,
+} from './ui/tool-lifecycle.js';
+export type {
+  DaemonToolLifecycle,
+  ToolLifecycleEntry,
+  ToolLifecycleState,
+} from './ui/tool-lifecycle.js';

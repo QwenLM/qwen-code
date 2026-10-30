@@ -40,18 +40,28 @@ export const App = () => {
                 settings.corruptedPath &&
                 fs.existsSync(settings.corruptedPath)
               ) {
+                const settingsPath = settings.corruptedPath.slice(
+                  0,
+                  -CORRUPTED_SUFFIX.length,
+                );
                 try {
-                  const settingsPath = settings.corruptedPath.slice(
-                    0,
-                    -CORRUPTED_SUFFIX.length,
-                  );
                   fs.copyFileSync(settings.corruptedPath, settingsPath);
                 } catch (e) {
-                  writeStderrLine(
-                    `Failed to restore corrupted file: ${e instanceof Error ? e.message : String(e)}`,
-                  );
-                  process.exit(1);
-                  return;
+                  let alreadyRestored = false;
+                  try {
+                    alreadyRestored = fs
+                      .readFileSync(settingsPath)
+                      .equals(fs.readFileSync(settings.corruptedPath));
+                  } catch {
+                    // Retain the copy when either file cannot be compared.
+                  }
+                  if (!alreadyRestored) {
+                    writeStderrLine(
+                      `Failed to restore corrupted file: ${e instanceof Error ? e.message : String(e)}`,
+                    );
+                    process.exit(1);
+                    return;
+                  }
                 }
                 try {
                   fs.unlinkSync(settings.corruptedPath);

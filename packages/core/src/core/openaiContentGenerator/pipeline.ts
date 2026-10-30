@@ -6,6 +6,7 @@
 
 import type OpenAI from 'openai';
 import {
+  FinishReason,
   type GenerateContentParameters,
   GenerateContentResponse,
 } from '@google/genai';
@@ -13,13 +14,18 @@ import type {
   ContentGeneratorConfig,
   PromptCacheSharingParameters,
 } from '../contentGenerator.js';
-import { OpenAIContentConverter } from './converter.js';
+import {
+  corroborateTruncationFromCompletionTokens,
+  OpenAIContentConverter,
+} from './converter.js';
 import { DashScopeOpenAICompatibleProvider } from './provider/dashscope.js';
 import {
   applyOfficialOpenAIPromptCaching,
   isOfficialOpenAIEndpoint,
 } from './prefix-caching.js';
 import { isDeepSeekHostname } from './provider/deepseek.js';
+import { getBuiltinDeepSeekReasoning } from '../deepseek-reasoning.js';
+import { getRequestModel } from '../request-model.js';
 import { isOpenRouterHostname } from './provider/openrouter.js';
 import { openaiRequestCaptureContext } from './requestCaptureContext.js';
 import { StreamingToolCallParser } from './streamingToolCallParser.js';
@@ -29,6 +35,7 @@ import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
 import { reconcileMaxTokens } from '../tokenLimits.js';
+import { markToolCallArgumentsIncomplete } from '../incomplete-tool-call-args.js';
 import {
   getGptReasoningCapabilities,
   isReasoningEffortPlaceholder,
@@ -96,6 +103,7 @@ function asObject(value: unknown): Record<string, unknown> | undefined {
 function profileReasoning(
   profile: NonNullable<ResolvedReasoning['profile']>,
   reasoning: ContentGeneratorConfig['reasoning'],
+  disableField?: ResolvedReasoning['disableField'],
 ): Record<string, unknown> {
   if (reasoning === undefined) return {};
   const enabled = reasoning !== false;
@@ -110,7 +118,9 @@ function profileReasoning(
         : {};
     case 'deepseek-openai':
       return {
-        thinking: { type: enabled ? 'enabled' : 'disabled' },
+        ...(disableField === 'enable_thinking'
+          ? { enable_thinking: enabled }
+          : { thinking: { type: enabled ? 'enabled' : 'disabled' } }),
         ...(effort ? { reasoning_effort: effort } : {}),
       };
     case 'dashscope-thinking':
@@ -135,6 +145,7 @@ function applyConfiguredReasoningEffort(
       ...profileReasoning(
         capabilities.profile,
         reasoning as ContentGeneratorConfig['reasoning'],
+        capabilities.disableField,
       ),
       ...rest,
     } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
@@ -335,6 +346,85 @@ function hasNonThoughtCandidateParts(
 }
 
 /**
+ * Releases whatever the trailing-tag filter is still withholding. The
+ * normal-end flush and the error-path flush both come through here so one
+ * guard cannot drift from the other. Every condition below names a state in
+ * which releasing the tail is unsafe, not merely unnecessary:
+ *
+ * - a cancellation is not a stream failure to recover from, spelled exactly as
+ *   the PROTOCOL_TAG_LEAK branch in the catch below spells it so one catch does
+ *   not hold two notions of "aborted";
+ * - a turn whose reasoning channel carried thinking tags is a cross-channel
+ *   leak whose withheld tail must not be handed over as clean prose;
+ * - a turn that already reported its finish reason is terminal, so released
+ *   text would land after the chunk downstream completeness gates key on. The
+ *   converter resolves the filter with `final` on every finish chunk, so
+ *   whatever is still held afterwards arrived past that chunk;
+ * - visible prose parked behind an unattributable tool call is discarded by
+ *   the error handler, so releasing the tail alone would leave a bare closing
+ *   tag as the turn's only content;
+ * - a turn the converter quarantined as an unresolved thinking-tag candidate
+ *   is the turn the loop below rejects with `PROTOCOL_TAG_LEAK`, so handing
+ *   its withheld tail over as ordinary prose would make the verdict depend on
+ *   how the stream terminated rather than on its bytes;
+ * - ownership of the tags moved to the tagged-thinking parser mid-stream, so
+ *   what the filter still holds is stranded rather than withheld for this
+ *   turn's end, and the same pass may still reject the turn as a leak.
+ *
+ * The parked array is created even when nothing is parked (the converter
+ * `??=`s it inside the hold branch), so its existence -- not its length -- is
+ * the signal that a hold is in effect.
+ *
+ * The tail the filter can hold is whitespace plus a tag fragment and never
+ * prose, so withholding it in these states loses no model output.
+ *
+ * A strip performed here is reported through the returned `sanitizedTagName`:
+ * the in-loop path is the only other reader of the filter's own verdict, so
+ * this route owes the same telemetry event.
+ */
+function flushTrailingThinkingTag(
+  abortSignal: AbortSignal | undefined,
+  context: RequestContext,
+  finishSeen: boolean,
+  /**
+   * Whether the stream is `FinishReason.STOP`-equivalent where it ended: a
+   * clean end with no finish frame reports an absent reason, which the
+   * converter's own mapper treats as finished normally, so a complete orphan
+   * closer still has to be stripped. A transport failure is a truncation and
+   * releases the tail verbatim instead.
+   */
+  completed: boolean,
+): {
+  response?: GenerateContentResponse;
+  sanitizedTagName?: 'think' | 'thinking';
+} {
+  if (
+    abortSignal?.aborted === true ||
+    context.hasThinkingTagInReasoning ||
+    finishSeen ||
+    context.pendingUntrustedResponseParts !== undefined ||
+    context.taggedThinkingParser !== undefined
+  ) {
+    return {};
+  }
+  const filter = context.trailingThinkingTagFilter;
+  const trailingText = filter?.parse('', true, completed);
+  const sanitizedTagName = filter?.sanitizedTagName;
+  if (filter) {
+    filter.sanitizedTagName = undefined;
+  }
+  if (!trailingText) return { sanitizedTagName };
+  const response = new GenerateContentResponse();
+  response.candidates = [
+    {
+      content: { parts: [{ text: trailingText }], role: 'model' },
+      index: 0,
+    },
+  ];
+  return { response, sanitizedTagName };
+}
+
+/**
  * Thrown when the HTTP 200 response to a streaming request has a content-type
  * incompatible with SSE (e.g. `text/html` from a gateway block page). Carries
  * bounded diagnostic metadata so the user/maintainer can distinguish "model
@@ -377,6 +467,29 @@ function hasProviderOutputBudgetKey(samplingParams: {
   return PROVIDER_OUTPUT_BUDGET_KEYS.some(
     (key) => samplingParams[key] !== undefined,
   );
+}
+
+/**
+ * Effective output-token ceiling carried by a wire request, whichever key the
+ * budget travels under (`max_tokens` or a provider-specific stand-in).
+ * Undefined when the request caps output by neither (e.g. a samplingParams
+ * opt-out), in which case the converter's truncation corroboration check is
+ * inconclusive and keeps its legacy inference.
+ */
+function getWireOutputBudget(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+): number | undefined {
+  if (typeof request.max_tokens === 'number' && request.max_tokens > 0) {
+    return request.max_tokens;
+  }
+  const wire = request as unknown as Record<string, unknown>;
+  for (const key of PROVIDER_OUTPUT_BUDGET_KEYS) {
+    const value = wire[key];
+    if (typeof value === 'number' && value > 0) {
+      return value;
+    }
+  }
+  return undefined;
 }
 
 /**
@@ -625,6 +738,10 @@ export class ContentGenerationPipeline {
     // function-call parts from the finish chunk).
     let pendingFinishResponse: GenerateContentResponse | null = null;
     let finishYielded = false;
+    // Whether a chunk carrying a finish reason was seen, as opposed to whether
+    // the stream ended normally: the flush guard below has to stay shut for a
+    // tail that arrives after a finish the loop absorbed without yielding.
+    let finishSeen = false;
     // Whether any user-visible content (a non-thought part) has been yielded
     // on this stream. The error-path flush below consults it before
     // withholding a parked tool-call finish: it must mirror LlmChat's
@@ -640,7 +757,7 @@ export class ContentGenerationPipeline {
       | NonNullable<RequestContext['protocolTagSanitized']>
       | undefined;
     const logPendingProtocolTagSanitized = (
-      response: GenerateContentResponse,
+      response: GenerateContentResponse | undefined,
       sanitization:
         | NonNullable<RequestContext['protocolTagSanitized']>
         | undefined,
@@ -649,7 +766,7 @@ export class ContentGenerationPipeline {
       const event = new ProtocolTagSanitizedEvent({
         model: context.model,
         promptId: userPromptId,
-        responseId: response.responseId,
+        responseId: response?.responseId,
         tagName: sanitization.tagName,
         toolCallCount: sanitization.toolCallCount,
       });
@@ -661,6 +778,26 @@ export class ContentGenerationPipeline {
         toolCallCount: event.tool_call_count,
       });
       logProtocolTagSanitized(this.config.cliConfig, event);
+    };
+
+    /**
+     * Reports an end-of-stream flush and returns the response it released, if
+     * any. The flush strips through the filter directly, so its verdict has to
+     * be logged here. This route has no converter response to take an id from
+     * -- the flush synthesises its own -- so the event's optional
+     * `response_id` is deliberately left absent rather than borrowed from
+     * another chunk.
+     */
+    const logFlushedTrailingTag = (
+      flushed: ReturnType<typeof flushTrailingThinkingTag>,
+    ): GenerateContentResponse | undefined => {
+      if (flushed.sanitizedTagName) {
+        logPendingProtocolTagSanitized(flushed.response, {
+          tagName: flushed.sanitizedTagName,
+          toolCallCount: 0,
+        });
+      }
+      return flushed.response;
     };
 
     try {
@@ -697,6 +834,10 @@ export class ContentGenerationPipeline {
           getToolCallPreparations(response).length === 0
         ) {
           continue;
+        }
+
+        if (response.candidates?.[0]?.finishReason) {
+          finishSeen = true;
         }
 
         if (
@@ -762,6 +903,7 @@ export class ContentGenerationPipeline {
             // into this generator at the yield below never runs the statement
             // that follows it, and the error-path flush re-tests this flag
             // before deciding whether the response still needs delivering.
+            this.settleParkedTruncationOverride(pendingFinishResponse, context);
             finishYielded = true;
             yield pendingFinishResponse;
             // Keep pendingFinishResponse alive so late-arriving usage
@@ -810,6 +952,27 @@ export class ContentGenerationPipeline {
         );
       }
 
+      // Below the leak verdict, so a turn about to be rejected as
+      // PROTOCOL_TAG_LEAK never has its withheld tail handed over as ordinary
+      // prose first; above the Stage 2d parked-finish yield, so released text
+      // cannot land after the `finishReason` chunk.
+      const flushedTail = logFlushedTrailingTag(
+        flushTrailingThinkingTag(
+          request.config?.abortSignal,
+          context,
+          finishSeen,
+          // A clean end with no finish chunk is the absent-reason case the
+          // converter's own mapper reports as STOP, so this tail belongs to a
+          // finished turn and a complete orphan closer still has to be
+          // stripped.
+          true,
+        ),
+      );
+      if (flushedTail) {
+        contentYielded ||= hasNonThoughtCandidateParts(flushedTail);
+        yield flushedTail;
+      }
+
       // Stage 2d: If there's still a pending finish response at the end
       // (e.g. no usage chunk arrived after the finish chunk), yield it.
       if (pendingFinishResponse && !finishYielded) {
@@ -818,6 +981,7 @@ export class ContentGenerationPipeline {
           pendingFinishProtocolTagSanitized,
         );
         // Before the yield, for the reason given at the in-loop one above.
+        this.settleParkedTruncationOverride(pendingFinishResponse, context);
         finishYielded = true;
         yield pendingFinishResponse;
       }
@@ -833,6 +997,21 @@ export class ContentGenerationPipeline {
 
       if (error instanceof InvalidStreamError) {
         throw error;
+      }
+
+      const flushedTail = logFlushedTrailingTag(
+        flushTrailingThinkingTag(
+          request.config?.abortSignal,
+          context,
+          finishSeen,
+          // An error mid-stream is a truncation, not an absent reason: the
+          // tail is released verbatim so a genuinely cut answer is not edited.
+          false,
+        ),
+      );
+      if (flushedTail) {
+        contentYielded ||= hasNonThoughtCandidateParts(flushedTail);
+        yield flushedTail;
       }
 
       // A finish chunk parked for the usage merge must not be lost when the
@@ -892,6 +1071,9 @@ export class ContentGenerationPipeline {
         if (parkedHasToolCall) {
           markFlushedToolCallPark(pendingFinishResponse);
         }
+        // Same invariant as the two normal delivery paths above: no parked
+        // finish is handed to the consumer with an unsettled rewrite on it.
+        this.settleParkedTruncationOverride(pendingFinishResponse, context);
         yield pendingFinishResponse;
         finishYielded = true;
       }
@@ -1021,6 +1203,58 @@ export class ContentGenerationPipeline {
     return true;
   }
 
+  /**
+   * Settle a finish_reason rewrite the converter parked for want of usage
+   * evidence, immediately before the parked finish response is delivered.
+   *
+   * The pipeline requests `stream_options.include_usage`, and under that
+   * convention the chunk carrying `finish_reason` reports no usage — the
+   * totals arrive on a later `choices: []` chunk, which handleChunkMerging
+   * folds into the parked finish response and only then releases. That merge
+   * is therefore the first point at which the rewrite can be corroborated, and
+   * it happens before the yield, so the consumer only ever observes the
+   * settled reason (QwenLM/qwen-code#12970).
+   *
+   * Downgrade-only and one-shot: the parked verdict is consumed here, and the
+   * candidate is touched only while it still reads MAX_TOKENS, so a
+   * provider-reported `length` is never rewritten.
+   */
+  private settleParkedTruncationOverride(
+    response: GenerateContentResponse,
+    context: RequestContext,
+  ): void {
+    const parked = context.pendingTruncationOverride;
+    if (!parked) {
+      return;
+    }
+    context.pendingTruncationOverride = undefined;
+    const candidate = response.candidates?.[0];
+    if (!candidate || candidate.finishReason !== FinishReason.MAX_TOKENS) {
+      return;
+    }
+    const verdict = corroborateTruncationFromCompletionTokens(
+      response.usageMetadata?.candidatesTokenCount,
+      context.maxOutputTokens,
+    );
+    if (verdict === 'disproved') {
+      candidate.finishReason = parked.finishReason;
+      // Same withdrawal as the converter's immediate `disproved` branch, only
+      // decided here because the usage totals arrived after the finish chunk.
+      // The arguments were unterminated — that is why an override was parked
+      // at all — so the guard has to stay armed through the downgrade.
+      markToolCallArgumentsIncomplete(candidate.content?.parts);
+    }
+    debugLogger.debug('Settled a parked truncation override', {
+      candidatesTokenCount:
+        response.usageMetadata?.candidatesTokenCount ?? null,
+      maxOutputTokens: context.maxOutputTokens ?? null,
+      verdict,
+      downgraded: verdict === 'disproved',
+      from: FinishReason.MAX_TOKENS,
+      to: candidate.finishReason,
+    });
+  }
+
   private async buildRequest(
     request: PromptCacheSharingParameters,
     userPromptId: string,
@@ -1043,10 +1277,10 @@ export class ContentGenerationPipeline {
 
     // Apply provider-specific enhancements
     let baseRequest: OpenAI.Chat.ChatCompletionCreateParams = {
-      model: context.model,
       messages,
-      ...this.buildGenerateContentConfig(request),
+      ...this.buildGenerateContentConfig({ ...request, model: context.model }),
       ...this.buildResponseFormat(request),
+      model: context.model,
     };
 
     if (isStreaming) {
@@ -1062,7 +1296,7 @@ export class ContentGenerationPipeline {
     }
 
     const effectiveReasoning = getEffectiveReasoning(
-      this.contentGeneratorConfig,
+      { ...this.contentGeneratorConfig, model: context.model },
       reasoningCapabilities,
     );
     if (
@@ -1081,7 +1315,11 @@ export class ContentGenerationPipeline {
     // mapping must leave it for the provider hook to translate.
     if (
       this.contentGeneratorConfig.samplingParams?.['reasoning'] === undefined &&
-      (!reasoningCapabilities?.profile ||
+      ((!reasoningCapabilities?.profile &&
+        !getBuiltinDeepSeekReasoning({
+          ...this.contentGeneratorConfig,
+          model: context.model,
+        })) ||
         this.contentGeneratorConfig.extra_body?.['reasoning'] === undefined) &&
       (reasoningCapabilities?.profile ||
         !isOpenRouterHostname(this.contentGeneratorConfig))
@@ -1186,7 +1424,10 @@ export class ContentGenerationPipeline {
           delete typed['enable_thinking'];
         }
         const template = asObject(typed['chat_template_kwargs']);
-        Object.assign(typed, profileReasoning(profile, false));
+        Object.assign(
+          typed,
+          profileReasoning(profile, false, reasoningCapabilities?.disableField),
+        );
         if (profile === 'qwen-chat-template') {
           delete typed['enable_thinking'];
           typed['chat_template_kwargs'] = {
@@ -1564,7 +1805,10 @@ export class ContentGenerationPipeline {
     }
 
     const reasoning = getEffectiveReasoning(
-      this.contentGeneratorConfig,
+      {
+        ...this.contentGeneratorConfig,
+        model: request.model || this.contentGeneratorConfig.model,
+      },
       resolveReasoningForModel(
         this.config.cliConfig,
         this.contentGeneratorConfig,
@@ -1601,6 +1845,10 @@ export class ContentGenerationPipeline {
         attemptContext,
         isStreaming,
       );
+      // The converter corroborates suspected tool-call truncation against the
+      // output budget actually sent on the wire before it may override
+      // finish_reason to "length" (QwenLM/qwen-code#12970).
+      attemptContext.maxOutputTokens = getWireOutputBudget(openaiRequest);
 
       // Position is load-bearing: capture must run after buildRequest (post
       // provider enhancement, post disable-reasoning) and before the SDK call
@@ -1759,7 +2007,10 @@ export class ContentGenerationPipeline {
     request: GenerateContentParameters,
     isStreaming: boolean,
   ): RequestContext {
-    const effectiveModel = request.model || this.contentGeneratorConfig.model;
+    const effectiveModel = getRequestModel(
+      this.contentGeneratorConfig,
+      request.model || this.contentGeneratorConfig.model,
+    );
     const providerOverrides =
       this.config.provider.getRequestContextOverrides?.() ?? {};
     const toolCallParser = isStreaming

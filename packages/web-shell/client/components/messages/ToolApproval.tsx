@@ -18,6 +18,7 @@ import { getShadowAwareActiveElement, isEditableTarget } from '../../utils/dom';
 import {
   getEmptyMcpToolTitleDescription,
   localizeToolDisplayName,
+  sanitizeControlChars,
 } from './toolFormatting';
 import {
   ThinkingTranslateButton,
@@ -27,12 +28,14 @@ import styles from './ToolApproval.module.css';
 import { buildUnifiedDiff } from '../../utils/unifiedDiff';
 import { DiffView } from './tools/DiffView';
 import { useWebShellCustomization } from '../../customization';
+import { BrowserNotificationControl } from './BrowserNotificationControl';
 
 interface ToolApprovalProps {
   request: PermissionRequest;
   onConfirm: (id: string, selectedOption: string) => void | Promise<void>;
   variant?: 'inline' | 'floating';
   disabled?: boolean;
+  showBrowserNotifications?: boolean;
   /**
    * Whether this approval should pull keyboard focus to its safe-default option
    * when it becomes the topmost (visible) one — on appearance, or when a panel/
@@ -44,6 +47,14 @@ interface ToolApprovalProps {
    * it — it just never grabs focus on its own.
    */
   keyboardActive?: boolean;
+  /**
+   * Id of an extra description the caller renders beside this panel, added to
+   * `aria-describedby`. The Managed approvals card states there that the tool
+   * arguments are unavailable, which is exactly the case where the panel's own
+   * description (tool name only) would let a screen-reader user confirm blind.
+   * Pass it only while that element is mounted, so no IDREF dangles.
+   */
+  extraDescriptionId?: string;
   planTodos?: readonly TodoItem[];
   planExecutionMode?: string;
   generateContent?: SessionContentGenerator;
@@ -246,7 +257,9 @@ export function ToolApproval({
   onConfirm,
   variant = 'inline',
   disabled = false,
+  showBrowserNotifications = false,
   keyboardActive = true,
+  extraDescriptionId,
   planTodos = [],
   planExecutionMode,
   generateContent,
@@ -264,6 +277,7 @@ export function ToolApproval({
           ? request.options.filter(
               (option) =>
                 option.id === 'restore_previous' ||
+                option.id === 'allow' ||
                 option.kind === 'reject_once' ||
                 option.kind === 'reject_always',
             )
@@ -294,7 +308,10 @@ export function ToolApproval({
         if (option.kind === 'allow_once') return t('approval.goal.confirm');
         if (option.kind === 'reject_once') return t('approval.goal.reject');
       }
-      if (hasPlanExecutionMode && option.id === 'restore_previous') {
+      if (
+        hasPlanExecutionMode &&
+        (option.id === 'restore_previous' || option.id === 'allow')
+      ) {
         return t('approval.option.executePlan', {
           mode: t(`mode.label.${planExecutionMode}`),
         });
@@ -486,6 +503,18 @@ export function ToolApproval({
       ) {
         return;
       }
+      if (
+        e.currentTarget.querySelector('[data-web-shell-notification-open]') &&
+        !isEditableTarget(e.target) &&
+        ((e.key >= '1' && e.key <= '9') ||
+          ((e.key === 'Enter' || e.key === ' ') &&
+            e.target instanceof Element &&
+            e.target.closest('[data-web-shell-permission-option]')))
+      ) {
+        e.preventDefault();
+        return;
+      }
+
       const count = displayOptions.length;
       if (e.key === 'ArrowDown' || e.key === 'j') {
         e.preventDefault();
@@ -555,6 +584,21 @@ export function ToolApproval({
     [request.content, hostOwnsEditDiffPreview],
   );
   const command = getCommandFromRawInput(request);
+  // `rawInput.command` is model-supplied and reaches this block verbatim, so
+  // neutralise the invisible controls `sanitizeControlChars` covers — C0/ANSI,
+  // C1, and the bidi embedding/isolate controls — before an approver reads it.
+  // That is the whole of its coverage: zero-width and line/paragraph separator
+  // code points are not in its character class and still pass through here.
+  // The raw `command` is kept for execution and for the explain button below.
+  const commandDisplay = sanitizeControlChars(command ?? '');
+  // The description is model-supplied too (`rawInput.description`, or a title
+  // built from the tool's own `getDescription()`), and renders one element
+  // above the command block, in its tooltip and in the `aria-describedby`
+  // target. Sanitise the text only: the element gate below must stay on the
+  // raw value or the IDREF dangles.
+  const descriptionDisplay = descriptionText
+    ? sanitizeControlChars(descriptionText)
+    : undefined;
   const showsCommandBlock =
     !isGoal && Boolean((isExec && command) || showsContent);
   // Exec warnings (e.g. command-substitution notices) arrive as real content
@@ -564,6 +608,16 @@ export function ToolApproval({
     isExec && command && showsContent && !request.contentIsInput
       ? contentText
       : null;
+  // The warnings text interpolates the model's raw `directory` argument
+  // (see `buildOutsideWorkspaceWarning`), so treat it like the command.
+  const execWarningsDisplay = execWarningsText
+    ? sanitizeControlChars(execWarningsText)
+    : undefined;
+  // The content text is model- or peer-supplied as well, and this block renders
+  // it in the body, in the `title` tooltip and as the `aria-describedby`
+  // target. Neutralise the text only: `showsContent` above stays on the raw
+  // value so the IDREF is still gated by whether the element renders.
+  const contentDisplay = sanitizeControlChars(contentText);
   const questionText = isGoal
     ? t('approval.goal.hint')
     : showsPlanWorkflow
@@ -598,6 +652,7 @@ export function ToolApproval({
       aria-describedby={[
         questionId,
         descriptionText ? descId : null,
+        extraDescriptionId ?? null,
         showsCommandBlock || isGoal ? commandId : null,
         execWarningsText ? contentId : null,
       ]
@@ -612,11 +667,12 @@ export function ToolApproval({
         <span className={styles.name} id={headingId}>
           {toolName}
         </span>
+        {showBrowserNotifications && <BrowserNotificationControl />}
       </div>
 
       {descriptionText && (
-        <div className={styles.desc} id={descId} title={descriptionText}>
-          {descriptionText}
+        <div className={styles.desc} id={descId} title={descriptionDisplay}>
+          {descriptionDisplay}
         </div>
       )}
 
@@ -630,17 +686,21 @@ export function ToolApproval({
       ) : isExec && command ? (
         <>
           <div className={styles.code}>
-            <pre className={styles.codeBlock} id={commandId} title={command}>
-              {command}
+            <pre
+              className={styles.codeBlock}
+              id={commandId}
+              title={commandDisplay}
+            >
+              {commandDisplay}
             </pre>
           </div>
           {execWarningsText && (
             <pre
               className={styles.content}
               id={contentId}
-              title={execWarningsText}
+              title={execWarningsDisplay}
             >
-              {execWarningsText}
+              {execWarningsDisplay}
             </pre>
           )}
         </>
@@ -650,9 +710,9 @@ export function ToolApproval({
             isExitPlanApproval ? ` ${styles.planContent}` : ''
           }`}
           id={commandId}
-          title={contentText}
+          title={contentDisplay}
         >
-          {contentText}
+          {contentDisplay}
         </pre>
       ) : null}
 
@@ -665,7 +725,10 @@ export function ToolApproval({
           {diffs.map((block, index) => (
             <div key={index}>
               <div>{block.path}</div>
-              <DiffView diff={block.diff} />
+              <DiffView
+                diff={block.diff}
+                fillScrollRegion={variant === 'floating'}
+              />
             </div>
           ))}
         </div>

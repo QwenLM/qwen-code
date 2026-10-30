@@ -38,6 +38,81 @@ vi.mock('fs', () => ({
 
 const originalPlatform = process.platform;
 
+const setPlatform = (value: string) =>
+  Object.defineProperty(process, 'platform', { value });
+const found = (path: string) =>
+  (execSync as Mock).mockReturnValue(Buffer.from(path));
+const notFound = () =>
+  (execSync as Mock).mockImplementation(() => {
+    throw new Error(); // no command found
+  });
+const foundSecond = (path: string) =>
+  (execSync as Mock)
+    .mockImplementationOnce(() => {
+      throw new Error(); // first command not found
+    })
+    .mockReturnValueOnce(Buffer.from(path));
+const hasApp = (exists: boolean) =>
+  (existsSync as Mock).mockReturnValue(exists);
+// Accept any path containing Zed.app (the check is for Contents/MacOS/cli).
+const hasZedApp = () =>
+  (existsSync as Mock).mockImplementation((path: string) =>
+    path.includes('Zed.app'),
+  );
+/** Stubs spawn() so its child fires `event` with `arg`; returns the `on` mock. */
+const mockSpawn = (event: 'close' | 'error', arg: unknown) => {
+  const on = vi.fn((e, cb) => {
+    if (e === event) cb(arg);
+  });
+  (spawn as Mock).mockReturnValue({ on });
+  return on;
+};
+const diff = (editor: EditorType) =>
+  getDiffCommand('old.txt', 'new.txt', editor);
+const open = (editor: EditorType, onEditorClose: () => void = () => {}) =>
+  openDiff('old.txt', 'new.txt', editor, onEditorClose);
+const GUI_DIFF_ARGS = ['--wait', '--diff', 'old.txt', 'new.txt'];
+const GUI_EDITORS: EditorType[] = [
+  'vscode',
+  'vscodium',
+  'windsurf',
+  'cursor',
+  'trae',
+];
+const TERMINAL_EDITORS: EditorType[] = ['vim', 'neovim', 'emacs'];
+
+const EDITOR_COMMANDS: Array<{
+  editor: EditorType;
+  commands: string[];
+  win32Commands: string[];
+}> = [
+  { editor: 'vscode', commands: ['code'], win32Commands: ['code.cmd'] },
+  { editor: 'vscodium', commands: ['codium'], win32Commands: ['codium.cmd'] },
+  { editor: 'windsurf', commands: ['windsurf'], win32Commands: ['windsurf'] },
+  { editor: 'cursor', commands: ['cursor'], win32Commands: ['cursor'] },
+  { editor: 'vim', commands: ['vim'], win32Commands: ['vim'] },
+  { editor: 'neovim', commands: ['nvim'], win32Commands: ['nvim'] },
+  { editor: 'zed', commands: ['zed', 'zeditor'], win32Commands: ['zed'] },
+  { editor: 'emacs', commands: ['emacs'], win32Commands: ['emacs.exe'] },
+  { editor: 'trae', commands: ['trae'], win32Commands: ['trae'] },
+];
+const PLATFORMS = [
+  {
+    platform: 'linux',
+    label: 'non-windows',
+    key: 'commands',
+    path: (cmd: string) => `/usr/bin/${cmd}`,
+    probe: (cmd: string) => `command -v ${cmd}`,
+  },
+  {
+    platform: 'win32',
+    label: 'windows',
+    key: 'win32Commands',
+    path: (cmd: string) => `C:\\Program Files\\...\\${cmd}`,
+    probe: (cmd: string) => `where.exe ${cmd}`,
+  },
+] as const;
+
 describe('editor utils', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -58,231 +133,78 @@ describe('editor utils', () => {
   });
 
   describe('checkHasEditorType', () => {
-    const testCases: Array<{
-      editor: EditorType;
-      commands: string[];
-      win32Commands: string[];
-    }> = [
-      { editor: 'vscode', commands: ['code'], win32Commands: ['code.cmd'] },
-      {
-        editor: 'vscodium',
-        commands: ['codium'],
-        win32Commands: ['codium.cmd'],
-      },
-      {
-        editor: 'windsurf',
-        commands: ['windsurf'],
-        win32Commands: ['windsurf'],
-      },
-      { editor: 'cursor', commands: ['cursor'], win32Commands: ['cursor'] },
-      { editor: 'vim', commands: ['vim'], win32Commands: ['vim'] },
-      { editor: 'neovim', commands: ['nvim'], win32Commands: ['nvim'] },
-      { editor: 'zed', commands: ['zed', 'zeditor'], win32Commands: ['zed'] },
-      { editor: 'emacs', commands: ['emacs'], win32Commands: ['emacs.exe'] },
-      { editor: 'trae', commands: ['trae'], win32Commands: ['trae'] },
-    ];
-
-    for (const { editor, commands, win32Commands } of testCases) {
+    for (const entry of EDITOR_COMMANDS) {
+      const { editor } = entry;
       describe(`${editor}`, () => {
-        // Non-windows tests
-        it(`should return true if first command "${commands[0]}" exists on non-windows`, () => {
-          Object.defineProperty(process, 'platform', { value: 'linux' });
-          (execSync as Mock).mockReturnValue(
-            Buffer.from(`/usr/bin/${commands[0]}`),
-          );
-          expect(checkHasEditorType(editor)).toBe(true);
-          expect(execSync).toHaveBeenCalledWith(`command -v ${commands[0]}`, {
-            stdio: 'ignore',
-          });
-        });
-
-        if (commands.length > 1) {
-          it(`should return true if first command doesn't exist but second command "${commands[1]}" exists on non-windows`, () => {
-            Object.defineProperty(process, 'platform', { value: 'linux' });
-            (execSync as Mock)
-              .mockImplementationOnce(() => {
-                throw new Error(); // first command not found
-              })
-              .mockReturnValueOnce(Buffer.from(`/usr/bin/${commands[1]}`)); // second command found
+        for (const { platform, label, key, path, probe } of PLATFORMS) {
+          const cmds = entry[key];
+          it(`should return true if first command "${cmds[0]}" exists on ${label}`, () => {
+            setPlatform(platform);
+            found(path(cmds[0]));
             expect(checkHasEditorType(editor)).toBe(true);
-            expect(execSync).toHaveBeenCalledTimes(2);
-          });
-        }
-
-        it(`should return false if none of the commands exist on non-windows`, () => {
-          Object.defineProperty(process, 'platform', { value: 'linux' });
-          (execSync as Mock).mockImplementation(() => {
-            throw new Error(); // all commands not found
-          });
-          expect(checkHasEditorType(editor)).toBe(false);
-          expect(execSync).toHaveBeenCalledTimes(commands.length);
-        });
-
-        // Windows tests
-        it(`should return true if first command "${win32Commands[0]}" exists on windows`, () => {
-          Object.defineProperty(process, 'platform', { value: 'win32' });
-          (execSync as Mock).mockReturnValue(
-            Buffer.from(`C:\\Program Files\\...\\${win32Commands[0]}`),
-          );
-          expect(checkHasEditorType(editor)).toBe(true);
-          expect(execSync).toHaveBeenCalledWith(
-            `where.exe ${win32Commands[0]}`,
-            {
+            expect(execSync).toHaveBeenCalledWith(probe(cmds[0]), {
               stdio: 'ignore',
-            },
-          );
-        });
+            });
+          });
 
-        if (win32Commands.length > 1) {
-          it(`should return true if first command doesn't exist but second command "${win32Commands[1]}" exists on windows`, () => {
-            Object.defineProperty(process, 'platform', { value: 'win32' });
-            (execSync as Mock)
-              .mockImplementationOnce(() => {
-                throw new Error(); // first command not found
-              })
-              .mockReturnValueOnce(
-                Buffer.from(`C:\\Program Files\\...\\${win32Commands[1]}`),
-              ); // second command found
-            expect(checkHasEditorType(editor)).toBe(true);
-            expect(execSync).toHaveBeenCalledTimes(2);
+          if (cmds.length > 1) {
+            it(`should return true if first command doesn't exist but second command "${cmds[1]}" exists on ${label}`, () => {
+              setPlatform(platform);
+              foundSecond(path(cmds[1]));
+              expect(checkHasEditorType(editor)).toBe(true);
+              expect(execSync).toHaveBeenCalledTimes(2);
+            });
+          }
+
+          it(`should return false if none of the commands exist on ${label}`, () => {
+            setPlatform(platform);
+            notFound();
+            expect(checkHasEditorType(editor)).toBe(false);
+            expect(execSync).toHaveBeenCalledTimes(cmds.length);
           });
         }
-
-        it(`should return false if none of the commands exist on windows`, () => {
-          Object.defineProperty(process, 'platform', { value: 'win32' });
-          (execSync as Mock).mockImplementation(() => {
-            throw new Error(); // all commands not found
-          });
-          expect(checkHasEditorType(editor)).toBe(false);
-          expect(execSync).toHaveBeenCalledTimes(win32Commands.length);
-        });
       });
     }
   });
 
   describe('getDiffCommand', () => {
-    const guiEditors: Array<{
-      editor: EditorType;
-      commands: string[];
-      win32Commands: string[];
-    }> = [
-      { editor: 'vscode', commands: ['code'], win32Commands: ['code.cmd'] },
-      {
-        editor: 'vscodium',
-        commands: ['codium'],
-        win32Commands: ['codium.cmd'],
-      },
-      {
-        editor: 'windsurf',
-        commands: ['windsurf'],
-        win32Commands: ['windsurf'],
-      },
-      { editor: 'cursor', commands: ['cursor'], win32Commands: ['cursor'] },
-      { editor: 'trae', commands: ['trae'], win32Commands: ['trae'] },
-    ];
+    const guiEntries = EDITOR_COMMANDS.filter((e) =>
+      GUI_EDITORS.includes(e.editor),
+    );
+    for (const entry of guiEntries) {
+      for (const { platform, label, key, path } of PLATFORMS) {
+        const cmds = entry[key];
+        const expectDiff = (command: string) =>
+          expect(diff(entry.editor)).toEqual({ command, args: GUI_DIFF_ARGS });
 
-    for (const { editor, commands, win32Commands } of guiEditors) {
-      // Non-windows tests
-      it(`should use first command "${commands[0]}" when it exists on non-windows`, () => {
-        Object.defineProperty(process, 'platform', { value: 'linux' });
-        (execSync as Mock).mockReturnValue(
-          Buffer.from(`/usr/bin/${commands[0]}`),
-        );
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', editor);
-        expect(diffCommand).toEqual({
-          command: commands[0],
-          args: ['--wait', '--diff', 'old.txt', 'new.txt'],
+        it(`should use first command "${cmds[0]}" when it exists on ${label}`, () => {
+          setPlatform(platform);
+          found(path(cmds[0]));
+          expectDiff(cmds[0]);
         });
-      });
 
-      if (commands.length > 1) {
-        it(`should use second command "${commands[1]}" when first doesn't exist on non-windows`, () => {
-          Object.defineProperty(process, 'platform', { value: 'linux' });
-          (execSync as Mock)
-            .mockImplementationOnce(() => {
-              throw new Error(); // first command not found
-            })
-            .mockReturnValueOnce(Buffer.from(`/usr/bin/${commands[1]}`)); // second command found
-
-          const diffCommand = getDiffCommand('old.txt', 'new.txt', editor);
-          expect(diffCommand).toEqual({
-            command: commands[1],
-            args: ['--wait', '--diff', 'old.txt', 'new.txt'],
+        if (cmds.length > 1) {
+          it(`should use second command "${cmds[1]}" when first doesn't exist on ${label}`, () => {
+            setPlatform(platform);
+            foundSecond(path(cmds[1]));
+            expectDiff(cmds[1]);
           });
+        }
+
+        it(`should fall back to last command "${cmds[cmds.length - 1]}" when none exist on ${label}`, () => {
+          setPlatform(platform);
+          notFound();
+          expectDiff(cmds[cmds.length - 1]);
         });
       }
-
-      it(`should fall back to last command "${commands[commands.length - 1]}" when none exist on non-windows`, () => {
-        Object.defineProperty(process, 'platform', { value: 'linux' });
-        (execSync as Mock).mockImplementation(() => {
-          throw new Error(); // all commands not found
-        });
-
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', editor);
-        expect(diffCommand).toEqual({
-          command: commands[commands.length - 1],
-          args: ['--wait', '--diff', 'old.txt', 'new.txt'],
-        });
-      });
-
-      // Windows tests
-      it(`should use first command "${win32Commands[0]}" when it exists on windows`, () => {
-        Object.defineProperty(process, 'platform', { value: 'win32' });
-        (execSync as Mock).mockReturnValue(
-          Buffer.from(`C:\\Program Files\\...\\${win32Commands[0]}`),
-        );
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', editor);
-        expect(diffCommand).toEqual({
-          command: win32Commands[0],
-          args: ['--wait', '--diff', 'old.txt', 'new.txt'],
-        });
-      });
-
-      if (win32Commands.length > 1) {
-        it(`should use second command "${win32Commands[1]}" when first doesn't exist on windows`, () => {
-          Object.defineProperty(process, 'platform', { value: 'win32' });
-          (execSync as Mock)
-            .mockImplementationOnce(() => {
-              throw new Error(); // first command not found
-            })
-            .mockReturnValueOnce(
-              Buffer.from(`C:\\Program Files\\...\\${win32Commands[1]}`),
-            ); // second command found
-
-          const diffCommand = getDiffCommand('old.txt', 'new.txt', editor);
-          expect(diffCommand).toEqual({
-            command: win32Commands[1],
-            args: ['--wait', '--diff', 'old.txt', 'new.txt'],
-          });
-        });
-      }
-
-      it(`should fall back to last command "${win32Commands[win32Commands.length - 1]}" when none exist on windows`, () => {
-        Object.defineProperty(process, 'platform', { value: 'win32' });
-        (execSync as Mock).mockImplementation(() => {
-          throw new Error(); // all commands not found
-        });
-
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', editor);
-        expect(diffCommand).toEqual({
-          command: win32Commands[win32Commands.length - 1],
-          args: ['--wait', '--diff', 'old.txt', 'new.txt'],
-        });
-      });
     }
 
-    const terminalEditors: Array<{
-      editor: EditorType;
-      command: string;
-    }> = [
-      { editor: 'vim', command: 'vim' },
-      { editor: 'neovim', command: 'nvim' },
-    ];
-
-    for (const { editor, command } of terminalEditors) {
+    for (const [editor, command] of [
+      ['vim', 'vim'],
+      ['neovim', 'nvim'],
+    ] as const) {
       it(`should return the correct command for ${editor}`, () => {
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', editor);
-        expect(diffCommand).toEqual({
+        expect(diff(editor)).toEqual({
           command,
           args: [
             '-d',
@@ -308,18 +230,16 @@ describe('editor utils', () => {
     }
 
     it('should return the correct command for emacs', () => {
-      const command = getDiffCommand('old.txt', 'new.txt', 'emacs');
-      expect(command).toEqual({
+      expect(diff('emacs')).toEqual({
         command: 'emacs',
         args: ['--eval', '(ediff "old.txt" "new.txt")'],
       });
     });
 
     it('should escape backslashes and quotes in emacs paths', () => {
-      // Backslashes (Windows separators) and double quotes are both Elisp
-      // string metacharacters; left unescaped they corrupt the (ediff ...)
-      // form. A double quote ends the string early; a backslash is consumed
-      // as an escape, dropping the following path character.
+      // Backslashes (Windows separators) and double quotes are Elisp string
+      // metacharacters: unescaped, a quote ends the (ediff ...) string early
+      // and a backslash swallows the following path character.
       const command = getDiffCommand(
         'C:\\tmp\\a"b.txt',
         '/tmp/new.txt',
@@ -333,295 +253,172 @@ describe('editor utils', () => {
 
     it('should return null for an unsupported editor', () => {
       // @ts-expect-error Testing unsupported editor
-      const command = getDiffCommand('old.txt', 'new.txt', 'foobar');
-      expect(command).toBeNull();
+      expect(diff('foobar')).toBeNull();
     });
 
-    // Zed-specific tests (Zed is handled specially for macOS app detection)
+    // Zed is handled specially for macOS app detection.
     describe('Zed', () => {
       it('should use CLI command "zed" when it exists on Linux', () => {
-        Object.defineProperty(process, 'platform', { value: 'linux' });
-        (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/zed'));
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
-        expect(diffCommand).toEqual({
-          command: 'zed',
-          args: ['--wait', '--diff', 'old.txt', 'new.txt'],
-        });
+        setPlatform('linux');
+        found('/usr/bin/zed');
+        expect(diff('zed')).toEqual({ command: 'zed', args: GUI_DIFF_ARGS });
       });
 
       it('should use CLI command "zeditor" when "zed" does not exist on Linux', () => {
-        Object.defineProperty(process, 'platform', { value: 'linux' });
-        (execSync as Mock)
-          .mockImplementationOnce(() => {
-            throw new Error(); // zed not found
-          })
-          .mockReturnValueOnce(Buffer.from('/usr/bin/zeditor')); // zeditor found
-
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
-        expect(diffCommand).toEqual({
+        setPlatform('linux');
+        foundSecond('/usr/bin/zeditor');
+        expect(diff('zed')).toEqual({
           command: 'zeditor',
-          args: ['--wait', '--diff', 'old.txt', 'new.txt'],
+          args: GUI_DIFF_ARGS,
         });
       });
 
       it('should return null on Linux when no CLI commands exist', () => {
-        Object.defineProperty(process, 'platform', { value: 'linux' });
-        (execSync as Mock).mockImplementation(() => {
-          throw new Error(); // all commands not found
-        });
-        (existsSync as Mock).mockReturnValue(false);
-
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
-        expect(diffCommand).toBeNull();
+        setPlatform('linux');
+        notFound();
+        hasApp(false);
+        expect(diff('zed')).toBeNull();
       });
 
       it('should use CLI command "zed" on Windows when it exists', () => {
-        Object.defineProperty(process, 'platform', { value: 'win32' });
-        (execSync as Mock).mockReturnValue(
-          Buffer.from('C:\\Program Files\\Zed\\zed.exe'),
-        );
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
-        expect(diffCommand).toEqual({
-          command: 'zed',
-          args: ['--wait', '--diff', 'old.txt', 'new.txt'],
-        });
+        setPlatform('win32');
+        found('C:\\Program Files\\Zed\\zed.exe');
+        expect(diff('zed')).toEqual({ command: 'zed', args: GUI_DIFF_ARGS });
       });
     });
   });
 
   describe('openDiff', () => {
-    const guiEditors: EditorType[] = [
-      'vscode',
-      'vscodium',
-      'windsurf',
-      'cursor',
-      'trae',
-    ];
-
-    for (const editor of guiEditors) {
+    for (const editor of GUI_EDITORS) {
       it(`should call spawn for ${editor}`, async () => {
-        const mockSpawnOn = vi.fn((event, cb) => {
-          if (event === 'close') {
-            cb(0);
-          }
-        });
-        (spawn as Mock).mockReturnValue({ on: mockSpawnOn });
-
-        await openDiff('old.txt', 'new.txt', editor, () => {});
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', editor)!;
+        const on = mockSpawn('close', 0);
+        await open(editor);
+        const diffCommand = diff(editor)!;
         expect(spawn).toHaveBeenCalledWith(
           diffCommand.command,
           diffCommand.args,
-          {
-            stdio: 'inherit',
-            shell: process.platform === 'win32',
-          },
+          { stdio: 'inherit', shell: process.platform === 'win32' },
         );
-        expect(mockSpawnOn).toHaveBeenCalledWith('close', expect.any(Function));
-        expect(mockSpawnOn).toHaveBeenCalledWith('error', expect.any(Function));
+        expect(on).toHaveBeenCalledWith('close', expect.any(Function));
+        expect(on).toHaveBeenCalledWith('error', expect.any(Function));
       });
 
       it(`should reject if spawn for ${editor} fails`, async () => {
-        const mockError = new Error('spawn error');
-        const mockSpawnOn = vi.fn((event, cb) => {
-          if (event === 'error') {
-            cb(mockError);
-          }
-        });
-        (spawn as Mock).mockReturnValue({ on: mockSpawnOn });
-
-        await expect(
-          openDiff('old.txt', 'new.txt', editor, () => {}),
-        ).rejects.toThrow('spawn error');
+        mockSpawn('error', new Error('spawn error'));
+        await expect(open(editor)).rejects.toThrow('spawn error');
       });
 
       it(`should reject if ${editor} exits with non-zero code`, async () => {
-        const mockSpawnOn = vi.fn((event, cb) => {
-          if (event === 'close') {
-            cb(1);
-          }
-        });
-        (spawn as Mock).mockReturnValue({ on: mockSpawnOn });
-
-        await expect(
-          openDiff('old.txt', 'new.txt', editor, () => {}),
-        ).rejects.toThrow(`${editor} exited with code 1`);
+        mockSpawn('close', 1);
+        await expect(open(editor)).rejects.toThrow(
+          `${editor} exited with code 1`,
+        );
       });
     }
 
-    // Zed-specific openDiff tests
     describe('Zed', () => {
       it('should call spawn for zed on macOS with CLI', async () => {
-        Object.defineProperty(process, 'platform', { value: 'darwin' });
-        (execSync as Mock).mockReturnValue(Buffer.from('/usr/local/bin/zed'));
-        (existsSync as Mock).mockReturnValue(false);
-
-        const mockSpawnOn = vi.fn((event, cb) => {
-          if (event === 'close') {
-            cb(0);
-          }
+        setPlatform('darwin');
+        found('/usr/local/bin/zed');
+        hasApp(false);
+        mockSpawn('close', 0);
+        await open('zed');
+        expect(spawn).toHaveBeenCalledWith('zed', GUI_DIFF_ARGS, {
+          stdio: 'inherit',
+          shell: false,
         });
-        (spawn as Mock).mockReturnValue({ on: mockSpawnOn });
-
-        await openDiff('old.txt', 'new.txt', 'zed', () => {});
-        expect(spawn).toHaveBeenCalledWith(
-          'zed',
-          ['--wait', '--diff', 'old.txt', 'new.txt'],
-          {
-            stdio: 'inherit',
-            shell: false,
-          },
-        );
       });
 
       it('should call spawn for zed on macOS with app bundle CLI', async () => {
-        Object.defineProperty(process, 'platform', { value: 'darwin' });
-        (execSync as Mock).mockImplementation(() => {
-          throw new Error(); // CLI not found
-        });
-        // Accept any path containing Zed.app
-        (existsSync as Mock).mockImplementation((path: string) =>
-          path.includes('Zed.app'),
-        );
-
-        const mockSpawnOn = vi.fn((event, cb) => {
-          if (event === 'close') {
-            cb(0);
-          }
-        });
-        (spawn as Mock).mockReturnValue({ on: mockSpawnOn });
-
-        await openDiff('old.txt', 'new.txt', 'zed', () => {});
+        setPlatform('darwin');
+        notFound();
+        hasZedApp();
+        mockSpawn('close', 0);
+        await open('zed');
         expect(spawn).toHaveBeenCalled();
-        // Verify the command uses the CLI tool (not GUI binary)
-        const call = (spawn as Mock).mock.calls[0];
-        expect(call[0]).toMatch(/MacOS[/\\]cli$/);
+        // The command is the app bundle's CLI tool, not the GUI binary.
+        expect((spawn as Mock).mock.calls[0][0]).toMatch(/MacOS[/\\]cli$/);
       });
 
       it('should reject if zed is not installed', async () => {
-        Object.defineProperty(process, 'platform', { value: 'darwin' });
-        (execSync as Mock).mockImplementation(() => {
-          throw new Error(); // CLI not found
-        });
-        (existsSync as Mock).mockReturnValue(false); // App not found
-
-        await openDiff('old.txt', 'new.txt', 'zed', () => {});
-        // Should complete without throwing (logs error to debugLogger)
+        setPlatform('darwin');
+        notFound();
+        hasApp(false);
+        // Completes without throwing (logs the error to debugLogger).
+        await open('zed');
       });
     });
 
-    const terminalEditors: EditorType[] = ['vim', 'neovim', 'emacs'];
-
-    for (const editor of terminalEditors) {
+    for (const editor of TERMINAL_EDITORS) {
       it(`should call spawnSync for ${editor}`, async () => {
-        await openDiff('old.txt', 'new.txt', editor, () => {});
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', editor)!;
+        await open(editor);
+        const diffCommand = diff(editor)!;
         expect(spawnSync).toHaveBeenCalledWith(
           diffCommand.command,
           diffCommand.args,
-          {
-            stdio: 'inherit',
-          },
+          { stdio: 'inherit' },
         );
       });
     }
 
     it('should handle unsupported editor gracefully', async () => {
+      // Completes without throwing (logs the error to debugLogger).
       // @ts-expect-error Testing unsupported editor
-      await openDiff('old.txt', 'new.txt', 'foobar', () => {});
-      // Function should complete without throwing (logs error to debugLogger)
+      await open('foobar');
     });
 
     describe('onEditorClose callback', () => {
-      const terminalEditors: EditorType[] = ['vim', 'neovim', 'emacs'];
-      for (const editor of terminalEditors) {
+      for (const editor of TERMINAL_EDITORS) {
         it(`should call onEditorClose for ${editor} on close`, async () => {
           const onEditorClose = vi.fn();
-          await openDiff('old.txt', 'new.txt', editor, onEditorClose);
+          await open(editor, onEditorClose);
           expect(onEditorClose).toHaveBeenCalledTimes(1);
         });
 
         it(`should call onEditorClose for ${editor} on error`, async () => {
           const onEditorClose = vi.fn();
-          const mockError = new Error('spawn error');
           (spawnSync as Mock).mockImplementation(() => {
-            throw mockError;
+            throw new Error('spawn error');
           });
-
-          await expect(
-            openDiff('old.txt', 'new.txt', editor, onEditorClose),
-          ).rejects.toThrow('spawn error');
+          await expect(open(editor, onEditorClose)).rejects.toThrow(
+            'spawn error',
+          );
           expect(onEditorClose).toHaveBeenCalledTimes(1);
         });
       }
 
-      const guiEditors: EditorType[] = [
-        'vscode',
-        'vscodium',
-        'windsurf',
-        'cursor',
-        'trae',
-      ];
-      for (const editor of guiEditors) {
+      for (const editor of GUI_EDITORS) {
         it(`should not call onEditorClose for ${editor}`, async () => {
           const onEditorClose = vi.fn();
-          const mockSpawnOn = vi.fn((event, cb) => {
-            if (event === 'close') {
-              cb(0);
-            }
-          });
-          (spawn as Mock).mockReturnValue({ on: mockSpawnOn });
-          await openDiff('old.txt', 'new.txt', editor, onEditorClose);
+          mockSpawn('close', 0);
+          await open(editor, onEditorClose);
           expect(onEditorClose).not.toHaveBeenCalled();
         });
       }
 
-      // Zed-specific onEditorClose tests
       it('should not call onEditorClose for zed', async () => {
-        Object.defineProperty(process, 'platform', { value: 'darwin' });
-        (execSync as Mock).mockReturnValue(Buffer.from('/usr/local/bin/zed'));
-        (existsSync as Mock).mockReturnValue(false);
-
+        setPlatform('darwin');
+        found('/usr/local/bin/zed');
+        hasApp(false);
         const onEditorClose = vi.fn();
-        const mockSpawnOn = vi.fn((event, cb) => {
-          if (event === 'close') {
-            cb(0);
-          }
-        });
-        (spawn as Mock).mockReturnValue({ on: mockSpawnOn });
-        await openDiff('old.txt', 'new.txt', 'zed', onEditorClose);
+        mockSpawn('close', 0);
+        await open('zed', onEditorClose);
         expect(onEditorClose).not.toHaveBeenCalled();
       });
     });
   });
 
   describe('allowEditorTypeInSandbox', () => {
-    it('should allow vim in sandbox mode', () => {
-      vi.stubEnv('SANDBOX', 'sandbox');
-      expect(allowEditorTypeInSandbox('vim')).toBe(true);
-    });
+    for (const editor of ['vim', 'emacs', 'neovim'] as const) {
+      it(`should allow ${editor} in sandbox mode`, () => {
+        vi.stubEnv('SANDBOX', 'sandbox');
+        expect(allowEditorTypeInSandbox(editor)).toBe(true);
+      });
 
-    it('should allow vim when not in sandbox mode', () => {
-      expect(allowEditorTypeInSandbox('vim')).toBe(true);
-    });
-
-    it('should allow emacs in sandbox mode', () => {
-      vi.stubEnv('SANDBOX', 'sandbox');
-      expect(allowEditorTypeInSandbox('emacs')).toBe(true);
-    });
-
-    it('should allow emacs when not in sandbox mode', () => {
-      expect(allowEditorTypeInSandbox('emacs')).toBe(true);
-    });
-
-    it('should allow neovim in sandbox mode', () => {
-      vi.stubEnv('SANDBOX', 'sandbox');
-      expect(allowEditorTypeInSandbox('neovim')).toBe(true);
-    });
-
-    it('should allow neovim when not in sandbox mode', () => {
-      expect(allowEditorTypeInSandbox('neovim')).toBe(true);
-    });
+      it(`should allow ${editor} when not in sandbox mode`, () => {
+        expect(allowEditorTypeInSandbox(editor)).toBe(true);
+      });
+    }
 
     const guiEditors: EditorType[] = [
       'vscode',
@@ -644,148 +441,100 @@ describe('editor utils', () => {
   });
 
   describe('isEditorAvailable', () => {
-    it('should return false for undefined editor', () => {
-      expect(isEditorAvailable(undefined)).toBe(false);
-    });
-
-    it('should return false for empty string editor', () => {
-      expect(isEditorAvailable('')).toBe(false);
-    });
-
-    it('should return false for invalid editor type', () => {
-      expect(isEditorAvailable('invalid-editor')).toBe(false);
+    it.each([
+      ['should return false for undefined editor', undefined],
+      ['should return false for empty string editor', ''],
+      ['should return false for invalid editor type', 'invalid-editor'],
+    ])('%s', (_title, editor) => {
+      expect(isEditorAvailable(editor)).toBe(false);
     });
 
     it('should return true for vscode when installed and not in sandbox mode', () => {
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/code'));
+      found('/usr/bin/code');
       expect(isEditorAvailable('vscode')).toBe(true);
     });
 
     it('should return false for vscode when not installed and not in sandbox mode', () => {
-      (execSync as Mock).mockImplementation(() => {
-        throw new Error();
-      });
+      notFound();
       expect(isEditorAvailable('vscode')).toBe(false);
     });
 
-    it('should return false for vscode when installed and in sandbox mode', () => {
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/code'));
-      vi.stubEnv('SANDBOX', 'sandbox');
-      expect(isEditorAvailable('vscode')).toBe(false);
-    });
-
-    it('should return true for vim when installed and in sandbox mode', () => {
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/vim'));
-      vi.stubEnv('SANDBOX', 'sandbox');
-      expect(isEditorAvailable('vim')).toBe(true);
-    });
-
-    it('should return true for emacs when installed and in sandbox mode', () => {
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/emacs'));
-      vi.stubEnv('SANDBOX', 'sandbox');
-      expect(isEditorAvailable('emacs')).toBe(true);
-    });
-
-    it('should return true for neovim when installed and in sandbox mode', () => {
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/nvim'));
-      vi.stubEnv('SANDBOX', 'sandbox');
-      expect(isEditorAvailable('neovim')).toBe(true);
-    });
+    it.each([
+      [false, 'vscode', 'code'],
+      [true, 'vim', 'vim'],
+      [true, 'emacs', 'emacs'],
+      [true, 'neovim', 'nvim'],
+    ] as Array<[boolean, EditorType, string]>)(
+      'should return %s for %s when installed and in sandbox mode',
+      (expected, editor, bin) => {
+        found(`/usr/bin/${bin}`);
+        vi.stubEnv('SANDBOX', 'sandbox');
+        expect(isEditorAvailable(editor)).toBe(expected);
+      },
+    );
   });
 
   describe('Zed macOS app detection', () => {
     describe('checkHasEditorType for Zed', () => {
       it('should return true on macOS when Zed.app exists even if CLI is not in PATH', () => {
-        Object.defineProperty(process, 'platform', { value: 'darwin' });
-        (execSync as Mock).mockImplementation(() => {
-          throw new Error(); // CLI not found
-        });
-        (existsSync as Mock).mockReturnValue(true); // Zed.app exists
+        setPlatform('darwin');
+        notFound();
+        hasApp(true);
         expect(checkHasEditorType('zed')).toBe(true);
       });
 
       it('should return false on macOS when Zed.app does not exist and CLI is not in PATH', () => {
-        Object.defineProperty(process, 'platform', { value: 'darwin' });
-        (execSync as Mock).mockImplementation(() => {
-          throw new Error(); // CLI not found
-        });
-        (existsSync as Mock).mockReturnValue(false); // Zed.app does not exist
+        setPlatform('darwin');
+        notFound();
+        hasApp(false);
         expect(checkHasEditorType('zed')).toBe(false);
       });
 
       it('should return true on macOS when Zed CLI is in PATH', () => {
-        Object.defineProperty(process, 'platform', { value: 'darwin' });
-        (execSync as Mock).mockReturnValue(Buffer.from('/usr/local/bin/zed'));
+        setPlatform('darwin');
+        found('/usr/local/bin/zed');
         expect(checkHasEditorType('zed')).toBe(true);
       });
 
       it('should not check for Zed.app on non-macOS platforms', () => {
-        Object.defineProperty(process, 'platform', { value: 'linux' });
-        (execSync as Mock).mockImplementation(() => {
-          throw new Error(); // CLI not found
-        });
-        (existsSync as Mock).mockReturnValue(true); // This should be ignored on Linux
+        setPlatform('linux');
+        notFound();
+        hasApp(true); // ignored on Linux
         expect(checkHasEditorType('zed')).toBe(false);
       });
     });
 
     describe('getDiffCommand for Zed on macOS', () => {
       it('should use app bundle CLI path when CLI is not in PATH', () => {
-        Object.defineProperty(process, 'platform', { value: 'darwin' });
-        (execSync as Mock).mockImplementation(() => {
-          throw new Error(); // CLI not found
-        });
-        // Accept any path containing Zed.app (the CLI check will be for Contents/MacOS/cli)
-        (existsSync as Mock).mockImplementation((path: string) =>
-          path.includes('Zed.app'),
-        );
-
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
+        setPlatform('darwin');
+        notFound();
+        hasZedApp();
+        const diffCommand = diff('zed');
         expect(diffCommand).not.toBeNull();
-        // Verify the command ends with cli (the CLI tool, not GUI binary zed)
+        // The command is the CLI tool (…/MacOS/cli), not the GUI binary zed.
         expect(diffCommand!.command).toMatch(/MacOS[/\\]cli$/);
-        expect(diffCommand!.args).toEqual([
-          '--wait',
-          '--diff',
-          'old.txt',
-          'new.txt',
-        ]);
+        expect(diffCommand!.args).toEqual(GUI_DIFF_ARGS);
       });
 
       it('should prefer CLI in PATH over app bundle', () => {
-        Object.defineProperty(process, 'platform', { value: 'darwin' });
-        (execSync as Mock).mockReturnValue(Buffer.from('/usr/local/bin/zed'));
-        (existsSync as Mock).mockReturnValue(true); // App also exists
-
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
-        expect(diffCommand).toEqual({
-          command: 'zed',
-          args: ['--wait', '--diff', 'old.txt', 'new.txt'],
-        });
+        setPlatform('darwin');
+        found('/usr/local/bin/zed');
+        hasApp(true); // app also exists
+        expect(diff('zed')).toEqual({ command: 'zed', args: GUI_DIFF_ARGS });
       });
 
       it('should return null when Zed is not installed at all', () => {
-        Object.defineProperty(process, 'platform', { value: 'darwin' });
-        (execSync as Mock).mockImplementation(() => {
-          throw new Error(); // CLI not found
-        });
-        (existsSync as Mock).mockReturnValue(false); // App not found
-
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
-        expect(diffCommand).toBeNull();
+        setPlatform('darwin');
+        notFound();
+        hasApp(false);
+        expect(diff('zed')).toBeNull();
       });
 
       it('should check user Applications folder as fallback', () => {
-        Object.defineProperty(process, 'platform', { value: 'darwin' });
-        (execSync as Mock).mockImplementation(() => {
-          throw new Error(); // CLI not found
-        });
-        // Accept any path containing Zed.app
-        (existsSync as Mock).mockImplementation((path: string) =>
-          path.includes('Zed.app'),
-        );
-
-        const diffCommand = getDiffCommand('old.txt', 'new.txt', 'zed');
+        setPlatform('darwin');
+        notFound();
+        hasZedApp();
+        const diffCommand = diff('zed');
         expect(diffCommand).not.toBeNull();
         expect(diffCommand!.command).toMatch(/MacOS[/\\]cli$/);
       });
@@ -810,124 +559,78 @@ describe('editor utils', () => {
   });
 
   describe('getExternalEditorCommand', () => {
+    /** Resolves `editor` for /tmp/file.txt and asserts a command was found. */
+    const external = (editor: EditorType) => {
+      const result = getExternalEditorCommand(editor, '/tmp/file.txt');
+      expect(result).not.toBeNull();
+      return result!;
+    };
+
     it('should return null when editor executable is not found', () => {
       (execSync as Mock).mockImplementation(() => {
         throw new Error('not found');
       });
-      (existsSync as unknown as Mock).mockReturnValue(false);
-      const result = getExternalEditorCommand('vscode', '/tmp/file.txt');
-      expect(result).toBeNull();
+      hasApp(false);
+      expect(getExternalEditorCommand('vscode', '/tmp/file.txt')).toBeNull();
     });
 
-    it('should return --wait flag for vscode', () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/code'));
-      const result = getExternalEditorCommand('vscode', '/tmp/file.txt');
-      expect(result).not.toBeNull();
-      expect(result!.command).toBe('code');
-      expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
-    });
+    /** Resolves `editor` on Linux with its binary at /usr/bin/`bin`. */
+    const onLinux = (editor: EditorType, bin: string) => {
+      setPlatform('linux');
+      found(`/usr/bin/${bin}`);
+      return external(editor);
+    };
 
-    it('should return --wait flag for vscodium', () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/codium'));
-      const result = getExternalEditorCommand('vscodium', '/tmp/file.txt');
-      expect(result).not.toBeNull();
-      expect(result!.command).toBe('codium');
-      expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
-    });
+    // `command` null: the original case did not check the resolved command.
+    it.each([
+      ['vscode', 'code', 'code'],
+      ['vscodium', 'codium', 'codium'],
+      ['windsurf', 'windsurf', 'windsurf'],
+      ['cursor', 'cursor', null],
+      ['trae', 'trae', 'trae'],
+      ['zed', 'zed', null],
+    ] as Array<[EditorType, string, string | null]>)(
+      'should return --wait flag for %s',
+      (editor, bin, command) => {
+        const result = onLinux(editor, bin);
+        if (command !== null) expect(result.command).toBe(command);
+        expect(result.args).toEqual(['/tmp/file.txt', '--wait']);
+      },
+    );
 
-    it('should return --wait flag for windsurf', () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/windsurf'));
-      const result = getExternalEditorCommand('windsurf', '/tmp/file.txt');
-      expect(result).not.toBeNull();
-      expect(result!.command).toBe('windsurf');
-      expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
-    });
+    it.each([
+      ['vim', 'vim'],
+      ['neovim', 'nvim'],
+      ['emacs', 'emacs'],
+    ] as Array<[EditorType, string]>)(
+      'should return plain args for %s (terminal editor)',
+      (editor, bin) => {
+        const result = onLinux(editor, bin);
+        expect(result.command).toBe(bin);
+        expect(result.args).toEqual(['/tmp/file.txt']);
+      },
+    );
 
-    it('should return --wait flag for cursor', () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/cursor'));
-      const result = getExternalEditorCommand('cursor', '/tmp/file.txt');
-      expect(result).not.toBeNull();
-      expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
-    });
-
-    it('should return --wait flag for trae', () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/trae'));
-      const result = getExternalEditorCommand('trae', '/tmp/file.txt');
-      expect(result).not.toBeNull();
-      expect(result!.command).toBe('trae');
-      expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
-    });
-
-    it('should return --wait flag for zed', () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/zed'));
-      const result = getExternalEditorCommand('zed', '/tmp/file.txt');
-      expect(result).not.toBeNull();
-      expect(result!.args).toEqual(['/tmp/file.txt', '--wait']);
-    });
-
-    it('should return plain args for vim (terminal editor)', () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/vim'));
-      const result = getExternalEditorCommand('vim', '/tmp/file.txt');
-      expect(result).not.toBeNull();
-      expect(result!.command).toBe('vim');
-      expect(result!.args).toEqual(['/tmp/file.txt']);
-    });
-
-    it('should return plain args for neovim (terminal editor)', () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/nvim'));
-      const result = getExternalEditorCommand('neovim', '/tmp/file.txt');
-      expect(result).not.toBeNull();
-      expect(result!.command).toBe('nvim');
-      expect(result!.args).toEqual(['/tmp/file.txt']);
-    });
-
-    it('should return plain args for emacs (terminal editor)', () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/emacs'));
-      const result = getExternalEditorCommand('emacs', '/tmp/file.txt');
-      expect(result).not.toBeNull();
-      expect(result!.command).toBe('emacs');
-      expect(result!.args).toEqual(['/tmp/file.txt']);
-    });
+    const needsShell = (platform: string, path: string, editor: EditorType) => {
+      setPlatform(platform);
+      found(path);
+      return external(editor).needsShell;
+    };
 
     it('should set needsShell=true for .cmd executables on Windows', () => {
-      Object.defineProperty(process, 'platform', { value: 'win32' });
-      (execSync as Mock).mockReturnValue(Buffer.from('C:\\code.cmd'));
-      const result = getExternalEditorCommand('vscode', '/tmp/file.txt');
-      expect(result).not.toBeNull();
-      expect(result!.needsShell).toBe(true);
+      expect(needsShell('win32', 'C:\\code.cmd', 'vscode')).toBe(true);
     });
 
     it('should set needsShell=true for .bat executables on Windows', () => {
-      Object.defineProperty(process, 'platform', { value: 'win32' });
-      (execSync as Mock).mockReturnValue(Buffer.from('C:\\code.bat'));
-      const result = getExternalEditorCommand('vscode', '/tmp/file.txt');
-      expect(result).not.toBeNull();
-      expect(result!.needsShell).toBe(true);
+      expect(needsShell('win32', 'C:\\code.bat', 'vscode')).toBe(true);
     });
 
     it('should set needsShell=false for non-.cmd executables on Windows', () => {
-      Object.defineProperty(process, 'platform', { value: 'win32' });
-      (execSync as Mock).mockReturnValue(Buffer.from('C:\\cursor'));
-      const result = getExternalEditorCommand('cursor', '/tmp/file.txt');
-      expect(result).not.toBeNull();
-      expect(result!.needsShell).toBe(false);
+      expect(needsShell('win32', 'C:\\cursor', 'cursor')).toBe(false);
     });
 
     it('should set needsShell=false on non-Windows', () => {
-      Object.defineProperty(process, 'platform', { value: 'linux' });
-      (execSync as Mock).mockReturnValue(Buffer.from('/usr/bin/code'));
-      const result = getExternalEditorCommand('vscode', '/tmp/file.txt');
-      expect(result).not.toBeNull();
-      expect(result!.needsShell).toBe(false);
+      expect(needsShell('linux', '/usr/bin/code', 'vscode')).toBe(false);
     });
 
     it('should return null for invalid editor type', () => {
