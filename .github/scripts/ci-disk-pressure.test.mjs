@@ -88,13 +88,13 @@ describe('ci.yml disk-pressure evidence', () => {
     );
     assert.match(tests, /hosttests\[\$\{hosttests:-unknown\}\]/);
 
-    // test_macos and test_windows inline the same sampler (plain echo, no
+    // test_macos_shards and test_windows inline the same sampler (plain echo, no
     // DISK_SAMPLES append), and no equality pin reaches them: the cross-leg
     // byte-identity in no-ak-integration-ci.test.js stops at the `( while
     // true` sentinel by design. Pin the sampler expression per leg, or an
     // edit that only touches the pinned test-job copy ships green while
     // these nightly-only lanes silently drop `load`/`hosttests`.
-    for (const jobName of ['test_macos', 'test_windows']) {
+    for (const jobName of ['test_macos_shards', 'test_windows']) {
       const leg = ciJobs[jobName].steps.find(
         (candidate) => candidate.name === 'Run tests and generate reports',
       );
@@ -257,7 +257,7 @@ describe('ci.yml disk-pressure evidence', () => {
     // reaches them ('Dump disk state on failure' is this lane's alone). Pin
     // them textually like the sampler loop above — not executed, because
     // test_windows greps /proc/meminfo, which Git Bash lacks.
-    for (const jobName of ['test', 'test_macos', 'test_windows']) {
+    for (const jobName of ['test', 'test_macos_shards', 'test_windows']) {
       const leg = ciJobs[jobName].steps.find(
         (candidate) => candidate.name === 'Run tests and generate reports',
       );
