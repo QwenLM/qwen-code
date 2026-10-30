@@ -110,7 +110,7 @@ To use the bot in QQ groups:
 
 QQ Bot API V2 only delivers group messages that @mention the bot — the bot does not see all group messages. By default, `requireMention` is `true` and should be left that way for QQ.
 
-Messages authored by another bot are dropped by default, so two bots in the same group cannot answer each other indefinitely. Set `forwardBotMessages: true` to deliver them instead: such a message reaches the model with a `[bot]` prefix on the sender line, and the model decides whether replying makes sense.
+Messages authored by another bot are dropped by default. Set `forwardBotMessages: true` to deliver them instead: such a message reaches the model with a `[bot]` prefix on the sender line, and the model decides whether replying makes sense. Bot-to-bot conversation is a feature, not a defect, and the switch is its whole boundary — QQ does not echo a bot's own messages, and there is deliberately no automatic rate cap on the enabled path; the group's human members and the model's own silence rules (`<noreply>`) are the guard, so enabling it is an explicit operator tradeoff.
 
 ### Session Isolation
 

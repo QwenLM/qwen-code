@@ -85,12 +85,17 @@ export interface QQChannelConfig {
    */
   allowMention?: boolean;
   /**
-   * When true, messages authored by another bot (or by this bot's own echo)
-   * are delivered to the agent with a `[bot]` prefix on the sender line and
-   * the model decides whether to reply. Default false: such messages are
-   * dropped before they reach the agent, so two bots in one group cannot
-   * answer each other indefinitely. Enable it only when you intentionally
-   * run bot-to-bot conversation.
+   * Deliver messages authored by another bot to the agent with a `[bot]`
+   * prefix on the sender line, letting the model decide whether to reply.
+   * Default false: such messages are dropped before they reach the agent.
+   *
+   * Bot-to-bot conversation is a feature, not a defect, and this switch is its
+   * whole boundary: QQ does not echo a bot's own messages back to it, so the
+   * only bot-authored traffic is another bot talking in the group. Turning the
+   * switch on is an explicit operator tradeoff — there is deliberately no
+   * automatic rate cap on top; the group's human members and the model's own
+   * silence rules are the guard, and the operator who enables it owns that
+   * tradeoff.
    */
   forwardBotMessages?: boolean;
   /** Route overrides for chat IDs that haven't been seen inbound yet.

@@ -5670,11 +5670,12 @@ export class QQChannel extends ChannelBase {
     const isSlash = effectiveIsAtBot && rawCommandText.startsWith('/');
     const commandText = sanitizePromptText(rawCommandText);
 
-    // Bot-authored messages are forwarded with a `[bot]` sender tag only when
-    // the operator opted in: QQ delivers other bots' messages to these
-    // handlers, and dropping them by default keeps two bots in one group from
-    // answering each other forever. A user-supplied `[bot]` is stripped above,
-    // so the tag cannot be forged.
+    // Bot-authored messages are a feature when the operator opts in, and the
+    // switch is the whole tradeoff: QQ does not echo a bot's own messages, so
+    // this traffic is another bot talking in the group, and no automatic rate
+    // cap follows the switch — the group's human members and the model's own
+    // silence rules are the guard. Dropping them is the default. A
+    // user-supplied `[bot]` is stripped above, so the tag cannot be forged.
     const botTag =
       event.author?.bot === true && this.qqConfig.forwardBotMessages === true
         ? '[bot] '
