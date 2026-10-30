@@ -4018,12 +4018,21 @@ async function executeHostedTurn(
             // The stream's Finished marker is already durable (the model layer's
             // finally committed a usage-only output_committed); the assistant
             // message.committed below is not. Hold here so the runner crashes this
-            // generation inside the B3a window and the next one must reissue.
+            // generation inside the B3a window and the next one must reissue. The
+            // hold still observes the Turn's abort signal: a leaked flag must not
+            // park a real Session uncancellably, so a cancel/deadline/daemon abort
+            // rejects into the enclosing catch and settles the Turn instead.
             crashBeforeCommitFired = true;
             writeStderrLineSafe(
               `qwen serve: E2E holding finished turn before assistant commit for Session ${sessionId} prompt ${promptId}`,
             );
-            await new Promise<never>(() => {});
+            await new Promise<never>((_resolve, reject) => {
+              const release = (): void =>
+                reject(abort.signal.reason ?? new Error('aborted'));
+              if (abort.signal.aborted) release();
+              else
+                abort.signal.addEventListener('abort', release, { once: true });
+            });
           }
           await commit(
             'assistant',

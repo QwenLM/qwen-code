@@ -2827,6 +2827,18 @@ try {
           mysqlPort,
           'SELECT execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution',
         );
+        if (
+          approvalFault === 'finished-before-commit' &&
+          executionAtCrash !== 'SETTLED\t1'
+        ) {
+          // The crash must land after the approved result settled and its
+          // post-tool round reached the window, not before. Assert the durable
+          // precondition from MySQL like the sibling crash arms, rather than
+          // trusting the hook's log line alone.
+          throw new Error(
+            `Finished-before-commit crash did not land after the approved result settled: executionAtCrash=${executionAtCrash}`,
+          );
+        }
         const publishedPrefix =
           approvalFault === 'after-result'
             ? await publicTranscript(replacementSpringUrl, tenant, session.id)

@@ -466,8 +466,27 @@ describe('managed-agent-server e2e runner', () => {
       'E2E holding finished turn before assistant commit',
     );
     // The flag rides only the crashing generation, never the recovery one.
-    expect(source).toContain("approvalFault === 'finished-before-commit'");
-    expect(source).toContain('crashBeforeAssistantCommit');
+    // Pin both call sites and the parameter default, not merely the
+    // identifiers (which appear at several runner sites): giving the recovery
+    // generation the flag, or flipping the default to true, must red here.
+    expect(source).toMatch(
+      /startReplacementHarness\(\s*'Replacement Hosted Harness',\s*approvalFault === 'finished-before-commit',?\s*\)/,
+    );
+    expect(source).toMatch(
+      /startReplacementHarness\(\s*'Post-fault recovery Harness',?\s*\)/,
+    );
+    expect(source).toContain('crashBeforeAssistantCommit = false');
+    // B3a asserts the durable crash precondition (the approved result settled)
+    // from MySQL like the sibling crash arms, not only the hook's log line.
+    expect(source).toContain(
+      'Finished-before-commit crash did not land after the approved result settled',
+    );
+    // B3a must take the same deep-equal parity gate as after-result; pin the
+    // combined condition so reverting it to after-result-only reds here rather
+    // than silently deleting the arm's only deep-equal assertion.
+    expect(source).toMatch(
+      /if \(\s*approvalFault === 'after-result' \|\|\s*approvalFault === 'finished-before-commit'\s*\)/,
+    );
     expect(harnessSource).toContain(
       "process.env['QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT']",
     );
