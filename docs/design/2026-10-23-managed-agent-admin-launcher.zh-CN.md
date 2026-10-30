@@ -34,20 +34,21 @@ server 有十二个离线维护入口，包括 Workspace storage 注册、Worksp
 
 `scripts/package-managed-agent-reference.mjs` 导出 `ADMIN_COMMANDS`，每一项包含命令名、入口类和一行简介。
 
-| 命令                   | 入口                                           |
-| ---------------------- | ---------------------------------------------- |
-| `storage-registration` | `persistence.WorkspaceStorageRegistrationMain` |
-| `workspace-recovery`   | `persistence.WorkspaceRecoveryMain`            |
-| `workspace-migration`  | `workspace.runtime.WorkspaceMigrationMain`     |
-| `maintenance-recovery` | `persistence.WorkspaceMaintenanceRecoveryMain` |
-| `operator-recovery`    | `workspace.runtime.WorkspaceRecoveryCommand`   |
-| `csi-registration`     | `persistence.WorkspaceCsiRegistrationMain`     |
-| `csi-protection`       | `workspace.runtime.WorkspaceCsiProtectionMain` |
-| `csi-session`          | `persistence.WorkspaceCsiSessionMain`          |
-| `csi-runtime`          | `persistence.WorkspaceCsiRuntimeMain`          |
-| `csi-retirement`       | `persistence.WorkspaceCsiRetirementMain`       |
-| `csi-worker-ack`       | `persistence.WorkspaceCsiWorkerAckMain`        |
-| `resident-retirement`  | `persistence.ResidentWorkspaceRetirementMain`  |
+| 命令                     | 入口                                           |
+| ------------------------ | ---------------------------------------------- |
+| `storage-registration`   | `maintenance.WorkspaceStorageRegistrationMain` |
+| `workspace-recovery`     | `maintenance.WorkspaceRecoveryMain`            |
+| `workspace-migration`    | `maintenance.WorkspaceMigrationMain`           |
+| `maintenance-recovery`   | `maintenance.WorkspaceMaintenanceRecoveryMain` |
+| `operator-recovery`      | `maintenance.WorkspaceRecoveryCommand`         |
+| `csi-registration`       | `maintenance.WorkspaceCsiRegistrationMain`     |
+| `csi-protection`         | `maintenance.WorkspaceCsiProtectionMain`       |
+| `csi-session`            | `maintenance.WorkspaceCsiSessionMain`          |
+| `csi-runtime`            | `maintenance.WorkspaceCsiRuntimeMain`          |
+| `csi-retirement`         | `maintenance.WorkspaceCsiRetirementMain`       |
+| `csi-worker-ack`         | `maintenance.WorkspaceCsiWorkerAckMain`        |
+| `resident-retirement`    | `maintenance.ResidentWorkspaceRetirementMain`  |
+| `resolved-configuration` | `preflight.ResolvedConfiguration`              |
 
 所有类都位于 `com.alibaba.qwen.code.managedagent` 包下。
 

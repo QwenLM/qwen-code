@@ -15,6 +15,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -6076,6 +6077,157 @@ describe('qwen-triage verify publish fidelity', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  // The report comment carries the same attribution /review posts: model,
+  // CLI version, and the content hash of the skill that ran. A half-known
+  // identity keeps the generic signature instead of posting a footer with
+  // a hole in it, and a weak notice reports the lane, not a round.
+  it('stamps the attribution footer only when all three values arrived', () => {
+    const dir = fixture();
+    try {
+      const attribution = {
+        VERIFY_MODEL: 'qwen3-max',
+        VERIFY_CLI_VERSION: '0.26.3',
+        VERIFY_SKILL_HASH: '0123456789ab',
+      };
+      const footer =
+        '_— qwen3-max via Qwen Code /verify-pr (v0.26.3; skill 0123456789ab)_';
+      const generic = '— _Qwen Code · sandboxed verification_';
+
+      const stamped = render(dir, { NAME: 'ft-on', ...attribution });
+      expect(stamped.trimEnd().endsWith(footer)).toBe(true);
+      expect(stamped).not.toContain(generic);
+
+      // No values at all, and each single hole: the generic signature stays.
+      const blank = {
+        VERIFY_MODEL: '',
+        VERIFY_CLI_VERSION: '',
+        VERIFY_SKILL_HASH: '',
+      };
+      const plain = render(dir, { NAME: 'ft-off', ...blank });
+      expect(plain.trimEnd().endsWith(generic)).toBe(true);
+      expect(plain).not.toContain('via Qwen Code /verify-pr');
+      for (const hole of Object.keys(attribution)) {
+        const partial = render(dir, {
+          NAME: `ft-${hole}`,
+          ...attribution,
+          [hole]: '',
+        });
+        expect(partial.trimEnd().endsWith(generic)).toBe(true);
+        expect(partial).not.toContain('via Qwen Code /verify-pr');
+      }
+
+      // Even with the values present, a weak notice keeps the generic
+      // signature: it reports the lane's outcome, not a verified round.
+      const weak = render(dir, {
+        NAME: 'ft-weak',
+        VERIFY_RESULT: 'cancelled',
+        ...attribution,
+      });
+      expect(weak.trimEnd().endsWith(generic)).toBe(true);
+      expect(weak).not.toContain('via Qwen Code /verify-pr');
+
+      // A downloaded artifact with no report.md is a weak notice too: the
+      // body says "No report.md was found", so it must not simultaneously
+      // carry a round attribution (review of 3108f8f24d, P3).
+      unlinkSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'report.md'),
+      );
+      const noReport = render(dir, { NAME: 'ft-noreport', ...attribution });
+      expect(noReport).toContain('No report.md was found');
+      expect(noReport.trimEnd().endsWith(generic)).toBe(true);
+      expect(noReport).not.toContain('via Qwen Code /verify-pr');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The three values are workflow-owned: the run step computes them from
+  // the lane's own model config, the runner's CLI and the re-pinned skill
+  // file — never from the agent-writable artifact tree, which PR code
+  // could plant. The hash is filter-proof for the same reason: prepare
+  // leaves .git node-owned.
+  it('threads workflow-owned attribution from the run step to the publisher', () => {
+    const run = stepIn('verify', 'Run verification agent');
+    expect(run).toContain(
+      'git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md',
+    );
+    expect(run).toContain('echo "cli_version=$CLI_VERSION"');
+    expect(run).toContain('echo "skill_hash=$SKILL_HASH"');
+    expect(run).toContain("tr -d '\\r\\n' | cut -c1-200");
+
+    // The ordering IS the security argument (review of 3108f8f24d, P2):
+    // the values must be collected after the base re-pin and BEFORE the
+    // agent starts. The workspace parent directory stays node-owned, so
+    // during the agent era PR code can replace the whole .qwen directory
+    // (mv + mkdir) without touching the root-owned files inside it; a
+    // post-agent hash could then name instructions the round never loaded.
+    // toContain is order-blind — these indices pin the property itself.
+    const repin = run.indexOf('chmod -R a-w,a+rX .qwen');
+    const cliCollect = run.indexOf('CLI_VERSION="$(timeout');
+    const hashCollect = run.indexOf('SKILL_HASH="$(timeout');
+    const agentStart = run.indexOf('--prompt "/verify-pr');
+    expect(repin).toBeGreaterThan(-1);
+    expect(cliCollect).toBeGreaterThan(repin);
+    expect(hashCollect).toBeGreaterThan(repin);
+    expect(agentStart).toBeGreaterThan(cliCollect);
+    expect(agentStart).toBeGreaterThan(hashCollect);
+    // Exactly one hash derivation, and the post-agent block only emits the
+    // saved value — it never re-derives one.
+    expect(run.split('git hash-object').length - 1).toBe(1);
+    expect(run.indexOf('echo "skill_hash=$SKILL_HASH"')).toBeGreaterThan(
+      agentStart,
+    );
+
+    const outputs =
+      job('verify').match(/\n {4}outputs:[\s\S]*?\n {4}steps:/)?.[0] ?? '';
+    expect(outputs).toContain("model: '${{ steps.run.outputs.model }}'");
+    expect(outputs).toContain(
+      "cli_version: '${{ steps.run.outputs.cli_version }}'",
+    );
+    expect(outputs).toContain(
+      "skill_hash: '${{ steps.run.outputs.skill_hash }}'",
+    );
+
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    expect(publish).toContain(
+      "VERIFY_MODEL: '${{ needs.verify.outputs.model }}'",
+    );
+    expect(publish).toContain(
+      "VERIFY_CLI_VERSION: '${{ needs.verify.outputs.cli_version }}'",
+    );
+    expect(publish).toContain(
+      "VERIFY_SKILL_HASH: '${{ needs.verify.outputs.skill_hash }}'",
+    );
+  });
+
+  // Two producers, one shape: the publisher's printf and the skill's local
+  // publish rule must carry the same footer template, or a wording edit to
+  // one leaves the two paths posting different attributions — the same
+  // skew /review's single-source footer module exists to prevent.
+  it('pins the same footer template in the skill and the publisher', () => {
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    expect(publish).toContain(
+      "printf '_— %s via Qwen Code /verify-pr (v%s; skill %s)_\\n'",
+    );
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      '_— <model> via Qwen Code /verify-pr (v<cli-version>; skill <skill-hash>)_',
+    );
+    expect(flat).toContain('$QWEN_CODE_MODEL_IDENTITY');
+    expect(flat).toContain(
+      'git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md',
+    );
+    // The report itself stays footer-free: both paths append at comment
+    // time, so a footer written into report.md would appear twice.
+    expect(flat).toContain('No attribution footer in it');
+  });
 });
 
 describe('qwen-triage verify execution-time controls', () => {
@@ -7725,18 +7877,28 @@ describe('qwen-triage verify Java toolchain', () => {
   function moduleCoordinates() {
     return [
       'packages/managed-agent-server/pom.xml',
+      ...readdirSync('packages/managed-agent-server', { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) =>
+          join('packages/managed-agent-server', entry.name, 'pom.xml'),
+        ),
       ...readdirSync('packages/sdk-java', { withFileTypes: true })
         .filter((entry) => entry.isDirectory())
         .map((entry) => join('packages/sdk-java', entry.name, 'pom.xml')),
     ]
       .filter((pom) => existsSync(pom))
       .map((pom) => {
-        const xml = readFileSync(pom, 'utf8').replace(
-          /<parent>[\s\S]*?<\/parent>/g,
-          '',
-        );
+        const source = readFileSync(pom, 'utf8');
+        const parent = source.match(/<parent>([\s\S]*?)<\/parent>/)?.[1] ?? '';
+        const xml = source.replace(/<parent>[\s\S]*?<\/parent>/g, '');
         return {
-          groupId: xml.match(/<groupId>([^<]+)<\/groupId>/)?.[1],
+          groupId:
+            xml
+              .split(
+                /<(?:dependencies|dependencyManagement|build|properties)>/,
+              )[0]
+              .match(/<groupId>([^<]+)<\/groupId>/)?.[1] ??
+            parent.match(/<groupId>([^<]+)<\/groupId>/)?.[1],
           artifactId: xml.match(/<artifactId>([^<]+)<\/artifactId>/)?.[1],
         };
       });

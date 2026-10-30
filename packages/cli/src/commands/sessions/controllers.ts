@@ -114,7 +114,7 @@ async function handleAdd(argv: AddArgs): Promise<void> {
   );
   writeStdoutLine(`  {"msgV":1,"type":"auth","token":"${token}"}`);
   writeStdoutLine(
-    'The target session must not have agents.crossSessionMessaging turned off (it is on by default), and must be restarted after changing that setting.',
+    'The target session must not have agents.crossSessionMessaging turned off (it is on by default), and must be restarted after changing that setting. It must also have a bound inbox: qwen sessions ps --json must show an ipcPath for it. --bare and --safe-mode bind none, and neither does the OpenTUI renderer.',
   );
   writeStdoutLine(
     'Messages it sends are delivered without per-message review, unless agents.crossSessionInbound is "hold" or "refuse".',

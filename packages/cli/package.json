@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/qwen-code",
   "private": true,
-  "version": "0.26.3",
+  "version": "0.26.4",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -30,7 +30,7 @@
     "lint": "eslint . --ext .ts,.tsx",
     "format": "prettier --write .",
     "test": "vitest run",
-    "test:ci": "vitest run",
+    "test:ci": "vitest run --bail=1",
     "typecheck": "tsc --noEmit",
     "check-i18n": "tsx ../../scripts/check-i18n.ts"
   },
@@ -38,7 +38,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.26.3"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.26.4"
   },
   "dependencies": {
     "@alcalzone/ansi-tokenize": "0.3.0",
