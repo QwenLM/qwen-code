@@ -15759,6 +15759,109 @@ describe('useLlmStream', () => {
       });
     });
 
+    it.each(['\n', '\r\n'])(
+      'repairs a raw code fence hidden by math at the character cap (%j)',
+      async (newline) => {
+        const codeLines = Array.from(
+          { length: 1200 },
+          (_, index) => `const v${index} = ${index};`,
+        );
+        const content = ['$$', '```js', ...codeLines, '```', '', 'Done.'].join(
+          newline,
+        );
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: 'raw' },
+        );
+        const stream = await streamStages(result, [content]);
+        try {
+          const committed = llmContentItems().map((item) => item.text);
+          expect(committed.length).toBeGreaterThan(0);
+          const chunks = [
+            ...committed,
+            result.current.pendingHistoryItems[0]?.text ?? '',
+          ];
+          for (const chunk of chunks) {
+            if (!chunk.includes('const v')) continue;
+            expect(chunk.replace(/^\$\$\r?\n/, '')).toMatch(
+              /^```js(?: qwen-code:start-line=\d+)?\r?\n/,
+            );
+            expect(
+              chunk.split(/\r?\n/).filter((line) => /^```/.test(line)),
+            ).toHaveLength(2);
+          }
+          expect(
+            chunks.flatMap((chunk) =>
+              chunk
+                .split(/\r?\n/)
+                .filter((line) => /^const v\d+ = \d+;$/.test(line)),
+            ),
+          ).toEqual(codeLines);
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
+    it.each(
+      (['raw', 'render'] as const).flatMap((mode) =>
+        ['\n', '\r\n'].map((newline) => ({ mode, newline })),
+      ),
+    )(
+      'hands off tall completed math before an open code fence in $mode (%j)',
+      async ({ mode, newline }) => {
+        const math = [
+          '$$',
+          ...Array.from({ length: 25 }, (_, i) => `x_${i}`),
+          '$$',
+          '',
+        ].join(newline);
+        const codeLines = Array.from(
+          { length: 40 },
+          (_, i) => `const v${i} = ${i};`,
+        );
+        const content = `${math}\`\`\`js${newline}${codeLines.join(newline)}${newline}`;
+        const { result } = renderTestHook(
+          [],
+          undefined,
+          { current: 24 },
+          undefined,
+          undefined,
+          undefined,
+          false,
+          { current: mode },
+        );
+        const stream = await streamStages(result, [content]);
+        try {
+          const committed = llmContentItems().map((item) => item.text);
+          expect(committed.length).toBeGreaterThan(1);
+          expect(committed[0]).toBe(math);
+          const chunks = [
+            ...committed.slice(1),
+            result.current.pendingHistoryItems[0]?.text ?? '',
+          ];
+          for (const chunk of chunks) {
+            expect(chunk).toMatch(/^```js(?: qwen-code:start-line=\d+)?\r?\n/);
+          }
+          expect(
+            chunks.flatMap((chunk) =>
+              chunk
+                .split(/\r?\n/)
+                .filter((line) => /^const v\d+ = \d+;$/.test(line)),
+            ),
+          ).toEqual(codeLines);
+        } finally {
+          await stream.stop();
+        }
+      },
+    );
+
     it.each(
       (['raw', 'render'] as const).flatMap((mode) =>
         ['\n', '\r\n'].flatMap((newline) =>

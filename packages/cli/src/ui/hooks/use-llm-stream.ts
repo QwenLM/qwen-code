@@ -2305,14 +2305,21 @@ export const useLlmStream = (
         // broken up so that there are more "statically" rendered.
         // Repair fences when the split lands inside a code block so the tail
         // does not render as prose (see splitFencedMarkdown).
-        const { before: beforeText, after: afterText } = mathRescue
-          ? {
-              before: newLlmMessageBuffer.slice(0, safeSplitPoint),
-              after: newLlmMessageBuffer.slice(safeSplitPoint),
-            }
-          : splitFencedMarkdown(newLlmMessageBuffer, safeSplitPoint);
+        const repairMathFence =
+          mathRescue &&
+          renderModeRef?.current === 'raw' &&
+          (rescueBlock.mathStart === 0 || rescueBlock.carriedMath) &&
+          getEnclosingFenceInfo(newLlmMessageBuffer, safeSplitPoint) !== null;
+        const { before: beforeText, after: afterText } =
+          mathRescue && !repairMathFence
+            ? {
+                before: newLlmMessageBuffer.slice(0, safeSplitPoint),
+                after: newLlmMessageBuffer.slice(safeSplitPoint),
+              }
+            : splitFencedMarkdown(newLlmMessageBuffer, safeSplitPoint);
         const consumed = mathRescue ? blockAt(safeSplitPoint) : rescueBlock;
         mathCarry =
+          repairMathFence ||
           afterText === newLlmMessageBuffer.slice(safeSplitPoint)
             ? {
                 text: '',
@@ -2397,6 +2404,7 @@ export const useLlmStream = (
         let activeCodeLanguage: string | null = null;
         let inMathBlock = mathCarry.inMathBlock;
         let carriedMath = inMathBlock;
+        let sawMath = inMathBlock;
         let firstCodeHandoff = -1;
         let allowMathExit = false;
         let capAllowsCodeSplit = false;
@@ -2429,15 +2437,12 @@ export const useLlmStream = (
               activeCodeFence = fence[1]!;
               activeCodeFenceStart = offset - sourceLine.length - 1;
               activeCodeLanguage = parseCodeFenceInfo(fence[2]).lang;
-              if (
-                carriedMath &&
-                activeCodeFenceStart > 0 &&
-                firstCodeHandoff < 0
-              ) {
+              if (sawMath && activeCodeFenceStart > 0 && firstCodeHandoff < 0) {
                 firstCodeHandoff = activeCodeFenceStart;
               }
             } else if (line !== null && /^ *\$\$ *$/.test(line)) {
               inMathBlock = true;
+              sawMath = true;
               if (k === 0 && mathCarry.linePrefix !== '') carriedMath = true;
             }
           }
@@ -2471,8 +2476,12 @@ export const useLlmStream = (
         let target: number;
         let fenceHandoff = false;
         const mathHandoff =
-          carriedMath &&
           firstCodeHandoff > 0 &&
+          (carriedMath ||
+            (sawMath &&
+              activeCodeFence !== null &&
+              activeCodeFenceStart === firstCodeHandoff &&
+              activeCodeLanguage?.toLowerCase() !== 'mermaid')) &&
           (boundaryIndex < 0 || boundaryIndex > firstCodeHandoff);
         if (mathHandoff) {
           target = firstCodeHandoff;
