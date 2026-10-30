@@ -3244,6 +3244,12 @@ export interface DaemonContextToolDetail {
 export interface DaemonContextMemoryDetail {
   path: string;
   tokens: number;
+  /**
+   * Absolute on-disk path when the row maps to a real file; absent for
+   * synthetic aggregates (e.g. the auto-memory prompt). Absent from older
+   * daemons.
+   */
+  absolutePath?: string;
 }
 
 export interface DaemonContextSkillDetail {

@@ -716,6 +716,11 @@ export interface ServeContextToolDetail {
 export interface ServeContextMemoryDetail {
   path: string;
   tokens: number;
+  /**
+   * Absolute on-disk path when the row maps to a real file; absent for
+   * synthetic aggregates. Absent from older servers.
+   */
+  absolutePath?: string;
 }
 
 export interface ServeContextSkillDetail {

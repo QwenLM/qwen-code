@@ -1246,6 +1246,7 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => {
     useTranscriptStore: () => mockStore,
     useWorkspace: () => mockWorkspace,
     useWorkspaceActions: () => mockWorkspaceActions,
+    useMemory: () => ({ readMemoryFile: vi.fn() }),
     useMcp: () => mockMcp,
     useWorkspaceEventSignals: () => testState.workspaceEventSignals,
   };

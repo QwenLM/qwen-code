@@ -126,6 +126,33 @@ describe('collectContextData (contextCommand)', () => {
     } as unknown as Config;
   });
 
+  it('exposes the absolute path of real memory files but not synthetic aggregates', async () => {
+    const config = {
+      ...makeMockConfig(200_000),
+      getWorkingDir: vi.fn().mockReturnValue('/workspace'),
+      getUserMemory: vi
+        .fn()
+        .mockReturnValue(
+          '--- Context from: AGENTS.md ---\nproject rules\n--- End of Context from: AGENTS.md ---',
+        ),
+      getAutoMemoryPrompt: vi.fn().mockReturnValue('auto memory catalog'),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+
+    // Real instruction files carry an absolute path; the auto-memory
+    // aggregate is synthetic and must not.
+    const agents = data.instructionFiles?.find(
+      (file) => file.path === 'AGENTS.md',
+    );
+    expect(agents?.absolutePath).toBe(path.resolve('/workspace', 'AGENTS.md'));
+    const autoMemory = data.memoryFiles.find(
+      (file) => file.path === t('auto memory'),
+    );
+    expect(autoMemory).toBeDefined();
+    expect(autoMemory?.absolutePath).toBeUndefined();
+  });
+
   it('queries getFunctionDeclarations with no args, matching the actual API request', async () => {
     // /context should reflect what's actually sent to the model. Deferred
     // tools (MCP tools default to shouldDefer=true) are excluded from the

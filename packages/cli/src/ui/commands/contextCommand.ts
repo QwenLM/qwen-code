@@ -122,6 +122,7 @@ function parseMemoryFiles(
       // the reader can disable or migrate that extension.
       path: owner ?? formatContextFileDisplayPath(absolutePath, workingDir),
       tokens: estimateContextTextTokens(content),
+      absolutePath,
     });
   }
 

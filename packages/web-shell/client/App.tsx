@@ -63,6 +63,7 @@ import {
   useDaemonFollowupSuggestion,
   useSettings,
   useProviders,
+  useMemory,
   useSessionNotices,
   useDaemonSessionOwnerGuard,
   useStreamingState,
@@ -71,6 +72,7 @@ import {
   useWorkspace,
   useWorkspaceActions,
   useWorkspaceEventSignals,
+  type DaemonContextMemoryDetail,
   type DaemonSessionActions,
   type DaemonSessionNotice,
   type DaemonSessionOwnerSnapshot,
@@ -4270,6 +4272,7 @@ export function App({
     ) === true;
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
+  const { readMemoryFile } = useMemory();
   const artifactWorkspaceTarget = useArtifactWorkspaceTarget(
     connection.workspaceCwd,
   );
@@ -8041,6 +8044,38 @@ export function App({
       setActiveArtifactPanelTabId(tab.id);
     },
     [],
+  );
+  const openMemoryFilePreview = useCallback(
+    async (file: DaemonContextMemoryDetail, fileWorkspaceCwd: string) => {
+      const absolutePath = file.absolutePath;
+      if (!absolutePath) return;
+      let content: string;
+      try {
+        // Read through the memory route so global files outside the bound
+        // workspace open too; workspace files fall back to the file API.
+        ({ content } = await readMemoryFile(absolutePath));
+      } catch (err) {
+        pushToast('error', err instanceof Error ? err.message : String(err));
+        return;
+      }
+      const tab: ArtifactPanelTab = {
+        id: `memory-file:${absolutePath}`,
+        kind: 'file',
+        title: file.path,
+        workspacePath: absolutePath,
+        previewContent: content,
+        previewOnly: true,
+        ...(fileWorkspaceCwd ? { workspaceCwd: fileWorkspaceCwd } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelOpen(true);
+    },
+    [readMemoryFile, pushToast],
   );
   const closeArtifactPanel = useCallback(() => {
     setArtifactPanelOpen(false);
@@ -21739,6 +21774,7 @@ export function App({
     onSelectTab: selectArtifactPanelTab,
     onCloseTab: closeArtifactPanelTab,
     onOpenFilePreview: openFilePreview,
+    onOpenMemoryFile: openMemoryFilePreview,
     onOpenFiles: filesAvailable ? openFilesPanel : undefined,
     onReferenceFile:
       workspaceContextActive && !dialogOpen && mainView === 'chat'
