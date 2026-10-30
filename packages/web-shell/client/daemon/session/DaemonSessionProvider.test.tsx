@@ -18031,6 +18031,119 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('parks an archived session on its 409 session_archived error instead of retrying', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const archived = new DaemonHttpError(
+      409,
+      {
+        error: 'Session "archived-1" is archived. Unarchive it before loading.',
+        code: 'session_archived',
+        sessionId: 'archived-1',
+      },
+      'Session "archived-1" is archived. Unarchive it before loading.',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* archivedEvents() {
+          eventsCalls += 1;
+          await Promise.resolve();
+          yield* [];
+          throw archived;
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({
+      status: 'disconnected',
+      error: 'Session "archived-1" is archived. Unarchive it before loading.',
+      errorStatus: 409,
+    });
+    // 409 is not a missing-session status: the pane must not render the
+    // session-deleted empty state, it shows the archived error.
+    expect(connection?.missingSession).not.toBe(true);
+    expect(connection?.sessionId).toBeUndefined();
+    // The structured signal a Split View pane reports from: `error` is a
+    // display string, so the archived park must be readable without it.
+    expect(connection?.sessionArchived).toBe(true);
+    // Terminal: the reconnect loop stops instead of hammering the daemon
+    // with 409s forever.
+    expect(eventsCalls).toBe(1);
+  });
+
+  it('keeps a plain 409 conflict error retriable (not terminal)', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: [],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    let eventsCalls = 0;
+    const conflict = new DaemonHttpError(
+      409,
+      {
+        error: 'Session "conflict-1" is open in another Qwen process.',
+        code: 'session_conflict',
+        sessionId: 'conflict-1',
+      },
+      'Session "conflict-1" is open in another Qwen process.',
+    );
+    sdkMocks.sessions.push(
+      createMockSession({
+        events: async function* conflictEvents() {
+          eventsCalls += 1;
+          await Promise.resolve();
+          yield* [];
+          throw conflict;
+        },
+      }),
+    );
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      reconnectDelayMs: 1,
+      maxReconnectDelayMs: 1,
+    });
+    await act(async () => {
+      await wait(50);
+      await flushPromises();
+    });
+
+    // A generic 409 can clear on its own, so the provider keeps retrying.
+    expect(eventsCalls).toBeGreaterThanOrEqual(2);
+    expect(connection?.errorStatus).toBe(409);
+    expect(connection?.sessionArchived).not.toBe(true);
+  });
+
   it('restores the workspace reasoning preview after an auth failure clears the stream', async () => {
     sdkMocks.workspaceProviders.mockResolvedValue(
       workspaceProvidersWithReasoningPreview(),
