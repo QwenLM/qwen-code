@@ -275,69 +275,8 @@ describe('ci.yml classify_pr runner routing', () => {
 });
 
 describe('ci.yml web_shell_e2e_smoke runner routing', () => {
-  const expression = String(ciDoc.jobs.web_shell_e2e_smoke['runs-on'])
-    .replace(/^\$\{\{\s*/, '')
-    .replace(/\s*\}\}$/, '');
-  const selectSmokeRunner = new Function(
-    'needs',
-    'fromJSON',
-    'contains',
-    `return (${expression});`,
-  );
-
-  it('uses ARM64 for self-hosted runs while preserving every hosted fallback', () => {
-    for (const ecsDisabled of [false, true]) {
-      for (const fleet of ['', 'x64', 'arm64', 'hosted']) {
-        for (const sameRepo of [false, true]) {
-          for (const assoc of ASSOCIATIONS) {
-            for (const dispatch of [
-              undefined,
-              'self-hosted',
-              'self-hosted-arm64',
-              'hosted',
-            ]) {
-              const runner = runPickRunner({
-                ecsDisabled,
-                fleet,
-                sameRepo,
-                assoc,
-                dispatch,
-                eventName: dispatch ? 'workflow_dispatch' : 'pull_request',
-              });
-              assert.deepEqual(
-                selectSmokeRunner(
-                  { classify_pr: { outputs: { ubuntu_runner: runner } } },
-                  JSON.parse,
-                  (labels, label) => labels.includes(label),
-                ),
-                JSON.parse(runner).includes('self-hosted')
-                  ? ['self-hosted', 'linux', 'arm64']
-                  : JSON.parse(HOSTED),
-                JSON.stringify({
-                  ecsDisabled,
-                  fleet,
-                  sameRepo,
-                  assoc,
-                  dispatch,
-                  runner,
-                }),
-              );
-            }
-          }
-        }
-      }
-    }
-  });
-
-  it('stays hosted when the classifier output is missing', () => {
-    assert.deepEqual(
-      selectSmokeRunner(
-        { classify_pr: { outputs: {} } },
-        JSON.parse,
-        (labels, label) => labels.includes(label),
-      ),
-      JSON.parse(HOSTED),
-    );
+  it('stays hosted independently of fleet, author and dispatch overrides', () => {
+    assert.equal(ciDoc.jobs.web_shell_e2e_smoke['runs-on'], 'ubuntu-latest');
   });
 });
 
@@ -932,7 +871,7 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     assert.match(run('Build Java components'), /-Dmaven\.repo\.local=/);
     assert.match(
       run('Build Java components'),
-      /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/qwen-managed-agent-server"/,
+      /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/"qwen-managed-agent-\*/,
     );
     assert.match(
       run('Assemble reference distribution'),

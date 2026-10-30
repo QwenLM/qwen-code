@@ -1260,18 +1260,84 @@ describe('e2e workflow', () => {
       expect(gateIndex).toBeLessThan(names.indexOf('Install dependencies'));
     });
 
-    it('keeps the gate on every pool-routed job', () => {
+    it('keeps the self-hosted contract on every pool-routed job', () => {
       // A new pool-routed leg without the gate reddens here instead of on a
-      // saturated host; the hosted legs stay ungated on fresh VMs.
+      // saturated host; the hosted legs stay ungated on fresh VMs. The same
+      // holds for the Node preflight (nodejs.org may be unreachable through
+      // the pool's egress proxy) and the ownership heal (docker shards leave
+      // root-owned files on the runners).
       const poolJobs = Object.entries(yml.jobs).filter(([, job]) =>
         String(job['runs-on'] ?? '').includes('ecs-qwen'),
       );
-      expect(poolJobs.map(([id]) => id)).toEqual(['e2e-test-linux']);
+      expect(poolJobs.map(([id]) => id)).toEqual(['build', 'e2e-test-linux']);
+      // Keep the build aligned with the leg, and pin the workspace fallback
+      // chains below so editing both copies cannot silently remove them.
+      const pinnedHeal = yml.jobs['e2e-test-linux'].steps.find(
+        (step) => step.name === 'Restore workspace ownership',
+      );
       for (const [id, job] of poolJobs) {
-        const gate = (job.steps ?? []).find(
+        const steps = job.steps ?? [];
+        const names = steps.map((step) => step.name);
+        const checkoutIndex = steps.findIndex((step) =>
+          String(step.uses ?? '').includes('actions/checkout'),
+        );
+        const installIndex = names.indexOf('Install dependencies');
+        // Presence alone is not the contract: the heal must precede
+        // checkout, the gate must sit between checkout and install, and the
+        // preflight must be the pool's own action — a reordered or
+        // re-pointed step fails here instead of on a runner.
+        const heal = steps.find(
+          (step) => step.name === 'Restore workspace ownership',
+        );
+        expect(heal?.if, id).toBe("${{ runner.environment == 'self-hosted' }}");
+        expect(names.indexOf('Restore workspace ownership'), id).toBeLessThan(
+          checkoutIndex,
+        );
+        const gate = steps.find(
           (step) => step.name === 'Disk floor gate (self-hosted)',
         );
         expect(gate, id).toBeDefined();
+        const gateIndex = names.indexOf('Disk floor gate (self-hosted)');
+        expect(gateIndex, id).toBeGreaterThan(checkoutIndex);
+        expect(gateIndex, id).toBeLessThan(installIndex);
+        const poolNode = steps.find(
+          (step) => step.name === 'Use pre-installed Node.js (self-hosted)',
+        );
+        expect(poolNode?.uses, id).toBe('./.github/actions/self-hosted-node');
+        const hostedNode = steps.find(
+          (step) =>
+            typeof step.name === 'string' &&
+            step.name.startsWith('Set up Node.js'),
+        );
+        expect(hostedNode?.if, id).toBe(
+          "${{ runner.environment == 'github-hosted' }}",
+        );
+        const npmCacheIndex = names.indexOf(
+          'Configure persistent npm cache (self-hosted)',
+        );
+        // Presence alone is not the contract here either: below the install it
+        // exports NPM_CONFIG_CACHE after npm has already picked a cache, so
+        // the pool re-downloads through the slow egress this step avoids, and
+        // without the `if:` the hosted lane points npm at a directory no cache
+        // step ever restores.
+        expect(npmCacheIndex, id).toBeGreaterThanOrEqual(0);
+        expect(npmCacheIndex, id).toBeLessThan(installIndex);
+        expect(steps[npmCacheIndex]?.if, id).toBe(
+          "${{ runner.environment == 'self-hosted' }}",
+        );
+        expect(steps[npmCacheIndex]?.run, id).toContain(
+          'cache_dir="${HOME}/.cache/qwen-code/npm"',
+        );
+        expect(steps[npmCacheIndex]?.run, id).toContain(
+          'echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"',
+        );
+        expect(heal?.run, id).toBe(pinnedHeal?.run);
+        expect(heal?.run, id).toContain(
+          'chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE"',
+        );
+        expect(heal?.run, id).toContain(
+          'chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE"',
+        );
       }
     });
   });
@@ -1279,8 +1345,8 @@ describe('e2e workflow', () => {
   describe('one build for every leg', () => {
     // Each leg used to build and bundle on its own runner — 4–8 minutes on a
     // hosted VM, 10–17 on a busy pool host, eleven times per run. The `build`
-    // job does it once on a hosted VM and the legs unpack its archive; these
-    // pins keep a leg from quietly growing its own build back.
+    // job does it once and the legs unpack its archive; these pins keep a leg
+    // from quietly growing its own build back.
     const build = yml.jobs.build;
     const legs = [
       'e2e-test-linux',
@@ -1289,9 +1355,13 @@ describe('e2e workflow', () => {
       'isolated-nightly',
     ];
 
-    it('builds once, on a hosted runner, off the shared pool', () => {
+    it("builds once, sharing the legs' pool-first runner routing", () => {
       expect(build.needs).toBeUndefined();
-      expect(build['runs-on']).toBe('ubuntu-latest');
+      // Hosted ubuntu jobs queued for hours while the pool idled
+      // (2026-10-28), so the build rides the exact routing expression every
+      // other pool job uses instead of pinning a hosted-only label.
+      expect(build['runs-on']).toBe(yml.jobs['e2e-test-linux']['runs-on']);
+      expect(String(build['runs-on'])).toContain('ecs-qwen');
       const names = build.steps.map((step) => step.name);
       expect(names).toContain('Build project');
       expect(names).toContain('Bundle CLI for E2E tests');

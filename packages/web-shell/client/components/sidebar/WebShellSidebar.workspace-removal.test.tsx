@@ -7061,7 +7061,7 @@ describe('WebShellSidebar standalone grouping', () => {
     act(() => projects.click());
     expect(
       container.querySelector('[data-testid="standalone-active-group"]'),
-    ).not.toBeNull();
+    ).toBeNull();
     act(() => projects.click());
 
     expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(1);
@@ -7144,9 +7144,8 @@ describe('WebShellSidebar standalone grouping', () => {
           ?.textContent,
       ).toContain('Moving conversation');
       expect(
-        container.querySelector('[data-testid="standalone-active-group"]')
-          ?.textContent,
-      ).not.toContain('Moving conversation');
+        container.querySelector('[data-testid="standalone-active-group"]'),
+      ).toBeNull();
     });
 
     listStandaloneSessionsPage.mockClear();
@@ -7280,6 +7279,16 @@ describe('WebShellSidebar standalone grouping', () => {
   });
 
   it('puts No workspace beside Projects and hides it for a locked workspace', async () => {
+    listStandaloneSessionsPage.mockResolvedValue({
+      sessions: [
+        {
+          sessionId: 'standalone-active',
+          displayName: 'Standalone active chat',
+          workspaceCwd: '/private/standalone/standalone-active',
+          context: { kind: 'standalone' },
+        },
+      ],
+    });
     const standaloneCapabilities = {
       ...capabilities,
       features: [...capabilities.features, 'standalone_sessions_v1'],
