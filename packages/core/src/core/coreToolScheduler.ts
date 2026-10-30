@@ -1200,6 +1200,8 @@ type SchedulerToolCallRequestInfo = ToolCallRequestInfo & {
   bridgeResolutionError?: {
     error: Error;
     type: ToolErrorType;
+    /** Resolved deferred-tool target, for per-target retry accounting. */
+    targetName?: string;
   };
 };
 
@@ -1214,8 +1216,15 @@ function getModelFacingToolName(request: ToolCallRequestInfo): string {
 // in the TUI). The width-1 glyph rationale used elsewhere in this change does
 // not apply here — these are not terminal strings to "fix" for column width.
 /** Directive injected when a tool call repeatedly fails validation. */
+/** Directive for a repeated tool_call envelope refusal (the bridge could not
+ *  resolve the envelope — the remedy is a different call shape, not a schema
+ *  fix, so the generic validation directive would misdiagnose it). */
+const BRIDGE_REFUSAL_RETRY_LOOP_DIRECTIVE =
+  '\n\n⚠ RETRY LOOP DETECTED: This tool_call envelope has been refused multiple times. ' +
+  'STOP retrying the bridge: call the target tool directly instead of using tool_call.';
+
 const RETRY_LOOP_STOP_DIRECTIVE =
-  '\n\n⚠ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +
+  '\n\n⚠ RETRY LOOP DETECTED: This tool call has failed validation multiple times. ' +
   'STOP retrying the same approach. Re-examine the tool schema and parameter requirements, then try a ' +
   'fundamentally different approach. If you cannot resolve the validation error, explain the issue to the user ' +
   'instead of retrying.';
@@ -2269,7 +2278,9 @@ export class CoreToolScheduler {
       switch (newStatus) {
         case 'success': {
           // Successful execution only resets retry state for this tool
-          this.clearRetryCountsForTool(currentCall.request.name);
+          this.clearRetryCountsForTool(
+            canonicalToolName(currentCall.request.name),
+          );
           const durationMs = existingStartTime
             ? Date.now() - existingStartTime
             : undefined;
@@ -3051,6 +3062,7 @@ export class CoreToolScheduler {
         bridgeResolutionError: {
           error: resolution.error,
           type: resolution.errorType,
+          targetName: resolution.targetName,
         },
       };
     }
@@ -3166,7 +3178,7 @@ export class CoreToolScheduler {
 
   /**
    * Removes all validation retry counters for the given tool. Keys are
-   * "<toolName>:<errorMessage>", so a plain `Map.delete(toolName)` would not
+   * "<toolName>:<causeClass>", so a plain `Map.delete(toolName)` would not
    * match anything.
    */
   private clearRetryCountsForTool(toolName: string): void {
@@ -3179,17 +3191,24 @@ export class CoreToolScheduler {
   }
 
   /**
-   * Increments the retry counter for a (tool, errorMessage) pair and prunes any
-   * other error counters for the same tool, so a different failure on the same
-   * tool restarts the count rather than tripping the loop threshold. Shared by
-   * the truncated-Edit rejection path and the schema-validation failure path so
-   * both feed the same RETRY LOOP DETECTED detector.
+   * Increments the retry counter for a (tool, cause class) pair and prunes any
+   * other cause counters for the same tool, so a different failure cause on
+   * the same tool restarts the count rather than tripping the loop threshold.
+   * Differently-worded failures of the SAME cause accumulate toward one
+   * counter (#13073: the #12970 shape produced three message variants from one
+   * root cause, so per-message keying never reached the threshold). Shared by
+   * the Edit-rejection path (truncation / incomplete-args classes, kept apart
+   * so each appends its own directive) and the schema-validation failure path.
    */
   private recordRetryableToolError(
     toolName: string,
-    errorMessage: string,
+    causeClass:
+      | 'validation'
+      | 'truncation'
+      | 'incomplete-args'
+      | 'bridge-refusal',
   ): number {
-    const errorKey = `${toolName}:${errorMessage}`;
+    const errorKey = `${toolName}:${causeClass}`;
     const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
     for (const key of this.validationRetryCounts.keys()) {
       if (key.startsWith(`${toolName}:`) && key !== errorKey) {
@@ -3253,13 +3272,22 @@ export class CoreToolScheduler {
       );
 
       // Prune validation retry state per-tool, not wholesale. Keys are
-      // "<toolName>:<errorMessage>"; retain counters only for tools actually
+      // "<toolName>:<causeClass>"; retain counters only for tools actually
       // present in the current batch. Keeping every tracked tool's counters
       // whenever any current request matched caused stale counts for
       // unrelated tools to survive and fire RETRY LOOP DETECTED prematurely
       // the next time those tools were used.
       if (this.validationRetryCounts.size > 0) {
-        const currentToolNames = new Set(requestsToProcess.map((r) => r.name));
+        const currentToolNames = new Set(
+          requestsToProcess.map((r) => canonicalToolName(r.name)),
+        );
+        // A failed bridge envelope keeps the wrapper name on the request; its
+        // resolved target owns the retry counter, so the target must count as
+        // present or the prune would drop a live per-target counter.
+        for (const r of requestsToProcess) {
+          const target = r.bridgeResolutionError?.targetName;
+          if (target) currentToolNames.add(target);
+        }
         for (const key of [...this.validationRetryCounts.keys()]) {
           const sep = key.indexOf(':');
           const toolName = sep === -1 ? key : key.slice(0, sep);
@@ -3273,11 +3301,22 @@ export class CoreToolScheduler {
       const retryErrorsRecordedInBatch = new Map<string, number>();
       const recordBatchRetryableToolError = (
         toolName: string,
-        errorMessage: string,
+        causeClass:
+          | 'validation'
+          | 'truncation'
+          | 'incomplete-args'
+          | 'bridge-refusal',
       ): number => {
-        const key = `${toolName}:${errorMessage}`;
+        const key = `${toolName}:${causeClass}`;
         const existingCount = retryErrorsRecordedInBatch.get(key);
-        if (existingCount !== undefined) {
+        // Write back only while the class is still live: an intervening
+        // different-cause recording in this batch legitimately restarted the
+        // count, and resurrecting the stale one would hand the call the
+        // stop directive on a count the declared semantics had just reset.
+        if (
+          existingCount !== undefined &&
+          this.validationRetryCounts.has(key)
+        ) {
           for (const trackedKey of this.validationRetryCounts.keys()) {
             if (trackedKey.startsWith(`${toolName}:`)) {
               this.validationRetryCounts.delete(trackedKey);
@@ -3286,7 +3325,7 @@ export class CoreToolScheduler {
           this.validationRetryCounts.set(key, existingCount);
           return existingCount;
         }
-        const count = this.recordRetryableToolError(toolName, errorMessage);
+        const count = this.recordRetryableToolError(toolName, causeClass);
         retryErrorsRecordedInBatch.set(key, count);
         return count;
       };
@@ -3356,13 +3395,24 @@ export class CoreToolScheduler {
               reqInfo.bridgeResolutionError.type ===
               ToolErrorType.INVALID_TOOL_PARAMS
             ) {
+              // A refusal (the bridge could not resolve the envelope) and the
+              // target's own argument-schema failure are different causes:
+              // the refusal's remedy is "call the tool directly", so it gets
+              // its own cause class and directive (#13073).
+              const isBridgeRefusal = bridgeError.message.startsWith(
+                DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+              );
               const count = recordBatchRetryableToolError(
-                reqInfo.name,
-                bridgeError.message,
+                reqInfo.bridgeResolutionError?.targetName ?? reqInfo.name,
+                isBridgeRefusal ? 'bridge-refusal' : 'validation',
               );
               if (count >= VALIDATION_RETRY_LOOP_THRESHOLD) {
                 bridgeError = new Error(
-                  `${bridgeError.message}${RETRY_LOOP_STOP_DIRECTIVE}`,
+                  `${bridgeError.message}${
+                    isBridgeRefusal
+                      ? BRIDGE_REFUSAL_RETRY_LOOP_DIRECTIVE
+                      : RETRY_LOOP_STOP_DIRECTIVE
+                  }`,
                 );
               }
             }
@@ -3532,16 +3582,17 @@ export class CoreToolScheduler {
               ? TRUNCATION_EDIT_REJECTION
               : INCOMPLETE_ARGS_EDIT_REJECTION;
             const count = recordBatchRetryableToolError(
-              reqInfo.name,
-              rejectionMessage,
+              canonicalToolName(reqInfo.name),
+              truncated ? 'truncation' : 'incomplete-args',
             );
-            // The directive is appended after the rejectionMessage key was
-            // recorded: recordRetryableToolError prunes the tool's other keys,
-            // so folding the directive into the key would reset the count at
-            // the threshold. And the incomplete-args arm must not reuse
-            // RETRY_LOOP_STOP_DIRECTIVE: this guard rejects before
-            // buildInvocation, so validation never ran and "failed validation
-            // ... re-examine the tool schema" would misdiagnose the cause.
+            // The directive is appended after the count was recorded under
+            // the cause class: recordRetryableToolError prunes the tool's
+            // other classes, so folding the directive into the class would
+            // reset the count at the threshold. And the incomplete-args arm
+            // must not reuse RETRY_LOOP_STOP_DIRECTIVE: this guard rejects
+            // before buildInvocation, so validation never ran and "failed
+            // validation ... re-examine the tool schema" would misdiagnose
+            // the cause.
             const truncationError = new Error(
               count >= VALIDATION_RETRY_LOOP_THRESHOLD
                 ? `${rejectionMessage}${
@@ -3674,17 +3725,25 @@ export class CoreToolScheduler {
                 ? new Error(targetMessage)
                 : invocationOrError;
 
-            // Track validation retry for loop detection. Counts accumulate per
-            // (tool, error message) pair so a different validation mistake on
-            // the same tool starts fresh rather than tripping the threshold.
+            // Track validation retry for loop detection. Counts accumulate
+            // per (tool, cause class) — differently-worded validation failures
+            // for the same tool accumulate toward one counter (#13073), while
+            // a different cause class starts fresh.
             const count = recordBatchRetryableToolError(
-              reqInfo.name,
-              invocationOrError.message,
+              canonicalToolName(reqInfo.name),
+              'validation',
             );
 
+            // The threshold directive replaces targetMessage but must keep
+            // the cause-matched guidance: on a provider-side argument-fusion
+            // failure the guidance names the real remedy ("issue one tool
+            // call per turn ..."), and dropping it at exactly the turn the
+            // counter exists for would blame the tool's schema instead.
             const finalError =
               count >= VALIDATION_RETRY_LOOP_THRESHOLD
-                ? new Error(`${targetMessage}${RETRY_LOOP_STOP_DIRECTIVE}`)
+                ? new Error(
+                    `${displayError ?? targetMessage}${RETRY_LOOP_STOP_DIRECTIVE}`,
+                  )
                 : displayError;
 
             newToolCalls.push({
@@ -3704,7 +3763,7 @@ export class CoreToolScheduler {
           resolvedInvocation = invocationOrError;
 
           // Reset all validation retry counters for this tool since it passed validation
-          this.clearRetryCountsForTool(reqInfo.name);
+          this.clearRetryCountsForTool(canonicalToolName(reqInfo.name));
 
           newToolCalls.push({
             status: 'validating',
