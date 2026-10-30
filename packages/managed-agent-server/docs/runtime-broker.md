@@ -43,7 +43,7 @@ the arbiter.
 
 ## JDBC persistence
 
-`JdbcRuntimeBrokerSchema.initialize(DataSource)` initializes or validates the shared 32-table fresh-database baseline used by Broker and Managed Server. It rejects legacy, foreign, partial and system catalogs before mutation; it does not upgrade or copy existing data. The JDBC implementations use `javax.sql.DataSource` for
+`JdbcRuntimeBrokerSchema.initialize(DataSource)` initializes or validates the shared 38-table fresh-database baseline used by Broker and Managed Server. It rejects legacy, foreign, partial and system catalogs before mutation; it does not upgrade or copy existing data. The JDBC implementations use `javax.sql.DataSource` for
 database access and fastjson2 (2.0.65) as the `reference_json`/`result_json`
 codec; the embedding service owns the connection pool and schema lifecycle.
 `JdbcRuntimeBindingRepository` additionally requires a `SecretProtector`
@@ -94,7 +94,7 @@ publications. After records are removed, callers must not reuse expired
 Runtime Session identifiers or idempotency keys. A missing execution is not
 permission to replay it. No permanent execution-key tombstone is retained.
 
-The Broker and Managed Server share the canonical 32-table V1 baseline. Initialize
+The Broker and Managed Server share the canonical 38-table V1 baseline. Initialize
 a fresh database; old catalogs are refused rather than upgraded. Keep the old
 environment for historical reads and settle its work before cutover. Repeated
 initialization validates structure without repairing it or changing receipts.

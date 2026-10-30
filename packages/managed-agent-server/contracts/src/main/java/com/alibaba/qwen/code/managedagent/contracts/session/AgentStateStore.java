@@ -31,7 +31,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationComma
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
@@ -47,8 +46,6 @@ public interface AgentStateStore {
     default Optional<SessionRecord> findSession(String tenantId, String sessionId) {
         return findSessionById(sessionId).filter(session -> tenantId.equals(session.tenantId()));
     }
-
-    int SNAPSHOT_REFRESH_EVENTS = 1000;
 
     public default void failWorktreeInitialTurns(String tenantId, String sessionId, String code) {
         throw new UnsupportedOperationException("Session worktrees are unavailable");
@@ -839,28 +836,23 @@ public interface AgentStateStore {
     public EventPage findTranscriptEvents(String tenantId, String sessionId,
             Long beforeSequence, int limit);
 
-    public StoreModels.SnapshotPage findSnapshotPage(String tenantId, String sessionId, String cursor, long afterSequence, int limit);
-
-    StoreModels.SnapshotPage findRecentSnapshotPage(String tenantId, String sessionId, String cursor, int limit);
-
     StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
             String cursor, int limit, boolean backward);
 
-    public Optional<SnapshotRecord> findSnapshot(String tenantId,
-            String sessionId);
+    StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
+            String cursor, int limit, boolean backward, long afterSequence);
 
-    /** The snapshot's covered sequence of each given Session, in one read. */
-    public Map<String, Long> findSnapshotCoveredSequences(String tenantId,
+    /** The message projection coverage of each Session, in one read. */
+    Map<String, Long> findMessageCoveredSequences(String tenantId,
             List<String> sessionIds);
 
     public ReplayWindow findReplayWindow(String tenantId, String sessionId);
 
-    /** The Sessions whose Snapshot covers more than their replay floor. */
-    public List<ReplayFloorTarget> findReplayFloorTargets(int limit);
+    /** The Sessions whose message projection covers more than their replay floor. */
+    List<ReplayFloorTarget> findReplayFloorTargets(int limit);
 
     /**
-     * Raises the Session's replay floor, never above the Snapshot's covered
-     * sequence, so a client told to resync can resume from the Snapshot.
+     * Raises the Session's replay floor only through readable message coverage.
      */
     public ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
             long floorSequence);

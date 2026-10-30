@@ -1,9 +1,9 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.daemon.DaemonHttpException;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.daemon.LoadHarnessSession;
 import com.alibaba.qwen.code.daemon.ManagedSessionStoreConnection;
-import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.sun.net.httpserver.HttpServer;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -69,7 +69,7 @@ final class HostedWorkspaceColdLoadProbe implements AutoCloseable {
                         var loaded = client.loadSession(new LoadHarnessSession(sessionId, connection));
                         response = json.writeValueAsBytes(Map.of("clientId", loaded.getHarnessClientId(),
                                 "bootId", loaded.getHarnessBootId()));
-                    } catch (HarnessHttpFailure error) {
+                    } catch (DaemonHttpException error) {
                         status = error.getStatusCode();
                         response = error.getResponseBody().getBytes(StandardCharsets.UTF_8);
                     }

@@ -27,10 +27,9 @@ class ManagedSchemaTimeContractTest {
             "ma_session_head=writer_lease_until,gmt_create,gmt_modified,"
                     + "activation_expires_at,claim_lease_until,wake_retry_at",
             "ma_session_journal_tx=gmt_create",
-            "ma_event_stream=snapshot_stale_since,gmt_modified",
+            "ma_event_stream=gmt_modified",
             "ma_public_event=gmt_create",
             "ma_message=gmt_create,gmt_modified",
-            "ma_snapshot=gmt_create,published_at,retain_until",
             "ma_session_record=gmt_create,started_at,settled_at",
             "ma_agent_definition=gmt_create",
             "ma_resource=gmt_create,last_verified_at,retention_until",
@@ -59,7 +58,7 @@ class ManagedSchemaTimeContractTest {
     }
 
     @Test
-    void all79PersistedTimestampsDeclareUnsignedIntegerMilliseconds() {
+    void all75PersistedTimestampsDeclareUnsignedIntegerMilliseconds() {
         Map<String, String> declarations = declarations();
         List<Executable> checks = new ArrayList<>();
         int count = 0;
@@ -76,7 +75,7 @@ class ManagedSchemaTimeContractTest {
                 });
             }
         }
-        assertEquals(79, count);
+        assertEquals(75, count);
         assertAll(checks);
     }
 

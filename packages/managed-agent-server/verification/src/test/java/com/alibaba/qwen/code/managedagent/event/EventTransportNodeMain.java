@@ -3,7 +3,8 @@ package com.alibaba.qwen.code.managedagent.event;
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerApplication;
 import com.alibaba.qwen.code.managedagent.adapters.event.LiteTopicEventTransport;
 import com.alibaba.qwen.code.managedagent.adapters.event.LiteTopicPublicEventTransport;
-import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.event.EventTransport;
+import com.alibaba.qwen.code.managedagent.contracts.event.JournalEventTransport;
 import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelope;
 import com.alibaba.qwen.code.managedagent.contracts.event.ManagedEventEnvelopes;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
@@ -12,8 +13,6 @@ import com.alibaba.qwen.code.managedagent.persistence.TransportConsumerStore;
 import com.alibaba.qwen.code.managedagent.session.OwnerSubscriptions;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.apache.rocketmq.client.apis.ClientServiceProvider;
-import org.apache.rocketmq.client.apis.producer.Producer;
 import org.springframework.beans.factory.config.BeanPostProcessor;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
 import org.springframework.boot.builder.SpringApplicationBuilder;
@@ -163,7 +162,7 @@ public final class EventTransportNodeMain {
         }
     }
 
-    /** Swaps the hooked subclasses in for the production transport beans. */
+    /** Wraps the production transports and installs the fault-aware wake activator. */
     private static final class Hooks implements BeanPostProcessor {
         private final ConfigurableListableBeanFactory beans;
         private final Faults faults;
@@ -182,23 +181,12 @@ public final class EventTransportNodeMain {
                 return new HookedWakes(beans.getBean(TransportConsumerStore.class),
                         beans.getBean(HarnessConnector.class), owners::subscribe, faults);
             }
-            if (bean instanceof LiteTopicEventTransport
-                    && !(bean instanceof HookedJournalWire)) {
-                var config = beans.getBean(ManagedAgentProperties.class)
-                        .getEventTransport();
-                return new HookedJournalWire(beans.getBean(Producer.class),
-                        beans.getBean(ClientServiceProvider.class), config.getTopic(),
-                        config.getWakeBootstrapLiteTopic(), faults);
+            if (bean instanceof LiteTopicEventTransport original) {
+                return new HookedJournalWire(original, faults);
             }
-            if (bean instanceof LiteTopicPublicEventTransport original
-                    && !(bean instanceof HookedPublicWire)) {
-                original.close();
-                TransportConsumerStore store = beans.getBean(TransportConsumerStore.class);
-                return new HookedPublicWire(beans.getBean(Producer.class),
-                        beans.getBean(ClientServiceProvider.class),
-                        beans.getBean(ManagedAgentProperties.class).getEventTransport()
-                                .getTopic(),
-                        beans.getBean(ObjectMapper.class), store, faults);
+            if (bean instanceof LiteTopicPublicEventTransport original) {
+                // Spring retains the original bean as its destroy-method owner.
+                return new HookedPublicWire(original, faults);
             }
             return bean;
         }
@@ -272,13 +260,13 @@ public final class EventTransportNodeMain {
         }
     }
 
-    private static final class HookedJournalWire extends LiteTopicEventTransport {
+    private static final class HookedJournalWire implements JournalEventTransport {
         private static final ObjectMapper JSON = new ObjectMapper();
+        private final JournalEventTransport delegate;
         private final Faults faults;
 
-        public HookedJournalWire(Producer producer, ClientServiceProvider provider,
-                String topic, String bootstrapLiteTopic, Faults faults) {
-            super(producer, provider, topic, bootstrapLiteTopic);
+        public HookedJournalWire(JournalEventTransport delegate, Faults faults) {
+            this.delegate = delegate;
             this.faults = faults;
         }
 
@@ -307,19 +295,19 @@ public final class EventTransportNodeMain {
                         Map.of("wakes", wakes));
             }
             long started = System.nanoTime();
-            super.publishCommitted(recordBytes);
+            delegate.publishCommitted(recordBytes);
             faults.record(Map.of("event", "journal-handoff",
                     "session", String.valueOf(session), "wakes", wakes,
                     "micros", (System.nanoTime() - started) / 1000));
         }
     }
 
-    private static final class HookedPublicWire extends LiteTopicPublicEventTransport {
+    private static final class HookedPublicWire implements EventTransport {
+        private final EventTransport delegate;
         private final Faults faults;
 
-        public HookedPublicWire(Producer producer, ClientServiceProvider provider, String topic,
-                ObjectMapper objectMapper, TransportConsumerStore store, Faults faults) {
-            super(producer, provider, topic, objectMapper, store::workspaceOf);
+        public HookedPublicWire(EventTransport delegate, Faults faults) {
+            this.delegate = delegate;
             this.faults = faults;
         }
 
@@ -337,7 +325,7 @@ public final class EventTransportNodeMain {
                 }
             }
             long started = System.nanoTime();
-            super.publish(events);
+            delegate.publish(events);
             faults.record(Map.of("event", "public-handoff",
                     "session", String.valueOf(session),
                     "micros", (System.nanoTime() - started) / 1000));

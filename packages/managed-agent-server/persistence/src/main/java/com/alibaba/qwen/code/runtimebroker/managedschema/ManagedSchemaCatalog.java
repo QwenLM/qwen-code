@@ -420,16 +420,7 @@ final class ManagedSchemaCatalog {
             List<String> expectedTokens = numericBooleans(expressionTokens(expression));
             List<String> actualTokens =
                     stored == null ? List.of() : numericBooleans(expressionTokens(stored));
-            boolean same = expectedTokens.equals(actualTokens);
-            if (!same && "projection_pending".equals(column.group(1))) {
-                int split = expectedTokens.indexOf("or");
-                List<String> commuted =
-                        new ArrayList<>(expectedTokens.subList(split + 1, expectedTokens.size()));
-                commuted.add("or");
-                commuted.addAll(expectedTokens.subList(0, split));
-                same = commuted.equals(actualTokens);
-            }
-            if (!same) {
+            if (!expectedTokens.equals(actualTokens)) {
                 throw new SQLException(
                         "Managed schema generated column differs: " + name + "." + column.group(1));
             }

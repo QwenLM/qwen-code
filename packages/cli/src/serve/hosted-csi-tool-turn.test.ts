@@ -551,7 +551,7 @@ it('fixes full Parts, original IDs, exact input bytes and final definitions befo
   const pinned = JSON.parse(
     await readFile(
       new URL(
-        '../../../managed-agent-server/persistence/src/main/resources/csi-native-file-declarations.json',
+        '../../../managed-agent-server/contracts/src/main/resources/csi-native-file-declarations.json',
         import.meta.url,
       ),
       'utf8',

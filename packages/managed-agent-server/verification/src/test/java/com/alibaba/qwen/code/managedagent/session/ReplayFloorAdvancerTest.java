@@ -6,7 +6,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.context.SpringBootTest;
 
 import java.time.Duration;
@@ -28,8 +27,8 @@ import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 /**
- * The retention pass raises a Session's replay floor as far as its Snapshot
- * proves safe, and only when it is enabled: the store is never touched while
+ * The retention pass raises a Session's replay floor through its message projection
+ * coverage, and only when it is enabled: the store is never touched while
  * {@code replay-floor-enabled} is false, a converged Session is never
  * selected again, one failing Session does not stop the rest, and a backlog
  * beyond one batch is drained within the pass without retrying the failure.
@@ -49,12 +48,8 @@ class ReplayFloorAdvancerTest {
     @Autowired
     private ManagedAgentStore store;
 
-    @Autowired
-    @Qualifier("managedJdbcTemplate")
-    private org.springframework.jdbc.core.JdbcTemplate jdbc;
-
     @Test
-    void scheduledPassRaisesTheFloorToTheSnapshotCoverage() {
+    void scheduledPassRaisesTheFloorToTheMessageCoverage() {
         String tenant = tenant();
         String sessionId = session(tenant);
         long last = append(tenant, sessionId, 5);
@@ -62,10 +57,6 @@ class ReplayFloorAdvancerTest {
         await().atMost(Duration.ofSeconds(10)).until(() ->
                 store.findReplayWindow(tenant, sessionId)
                         .snapshotThroughSequence() == last);
-        // This pass runs after any earlier page cursors have expired.
-        jdbc.update("UPDATE ma_snapshot SET retain_until = 0 WHERE tenant_id = ? AND session_id = ?"
-                + " AND snapshot_id <> (SELECT current_snapshot_id FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
-                + " AND stream_kind = 'SESSION' AND stream_id = X'')", tenant, sessionId, tenant, sessionId);
         await().atMost(Duration.ofSeconds(10)).until(() ->
                 store.findReplayWindow(tenant, sessionId)
                         .floorSequence() == last);
@@ -77,9 +68,6 @@ class ReplayFloorAdvancerTest {
         String sessionId = session(tenant);
         long last = append(tenant, sessionId, 3);
         await().atMost(Duration.ofSeconds(10)).until(() -> store.findReplayWindow(tenant, sessionId).snapshotThroughSequence() == last);
-        jdbc.update("UPDATE ma_snapshot SET retain_until = 0 WHERE tenant_id = ? AND session_id = ?"
-                + " AND snapshot_id <> (SELECT current_snapshot_id FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
-                + " AND stream_kind = 'SESSION' AND stream_id = X'')", tenant, sessionId, tenant, sessionId);
         await().atMost(Duration.ofSeconds(10)).until(() ->
                 store.findReplayWindow(tenant, sessionId)
                         .floorSequence() == last);
@@ -99,7 +87,7 @@ class ReplayFloorAdvancerTest {
     }
 
     @Test
-    void enabledPassAdvancesEveryTargetAsFarAsTheSnapshotProves() {
+    void enabledPassAdvancesEveryTargetThroughMessageCoverage() {
         AgentStateStore mockStore = mock(AgentStateStore.class);
         when(mockStore.findReplayFloorTargets(anyInt())).thenReturn(List.of(
                 new ReplayFloorTarget("tenant-a", "session-a"),

@@ -4,6 +4,7 @@ import com.tngtech.archunit.core.domain.JavaClasses;
 import com.tngtech.archunit.core.importer.ClassFileImporter;
 import org.junit.jupiter.api.Test;
 
+import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -21,6 +22,9 @@ class ModuleArchitectureTest {
             var classes = new ClassFileImporter().importPath(Path.of("..", module, "target", "classes"));
             assertThat(classes).as("compiled classes of %s", module).isNotEmpty();
             modules.put(module, classes);
+            Path declarations = Path.of("..", module, "target", "classes", "csi-native-file-declarations.json");
+            assertThat(Files.exists(declarations)).as("native-tool declarations in %s", module)
+                    .isEqualTo(module.equals("contracts"));
         }
         Map<String, String> owners = new HashMap<>();
         Map<String, String> packages = new HashMap<>();

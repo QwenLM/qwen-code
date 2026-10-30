@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 class ManagedSnapshotNumericPagingTest {
     @Test
@@ -25,26 +26,27 @@ class ManagedSnapshotNumericPagingTest {
         for (int count : List.of(1000, 10000)) {
             try (Fixture fixture = new Fixture(count, false)) {
                 fixture.jdbc.bodyReads = 0;
-                var page = fixture.store.findRecentSnapshotPage("tenant", "session", null, 2);
+                var page = fixture.backward(null, 2);
                 assertThat(page.items()).extracting(StoreModels.ItemRecord::itemId)
                         .containsExactly(id(count - 1), id(count));
                 assertThat(page.hasMore()).isTrue();
                 assertThat(fixture.jdbc.bodyReads).isEqualTo(2);
-                var older = fixture.store.findRecentSnapshotPage("tenant", "session", page.nextCursor(), 2);
+                var older = fixture.backward(page.nextCursor(), 2);
                 assertThat(older.items()).extracting(StoreModels.ItemRecord::itemId)
                         .containsExactly(id(count - 3), id(count - 2));
                 assertThat(older.coveredSequence()).isEqualTo(page.coveredSequence());
+                assertThat(fixture.jdbc.bodyReads).isEqualTo(4);
             }
         }
     }
 
     @Test
-    void recentItemsCrossPhysicalPagesAndTerminateWithoutDuplicates() {
+    void recentItemsCrossPagesAndTerminateWithoutDuplicates() {
         try (Fixture fixture = new Fixture(205, true)) {
             List<String> ids = new ArrayList<>();
             String cursor = null;
             do {
-                var page = fixture.store.findRecentSnapshotPage("tenant", "session", cursor, 37);
+                var page = fixture.backward(cursor, 37);
                 assertThat(page.items()).hasSizeLessThanOrEqualTo(37);
                 ids.addAll(0, page.items().stream().map(StoreModels.ItemRecord::itemId).toList());
                 cursor = page.nextCursor();
@@ -56,25 +58,20 @@ class ManagedSnapshotNumericPagingTest {
     }
 
     @Test
-    void recentCursorCannotBeUsedAsForwardCursorOrChanged() {
+    void messageCursorRejectsAnotherDirectionAndMalformedData() {
         try (Fixture fixture = new Fixture(205, false)) {
-            var page = fixture.store.findRecentSnapshotPage("tenant", "session", null, 1);
-            org.assertj.core.api.Assertions.assertThatThrownBy(() -> fixture.store.findSnapshotPage(
-                    "tenant", "session", page.nextCursor(), 0, 1)).hasMessageContaining("cursor");
-            var forward = fixture.store.findSnapshotPage("tenant", "session", null, 0, 1);
-            org.assertj.core.api.Assertions.assertThatThrownBy(() -> fixture.store.findRecentSnapshotPage(
-                    "tenant", "session", forward.nextCursor(), 1)).hasMessageContaining("cursor");
-            String cursor = page.nextCursor();
-            String tampered = cursor.substring(0, cursor.indexOf('.') + 1) + "AAAA";
-            org.assertj.core.api.Assertions.assertThatThrownBy(() -> fixture.store.findRecentSnapshotPage(
-                    "tenant", "session", tampered, 1)).hasMessageContaining("cursor");
+            var page = fixture.backward(null, 1);
+            assertThatThrownBy(() -> fixture.forward(page.nextCursor(), 0, 1)).hasMessageContaining("cursor");
+            var forward = fixture.forward(null, 0, 1);
+            assertThatThrownBy(() -> fixture.backward(forward.nextCursor(), 1)).hasMessageContaining("cursor");
+            assertThatThrownBy(() -> fixture.backward("not-a-message-cursor", 1)).hasMessageContaining("cursor");
         }
     }
 
     @Test
-    void recentCursorKeepsItsSnapshotWhenANewerProjectionIsPublished() {
+    void recentCursorExpiresWhenTheMessageProjectionIsRebuilt() {
         try (Fixture fixture = new Fixture(205, false)) {
-            var first = fixture.store.findRecentSnapshotPage("tenant", "session", null, 2);
+            var first = fixture.backward(null, 2);
             fixture.transaction.executeWithoutResult(status -> {
                 fixture.jdbc.update("UPDATE ma_message SET item_status='retracted'"
                         + " WHERE tenant_id=? AND session_id=? AND item_id=?", "tenant", "session", id(203));
@@ -83,12 +80,10 @@ class ManagedSnapshotNumericPagingTest {
                         "tenant", "session");
                 fixture.project();
             });
-            var latest = fixture.store.findRecentSnapshotPage("tenant", "session", null, 3);
-            assertThat(latest.items().getFirst().status()).isEqualTo("retracted");
-            var next = fixture.store.findRecentSnapshotPage("tenant", "session", first.nextCursor(), 2);
-            assertThat(next.items()).extracting(StoreModels.ItemRecord::itemId).containsExactly(id(202), id(203));
-            assertThat(next.items().getLast().status()).isEqualTo("completed");
-            assertThat(next.coveredSequence()).isEqualTo(first.coveredSequence());
+            assertThat(fixture.backward(null, 3).items().getFirst().status()).isEqualTo("retracted");
+            assertThatThrownBy(() -> fixture.backward(first.nextCursor(), 2))
+                    .isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("message_projection_changed"));
         }
     }
 
@@ -98,7 +93,7 @@ class ManagedSnapshotNumericPagingTest {
         for (int count : List.of(1000, 10000)) {
             try (Fixture fixture = new Fixture(count, false)) {
                 fixture.jdbc.bodyReads = 0;
-                var page = fixture.store.findSnapshotPage("tenant", "session", null, count - 1, 1);
+                var page = fixture.forward(null, count - 1, 1);
                 assertThat(page.items())
                         .extracting(StoreModels.ItemRecord::itemId)
                         .containsExactly(id(count));
@@ -108,69 +103,54 @@ class ManagedSnapshotNumericPagingTest {
                 fixture.verifyDirectoryPlan();
             }
         }
-        assertThat(reads).containsExactly(2, 2);
+        assertThat(reads).containsExactly(1, 1);
     }
 
     @Test
     void numericBoundarySkipsAllEqualSequencesAcrossPageBoundaries() {
         try (Fixture fixture = new Fixture(205, true)) {
-            var ties = fixture.store.findSnapshotPage("tenant", "session", null, 99, 2);
+            var ties = fixture.forward(null, 99, 2);
             assertThat(ties.items())
                     .extracting(StoreModels.ItemRecord::itemId)
                     .containsExactly(id(100), id(101));
             assertThat(ties.hasMore()).isTrue();
             var remainingTies =
-                    fixture.store.findSnapshotPage("tenant", "session", ties.nextCursor(), 0, 2);
+                    fixture.forward(ties.nextCursor(), 0, 2);
             assertThat(remainingTies.items())
                     .extracting(StoreModels.ItemRecord::itemId)
                     .containsExactly(id(102), id(103));
-            var afterTies = fixture.store.findSnapshotPage("tenant", "session", null, 100, 2);
+            var afterTies = fixture.forward(null, 100, 2);
             assertThat(afterTies.items())
                     .extracting(StoreModels.ItemRecord::itemId)
                     .containsExactly(id(106), id(107));
             fixture.jdbc.bodyReads = 0;
-            var empty = fixture.store.findSnapshotPage("tenant", "session", null, 200, 2);
+            var empty = fixture.forward(null, 200, 2);
             assertThat(empty.items()).isEmpty();
             assertThat(empty.hasMore()).isFalse();
             assertThat(empty.nextCursor()).isNull();
             assertThat(empty.coveredSequence()).isEqualTo(ties.coveredSequence());
-            assertThat(fixture.jdbc.bodyReads).isEqualTo(1);
+            assertThat(fixture.jdbc.bodyReads).isZero();
         }
     }
 
     @Test
-    void numericFirstPageCursorRetainsOriginalSnapshotAfterProjectionChanges() {
+    void numericFirstPageCursorExpiresAfterProjectionRebuild() {
         try (Fixture fixture = new Fixture(205, false)) {
-            var first = fixture.store.findSnapshotPage("tenant", "session", null, 199, 2);
-            fixture.transaction.executeWithoutResult(
-                    status -> {
-                        fixture.jdbc.update(
-                                "UPDATE ma_message SET item_status='retracted' WHERE tenant_id=?"
-                                        + " AND session_id=? AND item_id=?",
-                                "tenant",
-                                "session",
-                                id(203));
-                        fixture.jdbc.update(
-                                "UPDATE ma_event_stream SET projection_version=projection_version+1"
-                                        + " WHERE tenant_id=? AND session_id=? AND"
-                                        + " stream_kind='SESSION' AND stream_id=X''",
-                                "tenant",
-                                "session");
-                        fixture.project();
-                    });
-            var changed = fixture.store.findSnapshotPage("tenant", "session", null, 201, 2);
-            assertThat(changed.items())
-                    .extracting(StoreModels.ItemRecord::itemId)
-                    .containsExactly(id(202), id(203));
+            var first = fixture.forward(null, 199, 2);
+            fixture.transaction.executeWithoutResult(status -> {
+                fixture.jdbc.update("UPDATE ma_message SET item_status='retracted' WHERE tenant_id=? AND session_id=? AND item_id=?",
+                        "tenant", "session", id(203));
+                fixture.jdbc.update("UPDATE ma_event_stream SET projection_version=projection_version+1"
+                        + " WHERE tenant_id=? AND session_id=? AND stream_kind='SESSION' AND stream_id=X''", "tenant", "session");
+                fixture.project();
+            });
+            var changed = fixture.forward(null, 201, 2);
+            assertThat(changed.items()).extracting(StoreModels.ItemRecord::itemId).containsExactly(id(202), id(203));
             assertThat(changed.items().getLast().status()).isEqualTo("retracted");
             assertThat(changed.coveredSequence()).isGreaterThan(first.coveredSequence());
-            var next =
-                    fixture.store.findSnapshotPage("tenant", "session", first.nextCursor(), 0, 2);
-            assertThat(next.items())
-                    .extracting(StoreModels.ItemRecord::itemId)
-                    .containsExactly(id(202), id(203));
-            assertThat(next.items().getLast().status()).isEqualTo("completed");
-            assertThat(next.coveredSequence()).isEqualTo(first.coveredSequence());
+            assertThatThrownBy(() -> fixture.forward(first.nextCursor(), 0, 2))
+                    .isInstanceOfSatisfying(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class,
+                            error -> assertThat(error.getCode()).isEqualTo("message_projection_changed"));
         }
     }
 
@@ -193,7 +173,7 @@ class ManagedSnapshotNumericPagingTest {
             if (sql.contains("FROM ma_resource WHERE") && sql.contains("inline_bytes")) {
                 bodyReads++;
             }
-            if (sql.startsWith("SELECT snapshot_page_ordinal FROM ma_resource")) {
+            if (sql.startsWith("SELECT m.item_id, m.first_sequence,")) {
                 directoryReads++;
                 directorySql = sql;
                 directoryArguments = args.clone();
@@ -215,6 +195,7 @@ class ManagedSnapshotNumericPagingTest {
             jdbc = new CountingJdbc(database.source());
             transaction =
                     new TransactionTemplate(new DataSourceTransactionManager(database.source()));
+            transaction.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
             store =
                     com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
                             jdbc,
@@ -254,7 +235,26 @@ class ManagedSnapshotNumericPagingTest {
                         + "first_sequence,last_sequence,gmt_create,gmt_modified,revision,parts_json)"
                         + " VALUES(?,?,?,?,'message','assistant','completed','{}',?,?,0,0,1,'[]')",
                     rows);
+            String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+            byte[] bytes = {91, 93};
+            for (int index = Math.max(1, count - 3); index <= count; index++) {
+                String resourceId = "numeric-parts-" + index;
+                String resourceKey = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.resourceKey(scope, resourceId);
+                jdbc.update("INSERT INTO ma_resource(resource_key,session_scope_key,tenant_id,session_id,"
+                                + "resource_id,kind,schema_version,byte_length,sha256,storage_kind,inline_bytes,state,gmt_create)"
+                                + " VALUES(?,?,'tenant','session',?,'managed-message-parts',1,2,?,'MYSQL_INLINE',?,'REFERENCED',0)",
+                        resourceKey, scope, resourceId, WorkspaceEvidenceResources.digest(bytes), bytes);
+                jdbc.update("UPDATE ma_message SET body_resource_key=? WHERE item_id=?", resourceKey, id(index));
+            }
             project();
+        }
+
+        StoreModels.MessagePage forward(String cursor, long afterSequence, int limit) {
+            return transaction.execute(status -> store.findMessagePage("tenant", "session", cursor, limit, false, afterSequence));
+        }
+
+        StoreModels.MessagePage backward(String cursor, int limit) {
+            return transaction.execute(status -> store.findMessagePage("tenant", "session", cursor, limit, true));
         }
 
         void project() {
@@ -282,7 +282,7 @@ class ManagedSnapshotNumericPagingTest {
                             String.class,
                             jdbc.directoryArguments);
             assertThat(plan)
-                    .contains("ix_ma_snapshot_page_lookup")
+                    .contains("ix_ma_message_history")
                     .doesNotContain("Table scan", "Sort:");
             var counts =
                     java.util.regex.Pattern.compile(

@@ -133,10 +133,6 @@ public class WebShellAgentController {
     @PostMapping("/sessions/export/query")
     public ApiModels.WebShellExportPage export(TenantContext tenant,
             @Valid @RequestBody ApiModels.WebShellExportRequest request) {
-        if ("messages".equals(request.view())) {
-            return service.messageExportPage(tenant.tenantId(), tenant.actorId(), request.sessionId(),
-                    request.cursor(), request.limit() == null ? 100 : request.limit(), false);
-        }
         return service.exportPage(tenant.tenantId(), tenant.actorId(), request.sessionId(),
                 request.cursor(), request.limit() == null ? 100 : request.limit());
     }
@@ -178,10 +174,6 @@ public class WebShellAgentController {
     @PostMapping("/transcript/query")
     public WebShellTranscript transcript(TenantContext tenant,
             @Valid @RequestBody WebShellTranscriptRequest request) {
-        if ("messages".equals(request.view())) {
-            return service.messageTranscript(tenant.tenantId(), tenant.actorId(), request.sessionId(),
-                    request.cursor(), request.limit() == null ? 100 : request.limit());
-        }
         return service.transcript(tenant.tenantId(), tenant.actorId(),
                 request.sessionId(),
                 request.cursor(),
@@ -191,10 +183,6 @@ public class WebShellAgentController {
     @PostMapping("/transcript/items/query")
     public WebShellExportPage recentTranscriptItems(TenantContext tenant,
             @Valid @RequestBody WebShellExportRequest request) {
-        if ("messages".equals(request.view())) {
-            return service.messageExportPage(tenant.tenantId(), tenant.actorId(), request.sessionId(),
-                    request.cursor(), request.limit() == null ? 100 : request.limit(), true);
-        }
         return service.recentTranscriptItems(tenant.tenantId(), tenant.actorId(), request.sessionId(),
                 request.cursor(), request.limit() == null ? 100 : request.limit());
     }

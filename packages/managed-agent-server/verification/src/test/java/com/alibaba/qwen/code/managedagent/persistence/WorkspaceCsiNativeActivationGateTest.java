@@ -294,7 +294,7 @@ class WorkspaceCsiNativeActivationGateTest {
                     .map(row -> JSON.valueToTree(new TreeMap<>(row)).toString()).sorted().toList());
         }
         assertThat(rows).containsKeys("ma_delivery", "ma_session", "ma_session_head", "ma_request_receipt");
-        assertThat(rows).hasSize(40);
+        assertThat(rows).hasSize(39);
         return rows;
     }
 

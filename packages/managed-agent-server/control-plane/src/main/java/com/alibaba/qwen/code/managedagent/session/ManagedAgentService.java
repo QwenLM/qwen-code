@@ -44,7 +44,6 @@ import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellWorkspace;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.EventPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ItemPartRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ItemRecord;
@@ -53,7 +52,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationComma
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
 import com.alibaba.qwen.code.managedagent.repository.ManagedArtifactReader;
@@ -75,7 +73,6 @@ import org.springframework.stereotype.Service;
 
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
-import java.util.ArrayList;
 import java.util.Base64;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -1152,61 +1149,17 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             throw new ManagedAgentException(400, "invalid_event_cursor", "Item sequence must be non-negative.");
         }
         requireReadableSession(tenantId, actorId, sessionId);
-        var page = store.findSnapshotPage(tenantId, sessionId, cursor, afterSequence, limit(requestedLimit));
+        var page = store.findMessagePage(tenantId, sessionId, cursor, limit(requestedLimit), false, afterSequence);
         return new PublicItemList("list", page.items().stream().map(this::publicItem).toList(), page.hasMore(),
-                page.nextCursor(), page.coveredSequence());
+                page.nextCursor(), page.throughSequence());
     }
 
     public WebShellExportPage exportPage(String tenantId, String actorId,
             String sessionId, String cursor, int requestedLimit) {
-        requireReadableSession(tenantId, actorId, sessionId);
-        var page = store.findSnapshotPage(tenantId, sessionId, cursor, 0, limit(requestedLimit));
-        return new WebShellExportPage(page.items().stream().map(this::webShellItem).toList(),
-                page.nextCursor(), page.hasMore(), page.coveredSequence());
+        return messageExportPage(tenantId, actorId, sessionId, cursor, requestedLimit, false);
     }
 
     public WebShellTranscript transcript(String tenantId, String actorId,
-            String sessionId, String cursor, int requestedLimit) {
-        SessionRecord session = requireReadableSession(tenantId, actorId,
-                sessionId);
-        int limit = eventLimit(requestedLimit);
-        if (StringUtils.isBlank(cursor)) {
-            SnapshotRecord snapshot = store.findSnapshot(tenantId, sessionId)
-                    .orElse(null);
-            if (snapshot != null) {
-                long visibleSequence = Math.max(session.lastSequence(),
-                        snapshot.coveredSequence());
-                List<EventRecord> events = new ArrayList<>(
-                        store.findControlEvents(tenantId, sessionId,
-                                snapshot.coveredSequence()));
-                events.addAll(tailEvents(tenantId, sessionId,
-                        snapshot.coveredSequence(), visibleSequence));
-                return new WebShellTranscript(snapshot.items().stream()
-                        .map(this::webShellItem).toList(),
-                        events.stream().map(this::webShellEvent).toList(),
-                        snapshot.coveredSequence(), null, false,
-                        visibleSequence);
-            }
-        }
-        EventPage page = store.findTranscriptEvents(tenantId, sessionId,
-                transcriptCursor(cursor), limit);
-        List<WebShellEvent> events = page.events().stream()
-                .map(this::webShellEvent).toList();
-        String olderCursor = page.hasMore() && !events.isEmpty()
-                ? Long.toString(events.get(0).sequence()) : null;
-        return new WebShellTranscript(List.of(), events, 0, olderCursor,
-                page.hasMore(), session.lastSequence());
-    }
-
-    public WebShellExportPage recentTranscriptItems(String tenantId, String actorId,
-            String sessionId, String cursor, int requestedLimit) {
-        requireReadableSession(tenantId, actorId, sessionId);
-        var page = store.findRecentSnapshotPage(tenantId, sessionId, cursor, limit(requestedLimit));
-        return new WebShellExportPage(page.items().stream().map(this::webShellItem).toList(),
-                page.nextCursor(), page.hasMore(), page.coveredSequence());
-    }
-
-    public WebShellTranscript messageTranscript(String tenantId, String actorId,
             String sessionId, String cursor, int requestedLimit) {
         requireReadableSession(tenantId, actorId, sessionId);
         var page = store.findMessagePage(tenantId, sessionId, cursor, requestedLimit, true);
@@ -1215,7 +1168,12 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 page.nextCursor(), page.hasMore(), page.coveredSequence());
     }
 
-    public WebShellExportPage messageExportPage(String tenantId, String actorId,
+    public WebShellExportPage recentTranscriptItems(String tenantId, String actorId,
+            String sessionId, String cursor, int requestedLimit) {
+        return messageExportPage(tenantId, actorId, sessionId, cursor, requestedLimit, true);
+    }
+
+    private WebShellExportPage messageExportPage(String tenantId, String actorId,
             String sessionId, String cursor, int requestedLimit, boolean backward) {
         requireReadableSession(tenantId, actorId, sessionId);
         var page = store.findMessagePage(tenantId, sessionId, cursor, requestedLimit, backward);
@@ -1223,14 +1181,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 page.nextCursor(), page.hasMore(), page.throughSequence());
     }
 
-    // Events are read before the floor: a floor that is not above the cursor
-    // after the read was not above it during the read either, so no event
-    // after the cursor had been pruned. A stream reconciliation discards the
-    // Snapshot without lowering the floor, so the floor can exceed the
-    // coverage while the Items rebuild; nothing prunes events yet, so such
-    // a cursor is still served instead of looping 409/resync until the
-    // rebuild finishes. The pruning work must revisit this condition once
-    // rows below the floor can be gone.
+    // Check the floor after reading events so a concurrent floor advance forces resync.
     private List<EventRecord> replayableEvents(SessionRecord session,
             long afterSequence, int limit) {
         List<EventRecord> events = store.findEvents(session.tenantId(),
@@ -1269,7 +1220,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         Map<String, TurnSummary> activeTurns = store.findActiveTurns(tenantId,
                 ids);
         Map<String, Long> coveredSequences = store
-                .findSnapshotCoveredSequences(tenantId, ids);
+                .findMessageCoveredSequences(tenantId, ids);
         Set<String> closed = completedWorkspaceCloses(tenantId, sessions);
         var compressions = store.contextCompressionStates(tenantId, sessions.stream()
                 .filter(session -> session.workspace() != null).map(SessionRecord::sessionId).toList());
@@ -1659,29 +1610,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                 part.firstSequence(), part.lastSequence());
     }
 
-    private List<EventRecord> tailEvents(String tenantId, String sessionId,
-            long afterSequence, long throughSequence) {
-        List<EventRecord> result = new ArrayList<>();
-        long cursor = afterSequence;
-        while (cursor < throughSequence) {
-            // Paged at the snapshot gate's lag bound: a session whose
-            // snapshot lags within the gate is served in one round trip.
-            List<EventRecord> page = store.findEvents(tenantId, sessionId,
-                    cursor, AgentStateStore.SNAPSHOT_REFRESH_EVENTS);
-            if (page.isEmpty()) {
-                break;
-            }
-            for (EventRecord event : page) {
-                if (event.sequence() > throughSequence) {
-                    return List.copyOf(result);
-                }
-                result.add(event);
-                cursor = event.sequence();
-            }
-        }
-        return List.copyOf(result);
-    }
-
     private void dispatch(String tenantId, Admission admission) {
         dispatch(tenantId, admission, false);
     }
@@ -1883,7 +1811,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
      * Reads the next catch-up page of a stream.
      *
      * @throws ReplayCursorExpired when the cursor is below the replay floor
-     *         while the Snapshot backs it
+     *         when the message projection supplies the resynchronization state
      */
     List<EventRecord> streamEvents(SessionRecord session, long afterSequence) {
         requireEventCursor(afterSequence);
@@ -2164,22 +2092,6 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         throw new ManagedAgentException(400, "invalid_cursor",
                 "Turn cursor is invalid.");
-    }
-
-    private static Long transcriptCursor(String cursor) {
-        if (StringUtils.isBlank(cursor)) {
-            return null;
-        }
-        try {
-            long value = Long.parseLong(cursor);
-            if (value <= 0) {
-                throw new NumberFormatException();
-            }
-            return value;
-        } catch (NumberFormatException error) {
-            throw new ManagedAgentException(400,
-                    "invalid_cursor", "Transcript cursor is invalid.");
-        }
     }
 
     private static CommandAdmission response(Admission admission) {

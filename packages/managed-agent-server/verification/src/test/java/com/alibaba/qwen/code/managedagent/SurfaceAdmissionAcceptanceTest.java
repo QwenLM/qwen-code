@@ -200,7 +200,7 @@ public class SurfaceAdmissionAcceptanceTest {
         assertThat(artifacts).isNotEmpty();
         artifactId = artifacts.getFirst().descriptor().path("id").asText();
         artifactItemId = fixture.sessions()
-                .findSnapshot(ARTIFACT_TENANT, ARTIFACT_SESSION).orElseThrow()
+                .findMessagePage(ARTIFACT_TENANT, ARTIFACT_SESSION, null, 100, false)
                 .items().getFirst().itemId();
         jdbc.update("INSERT INTO ma_workspace (tenant_id,"
                 + " workspace_id, workspace_generation, storage_id,"

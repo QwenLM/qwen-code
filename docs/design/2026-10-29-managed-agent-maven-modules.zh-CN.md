@@ -97,12 +97,13 @@ server 装配保留无 Servlet 嵌入、显式内部回调和独立服务三种�
 管理器、mapper、执行器和调度器保留名称，与宿主默认 Bean 隔离。限定组件扫描，并让
 每项资源只有一个关闭责任方。
 
-| 资源                        | 归属           |
-| --------------------------- | -------------- |
-| OpenAPI 和共享协议 schema   | `contracts`    |
-| V1 schema 和 CSI 持久化声明 | `persistence`  |
-| 应用 YAML 与 Spring 注册    | `server`       |
-| 测试夹具与 JUnit 服务注册   | `verification` |
+| 资源                      | 归属           |
+| ------------------------- | -------------- |
+| OpenAPI 和共享协议 schema | `contracts`    |
+| CSI 原生工具协议声明      | `contracts`    |
+| V1 数据库 schema          | `persistence`  |
+| 应用 YAML 与 Spring 注册  | `server`       |
+| 测试夹具与 JUnit 服务注册 | `verification` |
 
 classpath 资源名保持不变，每份资源只有一个产物所有者。TypeScript 工具结果 schema
 仍为权威来源。同步更新启动器、Docker、分发和版本检查、WebShell 契约读取、历史路径

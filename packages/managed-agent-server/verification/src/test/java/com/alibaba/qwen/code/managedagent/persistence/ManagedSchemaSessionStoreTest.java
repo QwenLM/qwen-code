@@ -45,6 +45,7 @@ public class ManagedSchemaSessionStoreTest {
         ManagedSchema.initialize(source);
         jdbc = new ManagedSchemaJdbcTemplate(source);
         tx = new TransactionTemplate(new DataSourceTransactionManager(source));
+        tx.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
         store =
                 com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedAgentStore(
                         jdbc,
@@ -106,35 +107,28 @@ public class ManagedSchemaSessionStoreTest {
     }
 
     @Test
-    void immutablePaginationSurvivesNewMessagesAndExpires() {
+    void messagePaginationKeepsItsRangeAndReadsCurrentContent() {
         for (int i = 0; i < 4; i++) {
             event("item-" + i, "text-" + i);
         }
         materialize();
-        var first = store.findSnapshotPage(tenant, session, null, 0, 2);
+        var first = page(null, 0, 2);
         assertThat(first.items()).hasSize(2);
         assertThat(first.hasMore()).isTrue();
         event("item-2", "changed");
         event("item-4", "new");
-        clock.advance(Duration.ofSeconds(6));
         materialize();
-        var next = store.findSnapshotPage(tenant, session, first.nextCursor(), 0, 2);
-        assertThat(next.items())
-                .extracting(StoreModels.ItemRecord::itemId)
+        var next = page(first.nextCursor(), 0, 2);
+        assertThat(next.items()).extracting(StoreModels.ItemRecord::itemId)
                 .containsExactly("item-2", "item-3");
-        assertThat(next.items().getFirst().content().getFirst().text()).isEqualTo("text-2");
-        assertThat(next.coveredSequence()).isEqualTo(first.coveredSequence());
-        assertThat(
-                        jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM ma_snapshot WHERE tenant_id = ?",
-                                Integer.class,
-                                tenant))
-                .isEqualTo(2);
-        assertThat(store.findSnapshotPage(tenant, session, null, 0, 10).items()).hasSize(5);
+        assertThat(next.items().getFirst().content().stream().map(StoreModels.ItemPartRecord::text)
+                .collect(java.util.stream.Collectors.joining())).isEqualTo("text-2changed");
+        assertThat(next.throughSequence()).isEqualTo(first.throughSequence());
+        assertThat(next.coveredSequence()).isGreaterThan(first.coveredSequence());
+        assertThat(page(null, 0, 10).items()).hasSize(5);
         clock.advance(Duration.ofMinutes(31));
-        assertThatThrownBy(() -> store.findSnapshotPage(tenant, session, first.nextCursor(), 0, 2))
-                .isInstanceOf(ManagedAgentException.class)
-                .hasMessageContaining("expired");
+        assertThat(page(first.nextCursor(), 0, 2).items()).extracting(StoreModels.ItemRecord::itemId)
+                .containsExactly("item-2", "item-3");
     }
 
     @Test
@@ -164,8 +158,7 @@ public class ManagedSchemaSessionStoreTest {
                                 tenant))
                 .isEqualTo("[]");
         assertThat(
-                        store.findSnapshot(tenant, session)
-                                .orElseThrow()
+                        messages()
                                 .items()
                                 .getFirst()
                                 .content()
@@ -182,53 +175,46 @@ public class ManagedSchemaSessionStoreTest {
     }
 
     @Test
-    void expiredSnapshotBodiesAreCollectedWithoutRetiringAnIdleSession() {
+    void releasedMessageBodiesAreCollectedOnlyWhenGcIsEnabled() {
         alignProjectionClock();
-        for (int i = 0; i < 4; i++) {
-            event("item-" + i, "text-" + i);
-            materialize();
-            clock.advance(Duration.ofSeconds(6));
-        }
-        jdbc.update("UPDATE ma_snapshot SET retain_until = 0 WHERE tenant_id = ?", tenant);
+        event("big", "a".repeat(70_000));
+        materialize();
+        String original = messageBody("big");
+        event("big", "b");
+        materialize();
         var properties = new ManagedAgentProperties();
         var collector = new SessionResourceCollectionCollector(jdbc,
                 new DataSourceTransactionManager(java.util.Objects.requireNonNull(jdbc.getDataSource())), properties);
         assertThat(collector.runOnce()).isFalse();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_snapshot WHERE tenant_id = ?", Integer.class, tenant))
-                .isEqualTo(4);
+        assertThat(resourceState(original)).isEqualTo("REFERENCED");
         properties.getToolPublication().setGcEnabled(true);
         assertThat(collector.runOnce()).isTrue();
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_snapshot WHERE tenant_id = ?", Integer.class, tenant))
-                .isEqualTo(1);
-        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource WHERE tenant_id = ? AND state = 'COLLECTED'"
-                + " AND inline_bytes IS NULL", Integer.class, tenant)).isEqualTo(6);
-        assertThat(store.findSnapshot(tenant, session).orElseThrow().items()).hasSize(4);
+        assertThat(resourceState(original)).isEqualTo("COLLECTED");
+        assertThat(resourceState(messageBody("big"))).isEqualTo("REFERENCED");
+        assertThat(messages().items()).singleElement()
+                .satisfies(item -> assertThat(item.content().getFirst().text()).hasSize(70_001));
         assertThat(jdbc.queryForObject("SELECT retired_at FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 Long.class, tenant, session)).isNull();
     }
 
     @Test
-    void validCursorRetainsOldLargeBodyUntilItsSnapshotExpires() {
+    void messageCursorDoesNotPinReleasedBodiesAndReadsTheirReplacement() {
         alignProjectionClock();
         event("small", "first");
         event("big", "a".repeat(70_000));
         materialize();
         String original = messageBody("big");
-        var cursor = store.findSnapshotPage(tenant, session, null, 0, 1).nextCursor();
+        var first = page(null, 0, 1);
         event("big", "b".repeat(70_000));
-        clock.advance(Duration.ofSeconds(6));
         materialize();
-        projectionCollector().runOnce();
-        assertThat(resourceState(original)).isEqualTo("REFERENCED");
-        assertThat(store.findSnapshotPage(tenant, session, cursor, 0, 1).items().getFirst().content().getFirst().text())
-                .isEqualTo("a".repeat(70_000));
-        clock.advance(Duration.ofMinutes(31));
-        jdbc.update("UPDATE ma_snapshot SET retain_until = 0 WHERE tenant_id = ?", tenant);
         projectionCollector().runOnce();
         assertThat(resourceState(original)).isEqualTo("COLLECTED");
         assertThat(resourceState(messageBody("big"))).isEqualTo("REFERENCED");
-        assertThat(store.findSnapshot(tenant, session).orElseThrow().items().getLast().content().getFirst().text())
+        var next = page(first.nextCursor(), 0, 1);
+        assertThat(next.items().getFirst().content().getFirst().text())
                 .isEqualTo("a".repeat(70_000) + "b".repeat(70_000));
+        assertThat(next.throughSequence()).isEqualTo(first.throughSequence());
+        assertThat(next.coveredSequence()).isGreaterThan(first.coveredSequence());
     }
 
     @Test
@@ -243,7 +229,6 @@ public class ManagedSchemaSessionStoreTest {
         var retention = new ToolPublicationRetentionStore(jdbc,
                 new DataSourceTransactionManager(java.util.Objects.requireNonNull(jdbc.getDataSource())));
         try (var lease = retention.read(tenant, session)) {
-            jdbc.update("UPDATE ma_snapshot SET retain_until = 0 WHERE tenant_id = ?", tenant);
             projectionCollector().runOnce();
             lease.check();
             assertThat(resourceState(original)).isEqualTo("REFERENCED");
@@ -253,59 +238,6 @@ public class ManagedSchemaSessionStoreTest {
         makeProjectionCandidatesDue();
         assertThat(projectionCollector().runOnce()).isTrue();
         assertThat(resourceState(original)).isEqualTo("COLLECTED");
-    }
-
-    @Test
-    void pausedRepeatableReadSnapshotBuildProtectsAReleasedMessageBody() throws Exception {
-        try (var connection = jdbc.getDataSource().getConnection()) {
-            org.junit.jupiter.api.Assumptions.assumeTrue(
-                    "MySQL".equals(connection.getMetaData().getDatabaseProductName()),
-                    "Cross-table consistent read is a real MySQL acceptance gate");
-        }
-        alignProjectionClock();
-        event("big", "a".repeat(70_000));
-        materialize();
-        String body = messageBody("big");
-        var original = store.findSnapshot(tenant, session).orElseThrow();
-        jdbc.update("UPDATE ma_snapshot SET retain_until = 0 WHERE tenant_id = ?", tenant);
-        var entered = new java.util.concurrent.CountDownLatch(1);
-        var release = new java.util.concurrent.CountDownLatch(1);
-        var builder = new ManagedSnapshotStore(jdbc, new ObjectMapper(), clock, (t, id, guard) -> {
-            entered.countDown();
-            try {
-                if (!release.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
-                    throw new IllegalStateException("projection did not commit");
-                }
-            } catch (InterruptedException interrupted) {
-                Thread.currentThread().interrupt();
-                throw new IllegalStateException(interrupted);
-            }
-            guard.run();
-            assertThat(jdbc.queryForObject("SELECT body_resource_key FROM ma_message WHERE tenant_id = ? AND session_id = ?",
-                    String.class, tenant, session)).isEqualTo(body);
-            assertThat(jdbc.queryForObject("SELECT inline_bytes FROM ma_resource WHERE resource_key = ?", byte[].class, body))
-                    .isNotEmpty();
-            return original.items();
-        });
-        try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
-            var build = executor.submit(() -> builder.build(tenant, session));
-            try {
-                assertThat(entered.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
-                event("big", "b");
-                clock.advance(Duration.ofSeconds(6));
-                materialize();
-                projectionCollector().runOnce();
-                assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key = ?", Integer.class, body))
-                        .isZero();
-                assertThat(resourceState(body)).isEqualTo("REFERENCED");
-            } finally {
-                release.countDown();
-            }
-            build.get(10, java.util.concurrent.TimeUnit.SECONDS);
-        }
-        makeProjectionCandidatesDue();
-        projectionCollector().runOnce();
-        assertThat(resourceState(body)).isEqualTo("COLLECTED");
     }
 
     @Test
@@ -322,7 +254,6 @@ public class ManagedSchemaSessionStoreTest {
         event("big", "b");
         clock.advance(Duration.ofSeconds(6));
         materialize();
-        jdbc.update("UPDATE ma_snapshot SET retain_until = 0 WHERE tenant_id = ?", tenant);
         projectionCollector().runOnce();
         assertThat(resourceState(original)).isEqualTo("REFERENCED");
         tx.executeWithoutResult(status -> {
@@ -415,29 +346,25 @@ public class ManagedSchemaSessionStoreTest {
     }
 
     @Test
-    void modifiedCursorCannotExtendItsValidityOrChangeItsPosition() throws Exception {
+    void messageCursorRejectsAnotherScopeAndInvalidUpperBound() throws Exception {
         event("a", "first");
         event("b", "second");
         materialize();
-        String cursor = store.findSnapshotPage(tenant, session, null, 0, 1).nextCursor();
-        String[] parts = cursor.split("\\.");
+        String cursor = page(null, 0, 1).nextCursor();
         var mapper = new ObjectMapper();
-        var data =
-                (com.fasterxml.jackson.databind.node.ObjectNode)
-                        mapper.readTree(Base64.getUrlDecoder().decode(parts[0]));
-        data.put("expires", clock.millis() + Duration.ofDays(365).toMillis());
-        String changed =
-                Base64.getUrlEncoder()
-                                .withoutPadding()
-                                .encodeToString(mapper.writeValueAsBytes(data))
-                        + "."
-                        + parts[1];
-        assertThatThrownBy(() -> store.findSnapshotPage(tenant, session, changed, 0, 1))
-                .isInstanceOf(ManagedAgentException.class)
-                .hasMessageContaining("cursor");
-        assertThat(store.findSnapshotPage(tenant, session, cursor, 0, 1).items())
-                .extracting(StoreModels.ItemRecord::itemId)
-                .containsExactly("b");
+        for (String field : List.of("scope", "through")) {
+            var data = (com.fasterxml.jackson.databind.node.ObjectNode)
+                    mapper.readTree(Base64.getUrlDecoder().decode(cursor));
+            if (field.equals("scope")) {
+                data.put(field, "0".repeat(64));
+            } else {
+                data.put(field, Long.MAX_VALUE);
+            }
+            String changed = Base64.getUrlEncoder().withoutPadding().encodeToString(mapper.writeValueAsBytes(data));
+            assertThatThrownBy(() -> page(changed, 0, 1))
+                    .isInstanceOf(ManagedAgentException.class).hasMessageContaining("cursor");
+        }
+        assertThat(page(cursor, 0, 1).items()).extracting(StoreModels.ItemRecord::itemId).containsExactly("b");
     }
 
     @Test
@@ -450,9 +377,9 @@ public class ManagedSchemaSessionStoreTest {
                 com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(tenant, "another-session"),
                 tenant,
                 "big");
-        assertThatThrownBy(() -> store.findSnapshot(tenant, session))
+        assertThatThrownBy(() -> messages())
                 .isInstanceOf(IllegalStateException.class)
-                .hasMessageContaining("Snapshot resource is unavailable");
+                .hasMessageContaining("Message body resource is unavailable");
         event("big", "next");
         assertThatThrownBy(this::materialize)
                 .isInstanceOf(IllegalStateException.class)
@@ -460,188 +387,96 @@ public class ManagedSchemaSessionStoreTest {
     }
 
     @Test
-    void oldSnapshotPinsLargeMessageBodyAfterLatestMessageChanges() {
+    void messageUpdatesReleaseOldBodyWithoutRetainingPageCopies() {
         event("big", "a".repeat(70_000));
         event("last", "last");
         materialize();
-        var first = store.findSnapshotPage(tenant, session, null, 0, 1);
-        String body =
-                jdbc.queryForObject(
-                        "SELECT body_resource_key FROM ma_message WHERE tenant_id = ? AND item_id ="
-                                + " ?",
-                        String.class,
-                        tenant,
-                        "big");
+        var first = page(null, 0, 1);
+        String body = messageBody("big");
         event("big", "b");
-        clock.advance(Duration.ofSeconds(6));
         materialize();
-        assertThat(
-                        jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind = 'MESSAGE'"
-                                        + " AND resource_key = ?",
-                                Integer.class,
-                                body))
-                .isZero();
-        assertThat(
-                        jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM ma_resource_ref WHERE owner_kind = 'SNAPSHOT'"
-                                        + " AND resource_key = ?",
-                                Integer.class,
-                                body))
-                .isEqualTo(1);
-        assertThat(store.findSnapshotPage(tenant, session, first.nextCursor(), 0, 1).items())
-                .extracting(StoreModels.ItemRecord::itemId)
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key = ?",
+                Integer.class, body)).isZero();
+        assertThat(page(first.nextCursor(), 0, 1).items()).extracting(StoreModels.ItemRecord::itemId)
                 .containsExactly("last");
-        assertThat(
-                        store
-                                .findSnapshot(tenant, session)
-                                .orElseThrow()
-                                .items()
-                                .getFirst()
-                                .content()
-                                .stream()
-                                .map(StoreModels.ItemPartRecord::text)
-                                .collect(java.util.stream.Collectors.joining())
-                                .length())
-                .isEqualTo(70_001);
+        assertThat(messages().items().getFirst().content().stream().map(StoreModels.ItemPartRecord::text)
+                .collect(java.util.stream.Collectors.joining())).hasSize(70_001);
     }
 
     @Test
-    void consistentViewPairsWatermarkAndMessagesWhileAnotherTransactionCommits() throws Exception {
-        try (var connection = jdbc.getDataSource().getConnection()) {
-            org.junit.jupiter.api.Assumptions.assumeTrue(
-                    connection.getMetaData().getDatabaseProductName().equals("MySQL"),
-                    "Cross-table consistent read is a real MySQL acceptance gate");
-        }
+    void repeatableReadPagePairsWatermarkAndMessagesWhileAnotherTransactionCommits() throws Exception {
+        var readers = java.util.Arrays.stream(ManagedAgentStore.class.getMethods())
+                .filter(method -> method.getName().equals("findMessagePage")).toList();
+        assertThat(readers).hasSize(2).allSatisfy(method -> {
+            var annotation = method.getAnnotation(org.springframework.transaction.annotation.Transactional.class);
+            assertThat(annotation).isNotNull();
+            assertThat(annotation.transactionManager()).isEqualTo("managedAgentTransactionManager");
+            assertThat(annotation.readOnly()).isTrue();
+            assertThat(annotation.isolation()).isEqualTo(org.springframework.transaction.annotation.Isolation.REPEATABLE_READ);
+        });
         event("a", "before");
         materialize();
-        var original = store.findSnapshot(tenant, session).orElseThrow();
-        var entered = new java.util.concurrent.CountDownLatch(1);
-        var release = new java.util.concurrent.CountDownLatch(1);
-        var snapshot =
-                new ManagedSnapshotStore(
-                        jdbc,
-                        new ObjectMapper(),
-                        clock,
-                        (t, id, guard) -> {
-                            entered.countDown();
-                            try {
-                                if (!release.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
-                                    throw new IllegalStateException("writer did not commit");
-                                }
-                            } catch (InterruptedException interrupted) {
-                                Thread.currentThread().interrupt();
-                                throw new IllegalStateException(interrupted);
-                            }
-                            guard.run();
-                            assertThat(
-                                            jdbc.queryForObject(
-                                                    "SELECT covered_sequence FROM ma_event_stream"
-                                                        + " WHERE tenant_id = ? AND session_id = ?"
-                                                        + " AND stream_kind = 'SESSION'",
-                                                    Long.class,
-                                                    t,
-                                                    id))
-                                    .isEqualTo(original.coveredSequence());
-                            assertThat(
-                                            jdbc.queryForObject(
-                                                    "SELECT parts_json FROM ma_message WHERE"
-                                                        + " tenant_id = ? AND session_id = ? AND"
-                                                        + " item_id = ?",
-                                                    String.class,
-                                                    t,
-                                                    id,
-                                                    "a"))
-                                    .contains("before")
-                                    .doesNotContain("after");
-                            return original.items();
-                        });
+        long original = messages().coveredSequence();
+        var paused = new PausedMessageRead();
         try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
-            var build = executor.submit(() -> snapshot.build(tenant, session));
+            var read = executor.submit(paused::read);
             try {
-                assertThat(entered.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                assertThat(paused.entered.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
                 event("a", "after");
                 materialize();
-                assertThat(
-                                jdbc.queryForObject(
-                                        "SELECT parts_json FROM ma_message WHERE tenant_id = ? AND"
-                                                + " session_id = ? AND item_id = ?",
-                                        String.class,
-                                        tenant,
-                                        session,
-                                        "a"))
-                        .contains("beforeafter");
+                assertThat(messages().items().getFirst().content().getFirst().text()).isEqualTo("beforeafter");
             } finally {
-                release.countDown();
+                paused.release.countDown();
             }
-            build.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            var page = read.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(page.coveredSequence()).isEqualTo(original);
+            assertThat(page.items().getFirst().content().getFirst().text()).isEqualTo("before");
         }
     }
 
     @Test
-    void writerHeartbeatCompletesWhileSnapshotBodyConstructionIsPaused() throws Exception {
+    void repeatableReadPageRetainsOldBodyViewWhileReleasedBytesAreCollected() throws Exception {
+        alignProjectionClock();
+        event("big", "a".repeat(70_000));
+        materialize();
+        String original = messageBody("big");
+        var paused = new PausedMessageRead();
+        try (var executor = java.util.concurrent.Executors.newSingleThreadExecutor()) {
+            var read = executor.submit(paused::read);
+            try {
+                assertThat(paused.entered.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                event("big", "b");
+                materialize();
+                projectionCollector().runOnce();
+                assertThat(resourceState(original)).isEqualTo("COLLECTED");
+            } finally {
+                paused.release.countDown();
+            }
+            assertThat(read.get(10, java.util.concurrent.TimeUnit.SECONDS).items().getFirst().content().getFirst().text())
+                    .isEqualTo("a".repeat(70_000));
+        }
+    }
+
+    @Test
+    void writerHeartbeatCompletesWhileMessagePageReadIsPaused() throws Exception {
         var privateStore = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new ManagedSessionStore(jdbc));
         String token = "a".repeat(32);
-        var grant =
-                tx.execute(
-                        status ->
-                                privateStore.acquireWriter(
-                                        tenant,
-                                        session,
-                                        token,
-                                        new ManagedSessionStoreModels.AcquireWriterRequest(
-                                                "workspace", "writer", 60_000L)));
+        var grant = tx.execute(status -> privateStore.acquireWriter(tenant, session, token,
+                new ManagedSessionStoreModels.AcquireWriterRequest("workspace", "writer", 60_000L)));
         event("a", "before");
         materialize();
-        var original = store.findSnapshot(tenant, session).orElseThrow();
-        var entered = new java.util.concurrent.CountDownLatch(1);
-        var release = new java.util.concurrent.CountDownLatch(1);
-        var snapshot =
-                new ManagedSnapshotStore(
-                        jdbc,
-                        new ObjectMapper(),
-                        clock,
-                        (t, id, guard) -> {
-                            entered.countDown();
-                            try {
-                                if (!release.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
-                                    throw new IllegalStateException("heartbeat did not complete");
-                                }
-                            } catch (InterruptedException interrupted) {
-                                Thread.currentThread().interrupt();
-                                throw new IllegalStateException(interrupted);
-                            }
-                            guard.run();
-                            return original.items();
-                        });
+        var paused = new PausedMessageRead();
         try (var executor = java.util.concurrent.Executors.newFixedThreadPool(2)) {
-            var build = executor.submit(() -> snapshot.build(tenant, session));
+            var read = executor.submit(paused::read);
             try {
-                assertThat(entered.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
-                var heartbeat =
-                        executor.submit(
-                                () ->
-                                        tx.execute(
-                                                status ->
-                                                        privateStore.renewWriter(
-                                                                tenant,
-                                                                session,
-                                                                token,
-                                                                new ManagedSessionStoreModels
-                                                                        .RenewWriterRequest(
-                                                                        "workspace",
-                                                                        "writer",
-                                                                        grant.writerGeneration(),
-                                                                        60_000L))));
-                assertThat(
-                                heartbeat
-                                        .get(3, java.util.concurrent.TimeUnit.SECONDS)
-                                        .writerGeneration())
-                        .isEqualTo(grant.writerGeneration());
+                assertThat(paused.entered.await(10, java.util.concurrent.TimeUnit.SECONDS)).isTrue();
+                var heartbeat = executor.submit(() -> tx.execute(status -> privateStore.renewWriter(tenant, session, token,
+                        new ManagedSessionStoreModels.RenewWriterRequest("workspace", "writer", grant.writerGeneration(), 60_000L))));
+                assertThat(heartbeat.get(3, java.util.concurrent.TimeUnit.SECONDS).writerGeneration()).isEqualTo(grant.writerGeneration());
             } finally {
-                release.countDown();
+                paused.release.countDown();
             }
-            build.get(10, java.util.concurrent.TimeUnit.SECONDS);
+            assertThat(read.get(10, java.util.concurrent.TimeUnit.SECONDS).items()).hasSize(1);
         }
     }
 
@@ -714,7 +549,7 @@ public class ManagedSchemaSessionStoreTest {
                                 false,
                                 "boot:kept:1"));
         materialize();
-        var frozen = store.findSnapshotPage(tenant, session, null, 0, 1);
+        var frozen = page(null, 0, 1);
         String oldBody =
                 jdbc.queryForObject(
                         "SELECT body_resource_key FROM ma_message WHERE"
@@ -724,7 +559,7 @@ public class ManagedSchemaSessionStoreTest {
                         session,
                         "withdrawn");
         long first =
-                store.findSnapshot(tenant, session).orElseThrow().items().stream()
+                messages().items().stream()
                         .filter(item -> "withdrawn".equals(item.itemId()))
                         .findFirst()
                         .orElseThrow()
@@ -735,7 +570,8 @@ public class ManagedSchemaSessionStoreTest {
                 status ->
                         store.retractContinuationOutput(
                                 tenant, session, turn, "owner", "boot", "old"));
-        assertThat(store.findSnapshot(tenant, session).orElseThrow().items())
+        materialize();
+        assertThat(messages().items())
                 .extracting(StoreModels.ItemRecord::itemId)
                 .doesNotContain("withdrawn");
         assertThat(
@@ -745,17 +581,11 @@ public class ManagedSchemaSessionStoreTest {
                                 Integer.class,
                                 oldBody))
                 .isZero();
-        assertThat(
-                        jdbc.queryForObject(
-                                "SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key = ?"
-                                        + " AND owner_kind = 'SNAPSHOT'",
-                                Integer.class,
-                                oldBody))
-                .isPositive();
-        assertThat(store.findSnapshotPage(tenant, session, frozen.nextCursor(), 0, 10).items())
-                .filteredOn(item -> "withdrawn".equals(item.itemId()))
-                .singleElement()
-                .satisfies(item -> assertThat(item.content().getFirst().text()).hasSize(70_000));
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_resource_ref WHERE resource_key = ?",
+                Integer.class, oldBody)).isZero();
+        assertThatThrownBy(() -> page(frozen.nextCursor(), 0, 10))
+                .isInstanceOfSatisfying(ManagedAgentException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("message_projection_changed"));
         tx.executeWithoutResult(
                 status ->
                         store.appendPublicEventIfAbsent(
@@ -777,7 +607,7 @@ public class ManagedSchemaSessionStoreTest {
                                 true,
                                 "boot:new:2"));
         materialize();
-        assertThat(store.findSnapshotPage(tenant, session, null, first, 10).items())
+        assertThat(page(null, first, 10).items())
                 .filteredOn(item -> "withdrawn".equals(item.itemId()))
                 .singleElement()
                 .satisfies(
@@ -838,7 +668,7 @@ public class ManagedSchemaSessionStoreTest {
                                 "boot:kept:2"));
         materialize();
         var before =
-                store.findSnapshot(tenant, session).orElseThrow().items().stream()
+                messages().items().stream()
                         .filter(item -> "same".equals(item.itemId()))
                         .findFirst()
                         .orElseThrow();
@@ -846,7 +676,8 @@ public class ManagedSchemaSessionStoreTest {
                 status ->
                         store.retractContinuationOutput(
                                 tenant, session, turn, "owner", "boot", "old"));
-        assertThat(store.findSnapshot(tenant, session).orElseThrow().items())
+        materialize();
+        assertThat(messages().items())
                 .filteredOn(item -> "same".equals(item.itemId()))
                 .singleElement()
                 .satisfies(
@@ -876,7 +707,7 @@ public class ManagedSchemaSessionStoreTest {
         event("big", "x".repeat(70_000));
         if ("none".equals(corruption)) {
             tx.executeWithoutResult(status -> subject.materializeNextBatch(tenant, session, 100));
-            assertThat(subject.findSnapshot(tenant, session).orElseThrow().items())
+            assertThat(tx.execute(status -> subject.findMessagePage(tenant, session, null, 100, false)).items())
                     .singleElement()
                     .satisfies(
                             item -> assertThat(item.content().getFirst().text()).hasSize(70_000));
@@ -947,6 +778,48 @@ public class ManagedSchemaSessionStoreTest {
             }
             return changed;
         }
+    }
+
+    private final class PausedMessageRead {
+        private final java.util.concurrent.CountDownLatch entered = new java.util.concurrent.CountDownLatch(1);
+        private final java.util.concurrent.CountDownLatch release = new java.util.concurrent.CountDownLatch(1);
+        private final ManagedAgentStore subject;
+
+        PausedMessageRead() {
+            var paused = new ManagedSchemaJdbcTemplate(java.util.Objects.requireNonNull(jdbc.getDataSource())) {
+                @Override
+                public <T> List<T> query(String sql, org.springframework.jdbc.core.RowMapper<T> mapper, Object... arguments) {
+                    var rows = super.query(sql, mapper, arguments);
+                    if (sql.startsWith("SELECT m.item_id, m.first_sequence,")) {
+                        entered.countDown();
+                        try {
+                            if (!release.await(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                                throw new IllegalStateException("Message page read was not released");
+                            }
+                        } catch (InterruptedException interrupted) {
+                            Thread.currentThread().interrupt();
+                            throw new IllegalStateException(interrupted);
+                        }
+                    }
+                    return rows;
+                }
+            };
+            subject = new ManagedAgentStore(paused, new ObjectMapper(), clock, ignored -> {},
+                    new ManagedWorkspaceRegistry(paused), new ManagedAgentProperties(),
+                    new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        }
+
+        StoreModels.MessagePage read() {
+            return tx.execute(status -> subject.findMessagePage(tenant, session, null, 100, false));
+        }
+    }
+
+    private StoreModels.MessagePage page(String cursor, long afterSequence, int limit) {
+        return tx.execute(status -> store.findMessagePage(tenant, session, cursor, limit, false, afterSequence));
+    }
+
+    private StoreModels.MessagePage messages() {
+        return page(null, 0, 100);
     }
 
     private void event(String item, String text) {

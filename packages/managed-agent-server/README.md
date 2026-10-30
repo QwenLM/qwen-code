@@ -157,9 +157,20 @@ Items and resumes after their `snapshot_through_sequence`. A
 cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
 event query and one `agent.session.resync_required` frame from either stream
 whenever the cursor is below the durable floor. Rebuilding projections or pruning
-all retained events never resets that floor. Snapshot-backed pages keep their immutable
-version during concurrent message changes; their scoped opaque cursor expires after
-30 minutes and retains the required snapshot and subsequent replay interval.
+all retained events never resets that floor. Message queries page directly over
+`ma_message`; a scoped opaque cursor fixes the membership range and complete
+ordering position while message bodies and statuses remain live. Projection
+rebuild invalidates the cursor. The default transcript returns recent Items and
+the actual materialized coverage for SSE handoff, without reading the whole
+history or unmaterialized event tail. Export reads forward within its initial
+membership range and does not promise a fixed content version. Its retained
+`snapshotThroughSequence` field names that fixed range; transcript coverage
+names the current read watermark. A projection behind the replay floor or an
+initial export behind committed events returns retryable
+`message_projection_pending`. The historical `reload_snapshot` resync action
+now means reload the live message view. See the
+[removal design](../../docs/design/2026-10-29-managed-message-snapshot-removal.md)
+([简体中文](../../docs/design/2026-10-29-managed-message-snapshot-removal.zh-CN.md)).
 `GET /v1/agents/sessions/{id}/turns` lists a Session's Turns newest first with
 an opaque cursor, and `GET /v1/agents/sessions/{id}/turns/{turnId}` reads one.
 Design: [English](../../docs/design/2026-09-27-managed-agent-api-contract.md) |
@@ -498,7 +509,7 @@ and requires the retention deployment gates. With both
 `qwen.managed-agent.tool-publication.enabled` and
 `qwen.managed-agent.tool-publication.gc-enabled` true, a typed
 `SESSION_RESOURCE_GC` operation in `ma_operation` releases retired journal,
-message, record, snapshot and artifact owners and their `ma_resource_ref`
+message, record, native journal snapshot and artifact owners and their `ma_resource_ref`
 references in bounded transactions after the deletion grace. Unreferenced
 `PUBLISHED` or `REFERENCED` immutable `MYSQL_INLINE` bodies in `ma_resource`
 are then byte-dropped, keeping their identities with state `COLLECTED`.
@@ -507,7 +518,8 @@ intent before physical deletion and retains its claim generation and cursor
 until the outcome is settled. Live readers, recovery protection and unresolved
 object writes block collection. Session/head tombstones and event-stream tail
 and retention-floor counters remain. Unreferenced bodies of active Sessions
-remain retained until Session retirement. Reads of the retired Session stay fenced with
+remain retained until Session retirement, except released public message bodies
+that the reader-aware projection collector can reclaim. Reads of the retired Session stay fenced with
 `tool_output_session_retired` exactly as before; a workspace-recovery read
 that physically reaches a collected byte copy fails the named check
 `resource_collected` instead of the generic `resource_layout_unsupported` or
@@ -1269,7 +1281,7 @@ standalone reference keeps the one configured directory for legacy unbound
 Sessions. Persisted bound Sessions use the private Workspace execution path
 below.
 
-Managed Server and Runtime Broker share the single 32-table baseline in
+Managed Server and Runtime Broker share the single 38-table baseline in
 [`persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql`](persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql).
 Until the first formal Managed Agent release, schema changes update this V1 baseline
 in place. Do not add V2+ migrations or increment the database schema version before
@@ -1327,7 +1339,7 @@ Publication and CSI ACK references retain executions and their parent sessions a
 bindings regardless of age, including COLLECTED publications.
 After cleanup, existing missing-record responses apply. Callers must not reuse
 expired Runtime Session IDs or idempotency keys. Initialize a fresh database with
-the single canonical 32-table V1 baseline and keep cleanup disabled. Legacy
+the single canonical 38-table V1 baseline and keep cleanup disabled. Legacy
 catalogs are rejected; no in-place upgrade or old-data migration is provided.
 Verify repeated initialization preserves terminal receipts, retain the old
 environment for historical reads and settle its in-flight work before cutover.
@@ -1417,7 +1429,7 @@ for record capacity and rewind semantics.
 
 ### Verified original-mount recovery (W1a)
 
-The current fresh 32-table baseline requires this physical mount guard for LOCAL tool and child Git execution in a trusted, single-host OpenJDK 21 `local-process` deployment on Linux or macOS with a persistent, unambiguous root birth time. Enable `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` and complete offline registration before admitting that work. Text-only Turns can run without registration; LOCAL tool acquisition fails with `409 workspace_unavailable` when the physical mapping is absent. Taking the next tool Turn after a Broker restart also requires `durable-local-process=true`. macOS requires `trusted-local-reboot-recovery=false` and supports same-boot adoption only. Linux whole-host restart succeeds only while the registered physical identity still matches. The shared V1 baseline stores registration, independent `mount_birth_time` and mount fence in `ma_storage` and `ma_storage_owner`. An unregistered mount is never registered from the directory found at startup.
+The current fresh 38-table baseline requires this physical mount guard for LOCAL tool and child Git execution in a trusted, single-host OpenJDK 21 `local-process` deployment on Linux or macOS with a persistent, unambiguous root birth time. Enable `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` and complete offline registration before admitting that work. Text-only Turns can run without registration; LOCAL tool acquisition fails with `409 workspace_unavailable` when the physical mapping is absent. Taking the next tool Turn after a Broker restart also requires `durable-local-process=true`. macOS requires `trusted-local-reboot-recovery=false` and supports same-boot adoption only. Linux whole-host restart succeeds only while the registered physical identity still matches. The shared V1 baseline stores registration, independent `mount_birth_time` and mount fence in `ma_storage` and `ma_storage_owner`. An unregistered mount is never registered from the directory found at startup.
 
 Marker v2 stores birth time as a canonical `Instant` string. Linux reads creation time, mtime, device and inode in one JDK `unix` attribute snapshot and rejects creation time at/before epoch or equal to mtime, which OpenJDK 21 may return when birth time is unsupported. A real Linux birth time equal to mtime is also conservatively refused; prepare the project layout or update the root's mtime offline before retrying. macOS reads native nanosecond birth time with `stat` and cross-checks its device/inode against the JDK canonical-directory snapshot, because JDK 21 truncates macOS birth time to seconds. A positive native macOS birth time is independent even when it equals mtime; fresh empty roots keep their original birth time. Mtime is not an identity field, and ordinary mtime changes do not invalidate an unchanged birth time. The marker contains an application-specific HMAC-SHA256 host ID with `Qwen-Code/verified-workspace/v2` as input. Its key is the trimmed machine-id UTF-8 bytes on Linux or the original `IOPlatformUUID` UTF-8 bytes on macOS; neither raw identity is stored in the marker.
 
@@ -1433,8 +1445,9 @@ crash. Database credentials come from `W1_JDBC_URL`, `W1_JDBC_USER` and
 `W1_JDBC_PASSWORD` environment variables:
 
 ```bash
-mvn -q -DskipTests compile exec:java \
-  -Dexec.mainClass=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain \
+mvn -q -pl server -am -DskipTests -Dgpg.skip=true install
+mvn -q -pl server exec:java \
+  -Dexec.mainClass=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceStorageRegistrationMain \
   -Dexec.args='register tenant-a storage-a /absolute/canonical/workspace-a <operation-uuid> --offline-confirmed'
 ```
 
@@ -1445,7 +1458,7 @@ wraps. The same entry is available from a shipped Spring Boot fat jar, without t
 
 ```bash
 java -cp /path/to/app.jar \
-  -Dloader.main=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain \
+  -Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceStorageRegistrationMain \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   register tenant-a storage-a /absolute/canonical/workspace-a '<operation-uuid>' --offline-confirmed
 ```
@@ -1553,7 +1566,7 @@ Checkstyle and the Spring Boot repackage, and the full suite includes
 environment-sensitive timing tests that can fail on a local machine, so CI is
 the arbiter; for SpotBugs alone, run `mvn compile spotbugs:check`. The
 optional real-MySQL profile also verifies schema upgrade,
-exact bytes, public Item/Snapshot projection, and the independent-JVM Managed
+exact bytes, public Item projection, and the independent-JVM Managed
 Session Store crash/takeover path:
 
 ```bash

@@ -134,7 +134,8 @@ component scans and maintain a single owner for closing each resource.
 | Resource                                      | Owner          |
 | --------------------------------------------- | -------------- |
 | OpenAPI and shared protocol schemas           | `contracts`    |
-| V1 schema and CSI persistence declarations    | `persistence`  |
+| CSI native-tool protocol declarations         | `contracts`    |
+| V1 database schema                            | `persistence`  |
 | Application YAML and Spring registration      | `server`       |
 | Test fixtures and JUnit service registrations | `verification` |
 

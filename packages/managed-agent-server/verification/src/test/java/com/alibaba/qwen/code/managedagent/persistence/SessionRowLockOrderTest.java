@@ -140,7 +140,7 @@ class SessionRowLockOrderTest {
             "ManagedProjectionResourceCollector.java",
             "ManagedRuntimeRetentionGuard.java",
             "ManagedSessionRetirementStore.java", "ManagedSessionStore.java",
-            "ManagedSnapshotStore.java", "ManagedToolResultStore.java",
+            "ManagedToolResultStore.java",
             "ManagedUserMessageStore.java",
             "ResidentWorkspaceRetirementStore.java", "ResidentWorkspaces.java",
             "ToolPublicationRetentionStore.java",
@@ -225,11 +225,6 @@ class SessionRowLockOrderTest {
                                     "ManagedSessionStore.sha256/1",
                                     "ManagedSessionStore.storedTransaction/1",
                                     "ManagedSessionStore.usesDataSource/1")),
-                    Map.entry("ManagedSnapshotStore.java",
-                            Set.of("ItemReader.read/3",
-                                    "ManagedSnapshotStore.decode/1",
-                                    "SnapshotReadLease.check/0",
-                                    "SnapshotReadLease.close/0")),
                     Map.entry("ManagedTaskEventStore.java",
                             Set.of("ManagedTaskEventStore.eventRow/2")),
                     Map.entry("ManagedToolResultProjector.java",
@@ -298,7 +293,6 @@ class SessionRowLockOrderTest {
                                     "Encoder.write/1",
                                     "FrozenOwnerReader.read/2|Inspection.read/2",
                                     "Inspection.context/2",
-                                    "Inspection.snapshot/0",
                                     "Kind.accepts/1",
                                     "Kind.binary/0",
                                     "Kind.integral/0",
@@ -353,16 +347,7 @@ class SessionRowLockOrderTest {
                     Map.entry("WorkspaceStorageGuard.java",
                             Set.of("WorkspaceStorageGuard.verify/1")));
 
-    // Held bodies whose invocation the parse cannot see but whose
-    // transaction it can: ManagedSnapshotStore.afterCommit registers a
-    // post-commit synchronization, and the build it runs opens its own
-    // REQUIRES_NEW transaction, so that body's session lock can never
-    // order against a row its registering caller touched. A deferred body
-    // is dropped rather than folded at its declaration, and the set is
-    // asserted exactly per file, so a new held body reaching a side still
-    // fails closed.
-    private static final Set<String> DEFERRED_BODIES = Set.of(
-            "ManagedSnapshotStore.afterCommit/2");
+    private static final Set<String> DEFERRED_BODIES = Set.of();
 
     private record Key(String owner, String name, List<String> paramTypes) {
         int arity() {
@@ -622,8 +607,7 @@ class SessionRowLockOrderTest {
                         entry.getValue().deferredBodies());
             }
         }
-        assertThat(deferred).isEqualTo(Map.of("ManagedSnapshotStore.java",
-                DEFERRED_BODIES));
+        assertThat(deferred).isEmpty();
     }
 
     // The derivation must report a writer that reaches the turn row through

@@ -3,7 +3,6 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.druid.pool.DruidDataSource;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
-import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaProjection;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -16,8 +15,6 @@ import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Clock;
-import java.util.List;
-import java.util.Map;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -26,7 +23,6 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 class ManagedSnapshotPoolTest {
     private DruidDataSource source;
     private ManagedSchemaJdbcTemplate jdbc;
-    private ManagedSnapshotStore snapshots;
 
     @BeforeEach
     void setup() throws Exception {
@@ -46,12 +42,6 @@ class ManagedSnapshotPoolTest {
                 ManagedSchemaKeys.key("tenant"), ManagedSchemaKeys.key("session"),
                 com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session"));
         jdbc.update("INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, covered_sequence, gmt_modified) VALUES ('tenant', 'session', 'SESSION', X'', 1, 1, 0)");
-        snapshots = new ManagedSnapshotStore(jdbc, new ObjectMapper(), Clock.systemUTC(),
-                (tenant, session, guard) -> {
-                    guard.run();
-                    return List.of(new StoreModels.ItemRecord(tenant, session, "item", "turn", "message",
-                            "assistant", "completed", Map.of(), 1, 1, 0, 0, 1, List.of()));
-                });
     }
 
     @AfterEach
@@ -60,26 +50,35 @@ class ManagedSnapshotPoolTest {
     }
 
     @Test
-    void buildsAndReadsImmutablePagesWithOneConnection() {
-        snapshots.build("tenant", "session");
-        assertThat(snapshots.page("tenant", "session", null, 0, 20).items()).hasSize(1);
-        assertThat(snapshots.latest("tenant", "session").orElseThrow().items()).hasSize(1);
+    void readsMessagePagesWithOneConnection() {
+        jdbc.update("INSERT INTO ma_message (tenant_id,session_id,item_id,turn_id,item_type,item_role,item_status,attributes_json,"
+                + "first_sequence,last_sequence,gmt_create,gmt_modified,parts_json)"
+                + " VALUES ('tenant','session','item','turn','message','assistant','completed','{}',1,1,0,0,'[]')");
+        var store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), new ManagedAgentProperties(),
+                new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
+        var view = new TransactionTemplate(new DataSourceTransactionManager(source));
+        view.setReadOnly(true);
+        view.setIsolationLevel(org.springframework.transaction.TransactionDefinition.ISOLATION_REPEATABLE_READ);
+        assertThat(view.execute(status -> store.findMessagePage("tenant", "session", null, 20, true)).items())
+                .singleElement().satisfies(item -> assertThat(item.itemId()).isEqualTo("item"));
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_read_lease", Integer.class)).isZero();
     }
 
     @Test
-    void retainedPrivatePinPreventsProjectionExpiryAndBodyCollection() {
-        snapshots.build("tenant", "session");
+    void retainedPrivatePinPreventsReleasedBodyCollection() {
         var manager = new DataSourceTransactionManager(source);
-        jdbc.update("UPDATE ma_snapshot SET retain_until = 0");
+        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey("tenant", "session");
+        jdbc.update("INSERT INTO ma_resource (resource_key,session_scope_key,tenant_id,session_id,resource_id,kind,schema_version,"
+                + "byte_length,sha256,storage_kind,inline_bytes,state,gmt_create,retention_until)"
+                + " VALUES (?,?,'tenant','session','released','managed-message-parts',1,2,?,'MYSQL_INLINE',?,'REFERENCED',0,0)",
+                ManagedSchemaKeys.key(scope, "released"), scope, "a".repeat(64), new byte[] {91, 93});
         jdbc.update("UPDATE ma_resource SET retention_until = " + ManagedSchemaTime.SQL_NOW);
         jdbc.update("UPDATE ma_session SET runtime_request_key = ?", "a".repeat(64));
-        var roots = jdbc.queryForList("SELECT " + ManagedSchemaProjection.SNAPSHOT.columns() + " FROM ma_snapshot");
         var resources = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource");
         var refs = jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE_REF.columns() + " FROM ma_resource_ref");
         var collector = new ManagedProjectionResourceCollector(jdbc, manager);
         assertThat(collector.runOnce()).isFalse();
-        assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.SNAPSHOT.columns() + " FROM ma_snapshot")).isEqualTo(roots);
         assertThat(jdbc.queryForList("SELECT " + ManagedSchemaProjection.RESOURCE.columns() + " FROM ma_resource"))
                 .usingRecursiveComparison()
                 .isEqualTo(resources);
