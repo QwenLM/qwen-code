@@ -1542,7 +1542,8 @@ jobs:
     # shared ARM64 pool, before the app mounted. Use a fresh hosted runner
     # to isolate this browser gate from other jobs' host network changes.
     # Self-hosted steps below are dormant on this routing and retained for
-    # reversibility; their guards are also pinned by checkout/preflight tests.
+    # reversibility. Only the checkout-metadata and Node-preflight guards are
+    # pinned by tests; the font baseline guard is parked while this lane is hosted.
     runs-on: 'ubuntu-latest'
     # Slow hosted mirrors kept downloading past 23 min; reserve time for
     # the 208 smoke tests and artifact cleanup after installation.
