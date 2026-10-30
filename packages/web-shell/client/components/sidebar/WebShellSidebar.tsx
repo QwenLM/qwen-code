@@ -6921,7 +6921,7 @@ export function WebShellSidebar({
                           if (
                             target instanceof Element &&
                             target.closest(
-                              '[data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+                              '[data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
                             )
                           )
                             event.preventDefault();

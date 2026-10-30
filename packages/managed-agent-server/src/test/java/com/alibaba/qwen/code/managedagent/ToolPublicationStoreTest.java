@@ -3408,7 +3408,7 @@ class ToolPublicationStoreTest {
         publicSessions.appendPublicEventIfAbsent("tenant-1", "session-1", "turn_public_1", "item.tool_call.updated",
                 Map.of("toolCallId", "model-1", "status", "in_progress"), false, "late-tool-update");
         new TransactionTemplate(manager).executeWithoutResult(status -> publicSessions.materializeNextBatch("tenant-1", "session-1", 100));
-        assertThat(publicSessions.findSnapshot("tenant-1", "session-1").orElseThrow().items()).singleElement()
+        assertThat(publicSessions.findMessagePage("tenant-1", "session-1", null, 100, false).items()).singleElement()
                 .satisfies(item -> {
                     assertThat(item.status()).isEqualTo("failed");
                     assertThat(JSON.valueToTree(item.attributes()).path("result")).isEqualTo(result);
@@ -3603,7 +3603,7 @@ class ToolPublicationStoreTest {
                 .contains(descriptor);
         assertThat(publicResults.findResult("tenant-1", "other-session", descriptor.path("item_id").asText())).isEmpty();
         new TransactionTemplate(manager).executeWithoutResult(status -> publicSessions.materializeNextBatch("tenant-1", "session-1", 100));
-        assertThat(publicSessions.findSnapshot("tenant-1", "session-1").orElseThrow().items()).singleElement()
+        assertThat(publicSessions.findMessagePage("tenant-1", "session-1", null, 100, false).items()).singleElement()
                 .satisfies(item -> assertThat(JSON.valueToTree(item.attributes()).path("result")).isEqualTo(descriptor));
         assertThat(publicSessions.findControlEvents("tenant-1", "session-1", 1)).isEmpty();
         assertThat(jdbc.queryForObject("SELECT status FROM ma_turn", String.class)).isEqualTo("COMPLETED");
