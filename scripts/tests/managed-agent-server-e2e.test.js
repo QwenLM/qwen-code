@@ -318,6 +318,7 @@ describe('managed-agent-server e2e runner', () => {
       'test:e2e:managed-harness-restart-approval-after-decision',
       'test:e2e:managed-harness-restart-approval-after-prepare',
       'test:e2e:managed-harness-restart-approval-after-result',
+      'test:e2e:managed-harness-restart-approval-finished-before-commit',
       'test:e2e:managed-harness-restart-approval-decision-reply-lost',
       'test:e2e:managed-harness-restart-approval-admission-reply-lost',
       'test:e2e:managed-harness-restart-approval-load-reply-lost',
@@ -450,6 +451,182 @@ describe('managed-agent-server e2e runner', () => {
     );
     expect(harnessSource).toContain("process.env['QWEN_E2E_DROP_LOAD_REPLY']");
     expect(harnessSource).toContain('E2E dropping first load reply');
+    // B3a crashes the replacement inside the window after its post-tool stream
+    // Finished marker is durable but before the assistant commit, via a
+    // test-gated hook set only on that generation. The barrier proves the
+    // fault landed; the recovery parity proves the next generation reissued
+    // the saved request rather than compensating an already-committed terminal.
+    expect(source).toContain(
+      'QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT: session.id',
+    );
+    expect(source).toContain(
+      "'Finished turn held before the assistant commit'",
+    );
+    expect(source).toContain(
+      'E2E holding finished turn before assistant commit',
+    );
+    // The flag rides only the crashing generation, never the recovery one.
+    // Pin both call sites and the parameter default, not merely the
+    // identifiers (which appear at several runner sites): giving the recovery
+    // generation the flag, or flipping the default to true, must red here.
+    expect(source).toMatch(
+      /startReplacementHarness\(\s*'Replacement Hosted Harness',\s*approvalFault === 'finished-before-commit',?\s*\)/,
+    );
+    expect(source).toMatch(
+      /startReplacementHarness\(\s*'Post-fault recovery Harness',?\s*\)/,
+    );
+    expect(source).toContain('crashBeforeAssistantCommit = false');
+    // B3a asserts the durable crash precondition (the approved result settled)
+    // from MySQL like the sibling crash arms, not only the hook's log line.
+    expect(source).toContain(
+      'Finished-before-commit crash did not land after the approved result settled',
+    );
+    // R1-1 (deeper): the settled execution is not the window. The barrier must
+    // also read the post-tool main attempt's durable Finished marker from the
+    // same journal the recovery reads, and assert no assistant commit follows
+    // it, before the SIGKILL. Pin this window-shaped — the journal assertion
+    // must sit between the B3a barrier and the crash, and its discriminator
+    // must mirror findHostedCommittedModelOutput — so deleting the assertion or
+    // moving the hold above the output_committed commit cannot stay green. A
+    // bare identifier check would survive both, since the recovery reader also
+    // accepts a saved request whose attempt is still started.
+    const b3aBarrier = source.indexOf(
+      "'Finished turn held before the assistant commit'",
+    );
+    const b3aCrash = source.indexOf('await crashChild(', b3aBarrier);
+    expect(b3aBarrier).toBeGreaterThan(-1);
+    expect(b3aCrash).toBeGreaterThan(b3aBarrier);
+    const b3aWindow = source.slice(b3aBarrier, b3aCrash);
+    expect(b3aWindow).toContain('finishedBeforeCommitWindow(');
+    expect(b3aWindow).toContain(
+      'SELECT prompt_id FROM qwen_managed_agent.ma_turn',
+    );
+    // R4-2: the window helper only runs through its arming ternary. Pin the
+    // condition itself, so narrowing the guard (e.g. to 'after-result') reds
+    // here instead of silently deleting the arm's only durable-window check
+    // while the helper name still appears in the barrier->crash slice.
+    expect(source).toMatch(
+      /approvalFault === 'finished-before-commit'\s*\?\s*finishedBeforeCommitWindow\(/,
+    );
+    expect(source).toContain(
+      'Finished-before-commit crash landed before the model Finished marker committed',
+    );
+    expect(source).toContain(
+      'Finished-before-commit crash landed after the assistant commit',
+    );
+    const windowFn = source.indexOf('function finishedBeforeCommitWindow(');
+    expect(windowFn).toBeGreaterThan(-1);
+    const windowFnBody = source.slice(
+      windowFn,
+      source.indexOf('\n}', windowFn),
+    );
+    expect(windowFnBody).toContain('qwen_managed_agent.ma_session_journal_tx');
+    expect(windowFnBody).toContain(':main:');
+    expect(windowFnBody).toContain(
+      "latestAttempt.payload['state'] !== 'output_committed'",
+    );
+    expect(windowFnBody).toContain("event.payload['role'] === 'assistant'");
+    expect(windowFnBody).toContain('event.sequence > latestAttempt.sequence');
+    // B3a must take the same deep-equal parity gate as after-result; pin the
+    // combined condition so reverting it to after-result-only reds here rather
+    // than silently deleting the arm's only deep-equal assertion.
+    expect(source).toMatch(
+      /if \(\s*approvalFault === 'after-result' \|\|\s*approvalFault === 'finished-before-commit'\s*\)/,
+    );
+    expect(harnessSource).toContain(
+      "process.env['QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT']",
+    );
+    expect(harnessSource).toContain(
+      'E2E holding finished turn before assistant commit',
+    );
+  });
+
+  // R4-2 (behavioural): the source pins above assert the window helper's
+  // spelling; this exercises finishedBeforeCommitWindow itself on injected
+  // journal rows, so the latest-attempt selection and both throw branches are
+  // proven on data, not on text. runMysql is injected through load() (the
+  // parameter must be spelled exactly runMysql to shadow the free identifier);
+  // the helper stays a top-level declaration so extracted() can walk it.
+  it('behaves finishedBeforeCommitWindow on injected journal rows', () => {
+    const promptId = 'turn_b3a';
+    const attempt = (sequence, state, prompt = promptId) => ({
+      kind: 'model.attempt',
+      sequence,
+      payload: { attemptId: `${prompt}:main:${sequence}`, state },
+    });
+    const assistantCommit = (sequence) => ({
+      kind: 'message.committed',
+      sequence,
+      payload: { role: 'assistant' },
+    });
+    // The helper reads HEX(record_bytes) rows; each row decodes to UTF-8 JSON
+    // Lines of managed_session_event_v1 records. Encode the events the way the
+    // journal writer does, as one HEX blob the helper splits back into lines.
+    const rows = (events) =>
+      Buffer.from(
+        events
+          .map((event) =>
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: event,
+            }),
+          )
+          .join('\n'),
+        'utf8',
+      ).toString('hex');
+    const run = (events) =>
+      load(
+        ['finishedBeforeCommitWindow'],
+        'finishedBeforeCommitWindow',
+        'runMysql',
+      )(() => rows(events)).finishedBeforeCommitWindow(0, 'filter', promptId);
+
+    // output_committed with no following assistant commit: the window holds.
+    expect(run([attempt(25, 'output_committed')])).toEqual({
+      attemptId: `${promptId}:main:25`,
+      attemptSequence: 25,
+    });
+    // An assistant commit before the attempt does not close the window.
+    expect(run([assistantCommit(20), attempt(25, 'output_committed')])).toEqual(
+      {
+        attemptId: `${promptId}:main:25`,
+        attemptSequence: 25,
+      },
+    );
+    // A non-assistant commit after the attempt does not close the window.
+    expect(
+      run([
+        attempt(25, 'output_committed'),
+        { kind: 'message.committed', sequence: 27, payload: { role: 'user' } },
+      ]),
+    ).toEqual({ attemptId: `${promptId}:main:25`, attemptSequence: 25 });
+    // The latest main attempt wins, even when rows arrive unsorted.
+    expect(
+      run([attempt(30, 'output_committed'), attempt(25, 'output_committed')]),
+    ).toEqual({ attemptId: `${promptId}:main:30`, attemptSequence: 30 });
+    // Another prompt's attempts are not this window's.
+    expect(() => run([attempt(25, 'output_committed', 'other_turn')])).toThrow(
+      /no main model attempt/,
+    );
+    // A still-started latest attempt: the crash landed before the Finished
+    // marker committed (a mutation the source pins alone cannot catch).
+    expect(() => run([attempt(25, 'started')])).toThrow(
+      /before the model Finished marker committed: attemptState=started/,
+    );
+    // A newer started attempt after an older completed one is still before the
+    // window: the recovery reader accepts a started attempt, so only the latest
+    // attempt's state discriminates.
+    expect(() =>
+      run([attempt(25, 'output_committed'), attempt(30, 'started')]),
+    ).toThrow(
+      /before the model Finished marker committed: attemptState=started/,
+    );
+    // An assistant commit after the attempt: the crash landed after the commit.
+    expect(() =>
+      run([attempt(25, 'output_committed'), assistantCommit(27)]),
+    ).toThrow(
+      /after the assistant commit: commitSequence=27 attemptSequence=25/,
+    );
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,
