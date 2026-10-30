@@ -74,6 +74,10 @@ succeed:
   `continue-on-error` rewrites `conclusion`)
 - payload validation failure → the step fails before writing the output
 
+Saving the fingerprint-named artifact for future releases is also non-fatal.
+If that upload fails, the validated same-run artifact still serves this release;
+the next release builds fresh unless another reusable artifact is available.
+
 An empty reuse ID runs the full native matrix. Fresh builds now pin Node and
 the prebuildify target to 22.22.3 and use filtered, frozen pnpm dependencies
 when a lockfile exists; only older refs retain the npm install path. Linux on hosted and ECS runners
@@ -131,8 +135,9 @@ Fingerprint, provenance, retention and payload behaviour are covered by unit
 tests with direct witnesses, including the retention boundary that motivated
 the selection/consumption split. The workflow wiring — non-fatal lookup,
 `outcome`-keyed acceptance, matrix skip, publisher re-verification, collector
-ordering and the architecture-free label — is pinned by contract tests, each
-confirmed to fail against an injected regression.
+ordering and the architecture-free label — is pinned by contract tests.
+The latest review adds regression-sensitive wiring assertions and fixes the
+retention test's clock; these additions await CI and were not run locally.
 
 A branch release dry-run can verify the miss path, all five native payloads and
 publisher consumption without publishing. It cannot seed a trusted reuse

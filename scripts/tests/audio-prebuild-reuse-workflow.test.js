@@ -6,6 +6,7 @@
 import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
+import { AUDIO_TARGETS } from '../../.github/scripts/audio-prebuilds.mjs';
 
 const workflow = (name) =>
   parse(readFileSync(`.github/workflows/${name}.yml`, 'utf8'));
@@ -15,19 +16,45 @@ const step = (job, name) =>
   releaseYaml.jobs[job].steps.find((entry) => entry.name === name);
 
 describe('audio prebuild reuse wiring', () => {
+  it('builds every target required by payload validation', () => {
+    const build = audioYaml.jobs.build;
+    const targets = build.strategy.matrix.include.flatMap(({ os, arch }) => {
+      if (os.startsWith('macos')) return [`darwin-${arch}`, 'darwin-x64'];
+      return [`${os.startsWith('windows') ? 'win32' : 'linux'}-${arch}`];
+    });
+    expect(targets.sort()).toEqual([...AUDIO_TARGETS].sort());
+    expect(
+      build.steps.find((entry) => entry.name === 'Build prebuild').run,
+    ).toContain('npm run prebuildify -- --target 22.22.3 --arch x64');
+  });
+
   it('only publishes a reuse ID after a trial download and payload validation', () => {
     // The ID comes from the acceptance step, not the lookup: a candidate that
     // cannot be downloaded or does not validate must leave the output empty so
     // the fresh build still runs.
-    expect(releaseYaml.jobs.prepare.outputs.audio_artifact_id).toBe(
-      '${{ steps.audio_reuse.outputs.artifact_id }}',
-    );
+    for (const [output, source] of Object.entries({
+      audio_prebuild_key: '${{ steps.audio_key.outputs.cache_key }}',
+      audio_artifact_id: '${{ steps.audio_reuse.outputs.artifact_id }}',
+      audio_run_id: '${{ steps.audio_reuse.outputs.run_id }}',
+    }))
+      expect(releaseYaml.jobs.prepare.outputs[output]).toBe(source);
     expect(releaseYaml.jobs.prepare.permissions.actions).toBe('read');
 
     const lookup = step('prepare', 'Find reusable audio prebuilds');
     const fingerprint = step('prepare', 'Fingerprint audio build inputs');
     const download = step('prepare', 'Try reusable audio prebuilds');
     const accept = step('prepare', 'Accept complete audio prebuilds');
+    expect(fingerprint.id).toBe('audio_key');
+    expect(lookup.env.AUDIO_KEY).toBe(
+      '${{ steps.audio_key.outputs.cache_key }}',
+    );
+    const steps = releaseYaml.jobs.prepare.steps;
+    for (const [before, after] of [
+      [fingerprint, lookup],
+      [lookup, download],
+      [download, accept],
+    ])
+      expect(steps.indexOf(before)).toBeLessThan(steps.indexOf(after));
     // Failure before acceptance must leave the fresh-build path available.
     for (const entry of [fingerprint, lookup, download, accept])
       expect(entry['continue-on-error']).toBe(true);
@@ -40,10 +67,17 @@ describe('audio prebuild reuse wiring', () => {
     );
     // outcome, not conclusion: continue-on-error rewrites conclusion to success.
     expect(accept.if).toBe("${{ steps.audio_download.outcome == 'success' }}");
-    expect(accept.run).toContain('audio-prebuilds.mjs validate');
+    expect(accept.run.trim().split('\n')).toEqual([
+      'node .release-workflow/.github/scripts/audio-prebuilds.mjs validate "$AUDIO_DIRECTORY"',
+      'echo "artifact_id=$AUDIO_ARTIFACT_ID" >> "$GITHUB_OUTPUT"',
+      'echo "run_id=$AUDIO_RUN_ID" >> "$GITHUB_OUTPUT"',
+    ]);
 
     // The trial bytes are always discarded, including when a step failed.
     const cleanup = step('prepare', 'Remove trial audio download');
+    expect(download.with.path).toBe('${{ steps.audio_key.outputs.directory }}');
+    for (const entry of [accept, cleanup])
+      expect(entry.env.AUDIO_DIRECTORY).toBe(download.with.path);
     expect(cleanup.if).toContain('always()');
     expect(cleanup.run).toBe('rm -rf -- "$AUDIO_DIRECTORY"');
 
@@ -89,6 +123,10 @@ describe('audio prebuild reuse wiring', () => {
       expect(verify['continue-on-error']).toBeUndefined();
       expect(verify.with.script).toContain('audioPrebuildKey');
       expect(verify.with.script).toContain('verifyAudioArtifact');
+      expect(verify.with.script).toContain(
+        'await verifyAudioArtifact(github, context.repo, artifact, key);',
+      );
+      expect(verify.with.script).not.toContain('AUDIO_SELECTION_MARGIN_MS');
 
       const reused = step(job, 'Download reusable audio prebuilds');
       const fresh = step(job, 'Download audio capture prebuilds');
@@ -106,6 +144,14 @@ describe('audio prebuild reuse wiring', () => {
       );
       // Exactly one of the two runs, and both land in the same directory.
       expect(reused.with.path).toBe(fresh.with.path);
+      const validateStep = step(job, 'Validate complete audio prebuilds');
+      expect(validateStep['continue-on-error']).toBeUndefined();
+      expect(validateStep.if).toBe(
+        "${{ github.repository == 'QwenLM/qwen-code' }}",
+      );
+      expect(validateStep.run).toBe(
+        `node .release-workflow/.github/scripts/audio-prebuilds.mjs validate ${reused.with.path}`,
+      );
 
       // Whichever path ran, the payload is validated before the build consumes it.
       const names = releaseYaml.jobs[job].steps.map((entry) => entry.name);
@@ -126,6 +172,8 @@ describe('audio prebuild reuse wiring', () => {
     // Without the keyed upload nothing can ever be reused; the fixed-name
     // artifact stays for the same-run consumer.
     expect(retain.if).toBe("${{ inputs.cache_key != '' }}");
+    expect(retain['continue-on-error']).toBe(true);
+    expect(retain.with.path).toBe('packages/audio-capture/prebuilds/');
     expect(retain.with.name).toBe(
       'audio-capture-prebuilds-${{ inputs.cache_key }}',
     );

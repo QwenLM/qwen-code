@@ -30,11 +30,12 @@ const temporary = () => {
   directories.push(path);
   return path;
 };
-afterEach(() =>
+afterEach(() => {
+  vi.restoreAllMocks();
   directories
     .splice(0)
-    .forEach((path) => rmSync(path, { recursive: true, force: true })),
-);
+    .forEach((path) => rmSync(path, { recursive: true, force: true }));
+});
 const write = (root, path, content) => {
   mkdirSync(dirname(join(root, path)), { recursive: true });
   writeFileSync(join(root, path), content);
@@ -137,6 +138,19 @@ describe('audio prebuild identity', () => {
     expect(f.key()).not.toBe(changedScript);
   });
 
+  it('fingerprints the workflow checkout separately from the release ref', () => {
+    const f = fixture();
+    const workflowRoot = temporary();
+    write(workflowRoot, '.github/scripts/audio-prebuilds.mjs', 'trusted helper');
+    const path = '.github/workflows/audio-capture-prebuilds.yml';
+    write(workflowRoot, path, 'workflow at dispatch');
+    const key = audioPrebuildKey(f.root, f.ref, workflowRoot);
+    write(f.root, path, 'unrelated release checkout edit');
+    expect(audioPrebuildKey(f.root, f.ref, workflowRoot)).toBe(key);
+    write(workflowRoot, path, 'updated native toolchain');
+    expect(audioPrebuildKey(f.root, f.ref, workflowRoot)).not.toBe(key);
+  });
+
   it('does not reuse refs without a native dependency lock', () => {
     const f = fixture();
     f.git('rm', 'pnpm-lock.yaml');
@@ -157,14 +171,23 @@ describe('audio prebuild identity', () => {
 });
 
 describe('audio prebuild payload', () => {
+  const targets = [
+    'darwin-arm64',
+    'darwin-x64',
+    'linux-arm64',
+    'linux-x64',
+    'win32-x64',
+  ];
   const fixture = () => {
     const root = temporary();
-    for (const target of AUDIO_TARGETS)
+    for (const target of targets)
       write(root, `${target}/audio.node`, 'native binary');
     return root;
   };
-  it('accepts all five nonempty targets', () =>
-    expect(() => validateAudioPrebuilds(fixture())).not.toThrow());
+  it('accepts all five nonempty targets', () => {
+    expect(AUDIO_TARGETS).toEqual(targets);
+    expect(() => validateAudioPrebuilds(fixture())).not.toThrow();
+  });
   it.each(AUDIO_TARGETS)('rejects missing %s', (target) => {
     const root = fixture();
     rmSync(join(root, target), { recursive: true });
@@ -228,12 +251,16 @@ describe('audio artifact provenance', () => {
     };
     return { artifact, run, github };
   };
-  it('selects an immutable artifact ID from a successful main release', async () => {
-    const f = fixture();
-    await expect(
-      findAudioArtifact(f.github, repo, 'key', vi.fn()),
-    ).resolves.toEqual({ artifact_id: 12, run_id: 34 });
-  });
+  it.each(['workflow_dispatch', 'schedule'])(
+    'selects an immutable artifact ID from a successful main %s release',
+    async (event) => {
+      const f = fixture();
+      f.run.event = event;
+      await expect(
+        findAudioArtifact(f.github, repo, 'key', vi.fn()),
+      ).resolves.toEqual({ artifact_id: 12, run_id: 34 });
+    },
+  );
   it.each([
     ['expired', true],
     ['expires_at', 'invalid'],
@@ -249,6 +276,8 @@ describe('audio artifact provenance', () => {
   it('requires selection headroom but consumes any unexpired artifact', async () => {
     const f = fixture();
     const now = Date.parse('2026-10-29T00:00:00Z');
+    vi.spyOn(Date, 'now').mockReturnValue(now);
+    expect(AUDIO_SELECTION_MARGIN_MS).toBe(48 * 60 * 60 * 1000);
     // Just over the selection margin: chosen by prepare, then consumed later.
     f.artifact.expires_at = new Date(
       now + AUDIO_SELECTION_MARGIN_MS + 60_000,
@@ -262,6 +291,9 @@ describe('audio artifact provenance', () => {
         now,
         AUDIO_SELECTION_MARGIN_MS,
       ),
+    ).resolves.toEqual({ artifact_id: 12, run_id: 34 });
+    await expect(
+      findAudioArtifact(f.github, repo, 'key', vi.fn()),
     ).resolves.toEqual({ artifact_id: 12, run_id: 34 });
     // The downstream consumers re-verify after the release has already
     // committed to reuse and skipped the fresh build, so they must not
@@ -316,10 +348,12 @@ describe('audio artifact provenance', () => {
     await expect(
       findAudioArtifact(f.github, repo, 'key', warn),
     ).resolves.toBeUndefined();
-    f.run.conclusion = 'failure';
+    f.github.rest.actions.listArtifactsForRepo.mockResolvedValueOnce({
+      data: { artifacts: [{ ...f.artifact, id: 13, expired: true }, f.artifact] },
+    });
     await expect(
       findAudioArtifact(f.github, repo, 'key', warn),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ artifact_id: 12, run_id: 34 });
     expect(warn).toHaveBeenCalledTimes(2);
   });
 });
