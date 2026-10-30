@@ -2,6 +2,8 @@
 
 The application lives in `packages/managed-agent-server`, alongside the Java SDK. It builds as one Maven reactor with six production modules and a verification module. The executable remains one Spring Boot service. Install the Java SDK before building the reactor; see [Runtime Broker internals](docs/runtime-broker.md).
 
+Every configuration property, with its environment variable and default, is listed in the [configuration reference](../../docs/users/managed-agent-configuration-reference.md). It is generated from this module's configuration metadata and the descriptions in `configuration-descriptions.json`; a new property needs a description there, and a settings class declared outside `ManagedAgentProperties` needs `@NestedConfigurationProperty` on its field, or the metadata leaves it out.
+
 Standalone Spring Boot control plane for the Qwen Code Hosted Harness. It has
 no DataWorks dependency. The default loopback listen address keeps the
 header-asserted tenant model: a trusted upstream sends `X-Qwen-Tenant-Id`
@@ -1836,6 +1838,19 @@ redrive restates the active attachment instead of wedging the Turn:
 
 ```bash
 npm run test:e2e:managed-harness-restart-approval-load-reply-lost
+```
+
+A crash between the main stream's durable Finished marker and the assistant
+commit (B3a) holds the replacement inside that window via a test-gated Harness
+hook (`QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT`, never set in production), set
+only on the generation that must crash. Once its post-tool round records
+Finished, the hook holds before the assistant commit and the runner kills it
+there; the next generation must reissue the saved request deep-equal and
+project one terminal with the recovered answer, rather than compensate an
+already-committed output:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-finished-before-commit
 ```
 
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
