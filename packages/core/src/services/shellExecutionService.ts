@@ -5,7 +5,6 @@
  */
 
 import stripAnsi from 'strip-ansi';
-import { isUtf8 } from 'node:buffer';
 import type { PtyImplementation } from '../utils/getPty.js';
 import { getPty } from '../utils/getPty.js';
 import { spawn as cpSpawn, spawnSync } from 'node:child_process';
@@ -331,18 +330,21 @@ function decodeBufferedOutput(finalBuffer: Buffer): string {
   return new TextDecoder(fallbackEncoding).decode(finalBuffer);
 }
 
+type TailEscState = 'ground' | 'esc' | 'csi' | 'str' | 'strEsc';
+
 function decodePreviewTail(buffer: Buffer): string {
-  let start = 0;
-  while (start < buffer.length && start < 3 && (buffer[start] & 0xc0) === 0x80)
-    start++;
-  const aligned = buffer.subarray(start);
-  // A ring can start inside a UTF-8 character; keep legacy bytes unless the
-  // remainder contains a valid multibyte UTF-8 sequence.
-  return decodeBufferedOutput(
-    start > 0 && isUtf8(aligned) && aligned.some((byte) => byte >= 0xc2)
-      ? aligned
-      : buffer,
-  );
+  if (buffer.length === 0) {
+    return '';
+  }
+  const encoding = getCachedEncodingForBuffer(buffer);
+  if (encoding === 'utf8' || encoding === 'utf-8') {
+    return buffer.toString('utf-8');
+  }
+  try {
+    return new TextDecoder(encoding).decode(buffer);
+  } catch {
+    return new TextDecoder('utf-8').decode(buffer);
+  }
 }
 
 function appendOutputCaptureLimitNotice(
@@ -1100,32 +1102,153 @@ export class ShellExecutionService {
         const stderrTailBytes = rawCapture
           ? Math.min(8192, Math.floor(maxBufferedOutputBytes / 8))
           : 0;
-        const createTail = (capacity: number) => {
+        const createTail = (
+          capacity: number,
+          seed?: {
+            bytes: Buffer;
+            flags: Uint8Array;
+            escState: TailEscState;
+            utf8Remaining: number;
+          },
+        ) => {
           const bytes = Buffer.alloc(capacity);
+          // 1 = byte arrived inside an escape sequence / multibyte char that opened
+          // earlier in the stream. We saw every byte ever, so this is evidence.
+          const inSequence = new Uint8Array(capacity);
           let length = 0;
           let position = 0;
+          let escState: TailEscState = seed?.escState ?? 'ground';
+          let utf8Remaining = seed?.utf8Remaining ?? 0;
+
+          const classify = (byte: number): 0 | 1 => {
+            if (utf8Remaining > 0) {
+              if ((byte & 0xc0) === 0x80) {
+                utf8Remaining--;
+                return 1;
+              }
+              utf8Remaining = 0;
+            }
+            if (escState === 'ground') {
+              if (byte === 0x1b) {
+                escState = 'esc';
+                return 0;
+              }
+              if (byte >= 0xc2 && byte <= 0xf4) {
+                utf8Remaining = byte >= 0xf0 ? 3 : byte >= 0xe0 ? 2 : 1;
+                return 0;
+              }
+              return 0;
+            }
+            switch (escState) {
+              case 'esc':
+                escState =
+                  byte === 0x1b
+                    ? 'esc'
+                    : byte === 0x5b
+                      ? 'csi' // ESC [
+                      : byte === 0x5d
+                        ? 'str' // ESC ] (OSC)
+                        : 'ground';
+                break;
+              case 'csi':
+                if (byte >= 0x40 && byte <= 0x7e) escState = 'ground';
+                else if (byte === 0x1b) escState = 'esc';
+                break;
+              case 'str':
+                if (byte === 0x07)
+                  escState = 'ground'; // BEL ends OSC
+                else if (byte === 0x1b) escState = 'strEsc'; // maybe ESC \
+                break;
+              case 'strEsc':
+                escState = byte === 0x5c ? 'ground' : 'str';
+                break;
+
+              default:
+                // escState is a closed union; nothing else to handle.
+                break;
+            }
+            return 1; // this byte is inside the sequence opened earlier
+          };
+
+          // Restore bytes retained by the previous (larger) ring together with their
+          // recorded flags. Do NOT re-classify them: the machine state as of the old
+          // ring's logical start is not kept, and the flags are the evidence recorded
+          // when each byte arrived.
+          if (seed && capacity > 0 && seed.bytes.length > 0) {
+            if (seed.bytes.length >= capacity) {
+              const offset = seed.bytes.length - capacity;
+              seed.bytes.copy(bytes, 0, offset);
+              inSequence.set(seed.flags.subarray(offset));
+              length = capacity;
+              position = 0;
+            } else {
+              seed.bytes.copy(bytes, 0);
+              inSequence.set(seed.flags, 0);
+              length = seed.bytes.length;
+              position = seed.bytes.length;
+            }
+          }
+
           return {
             add(data: Buffer) {
-              if (bytes.length === 0) return;
+              if (bytes.length === 0) {
+                for (let i = 0; i < data.length; i++) classify(data[i]);
+                return;
+              }
               if (data.length >= bytes.length) {
-                data.copy(bytes, 0, data.length - bytes.length);
+                const dataFlags = new Uint8Array(data.length);
+                for (let i = 0; i < data.length; i++) {
+                  dataFlags[i] = classify(data[i]);
+                }
+                const offset = data.length - bytes.length;
+                data.copy(bytes, 0, offset);
+                inSequence.set(dataFlags.subarray(offset));
                 length = bytes.length;
                 position = 0;
                 return;
               }
-              const first = Math.min(data.length, bytes.length - position);
-              data.copy(bytes, position, 0, first);
-              data.copy(bytes, 0, first);
-              position = (position + data.length) % bytes.length;
+              for (let i = 0; i < data.length; i++) {
+                bytes[position] = data[i];
+                inSequence[position] = classify(data[i]);
+                position = (position + 1) % bytes.length;
+              }
               length = Math.min(bytes.length, length + data.length);
             },
+            ordered(): { buf: Buffer; flags: Uint8Array } {
+              if (length === 0)
+                return { buf: Buffer.alloc(0), flags: new Uint8Array(0) };
+              if (length < bytes.length) {
+                return {
+                  buf: bytes.subarray(0, length),
+                  flags: inSequence.subarray(0, length),
+                };
+              }
+              const flags = new Uint8Array(length);
+              flags.set(inSequence.subarray(position), 0);
+              flags.set(inSequence.subarray(0, position), length - position);
+              return {
+                buf: Buffer.concat([
+                  bytes.subarray(position),
+                  bytes.subarray(0, position),
+                ]),
+                flags,
+              };
+            },
             read(): Buffer {
-              if (length === 0) return Buffer.alloc(0);
-              if (length < bytes.length) return bytes.subarray(0, length);
-              return Buffer.concat([
-                bytes.subarray(position),
-                bytes.subarray(0, position),
-              ]);
+              const { buf, flags } = this.ordered();
+              // Drop leading bytes that are the orphan half of a cut sequence.
+              let skip = 0;
+              while (skip < flags.length && flags[skip] === 1) skip++;
+              return skip > 0 ? buf.subarray(skip) : buf;
+            },
+            snapshot() {
+              const { buf, flags } = this.ordered();
+              return {
+                bytes: Buffer.from(buf),
+                flags: Uint8Array.from(flags),
+                escState,
+                utf8Remaining,
+              };
             },
           };
         };
@@ -1178,11 +1301,11 @@ export class ShellExecutionService {
         const handleOutput = (data: Buffer, stream: 'stdout' | 'stderr') => {
           totalOutputBytes += data.length;
           if (stream === 'stderr' && stderrTailBytes > 0 && !stderrTail) {
-            const previous = retainedTail();
+            const previous = previewTail?.snapshot();
             previewTail = createTail(
               maxBufferedOutputBytes - previewHeadBytes - stderrTailBytes,
+              previous,
             );
-            previewTail.add(previous);
             stderrTail = createTail(stderrTailBytes);
           }
           previewTail?.add(data);
