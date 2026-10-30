@@ -41,3 +41,11 @@ Ink 的真实 TextEntryStep 复用 shared TextInput 的 CLEAR_INPUT 合同。新
 ## 规范持久化颜色
 
 颜色选项保持既有显示名，但现在把小写 option id 提交给公开 manager。`blue`/`green` 能通过既有 Core 解析，`auto` 仍在序列化时省略。选择器兼读规范 id 与历史显示名，不暗自重写文件。此前精确 `color: Blue` 创建证据不证明 Core 重载后保留颜色。修正后的公开创建整案要求 `color: blue` 及冷热详情颜色。当前规范颜色批次已通过八个 CLI 整文件共 146 项测试、正常完整 build、typecheck、原生布局/resize 和 bundle。Node+Ink、Bun+Ink 与 strict Bun+OpenTUI 已各针对同一本地源码 bundle 通过包含本创建场景和新增编辑/删除场景的完整五项公开 case：15 次执行、五个唯一 case、24 次自然会话退出及零模型请求。独立保存结果审查已确认三个 profile 和 58 个有限输入 pins；最终 typecheck 已通过，最终 lint 也已通过。此前大写颜色的结果保留历史范围，不代表安装后的修改行为、其他平台或最终合入 main 的验收。
+
+## 原生创建器几何修正
+
+对已提交原创建器的后续真实 native probe 发现独立的窄区回归：11列、12行对话区域中，手动创建前三页实际长到37/36/35行并绘制到区域外，生成方式选项不可见；100列、30行 probe 到达全部三页。此前常规宽度公开运行和 mock 单测保留原范围。
+
+现在 caller 按实际内容宽度测量完整步骤标题与精确 footer，使用普通 footer 并计入五行固定 chrome，正文明确限高。容不下 chrome 时隐藏标题/footer、纵向 padding 和 border，保留横向 padding。紧凑选项不画数字，并按扣除选择箭头后的剩余宽度截断清理后的标签；数字键选择语义不变。现有真实 native 几何脚本加入同样前三个手动页的11x12及100x30检查，并增加标签单测。本修正只涉及布局，不改手动步骤、保存或 owner 守卫，不添加引导生成。
+
+修正后的工作树候选已通过八个 CLI 整文件共 148 项测试，以及正常完整 build、typecheck、lint 和 bundle。永久 native 整案保留原 132 项并通过新增六个创建器观察，第三页还实际证明姓名字段接收输入；未改动的原 probe 另行通过同样的窄区/常规几何检查。受影响的完整 manual 创建 case 随后在 Node+Ink、Bun+Ink、strict Bun+OpenTUI 各通过一次：三次执行、一个唯一 case、六次无 signal 的自然退出、模型请求为零。这些新 manual-only 运行与此前 0a34 的五 case/15 次执行/24 次退出证据分开；其余四个公开 case 未改，也不为本修正重跑。本证据对应提交前源码 bundle，不代表提交后打包、安装态创建、窄区全部八页、其他平台或最终合入 main 的验收。原 37/36/35 行失败保留。

@@ -17,6 +17,7 @@ import type {
 const mocks = vi.hoisted(() => ({
   keyboard: [] as Array<(key: unknown) => void>,
   paste: [] as Array<(event: unknown) => void>,
+  dimensions: { width: 110, height: 40 },
 }));
 vi.mock(
   '@opentui/core',
@@ -27,7 +28,7 @@ vi.mock('@opentui/react', async () =>
   (await import('../../test-utils/opentui-catalog.js')).catalogHooks(
     mocks.keyboard,
     mocks.paste,
-    () => ({ width: 110, height: 40 }),
+    () => mocks.dimensions,
   ),
 );
 vi.mock('@opentui/react/jsx-runtime', async () =>
@@ -39,7 +40,10 @@ vi.mock('@opentui/react/jsx-dev-runtime', async () =>
 
 import { OpenTuiSubagentCreateDialog } from './SubagentCreateDialog.js';
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  mocks.dimensions = { width: 110, height: 40 };
+});
 
 function press(name: string, sequence = name, ctrl = false) {
   act(() => {
@@ -151,6 +155,24 @@ describe('native manual subagent creation', () => {
     press('return');
     expect(screen.getByText('Automatic Color')).toBeTruthy();
     expect(screen.getByText('Blue')).toBeTruthy();
+    expect(f.createSubagent).not.toHaveBeenCalled();
+  });
+
+  it('keeps compact location labels readable at the actual inner width', () => {
+    mocks.dimensions = { width: 11, height: 20 };
+    const f = fixture();
+    expect(screen.getByText('Pr…')).toBeTruthy();
+    expect(screen.getByText('Us…')).toBeTruthy();
+    expect(screen.queryByText('Step 1: Choose Location')).toBeNull();
+    expect(f.createSubagent).not.toHaveBeenCalled();
+  });
+
+  it('keeps the compact manual choice visible without consuming an extra Enter', () => {
+    mocks.dimensions = { width: 11, height: 20 };
+    const f = fixture();
+    press('return');
+    expect(screen.getByText('Ma…')).toBeTruthy();
+    expect(screen.queryByText('Manual Creation')).toBeNull();
     expect(f.createSubagent).not.toHaveBeenCalled();
   });
 

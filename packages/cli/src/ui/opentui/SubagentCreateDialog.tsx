@@ -27,6 +27,7 @@ import { getStepKind } from '../components/subagents/utils.js';
 import {
   sanitizeTerminalLine,
   sanitizeTerminalText,
+  truncateToWidth,
 } from '../utils/textUtils.js';
 import { useBatchSafeState } from './batch-cursor.js';
 import { toOriginalKey } from './key-map.js';
@@ -36,10 +37,11 @@ import { normalizePastedText } from './input-prompt-model.js';
 import {
   DialogFrame,
   DialogSelect,
-  FooterHint,
+  dialogAreaWidth,
   dialogContentWidth,
   useDialogSelect,
 } from './dialogs-shared.js';
+import { chromeRows, scrollDialogLayout } from './dialogs-core.js';
 import { C } from './theme.js';
 
 export function OpenTuiSubagentCreateDialog({
@@ -203,9 +205,53 @@ export function OpenTuiSubagentCreateDialog({
               ),
             )
           : 0;
-  const bodyRows = Math.max(
+  const title =
+    kind === 'LOCATION'
+      ? t('Choose Location')
+      : kind === 'GEN_METHOD'
+        ? t('Choose Generation Method')
+        : kind === 'MANUAL_NAME'
+          ? t('Enter Subagent Name')
+          : kind === 'MANUAL_PROMPT'
+            ? t('Enter System Prompt')
+            : kind === 'MANUAL_DESC'
+              ? t('Enter Description')
+              : kind === 'TOOLS'
+                ? t('Select Tools')
+                : kind === 'COLOR'
+                  ? t('Choose Background Color')
+                  : t('Confirm and Save');
+  const footer = nameCheckFailed.value
+    ? t('Esc to go back')
+    : checkingName.value
+      ? t('Checking existing subagents… Esc to go back')
+      : saving.value
+        ? t('Saving… Esc to close')
+        : succeeded.value
+          ? t('Esc to close')
+          : kind === 'FINAL'
+            ? t('Press Enter to save, Esc to go back')
+            : step === 1
+              ? t('Press Enter to continue, ↑↓ to navigate, Esc to cancel')
+              : t('Press Enter to continue, Esc to go back');
+  const fullTitle = `Step ${step}: ${title}`;
+  const region = Math.max(1, availableTerminalHeight ?? height - 8);
+  const normalWidth = Math.max(1, dialogContentWidth(width));
+  const layout = scrollDialogLayout(
+    region,
+    chromeRows({
+      fixed: 5,
+      runs: [
+        { text: fullTitle, width: normalWidth },
+        { text: footer, width: normalWidth },
+      ],
+    }),
+    12,
+  );
+  const bodyRows = layout.compact ? Math.min(12, region) : layout.bodyRows;
+  const contentWidth = Math.max(
     1,
-    Math.min(12, (availableTerminalHeight ?? height - 8) - 6),
+    layout.compact ? dialogAreaWidth(width) - 2 : normalWidth,
   );
   const select = useDialogSelect({
     items,
@@ -418,45 +464,38 @@ export function OpenTuiSubagentCreateDialog({
     field.insert(value);
   });
 
-  const title =
-    kind === 'LOCATION'
-      ? t('Choose Location')
-      : kind === 'GEN_METHOD'
-        ? t('Choose Generation Method')
-        : kind === 'MANUAL_NAME'
-          ? t('Enter Subagent Name')
-          : kind === 'MANUAL_PROMPT'
-            ? t('Enter System Prompt')
-            : kind === 'MANUAL_DESC'
-              ? t('Enter Description')
-              : kind === 'TOOLS'
-                ? t('Select Tools')
-                : kind === 'COLOR'
-                  ? t('Choose Background Color')
-                  : t('Confirm and Save');
-  const spans = windowLineAtCaret(
-    { text, cursor: field.caret },
-    Math.max(1, dialogContentWidth(width)),
-  );
+  const spans = windowLineAtCaret({ text, cursor: field.caret }, contentWidth);
   const before = sanitizeTerminalLine(spans.before);
   const after = sanitizeTerminalLine(spans.after);
   return (
-    <DialogFrame>
-      <text fg={C.text}>{`Step ${step}: ${title}`}</text>
+    <DialogFrame
+      bodyLayout={{ ...layout, border: !layout.compact && layout.border }}
+    >
+      {!layout.compact && <text fg={C.text}>{fullTitle}</text>}
       {succeeded.value ? (
-        <text fg={C.green}>{t('✓ Subagent Created Successfully!')}</text>
+        <scrollbox height={bodyRows} marginTop={layout.compact ? 0 : 1}>
+          <text fg={C.green}>{t('✓ Subagent Created Successfully!')}</text>
+        </scrollbox>
       ) : (
-        <scrollbox height={bodyRows} marginTop={1}>
+        <scrollbox height={bodyRows} marginTop={layout.compact ? 0 : 1}>
           {items.length > 0 ? (
             <DialogSelect
               items={items}
               activeIndex={select.activeIndex}
               scrollOffset={select.scrollOffset}
               maxItemsToShow={bodyRows}
+              showNumbers={!layout.compact}
               onHover={select.highlightIndex}
               onSelectIndex={select.selectIndex}
               renderLabel={(item, { titleColor }) => (
-                <text fg={titleColor}>{sanitizeTerminalLine(item.label)}</text>
+                <text fg={titleColor}>
+                  {layout.compact
+                    ? truncateToWidth(
+                        sanitizeTerminalLine(item.label),
+                        Math.max(0, contentWidth - 2),
+                      )
+                    : sanitizeTerminalLine(item.label)}
+                </text>
               )}
             />
           ) : null}
@@ -520,25 +559,7 @@ export function OpenTuiSubagentCreateDialog({
           ) : null}
         </scrollbox>
       )}
-      <FooterHint
-        text={
-          nameCheckFailed.value
-            ? t('Esc to go back')
-            : checkingName.value
-              ? t('Checking existing subagents… Esc to go back')
-              : saving.value
-                ? t('Saving… Esc to close')
-                : succeeded.value
-                  ? t('Esc to close')
-                  : kind === 'FINAL'
-                    ? t('Press Enter to save, Esc to go back')
-                    : step === 1
-                      ? t(
-                          'Press Enter to continue, ↑↓ to navigate, Esc to cancel',
-                        )
-                      : t('Press Enter to continue, Esc to go back')
-        }
-      />
+      {!layout.compact && <text fg={C.dim}>{footer}</text>}
     </DialogFrame>
   );
 }
