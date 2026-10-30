@@ -5939,11 +5939,18 @@ jobs:
             # Pin the artifact-dir shape and sort: a bare -name search takes
             # whatever directory find visits first, which is unordered.
             REPORT="$(find verify-results -mindepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
-            # The counts must come from the report's own directory: another
-            # round directory's zero would headline this report.
+            # The counts and the verdict must come from the report's own
+            # directory: the verify job picked AGENT_VERDICT by its own
+            # search, and another round directory's zero or word would
+            # headline this report. Same allowlist as that job.
             if [ -n "$REPORT" ]; then
               ASSERTIONS_FILE="$(dirname "$REPORT")/assertions.json"
               [ -f "$ASSERTIONS_FILE" ] || ASSERTIONS_FILE=''
+              AGENT_VERDICT="$(head -c 4096 "$(dirname "$REPORT")/verdict.txt" 2>/dev/null | tr -d '[:space:]' | cut -c1-32 || true)"
+              case "$AGENT_VERDICT" in
+                merge-ready|findings|blocked|inconclusive) ;;
+                *) AGENT_VERDICT='' ;;
+              esac
             else
               ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
             fi
@@ -5985,7 +5992,7 @@ jobs:
             fi
             # The checker local rounds run before posting, from this trusted
             # checkout, so both paths share one set of rules. It must pass on
-            # the report's directory and read the verdict this run reported.
+            # the report's directory and read the verdict taken from it above.
             # Only its last stdout line is the summary: warnings above it can
             # carry agent-chosen evidence filenames, so they are never echoed.
             # node also exits 1 when the script cannot load; stderr says why.
@@ -5996,10 +6003,6 @@ jobs:
               node "${VERIFY_PR_CHECK:-scripts/verify-pr-check.mjs}" "$(dirname "$REPORT")" > "$check_log" 2> "$check_log.err" || check_status=$?
               case "${check_status}:$(tail -n 1 "$check_log")" in
                 "0:  ok: verdict=${AGENT_VERDICT} ("*) ARTIFACT_CHECK=ok ;;
-                '0:'*)
-                  ARTIFACT_CHECK=mismatch
-                  echo "verdict.txt beside report.md is not the reported ${AGENT_VERDICT}"
-                  ;;
                 '1:  failed: verdict='*)
                   ARTIFACT_CHECK=refused
                   grep '^  error ' "$check_log" | head -20 | cut -c1-300 || true
@@ -6124,10 +6127,6 @@ jobs:
                 refused)
                   CHECK_NOTE='its artifacts fail the consistency check (`verify-pr-check.mjs`), so that verdict was not trusted — the workflow run log lists the errors'
                   CHECK_NOTE_ZH='其产物未通过一致性检查（`verify-pr-check.mjs`），因此该判定未被采信——检查的错误见工作流运行日志'
-                  ;;
-                mismatch)
-                  CHECK_NOTE='the `verdict.txt` beside its report names a different verdict, so that verdict was not trusted'
-                  CHECK_NOTE_ZH='其报告旁的 `verdict.txt` 写的是另一个判定，因此该判定未被采信'
                   ;;
                 error)
                   CHECK_NOTE='the consistency check (`verify-pr-check.mjs`) could not run on its artifacts, so that verdict was not trusted — the workflow run log shows why'

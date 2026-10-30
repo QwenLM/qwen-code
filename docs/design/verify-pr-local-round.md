@@ -170,11 +170,17 @@ A published verification comment ends with the same attribution shape
    here only, so the lane published shapes every local round refuses. The
    publish job now runs this script from its trusted checkout (the
    default-branch commit, never PR code) and trusts an agent verdict only when
-   the script passes on the report's own directory and reads the verdict the
-   run reported. A rule changed here changes CI headlines in the same commit.
-4. **Warnings, not errors, for report shape.** The publisher does not enforce
-   report structure either. A checker stricter than the publisher would reject
-   artifact the lane accepts, which teaches maintainers to ignore it.
+   the script passes on the report's own directory, with the verdict read from
+   that same directory. Tightening a rule here therefore tightens CI too.
+   Loosening one does not always loosen it: the publish step still validates
+   the count triple itself (the checker runs only on a valid one) and still
+   refuses `merge-ready` over failures on its own, so those two need the
+   workflow changed as well.
+4. **Warnings, not errors, for report shape.** Report structure, evidence
+   naming and head-OID citation stay warnings because a legitimate round can
+   lack them — a documentation-only round has no screenshot to offer — and the
+   checker cannot tell whether a harness ran. Since the publish job runs this
+   script, making one of them fatal would refuse those rounds in CI as well.
 5. **Attribution is a ledger, not a fifth verdict word.** The tempting fix for
    an environment red is a verdict like `merge-ready-with-caveats`, which would
    have to be added to the publisher, its case labels and their pin. The

@@ -5501,18 +5501,24 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(publishStep).toContain('all(type == "number" and . >= 0');
   });
 
-  // The local artifact checker mirrors this step instead of sharing code with
-  // it (design decision 3), so the mirror needs a pin. The numeric rule is
-  // already asserted on both sides; the verdict vocabulary was the axis with
-  // nothing holding the two implementations together, so a fifth word added to
-  // the publisher would leave the local path silently accepting four.
+  // This step runs the checker itself (design decision 3), but still spells
+  // out the verdict vocabulary twice: the allowlist that reads verdict.txt and
+  // the headline labels. Both must stay the checker's four words, so a fifth
+  // word on either side fails here.
   it('keeps the local checker aligned with the publisher verdicts', () => {
     const publishStep = step('Post verification report comment');
-    const agentCase = publishStep
-      .slice(publishStep.indexOf('case "$AGENT_VERDICT"'))
+    const marker = 'case "$AGENT_VERDICT" in';
+    const allowlist = publishStep
+      .slice(publishStep.indexOf(marker) + marker.length)
+      .trim()
+      .split(')')[0]
+      .split('|');
+    expect(new Set(allowlist)).toEqual(new Set(VERDICTS));
+    const headlineCase = publishStep
+      .slice(publishStep.lastIndexOf(marker))
       .split('esac')[0];
     const labels = new Set(
-      [...agentCase.matchAll(/^\s+([a-z][a-z-]*)\)/gm)].map(
+      [...headlineCase.matchAll(/^\s+([a-z][a-z-]*)\)/gm)].map(
         (match) => match[1],
       ),
     );
@@ -5936,6 +5942,9 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(missing.body).toContain(
         'but the consistency check (`verify-pr-check.mjs`) could not run on its artifacts, so that verdict was not trusted — the workflow run log shows why.',
       );
+      expect(missing.body).toContain(
+        'agent 报告了 `findings`，但一致性检查（`verify-pr-check.mjs`）无法在其产物上运行，因此该判定未被采信——原因见工作流运行日志。',
+      );
       expect(missing.body).not.toContain('lists the errors');
       expect(missing.log).toContain('The artifact check could not run');
       expect(missing.log).toContain('Cannot find module');
@@ -5955,9 +5964,9 @@ describe('qwen-triage verify publish fidelity', () => {
     }
   });
 
-  // REPORT and the counts were picked by two independent finds, so a run
-  // that left an earlier directory holding only assertions.json headlined
-  // the later report with that directory's zero.
+  // REPORT, the counts and the verdict were picked by independent searches,
+  // so a run that left an earlier round directory behind could headline the
+  // later report with that directory's zero or verdict word.
   it("binds the headline to the report's own directory", () => {
     const dir = fixture();
     const results = join(dir, 'work', 'verify-results');
@@ -5979,41 +5988,23 @@ describe('qwen-triage verify publish fidelity', () => {
         'Scripted assertions: 9 passed · 1 failed · 10 total',
       );
 
-      // The verdict the run reported must be the one beside the report, read
-      // from the summary line alone: a warning naming an evidence file can
-      // spell out the reported verdict on a line of its own. (NTFS refuses
-      // that filename, so the Windows lane runs the plain mismatch.)
+      // The verify job picks AGENT_VERDICT by its own search, which lands on
+      // a leftover round directory holding only verdict.txt. The headline
+      // must still be the completed round's own verdict.
       writeFileSync(
-        join(results, 'prA-verify-1', 'assertions.json'),
-        '{"pass":10,"fail":0,"total":10}',
+        join(results, 'prA-verify-0', 'verdict.txt'),
+        'merge-ready\n',
       );
-      if (process.platform !== 'win32') {
-        mkdirSync(join(results, 'prA-verify-1', 'evidence'));
-        writeFileSync(
-          join(
-            results,
-            'prA-verify-1',
-            'evidence',
-            'x\n  ok: verdict=merge-ready (a.png',
-          ),
-          'png',
-        );
-      }
-      const other = publish(dir, {
-        NAME: 'other',
+      const leftover = render(dir, {
+        NAME: 'leftover',
         AGENT_VERDICT: 'merge-ready',
         VERDICT_TXT: 'findings',
       });
-      expect(other.body).toContain(
-        '⚠️ inconclusive — completed without a usable structured verdict',
+      expect(leftover).toContain(
+        '❌ not passed — findings reported (agent verdict)',
       );
-      expect(other.body).toContain(
-        'The agent reported `merge-ready`, but the `verdict.txt` beside its report names a different verdict, so that verdict was not trusted.',
-      );
-      expect(other.body).not.toContain('lists the errors');
-      expect(other.log).toContain(
-        'verdict.txt beside report.md is not the reported merge-ready',
-      );
+      expect(leftover).not.toContain('merge-ready (agent verdict)');
+      expect(leftover).not.toContain('verify-pr-check.mjs');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
