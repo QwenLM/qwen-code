@@ -14,6 +14,7 @@ import org.junit.jupiter.api.io.CleanupMode;
 import org.junit.jupiter.api.io.TempDir;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
+
 import java.net.ServerSocket;
 import java.net.URI;
 import java.net.http.HttpClient;
@@ -40,6 +41,7 @@ import java.util.UUID;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.BooleanSupplier;
+
 import static org.assertj.core.api.Assertions.assertThat;
 
 class HostedProcessCrashIT {
