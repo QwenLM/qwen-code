@@ -55,7 +55,7 @@ describe('managed-agent-server e2e runner', () => {
   it('queries tables from the shared fresh-database baseline', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     const baseline = read(
-      'packages/managed-agent-server/src/main/resources/db/managed-schema/V1__managed_schema.sql',
+      'packages/managed-agent-server/persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql',
     );
     const tables = new Set(
       [...baseline.matchAll(/CREATE TABLE (\w+)/g)].map((match) => match[1]),
@@ -634,7 +634,7 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain(`'${refusal}'`);
     expect(
       read(
-        'packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java',
+        'packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java',
       ),
     ).toContain(`"${refusal}."`);
     const writerBefore = source.indexOf(
@@ -873,7 +873,9 @@ describe('managed-agent-server e2e runner', () => {
     // Harness and find its workspace ID there: application.yml derives the
     // switch from the Harness, and Prerequisites exports the ID.
     expect(
-      read('packages/managed-agent-server/src/main/resources/application.yml'),
+      read(
+        'packages/managed-agent-server/server/src/main/resources/application.yml',
+      ),
       'the Session Store switch must follow the Harness by default',
     ).toContain(
       "enabled: '${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:${qwen.managed-agent.harness.enabled:false}}'",
@@ -916,7 +918,7 @@ describe('managed-agent-server e2e runner', () => {
     // document the current authority, so the false claim reaches
     // integrators in either language.
     const toolTurnIt =
-      'packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java';
+      'packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java';
     expect(
       existsSync(new URL(`../../${toolTurnIt}`, import.meta.url)) &&
         read('.github/workflows/sdk-java.yml').includes(
@@ -1451,7 +1453,7 @@ describe('managed-agent-server e2e runner', () => {
     const dockerfile = read('packages/managed-agent-server/Dockerfile');
     expect(dockerfile).toContain('qwen-managed-agent-server-*-exec.jar');
     expect(dockerfile).toContain('/tmp/qwen-managed-agent-server.jar');
-    expect(read('packages/managed-agent-server/pom.xml')).toContain(
+    expect(read('packages/managed-agent-server/server/pom.xml')).toContain(
       '<classifier>exec</classifier>',
     );
   });
@@ -1477,7 +1479,7 @@ describe('managed-agent-server e2e runner', () => {
     const pattern = new Function(`return ${patternSource};`)();
     const match = read('packages/managed-agent-server/pom.xml').match(pattern);
     expect(match?.[0]).toContain(
-      '<artifactId>qwen-managed-agent-server</artifactId>',
+      '<artifactId>qwen-managed-agent-parent</artifactId>',
     );
     expect(match?.[1]).toBeTruthy();
     expect(match?.[1]).not.toContain('${');
@@ -1489,10 +1491,10 @@ describe('managed-agent-server e2e runner', () => {
     // whitespace-tolerant, and an empty element still matches nothing, so
     // the runner's descriptive guard fires.
     const wrapped =
-      '<artifactId>qwen-managed-agent-server</artifactId>\n  <version>\n    9.9.9\n  </version>';
+      '<artifactId>qwen-managed-agent-parent</artifactId>\n  <version>\n    9.9.9\n  </version>';
     expect(wrapped.match(pattern)?.[1]).toBe('9.9.9');
     expect(
-      '<artifactId>qwen-managed-agent-server</artifactId><version></version>'.match(
+      '<artifactId>qwen-managed-agent-parent</artifactId><version></version>'.match(
         pattern,
       ),
     ).toBeNull();
@@ -1521,7 +1523,7 @@ describe('managed-agent-server e2e runner', () => {
     // --server.address on the command line and the e2e runner passes none,
     // so a flipped yml default would otherwise ship silently.
     const applicationYml = read(
-      'packages/managed-agent-server/src/main/resources/application.yml',
+      'packages/managed-agent-server/server/src/main/resources/application.yml',
     );
     expect(applicationYml).toMatch(
       /address: '\$\{QWEN_MANAGED_AGENT_SERVER_ADDRESS:127\.0\.0\.1\}'/,
@@ -1654,7 +1656,7 @@ describe('managed-agent-server e2e runner', () => {
     () => {
       const dockerfile = read('packages/managed-agent-server/Dockerfile');
       const stage = dockerfile.match(
-        /cd packages\/managed-agent-server\/target \\[\s\S]*?&& cp "\$main" \/tmp\/qwen-managed-agent-server\.jar/,
+        /cd packages\/managed-agent-server\/server\/target \\[\s\S]*?&& cp "\$main" \/tmp\/qwen-managed-agent-server\.jar/,
       );
       expect(
         stage,
@@ -1703,7 +1705,7 @@ describe('managed-agent-server e2e runner', () => {
           for (const jar of jars) writeFileSync(join(dir, jar), '');
           const fixture = script
             .replace(
-              'cd packages/managed-agent-server/target',
+              'cd packages/managed-agent-server/server/target',
               `cd '${dir.replaceAll('\\', '/')}'`,
             )
             .replace(
