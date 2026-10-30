@@ -21,9 +21,9 @@ fn def() -> &'static ToolDef {
             - kind: `\"desktop\"` for `.app` bundles on macOS.\n\
             - last_used: RFC3339 timestamp from the bundle's filesystem mtime, \
             when readable; otherwise null.\n\n\
-            Standalone running entries include Regular-policy apps. Installed \
-            accessory apps also report live state when their bundle path matches; \
-            uninstalled background helpers stay excluded. Installed \
+            Standalone running entries include Regular- and Accessory-policy apps, \
+            including menu-bar apps outside the installed-app directories. \
+            Prohibited-policy background helpers outside installed apps stay excluded. Installed \
             apps come from scanning /Applications, /Applications/Utilities, \
             ~/Applications, /System/Applications, and /System/Applications/Utilities.\n\n\
             Use this for \"is X installed?\" as well as \"is X running?\". For \
@@ -35,7 +35,7 @@ fn def() -> &'static ToolDef {
         input_schema: serde_json::json!({
             "type": "object",
             "properties": {
-                "running_only": { "type": "boolean", "description": "Return only live applications, including installed accessory apps." }
+                "running_only": { "type": "boolean", "description": "Return only live applications, including menu-bar accessory apps." }
             },
             "additionalProperties": false
         }),
