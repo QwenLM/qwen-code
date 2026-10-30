@@ -92,12 +92,15 @@ MCP 管理、definition pin、skills 与 extension 投影。它的 7 个公开
 容器。Server 与 Broker 共享字节级协议规则是正确的，但 `runtimebroker` 根包
 在已有子包旁边仍平铺着 45 个文件。
 
-**D4. 配置面。** `ManagedAgentProperties` 1,114 行、40 处 `@DurationUnit`
+**D4. 配置面。** `ManagedAgentProperties` 1,114 行、36 处 `@DurationUnit`
 注解；server config 包有 21 个类。`RuntimeBrokerService` 的
 `MIN_V3_RESULT_WINDOW` javadoc 记录了一个真实的绑定陷阱：同一个不带单位的
 数字，在 server 属性里按秒绑定，在其他消费方按毫秒绑定。目前靠注释和启动
-sweep 管理这个陷阱。（#15939 已开始从元数据生成配置参考；那是互补工作，
-不能替代本项。）
+sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定契约：
+`ManagedAgentPropertiesTest` 遍历全部 36 个 Duration 字段，钉死 9 个毫秒
+例外（含 `Auth.allowedDrift`）、`Retention.maxAge` 按天、其余按秒，因此
+"统一单位"是配置行为变更，不是内部清理。（#15939 已开始从元数据生成配置
+参考；那是互补工作，不能替代本项。）
 
 **D5. 文档可导航性。** 2,006 行的 README 已是百科全书，200+ 篇设计文档是按
 时间排列的"地层"。缺一篇"今天这个系统如何工作"的横切导览。
@@ -140,8 +143,17 @@ sweep 管理这个陷阱。（#15939 已开始从元数据生成配置参考；�
    }
    ```
 
-   分量清单就是今天最长重载的参数，一次命名清楚。builder 可选；仅 record
-   本身已消除位置参数风险。
+   分量清单就是今天最长重载的参数，在定义处一次命名清楚。有两个显式
+   边界。其一，canonical 构造器仍是位置式的：交换两个同类型实参（例如
+   都是 `String` 的 `tenantId` 与 `actorId`）依然能编译，所以 record 收敛
+   的是 store API，并没有消除构造点上的错位风险。如果消除该风险也是
+   目标，P0 必须同时提供具名构造路径——按分量设值的 builder，例如
+   `SessionCreationCommand.builder().tenantId(...).actorId(...).build()`
+   ——这是记录在开放问题中的显式范围决策，而不是裸 record 已经解决的
+   事。其二，新增分量会改变 canonical 构造器签名，既有构造调用点在
+   源码与二进制层面都会失效，必须在同一改动内更新；发布前硬切让这在
+   当下可接受，首个 release 之后则不行。P0 的承诺范围是收敛 store 重载
+   链，包括迁移每一个构造调用点。
 
 2. 把 `AgentStateStore` 与 `ManagedAgentStore` 中的 9 个重载替换为单一的
    `Admission insertWorkspaceSessionCommand(SessionCreationCommand)`。
@@ -175,16 +187,26 @@ sweep 管理这个陷阱。（#15939 已开始从元数据生成配置参考；�
   摘要与规范化字节的前提下，把 `CsiNativeActivationProof` 拆成按协议划分
   的无状态类。把"contracts 里的引擎类必须是无状态协议规则"这条线写进模块
   AGENTS.md。
-- 统一 Duration 绑定：在 preflight 中拒绝不带单位的数值（或全局统一绑定
-  单位），把文档化的陷阱变成启动期错误。
+- Duration 绑定：各字段单位是一份被钉住、与安全相关的契约（9 个毫秒
+  字段含 `Auth.allowedDrift`、`Retention.maxAge` 按天、其余按秒）。
+  `auth.allowed-drift=120000` 今天是 2 分钟；按秒重释会把签名重放窗口
+  扩大到 33 小时 20 分，而直接拒绝无单位值会拒掉绑定测试当前接受的
+  配置。因此统一绑定是带有兼容与迁移义务的配置行为变更，超出本
+  "不改行为"提案的范围；任何这类统一都需要单独提案，写清迁移策略与
+  验证要求。范围内的工作是保持每个字段既有单位与接受语义，同时让
+  契约更显式，例如在生成的配置参考中呈现各字段的单位。
 - README 瘦身为 quickstart + 模块表 + 安全边界 + 索引；深节移到已有的
   `docs/` 页面。新增一篇双语横切架构导览。
 
 ## 设计决策与理由
 
-- **参数 record 优于继续加重载或纯 builder API。** 重载链本身就是缺陷；
-  record 把每个参数命名一次，未来能力变成追加字段而不是新签名。调用点
-  需要时以后可以再加 builder。
+- **参数 record 优于继续加重载。** 重载链本身就是缺陷；record 在定义处
+  把每个参数命名一次，并让 store 方法签名在能力增长时保持稳定。record
+  并不让构造变得位置安全（同类型交换仍能编译），且每新增一个分量仍会
+  改变 canonical 构造器签名，因此每次扩展都要处理构造调用点与二进制
+  兼容——发布前硬切下可接受，之后则不行。若以消除错位风险为目标，
+  具名构造 builder 才是相应机制；P0 是否附带它是显式开放问题，而不是
+  裸 record 已经关闭的风险。
 - **硬切优于 deprecated 桥。** 发布前窗口，简单优先；桥会保住重载链，
   并在迁移期让契约面翻倍。
 - **先拆接口，后拆实现。** 消费方立即获得隔离，行为风险近乎为零；有风险
@@ -239,6 +261,8 @@ sweep 管理这个陷阱。（#15939 已开始从元数据生成配置参考；�
 
 - `SessionCreationCommand` 的确切归属：`AgentStateStore` 旁边的 contracts
   session 包，还是 `StoreModels` 旁边的 `managedagent.model`？
+- P0 是否同时为 `SessionCreationCommand` 提供具名构造 builder，以关闭
+  构造点上同类型交换的错位风险；裸 record 并不关闭该风险。
 - 类体量棘轮门禁是在 P1 之前引入（阻止继续长大），还是在拆分落地之后
   再引入。
 - P1 切片与同批类上进行中的功能工作如何排序。

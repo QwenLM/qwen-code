@@ -105,12 +105,17 @@ between Server and Broker is correct, but the `runtimebroker` root package
 still holds 45 flat files next to its existing subpackages.
 
 **D4. Configuration surface.** `ManagedAgentProperties` is 1,114 lines with
-40 `@DurationUnit` annotations; the server config package holds 21 classes.
+36 `@DurationUnit` annotations; the server config package holds 21 classes.
 The `MIN_V3_RESULT_WINDOW` javadoc in `RuntimeBrokerService` documents a real
 binding trap: the same suffix-less number binds as seconds in the server
 property and as milliseconds in other consumers. Today the trap is managed by
-comments and a startup sweep. (#15939 began generating the configuration
-reference from metadata; that work is complementary, not a substitute.)
+comments and a startup sweep. The per-field units are themselves a pinned
+binding contract: `ManagedAgentPropertiesTest` walks all 36 Duration fields
+and pins nine millisecond exceptions (including `Auth.allowedDrift`),
+`Retention.maxAge` in days, and seconds for the rest, so "unify the units" is
+a configuration behavior change, not an internal cleanup. (#15939 began
+generating the configuration reference from metadata; that work is
+complementary, not a substitute.)
 
 **D5. Documentation navigability.** The 2,006-line README is an encyclopedia,
 and the 200+ design documents are chronological strata. There is no single
@@ -154,8 +159,21 @@ cross-cutting "how the system works today" tour.
    }
    ```
 
-   The component list is exactly today's longest overload, named once. A
-   builder is optional; the record alone removes the positional-argument risk.
+   The component list is exactly today's longest overload, named once at the
+   definition site. Two limits are explicit. First, the canonical constructor
+   remains positional: swapping two same-typed arguments (for example
+   `tenantId` and `actorId`, both `String`) still compiles, so the record
+   converges the store API but does not eliminate misordering risk at
+   construction sites. If eliminating that risk is a goal, P0 must also ship
+   a named-construction path — a builder with per-component methods, such as
+   `SessionCreationCommand.builder().tenantId(...).actorId(...).build()` —
+   which is an explicit scope decision recorded under open questions, not
+   something the bare record already solves. Second, adding a component
+   changes the canonical constructor signature, so existing construction
+   call sites break at source and binary level and must be updated in the
+   same change; the pre-release hard cut makes this acceptable now, not after
+   the first release. P0's committed scope is converging the store overload
+   chain, including migrating every construction call site.
 
 2. Replace the 9 overloads in `AgentStateStore` and `ManagedAgentStore` with a
    single `Admission insertWorkspaceSessionCommand(SessionCreationCommand)`.
@@ -196,18 +214,35 @@ cross-cutting "how the system works today" tour.
   `CsiNativeActivationProof` into stateless per-protocol classes without
   changing any digest or canonicalization byte. Record the rule "contracts
   engine classes must be stateless protocol rules" in the module AGENTS.md.
-- Make Duration binding uniform: reject suffix-less values in preflight (or
-  bind one unit everywhere), turning the documented trap into a startup error.
+- Duration binding: the per-field units are a pinned, security-relevant
+  contract (nine millisecond fields including `Auth.allowedDrift`,
+  `Retention.maxAge` in days, the rest in seconds). `auth.allowed-drift=120000`
+  means two minutes today; reinterpreting it as seconds would widen the
+  signature-replay window to 33h20m, and rejecting suffix-less values would
+  refuse configurations the binding tests currently accept. Uniform binding
+  is therefore a configuration behavior change with compatibility and
+  migration obligations — out of scope for this no-behavior-change proposal,
+  and any such unification needs its own proposal with a migration strategy
+  and validation plan. The in-scope work preserves each field's existing unit
+  and acceptance semantics while making the contract more visible, for
+  example by surfacing per-field units in the generated configuration
+  reference.
 - Slim the README to quickstart + module table + security boundary + index;
   move deep feature sections to their existing `docs/` pages. Add one
   bilingual cross-cutting architecture tour.
 
 ## Design decisions and rationale
 
-- **Parameter record over more overloads or a builder-only API.** The overload
-  chain is the defect; a record names every argument once and makes future
-  capabilities additive fields instead of new signatures. A builder can be
-  added later if call sites need it.
+- **Parameter record over more overloads.** The overload chain is the defect;
+  a record names every argument once at the definition site and keeps the
+  store method signature stable as capabilities grow. The record does not
+  make construction positional-safe (same-typed swaps still compile), and
+  each new component still changes the canonical constructor signature, so
+  construction call sites and binary compatibility need handling in every
+  extension — acceptable under the pre-release hard cut, not afterwards. A
+  named-construction builder is the mechanism if misordering elimination
+  becomes a goal; whether P0 ships it is an explicit open question, not a
+  risk the bare record has already closed.
 - **Hard cut over a deprecated bridge.** Pre-release, simplicity-first wins;
   a bridge preserves the chain and doubles the contract surface during
   migration.
@@ -273,6 +308,9 @@ cross-cutting "how the system works today" tour.
 
 - Exact home of `SessionCreationCommand`: the contracts session package next
   to `AgentStateStore`, or `managedagent.model` next to `StoreModels`?
+- Whether P0 also ships a named-construction builder for
+  `SessionCreationCommand` to close the same-typed-swap risk at construction
+  sites; the bare record leaves that risk open.
 - Whether to introduce the class-size ratchet gate before P1 (to stop
   regrowth) or only after the splits land.
 - Sequencing of P1 slices against in-flight feature work on the same classes.
