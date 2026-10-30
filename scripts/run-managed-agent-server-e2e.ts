@@ -81,6 +81,7 @@ const approvalFaults = [
   'cleanup-failed',
   'decision-reply-lost',
   'admission-reply-lost',
+  'load-reply-lost',
   'terminal-reply-lost',
   'terminal-write-failed',
 ] as const;
@@ -123,7 +124,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     index += 1;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|decision-reply-lost|admission-reply-lost|terminal-reply-lost|terminal-write-failed]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
     );
   }
 }
@@ -245,7 +246,7 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 
 const cliBundle = path.join(root, 'dist', 'cli.js');
 const springModule = path.join(root, 'packages', 'managed-agent-server');
-const springTarget = path.join(springModule, 'target');
+const springTarget = path.join(springModule, 'server', 'target');
 // The pom attaches classified repackage executions alongside the
 // unclassified server jar, so a wildcard over target/ matches several
 // artifacts. Read the project version from the
@@ -256,7 +257,7 @@ const springTarget = path.join(springModule, 'target');
 // re-indenting the element cannot flow newlines into the jar path.
 const pomXml = readFileSync(path.join(springModule, 'pom.xml'), 'utf8');
 const pomVersion = pomXml.match(
-  /<artifactId>qwen-managed-agent-server<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
+  /<artifactId>qwen-managed-agent-parent<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
 )?.[1];
 if (!pomVersion) {
   throw new Error(
@@ -1740,7 +1741,7 @@ try {
       [
         '-cp',
         springJar,
-        '-Dloader.main=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain',
+        '-Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceStorageRegistrationMain',
         'org.springframework.boot.loader.launch.PropertiesLauncher',
         'register',
         tenant,
@@ -2505,6 +2506,11 @@ try {
             QWEN_MODEL: 'fake-model',
             QWEN_RUNTIME_BROKER_TOKEN: brokerToken,
             QWEN_RUNTIME_BROKER_URL: replacementBrokerUrl,
+            // A4: the replacement loses its first load attach reply once, so
+            // the control plane must redrive into the now-active driver.
+            ...(approvalFault === 'load-reply-lost'
+              ? { QWEN_E2E_DROP_LOAD_REPLY: session.id }
+              : {}),
           },
         },
         name,
@@ -2540,6 +2546,18 @@ try {
         120_000,
         replacementHarness,
       );
+      if (approvalFault === 'load-reply-lost') {
+        // The fault must actually have landed: the replacement lost its first
+        // load attach reply (after its driver started). A redrive that never
+        // lost a reply would prove nothing about the active-driver handoff.
+        await waitUntil(
+          'Takeover load reply lost',
+          () =>
+            replacementHarness.log().includes('E2E dropping first load reply'),
+          120_000,
+          replacementHarness,
+        );
+      }
       const actionBeforeResponse = await fetchJson<Record<string, unknown>>(
         `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${originalApprovalId}`,
         { headers: tenantHeaders(tenant) },
