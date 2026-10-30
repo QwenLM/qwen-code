@@ -68,6 +68,14 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/hosted-harness-session.ts',
+    {
+      reason:
+        'The packaged load-reply-lost E2E arm sets QWEN_E2E_DROP_LOAD_REPLY=<sessionId> on the replacement Harness only; the session bridge reads it once at construction to lose exactly the first load attach reply for that Session as fault injection. It is a process-scoped test switch, never set in production.',
+      accesses: { 'key:QWEN_E2E_DROP_LOAD_REPLY': 1 },
+    },
+  ],
+  [
     'packages/cli/src/serve/workspace-recovery-worker.ts',
     {
       reason:
