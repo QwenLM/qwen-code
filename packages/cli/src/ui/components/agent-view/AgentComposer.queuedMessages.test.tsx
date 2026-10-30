@@ -88,6 +88,7 @@ function makeFakeAgent(): AgentInteractive {
     getError: vi.fn(),
     getLastRoundError: vi.fn(),
     getCore: () => ({
+      modelConfig: {},
       runtimeContext: {
         getApprovalMode: () => ApprovalMode.DEFAULT,
         setApprovalMode: vi.fn(),

@@ -24,6 +24,10 @@ import {
   ApprovalMode,
   APPROVAL_MODES,
 } from '@qwen-code/qwen-code-core/config/approval-mode.js';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { AgentCore } from '@qwen-code/qwen-code-core/agents/runtime/agent-core.js';
+import { tokenLimit } from '@qwen-code/qwen-code-core/core/tokenLimits.js';
+import { runOutsideAgentContext } from '@qwen-code/qwen-code-core/agents/runtime/agent-context.js';
 import {
   useAgentViewState,
   useAgentViewActions,
@@ -76,6 +80,60 @@ export function getAgentComposerLayoutKey(parts: {
     parts.queuedMessageCount,
     parts.inputText,
   ].join('|');
+}
+
+/**
+ * The context window the agent tab's usage line is sized against. An agent
+ * on the session's model shares the session's window. An agent on its own
+ * model gets that model's window: the one its registry entry declares, else
+ * the model's known limit. Its runtime config is no guide here, because a
+ * same-provider agent inherits the session's window when the registry
+ * declares none, and a cross-provider agent has no window at all.
+ */
+export function getAgentContextWindowSize(
+  config: Pick<Config, 'getContentGeneratorConfig' | 'getModel'> &
+    Partial<Pick<Config, 'getModelsConfig'>>,
+  core: Pick<AgentCore, 'modelConfig' | 'runtimeView'> | undefined,
+): number | undefined {
+  // The footer can render from inside the agent's own runtime frame, where
+  // these getters answer with the agent's config, so read them outside it.
+  const sessionConfig = runOutsideAgentContext(() =>
+    config.getContentGeneratorConfig(),
+  );
+  const agentModel = core?.modelConfig.model;
+  if (!agentModel) {
+    return sessionConfig?.contextWindowSize;
+  }
+  const sessionModel = runOutsideAgentContext(() => config.getModel());
+  const ownRoute = core?.runtimeView?.contentGeneratorConfig;
+  // The same model id on another provider or endpoint is a different model,
+  // so the session window only applies when the agent also shares its route.
+  const onSessionRoute =
+    !ownRoute ||
+    (ownRoute.authType === sessionConfig?.authType &&
+      ownRoute.baseUrl === sessionConfig?.baseUrl);
+  if (agentModel === sessionModel && onSessionRoute) {
+    return sessionConfig?.contextWindowSize;
+  }
+  const route = ownRoute ?? sessionConfig;
+  const modelsConfig = config.getModelsConfig?.();
+  // Look up the entry for the route's own endpoint, then the one declared
+  // without a base URL. `null` stops either lookup from taking an entry
+  // declared for some other endpoint.
+  const declared =
+    route?.authType && modelsConfig
+      ? (
+          modelsConfig.getResolvedModel(
+            route.authType,
+            agentModel,
+            route.baseUrl ?? null,
+          ) ?? modelsConfig.getResolvedModel(route.authType, agentModel, null)
+        )?.generationConfig.contextWindowSize
+      : undefined;
+  // A declared window of 0 would divide the usage by zero.
+  return declared !== undefined && declared > 0
+    ? declared
+    : tokenLimit(agentModel, 'input');
 }
 
 // ─── Component ──────────────────────────────────────────────
@@ -380,9 +438,10 @@ export const AgentComposer: React.FC<AgentComposerProps> = ({ agentId }) => {
         <AgentFooter
           approvalMode={agentApprovalMode}
           promptTokenCount={lastPromptTokenCount}
-          contextWindowSize={
-            config.getContentGeneratorConfig()?.contextWindowSize
-          }
+          contextWindowSize={getAgentContextWindowSize(
+            config,
+            interactiveAgent?.getCore(),
+          )}
           terminalWidth={terminalWidth}
         />
       </Box>
