@@ -5218,10 +5218,11 @@ jobs:
       contents: 'read'
       pull-requests: 'write'
     steps:
-      # Sparse — the uploader, its helper dependency, and the root
-      # package.json that marks the uploader's `.js` as ESM (without it the
-      # uploader only parses on the Node versions that infer module syntax,
-      # and this job pins no Node).
+      # Sparse — the uploader, its helper dependency, the artifact checker
+      # local rounds run before publishing, and the root package.json that
+      # marks the uploader's `.js` as ESM (without it the uploader only
+      # parses on the Node versions that infer module syntax, and this job
+      # pins no Node).
       - name: 'Checkout the OSS publisher scripts'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -5235,6 +5236,8 @@ jobs:
             /package.json
             scripts/upload-aliyun-oss-assets.js
             scripts/release-script-utils.js
+            scripts/verify-pr-check.mjs
+            scripts/lib/entry-point.js
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -5974,13 +5977,37 @@ jobs:
                 echo "::warning::assertions.json missing or inconsistent; not treating it as evidence."
               fi
             fi
+            # The artifact checker local rounds run before publishing, from
+            # this trusted checkout: one implementation of the consistency
+            # rules for both paths, including the failure ledger and the
+            # per-commit mutation claim the counts above cannot see. A refusal
+            # is exit 1 plus the checker's own `failed:` summary line; node
+            # also exits 1 when the script cannot load, and an unchecked
+            # verdict is not trusted either. Only `error` lines are echoed:
+            # they carry fixed text, counts, hex ids and a JSON-escaped
+            # verdict, while warnings can name agent-chosen evidence files.
+            ARTIFACT_CHECK=''
+            if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ] && [ -n "${AGENT_VERDICT:-}" ]; then
+              check_log="${RUNNER_TEMP:-/tmp}/verify-pr-check.log"
+              check_status=0
+              node "${VERIFY_PR_CHECK:-scripts/verify-pr-check.mjs}" "$(dirname "$REPORT")" > "$check_log" 2>&1 || check_status=$?
+              if [ "$check_status" -eq 0 ]; then
+                ARTIFACT_CHECK=ok
+              elif [ "$check_status" -eq 1 ] && grep -q '^  failed: verdict=' "$check_log"; then
+                ARTIFACT_CHECK=refused
+                grep '^  error ' "$check_log" | head -20 | cut -c1-300 || true
+              else
+                ARTIFACT_CHECK=error
+                echo "::warning::The artifact check could not run (exit ${check_status}); not trusting the agent verdict."
+              fi
+            fi
             # The agent's own verdict is only honoured for a run that
             # actually completed AND left consistent evidence: an early
             # `merge-ready` file must not headline a run that then timed out,
             # crashed, or produced no report/assertions. Otherwise the
             # headline comes from the process outcome.
             TRUST_AGENT_VERDICT=false
-            if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ]; then
+            if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ] && [ "$ARTIFACT_CHECK" = ok ]; then
               case "${AGENT_VERDICT:-}" in
                 merge-ready) [ "$A_FAIL" = '0' ] && TRUST_AGENT_VERDICT=true ;;
                 findings|blocked|inconclusive) TRUST_AGENT_VERDICT=true ;;
@@ -5995,9 +6022,21 @@ jobs:
             # or produced no usable verdict says nothing about the PR and
             # gets incomplete/inconclusive, never a pass or a fail.
             if [ "$TRUST_AGENT_VERDICT" = true ]; then
+              # A checked `findings` verdict with no failed assertion is
+              # advisory: every scripted check passed, and the rule that
+              # verdicts come from harness exits gives the prose no power to
+              # fail the PR. A failed assertion keeps it "not passed"; the
+              # checker has already refused a ledger that attributes none of
+              # the failures to the PR.
               case "$AGENT_VERDICT" in
                 merge-ready) QUAL='✅ passed'; QUAL_ZH='✅ 通过'; HEADLINE='merge-ready (agent verdict)'; HEADLINE_ZH='可合入（agent 判定）' ;;
-                findings) QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='findings reported (agent verdict)'; HEADLINE_ZH='报告了发现（agent 判定）' ;;
+                findings)
+                  if [ "$A_FAIL" = '0' ]; then
+                    QUAL='✅ passed with findings'; QUAL_ZH='✅ 通过（有发现）'; HEADLINE='non-blocking findings, every scripted assertion passed (agent verdict)'; HEADLINE_ZH='非阻塞发现，脚本断言全部通过（agent 判定）'
+                  else
+                    QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='findings reported (agent verdict)'; HEADLINE_ZH='报告了发现（agent 判定）'
+                  fi
+                  ;;
                 blocked) QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='blocked (agent verdict)'; HEADLINE_ZH='阻塞（agent 判定）' ;;
                 inconclusive) QUAL='⚠️ inconclusive'; QUAL_ZH='⚠️ 无法判定'; HEADLINE='the agent could not reach a conclusion'; HEADLINE_ZH='agent 未能得出结论' ;;
               esac
@@ -6015,8 +6054,10 @@ jobs:
                     echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (report.md missing); reporting the process outcome instead."
                   elif [ -z "$ASSERT_LINE" ]; then
                     echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions.json missing or inconsistent); reporting the process outcome instead."
-                  else
+                  elif [ "$AGENT_VERDICT" = 'merge-ready' ] && [ "${A_FAIL:-0}" != '0' ]; then
                     echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions recorded ${A_FAIL:-?} failures); reporting the process outcome instead."
+                  else
+                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (artifact check: ${ARTIFACT_CHECK}); reporting the process outcome instead."
                   fi
                 else
                   echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but the run did not complete cleanly (process verdict '${VERDICT:-}'); reporting the process outcome instead."
@@ -6067,6 +6108,22 @@ jobs:
                 FLAKE_LINE_ZH='抖动门：⚠️ error — 发布时门判定缺失或无法识别，按 error 处理'
                 ;;
             esac
+            # The merge-ready-with-failures case has its own paragraph below.
+            CHECK_NOTE=''
+            CHECK_NOTE_ZH=''
+            if [ "$TRUST_AGENT_VERDICT" != true ] &&
+               ! { [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "${A_FAIL:-0}" != '0' ]; }; then
+              case "$ARTIFACT_CHECK" in
+                refused)
+                  CHECK_NOTE='its artifacts fail the consistency check local rounds run before publishing'
+                  CHECK_NOTE_ZH='其产物未通过本地轮次发布前运行的一致性检查'
+                  ;;
+                error)
+                  CHECK_NOTE='the consistency check local rounds run before publishing could not run on its artifacts'
+                  CHECK_NOTE_ZH='本地轮次发布前运行的一致性检查无法在其产物上运行'
+                  ;;
+              esac
+            fi
             if [ -z "$REPORT" ]; then
               MISSING_REPORT_NOTE='No report.md was found in the run artifacts, so the report section is omitted — see the workflow run output.'
               echo "::warning::${MISSING_REPORT_NOTE}"
@@ -6107,6 +6164,9 @@ jobs:
               if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
                 printf 'The agent reported `merge-ready`, but `assertions.json` recorded %s failures, so that claim was not trusted — see the report for whether these are expected A/B control cells.\n\n' "$A_FAIL"
               fi
+              if [ -n "$CHECK_NOTE" ]; then
+                printf 'The agent reported `%s`, but %s (`verify-pr-check.mjs`), so that verdict was not trusted — the workflow run log lists the errors.\n\n' "$AGENT_VERDICT" "$CHECK_NOTE"
+              fi
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf 'The deterministic flakiness gate re-ran the test files this PR changes and got different outcomes from identical runs%s. A test that can fail with no code changing lands as intermittent red on unrelated PRs, so this run is reported as not passed regardless of the agent verdict — the per-round matrix is in the flakiness gate log below.\n\n' "${AGENT_VERDICT:+ (agent verdict: \`${AGENT_VERDICT}\`)}"
                 if [ ! -f "$FLAKE_LOG" ]; then
@@ -6131,6 +6191,9 @@ jobs:
               fi
               if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
                 printf 'agent 报告了 `merge-ready`，但 `assertions.json` 记录了 %s 个失败，因此该判定未被采信——请参阅报告确认这些是否为预期的 A/B 对照单元。\n\n' "$A_FAIL"
+              fi
+              if [ -n "$CHECK_NOTE_ZH" ]; then
+                printf 'agent 报告了 `%s`，但%s（`verify-pr-check.mjs`），因此该判定未被采信——检查的错误见工作流运行日志。\n\n' "$AGENT_VERDICT" "$CHECK_NOTE_ZH"
               fi
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '确定性抖动门将本 PR 改动的测试文件原样重跑了多轮，得到了不一致的结果%s。一个在代码不变时也会失败的测试会以间歇性红灯落在无关的 PR 上，因此无论 agent 判定如何，本次运行按不通过报告——各轮结果矩阵见下方抖动门日志。\n\n' "${AGENT_VERDICT:+（agent 判定：\`${AGENT_VERDICT}\`）}"

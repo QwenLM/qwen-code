@@ -1591,6 +1591,16 @@ reviewer's attention; `blocked` = the central claim failed its A/B or a
 regression reproduced; `inconclusive` = budget or environment prevented the
 central claim from being tested — say why.
 
+The published headline follows the counts, not the word alone: `findings`
+with `fail: 0` is published as passed with findings. A defect you reproduced
+at head is therefore a failed assertion attributed to `pr`, never an
+expected-red pass — that rule covers control cells, which exist to fail, not
+head behaviour the PR got wrong. Measured example: a round reproduced a
+regression, asserted that the head showed it, and published `blocked` over
+4382 passes and 0 failures. The CI publisher runs `verify-pr-check.mjs` before
+it trusts any verdict, so run it on the artifact dir before you finish, in
+either path.
+
 ### report.md structure
 
 1. **Verdict line first**, with assertion totals and the verified head OID

@@ -4396,8 +4396,20 @@ describe('qwen-triage verify hardening round 2', () => {
       '/package.json',
       'scripts/upload-aliyun-oss-assets.js',
       'scripts/release-script-utils.js',
+      'scripts/verify-pr-check.mjs',
     ]) {
       expect(checkout).toContain(`\n            ${entry}\n`);
+    }
+    // The checker's only local import; the last entry has no trailing newline.
+    expect(checkout).toContain('\n            scripts/lib/entry-point.js');
+    for (const [file, imports] of [
+      ['scripts/verify-pr-check.mjs', ['./lib/entry-point.js']],
+      ['scripts/lib/entry-point.js', []],
+    ]) {
+      const source = readFileSync(file, 'utf8');
+      expect(
+        [...source.matchAll(/from '(\.[^']+)'/g)].map((m) => m[1]),
+      ).toEqual(imports);
     }
   });
 
@@ -5514,11 +5526,21 @@ describe('qwen-triage verify publish fidelity', () => {
       .match(/run: \|-\n([\s\S]*)$/)?.[1]
       .replace(/^ {10}/gm, '');
 
-  // Render the publisher for a given outcome with a stubbed gh, and return
-  // the comment body it would post.
-  const render = (dir, env) => {
+  // Render the publisher for a given outcome with a stubbed gh and the real
+  // artifact checker, and return the comment body it would post plus the
+  // step log. The verify job reads AGENT_VERDICT from the artifact's
+  // verdict.txt, so the fixture carries the same word.
+  const publish = (dir, env) => {
     const out = join(dir, `body-${env.NAME}.md`);
     const work = join(dir, 'work');
+    const verdictFile = join(
+      work,
+      'verify-results',
+      'prA-verify-1',
+      'verdict.txt',
+    );
+    rmSync(verdictFile, { force: true });
+    if (env.AGENT_VERDICT) writeFileSync(verdictFile, `${env.AGENT_VERDICT}\n`);
     const res = spawnSync('bash', ['-c', publishScript()], {
       cwd: work,
       encoding: 'utf8',
@@ -5540,12 +5562,14 @@ describe('qwen-triage verify publish fidelity', () => {
         AGENT_VERDICT: '',
         SKIP_REASON: '',
         PREPARE_FAILURE_PHASE: '',
+        VERIFY_PR_CHECK: join(process.cwd(), 'scripts', 'verify-pr-check.mjs'),
         ...env,
       },
     });
     expect(res.status).toBe(0);
-    return readFileSync(out, 'utf8');
+    return { body: readFileSync(out, 'utf8'), log: res.stdout };
   };
+  const render = (dir, env) => publish(dir, env).body;
 
   const fixture = () => {
     const dir = mkdtempSync(join(tmpdir(), 'verify-publish2-'));
@@ -5758,6 +5782,10 @@ describe('qwen-triage verify publish fidelity', () => {
     // verdict-less run says nothing about the PR and must render as
     // incomplete/inconclusive, never as a pass or a fail.
     const dir = fixture();
+    // A failed assertion the PR caused is what may fail the PR; findings
+    // over an all-green ledger are advisory.
+    const PR_RED =
+      '{"pass":9,"fail":1,"total":10,"failures":[{"id":"head-regression","attribution":"pr"}]}';
     try {
       const ARMS = [
         [
@@ -5767,13 +5795,20 @@ describe('qwen-triage verify publish fidelity', () => {
         ],
         [
           { VERDICT: 'pass', AGENT_VERDICT: 'findings' },
+          '\u2705 passed with findings \u2014 non-blocking findings, every scripted assertion passed (agent verdict)',
+          '\u2705 \u901a\u8fc7\uff08\u6709\u53d1\u73b0\uff09 \u00b7 \u975e\u963b\u585e\u53d1\u73b0\uff0c\u811a\u672c\u65ad\u8a00\u5168\u90e8\u901a\u8fc7\uff08agent \u5224\u5b9a\uff09',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'findings' },
           '\u274c not passed \u2014 findings reported (agent verdict)',
           '\u274c \u4e0d\u901a\u8fc7 \u00b7 \u62a5\u544a\u4e86\u53d1\u73b0\uff08agent \u5224\u5b9a\uff09',
+          PR_RED,
         ],
         [
           { VERDICT: 'pass', AGENT_VERDICT: 'blocked' },
           '\u274c not passed \u2014 blocked (agent verdict)',
           '\u274c \u4e0d\u901a\u8fc7 \u00b7 \u963b\u585e\uff08agent \u5224\u5b9a\uff09',
+          PR_RED,
         ],
         [
           { VERDICT: 'pass', AGENT_VERDICT: 'inconclusive' },
@@ -5808,7 +5843,17 @@ describe('qwen-triage verify publish fidelity', () => {
       ];
       const seenEn = new Set();
       const seenZh = new Set();
-      ARMS.forEach(([env, en, zh], i) => {
+      ARMS.forEach(([env, en, zh, assertions], i) => {
+        writeFileSync(
+          join(
+            dir,
+            'work',
+            'verify-results',
+            'prA-verify-1',
+            'assertions.json',
+          ),
+          assertions ?? '{"pass":10,"fail":0,"total":10}',
+        );
         const body = render(dir, { NAME: `hl${i}`, AGENT_VERDICT: '', ...env });
         expect(body).toContain(`**Sandboxed verification: ${en}**`);
         expect(body).toContain(
@@ -5830,6 +5875,74 @@ describe('qwen-triage verify publish fidelity', () => {
       // pairing is pinned as a bijection.
       expect(seenEn.size).toBe(ARMS.length);
       expect(seenZh.size).toBe(ARMS.length);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The publisher used to check only the count triple, so CI published the
+  // shapes every local round refuses: findings over environment-only reds,
+  // and blocked over a harness fault.
+  it('does not trust a verdict the artifact checker refuses', () => {
+    const dir = fixture();
+    const assertionsFile = join(
+      dir,
+      'work',
+      'verify-results',
+      'prA-verify-1',
+      'assertions.json',
+    );
+    const UNTRUSTED =
+      '⚠️ inconclusive — completed without a usable structured verdict';
+    try {
+      writeFileSync(
+        assertionsFile,
+        '{"pass":8,"fail":2,"total":10,"failures":[{"id":"head","attribution":"environment"},{"id":"base-aa","attribution":"environment"}]}',
+      );
+      const envOnly = publish(dir, { NAME: 'env', AGENT_VERDICT: 'findings' });
+      expect(envOnly.body).toContain(UNTRUSTED);
+      expect(envOnly.body).not.toContain('❌');
+      expect(envOnly.body).toContain(
+        'The agent reported `findings`, but its artifacts fail the consistency check local rounds run before publishing (`verify-pr-check.mjs`)',
+      );
+      expect(envOnly.body).toContain(
+        'agent 报告了 `findings`，但其产物未通过本地轮次发布前运行的一致性检查',
+      );
+      expect(envOnly.log).toContain(
+        '  error findings with 2 failed assertions and none attributed to the PR',
+      );
+      expect(envOnly.log).toContain('(artifact check: refused)');
+
+      writeFileSync(
+        assertionsFile,
+        '{"pass":9,"fail":1,"total":10,"failures":[{"id":"probe","attribution":"harness"}]}',
+      );
+      const blocked = render(dir, { NAME: 'blk', AGENT_VERDICT: 'blocked' });
+      expect(blocked).toContain(UNTRUSTED);
+      expect(blocked).toContain('The agent reported `blocked`');
+
+      // A checker that cannot load is not a clean check.
+      const missing = publish(dir, {
+        NAME: 'nochk',
+        AGENT_VERDICT: 'findings',
+        VERIFY_PR_CHECK: join(dir, 'absent.mjs'),
+      });
+      expect(missing.body).toContain(UNTRUSTED);
+      expect(missing.body).toContain(
+        'but the consistency check local rounds run before publishing could not run on its artifacts',
+      );
+      expect(missing.log).toContain('The artifact check could not run');
+
+      // merge-ready over failures keeps its own explanation, not both.
+      writeFileSync(
+        assertionsFile,
+        '{"pass":9,"fail":1,"total":10,"failures":[{"id":"x","attribution":"pr"}]}',
+      );
+      const mr = render(dir, { NAME: 'mr', AGENT_VERDICT: 'merge-ready' });
+      expect(mr).toContain(
+        'recorded 1 failures, so that claim was not trusted',
+      );
+      expect(mr).not.toContain('verify-pr-check.mjs');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
