@@ -133,6 +133,81 @@ const BRIDGE = `(() => {
   };
 })()`;
 
+// Reads a native error's own data properties without invoking guest getters or
+// toString hooks; anything else describes as ''. Evaluated before generated
+// code runs, so later changes to globals cannot reach these references.
+const DESCRIBE = `(() => {
+  'use strict';
+  const getPrototypeOf = Object.getPrototypeOf;
+  const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const natives = [Error.prototype, EvalError.prototype, RangeError.prototype,
+    ReferenceError.prototype, SyntaxError.prototype, TypeError.prototype,
+    URIError.prototype];
+  function isNative(prototype) {
+    for (let i = 0; i < natives.length; i++) if (natives[i] === prototype) return true;
+    return false;
+  }
+  function data(object, key) {
+    let current = object;
+    for (let depth = 0; current !== null && depth < 8; depth++) {
+      const descriptor = getOwnPropertyDescriptor(current, key);
+      if (descriptor) return typeof descriptor.value === 'string' ? descriptor.value : '';
+      if (isNative(current)) return '';
+      current = getPrototypeOf(current);
+    }
+    return '';
+  }
+  return function (error) {
+    if (error === null || typeof error !== 'object') return '';
+    let current = getPrototypeOf(error);
+    let native = false;
+    for (let depth = 0; current !== null && depth < 8; depth++) {
+      if (isNative(current)) { native = true; break; }
+      current = getPrototypeOf(current);
+    }
+    if (!native) return '';
+    const line = getOwnPropertyDescriptor(error, 'lineNumber');
+    return data(error, 'name').slice(0, 40) + '\\n' +
+      data(error, 'message').slice(0, 300) + '\\n' +
+      data(error, 'stack').slice(0, 300) + '\\n' +
+      (line && typeof line.value === 'number' ? String(line.value) : '');
+  };
+})()`;
+
+const RUNTIME_LIMIT =
+  'Generated JavaScript failed or exceeded a runtime limit.';
+const SOURCE_NAME = 'generated-ui.js';
+const SCRIPT_ERRORS = new Set([
+  'Error',
+  'EvalError',
+  'RangeError',
+  'ReferenceError',
+  'SyntaxError',
+  'TypeError',
+  'URIError',
+]);
+
+/**
+ * Formats an error description from DESCRIBE. Only ordinary script errors are
+ * named; QuickJS InternalError (stack or memory exhaustion) and thrown
+ * non-errors keep the generic runtime-limit message.
+ */
+export function formatScriptError(description: string): string | undefined {
+  const [name = '', message = '', stack = '', line = ''] =
+    description.split('\n');
+  if (!SCRIPT_ERRORS.has(name)) return undefined;
+  const location = /generated-ui\.js:(\d+)(?::(\d+))?/.exec(stack);
+  const lineNumber = location?.[1] ?? (/^\d+$/.test(line) ? line : undefined);
+  const where = lineNumber
+    ? ` (line ${lineNumber}${location?.[2] ? `, column ${location[2]}` : ''})`
+    : '';
+  let detail = message.replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\s]+/gu, ' ').trim();
+  if (detail.length > 160) detail = `${detail.slice(0, 159)}…`;
+  detail = detail.replace(/[.。]+$/u, '');
+  const label = name === 'Error' ? detail || name : `${name}: ${detail}`;
+  return `Script error: ${label.replace(/: $/, '')}${where}.`;
+}
+
 function serializeInputs(inputs: InputValues): string {
   if (
     !inputs ||
@@ -166,6 +241,7 @@ export class UiRuntime {
   private readonly runtime: QuickJSRuntime;
   private readonly vm: QuickJSContext;
   private bridge?: QuickJSHandle;
+  private describer?: QuickJSHandle;
   private deadline = Infinity;
   private interrupted = false;
   private initialized = false;
@@ -180,6 +256,7 @@ export class UiRuntime {
       return this.interrupted;
     });
     this.vm = this.runtime.newContext();
+    this.describer = this.take(this.vm.evalCode(DESCRIBE, 'ui-describe.js'));
     this.bridge = this.take(this.vm.evalCode(BRIDGE, 'ui-bridge.js'));
   }
 
@@ -197,7 +274,7 @@ export class UiRuntime {
       }
       this.call('inputs', serializeInputs(inputs)).dispose();
       this.take(
-        this.vm.evalCode(javascript, 'generated-ui.js', { type: 'global' }),
+        this.vm.evalCode(javascript, SOURCE_NAME, { type: 'global' }),
       ).dispose();
     });
   }
@@ -234,18 +311,46 @@ export class UiRuntime {
     if (this.disposed) return;
     this.disposed = true;
     this.bridge?.dispose();
+    this.describer?.dispose();
     this.vm.dispose();
     this.runtime.dispose();
   }
 
   private take(result: ReturnType<QuickJSContext['evalCode']>): QuickJSHandle {
     if (result.error) {
+      const message = this.describe(result.error) ?? RUNTIME_LIMIT;
       result.error.dispose();
-      throw new Error(
-        'Generated JavaScript failed or exceeded a runtime limit.',
-      );
+      throw new Error(message);
     }
     return result.value;
+  }
+
+  private describe(error: QuickJSHandle): string | undefined {
+    if (!this.describer || this.interrupted) return undefined;
+    // Describing must not extend a round past its time budget.
+    const deadline = this.deadline;
+    this.deadline = Math.min(deadline, performance.now() + 50);
+    try {
+      const result = this.vm.callFunction(
+        this.describer,
+        this.vm.undefined,
+        error,
+      );
+      if (result.error) {
+        result.error.dispose();
+        return undefined;
+      }
+      try {
+        return formatScriptError(this.vm.getString(result.value));
+      } finally {
+        result.value.dispose();
+      }
+    } catch {
+      return undefined;
+    } finally {
+      this.interrupted = false;
+      this.deadline = deadline;
+    }
   }
 
   private call(command: string, payload = ''): QuickJSHandle {

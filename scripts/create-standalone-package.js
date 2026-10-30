@@ -14,6 +14,7 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import { pipeline } from 'node:stream/promises';
 import { fileURLToPath } from 'node:url';
+import { copyManagedLocalRuntime } from './managed-local-package.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -172,6 +173,10 @@ async function main() {
     fail('--runtime must be either "node" or "bun"');
   }
 
+  if (Boolean(args.managedServerJar) !== Boolean(args.managedJreHome)) {
+    fail('--managed-server-jar and --managed-jre-home are required together.');
+  }
+
   if (!args.nodeArchive) {
     fail('--node-archive is required');
   }
@@ -184,11 +189,27 @@ async function main() {
   assertRequiredInputs();
 
   const version = args.version || readPackageVersion();
-  const outDir = path.resolve(args.outDir || path.join(distDir, 'standalone'));
+  if (args.managedServerJar && version !== readPackageVersion()) {
+    fail(
+      'Managed package --version must match the built CLI version. Build all components from the same versioned checkout.',
+    );
+  }
+  const outDir = path.resolve(
+    args.outDir ||
+      path.join(
+        distDir,
+        args.managedServerJar ? 'managed-local' : 'standalone',
+      ),
+  );
   fs.mkdirSync(outDir, { recursive: true });
 
   const targetConfig = TARGETS.get(target);
-  const outputName = standaloneArchiveName(target, args.runtime);
+  const outputName = args.managedServerJar
+    ? standaloneArchiveName(target, args.runtime).replace(
+        'qwen-code-',
+        'qwen-code-managed-local-',
+      )
+    : standaloneArchiveName(target, args.runtime);
   const outputPath = path.join(outDir, outputName);
   const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-standalone-'));
 
@@ -219,11 +240,22 @@ async function main() {
     }
     validateNodeRuntime(target, nodeDir);
     writeShims(packageRoot, args.runtime);
+    if (args.managedServerJar) {
+      copyManagedLocalRuntime({
+        destination: path.join(packageRoot, 'lib', 'managed-runtime'),
+        serverJar: path.resolve(args.managedServerJar),
+        jreHome: path.resolve(args.managedJreHome),
+        version,
+        target,
+        runtime: args.runtime,
+      });
+    }
     writeManifest(packageRoot, {
       version,
       target,
       nodeArchive: path.basename(nodeArchive),
       runtime: args.runtime,
+      ...(args.managedServerJar ? { managedLocal: true } : {}),
     });
 
     if (fs.existsSync(outputPath)) {
@@ -271,6 +303,8 @@ function parseArgs(argv) {
     opentuiModulesDir: undefined,
     outDir: undefined,
     nodeArchive: undefined,
+    managedServerJar: undefined,
+    managedJreHome: undefined,
     runtime: 'node',
     skipChecksums: false,
     target: undefined,
@@ -294,6 +328,14 @@ function parseArgs(argv) {
         break;
       case '--node-archive':
         args.nodeArchive = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--managed-server-jar':
+        args.managedServerJar = readOptionValue(argv, index, arg);
+        index += 1;
+        break;
+      case '--managed-jre-home':
+        args.managedJreHome = readOptionValue(argv, index, arg);
         index += 1;
         break;
       case '--native-modules-dir':
@@ -344,6 +386,11 @@ Options:
                           binary at the bundled runtime path so the OpenTUI
                           renderer (needs bun:ffi) works standalone.
   --node-archive PATH     Downloaded Node.js runtime archive.
+  --managed-server-jar PATH
+                          Include the matching Managed server Spring Boot JAR.
+  --managed-jre-home DIR  Complete extracted Java 21 runtime for TARGET, including
+                          legal/. Required with --managed-server-jar; creates a
+                          distinct qwen-code-managed-local-TARGET archive.
   --native-modules-dir DIR
                           Staged native node_modules directory holding
                           @teddyzhu/clipboard* and @lydell/node-pty*
@@ -355,7 +402,8 @@ Options:
                           Staged node_modules directory holding @opentui
                           platform packages. Used with --runtime bun; missing
                           packages are fatal when this is supplied.
-  --out-dir DIR           Output directory. Defaults to dist/standalone.
+  --out-dir DIR           Output directory. Defaults to dist/standalone,
+                          or dist/managed-local for a Managed package.
   --version VERSION       Qwen Code version. Defaults to package.json version.
   --skip-checksums        Do not update SHA256SUMS. Used by release packaging.
   -h, --help              Show this help message.`);
@@ -1064,6 +1112,7 @@ function writeManifest(packageRoot, manifest) {
         target: manifest.target,
         runtime: manifest.runtime || 'node',
         nodeArchive: manifest.nodeArchive,
+        ...(manifest.managedLocal ? { managedLocal: true } : {}),
         createdAt: new Date().toISOString(),
       },
       null,

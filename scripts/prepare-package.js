@@ -15,6 +15,13 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import semver from 'semver';
+import os from 'node:os';
+import {
+  NPM_BUN_OPTIONAL_DEPENDENCIES,
+  NPM_OPENTUI_NATIVE_ASSETS,
+  prepareNpmOpenTuiAssets,
+  stageOpenTuiPackages,
+} from './opentui-package-assets.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -39,24 +46,41 @@ export function preparePackage({
   requireNativeAudioCapture = process.env
     .QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD === '1',
   maxPackageUnpackedBytes = DEFAULT_MAX_NPM_PACKAGE_UNPACKED_BYTES,
+  opentuiModulesDir,
+  npmDistribution = true,
 } = {}) {
   const distDir = path.join(rootDir, 'dist');
 
   verifyBundleArtifacts(rootDir, distDir);
+  if (npmDistribution) prepareNpmOpenTuiAssets(distDir, opentuiModulesDir);
   copyDocumentationFiles(rootDir, distDir);
   copyLocales(rootDir, distDir);
   copyExtensionExamples(rootDir, distDir);
   verifyNativeAudioCapturePackage(rootDir, distDir, {
     required: requireNativeAudioCapture,
   });
-  writeDistPackageJson(rootDir, distDir);
+  writeDistPackageJson(rootDir, distDir, npmDistribution);
   assertNoSensitivePackageScanLiterals(distDir);
   assertPreparedPackageSize(distDir, maxPackageUnpackedBytes);
   printPackageStructure(distDir);
 }
 
 if (isDirectRun()) {
-  preparePackage();
+  if (process.argv.includes('--host-runtime')) {
+    preparePackage({ npmDistribution: false });
+  } else {
+    const staging = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-npm-opentui-'));
+    try {
+      const opentuiModulesDir = stageOpenTuiPackages(
+        defaultRootDir,
+        staging,
+        Object.keys(NPM_OPENTUI_NATIVE_ASSETS),
+      );
+      preparePackage({ opentuiModulesDir });
+    } finally {
+      fs.rmSync(staging, { recursive: true, force: true });
+    }
+  }
 }
 
 function isDirectRun() {
@@ -277,7 +301,7 @@ function hasFileMatching(dir, predicate) {
   return false;
 }
 
-function writeDistPackageJson(rootDir, distDir) {
+function writeDistPackageJson(rootDir, distDir, npmDistribution) {
   console.log('Creating package.json for distribution...');
 
   const cliEntryPath = path.join(distDir, 'cli-entry.js');
@@ -372,21 +396,20 @@ function writeDistPackageJson(rootDir, distDir) {
       'web-shell',
       'export-transcript-document.js',
       'export-transcript-document.css',
-      // OpenTUI renderer runtime assets (tree-sitter grammars, parser worker,
-      // web-tree-sitter wasm, native render library) are intentionally NOT
-      // published in the npm package — a multi-megabyte tree dominated by the
-      // native render library — against the unpacked-size budget. An npm
-      // install also has no @opentui/core dependency to resolve the assets
-      // against: below the runtime floor (Node < 26.4.0) the renderer gate
-      // never selects opentui, and at or above it, QWEN_TUI_RENDERER=opentui
-      // selects the renderer, the boot fails on the missing asset tree, and
-      // a stderr warning falls back to ink on every startup. The opt-in Bun
-      // standalone flavor (--runtime=bun) carries the assets via
-      // create-standalone-package.js instead.
+      ...(npmDistribution
+        ? [
+            'opentui-assets/@opentui/core',
+            'opentui-assets/web-tree-sitter',
+            ...Object.keys(NPM_OPENTUI_NATIVE_ASSETS).map(
+              (name) => `opentui-assets/${name}`,
+            ),
+          ]
+        : []),
     ],
     config: rootPackageJson.config,
     dependencies: {},
     optionalDependencies: {
+      ...(npmDistribution ? NPM_BUN_OPTIONAL_DEPENDENCIES : {}),
       '@qwen-code/audio-capture': rootPackageJson.version,
       ...nodePtyPins,
       '@teddyzhu/clipboard': '0.0.5',

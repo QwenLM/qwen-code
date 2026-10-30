@@ -307,7 +307,11 @@ function applyDaemonTranscriptEvent(
   if (event.eventId !== undefined) {
     next.lastEventId = Math.max(next.lastEventId ?? 0, event.eventId);
   }
-  if (next.awaitingResync && !RESYNC_PASSTHROUGH_TYPES.has(event.type)) {
+  if (
+    next.awaitingResync &&
+    !RESYNC_PASSTHROUGH_TYPES.has(event.type) &&
+    !(event.type === 'session.rewound' && event.replay !== undefined)
+  ) {
     // Diagnostic for the "permanently frozen
     // transcript" case. Without this log, consumers debugging a stuck UI
     // had no signal that events were being dropped. The latch is
@@ -553,7 +557,39 @@ function applyDaemonTranscriptEvent(
       // transcript mutation.
       break;
     case 'session.rewound':
-      rewindTranscriptToUserTurn(next, event.targetTurnIndex);
+      if (event.replay !== undefined) {
+        const previousLength = next.blocks.length;
+        const previousOldestRecordId = next.blocks.find(
+          (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+        )?.sourceRecordIds?.[0];
+        next.awaitingResync = false;
+        next.lastResyncRequired = undefined;
+        truncateTranscriptBeforeBlock(next, 0, false);
+        for (const frame of event.replay)
+          applyDaemonTranscriptEvent(next, frame);
+        finishAssistant(next);
+        next.activeUserBlockId = undefined;
+        const callback = truncationCallbacks.get(next);
+        // Retention and rewind notifications must observe the installed prefix.
+        trimTranscriptState(next);
+        if (previousLength > 0) {
+          const oldestRetainedRecordId = next.blocks.find(
+            (block) => (block.sourceRecordIds?.length ?? 0) > 0,
+          )?.sourceRecordIds?.[0];
+          callback?.({
+            kind: 'blocks',
+            oldestRetainedRecordId,
+            evictedOldest: oldestRetainedRecordId !== previousOldestRecordId,
+            replacedReplay: true,
+            blockCount: next.blocks.length,
+            retainedBytes: next.retainedBytes,
+            maxBlocks: next.maxBlocks,
+            maxRetainedBytes: next.maxRetainedBytes,
+          });
+        }
+      } else {
+        rewindTranscriptToUserTurn(next, event.targetTurnIndex);
+      }
       break;
     case 'session.branched':
       appendStatusBlock(
@@ -909,6 +945,11 @@ function appendTextDelta(
   if (parentId != null) {
     (block as DaemonTextTranscriptBlock).parentToolCallId = parentId;
   }
+  const eventAgent =
+    'agent' in event ? (event as DaemonUiTextEvent).agent : undefined;
+  if (eventAgent) {
+    (block as DaemonTextTranscriptBlock).agent = eventAgent;
+  }
   appendBlock(state, block);
 
   if (parentMap && parentId != null) {
@@ -1162,6 +1203,12 @@ function upsertToolBlock(
     if (event.subagentType && !existing.subagentType) {
       existing.subagentType = event.subagentType;
     }
+    // Same first-wins adoption as subagentType: a replayed result frame
+    // carries the identity its start frame never had — persistence keeps
+    // it only on the closing task_execution display.
+    if (event.agent && !existing.agent) {
+      existing.agent = event.agent;
+    }
     state.retainedBytes += estimateBlockBytes(existing) - bytesBefore;
     updateCurrentToolPointer(state, event.toolCallId, event.status);
     return;
@@ -1231,6 +1278,7 @@ function upsertToolBlock(
       ? { parentToolCallId: event.parentToolCallId }
       : {}),
     ...(event.subagentType ? { subagentType: event.subagentType } : {}),
+    ...(event.agent ? { agent: event.agent } : {}),
     ...(parentBlockId ? { parentBlockId } : {}),
   };
   appendBlock(state, block);
@@ -2143,9 +2191,39 @@ function takeBlockIndexOwnership(state: DaemonTranscriptState): void {
   ownedBlockIndexes.set(state, state.blockIndexById);
 }
 
-// Applies a daemon rewind event to this in-memory transcript only. The target
-// user turn and everything after it are removed so the rendered session view
-// matches the already-rewound backend state.
+/**
+ * Whether a transcript block is a user turn a rewind may target.
+ *
+ * The SDK's legacy ordinal traversal excludes background notifications and
+ * injected mid-turn messages. Prompt-ID lookup uses the same classification
+ * to ignore injected rows that share their owner's identity.
+ */
+export function isDaemonRewindUserBlock(
+  block: DaemonTranscriptBlock | undefined,
+): boolean {
+  if (block?.kind !== 'user') return false;
+  const source = block.meta?.['source'];
+  return (
+    source !== 'background_notification' &&
+    source !== 'mid_turn_message_injected'
+  );
+}
+
+export function findDaemonRewindUserBlock(
+  blocks: readonly DaemonTranscriptBlock[],
+  promptId: string,
+): DaemonTextTranscriptBlock | undefined {
+  // Injected mid-turn rows may share their owner's prompt ID.
+  const matches = blocks.filter(
+    (block): block is DaemonTextTranscriptBlock =>
+      block.kind === 'user' &&
+      isDaemonRewindUserBlock(block) &&
+      block.promptId === promptId,
+  );
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
+// Applies a legacy daemon rewind event to this in-memory transcript only.
 function rewindTranscriptToUserTurn(
   state: DaemonTranscriptState,
   targetTurnIndex: number,
@@ -2155,10 +2233,9 @@ function rewindTranscriptToUserTurn(
 
   for (let index = 0; index < state.blocks.length; index += 1) {
     const block = state.blocks[index];
-    if (
-      block?.kind !== 'user' ||
-      block.meta?.['source'] === 'background_notification'
-    ) {
+    // Same rule as the renderer, or a legacy turn index resolves onto the
+    // injected row that does not occupy an ordinal.
+    if (!isDaemonRewindUserBlock(block)) {
       continue;
     }
     lastUserIndex = index;
@@ -2177,6 +2254,7 @@ function rewindTranscriptToUserTurn(
 function truncateTranscriptBeforeBlock(
   state: DaemonTranscriptState,
   blockIndex: number,
+  notify = true,
 ): void {
   takeBlocksOwnership(state);
   const originalLength = state.blocks.length;
@@ -2190,7 +2268,7 @@ function truncateTranscriptBeforeBlock(
   ownedBlocks.set(state, state.blocks);
   rebuildTranscriptIndexes(state);
   ownedBlockIndexes.set(state, state.blockIndexById);
-  if (state.blocks.length < originalLength) {
+  if (notify && state.blocks.length < originalLength) {
     // A rewind frees retention capacity just like an eviction does. Fire the
     // same 'blocks' truncation signal so consumers reconciling a pagination
     // capacity latch on freed capacity observe rewinds too. `evictedOldest`

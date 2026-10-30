@@ -1,0 +1,29 @@
+package com.alibaba.qwen.code.managedagent.persistence;
+
+import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
+import org.flywaydb.core.Flyway;
+import org.junit.jupiter.api.AfterEach;
+
+import javax.sql.DataSource;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+class SshWorkspaceMySqlIT extends SshWorkspaceStoreTest {
+    private IsolatedManagedSchemaMySqlTestDatabase database;
+
+    @Override
+    DataSource source() {
+        database = new IsolatedManagedSchemaMySqlTestDatabase();
+        var source = database.source();
+        Flyway.configure().dataSource(source).locations(ManagedSchema.FLYWAY_LOCATION).load().migrate();
+        assertThat(ManagedSchema.schemaVersion(source)).isEqualTo(1);
+        return source;
+    }
+
+    @AfterEach
+    void closeDatabase() {
+        if (database != null) {
+            database.close();
+        }
+    }
+}

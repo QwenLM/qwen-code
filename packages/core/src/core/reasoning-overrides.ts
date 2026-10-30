@@ -18,6 +18,7 @@ import {
   normalizeDeepSeekReasoningEffort,
 } from './deepseek-reasoning.js';
 import { isOpenRouterHostname } from './openaiContentGenerator/provider/openrouter.js';
+import { QWENCLOUD_MAAS_HOSTS } from './dashscope-source-config.js';
 import {
   parseClaudeModelVersion,
   anthropicSupportedEffortTiers,
@@ -181,13 +182,18 @@ export function validateReasoningCapabilities(
   } catch {
     host = '';
   }
-  // The QwenCloud MaaS suffixes stay inside the anchored (^|\.)…$ group so a
-  // forged `maas.qianwenaiapi.com.evil.com` cannot match, and so their
-  // `token-plan.` subscription subdomains still do.
+  // Host-or-subdomain, anchored, so a forged `maas.qianwenaiapi.com.evil.com`
+  // cannot match while the `token-plan.` subscription subdomains still do. The
+  // QwenCloud hosts are dotted and matched literally rather than spliced into
+  // the alternation above, which keeps them out of regex-escaping duty; the
+  // list itself comes from the attribution leaf (#15107).
   const dashscope =
     auth === 'qwen-oauth' ||
-    /(^|\.)(dashscope(?:-intl|-us)?\.aliyuncs\.com|alibaba-inc\.com|aliyun-inc\.com|alicloudapi\.com|maas\.qianwenaiapi\.com|maas\.qwencloudapi\.com)$/.test(
+    /(^|\.)(dashscope(?:-intl|-us)?\.aliyuncs\.com|alibaba-inc\.com|aliyun-inc\.com|alicloudapi\.com)$/.test(
       host,
+    ) ||
+    QWENCLOUD_MAAS_HOSTS.some(
+      (domain) => host === domain || host.endsWith(`.${domain}`),
     ) ||
     /^token-plan\..+\.maas\.aliyuncs\.com$/.test(host);
   const profile =

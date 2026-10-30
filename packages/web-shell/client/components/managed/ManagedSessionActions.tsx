@@ -1,4 +1,4 @@
-import { MoreHorizontalIcon } from 'lucide-react';
+import { EllipsisVerticalIcon, MoreHorizontalIcon } from 'lucide-react';
 import { useI18n } from '../../i18n';
 import { Button } from '../ui/button';
 import {
@@ -8,6 +8,7 @@ import {
   DropdownMenuTrigger,
 } from '../ui/dropdown-menu';
 import { DialogShell } from '../dialogs/DialogShell';
+import sidebarStyles from '../sidebar/WebShellSidebar.module.css';
 import type {
   ManagedAgentSessionSummary,
   ManagedLifecycleAction,
@@ -42,14 +43,17 @@ export function managedSessionActions(
 
 export function ManagedSessionActions({
   session,
+  sidebar = false,
   lifecycle,
   exporting,
   state,
   onAction,
   onExport,
   onConfirm,
+  onRename,
 }: {
   session: ManagedAgentSessionSummary;
+  sidebar?: boolean;
   lifecycle: boolean;
   exporting?: boolean;
   state?: ManagedLifecycleState;
@@ -59,29 +63,49 @@ export function ManagedSessionActions({
   ) => void;
   onExport?: (sessionId: string, format: 'html' | 'md') => void;
   onConfirm: (sessionId: string) => void;
+  onRename?: () => void;
 }) {
   const { t } = useI18n();
   const actions = lifecycle ? managedSessionActions(session) : [];
   const canManage = Object.entries(session.capabilities).some(
     ([key, value]) => key.startsWith('session') && value === true,
   );
-  if (!actions.length && !onExport && !state) return null;
+  if (!actions.length && !onExport && !state && !onRename) return null;
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <Button
-          type="button"
-          size="icon-sm"
-          variant="ghost"
-          aria-label={`${t('managed.sessionActions')}: ${session.title}`}
-        >
-          <MoreHorizontalIcon aria-hidden="true" />
-        </Button>
+        {sidebar ? (
+          <button
+            type="button"
+            className={sidebarStyles.sessionActionButton}
+            aria-label={`${t('managed.sessionActions')}: ${session.title}`}
+            title={t('sidebar.moreActions')}
+          >
+            <EllipsisVerticalIcon aria-hidden="true" />
+          </button>
+        ) : (
+          <Button
+            type="button"
+            size="icon-sm"
+            variant="ghost"
+            aria-label={`${t('managed.sessionActions')}: ${session.title}`}
+          >
+            <MoreHorizontalIcon aria-hidden="true" />
+          </Button>
+        )}
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
         className={onExport ? 'w-72 max-w-[calc(100vw-1rem)]' : undefined}
       >
+        {onRename && (
+          <DropdownMenuItem
+            disabled={Boolean(state?.canConfirm || state?.busy)}
+            onSelect={onRename}
+          >
+            {t('sidebar.rename')}
+          </DropdownMenuItem>
+        )}
         {exporting && (
           <DropdownMenuItem disabled>{t('managed.exporting')}</DropdownMenuItem>
         )}

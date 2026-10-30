@@ -209,6 +209,10 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/messages/SelectionCopyMenu.transcript-stub.tsx',
     ],
     [
+      './client/utils/selectionClipboard.ts',
+      './client/utils/selectionClipboard.transcript-stub.ts',
+    ],
+    [
       './client/components/messages/workflow-agent-details.ts',
       './client/components/messages/workflow-agent-details.transcript-stub.ts',
     ],
@@ -223,6 +227,10 @@ const TRANSCRIPT_STUBS = new Map(
     [
       './client/components/managed/managed-workspace-messages.ts',
       './client/components/managed/managed-workspace-messages.transcript-stub.ts',
+    ],
+    [
+      './client/components/managed/managed-mcp-messages.ts',
+      './client/components/managed/managed-mcp-messages.transcript-stub.ts',
     ],
   ].map(([module, stub]) => [
     normalizePath(resolve(__dirname, module)),
