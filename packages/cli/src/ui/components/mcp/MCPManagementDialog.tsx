@@ -241,7 +241,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
 
   // Selected server
   const selectedServer = useMemo(() => {
-    if (!selectedServerName) return null;
+    if (selectedServerName === null) return null;
     return servers.find((server) => server.name === selectedServerName) ?? null;
   }, [servers, selectedServerName]);
 

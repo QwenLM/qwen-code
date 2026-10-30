@@ -102,6 +102,15 @@ describe('ServerListStep', () => {
     expect(lastFrame()).toContain('❯ first');
   });
 
+  it('does not select a server from an empty list after navigation', () => {
+    const onSelect = vi.fn();
+    render(<ServerListStep servers={[]} onSelect={onSelect} />);
+    pressKey({ name: 'down' });
+    pressKey({ name: 'up' });
+    pressKey({ name: 'return' });
+    expect(onSelect).not.toHaveBeenCalled();
+  });
+
   describe('approval reason (gated servers skipped by discovery)', () => {
     const gatedServer = (
       name: string,
