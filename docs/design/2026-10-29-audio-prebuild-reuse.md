@@ -137,9 +137,14 @@ The latest review adds regression-sensitive wiring assertions and fixes the
 retention test's clock; these additions await CI and were not run locally.
 
 A branch release dry-run can verify the miss path, all five native payloads and
-publisher consumption without publishing. It cannot seed a trusted reuse
-candidate because producers must run on `main`. A successful `main` run must
-first retain a keyed artifact; a later run with the same key can exercise reuse.
+publisher consumption without publishing. Reuse provenance is checked at the
+run level: repository, `head_branch`, event, workflow path and successful
+conclusion. `head_branch` identifies the dispatch branch, not the built
+`inputs.ref`. A run dispatched on a feature branch cannot seed an eligible
+candidate; one dispatched on `main` with `inputs.ref` pointing at a feature
+branch can. The fingerprint pins the audio build inputs, not the source
+commit's membership in `main`. A successful eligible run must first retain a
+keyed artifact; a later run with the same key can exercise reuse.
 Record the switch state and actual runners used by each dry run. A hosted run
 does not verify ECS execution, and a miss does not verify reuse.
 
