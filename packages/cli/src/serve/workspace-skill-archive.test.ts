@@ -362,6 +362,7 @@ describe('file-backed Skill ZIP policy', () => {
     await installWorkspaceSkill(root, request(file));
     const controller = new AbortController();
     const committed = vi.fn();
+    const rename = vi.spyOn(fs, 'rename');
     const rm = fs.rm.bind(fs);
     vi.spyOn(fs, 'rm').mockImplementation(async (...args) => {
       if (String(args[0]).includes('.backup-'))
@@ -371,7 +372,10 @@ describe('file-backed Skill ZIP policy', () => {
     await expect(
       installWorkspaceSkill(root, request(file), undefined, undefined, {
         signal: controller.signal,
-        beforePublish: () => controller.abort(),
+        beforePublish: () => {
+          expect(rename).not.toHaveBeenCalled();
+          controller.abort();
+        },
         onCommitted: committed,
       }),
     ).resolves.toMatchObject({ skillName: 'example' });

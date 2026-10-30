@@ -56,6 +56,7 @@ describe('owned Skill archives', () => {
 
   it('rejects a digest mismatch without changing the input', async () => {
     const file = await fixture();
+    const mkdtemp = vi.spyOn(fs, 'mkdtemp');
     await expect(
       acquireSkillArchive(
         { type: 'zip-file', path: file, sha256: '0'.repeat(64) },
@@ -63,6 +64,9 @@ describe('owned Skill archives', () => {
       ),
     ).rejects.toMatchObject({ code: 'skill_archive_digest_mismatch' });
     await expect(fs.readFile(file, 'utf8')).resolves.toBe('original');
+    await expect(
+      fs.access(await mkdtemp.mock.results[0]!.value),
+    ).rejects.toThrow();
   });
 
   it('rejects a symbolic link and a directory', async () => {
@@ -83,6 +87,7 @@ describe('owned Skill archives', () => {
     'rejects a source %s during copying and closes its handle',
     async (change) => {
       const file = await fixture();
+      const mkdtemp = vi.spyOn(fs, 'mkdtemp');
       const open = fs.open.bind(fs);
       const handles: Array<Awaited<ReturnType<typeof fs.open>>> = [];
       vi.spyOn(fs, 'open').mockImplementation(async (...args) => {
@@ -98,6 +103,7 @@ describe('owned Skill archives', () => {
               utimesSync(file, 1, 1);
             }
           });
+          result.pause();
           return result;
         });
         return handle;
@@ -109,6 +115,9 @@ describe('owned Skill archives', () => {
         ),
       ).rejects.toMatchObject({ code: 'skill_archive_changed' });
       expect(handles.every((handle) => handle.fd === -1)).toBe(true);
+      await expect(
+        fs.access(await mkdtemp.mock.results[0]!.value),
+      ).rejects.toThrow();
     },
   );
 
@@ -131,6 +140,7 @@ describe('owned Skill archives', () => {
     );
     expect((await fs.stat(accepted.path)).size).toBe(MAX_SKILL_ARCHIVE_BYTES);
     await accepted.dispose();
+    const mkdtemp = vi.spyOn(fs, 'mkdtemp');
     await expect(
       acquireSkillArchive(
         bytes(MAX_SKILL_ARCHIVE_BYTES + 1),
@@ -140,9 +150,13 @@ describe('owned Skill archives', () => {
       code: 'skill_archive_too_large',
       statusCode: 413,
     });
+    await expect(
+      fs.access(await mkdtemp.mock.results[0]!.value),
+    ).rejects.toThrow();
   });
 
   it('stops a live receive on cancellation', async () => {
+    const mkdtemp = vi.spyOn(fs, 'mkdtemp');
     const controller = new AbortController();
     const source = new Readable({
       read() {
@@ -154,5 +168,8 @@ describe('owned Skill archives', () => {
       acquireSkillArchive(source, controller.signal),
     ).rejects.toMatchObject({ name: 'AbortError' });
     source.destroy();
+    await expect(
+      fs.access(await mkdtemp.mock.results[0]!.value),
+    ).rejects.toThrow();
   });
 });
