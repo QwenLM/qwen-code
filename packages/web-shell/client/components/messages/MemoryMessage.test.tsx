@@ -381,7 +381,7 @@ describe('MemoryMessage auto tab', () => {
     );
     expect(editButton).toBeUndefined();
 
-    act(() => button('Project').click());
+    act(() => button('Workspace').click());
     await flush();
     expect(container.textContent).toContain('QWEN.md');
     expect(button('Edit')).toBeDefined();
@@ -428,7 +428,7 @@ describe('MemoryMessage auto tab', () => {
     const active = Array.from(container.querySelectorAll('nav button')).filter(
       (item) => item.className.includes('memoryCardActive'),
     );
-    expect(active.map((item) => item.textContent)).toEqual(['Project']);
+    expect(active.map((item) => item.textContent)).toEqual(['Workspace']);
   });
 
   it('keeps an unsaved edit across a round trip through the Auto tab', async () => {
@@ -455,7 +455,7 @@ describe('MemoryMessage auto tab', () => {
 
     act(() => button('Auto memory').click());
     await flush();
-    act(() => button('Project').click());
+    act(() => button('Workspace').click());
     await flush();
 
     const editor = container.querySelector('textarea');
