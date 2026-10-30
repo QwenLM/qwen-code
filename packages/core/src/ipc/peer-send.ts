@@ -29,6 +29,7 @@ import {
   buildUserFrame,
   canonicalizeMsgId,
   type PeerDeliveryStatus,
+  type PeerMessagePriority,
 } from './peer-frames.js';
 import {
   advertisablePeerAddress,
@@ -585,6 +586,12 @@ export interface SendToPeerOptions {
   /** Current approval mode, asserted to the receiver for mode parity. */
   approvalMode: ApprovalMode | null;
   /**
+   * Delivery urgency written to the frame. Absent means `"next"`, the wire
+   * default. Nothing here acts on it: the receiver decides, and only within
+   * its own settings, so a sender cannot promote itself.
+   */
+  priority?: PeerMessagePriority;
+  /**
    * Addresses the caller's own routing keeps in-process (a teammate's
    * name, the broadcast keyword). A peer whose bare name is reserved is
    * reported — in suggestions and in the sent address — as `name [ref]`,
@@ -732,6 +739,7 @@ export async function sendToPeer(
     ...(options.approvalMode !== null
       ? { fromMode: senderModeClass(options.approvalMode) }
       : {}),
+    ...(options.priority !== undefined ? { priority: options.priority } : {}),
   });
   const reservation = reservePacerToken(
     peer.ipcPath,

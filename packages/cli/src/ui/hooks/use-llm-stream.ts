@@ -151,6 +151,7 @@ import {
   GOAL_COMMAND_RE,
   type DirectUserAdmission,
   type QueuedGoalTurn,
+  type UseMessageQueueReturn,
 } from './useMessageQueue.js';
 import { classifyApiError } from '../../utils/classify-api-error.js';
 import {
@@ -238,6 +239,31 @@ interface ResolvedSteerMessages {
   parts: Part[];
   accept: () => void;
   restoreMessages: string[];
+}
+
+/**
+ * A batch of accepted cross-session envelopes taken at a tool-round boundary.
+ * Peer envelopes cannot ride `midTurnDrainRef`: that `string[]` channel carries
+ * neither projection nor pin, and its resolver runs `@path` expansion over
+ * peer-authored text.
+ */
+export interface PeerMidTurnBatch {
+  /** The full envelopes, exactly as the model receives them. */
+  entries: Array<{ modelText: string; displayText: string }>;
+  /** Requeues the batch, still tagged peer, without re-rendering it. */
+  restore: () => void;
+}
+
+/**
+ * The boundary's peer drain, as AppContainer builds it. `eligible` answers what
+ * the drain is about to do — pay from the window and take a leading `"now"`
+ * envelope — so the steer drain holds user text behind an envelope only while
+ * that envelope is really going into this submission. Optional because a test
+ * double may be a bare function.
+ */
+export interface PeerMidTurnDrain {
+  (): PeerMidTurnBatch | null;
+  eligible?: () => boolean;
 }
 
 interface GoalTurnBinding {
@@ -623,9 +649,7 @@ export const useLlmStream = (
   setShellInputFocused: (value: boolean) => void,
   terminalWidth: number,
   terminalHeight: number,
-  midTurnDrainRef?: React.RefObject<
-    ((includeDeferred?: boolean, goalTurnActive?: boolean) => string[]) | null
-  >,
+  midTurnDrainRef?: React.RefObject<UseMessageQueueReturn['drainQueue'] | null>,
   logger?: Logger | null,
   // Live content-area height (terminal minus composer/header). Used to bound the
   // pending item's rendered height so it commits to <Static> before it can grow
@@ -646,6 +670,12 @@ export const useLlmStream = (
     submissionInFlightRef?: React.RefObject<boolean>;
     onSubmissionSettled?: () => void;
   } | null>,
+  // Mid-turn cross-session delivery, supplied by AppContainer, which owns the
+  // peer inbox. Null when the setting is off or the session takes no peer
+  // messages, so the hook never reads the setting itself. Its `eligible` probe
+  // is what tells the steer drain whether an envelope is really about to be
+  // delivered, and therefore whether the barrier may hold user text behind it.
+  midTurnPeerDrainRef?: React.RefObject<PeerMidTurnDrain | null>,
 ) => {
   const [workflowKeywordActive, setWorkflowKeywordActive] = useState(false);
   const workflowConfigRef = useRef(config);
@@ -3850,12 +3880,33 @@ export const useLlmStream = (
     [midTurnRestoreRef, onDebugMessage, resolveSteeredMessages],
   );
 
+  // Is a peer envelope actually going to be delivered at this boundary? Only
+  // then may the barrier hold user text behind it. Only the tool-round boundary
+  // asks it — the peer pop lives there and nowhere else.
+  const peerMidTurnWillDeliver = useCallback(
+    () => midTurnPeerDrainRef?.current?.eligible?.() ?? false,
+    [midTurnPeerDrainRef],
+  );
+
   const drainSteerAtBoundary = useCallback(
     async (signal: AbortSignal): Promise<SteerInput | undefined> => {
+      // Never a barrier here. This is core's continuation steer — takeSteerInput
+      // reaches it from four sites in core/client.ts, none of them the
+      // tool-round boundary where the peer pop lives: after a completed
+      // response with no tool calls pending (client.ts:5355, where the drained
+      // text is the entire next request rather than an appended continuation),
+      // both stop-hook continuations (client.ts:5495 and :5605, where it is
+      // appended behind core's own continueReason), and the
+      // `next_speaker === 'model'` continuation (client.ts:5722, where it
+      // replaces `Please continue.`). Holding typed text behind a peer
+      // envelope one of these calls cannot deliver would withhold the user's
+      // own correction while the model carries on with the course that
+      // correction was meant to change.
       const messages =
         midTurnDrainRef?.current?.(
           false,
           Boolean(activeGoalAdmissionRef.current),
+          false,
         ) ?? [];
       if (messages.length === 0) return undefined;
       return resolveDrainedSteerMessages(messages, signal);
@@ -6468,6 +6519,7 @@ export const useLlmStream = (
           : (midTurnDrainRef?.current?.(
               false,
               Boolean(activeGoalAdmissionRef.current),
+              peerMidTurnWillDeliver(),
             ) ?? []);
       let drainedSteer: SteerInput | undefined;
       if (drained.length > 0) {
@@ -6516,6 +6568,38 @@ export const useLlmStream = (
           })),
         );
       }
+      // Accepted cross-session envelopes join the same boundary; everything
+      // that keeps them out of this batch leaves them queued rather than
+      // dropped: a null drain, a Goal turn owning the session, a detached or
+      // cancelled continuation, and every failed settlement below.
+      let drainedPeers: PeerMidTurnBatch | undefined;
+      const drainPeers = midTurnPeerDrainRef?.current;
+      if (
+        drainPeers &&
+        !continuationOwner?.survivesGenerationChange &&
+        !continuationWasCancelled() &&
+        !activeGoalAdmissionRef.current
+      ) {
+        // No limit: one envelope per boundary is the drain's own rule, not a
+        // number this caller gets to choose.
+        const batch = drainPeers();
+        if (batch && batch.entries.length > 0) {
+          drainedPeers = batch;
+          debugLogger.debug(
+            `draining ${batch.entries.length} peer message(s) into tool-round submission`,
+          );
+          responsesToSend.push(
+            ...batch.entries.map((entry) => ({ text: entry.modelText })),
+          );
+        }
+      }
+      // The boundary envelopes in the order they were pushed after the tool
+      // responses: steer parts, then teammates, then peers. One combined
+      // strip (see `settleBoundary`) is what keeps a mixed round honest.
+      const boundaryEnvelopeTexts = [
+        ...(drainedTeammates?.entries.map((entry) => entry.modelText) ?? []),
+        ...(drainedPeers?.entries.map((entry) => entry.modelText) ?? []),
+      ];
       // Settle the drained batch exactly once. The settlement carrier below
       // is passed through the existing `steerInput` option so GeminiClient
       // settles it next to the actual history push: acceptance compares the
@@ -6531,32 +6615,13 @@ export const useLlmStream = (
         }
         const { entries, restore, generation } = drainedTeammates;
         drainedTeammates = undefined;
-        const envelopeTexts = entries.map((entry) => entry.modelText);
         // A TeamManager swap moved the generation while this batch was in
         // flight: it belongs to the outgoing team no matter how it now
         // settles, and must not be journaled into, or recorded as retry
         // debt against, the NEW team's session. (The restore side of this
         // guard lives in `drainTeammateQueue`'s restore itself.)
         const swapped = teammateQueueGenerationRef.current !== generation;
-        // The envelopes are baked into the Ctrl+Y retry payload either way:
-        // `submitQuery` stored `finalQueryToSend` (envelope parts included)
-        // in `lastPromptRef` before the client call settled. Strip them on
-        // BOTH outcomes — a restored batch is redelivered by the Idle
-        // fallback, and an accepted batch is already in the session
-        // history, so a retry that re-sends them would hand the leader the
-        // identical report twice (accepted-then-failed-mid-stream retry,
-        // or retry + Idle drain after a restore). The trailing-match guard
-        // inside the helper keeps this a no-op when settlement fires before
-        // `submitQuery` stored the payload (cancel and preempt paths below)
-        // or after a later submission overwrote it. One exception to
-        // "already in the session history": an accepted round can still
-        // fail terminally BEFORE any content, leaving the pushed entry as
-        // a trailing orphan that the Retry path pops before re-pushing the
-        // payload. The accept branch records retry debt
-        // (`boundaryEnvelopeRetryDebtRef`) so `retryLastPrompt` re-attaches
-        // the envelopes exactly when that orphan pop would drop them.
         if (accepted) {
-          stripTrailingTextsFromLastPrompt(envelopeTexts);
           if (swapped) {
             debugLogger.debug(
               `dropping ${entries.length} accepted teammate message(s): team changed while in flight`,
@@ -6609,19 +6674,76 @@ export const useLlmStream = (
           `restoring ${entries.length} teammate message(s) after failed/cancelled submission`,
         );
         restore();
-        stripTrailingTextsFromLastPrompt(envelopeTexts);
+      };
+      // Peer batch settles the same way: a restore requeues it with `peer`
+      // intact, so the idle drain picks it up and the line is not shown twice.
+      const settleDrainedPeers = (accepted: boolean) => {
+        if (!drainedPeers || drainedPeers.entries.length === 0) {
+          return;
+        }
+        const { entries, restore } = drainedPeers;
+        drainedPeers = undefined;
+        if (accepted) {
+          // Journal it like the boundary teammate path: the settlement strip
+          // takes the envelope out of the retry payload, so without this a
+          // `delivered` receipt could back a message lost on `/resume`.
+          const envelopeParts = entries.map((entry) => ({
+            text: entry.modelText,
+          }));
+          config
+            .getChatRecordingService?.()
+            ?.recordNotification?.(
+              envelopeParts,
+              entries.map((entry) => entry.displayText).join('; '),
+              undefined,
+              toolGoalBinding?.permit,
+            );
+          boundaryEnvelopeRetryDebtRef.current.push({
+            envelopeParts,
+            pushedEntryParts: capturePushedTeammateEntry(envelopeParts),
+          });
+          return;
+        }
+        restore();
+      };
+      // One strip for the whole boundary batch, in the tail order the parts
+      // were pushed, on BOTH outcomes. `stripTrailingTextsFromLastPrompt`
+      // removes a matching suffix or nothing at all: stripped per batch, the
+      // teammate call was a no-op whenever a peer text was the actual tail,
+      // so that envelope stayed in the Ctrl+Y payload and the retry re-attach
+      // handed the model a second copy. Stripping both together also removes
+      // the dependence on the two callbacks' relative order; a batch of one
+      // kind strips exactly as it did before.
+      //
+      // A restored batch is redelivered by the Idle fallback and an accepted
+      // one is already in the session history, so a retry re-sending either
+      // would double it. The trailing-match guard in the helper keeps this a
+      // no-op when settlement fires before `submitQuery` stored the payload
+      // (the cancel and preempt exits below) or after a later submission
+      // overwrote it. The accept branches separately record retry debt so an
+      // accepted round that fails before any content does not lose the
+      // envelopes with the orphan the Retry path pops.
+      const settleBoundary = (accepted: boolean) => {
+        stripTrailingTextsFromLastPrompt(boundaryEnvelopeTexts);
+        settleDrainedTeammates(accepted);
+        settleDrainedPeers(accepted);
       };
       const submissionSettlement: SteerInput | undefined =
-        drainedSteer || drainedTeammates
+        drainedSteer || drainedTeammates || drainedPeers
           ? {
               parts: drainedSteer?.parts ?? [],
               accept: () => {
                 drainedSteer?.accept();
-                settleDrainedTeammates(true);
+                settleBoundary(true);
               },
               restore: () => {
+                // Order matters: both restores prepend to the shared queue and
+                // the last one run owns the head. Steer text was queued before
+                // the envelope it post-dates, so peers settle first and steer
+                // second; reversed, a requeued envelope pins ahead of user
+                // input queued before it for the rest of the session.
+                settleBoundary(false);
                 drainedSteer?.restore();
-                settleDrainedTeammates(false);
               },
             }
           : undefined;
@@ -6632,8 +6754,8 @@ export const useLlmStream = (
       // sends an unpaired call -- the same pairing the cancellation check
       // above owes its own batch.
       if (continuationWasCancelled()) {
+        settleBoundary(false);
         drainedSteer?.restore();
-        settleDrainedTeammates(false);
         if (toolGoalBinding) {
           if (llmClient) {
             llmClient.addHistory({
@@ -6651,8 +6773,8 @@ export const useLlmStream = (
         return;
       }
       if (toolGoalBinding?.controller.signal.aborted) {
+        settleBoundary(false);
         drainedSteer?.restore();
-        settleDrainedTeammates(false);
         if (llmClient) {
           llmClient.addHistory({
             role: 'user',
@@ -6702,6 +6824,8 @@ export const useLlmStream = (
       modelSwitchedFromQuotaError,
       config,
       midTurnDrainRef,
+      midTurnPeerDrainRef,
+      peerMidTurnWillDeliver,
       addItem,
       dualOutput,
       resolveDrainedSteerMessages,

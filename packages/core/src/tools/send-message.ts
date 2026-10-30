@@ -66,6 +66,13 @@ export interface SendMessageParams {
   message: string;
   /** Optional 5-10 word summary for UI display (team mode). */
   summary?: string;
+  /**
+   * Delivery urgency to a cross-session peer: `"now"` asks the receiver to
+   * steer its running turn, `"next"` waits for that turn to end. Honoured only
+   * under the receiver's `agents.crossSessionMidTurn`, and only for a `to`
+   * recipient.
+   */
+  priority?: 'now' | 'next';
 }
 
 class SendMessageInvocation extends BaseToolInvocation<
@@ -134,6 +141,10 @@ class SendMessageInvocation extends BaseToolInvocation<
       target: to,
       message: this.params.message,
       approvalMode,
+      // Carried on the frame; the receiver decides whether it acts on it.
+      ...(this.params.priority === undefined
+        ? {}
+        : { priority: this.params.priority }),
       // Addresses this tool would keep in-process must never be handed
       // back to the model as a peer address, bare.
       isReserved: (address) => isInProcessRecipient(address, teamFile),
@@ -596,6 +607,12 @@ export class SendMessageTool extends BaseDeclarativeTool<
             type: 'string',
             description: 'Optional 5-10 word summary for UI display.',
           },
+          priority: {
+            type: 'string',
+            description:
+              'Delivery urgency to another Qwen Code session. "now" asks the receiver to steer its running turn at the next tool-round boundary; "next" (default) delivers when its turn ends. Steering needs the receiver\'s agents.crossSessionMidTurn on, and even then the receiver holds the grant: a per-window budget, its own queued user input, and an active Goal turn can each leave the message for the turn boundary. Ignored for teammates and background tasks.',
+            enum: ['now', 'next'],
+          },
         },
         required: ['message'],
         additionalProperties: false,
@@ -635,7 +652,9 @@ export class SendMessageTool extends BaseDeclarativeTool<
    * Forward the routing fields and the message verbatim to the classifier —
    * `to`/`task_id` identify the privileged sink and the `message` itself is
    * the new instruction the recipient will execute, so the classifier needs
-   * the full text to evaluate the action's safety.
+   * the full text to evaluate the action's safety. `priority` rides along
+   * (the wire's convention: absence is the default "next") so the classifier
+   * can tell a mid-turn "now" from an ordinary "next".
    */
   override toAutoClassifierInput(
     params: SendMessageParams,
@@ -644,6 +663,7 @@ export class SendMessageTool extends BaseDeclarativeTool<
       to: params.to,
       task_id: params.task_id,
       message: params.message,
+      ...(params.priority === undefined ? {} : { priority: params.priority }),
     };
   }
 }

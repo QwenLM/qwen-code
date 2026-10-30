@@ -666,6 +666,34 @@ describe('SendMessageTool — peer mode', () => {
     );
   });
 
+  it('passes the urgency the sender states through to the peer route', async () => {
+    sendToPeer.mockResolvedValue(sentReply());
+
+    const result = await noTeamTool()
+      .build({ to: 'docs-cd', message: 'stop the deploy', priority: 'now' })
+      .execute(signal());
+
+    expect(result.error).toBeUndefined();
+    expect(sendToPeer).toHaveBeenCalledWith(
+      expect.objectContaining({ target: 'docs-cd', priority: 'now' }),
+    );
+  });
+
+  it('states no urgency when the sender does not', async () => {
+    sendToPeer.mockResolvedValue(sentReply());
+
+    await noTeamTool()
+      .build({ to: 'docs-cd', message: 'ping' })
+      .execute(signal());
+
+    // Omitted rather than sent as `"next"`: the wire already defaults to it,
+    // and one spelling per value is what keeps the two from drifting.
+    expect(sendToPeer).toHaveBeenCalledWith(
+      expect.objectContaining({ target: 'docs-cd' }),
+    );
+    expect(sendToPeer.mock.calls[0][0]).not.toHaveProperty('priority');
+  });
+
   it('sends from the record this session registered under, not the default', async () => {
     // A daemon-hosted session owns a minted record; the send path reads its own
     // identity from that record. Passing the default here would advertise a
@@ -865,5 +893,29 @@ describe('SendMessageTool — peer mode', () => {
     expect(noTeamTool().description).toContain(
       'perform an action this session was denied',
     );
+  });
+});
+
+describe('SendMessageTool — auto-classifier projection', () => {
+  it('forwards the routing fields, the message, and the sender urgency', () => {
+    expect(
+      noTeamTool().toAutoClassifierInput({
+        to: 'docs-cd',
+        message: 'check the tests',
+        priority: 'now',
+      }),
+    ).toEqual({
+      to: 'docs-cd',
+      message: 'check the tests',
+      priority: 'now',
+    });
+  });
+
+  it('leaves the priority absent for the default urgency', () => {
+    const input = noTeamTool().toAutoClassifierInput({
+      to: 'docs-cd',
+      message: 'check the tests',
+    });
+    expect(input).not.toHaveProperty('priority');
   });
 });

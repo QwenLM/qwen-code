@@ -263,6 +263,24 @@ describe('sendToPeer', () => {
     });
   });
 
+  it('carries the urgency the sender stated onto the frame', async () => {
+    peers(peer('s1', 'app-ab'));
+    await sendTo('app-ab', 'stop and re-check the lease', {
+      priority: 'now',
+    });
+    // The receiver decides what to do with this; the sender is only allowed
+    // to ask, and nothing here interprets it on the sending side.
+    expect(frameAt()).toMatchObject({ priority: 'now' });
+  });
+
+  it('writes the wire default when the sender states no urgency', async () => {
+    peers(peer('s1', 'app-ab'));
+    await sendTo('app-ab', 'just so you know');
+    // buildUserFrame always emits the field, defaulting to "next"; what the
+    // receiver stores is the narrower question, handled on that side.
+    expect(frameAt()).toMatchObject({ priority: 'next' });
+  });
+
   it('authenticates with the target token and offers its own for receipts', async () => {
     readOwnSessionRecord.mockResolvedValue({ ...SELF, ipcToken: 'own-token' });
     peers({ ...peer('s1', 'app-ab'), ipcToken: 'target-token' });

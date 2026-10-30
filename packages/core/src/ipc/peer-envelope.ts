@@ -30,7 +30,7 @@
 // and a value import would close that loop at runtime.
 import type { PeerControllerIdentity } from './peer-controllers.js';
 
-const CROSS_SESSION_TAG = 'cross_session_message';
+export const CROSS_SESSION_TAG = 'cross_session_message';
 
 /**
  * Characters that render as nothing: control and format characters, and

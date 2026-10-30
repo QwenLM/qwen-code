@@ -53,6 +53,7 @@ import {
   type PeerDropReason,
   type PeerFrame,
   type PeerInbox,
+  type PeerMessagePriority,
   type PeerOrigin,
   peerSenderKey,
   type PeerUserFrame,
@@ -65,16 +66,37 @@ import {
   settleSentPeerMessage,
   startPeerInbox,
 } from '@qwen-code/qwen-code-core';
+import {
+  PEER_MID_TURN_BUDGET_DEFAULT,
+  PEER_MID_TURN_WINDOW_MS,
+} from './mid-turn-constants.js';
 
 const debugLogger = createDebugLogger('PEER_MESSAGING');
 
-/** Identity needed to re-check a queued frame's recipient at drain time. */
+/**
+ * What the drain needs about a queued frame: identity to re-check its recipient
+ * against, plus the sender's stated urgency. Only the receiver acts on it, under
+ * its own settings, so a sender proposing `"now"` cannot promote itself.
+ */
 export interface PeerQueuedDelivery {
   msgId: string;
   admissionKey?: string;
   from?: string;
   replyToken?: string;
   toSessionId?: string;
+  priority?: PeerMessagePriority;
+}
+
+/**
+ * The receipt identity of an accepted frame whose fate is not settled yet —
+ * what `settleUnconsumed` needs to correct the frame's 'delivered' receipt at
+ * close. The queue and the restore path both carry this much in a
+ * `PeerQueuedDelivery`, so neither has to hand back a full frame.
+ */
+interface UndecidedPeerFrame {
+  msgId: string;
+  from?: string;
+  replyToken?: string;
 }
 
 export {
@@ -103,6 +125,72 @@ export type PeerSubmitFn = (
  * the same leak the hold buffer's ceiling exists to prevent.
  */
 export const MAX_ACCEPTED_BACKLOG = MAX_HELD_MESSAGES;
+
+/**
+ * Reads the budget setting without trusting it. A negative or unparseable value
+ * cannot mean "unlimited" — the ceiling exists because a peer can spend this
+ * session's model work — so anything unreadable falls back to the default.
+ * `0` is a real number and legitimately turns mid-turn delivery off.
+ */
+export function peerMidTurnBudgetOf(value: unknown): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    return PEER_MID_TURN_BUDGET_DEFAULT;
+  }
+  return value < 0 ? 0 : Math.floor(value);
+}
+
+/**
+ * Ceiling on peer messages steered into a session's running turn: at most
+ * `capacity` per rolling `PEER_MID_TURN_WINDOW_MS`. Past the allowance an
+ * envelope is not lost, it waits for the idle drain.
+ */
+export class PeerMidTurnBudget {
+  private stamps: number[] = [];
+
+  /**
+   * A stamp counts only inside the window and not from the future: a host
+   * clock step back would otherwise keep every stamp alive forever, pinning
+   * the window shut on an idle queue — the silent throttle the pause notice
+   * exists to prevent. Both comparisons share this predicate.
+   */
+  private isLive(stamp: number, now: number): boolean {
+    const age = now - stamp;
+    return age >= 0 && age < PEER_MID_TURN_WINDOW_MS;
+  }
+
+  /** True when one more envelope may join the turn in flight. */
+  tryConsume(now: number, capacity: number): boolean {
+    if (capacity <= 0) return false;
+    this.stamps = this.stamps.filter((stamp) => this.isLive(stamp, now));
+    if (this.stamps.length >= capacity) return false;
+    this.stamps.push(now);
+    return true;
+  }
+
+  /**
+   * Read-only `tryConsume`: whether a drain could pay for one envelope right
+   * now. Callers use it to skip a pop they already know will be restored; it
+   * prunes nothing — the next real consume still does that.
+   */
+  hasAllowance(now: number, capacity: number): boolean {
+    if (capacity <= 0) return false;
+    return (
+      this.stamps.filter((stamp) => this.isLive(stamp, now)).length < capacity
+    );
+  }
+
+  /**
+   * Gives back allowance for envelopes whose submission did not deliver them.
+   *
+   * A restored batch is delivered later by the idle drain, so it never spent a
+   * mid-turn model run; charging it anyway would let repeated cancellations
+   * starve the budget while nothing reached the model.
+   */
+  refund(count = 1): void {
+    if (count <= 0) return;
+    this.stamps.splice(-count);
+  }
+}
 
 /**
  * How long `close()` waits for folded drop receipts to reach their
@@ -283,11 +371,12 @@ export class PeerMessaging {
   private validControllerIds: ReadonlySet<string> | null = null;
   /**
    * Accepted frames whose 'delivered' receipt has not been earned yet:
-   * still buffered here or still queued in the session's input queue.
-   * Settled with a corrective receipt at close.
+   * still buffered here, still queued in the session's input queue, or
+   * popped and awaiting a boundary settlement. Consumption and rejection
+   * settle a frame out of this set; everything still in it dies unconsumed
+   * at close and is settled with a corrective receipt there.
    */
-  private readonly outstanding: PeerUserFrame[] = [];
-  private queuedPeerCount: (() => number) | null = null;
+  private readonly outstanding: UndecidedPeerFrame[] = [];
   private readonly heldListeners = new Set<
     (held: readonly HeldMessage[]) => void
   >();
@@ -479,14 +568,32 @@ export class PeerMessaging {
   }
 
   /**
-   * Register a counter for the peer entries still waiting in the
-   * session's input queue. At close, that many of the most recently
-   * submitted frames are settled alongside the buffered ones: the queue
-   * drains in order, so the unconsumed tail is exactly the queue's
-   * current depth.
+   * A popped or drained frame was consumed — it reached the model, so its
+   * 'delivered' receipt stands and no corrective receipt is owed at close.
    */
-  setQueuedPeerCount(fn: () => number): void {
-    this.queuedPeerCount = fn;
+  settleConsumedFrame(msgId: string): void {
+    for (let i = this.outstanding.length - 1; i >= 0; i--) {
+      if (this.outstanding[i]?.msgId === msgId) this.outstanding.splice(i, 1);
+    }
+  }
+
+  /**
+   * A settled-out frame came back: an admission or boundary settlement
+   * failed and the envelope was restored to the queue, so it is undecided
+   * again and the corrective receipt at close applies to it after all.
+   * Idempotent: a frame still tracked is left alone rather than duplicated.
+   */
+  trackUndecidedFrame(delivery: PeerQueuedDelivery): void {
+    if (this.outstanding.some((frame) => frame.msgId === delivery.msgId)) {
+      return;
+    }
+    this.outstanding.push({
+      msgId: delivery.msgId,
+      ...(delivery.from !== undefined ? { from: delivery.from } : {}),
+      ...(delivery.replyToken !== undefined
+        ? { replyToken: delivery.replyToken }
+        : {}),
+    });
   }
 
   getHeld(): readonly HeldMessage[] {
@@ -727,17 +834,15 @@ export class PeerMessaging {
 
   /**
    * Correct the 'delivered' receipts of accepted messages the session
-   * never consumed. Without this, a sender told "delivered" about a
+   * never consumed. Outstanding holds exactly those: every consumption or
+   * rejection settled its frame out of the set, so the whole set is
+   * corrected here. Without this, a sender told "delivered" about a
    * message that dies in the buffer or the input queue at exit cannot
    * tell that from "delivered and read" — the distinction the receipts
    * exist to carry.
    */
   private async settleUnconsumed(): Promise<void> {
-    const queued = this.queuedPeerCount?.() ?? 0;
-    const dropped = this.outstanding.slice(
-      Math.max(0, this.outstanding.length - this.buffered.length - queued),
-    );
-    const receipts = dropped
+    const receipts = this.outstanding
       .filter((frame) => frame.from !== undefined)
       .map((frame) =>
         sendDeliveryStatus(
@@ -952,11 +1057,17 @@ export class PeerMessaging {
   }
 
   private trackOutstanding(frame: PeerUserFrame): void {
-    this.outstanding.push(frame);
-    // Only the unconsumed tail can ever matter, and it is bounded: at
-    // most MAX_ACCEPTED_BACKLOG frames wait here and another
-    // MAX_ACCEPTED_BACKLOG in the session's input queue. Anything older
-    // was necessarily consumed.
+    this.outstanding.push({
+      msgId: frame.msgId,
+      ...(frame.from !== undefined ? { from: frame.from } : {}),
+      ...(frame.replyToken !== undefined
+        ? { replyToken: frame.replyToken }
+        : {}),
+    });
+    // Every consumption settles its frame out, so what remains is bounded
+    // by the backlog here plus what the input queue holds. The bound keeps
+    // a long session from growing the set without end; past it, the oldest
+    // undecided frame's corrective receipt is skipped rather than sent.
     while (this.outstanding.length > 2 * MAX_ACCEPTED_BACKLOG) {
       this.outstanding.shift();
     }
@@ -1024,6 +1135,9 @@ export class PeerMessaging {
           ...(frame.toSessionId !== undefined
             ? { toSessionId: frame.toSessionId }
             : {}),
+          // Only the non-default urgency is stored: absence already means
+          // `"next"`, and the drain tests for `"now"` alone.
+          ...(frame.priority === 'now' ? { priority: frame.priority } : {}),
         },
       ) ?? false
     );
@@ -1056,6 +1170,10 @@ export class PeerMessaging {
     if (delivery.admissionKey !== undefined) {
       this.gate?.forgetAdmittedMessage(delivery.admissionKey, delivery.msgId);
     }
+    // The reject is final — the misaddressed receipt above settles it — so
+    // the frame leaves the undecided set instead of collecting an extra
+    // corrective receipt at close.
+    this.settleConsumedFrame(delivery.msgId);
     return false;
   }
 
