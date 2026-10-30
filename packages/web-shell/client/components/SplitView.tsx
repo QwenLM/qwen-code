@@ -429,21 +429,21 @@ export function SplitView({
 
   const paneIdsRef = useRef(paneIds);
   paneIdsRef.current = paneIds;
+  // Parent-appended panes (controlled mode): reveal and focus the new one.
+  // paneIds derives from the prop, so by the time this runs the render-time
+  // ref above is already current — track the previous commit here instead.
+  const prevControlledIdsRef = useRef(normalizedSessionIds);
   useEffect(() => {
     if (!sessionIdsControlled) return;
+    const prev = prevControlledIdsRef.current;
     const addedSessionId = normalizedSessionIds.find(
-      (id) => !paneIdsRef.current.includes(id),
+      (id) => !prev.includes(id),
     );
+    prevControlledIdsRef.current = normalizedSessionIds;
     if (addedSessionId) {
       setMaximizedPaneId(null);
       setActivePaneId(addedSessionId);
     }
-    setPaneIds((prev) =>
-      prev.length === normalizedSessionIds.length &&
-      prev.every((id, index) => id === normalizedSessionIds[index])
-        ? prev
-        : normalizedSessionIds,
-    );
   }, [normalizedSessionIds, sessionIdsControlled]);
 
   // Probe verdicts per session id, recorded for the lifetime of the pane set.

@@ -1286,6 +1286,8 @@ describe('SplitView', () => {
       container!.querySelector('[data-pane-active]')?.textContent,
     ).toContain('Three');
     expect(onPanesChange).not.toHaveBeenCalled();
+  });
+
   it('keeps the add button enabled when the catalog has no other sessions', () => {
     sessionsState = [
       { sessionId: 's3', workspaceCwd: '/w', displayName: 'Three' },
