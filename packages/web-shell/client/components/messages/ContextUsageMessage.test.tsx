@@ -84,6 +84,42 @@ function render(
   return container;
 }
 
+describe('instruction and memory categories', () => {
+  it.each(['en', 'zh-CN'] as const)(
+    'renders separate categories and survives serialization (%s)',
+    (language) => {
+      const status = makeStatus(60, false);
+      status.usage.breakdown.instructionFiles = 15;
+      status.usage.instructionFiles = [{ path: 'QWEN.md', tokens: 15 }];
+      status.usage.memoryFiles = [{ path: 'auto memory', tokens: 5 }];
+      status.usage.showDetails = true;
+      expect(
+        parseContextUsageMessage(serializeContextUsageMessage(status)),
+      ).toEqual(status);
+      const container = render(status, false, undefined, language);
+      expect(container.textContent).toContain(
+        language === 'en' ? 'Instruction files' : '指令文件',
+      );
+      expect(container.textContent).toContain(
+        language === 'en' ? 'Auto memory' : '自动记忆',
+      );
+      expect(container.textContent).toContain('QWEN.md');
+      expect(container.textContent).not.toContain('Memory files');
+    },
+  );
+
+  it('preserves the legacy category without guessing file ownership', () => {
+    const status = makeStatus(60, false);
+    status.usage.memoryFiles = [{ path: 'QWEN.md', tokens: 5 }];
+    status.usage.showDetails = true;
+    const container = render(status, false);
+    expect(container.textContent).toContain('Memory files');
+    expect(container.textContent).toContain('QWEN.md');
+    expect(container.textContent).not.toContain('Auto memory');
+    expect(container.textContent).not.toContain('Instruction files');
+  });
+});
+
 describe('ContextUsageMessage', () => {
   it.each(['en', 'zh-CN'] as const)(
     'renders a large detail snapshot through the real transcript pipeline (%s)',
