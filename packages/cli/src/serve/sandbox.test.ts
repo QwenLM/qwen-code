@@ -388,7 +388,7 @@ describe('resolveSeatbeltProfileFile', () => {
 });
 
 describe('getSandboxPassthroughEnvArgs', () => {
-  it('passes update relaunch state into container sandboxes', () => {
+  it('passes operator state into container sandboxes', () => {
     expect(
       getSandboxPassthroughEnvArgs({
         QWEN_CODE_MODELS_DEV: 'off',
@@ -399,6 +399,8 @@ describe('getSandboxPassthroughEnvArgs', () => {
         QWEN_CODE_HOST_UPDATE_RELAUNCH: 'false',
         QWEN_CODE_SERVE: '1',
         QWEN_CODE_DESKTOP: '1',
+        QWEN_CODE_ENABLE_WORKFLOWS: '1',
+        QWEN_CODE_DISABLE_WORKFLOWS: '1',
       }),
     ).toEqual([
       '--env',
@@ -417,6 +419,10 @@ describe('getSandboxPassthroughEnvArgs', () => {
       'QWEN_CODE_SERVE=1',
       '--env',
       'QWEN_CODE_DESKTOP=1',
+      '--env',
+      'QWEN_CODE_ENABLE_WORKFLOWS=1',
+      '--env',
+      'QWEN_CODE_DISABLE_WORKFLOWS=1',
     ]);
   });
 });

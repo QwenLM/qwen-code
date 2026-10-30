@@ -922,7 +922,8 @@ describe('livePromptEvents', () => {
       'terminal tool.call',
     );
     expect(sendMessageStream).not.toHaveBeenCalled();
-    expect(initializeMods).toHaveBeenCalledOnce();
+    // OpenTUI offers the band above the prompt.
+    expect(initializeMods).toHaveBeenCalledExactlyOnceWith(['AbovePrompt']);
   });
 
   it('waits for the shared initialization before the first send', async () => {

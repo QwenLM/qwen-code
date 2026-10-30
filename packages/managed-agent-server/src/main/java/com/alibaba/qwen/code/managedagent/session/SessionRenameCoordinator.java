@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.RenameDelivery;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -27,7 +28,7 @@ public class SessionRenameCoordinator {
     private final Set<List<String>> active = ConcurrentHashMap.newKeySet();
 
     public SessionRenameCoordinator(AgentStateStore store, HarnessConnector harness,
-            ExecutorService executor, Clock clock, ManagedAgentProperties properties) {
+            @Qualifier("managedAgentExecutor") ExecutorService executor, @Qualifier("managedAgentClock") Clock clock, ManagedAgentProperties properties) {
         this.store = store;
         this.harness = harness;
         this.executor = executor;
@@ -35,7 +36,7 @@ public class SessionRenameCoordinator {
         this.settings = properties.getDispatch();
     }
 
-    @Scheduled(fixedDelayString = "${qwen.managed-agent.dispatch.scan-delay:1s}")
+    @Scheduled(scheduler = "managedAgentScheduler", fixedDelayString = "${qwen.managed-agent.dispatch.scan-delay:1s}")
     public void recover() {
         if (!harness.isAvailable()) {
             return;

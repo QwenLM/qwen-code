@@ -12,7 +12,8 @@ import type {
   ModRenderProps,
 } from '@qwen-code/qwen-code-core/mods/render-tree.js';
 import { theme } from '../semantic-colors.js';
-import { ModBand, drawModTree, modBandMaxRows } from './ModBand.js';
+import { modBandMaxRows } from '../utils/mod-band-tree.js';
+import { ModBand, drawModTree } from './ModBand.js';
 
 const band = (tree: ModRenderElement, revision = 1) => ({
   tree,

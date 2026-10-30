@@ -35,10 +35,14 @@ existing graceful shutdown path; it does not resume an interrupted model turn.
   if files change after checking or if process replacement or serve startup fails.
 - Restrict preparation/restart to primary connections using the daemon token
   or trusted tokenless loopback, actual CLI entry points with a restart callback, POSIX platforms with `process.execve`, supported
-  standalone/global managed npm installs, and operator settings permitting
+  standalone installs and global npm/pnpm/yarn/bun installs (including
+  root-owned npm prefixes), and operator settings permitting
   `general.enableAutoUpdate`. Ignore workspace settings for this process-wide
-  decision. Windows, embedded servers, development installs, package-manager
-  installs, and unsupported Node runtimes do not offer the button.
+  decision. Windows, embedded servers, development installs, and unsupported
+  Node runtimes do not offer the button; other unsupported shapes report an
+  available update with manual instructions instead. Eligibility and button
+  visibility are widened by
+  [Web Shell update coverage](web-shell-update-coverage.md).
 - Status is `available`, `up-to-date`, `installing` (background preparation only),
   `ready`, `restarting`, `unavailable`, or `error`, with current/latest versions,
   `canInstall`, optional instructions, and optional message. Concurrent mutations
@@ -50,8 +54,9 @@ existing graceful shutdown path; it does not resume an interrupted model turn.
 - Web Shell checks on mount and periodically, requests preparation automatically
   when supported, and polls preparation/restart every 2 seconds. The expanded
   sidebar places the version and button on a separate line above footer actions,
-  including narrow widths. The collapsed sidebar shows an accessible icon only
-  when ready. Use the shared button, semantic colors, and English/Chinese labels.
+  including narrow widths. The collapsed sidebar shows an accessible icon when
+  ready or when manual instructions are available. Use the shared button,
+  semantic colors, and English/Chinese labels.
 - Keep checks/downloads quiet. Explicit restart failures use the existing error
   notification. During restart, disable the button and tolerate connection loss;
   capture the full URL when clicked and, after the running version changes,

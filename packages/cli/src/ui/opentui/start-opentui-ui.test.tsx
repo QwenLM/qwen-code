@@ -791,6 +791,7 @@ describe('startOpenTuiUI fallback contract', () => {
   });
 
   it('reads live composer text for Ctrl+D and only arms exit after it becomes empty', async () => {
+    const config = buildConfig();
     await withEntryApp(() => {
       let text = 'draft';
       const handle = mocks.state.appProps?.composerHandle;
@@ -813,31 +814,60 @@ describe('startOpenTuiUI fallback contract', () => {
       press();
       expect(exitSession).not.toHaveBeenCalled();
       press();
-      expect(exitSession).toHaveBeenCalledTimes(1);
-    });
+      expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+    }, config);
   });
 
-  it.each(['stream-c', 'confirmation-d'] as const)(
-    'arms before cleanup and exits on the second key: %s',
+  it.each(['c', 'd'] as const)(
+    'exits idle keyboard confirmation with code 0: %s',
+    async (name) => {
+      const config = buildConfig();
+      await withEntryApp(() => {
+        act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+        expect(exitSession).not.toHaveBeenCalled();
+        expect(mocks.state.interrupt).not.toHaveBeenCalled();
+        act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+        expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+      }, config);
+    },
+  );
+
+  it.each([
+    'stream-c',
+    'stream-d',
+    'confirmation-c',
+    'confirmation-d',
+  ] as const)(
+    'preserves cancellation before confirmed graceful exit: %s',
     async (mode) => {
+      const config = buildConfig();
       const confirm = vi.fn(async () => {});
       mocks.state.streaming = true;
-      if (mode === 'confirmation-d')
+      const parked = mode.startsWith('confirmation');
+      if (parked)
         mocks.state.waitingCalls = [
           { callId: 'parked', confirmationDetails: { onConfirm: confirm } },
         ];
-      await withEntryApp(() => {
-        const name = mode === 'stream-c' ? 'c' : 'd';
+      await withEntryApp((rerender) => {
+        const name = mode.endsWith('c') ? 'c' : 'd';
         act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
         expect(exitSession).not.toHaveBeenCalled();
-        expect(confirm).not.toHaveBeenCalled();
-        expect(mocks.state.interrupt).toHaveBeenCalledTimes(
-          mode === 'stream-c' ? 1 : 0,
+        expect(confirm).toHaveBeenCalledTimes(
+          mode === 'confirmation-c' ? 1 : 0,
         );
+        expect(mocks.state.interrupt).toHaveBeenCalledTimes(parked ? 0 : 1);
+        if (mode === 'stream-d') {
+          mocks.state.streaming = false;
+          act(rerender);
+          act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
+          expect(exitSession).not.toHaveBeenCalled();
+        }
         act(() => mocks.state.keyboard.at(-1)!({ name, ctrl: true }));
-        expect(exitSession).toHaveBeenCalledTimes(1);
-        expect(confirm).not.toHaveBeenCalled();
-      });
+        expect(exitSession).toHaveBeenCalledExactlyOnceWith(config, 0);
+        expect(confirm).toHaveBeenCalledTimes(
+          mode === 'confirmation-c' ? 1 : 0,
+        );
+      }, config);
     },
   );
 
@@ -1106,6 +1136,7 @@ describe('startOpenTuiUI fallback contract', () => {
     config.isInteractive = () => true;
     const warning = 'tool.call and tool.check are not supported.';
     let host!: ModTerminalHost;
+    const setRenderInput = vi.fn();
     const factory = vi
       .spyOn(ModSession, 'create')
       .mockImplementation((_config, _settings, output) => {
@@ -1118,6 +1149,7 @@ describe('startOpenTuiUI fallback contract', () => {
               config.getSessionId(),
             ),
           flushLogs: () => {},
+          setRenderInput,
           close: async () => {},
         } as unknown as ModSession;
       });
@@ -1166,6 +1198,39 @@ describe('startOpenTuiUI fallback contract', () => {
       const calls = mocks.state.root.render.mock.calls;
       view = render(calls[calls.length - 1]?.[0] as ReactElement);
       expect(mocks.state.replayOrder).toEqual(['reset', 'info']);
+      // The band's input, as Ink reports it; OpenTUI has no survey.
+      expect(setRenderInput).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          component: 'AbovePrompt',
+          viewport: { columns: 120, rows: 40, isFullscreen: false },
+          props: expect.objectContaining({
+            hasSurvey: false,
+            isWorking: false,
+            maxRows: 13,
+            bodyColumns: 115,
+          }),
+        }),
+      );
+      // A turn in flight is working.
+      mocks.state.streaming = true;
+      const tree = calls[calls.length - 1]?.[0] as ReactElement<{
+        children: ReactElement<{ children: ReactElement }>;
+      }>;
+      const vim = tree.props.children;
+      act(() =>
+        view!.rerender(
+          cloneElement(
+            tree,
+            {},
+            cloneElement(vim, {}, cloneElement(vim.props.children)),
+          ),
+        ),
+      );
+      expect(setRenderInput).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          props: expect.objectContaining({ isWorking: true }),
+        }),
+      );
       expect(mocks.state.appProps?.startupHistory).toEqual([
         expect.objectContaining({
           type: 'user',
