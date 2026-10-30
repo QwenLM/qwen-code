@@ -182,7 +182,7 @@ class HostedProcessCrashIT {
             assertThat(api("GET", "/v1/agents/sessions/" + session + "/turns/" + turn,
                     null, null, 200).path("status").asText()).isEqualTo("completed");
             await(() -> itemsWhenProjected(session)
-                    .map(node -> node.toString().contains("RESTART_OK")).orElse(false), 60,
+                    .map(node -> node.toString().contains("RESTART_OK")).orElse(false), 15,
                     "materialized recovered output");
 
             JsonNode state = driverState();
@@ -217,7 +217,7 @@ class HostedProcessCrashIT {
                             + " WHERE tenant_id = ? AND session_id = ? AND turn_id = ?",
                     String.class, tenant, session, followupTurn)), 30, "following Turn completion");
             await(() -> itemsWhenProjected(session)
-                    .map(node -> node.toString().contains("FOLLOW_UP_OK")).orElse(false), 60,
+                    .map(node -> node.toString().contains("FOLLOW_UP_OK")).orElse(false), 15,
                     "materialized following output");
             state = driverState();
             assertThat(state.path("primaryRequests").asInt()).isEqualTo(1);
