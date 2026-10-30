@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { TimelineModel } from './buildTimeline';
 
 export interface TimelineViewport {
@@ -28,6 +28,12 @@ export function useTimelineViewport(
 ): TimelineViewportController {
   const [state, setState] = useState<ViewportState>();
   const latest = useRef<ViewportState | undefined>(undefined);
+
+  useEffect(() => {
+    if (state && state.of !== model) setState(undefined);
+    if (latest.current && latest.current.of !== model)
+      latest.current = undefined;
+  }, [model, state]);
 
   const currentView = useCallback(() => {
     const current = model;

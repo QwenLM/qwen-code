@@ -22,6 +22,7 @@ import {
   resolveSlimmingConfig,
   wrapSystemReminder,
 } from '@qwen-code/qwen-code-core';
+import { AUTO_MEMORY_SNAPSHOT_METADATA } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import { t } from '../../i18n/index.js';
 import type { ContextCategoryBreakdown } from '../types.js';
 import {
@@ -384,6 +385,149 @@ describe('collectContextData (contextCommand)', () => {
         (breakdown.unattributed ?? 0)
       );
     }
+
+    it.each([
+      {
+        name: 'unchanged retained catalogs',
+        retained: ['old', 'new'],
+        current: 'new',
+        billed: ['old', 'new'],
+        total: 0,
+      },
+      {
+        name: 'changed pending catalog',
+        retained: ['old'],
+        current: 'new',
+        billed: ['old', 'new'],
+        total: 0,
+      },
+      {
+        name: 'compacted history without snapshots',
+        summary:
+          '<state_snapshot>Earlier user work is complete.</state_snapshot>',
+        retained: [],
+        current: 'new',
+        billed: ['new'],
+        total: 0,
+      },
+      {
+        name: 'suppressed retained catalogs',
+        retained: ['old', 'new'],
+        current: '',
+        billed: [],
+        total: 0,
+      },
+      {
+        name: 'a pending version seen before the latest retained version',
+        retained: ['new', 'old'],
+        current: 'new',
+        billed: ['new', 'old', 'new'],
+        total: 0,
+      },
+      {
+        name: 'provider-reported total',
+        retained: ['old', 'new'],
+        current: 'new',
+        billed: ['old', 'new'],
+        total: 40_000,
+      },
+    ])(
+      'accounts for memory snapshots once: $name',
+      async ({ retained, current, billed, total, summary }) => {
+        const catalog = (version: string) =>
+          `${version} catalog entry\n`.repeat(version === 'old' ? 17 : 40);
+        const snapshotText = (version: string) =>
+          'Current memory catalog (full snapshot; supersedes all earlier memory catalogs):\n' +
+          catalog(version);
+        const policy = 'Stable auto-memory policy.';
+        const realUser = {
+          text: 'Please inspect my actual request.',
+          partMetadata: { user_note: true },
+        };
+        const reply = 'I inspected the request.';
+        // A user can quote a catalog; only marked parts belong to memory.
+        const quotedCatalog = {
+          text: snapshotText('quoted'),
+          partMetadata: { user_note: true },
+        };
+        const compacted: Content[] = summary
+          ? [
+              { role: 'user', parts: [{ text: summary }] },
+              { role: 'model', parts: [{ text: reply }] },
+            ]
+          : [];
+        const history: Content[] = [
+          prelude,
+          ...compacted,
+          ...retained.flatMap((version): Content[] => [
+            {
+              role: 'user',
+              parts: [
+                realUser,
+                {
+                  text: snapshotText(version),
+                  partMetadata: { [AUTO_MEMORY_SNAPSHOT_METADATA]: true },
+                },
+              ],
+            },
+            { role: 'model', parts: [{ text: reply }] },
+          ]),
+          { role: 'user', parts: [realUser, quotedCatalog] },
+        ];
+        const before = structuredClone(history);
+        const getHistoryShallow = vi.fn().mockReturnValue(history);
+        const config = makeChatConfig({ total, history });
+        const chat = config.getLlmClient().getChat();
+        Object.assign(chat, { getHistoryShallow });
+        Object.assign(config, {
+          getAutoMemoryPrompt: () => policy,
+          getAutoMemoryContext: () => (current ? catalog(current) : ''),
+        });
+
+        const data = await collectContextData(config, true);
+        const expectedMemory =
+          estimateContextTextTokens(policy) +
+          billed.reduce(
+            (sum, version) =>
+              sum + estimateContextTextTokens(snapshotText(version)),
+            0,
+          );
+        const expectedMessages =
+          (retained.length + 1) * estimateContextTextTokens(realUser.text) +
+          retained.length * estimateContextTextTokens(reply) +
+          estimateContextTextTokens(quotedCatalog.text) +
+          (summary
+            ? estimateContextTextTokens(summary) +
+              estimateContextTextTokens(reply)
+            : 0);
+        expect(data.breakdown.messages).toBe(expectedMessages);
+        expect(data.breakdown.memoryFiles).toBe(expectedMemory);
+        expect(data.memoryFiles).toEqual([
+          { path: t('auto memory'), tokens: expectedMemory },
+        ]);
+        expect(data.breakdown.startupContext).toBe(
+          estimateContextTextTokens(environmentReminder),
+        );
+        expect(data.breakdown.skills).toBe(
+          estimateContextTextTokens(listingReminder),
+        );
+        expect(data.totalTokens).toBe(total);
+        if (total) {
+          expect(sumRows(data.breakdown)).toBe(total);
+        } else {
+          expect(data.breakdown.freeSpace).toBe(
+            200_000 -
+              sumRows(data.breakdown) -
+              data.breakdown.autocompactBuffer,
+          );
+        }
+        expect(getHistoryShallow).toHaveBeenCalledWith();
+        expect(chat.getHistory).not.toHaveBeenCalled();
+        expect(history).toEqual(before);
+        expect(history.at(-1)?.parts?.[0]).toBe(realUser);
+        expect(history.at(-1)?.parts?.[1]).toBe(quotedCatalog);
+      },
+    );
 
     it('bills the skill listing as sent under skills and the rest of the prelude as startup context', async () => {
       const data = await collectContextData(
@@ -1637,23 +1781,39 @@ describe('collectContextData (contextCommand)', () => {
 
   it('lists the auto-memory section as a separate memory entry (#7651)', async () => {
     // The managed auto-memory section is no longer part of getUserMemory(); its
-    // tokens are surfaced via getAutoMemoryPrompt(). Exercise the non-empty
-    // branch so a regression that drops the "auto memory" row from /context
-    // fails here instead of silently under-counting the memory breakdown.
-    const config = {
-      ...makeMockConfig(),
-      getUserMemory: vi.fn().mockReturnValue(''),
-      getOutputStyle: vi.fn().mockReturnValue(undefined),
-      getAutoMemoryPrompt: vi
-        .fn()
-        .mockReturnValue('# auto memory\nMEMORY_INDEX_MARKER'),
-    } as unknown as Config;
+    // tokens are surfaced via getAutoMemoryPrompt() plus the request-only
+    // catalog from getAutoMemoryContext(). Exercise the non-empty branch so a
+    // regression that drops the "auto memory" row from /context, or that drops
+    // either of its two terms, fails here instead of silently under-counting
+    // the memory breakdown.
+    const configWithCatalog = (catalog: string) =>
+      ({
+        ...makeMockConfig(),
+        getUserMemory: vi.fn().mockReturnValue(''),
+        getOutputStyle: vi.fn().mockReturnValue(undefined),
+        getAutoMemoryPrompt: vi
+          .fn()
+          .mockReturnValue('# auto memory\nStable policy'),
+        getAutoMemoryContext: vi.fn().mockReturnValue(catalog),
+      }) as unknown as Config;
 
-    const data = await collectContextData(config, true);
+    // contextCommand gates the row on the joined string, so a catalog-only
+    // config still yields exactly one row.
+    const policyOnly = await collectContextData(configWithCatalog(''), true);
+    const withCatalog = await collectContextData(
+      configWithCatalog('MEMORY_INDEX_MARKER\n'.repeat(200)),
+      true,
+    );
 
-    expect(data.memoryFiles).toHaveLength(1);
-    expect(data.memoryFiles[0].path).toBe(t('auto memory'));
-    expect(data.memoryFiles[0].tokens).toBeGreaterThan(0);
+    expect(policyOnly.memoryFiles).toHaveLength(1);
+    expect(policyOnly.memoryFiles[0].path).toBe(t('auto memory'));
+    expect(policyOnly.memoryFiles[0].tokens).toBeGreaterThan(0);
+
+    expect(withCatalog.memoryFiles).toHaveLength(1);
+    expect(withCatalog.memoryFiles[0].path).toBe(t('auto memory'));
+    expect(withCatalog.memoryFiles[0].tokens).toBeGreaterThan(
+      policyOnly.memoryFiles[0].tokens,
+    );
   });
 
   it('shortens home-dir memory marker paths to ~ in the breakdown', async () => {

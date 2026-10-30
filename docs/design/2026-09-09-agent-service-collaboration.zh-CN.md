@@ -2,7 +2,7 @@
 
 [English](2026-09-09-agent-service-collaboration.md) | [简体中文](2026-09-09-agent-service-collaboration.zh-CN.md)
 
-状态：接续设计，尚未实现。2026-09-09。
+状态：接续设计，尚未实现。2026-09-09。协作部分已被取代：这里描述的 thread 模型（thread、`thread_*` 工具、调度器和 Host v1 租约）已由[会话多 Agent 设计](2026-10-05-session-multi-agent.zh-CN.md)替换并删除；A2A 契约见 [2026-09-09-a2a-frozen-contract.zh-CN.md](2026-09-09-a2a-frozen-contract.zh-CN.md)。
 
 核心目标：Qwen Code 既能开放本地 Agent 给外部授权调用，也能联系本地或远程的已有 Agent；用户仍从原有对话入口发起工作，在同一工作界面查看分工、插话和验收。独立身份不要求永久运行一个进程，外部 Agent 不要求成为 Qwen subagent 或 Team 成员。
 

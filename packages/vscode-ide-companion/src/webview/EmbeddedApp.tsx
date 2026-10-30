@@ -16,6 +16,9 @@ import {
 } from '@qwen-code/web-shell';
 import {
   DaemonClient,
+  DaemonHttpError,
+  findDaemonRewindUserBlock,
+  isDaemonRewindUserBlock,
   type DaemonSessionSummary,
   type DaemonTranscriptBlock,
 } from '@qwen-code/sdk/daemon';
@@ -44,20 +47,21 @@ const SESSION_SWITCH_MIN_VISIBLE_MS = 120;
 /** Longest an edit submit waits for the rewind to land in the transcript. */
 const REWIND_APPLIED_TIMEOUT_MS = 2_000;
 
-/** Conversational user turns — the blocks a rewind indexes against. */
+/**
+ * Conversational user turns — the blocks a rewind indexes against.
+ * `mid_turn_message_injected` renders as `role: 'system'`, so the web shell's
+ * ordinal never numbers it; counting it here shifts every later index.
+ */
+function isEditableUserBlock(
+  block: DaemonTranscriptBlock | undefined,
+): boolean {
+  return isDaemonRewindUserBlock(block);
+}
+
 function countEditableUserTurns(
   blocks: readonly DaemonTranscriptBlock[],
 ): number {
-  let count = 0;
-  for (const block of blocks) {
-    if (
-      block?.kind === 'user' &&
-      block.meta?.['source'] !== 'background_notification'
-    ) {
-      count += 1;
-    }
-  }
-  return count;
+  return blocks.filter(isEditableUserBlock).length;
 }
 
 function waitForRewindApplied(
@@ -300,7 +304,7 @@ interface InsightProgress {
 }
 
 interface EditingMessage {
-  turnIndex?: number;
+  blockId?: string;
 }
 
 function isAutomaticApprovalMode(modeId: unknown): boolean {
@@ -381,6 +385,7 @@ export function EmbeddedApp() {
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
   const historyButtonRef = useRef<HTMLButtonElement>(null);
+  const appRootRef = useRef<HTMLDivElement>(null);
   const shellRef = useRef<WebShellApi | null>(null);
   const composerRef = useRef<WebShellComposerApi | null>(null);
   const currentModelIdRef = useRef<string | undefined>(undefined);
@@ -699,6 +704,33 @@ export function EmbeddedApp() {
     return () =>
       document.removeEventListener('contextmenu', trackContextMenu, true);
   }, [vscode]);
+
+  // VS Code 1.143's webview guest script refocuses the webview's last
+  // focused element right before running a clipboard execCommand (Ctrl+C,
+  // context-menu Copy). The last focused element here is the composer's
+  // contenteditable, and focusing an editable collapses the document text
+  // selection, so the copy runs on an empty selection and lands nothing in
+  // the clipboard. Keep the app root (a non-editable element) focused while
+  // the pointer presses into a non-interactive area: focusing a
+  // non-editable div preserves the selection, and an activeElement that is
+  // not <body> makes the guest script skip the refocus.
+  useEffect(() => {
+    const keepSelectionFocus = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (!target) return;
+      if (
+        target.closest(
+          'button, a, input, textarea, select, [contenteditable="true"], [role="button"]',
+        )
+      ) {
+        return;
+      }
+      appRootRef.current?.focus({ preventScroll: true });
+    };
+    document.addEventListener('pointerdown', keepSelectionFocus, true);
+    return () =>
+      document.removeEventListener('pointerdown', keepSelectionFocus, true);
+  }, []);
 
   useEffect(() => {
     const handleCopyCommand = (event: MessageEvent) => {
@@ -1048,7 +1080,14 @@ export function EmbeddedApp() {
 
   return (
     <div
-      style={{ ...ROOT_STYLE, position: 'relative', flexDirection: 'column' }}
+      ref={appRootRef}
+      tabIndex={-1}
+      style={{
+        ...ROOT_STYLE,
+        position: 'relative',
+        flexDirection: 'column',
+        outline: 'none',
+      }}
       data-vscode-context='{"webviewSection":"chat-messages"}'
     >
       <style>{VSCODE_EMBEDDED_CSS}</style>
@@ -1481,7 +1520,10 @@ export function EmbeddedApp() {
           className="qwen-code-vscode-web-shell"
           style={SHELL_STYLE}
           theme={theme}
-          language={language}
+          // No `language` prop on purpose: the shell resolves its own UI
+          // language (daemon setting, then browser locale), so a pick in its
+          // settings dialog is not reset to the host chrome language.
+          // `readLanguage` above feeds only the chrome's own copy table.
           sessionSourceType={
             runtime.sessionId ? undefined : VSCODE_SESSION_SOURCE_TYPE
           }
@@ -1576,11 +1618,16 @@ export function EmbeddedApp() {
             const editContent = queuedPromptForEdit
               ? queuedPromptForEdit.prompt
               : content;
+            const target =
+              transcriptBlocksRef.current.filter(isEditableUserBlock)[
+                turnIndex
+              ];
+            if (!editsQueuedPrompt && !target) return false;
             composerRef.current?.clear({ text: true, tags: true });
             composerRef.current?.setText(editContent);
             composerRef.current?.focus?.();
             setEditingMessage({
-              turnIndex: editsQueuedPrompt ? undefined : turnIndex,
+              blockId: editsQueuedPrompt ? undefined : target?.id,
             });
             return true;
           }}
@@ -1612,11 +1659,35 @@ export function EmbeddedApp() {
           }}
           composerRef={composerRef}
           prepareSubmit={async (submission) => {
+            if (submission.source === 'mcp-app') return undefined;
             if (editingMessage) {
+              const { blockId } = editingMessage;
+              setEditingMessage(undefined);
               const sessionId = submission.sessionId ?? runtime.sessionId;
               if (!daemonClient || !sessionId) {
                 throw new Error(t('composer.editUnavailable'));
               }
+              const blocks = transcriptBlocksRef.current;
+              const userBlocks = blocks.filter(isEditableUserBlock);
+              const target =
+                blockId === undefined
+                  ? userBlocks.at(-1)
+                  : userBlocks.find((block) => block.id === blockId);
+              // The clear above is unconditional so no refusal can wedge the
+              // next send, but a transient daemon failure has to re-arm the
+              // edit: the message says "Please try again", and a retry that
+              // skipped the rewind would append the edited text as a new turn
+              // instead of replacing the original. Only permanent 4xx refusals
+              // stay cleared, so a rewind that can never succeed cannot wedge
+              // the composer again. Never `cancelMessageEditing` here — it
+              // wipes the composer text the retry needs.
+              const rearmOnTransientFailure = (error: unknown) => {
+                if (runtimeRef.current?.sessionId !== sessionId) return;
+                if (error instanceof DaemonHttpError && error.status < 500) {
+                  return;
+                }
+                setEditingMessage({ blockId });
+              };
               let snapshots: Awaited<
                 ReturnType<typeof daemonClient.getRewindSnapshots>
               >['snapshots'];
@@ -1624,22 +1695,25 @@ export function EmbeddedApp() {
                 ({ snapshots } =
                   await daemonClient.getRewindSnapshots(sessionId));
               } catch (err) {
+                rearmOnTransientFailure(err);
                 throw new Error(t('composer.editFailed'), { cause: err });
               }
-              const snapshot =
-                editingMessage.turnIndex === undefined
-                  ? snapshots.reduce<(typeof snapshots)[number] | undefined>(
-                      (latest, entry) =>
-                        !latest || entry.turnIndex > latest.turnIndex
-                          ? entry
-                          : latest,
-                      undefined,
+              const matches =
+                target?.promptId &&
+                findDaemonRewindUserBlock(blocks, target.promptId)?.id ===
+                  target.id
+                  ? snapshots.filter(
+                      (entry) => entry.daemonPromptId === target.promptId,
                     )
-                  : snapshots.find(
-                      (entry) => entry.turnIndex === editingMessage.turnIndex,
-                    );
-              if (!snapshot) {
-                throw new Error(t('composer.editExpired'));
+                  : [];
+              const snapshot = matches.length === 1 ? matches[0] : undefined;
+              if (!snapshot || !target) {
+                const reason =
+                  snapshots.length > 0 &&
+                  snapshots.every((entry) => !entry.daemonPromptId)
+                    ? 'composer.editIdentityUnavailable'
+                    : 'composer.editExpired';
+                throw new Error(t(reason));
               }
               try {
                 // No X-Qwen-Client-Id on purpose: the daemon registers a
@@ -1653,9 +1727,9 @@ export function EmbeddedApp() {
                   rewindFiles: false,
                 });
               } catch (err) {
+                rearmOnTransientFailure(err);
                 throw new Error(t('composer.editFailed'), { cause: err });
               }
-              setEditingMessage(undefined);
               clearInsight();
               // The daemon delivers `session.rewound` on the session stream,
               // which lands in the transcript store after the rewind HTTP
@@ -1668,7 +1742,7 @@ export function EmbeddedApp() {
               if (
                 !(await waitForRewindApplied(
                   () => transcriptBlocksRef.current,
-                  snapshot.turnIndex,
+                  userBlocks.indexOf(target),
                 )) &&
                 runtimeRef.current?.sessionId === sessionId
               ) {

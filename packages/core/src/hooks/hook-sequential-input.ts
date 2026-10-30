@@ -8,6 +8,7 @@ import { createHookOutput, HookEventName } from './types.js';
 import type {
   HookInput,
   HookOutput,
+  PreToolUseHookOutput,
   PreToolUseInput,
   UserPromptExpansionInput,
   UserPromptSubmitInput,
@@ -55,8 +56,18 @@ export function applyHookOutputToInput(
         }
         break;
 
-      case HookEventName.PreToolUse:
-        if ('tool_input' in hookOutput.hookSpecificOutput) {
+      case HookEventName.PreToolUse: {
+        // The canonical replacement takes precedence over the legacy
+        // `tool_input` merge; an invalid one leaves the input unchanged
+        // (the aggregated result still rejects the call).
+        const updatedInput = (
+          createHookOutput(eventName, hookOutput) as PreToolUseHookOutput
+        ).getUpdatedInput();
+        if (updatedInput !== undefined) {
+          if (updatedInput && 'tool_input' in modifiedInput) {
+            (modifiedInput as PreToolUseInput).tool_input = updatedInput;
+          }
+        } else if ('tool_input' in hookOutput.hookSpecificOutput) {
           const newToolInput = hookOutput.hookSpecificOutput[
             'tool_input'
           ] as Record<string, unknown>;
@@ -68,6 +79,7 @@ export function applyHookOutputToInput(
           }
         }
         break;
+      }
 
       default:
         // For other events, no special input modification is needed

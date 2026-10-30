@@ -205,7 +205,7 @@ test('live daemon settings honor host inclusion and exclusion lists @smoke', asy
           ).toBeVisible();
           await expect(page.getByRole('combobox')).toHaveCount(1);
           await expect(
-            page.getByText('Browser task notifications', { exact: true }),
+            page.getByText('Task notifications', { exact: true }),
           ).toHaveCount(0);
         }
       }

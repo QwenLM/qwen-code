@@ -14,7 +14,6 @@ import type { Config } from '../../config/config.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import { resolveAgentPersona } from './persona.js';
 import { updateWorkspaceAgents } from './store.js';
-import { THREAD_TOOL_NAMES } from './capability.js';
 import type { WorkspaceAgent } from './types.js';
 
 const PROJECT_ROOT = '/agent-persona-test';
@@ -166,10 +165,9 @@ describe('resolveAgentPersona', () => {
     );
   });
 
-  it('applies the read-only ceiling in the process that will run the tools', async () => {
-    // A definition asking for everything still cannot get an editing tool: the
-    // boundary is applied here, so a session cannot start wider and be
-    // narrowed afterwards.
+  it('keeps every tool behind approval instead of a read-only ceiling', async () => {
+    // Plan §8-1: a session agent may use what the session offers; writes go
+    // through the session's ordinary approval flow rather than being removed.
     await seed([ALICE_WITH_DEFINITION]);
     const { config } = makeConfig();
 
@@ -177,36 +175,10 @@ describe('resolveAgentPersona', () => {
 
     expect(result.status).toBe('resolved');
     if (result.status !== 'resolved') return;
-    expect(result.toolConfig.tools).toEqual(
-      expect.arrayContaining([...THREAD_TOOL_NAMES]),
-    );
-    expect(result.toolConfig.tools).not.toContain(ToolNames.EDIT);
-    expect(result.toolConfig.tools).not.toContain(ToolNames.SHELL);
-    expect(result.toolConfig.disallowedTools).toEqual(
-      expect.arrayContaining([ToolNames.EDIT, ToolNames.SHELL]),
-    );
-  });
-
-  it('keeps every tool behind approval on the session surface', async () => {
-    // Plan §8-1: a session agent may use what the session offers; writes go
-    // through the session's ordinary approval flow rather than being removed.
-    // Only the thread tools stay out: there is no thread behind the session.
-    await seed([ALICE_WITH_DEFINITION]);
-    const { config } = makeConfig();
-
-    const result = await resolveAgentPersona(config, ALICE.id, {
-      surface: 'session',
-    });
-
-    expect(result.status).toBe('resolved');
-    if (result.status !== 'resolved') return;
     expect(result.toolConfig.tools).toEqual(['*']);
     expect(result.toolConfig.executionAllowedTools).toBeUndefined();
     expect(result.toolConfig.disallowedTools ?? []).not.toContain(
       ToolNames.EDIT,
-    );
-    expect(result.toolConfig.disallowedTools).toEqual(
-      expect.arrayContaining([...THREAD_TOOL_NAMES]),
     );
     expect(result.systemPrompt).toContain('@alice');
   });

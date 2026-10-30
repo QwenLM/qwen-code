@@ -62,7 +62,8 @@ export class WebViewContent {
     // The WebShell transcript bundles Shiki, whose Oniguruma engine compiles
     // WASM at runtime, and self-contained KaTeX fonts as data URLs, so the CSP
     // grants both wasm-unsafe-eval and data: fonts.
-    const csp = `default-src 'none'; connect-src ${connectSrc}; img-src ${webview.cspSource} data:; font-src data:; script-src ${webview.cspSource} 'wasm-unsafe-eval'; style-src ${webview.cspSource} 'unsafe-inline';`;
+    // Excel previews run the bundled parser in a blob worker.
+    const csp = `default-src 'none'; worker-src blob:; connect-src ${connectSrc}; img-src ${webview.cspSource} data:; font-src data:; script-src ${webview.cspSource} 'wasm-unsafe-eval'; style-src ${webview.cspSource} 'unsafe-inline';`;
 
     return `<!DOCTYPE html>
 <html lang="${language}">

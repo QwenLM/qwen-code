@@ -16,7 +16,7 @@ export function getString(value: unknown, key: string): string | undefined {
   return typeof entry === 'string' ? entry : undefined;
 }
 
-function getFiniteNumber(
+export function getFiniteNumber(
   value: Record<string, unknown>,
   key: string,
 ): number | undefined {
@@ -67,6 +67,9 @@ export function extractTranscriptTiming(
     kind,
     durationMs,
     ...carriedStrings,
+    ...(kind === 'request' && getString(timing, 'executionId')?.trim()
+      ? { executionId: getString(timing, 'executionId') }
+      : {}),
     ...(startedAt !== undefined && startedAt >= 0 ? { startedAt } : {}),
     ...(kind === 'request' && ttftMs !== undefined && ttftMs >= 0
       ? { ttftMs }
