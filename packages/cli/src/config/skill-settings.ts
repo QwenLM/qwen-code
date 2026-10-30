@@ -174,10 +174,11 @@ export type SkillToggleTargetScope = SettingScope.User | SettingScope.Workspace;
  * the toggle edits rather than a higher lock.
  *
  * `writtenName` is the spelling the pending write records when it differs
- * from the catalog identity (`pdf` for `rust:pdf`). The self-removal
- * exemptions below key on it: only an entry the write actually removes or
- * cancels may stop blocking, while every spelling of the identity is still
- * searched in the higher scopes.
+ * from the catalog identity (`pdf` for `rust:pdf`). `writtenNames` lists the
+ * spellings that write removes from the target scope; the self-removal
+ * exemptions below key on them, so only an entry the write actually removes
+ * or cancels may stop blocking, while every spelling of the identity is
+ * still searched in the higher scopes.
  */
 export function buildHigherDisabled(
   settings: LoadedSettings,
@@ -188,6 +189,7 @@ export function buildHigherDisabled(
     name: string;
     authoredName?: string;
     writtenName?: string;
+    writtenNames?: readonly string[];
   }) => SkillToggleBlock | null;
 } {
   const targetLabel: SkillToggleBlock['scope'] =
@@ -247,12 +249,47 @@ export function buildHigherDisabled(
       ? normalizeSkillNames(skillSettingStrings(settings, target, 'disabled'))
       : [],
   );
+  const targetDefaultDisabled = new Set(
+    target === SettingScope.User || includeWorkspace
+      ? normalizeSkillNames(
+          skillSettingStrings(settings, target, 'defaultDisabled'),
+        )
+      : [],
+  );
+  // Entries outside the target scope survive the write. A higher default
+  // entry under the same spelling is cancelled only by an identically
+  // spelled grant, so it still blocks once the target entry is removed.
+  const higherDefaultScopes = new Map<string, SkillToggleBlock['scope']>();
+  for (const [scope, label] of [
+    [SettingScope.SystemDefaults, 'SystemDefaults'],
+    [SettingScope.User, 'User'],
+    [SettingScope.Workspace, 'Workspace'],
+    [SettingScope.System, 'System'],
+  ] as const) {
+    if (
+      scope === target ||
+      (scope === SettingScope.Workspace && !includeWorkspace)
+    ) {
+      continue;
+    }
+    for (const name of normalizeSkillNames(
+      skillSettingStrings(settings, scope, 'defaultDisabled'),
+    )) {
+      higherDefaultScopes.set(name, label);
+    }
+  }
   const blockIn = (skill: {
     name: string;
     authoredName?: string;
     writtenName?: string;
+    writtenNames?: readonly string[];
   }): SkillToggleBlock | null => {
     const written = (skill.writtenName ?? skill.name).trim().toLowerCase();
+    const writtenNames = new Set(
+      (skill.writtenNames ?? [skill.writtenName ?? skill.name]).map((name) =>
+        name.trim().toLowerCase(),
+      ),
+    );
     const spellings = skillRestrictionNames(skill);
     // A higher-scope hard entry wins the blame before any nearer one:
     // deleting the workspace file's copy cannot unlock while it stands.
@@ -264,11 +301,12 @@ export function buildHigherDisabled(
     }
     for (const spelling of spellings) {
       const hard = hardEntries.get(spelling);
-      if (hard) {
-        // The toggle removes an exact-spelling entry in its own scope itself.
-        if (spelling === written && targetDisabled.has(spelling)) {
-          continue;
-        }
+      // Removing a spelling the write names can expose a default entry the
+      // same spelling carries, so the default check below still runs.
+      if (
+        hard &&
+        !(writtenNames.has(spelling) && targetDisabled.has(spelling))
+      ) {
         return {
           reason: 'hard',
           list: 'disabled',
@@ -280,12 +318,16 @@ export function buildHigherDisabled(
       if (def) {
         // A grant identical to the entry cancels it at resolve time — the
         // persisted qualified one, or any identical-spelling bare one.
-        if (spelling === written || enabledEntries.has(spelling)) continue;
+        const cancelled = spelling === written || enabledEntries.has(spelling);
+        const removed =
+          writtenNames.has(spelling) && targetDefaultDisabled.has(spelling);
+        const higher = higherDefaultScopes.get(spelling);
+        if (cancelled || (removed && !higher)) continue;
         return {
           reason: 'default',
           list: 'defaultDisabled',
           entry: spelling,
-          scope: def,
+          scope: higher ?? def,
         };
       }
     }
@@ -308,7 +350,12 @@ export function buildHigherDisabled(
 
 export function skillToggleBlockForName(
   settings: LoadedSettings,
-  skill: { name: string; authoredName?: string; writtenName?: string },
+  skill: {
+    name: string;
+    authoredName?: string;
+    writtenName?: string;
+    writtenNames?: readonly string[];
+  },
   target: SkillToggleTargetScope = SettingScope.Workspace,
 ): SkillToggleBlock | null {
   return buildHigherDisabled(settings, target).blockIn(skill);
@@ -368,27 +415,41 @@ export interface SkillActivationSettingLists {
 /**
  * Applies one activation change to a scope's three skill lists so the name
  * ends up in exactly one of them: `enabled` when enabling, `disabled` or
- * `defaultDisabled` (per `mode`) when disabling. Only the exact spelling is
- * touched; other spellings and unrelated entries are preserved verbatim.
+ * `defaultDisabled` (per `mode`) when disabling.
+ *
+ * `aliases` names the same skill under its other spellings (`pdf` for
+ * `rust:pdf`). An enable drops them from both disable lists, because a
+ * leftover alias still disables the skill; only `skillName` is recorded as
+ * the grant. Other spellings and unrelated entries are preserved verbatim.
  */
 export function updateSkillActivationLists(
   lists: SkillActivationSettingLists,
   skillName: string,
   enabled: boolean,
   mode: SkillDisableMode = 'hard',
+  aliases: readonly string[] = [],
 ): SkillActivationSettingLists {
+  if (enabled) {
+    let disabled = lists.disabled;
+    let defaultDisabled = lists.defaultDisabled;
+    for (const alias of aliases) {
+      disabled = updateTarget(disabled, alias, false);
+      defaultDisabled = updateTarget(defaultDisabled, alias, false);
+    }
+    return {
+      disabled: updateTarget(disabled, skillName, false),
+      defaultDisabled: updateTarget(defaultDisabled, skillName, false),
+      enabled: updateTarget(lists.enabled, skillName, true),
+    };
+  }
   return {
-    disabled: updateTarget(
-      lists.disabled,
-      skillName,
-      !enabled && mode === 'hard',
-    ),
+    disabled: updateTarget(lists.disabled, skillName, mode === 'hard'),
     defaultDisabled: updateTarget(
       lists.defaultDisabled,
       skillName,
-      !enabled && mode === 'default',
+      mode === 'default',
     ),
-    enabled: updateTarget(lists.enabled, skillName, enabled),
+    enabled: updateTarget(lists.enabled, skillName, false),
   };
 }
 

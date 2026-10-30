@@ -6041,10 +6041,12 @@ async function runQwenServeImpl(
     const blockSkillIdentity = (
       identity: { name: string; authoredName?: string; registryName?: string },
       writtenName: string,
+      writtenNames?: readonly string[],
     ) => ({
       name: identity.registryName ?? identity.name,
       ...(identity.authoredName ? { authoredName: identity.authoredName } : {}),
       writtenName,
+      ...(writtenNames ? { writtenNames } : {}),
     });
     const persistDisabledToolsFn = (
       workspace: string,
@@ -6308,6 +6310,19 @@ async function runQwenServeImpl(
           const writtenName = (index: number) =>
             skillIdentities[index]!.registryName ??
             skillIdentities[index]!.name;
+          // A catalog identity can be stored under its registry spelling or
+          // the authored one (`pdf` for `rust:pdf`): a disable that ran before
+          // the name resolved wrote the request spelling. An enable removes
+          // every spelling from the target lists, so a legacy entry cannot
+          // outlive the grant that contradicts it.
+          const identityNames = (index: number): string[] => {
+            const written = writtenName(index);
+            const authoredName = skillIdentities[index]!.authoredName;
+            return authoredName &&
+              authoredName.trim().toLowerCase() !== written.trim().toLowerCase()
+              ? [written, authoredName]
+              : [written];
+          };
           let next = initial;
           const outcomes: PersistUserSkillActivationResult['outcomes'] =
             skillNames.map((_, index) => ({
@@ -6316,14 +6331,18 @@ async function runQwenServeImpl(
             }));
           // A grant a standing entry still forbids is not a write: the merged
           // config would keep the skill disabled while the route reported an
-          // enable. A `defaultDisabled` entry a grant the batch records cancels,
-          // or a User entry another name already removed, no longer forbids it,
-          // so refused names are rechecked until the batch converges and the
-          // result does not depend on request order.
+          // enable. A `defaultDisabled` entry a grant the batch records
+          // cancels no longer forbids it, so refused names are rechecked
+          // until the batch converges and the result does not depend on
+          // request order.
           const stillBlocked = (index: number) => {
             const block = skillToggleBlockForName(
               fresh,
-              blockSkillIdentity(skillIdentities[index]!, writtenName(index)),
+              blockSkillIdentity(
+                skillIdentities[index]!,
+                writtenName(index),
+                identityNames(index),
+              ),
               USER_SETTING_SCOPE,
             );
             if (
@@ -6334,11 +6353,7 @@ async function runQwenServeImpl(
             ) {
               return null;
             }
-            if (!block || block.scope !== 'User') return block;
-            const removed = !next[block.list].some(
-              (name) => name.trim().toLowerCase() === block.entry,
-            );
-            return removed ? null : block;
+            return block;
           };
           let pending = skillNames.map((_, index) => index);
           for (let pass = 0; pass < skillNames.length; pass += 1) {
@@ -6368,6 +6383,7 @@ async function runQwenServeImpl(
                 skillName,
                 enabled,
                 mode,
+                identityNames(index).slice(1),
               );
               const changed = JSON.stringify(updated) !== JSON.stringify(next);
               outcomes[index] = { skillName, changed };

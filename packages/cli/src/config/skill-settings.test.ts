@@ -576,6 +576,48 @@ describe('buildHigherDisabled for the User scope', () => {
       )?.scope,
     ).toBe('System');
   });
+
+  it('lets a write remove a user entry under any spelling it records', () => {
+    const higher = user({ merged: {}, user: { disabled: ['pdf'] } });
+
+    expect(
+      higher.blockIn({ ...prefixed, writtenNames: ['demo:pdf', 'pdf'] }),
+    ).toBeNull();
+  });
+
+  it('keeps a higher default entry the target write cannot cancel', () => {
+    const higher = user({
+      merged: {},
+      user: { defaultDisabled: ['pdf'] },
+      systemDefaults: { defaultDisabled: ['pdf'] },
+    });
+
+    expect(
+      higher.blockIn({ ...prefixed, writtenNames: ['demo:pdf', 'pdf'] }),
+    ).toEqual({
+      reason: 'default',
+      list: 'defaultDisabled',
+      entry: 'pdf',
+      scope: 'SystemDefaults',
+    });
+  });
+
+  it('checks the surviving default after a removable hard entry', () => {
+    const higher = user({
+      merged: {},
+      user: { disabled: ['pdf'], defaultDisabled: ['pdf'] },
+      systemDefaults: { defaultDisabled: ['pdf'] },
+    });
+
+    expect(
+      higher.blockIn({ ...prefixed, writtenNames: ['demo:pdf', 'pdf'] }),
+    ).toEqual({
+      reason: 'default',
+      list: 'defaultDisabled',
+      entry: 'pdf',
+      scope: 'SystemDefaults',
+    });
+  });
 });
 
 describe('updateSkillActivationLists', () => {
@@ -634,5 +676,25 @@ describe('updateSkillActivationLists', () => {
       enabled: [],
     });
     expect(updateSkillActivationLists(lists, 'pdf', false)).toEqual(lists);
+  });
+
+  it('removes every spelling of an enabled skill from the disable lists', () => {
+    expect(
+      updateSkillActivationLists(
+        {
+          disabled: ['pdf'],
+          defaultDisabled: ['pdf'],
+          enabled: [],
+        },
+        'demo:pdf',
+        true,
+        'hard',
+        ['pdf'],
+      ),
+    ).toEqual({
+      disabled: [],
+      defaultDisabled: [],
+      enabled: ['demo:pdf'],
+    });
   });
 });

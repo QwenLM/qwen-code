@@ -1999,39 +1999,55 @@ describe('workspace skill settings persistence', () => {
     });
   });
 
-  it('makes a user batch enable order-independent and reports blocks', async () => {
+  it('makes a user batch enable order-independent and reports higher-scope blocks', async () => {
     writeSkillSettings([], ['pdf', 'locked']);
-    const { persistUserSkillActivation } = await captureSkillPersistence([
-      skillStatus('pdf', 'user'),
-      skillStatus('rust:pdf', 'extension', 'rust'),
-      skillStatus('rust:locked', 'extension', 'rust'),
-    ]);
-
-    const result = await persistUserSkillActivation!(
-      workspace,
-      ['rust:pdf', 'pdf', 'rust:locked'],
-      true,
-      'hard',
+    const systemSettings = path.join(qwenHome, 'system-settings.json');
+    fs.writeFileSync(
+      systemSettings,
+      JSON.stringify({ skills: { disabled: ['locked'] } }),
     );
+    const previousSystemPath = process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+    process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettings;
+    try {
+      const { persistUserSkillActivation } = await captureSkillPersistence([
+        skillStatus('pdf', 'user'),
+        skillStatus('rust:pdf', 'extension', 'rust'),
+        skillStatus('rust:locked', 'extension', 'rust'),
+      ]);
 
-    expect(result.outcomes).toEqual([
-      { skillName: 'rust:pdf', changed: true },
-      { skillName: 'pdf', changed: true },
-      {
-        skillName: 'rust:locked',
-        changed: false,
-        block: {
-          reason: 'hard',
-          list: 'disabled',
-          entry: 'locked',
-          scope: 'User',
+      const result = await persistUserSkillActivation!(
+        workspace,
+        ['rust:pdf', 'pdf', 'rust:locked'],
+        true,
+        'hard',
+      );
+
+      expect(result.outcomes).toEqual([
+        { skillName: 'rust:pdf', changed: true },
+        { skillName: 'pdf', changed: true },
+        {
+          skillName: 'rust:locked',
+          changed: false,
+          block: {
+            reason: 'hard',
+            list: 'disabled',
+            entry: 'locked',
+            scope: 'System',
+          },
         },
-      },
-    ]);
-    expect(
-      JSON.parse(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'))
-        .skills,
-    ).toEqual({ disabled: ['locked'], enabled: ['pdf', 'rust:pdf'] });
+      ]);
+      expect(
+        JSON.parse(
+          fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'),
+        ).skills,
+      ).toEqual({ disabled: ['locked'], enabled: ['rust:pdf', 'pdf'] });
+    } finally {
+      if (previousSystemPath === undefined) {
+        delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      } else {
+        process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = previousSystemPath;
+      }
+    }
   });
 
   it('does not report a default block a batch grant cancels in another scope', async () => {
@@ -2190,6 +2206,52 @@ describe('workspace skill settings persistence', () => {
       outcomes: [{ skillName: 'rust:pdf', changed: true }],
       settingsChanges: [
         { key: 'skills.disabled', value: undefined },
+        { key: 'skills.enabled', value: ['rust:pdf'] },
+      ],
+    });
+    expect(
+      JSON.parse(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'))
+        .skills,
+    ).toEqual({ enabled: ['rust:pdf'] });
+  });
+
+  it('enables a skill whose user entry uses the authored spelling', async () => {
+    writeSkillSettings([], ['pdf']);
+    const { persistUserSkillActivation } = await captureSkillPersistence([
+      skillStatus('rust:pdf', 'extension', 'rust'),
+    ]);
+
+    await expect(
+      persistUserSkillActivation!(workspace, ['pdf'], true, 'hard'),
+    ).resolves.toEqual({
+      outcomes: [{ skillName: 'rust:pdf', changed: true }],
+      settingsChanges: [
+        { key: 'skills.disabled', value: undefined },
+        { key: 'skills.enabled', value: ['rust:pdf'] },
+      ],
+    });
+    expect(
+      JSON.parse(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'))
+        .skills,
+    ).toEqual({ enabled: ['rust:pdf'] });
+  });
+
+  it('enables a skill whose user defaultDisabled entry uses the authored spelling', async () => {
+    writeSkillSettings([], []);
+    fs.writeFileSync(
+      path.join(qwenHome, 'settings.json'),
+      JSON.stringify({ skills: { defaultDisabled: ['pdf'] } }),
+    );
+    const { persistUserSkillActivation } = await captureSkillPersistence([
+      skillStatus('rust:pdf', 'extension', 'rust'),
+    ]);
+
+    await expect(
+      persistUserSkillActivation!(workspace, ['pdf'], true, 'hard'),
+    ).resolves.toEqual({
+      outcomes: [{ skillName: 'rust:pdf', changed: true }],
+      settingsChanges: [
+        { key: 'skills.defaultDisabled', value: undefined },
         { key: 'skills.enabled', value: ['rust:pdf'] },
       ],
     });
