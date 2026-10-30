@@ -184,6 +184,8 @@ import {
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  IDE_CONTEXT_CHANGES_OPENER,
+  IDE_CONTEXT_OPENER,
   wrapSystemReminder,
   type AgentAvailabilityEntry,
 } from './environmentContext.js';
@@ -3101,7 +3103,7 @@ export class LlmClient {
       }
 
       const contextParts = [
-        "Here is the user's current editor context. Use it when relevant, including to answer questions about the active file, open files, cursor, or selected text.",
+        `${IDE_CONTEXT_OPENER} Use it when relevant, including to answer questions about the active file, open files, cursor, or selected text.`,
         contextLines.join('\n'),
       ];
 
@@ -3231,7 +3233,7 @@ export class LlmClient {
       }
 
       const contextParts = [
-        "Here is a summary of changes in the user's current editor context. Use it with the previous editor context when relevant, including to answer questions about the active file, open files, cursor, or selected text.",
+        `${IDE_CONTEXT_CHANGES_OPENER} Use it with the previous editor context when relevant, including to answer questions about the active file, open files, cursor, or selected text.`,
         changeLines.join('\n'),
       ];
 

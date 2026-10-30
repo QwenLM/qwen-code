@@ -10,6 +10,8 @@ import type { InputModalities } from '../core/contentGenerator.js';
 import { ToolNames } from '../tools/tool-names.js';
 import {
   AUTO_MEMORY_SNAPSHOT_METADATA,
+  IDE_CONTEXT_CHANGES_OPENER,
+  IDE_CONTEXT_OPENER,
   isWrappedSystemReminderPart,
   SYSTEM_REMINDER_CLOSE,
   SYSTEM_REMINDER_OPEN,
@@ -22,6 +24,7 @@ import {
 import {
   ATTACHMENT_PROCESSING_FAILURE_NOTICE,
   EXTENSION_HEADER_PREFIX,
+  HOSTED_ATTACHMENT_HEADER_PREFIX,
   isTypedPrompt,
   MCP_RESOURCE_HEADER_PREFIX,
   MCP_RESOURCE_NOTE_HEADER_PREFIX,
@@ -364,9 +367,7 @@ export function slimCompactionInput(
     let touched = false;
     const newParts: Part[] = content.parts.map((part, index) => {
       const replacement =
-        typed?.[index] &&
-        isUserTextPart(part) &&
-        !isWrappedSystemReminderPart(part)
+        typed?.[index] && isUserTextPart(part) && !isInjectedReminderPart(part)
           ? capTypedText(part, stats)
           : transformPart(part, stats, supportedModalities, options);
       if (replacement !== part) {
@@ -798,11 +799,9 @@ function userMessageTexts(history: Content[]): string[] {
     const typedText = parts
       .filter(
         (part, index) =>
-          typed[index] &&
-          isUserTextPart(part) &&
-          !isWrappedSystemReminderPart(part),
+          typed[index] && isUserTextPart(part) && !isInjectedReminderPart(part),
       )
-      .map((part) => stripLeadingSystemReminders(part.text!))
+      .map((part) => stripLeadingIdeContext(part.text!))
       .join('\n')
       .trim();
     // Tool traffic, reminders, hook context and the memory snapshot ride the
@@ -885,15 +884,32 @@ function isInjectedContext(part: Part): boolean {
 }
 
 /**
- * `text` without the complete `<system-reminder>` blocks at its start, which is
- * where IDE context is prepended into the prompt's own part. A tag anywhere
- * else is the user's, kept and escaped with the rest of the quote.
+ * A wrapped `<system-reminder>` part qwen-code injected. A marked part is the
+ * user's request even when it starts and ends with the tags: the IDE context
+ * the client prepends can open it, and the user's own text can close it.
  */
-function stripLeadingSystemReminders(text: string): string {
+function isInjectedReminderPart(part: Part): boolean {
+  return isWrappedSystemReminderPart(part) && !isTypedPrompt(part);
+}
+
+const IDE_CONTEXT_OPENERS = [IDE_CONTEXT_OPENER, IDE_CONTEXT_CHANGES_OPENER];
+
+/**
+ * `text` without the IDE context blocks the client prepends to the prompt's
+ * own part. Only a complete reminder block that opens with an IDE context line
+ * is stripped; its body escapes its own tags, so the first closing tag ends
+ * it. Any other reminder block, or a tag anywhere else, is the user's, kept
+ * and escaped with the rest of the quote.
+ */
+function stripLeadingIdeContext(text: string): string {
   let rest = text;
   for (;;) {
     const start = rest.trimStart();
     if (!start.startsWith(SYSTEM_REMINDER_OPEN)) return rest;
+    const body = start.slice(SYSTEM_REMINDER_OPEN.length).trimStart();
+    if (!IDE_CONTEXT_OPENERS.some((opener) => body.startsWith(opener))) {
+      return rest;
+    }
     const close = start.indexOf(
       SYSTEM_REMINDER_CLOSE,
       SYSTEM_REMINDER_OPEN.length,
@@ -940,12 +956,13 @@ function capTypedText(part: Part, stats: SlimStats): Part {
 const ATTACHED_NAMES_MAX = 8;
 const ATTACHED_NAME_MAX_CHARS = 120;
 
-/** Headers whose first line, without its dashes, names the block. */
+/** Headers whose first line, without its dashes or colon, names the block. */
 const SELF_NAMING_HEADER_PREFIXES = [
   REFERENCED_SESSION_HEADER_PREFIX,
   MCP_RESOURCE_NOTE_HEADER_PREFIX,
   MCP_SERVER_HEADER_PREFIX,
   EXTENSION_HEADER_PREFIX,
+  HOSTED_ATTACHMENT_HEADER_PREFIX,
 ];
 
 /** One line naming the attached content in `parts`, or '' when none. */
@@ -963,7 +980,7 @@ function attachedContentNote(parts: Part[]): string {
       ];
     }
     if (SELF_NAMING_HEADER_PREFIXES.some((prefix) => line.startsWith(prefix))) {
-      return [line.split('\n', 1)[0]!.replace(/^-+\s*|\s*-+$/g, '')];
+      return [line.split('\n', 1)[0]!.replace(/^-+\s*|\s*(?:-+|:)$/g, '')];
     }
     return [];
   });

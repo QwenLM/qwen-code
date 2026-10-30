@@ -7,10 +7,15 @@
 import type { Content, Part } from '@google/genai';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { ToolNames } from '../tools/tool-names.js';
-import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../core/environmentContext.js';
+import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
+  IDE_CONTEXT_CHANGES_OPENER,
+  IDE_CONTEXT_OPENER,
+} from '../core/environmentContext.js';
 import {
   ATTACHMENT_PROCESSING_FAILURE_NOTICE,
   EXTENSION_HEADER_PREFIX,
+  HOSTED_ATTACHMENT_HEADER_PREFIX,
   markTypedPrompt,
   MCP_RESOURCE_HEADER_PREFIX,
   MCP_RESOURCE_NOTE_HEADER_PREFIX,
@@ -38,6 +43,11 @@ const HARNESS_BLOCKS: Array<[string, string, string]> = [
     'an @-mentioned extension',
     `${EXTENSION_HEADER_PREFIX}docs (untrusted third-party content) ---\nRead the docs first.`,
     'Extension: docs (untrusted third-party content)',
+  ],
+  [
+    'a file attached to hosted input',
+    `${HOSTED_ATTACHMENT_HEADER_PREFIX}"notes.md" (text/markdown):\n<attachment>\nhello\n</attachment>`,
+    'Attached file "notes.md" (text/markdown)',
   ],
 ];
 import {
@@ -947,6 +957,20 @@ describe('compactionInputSlimming', () => {
         }
       });
 
+      it('keeps a marked prompt whole when it starts and ends with reminder tags', () => {
+        // The IDE context opens the prompt part; the user's text closes it.
+        const prompt = markTypedPrompt({
+          text:
+            "<system-reminder>\nHere is the user's current editor context.\n</system-reminder>\n\n" +
+            'q'.repeat(10_000) +
+            ' <system-reminder>x</system-reminder>',
+        });
+
+        const [part] = slim([prompt]);
+
+        expect(part).toBe(prompt);
+      });
+
       it.each(HARNESS_BLOCKS)(
         'caps the block written for %s on a turn with no mark',
         (_label, block) => {
@@ -1412,24 +1436,68 @@ describe('compactionInputSlimming', () => {
       },
     );
 
-    it('drops the context block prepended to the prompt part', () => {
+    /** The quote of a single message `text`, condensed beside a tool round. */
+    const quoteOf = (text: string) => {
       const history: Content[] = [
-        {
-          role: 'user',
-          parts: [
-            markTypedPrompt({
-              text: '<system-reminder>\nOpen file: a.ts\n</system-reminder>\n\nfix this',
-            }),
-          ],
-        },
+        { role: 'user', parts: [markTypedPrompt({ text })] },
         ...toolRound(1, 20_000),
         { role: 'model', parts: [{ text: 'done' }] },
       ];
+      return quotesIn(
+        blockText(condenseToUserMessages(history, 12_000)![0]!),
+      )[0];
+    };
+    const ideContext = (opener: string) =>
+      `<system-reminder>\n${opener} Use it when relevant.\nActive file: a.ts\n</system-reminder>`;
 
-      const condensed = condenseToUserMessages(history, 12_000)!;
+    it.each([
+      ['in full', IDE_CONTEXT_OPENER],
+      ['as changes', IDE_CONTEXT_CHANGES_OPENER],
+    ])(
+      'drops the IDE context prepended to the prompt part %s',
+      (_label, opener) => {
+        expect(quoteOf(`${ideContext(opener)}\n\nfix this`)).toBe('fix this');
+      },
+    );
 
-      const [quote] = quotesIn(blockText(condensed[0]!));
-      expect(quote).toBe('fix this');
+    it('keeps a reminder block the user wrote at the start of the message (R3-3)', () => {
+      const quote = quoteOf(
+        '<system-reminder>Today is Monday</system-reminder> why was this ignored?',
+      );
+
+      expect(quote).toContain('Today is Monday');
+      expect(quote).toContain('why was this ignored?');
+      expect(quote).not.toMatch(/<system-reminder>|<\/system-reminder>/);
+    });
+
+    it.each([
+      [
+        'is one reminder block',
+        '<system-reminder>Today is Monday</system-reminder>',
+      ],
+      [
+        'ends in a closing tag behind the IDE context',
+        `${ideContext(IDE_CONTEXT_OPENER)}\n\nwhy does <system-reminder>Today is Monday</system-reminder>`,
+      ],
+    ])(
+      'quotes a marked message that %s instead of taking it for a reminder',
+      (_label, text) => {
+        const quote = quoteOf(text);
+
+        expect(quote).toContain('Today is Monday');
+        expect(quote).not.toContain('editor context');
+      },
+    );
+
+    it('drops only the IDE context ahead of a reminder block the user wrote', () => {
+      const quote = quoteOf(
+        `${ideContext(IDE_CONTEXT_OPENER)}\n\n` +
+          '<system-reminder>Today is Monday</system-reminder> why was this ignored?',
+      );
+
+      expect(quote).not.toContain('editor context');
+      expect(quote).toContain('Today is Monday');
+      expect(quote).toContain('why was this ignored?');
     });
 
     /** The text of each quote in a condensed block, in order. */

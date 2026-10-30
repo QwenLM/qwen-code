@@ -29,6 +29,7 @@ import type {
   PartUnion,
 } from '@google/genai';
 import { isTypedPrompt } from '../utils/attached-content.js';
+import { condenseToUserMessages } from '../services/compactionInputSlimming.js';
 import {
   LlmClient,
   SendMessageType,
@@ -10929,6 +10930,27 @@ Other open files:
         `<system-reminder>\n${expectedContext}`,
       );
       expect(getLastTurnRequestText()).toContain('</system-reminder>\n\nHi');
+    });
+
+    it('opens the IDE context with a line compaction leaves out of the quote', async () => {
+      await ideTurn(
+        [{ path: '/path/to/recent/file1.ts', timestamp: Date.now() }],
+        true,
+      );
+      const request = mockTurnRunFn.mock.calls.at(-1)?.[1] as Part[];
+
+      const condensed = condenseToUserMessages(
+        [
+          { role: 'user', parts: request },
+          { role: 'model', parts: [{ text: 'x'.repeat(20_000) }] },
+          { role: 'user', parts: [{ text: 'next' }] },
+          { role: 'model', parts: [{ text: 'y'.repeat(20_000) }] },
+        ],
+        60_000,
+      );
+
+      const block = condensed![0]!.parts!.map((part) => part.text).join('\n');
+      expect(block).toContain('<user_message>\nHi\n</user_message>');
     });
 
     it('should return the turn instance after the stream is complete', async () => {
