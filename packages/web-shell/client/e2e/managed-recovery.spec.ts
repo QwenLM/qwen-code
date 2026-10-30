@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 import type {
   JavaAgentEvent,
   JavaAgentSession,
+  JavaAgentTranscript,
 } from '../components/managed/java-managed-agent-client';
 
 async function installRecovery(page: Page, running = false) {
@@ -94,6 +95,7 @@ async function installRecovery(page: Page, running = false) {
     sessionId: 'source',
     eventId: `event-${event.sequence}`,
     createdAt: event.sequence,
+    terminal: event.type === 'turn.completed' || event.type === 'turn.failed',
   }));
   page.on('pageerror', (error) => errors.push(error.message));
   await page.route('**/api/agent/web-shell/v1/**', async (route) => {
@@ -151,7 +153,7 @@ async function installRecovery(page: Page, running = false) {
           coveredSequence: 6,
           lastSequence: 6,
           hasMore: false,
-        },
+        } satisfies JavaAgentTranscript,
       });
     if (path.endsWith('/events/stream'))
       return route.fulfill({ contentType: 'text/event-stream', body: '' });
