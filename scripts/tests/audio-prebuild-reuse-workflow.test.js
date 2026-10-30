@@ -126,6 +126,7 @@ describe('audio prebuild reuse wiring', () => {
     // Without the keyed upload nothing can ever be reused; the fixed-name
     // artifact stays for the same-run consumer.
     expect(retain.if).toBe("${{ inputs.cache_key != '' }}");
+    expect(retain['continue-on-error']).toBe(true);
     expect(retain.with.name).toBe(
       'audio-capture-prebuilds-${{ inputs.cache_key }}',
     );
@@ -139,6 +140,11 @@ describe('audio prebuild reuse wiring', () => {
       collect.steps.find((entry) => entry.name === 'Upload combined prebuilds')
         .with.overwrite,
     ).toBe(true);
+    expect(
+      collect.steps.find((entry) => entry.name === 'Upload combined prebuilds')[
+        'continue-on-error'
+      ],
+    ).toBeUndefined();
     // The producer builds the ref the release pinned, not the branch tip.
     expect(
       audioYaml.jobs.build.steps.find((entry) =>

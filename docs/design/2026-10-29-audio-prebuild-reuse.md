@@ -73,6 +73,7 @@ succeed:
 - download failure → acceptance skipped (keyed on `outcome`, since
   `continue-on-error` rewrites `conclusion`)
 - payload validation failure → the step fails before writing the output
+- reusable upload failure → the current release proceeds; future reuse may miss
 
 An empty reuse ID runs the full native matrix. Fresh builds now pin Node and
 the prebuildify target to 22.22.3 and use filtered, frozen pnpm dependencies

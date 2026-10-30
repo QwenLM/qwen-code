@@ -95,6 +95,7 @@ async function installRecovery(page: Page, running = false) {
     sessionId: 'source',
     eventId: `event-${event.sequence}`,
     createdAt: event.sequence,
+    terminal: event.type === 'turn.completed' || event.type === 'turn.failed',
   }));
   page.on('pageerror', (error) => errors.push(error.message));
   await page.route('**/api/agent/web-shell/v1/**', async (route) => {
@@ -149,8 +150,8 @@ async function installRecovery(page: Page, running = false) {
         json: {
           items: [],
           events,
-          lastSequence: 6,
           coveredSequence: 6,
+          lastSequence: 6,
           hasMore: false,
         } satisfies JavaAgentTranscript,
       });

@@ -63,6 +63,7 @@ Node 版本 pin 和 `prebuildify --target` 参数进入 key 的方式。
 - 下载失败 → 跳过接受步骤（以 `outcome` 为判据，因为 `continue-on-error`
   会改写 `conclusion`）
 - 载荷校验失败 → 该步骤在写出 output 之前就失败
+- 复用产物上传失败 → 当前发布继续，后续发布可能无法复用
 
 空的复用 ID 会执行完整的原生构建矩阵。重新构建现在把 Node 和 prebuildify
 目标固定为 22.22.3，存在锁文件时使用按包筛选、冻结的 pnpm 依赖；只有旧 ref

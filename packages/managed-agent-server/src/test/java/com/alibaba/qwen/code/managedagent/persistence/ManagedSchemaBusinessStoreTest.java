@@ -318,15 +318,10 @@ public class ManagedSchemaBusinessStoreTest {
                 "INSERT INTO ma_message (tenant_id, session_id, item_id, turn_id, item_type, item_status, attributes_json, first_sequence, last_sequence, gmt_create, gmt_modified, parts_json, body_resource_key) VALUES (?, ?, 'item', 'turn', 'message', 'completed', '{}', 1, 7, 0, 0, '[]', ?)",
                 tenant, session, resource);
         jdbc.update(
-                "INSERT INTO ma_snapshot (tenant_id, session_id, snapshot_id, snapshot_version, covered_sequence, projection_version, manifest_resource_key, manifest_sha256, item_count, state, gmt_create, retain_until) VALUES (?, ?, 'snapshot', 1, 7, 1, ?, ?, 1, 'PUBLISHED', 0, 0)", tenant, session, resource, digest);
-        for (String owner : List.of("MESSAGE", "SNAPSHOT")) {
-            jdbc.update(
-                    "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES (?, ?, ?, 1, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
-                    scope, owner, ManagedSchemaKeys.key(scope, owner.equals("MESSAGE") ? "item" : "snapshot"), resource,
-                    tenant, session, "projection-body");
-        }
+                "INSERT INTO ma_resource_ref (session_scope_key, owner_kind, owner_key, owner_revision, resource_key, tenant_id, session_id, resource_id, gmt_create) VALUES (?, 'MESSAGE', ?, 1, ?, ?, ?, ?, " + ManagedSchemaTime.SQL_NOW + ")",
+                scope, ManagedSchemaKeys.key(scope, "item"), resource, tenant, session, "projection-body");
         jdbc.update(
-                "INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, replay_floor_sequence, covered_sequence, current_snapshot_id, gmt_modified) VALUES (?, ?, 'SESSION', ?, 7, 2, 5, 'snapshot', 0)",
+                "INSERT INTO ma_event_stream (tenant_id, session_id, stream_kind, stream_id, last_sequence, replay_floor_sequence, covered_sequence, gmt_modified) VALUES (?, ?, 'SESSION', ?, 7, 2, 5, 0)",
                 tenant, session, "");
         jdbc.update(
                 "INSERT INTO ma_public_event (tenant_id, session_id, sequence_id, event_id, event_type, data_json, terminal, gmt_create) VALUES (?, ?, 7, ?, 'item.completed', '{}', FALSE, 0)", tenant, session, "event-" + tenant);
