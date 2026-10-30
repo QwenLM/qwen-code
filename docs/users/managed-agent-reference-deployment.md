@@ -150,18 +150,21 @@ This base configuration supports text-only Hosted Sessions. Keep the listener on
 With the default loopback listener, the API takes the tenant from the `X-Qwen-Tenant-Id` header. Create a Session whose first Turn asks the model a question:
 
 ```bash
+key="first-session-$(date +%s)"
 curl --fail -X POST http://127.0.0.1:8080/v1/agents/sessions \
   -H 'X-Qwen-Tenant-Id: default' -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: first-session' \
+  -H "Idempotency-Key: $key" \
   -d '{"agent_id":"qwen-code","input":[{"type":"input_text","text":"Say hello."}]}'
 ```
 
-The `Idempotency-Key` header is required: a retry with the same key returns the same Session instead of creating another. The response carries the Session's `id`. Read its events, and repeat until one has `"terminal": true`:
+The `Idempotency-Key` header is required. Use a new key for each check, and send the same one again only to retry that request: the same key returns the same Session instead of creating another, so a later check with an old key replays the old Session and its old result. The response carries the Session's `id`. Read its events, starting with `after=0`:
 
 ```bash
 curl --fail -H 'X-Qwen-Tenant-Id: default' \
-  'http://127.0.0.1:8080/v1/agents/sessions/<id>/events?after=0&limit=100'
+  'http://127.0.0.1:8080/v1/agents/sessions/<id>/events?after=<after>&limit=100'
 ```
+
+A page holds at most `limit` events, in `sequence` order. Set `after` to the `sequence` of the last event received, keep it when a page comes back empty, and poll again until an event has `"terminal": true`.
 
 A Turn that succeeds ends with `turn.completed`, and the model's reply is the `text` of the `item.output_text.delta` events before it. A terminal `turn.failed`, or none before the Turn deadline, points at the Harness or the model: the Harness log names the cause. This Session is the deployment's first proof; repeat it after every upgrade, as `verify --turn` does on the systemd layout.
 

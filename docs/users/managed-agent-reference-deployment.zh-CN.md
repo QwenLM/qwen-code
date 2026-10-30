@@ -150,18 +150,21 @@ curl --fail http://127.0.0.1:8080/actuator/health
 使用默认的 loopback 监听时，API 从 `X-Qwen-Tenant-Id` 请求头读取租户。创建一个 Session，让它的第一个 Turn 向模型提问：
 
 ```bash
+key="first-session-$(date +%s)"
 curl --fail -X POST http://127.0.0.1:8080/v1/agents/sessions \
   -H 'X-Qwen-Tenant-Id: default' -H 'Content-Type: application/json' \
-  -H 'Idempotency-Key: first-session' \
+  -H "Idempotency-Key: $key" \
   -d '{"agent_id":"qwen-code","input":[{"type":"input_text","text":"Say hello."}]}'
 ```
 
-`Idempotency-Key` 请求头是必需的：用同一个 key 重试会返回同一个 Session，而不会再创建一个。响应中包含 Session 的 `id`。读取它的事件，重复执行，直到出现 `"terminal": true` 的事件：
+`Idempotency-Key` 请求头是必需的。每次检查都用一个新 key，只在重试同一个请求时才重复使用它：同一个 key 会返回同一个 Session，而不会再创建一个，因此之后的检查若沿用旧 key，只会重放旧 Session 及其旧结果。响应中包含 Session 的 `id`。从 `after=0` 开始读取它的事件：
 
 ```bash
 curl --fail -H 'X-Qwen-Tenant-Id: default' \
-  'http://127.0.0.1:8080/v1/agents/sessions/<id>/events?after=0&limit=100'
+  'http://127.0.0.1:8080/v1/agents/sessions/<id>/events?after=<after>&limit=100'
 ```
+
+每页最多返回 `limit` 个事件，按 `sequence` 排序。把 `after` 设为最后收到的事件的 `sequence`，页面为空时保持不变，然后继续轮询，直到出现 `"terminal": true` 的事件。
 
 成功的 Turn 以 `turn.completed` 结束，模型的回复在它之前的 `item.output_text.delta` 事件的 `text` 中。如果终结事件是 `turn.failed`，或者在 Turn 期限内一直没有终结事件，问题出在 Harness 或模型，Harness 日志会给出原因。这个 Session 是部署成功的第一个证明；每次升级后都再做一次，systemd 布局下的 `verify --turn` 做的就是这件事。
 
