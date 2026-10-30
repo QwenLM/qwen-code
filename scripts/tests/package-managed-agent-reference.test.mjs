@@ -35,7 +35,9 @@ import {
 } from '../../packages/managed-agent-server/distribution/bin/qwen-managed-agent-bootstrap.mjs';
 import {
   ADMIN_COMMANDS,
+  DOCUMENTATION,
   createReferenceDistribution,
+  shippedDocumentLinks,
 } from '../package-managed-agent-reference.mjs';
 
 function mainSource(main) {
@@ -97,9 +99,11 @@ async function fixture(root) {
     'docs/users/managed-agent-reference-deployment.zh-CN.md': '部署\n',
     'docs/users/hosted-workspace-recovery.md': 'recover\n',
     'docs/users/hosted-workspace-recovery.zh-CN.md': '恢复\n',
-    'docs/users/managed-agent-configuration-reference.md': 'configure\n',
+    'docs/users/managed-agent-configuration-reference.md':
+      '[中文](managed-agent-configuration-reference.zh-CN.md) [guide](managed-agent-reference-deployment.md#upgrade) [site](https://example.com/a.md) [design](../design/x.md)\n',
     'docs/users/managed-agent-configuration-reference.zh-CN.md': '配置\n',
-    'packages/managed-agent-server/README.md': 'server reference\n',
+    'packages/managed-agent-server/README.md':
+      'server reference, [configuration](../../docs/users/managed-agent-configuration-reference.md)\n',
   };
   for (const [, main] of ADMIN_COMMANDS) {
     files[mainSource(main)] =
@@ -201,9 +205,17 @@ test('packages an independently verifiable reference distribution', async () => 
       '#!/usr/bin/env sh\nupgrade\n',
     );
     assert.equal((await stat(upgrade)).mode & 0o777, 0o755);
+    // Links to the other shipped documents name them as the archive does.
     for (const [page, contents] of [
-      ['docs/configuration.md', 'configure\n'],
+      [
+        'docs/configuration.md',
+        '[中文](configuration.zh-CN.md) [guide](deployment.md#upgrade) [site](https://example.com/a.md) [design](../design/x.md)\n',
+      ],
       ['docs/configuration.zh-CN.md', '配置\n'],
+      [
+        'docs/server-reference.md',
+        'server reference, [configuration](configuration.md)\n',
+      ],
     ]) {
       assert.equal(await readFile(path.join(bundle, page), 'utf8'), contents);
     }
@@ -387,6 +399,96 @@ test('refuses an admin command whose entry point is gone', async () => {
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
+});
+
+test('a shipped document links to another by its name in the archive', () => {
+  const documentation = [
+    ['docs/users/guide.md', 'docs/deployment.md'],
+    ['docs/users/guide.zh-CN.md', 'docs/deployment.zh-CN.md'],
+    ['packages/server/README.md', 'docs/server-reference.md'],
+    ['LICENSE', 'LICENSE'],
+  ];
+  const links = (text, source) =>
+    shippedDocumentLinks(text, source, documentation);
+  assert.equal(
+    links(
+      '[中文](guide.zh-CN.md#top) and [it](./guide.zh-CN.md) [server](../../packages/server/README.md)',
+      'docs/users/guide.md',
+    ),
+    '[中文](deployment.zh-CN.md#top) and [it](deployment.zh-CN.md) [server](server-reference.md)',
+  );
+  assert.equal(
+    links(
+      '[guide](../../docs/users/guide.md#upgrade)',
+      'packages/server/README.md',
+    ),
+    '[guide](deployment.md#upgrade)',
+  );
+  // LICENSE ships too, one level up from the documents.
+  assert.equal(
+    links('[license](../../LICENSE)', 'packages/server/README.md'),
+    '[license](../LICENSE)',
+  );
+  // An unshipped file, a URL, an anchor and an absolute path stay as
+  // written, even an absolute path that would join to a shipped one.
+  const kept =
+    '[runtime](docs/runtime-broker.md) [web](https://example.com/guide.zh-CN.md) [here](#top) [root](/guide.zh-CN.md)';
+  assert.equal(links(kept, 'docs/users/guide.md'), kept);
+});
+
+test('the shipped documents reach each other by their archive names', async () => {
+  const root = fileURLToPath(new URL('../../', import.meta.url));
+  const shipped = new Map(DOCUMENTATION);
+  const pattern = /\]\(([^()\s#]+)(#[^()\s]*)?\)/g;
+  const rewritten = {};
+  for (const [source, destination] of DOCUMENTATION) {
+    if (!source.endsWith('.md')) {
+      continue;
+    }
+    const text = await readFile(path.join(root, source), 'utf8');
+    const after = shippedDocumentLinks(text, source);
+    rewritten[destination] = after;
+    const before = [...text.matchAll(pattern)];
+    const now = [...after.matchAll(pattern)];
+    assert.equal(now.length, before.length, destination);
+    before.forEach(([, target], index) => {
+      const named = shipped.get(
+        path.posix.normalize(
+          path.posix.join(path.posix.dirname(source), target),
+        ),
+      );
+      if (named !== undefined) {
+        const resolved = path.posix.join(
+          path.posix.dirname(destination),
+          now[index][1],
+        );
+        assert.equal(resolved, named, `${destination}: ${target}`);
+      }
+    });
+    assert.doesNotMatch(
+      after,
+      /\]\([^)]*(managed-agent-configuration-reference|managed-agent-reference-deployment)/,
+      destination,
+    );
+  }
+  assert.match(
+    rewritten['docs/configuration.md'],
+    /\]\(configuration\.zh-CN\.md\)/,
+  );
+  assert.match(rewritten['docs/configuration.md'], /\]\(deployment\.md\)/);
+  assert.match(
+    rewritten['docs/configuration.zh-CN.md'],
+    /\]\(deployment\.zh-CN\.md\)/,
+  );
+  assert.match(rewritten['docs/deployment.md'], /\]\(configuration\.md\)/);
+  assert.match(
+    rewritten['docs/deployment.zh-CN.md'],
+    /\]\(configuration\.zh-CN\.md\)/,
+  );
+  assert.match(
+    rewritten['docs/server-reference.md'],
+    /\]\(configuration\.md\)/,
+  );
 });
 
 test('maps every admin command to an entry point in the server', async () => {
