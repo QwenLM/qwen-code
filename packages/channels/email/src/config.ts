@@ -56,8 +56,9 @@ export function emailSettings(raw: Readonly<Record<string, unknown>>) {
   }
   // Whitelist rather than exclude: a new dispatch mode must opt in explicitly,
   // because email's per-delivery durable claim only survives if every message
-  // becomes its own (or a collected) turn — `inject` hands the text to a
-  // running turn and would release the claim as soon as it is queued.
+  // becomes its own turn — `collect` coalesces it into a later turn and
+  // `inject` hands the text to a running one, so both release the claim as
+  // soon as the message is queued.
   const dispatchMode = raw['dispatchMode'];
   if (
     dispatchMode !== undefined &&
