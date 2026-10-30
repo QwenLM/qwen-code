@@ -315,6 +315,147 @@ describe('ManagedSessionsPage', () => {
     });
   }
 
+  it('opens only the host Session without catalog, creation, cancellation or daemon calls', async () => {
+    provider = { ...provider, canCancel: false };
+    mocks.client.listSessions.mockRejectedValue(new Error('catalog forbidden'));
+    mocks.client.createSession.mockRejectedValue(
+      new Error('creation forbidden'),
+    );
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    expect(
+      container.querySelector('[data-testid="messages"]')?.textContent,
+    ).toContain('Persisted answer');
+    expect(mocks.client.getSession).toHaveBeenCalledWith(
+      's1',
+      expect.any(Object),
+    );
+    expect(mocks.client.getTranscript).toHaveBeenCalledWith(
+      's1',
+      expect.any(Object),
+    );
+    expect(mocks.client.subscribeEvents).toHaveBeenCalledWith(
+      's1',
+      expect.any(Object),
+    );
+    expect(container.querySelector('nav')).toBeNull();
+    expect(container.textContent).not.toContain('New session');
+    expect(mocks.editorProps?.disabled).toBe(false);
+    await act(async () => {
+      mocks.editorProps!.onSubmit(
+        'host follow-up',
+        undefined,
+        undefined,
+        () => {},
+      );
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).toHaveBeenCalledWith(
+      's1',
+      expect.objectContaining({ text: 'host follow-up' }),
+      expect.any(Object),
+    );
+    expect(mocks.client.listSessions).not.toHaveBeenCalled();
+    expect(mocks.client.createSession).not.toHaveBeenCalled();
+    expect(mocks.client.cancel).not.toHaveBeenCalled();
+    expect(mocks.useWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('waits for an explicit host ID and clears the old conversation when it is removed', async () => {
+    const host = { hostSessionOnly: true };
+    await render(undefined, 'en', provider, undefined, true, host);
+    expect(
+      container.querySelector('[data-managed-host-waiting]'),
+    ).not.toBeNull();
+    expect(container.querySelector('form')).toBeNull();
+    expect(mocks.client.getSession).not.toHaveBeenCalled();
+    expect(mocks.client.listSessions).not.toHaveBeenCalled();
+    await render('s1', 'en', provider, undefined, true, host);
+    const streamSignal = mocks.client.subscribeEvents.mock.calls[0][1]
+      .signal as AbortSignal;
+    expect(container.textContent).toContain('Persisted answer');
+    await render(undefined, 'en', provider, undefined, true, host);
+    expect(streamSignal.aborted).toBe(true);
+    expect(container.textContent).not.toContain('Persisted answer');
+    expect(container.querySelector('form')).toBeNull();
+    expect(onSelect).not.toHaveBeenCalled();
+    expect(mocks.client.createSession).not.toHaveBeenCalled();
+    expect(mocks.client.listSessions).not.toHaveBeenCalled();
+  });
+
+  it('tears down the old host scope and ignores its late transcript', async () => {
+    let resolveOld!: (value: ManagedAgentSessionTranscript) => void;
+    mocks.client.getTranscript.mockImplementationOnce(
+      () =>
+        new Promise<ManagedAgentSessionTranscript>((resolve) => {
+          resolveOld = resolve;
+        }),
+    );
+    await render('s1', 'en', provider, undefined, true, {
+      hostSessionOnly: true,
+    });
+    const oldSignal = mocks.client.getSession.mock.calls[0][1]
+      .signal as AbortSignal;
+    const next = { ...provider, storageKey: 'tenant-b:actor-b' };
+    await render('s2', 'en', next, undefined, true, { hostSessionOnly: true });
+    expect(oldSignal.aborted).toBe(true);
+    await act(async () => {
+      resolveOld({ events: [event(1, 'Private old scope')], lastEventId: 1 });
+      await flush();
+    });
+    expect(container.textContent).not.toContain('Private old scope');
+    expect(mocks.editorProps?.composerScopeKey).toContain(
+      'tenant-b:actor-b:s2',
+    );
+    expect(mocks.client.listSessions).not.toHaveBeenCalled();
+    expect(mocks.client.createSession).not.toHaveBeenCalled();
+  });
+
+  it('uses the host capability to keep a single-turn session read-only', async () => {
+    sessionStorage.setItem(
+      `qwen-managed-turn-cancel:${JSON.stringify([provider.storageKey, 's1'])}`,
+      JSON.stringify({
+        sessionId: 's1',
+        turnId: 'p1',
+        idempotencyKey: 'old-cancel',
+      }),
+    );
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        agentId: 'qwen-code',
+        phase: 'runtime_starting',
+        capabilities: { canSend: false, canCancel: true },
+        workspace: { workspaceId: 'host-workspace', cwdRelative: '.' },
+        runtimeReady: false,
+        runtimeState: 'unknown',
+      }),
+    );
+    await render(
+      's1',
+      'en',
+      { ...provider, canCancel: false },
+      undefined,
+      true,
+      { hostSessionOnly: true },
+    );
+    expect(container.textContent).toContain('Persisted answer');
+    expect(mocks.editorProps?.disabled).toBe(true);
+    expect(mocks.editorProps?.isRunning).toBe(false);
+    expect(mocks.editorProps?.onCancel).toBeUndefined();
+    expect(mocks.editorProps?.currentModel).toBe('');
+    expect(mocks.editorProps?.visibleToolbarActions).not.toContain('model');
+    expect(container.textContent).not.toContain('The model is fixed');
+    await act(async () => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }));
+      mocks.editorProps!.onSubmit('blocked', undefined, undefined, () => {});
+      await flush();
+    });
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    expect(mocks.client.cancel).not.toHaveBeenCalled();
+    expect(mocks.client.queryCancelOperation).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])(
     'refreshes a preparing empty worktree session until ready (home: %s) and keeps attachments unavailable during preparation',
     async (home) => {

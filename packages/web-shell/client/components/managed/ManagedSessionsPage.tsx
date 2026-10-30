@@ -186,6 +186,7 @@ export function ManagedSessionsPage({
   onSelectWorkspace,
   onSessionWorkspaceChange,
   managedAgentProvider,
+  hostSessionOnly = false,
   navigationTarget,
   archivedNavigationTarget,
   onArchivedSessionsStatusChange,
@@ -211,6 +212,7 @@ export function ManagedSessionsPage({
   onSelectWorkspace?: (workspaceId: string) => void;
   onSessionWorkspaceChange?: (workspaceId: string | null) => void;
   managedAgentProvider?: ManagedAgentProvider;
+  hostSessionOnly?: boolean;
   /** Null keeps home layout while its sidebar slot is temporarily unmounted. */
   navigationTarget?: HTMLElement | null;
   archivedNavigationTarget?: HTMLElement | null;
@@ -241,6 +243,7 @@ export function ManagedSessionsPage({
         onSelectWorkspace={onSelectWorkspace}
         onSessionWorkspaceChange={onSessionWorkspaceChange}
         provider={managedAgentProvider}
+        hostSessionOnly={hostSessionOnly}
         cancellationEnabled={managedAgentProvider.canCancel}
         navigationTarget={navigationTarget}
         archivedNavigationTarget={archivedNavigationTarget}
@@ -309,6 +312,7 @@ function ManagedSessionsContent({
   onSelectWorkspace,
   onSessionWorkspaceChange,
   provider,
+  hostSessionOnly,
   cancellationEnabled,
   navigationTarget,
   archivedNavigationTarget,
@@ -335,6 +339,7 @@ function ManagedSessionsContent({
   onSelectWorkspace?: (workspaceId: string) => void;
   onSessionWorkspaceChange?: (workspaceId: string | null) => void;
   provider: ManagedAgentProvider;
+  hostSessionOnly: boolean;
   cancellationEnabled: boolean;
   navigationTarget?: HTMLElement | null;
   archivedNavigationTarget?: HTMLElement | null;
@@ -348,7 +353,7 @@ function ManagedSessionsContent({
 }) {
   const { t, language } = useI18n();
   const recoveryText = useManagedRecoveryText();
-  const home = navigationTarget !== undefined;
+  const home = hostSessionOnly || navigationTarget !== undefined;
   const clientId = useMemo(
     () => getManagedClientId(provider.storageKey),
     [provider.storageKey],
@@ -368,9 +373,9 @@ function ManagedSessionsContent({
   const turnCancel = useManagedTurnCancel(
     provider,
     clientId,
-    sessionId,
+    hostSessionOnly && !cancellationEnabled ? undefined : sessionId,
     detail.summary,
-    interactive,
+    interactive && (!hostSessionOnly || cancellationEnabled),
     detail.refreshSummary,
   );
   const [handoff, setHandoff] = useState<ManagedRecoveryHandoff>();
@@ -547,7 +552,7 @@ function ManagedSessionsContent({
     },
     [sessionId],
   );
-  const pendingKey = `qwen-managed-pending:${provider.storageKey}:${clientId}`;
+  const pendingKey = `qwen-managed-pending:${provider.storageKey}:${clientId}${hostSessionOnly ? `:host:${sessionId ?? ''}` : ''}`;
   const [pending, setPending] = useState<PendingPrompt | undefined>(() =>
     readPending(pendingKey),
   );
@@ -833,6 +838,7 @@ function ManagedSessionsContent({
     : '';
   const navigationSessions = listTitleQuery ? sessions : navigationSummaries;
   useEffect(() => {
+    if (hostSessionOnly) return;
     const abort = new AbortController();
     listLifetime.current = abort;
     listBusy.current = false;
@@ -864,7 +870,14 @@ function ManagedSessionsContent({
         if (!abort.signal.aborted) setListLoading(false);
       });
     return () => abort.abort();
-  }, [provider, clientId, listRevision, archiveState, listTitleQuery]);
+  }, [
+    provider,
+    clientId,
+    listRevision,
+    archiveState,
+    listTitleQuery,
+    hostSessionOnly,
+  ]);
 
   useEffect(() => {
     const current = detail.summary;
@@ -985,6 +998,10 @@ function ManagedSessionsContent({
   ) {
     const abort = lifetime.current;
     if (
+      (hostSessionOnly &&
+        (!sessionId ||
+          (pendingRef.current &&
+            pendingRef.current.sessionId !== sessionId))) ||
       !abort ||
       abort.signal.aborted ||
       busy ||
@@ -1222,7 +1239,12 @@ function ManagedSessionsContent({
   const modelContext = currentSummary?.modelContext;
   const selectedModel = currentSummary?.modelSelection?.modelId;
   const displayedModel =
-    selectedModel ?? modelContext?.modelId ?? currentSummary?.agentId ?? '';
+    hostSessionOnly && !modelChange.supported
+      ? ''
+      : (selectedModel ??
+        modelContext?.modelId ??
+        (hostSessionOnly ? undefined : currentSummary?.agentId) ??
+        '');
   const contextUsageKnown =
     !compression.usageInvalidated &&
     (!selectedModel || modelContext?.modelId === selectedModel) &&
@@ -1523,6 +1545,14 @@ function ManagedSessionsContent({
       )}
     </nav>
   );
+  if (hostSessionOnly && !sessionId) {
+    return (
+      <section
+        aria-label={t('managed.conversation')}
+        data-managed-host-waiting
+      />
+    );
+  }
   return (
     <div
       ref={pageRef}
@@ -1533,7 +1563,8 @@ function ManagedSessionsContent({
       <p role="status" className="sr-only">
         {discarded ? t('managed.discarded') : ''}
       </p>
-      {home &&
+      {!hostSessionOnly &&
+        home &&
         provider.lifecycle &&
         archivedNavigationTarget &&
         createPortal(
@@ -1642,11 +1673,13 @@ function ManagedSessionsContent({
             : undefined
         }
       >
-        {home
-          ? navigationTarget
-            ? createPortal(navigation, navigationTarget)
-            : null
-          : navigation}
+        {hostSessionOnly
+          ? null
+          : home
+            ? navigationTarget
+              ? createPortal(navigation, navigationTarget)
+              : null
+            : navigation}
         <section
           className={`${shellStyles.chatPane} ${home ? '' : 'gap-3'}`}
           data-managed-home={home || undefined}
@@ -2099,7 +2132,10 @@ function ManagedSessionsContent({
               loading={detail.loading}
             />
           </div>
-          {(!summary?.workspace || summary.capabilities.workspaceTurns) &&
+          {(!hostSessionOnly || !!sessionId) &&
+          (hostSessionOnly ||
+            !summary?.workspace ||
+            summary.capabilities.workspaceTurns) &&
           (!provider.workspaceBinding || (sessionId && summary)) ? (
             <div
               ref={composerContainerRef}
@@ -2308,7 +2344,14 @@ function ManagedSessionsContent({
                 }
                 dialogOpen={!interactive}
                 isRunning={
-                  home && Boolean(active || summary?.capabilities.canCancel)
+                  home &&
+                  Boolean(active || summary?.capabilities.canCancel) &&
+                  (!hostSessionOnly ||
+                    Boolean(
+                      cancellationEnabled &&
+                        summary?.capabilities.canCancel &&
+                        summary.activeTurnId,
+                    ))
                 }
                 onCancel={
                   home &&
