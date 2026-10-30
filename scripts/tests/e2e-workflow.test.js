@@ -189,6 +189,9 @@ describe('TUI product evidence', () => {
     ['packages/desktop/package.json', []],
     ['packages/live-host/electron-builder.yml', []],
     ['packages/mobile-shell/build.gradle.kts', []],
+    ['packages/sdk-java/client/pom.xml', []],
+    ['packages/sdk-python/pyproject.toml', []],
+    ['packages/zed-extension/extension.toml', []],
     ['scripts/unrelated-maintenance.js', ['component']],
   ])(
     'selects mechanisms rather than blanket full acceptance for %s',
