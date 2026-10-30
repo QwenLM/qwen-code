@@ -217,10 +217,6 @@ it.each(cases)(
       const temp = join(scratch, 'tmp');
       for (const dir of [workspace, home, runtimeDir, temp])
         mkdirSync(dir, { recursive: true });
-      const systemSettings = join(scratch, 'system-settings.json');
-      const systemDefaults = join(scratch, 'system-defaults.json');
-      json(systemSettings, {});
-      json(systemDefaults, {});
       sidecar = join(scratch, 'events.jsonl');
       const toolFile = join(workspace, 'owned-tool.txt');
       const prompt = `DUAL-PROMPT-${name}`;
@@ -277,8 +273,6 @@ it.each(cases)(
           HOME: scratch,
           QWEN_HOME: home,
           QWEN_RUNTIME_DIR: runtimeDir,
-          QWEN_CODE_SYSTEM_SETTINGS_PATH: systemSettings,
-          QWEN_CODE_SYSTEM_DEFAULTS_PATH: systemDefaults,
           TMPDIR: temp,
           TMP: temp,
           TEMP: temp,

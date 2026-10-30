@@ -176,8 +176,6 @@ it(`H11a real model edit creates, hot-restores and cold-resumes its product chec
         HOME: scratch,
         QWEN_HOME: home,
         QWEN_RUNTIME_DIR: runtimeDir,
-        QWEN_CODE_SYSTEM_SETTINGS_PATH: join(scratch, 'system.json'),
-        QWEN_CODE_SYSTEM_DEFAULTS_PATH: join(scratch, 'defaults.json'),
         TERM: 'xterm-256color',
         LANG: 'en_US.UTF-8',
         QWEN_CODE_LANG: 'en',
@@ -207,8 +205,6 @@ it(`H11a real model edit creates, hot-restores and cold-resumes its product chec
       },
     });
   try {
-    for (const name of ['system.json', 'defaults.json'])
-      json(join(scratch, name), { $version: 4 });
     json(join(home, 'settings.json'), {
       $version: 4,
       security: {

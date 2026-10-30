@@ -49,6 +49,31 @@ import * as runQwenServeModule from './run-qwen-serve.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import type { Settings } from '../config/settingsSchema.js';
 import { serveCommand } from '../commands/serve.js';
+import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings.js';
+
+// The system settings overrides are only honored for a root-owned regular
+// file, which a non-root test host cannot arrange for its temp fixtures; the
+// fixtures stand in for administrator-created system files.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../test-utils/trusted-system-settings.js');
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+  };
+});
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../test-utils/trusted-system-settings.js');
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+  };
+});
 
 let tempWorkspace: string | undefined;
 let tempLaunchCwd: string | undefined;
@@ -209,6 +234,14 @@ function useTempQwenHome(): string {
     tempQwenHome,
     'system-defaults.json',
   );
+  // The trust gate (#13513) only honors a root-owned regular file; the
+  // lstat mock above reports these empty fixtures as root-owned, so the
+  // overrides resolve here instead of the platform default a dev host may
+  // ship with real content.
+  for (const name of ['system-settings.json', 'system-defaults.json']) {
+    writeFileSync(join(tempQwenHome, name), JSON.stringify({ $version: 4 }));
+  }
+  trustedSystemSettingsDirs.add(tempQwenHome);
   return tempQwenHome;
 }
 
@@ -383,6 +416,7 @@ afterEach(() => {
     tempLaunchCwd = undefined;
   }
   if (tempQwenHome) {
+    trustedSystemSettingsDirs.delete(tempQwenHome);
     rmSync(tempQwenHome, { recursive: true, force: true });
     tempQwenHome = undefined;
   }

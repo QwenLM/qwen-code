@@ -175,8 +175,6 @@ async function setup(name: string) {
     memory: E2E_MEMORY_SETTINGS_DEFAULTS,
     experimental: { mods: false },
   });
-  for (const file of ['system.json', 'defaults.json'])
-    json(join(scratch, file), { $version: 4 });
   const server = await startFakeOpenAIServer(({ requestIndex }) => ({
     content: `RECOVERY_${name}_${requestIndex}_DONE`,
     usage: { prompt_tokens: 11, completion_tokens: 7, total_tokens: 18 },
@@ -230,8 +228,6 @@ async function setup(name: string) {
           HOME: scratch,
           QWEN_HOME: home,
           QWEN_RUNTIME_DIR: runtimeDir,
-          QWEN_CODE_SYSTEM_SETTINGS_PATH: join(scratch, 'system.json'),
-          QWEN_CODE_SYSTEM_DEFAULTS_PATH: join(scratch, 'defaults.json'),
           TERM: 'xterm-256color',
           LANG: 'en_US.UTF-8',
           QWEN_CODE_LANG: 'en',

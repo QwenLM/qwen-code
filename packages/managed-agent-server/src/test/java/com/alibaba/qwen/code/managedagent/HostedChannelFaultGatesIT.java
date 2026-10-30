@@ -345,10 +345,6 @@ class HostedChannelFaultGatesIT {
         environment.put("TMPDIR", temporary.toString());
         environment.put("TMP", temporary.toString());
         environment.put("TEMP", temporary.toString());
-        environment.put("QWEN_CODE_SYSTEM_SETTINGS_PATH",
-                temporary.resolve("system-settings.json").toString());
-        environment.put("QWEN_CODE_SYSTEM_DEFAULTS_PATH",
-                temporary.resolve("system-defaults.json").toString());
         environment.put("QWEN_CODE_TRUSTED_FOLDERS_PATH",
                 temporary.resolve("trusted-folders.json").toString());
         harness = builder.start();

@@ -12,6 +12,7 @@ import {
   getGlobalQwenDirLite,
   getSystemDefaultsPath,
   getSystemSettingsPath,
+  ignoredSystemPathOverrides,
 } from './storage-paths-lite.js';
 
 export interface ExecutionSandboxSettings {
@@ -135,43 +136,59 @@ export function readBareModeOperatorSettings(): SandboxSettingsInput & {
 
 function readOperatorSettingsScopes(): OperatorSettingsScope[] {
   const userSettingsPath = path.join(getGlobalQwenDirLite(), 'settings.json');
-  return [
-    getSystemDefaultsPath(),
-    userSettingsPath,
-    getSystemSettingsPath(),
-  ].map((file) => {
-    let source: string;
-    try {
-      source = fs.readFileSync(file, 'utf8');
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
-      throw new InvalidExecutionSandboxConfigError(
-        `Cannot read operator sandbox policy from ${file}: ${String(error)}. Restore read access to this settings file and restart; it has not been reset.`,
-      );
-    }
-    try {
-      const parsed: unknown = JSON.parse(
-        stripJsonComments(stripUtf8Bom(source)),
-      );
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        throw new Error('Expected a settings object.');
+  const systemSettingsPath = getSystemSettingsPath();
+  // A configured-but-rejected system layer is not an absent one: the ENOENT
+  // branch below reads "the platform default does not exist" as "no operator
+  // policy" and would run the tools without confinement, while the operator
+  // policy the variable names was dropped by the trust gate. Fail loud for a
+  // rejected layer while the platform default is also absent; a genuinely
+  // unconfigured install stays silent, and a present platform file is read
+  // as the system layer either way.
+  const rejected = ignoredSystemPathOverrides().filter(
+    (entry) => entry.reason === 'not-administrator-controlled',
+  );
+  if (rejected.length > 0 && !fs.existsSync(systemSettingsPath)) {
+    throw new InvalidExecutionSandboxConfigError(
+      `${rejected[0].name} is set to ${JSON.stringify(
+        rejected[0].configured,
+      )}, which is not administrator-controlled, so it was ignored; the system settings layer is absent, so no operator sandbox policy is in effect. Point the variable at an administrator-controlled file or unset it, and restart.`,
+    );
+  }
+  return [getSystemDefaultsPath(), userSettingsPath, systemSettingsPath].map(
+    (file) => {
+      let source: string;
+      try {
+        source = fs.readFileSync(file, 'utf8');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+        throw new InvalidExecutionSandboxConfigError(
+          `Cannot read operator sandbox policy from ${file}: ${String(error)}. Restore read access to this settings file and restart; it has not been reset.`,
+        );
       }
-      return parsed as OperatorSettingsScope;
-    } catch (error) {
-      let backupPath: string | undefined;
-      if (file === userSettingsPath) {
-        try {
-          backupPath = `${file}.corrupted`;
-          fs.copyFileSync(file, backupPath);
-        } catch {
-          backupPath = undefined;
+      try {
+        const parsed: unknown = JSON.parse(
+          stripJsonComments(stripUtf8Bom(source)),
+        );
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          throw new Error('Expected a settings object.');
         }
+        return parsed as OperatorSettingsScope;
+      } catch (error) {
+        let backupPath: string | undefined;
+        if (file === userSettingsPath) {
+          try {
+            backupPath = `${file}.corrupted`;
+            fs.copyFileSync(file, backupPath);
+          } catch {
+            backupPath = undefined;
+          }
+        }
+        throw new InvalidExecutionSandboxConfigError(
+          `Cannot read operator sandbox policy from ${file}: ${String(error)}${backupPath ? `. A copy was saved to ${backupPath}` : ''}. Repair the JSON object in ${file} and restart; the original file has not been reset.`,
+        );
       }
-      throw new InvalidExecutionSandboxConfigError(
-        `Cannot read operator sandbox policy from ${file}: ${String(error)}${backupPath ? `. A copy was saved to ${backupPath}` : ''}. Repair the JSON object in ${file} and restart; the original file has not been reset.`,
-      );
-    }
-  });
+    },
+  );
 }
 
 function sandboxSettingsFromScopes(

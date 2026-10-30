@@ -110,10 +110,6 @@ async function withForegroundShell(
   const evidence = mkdtempSync(
     join(output, `shell-${name}-${runtime}-${renderer}-`),
   );
-  const system = join(scratch, 'system.json');
-  const defaults = join(scratch, 'defaults.json');
-  json(system, { $version: 4 });
-  json(defaults, { $version: 4 });
   json(join(home, 'settings.json'), {
     security: {
       auth: { selectedType: 'openai' },
@@ -244,8 +240,6 @@ async function withForegroundShell(
         HOME: scratch,
         QWEN_HOME: home,
         QWEN_RUNTIME_DIR: runtimeDir,
-        QWEN_CODE_SYSTEM_SETTINGS_PATH: system,
-        QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaults,
         TMPDIR: temp,
         TMP: temp,
         TEMP: temp,

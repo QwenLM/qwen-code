@@ -197,16 +197,17 @@ jobs:
           umask 077
           fixture_root="$(mktemp -d "${RUNNER_TEMP}/qwen-tui-parity.XXXXXX")"
           mkdir "$fixture_root/home" "$fixture_root/runtime"
-          printf '{"$version":4}\n' > "$fixture_root/system.json"
-          printf '{"$version":4}\n' > "$fixture_root/defaults.json"
+          # QWEN_CODE_SYSTEM_*_PATH are deliberately left unset: the trust
+          # gate (#13513) rejects a user-owned temp fixture and fails loud
+          # when the platform default is absent (exit 52). The platform
+          # default does not exist on the CI host, so the effective system
+          # layer is absent either way.
           {
             echo "COREPACK_HOME=${COREPACK_HOME:-${XDG_CACHE_HOME:-${LOCALAPPDATA:-$HOME/.cache}}/node/corepack}"
             echo "QWEN_TUI_FIXTURE_ROOT=$fixture_root"
             echo "HOME=$fixture_root/home"
             echo "QWEN_HOME=$fixture_root/home"
             echo "QWEN_RUNTIME_DIR=$fixture_root/runtime"
-            echo "QWEN_CODE_SYSTEM_SETTINGS_PATH=$fixture_root/system.json"
-            echo "QWEN_CODE_SYSTEM_DEFAULTS_PATH=$fixture_root/defaults.json"
           } >> "$GITHUB_ENV"
       - name: 'Build cli'
         run: 'npm run build -- --cli-only'

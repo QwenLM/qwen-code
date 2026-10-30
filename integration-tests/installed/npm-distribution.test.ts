@@ -524,10 +524,6 @@ for (const kind of ['global', 'npx'] as const) {
         assert.equal(fs.existsSync(out), false);
         const qwenHome = path.join(out, 'qwen-home');
         fs.mkdirSync(qwenHome, { recursive: true });
-        const system = path.join(out, 'system.json');
-        const defaults = path.join(out, 'defaults.json');
-        save(system, { $version: 4 });
-        save(defaults, { $version: 4 });
         save(path.join(qwenHome, 'settings.json'), {
           $version: 4,
           experimental: { mods: false },
@@ -601,8 +597,6 @@ for (const kind of ['global', 'npx'] as const) {
                 ...layout.env,
                 QWEN_HOME: qwenHome,
                 QWEN_RUNTIME_DIR: path.join(out, 'runtime'),
-                QWEN_CODE_SYSTEM_SETTINGS_PATH: system,
-                QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaults,
                 TERM: 'xterm-256color',
                 LANG: 'en_US.UTF-8',
                 QWEN_CODE_LANG: 'en',

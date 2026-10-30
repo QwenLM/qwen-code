@@ -169,8 +169,6 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
       });
     write('plugins/owned-command/commands/owned-proof.md', command);
     json(trust, { [realpathSync(workspace)]: 'TRUST_FOLDER' });
-    json(join(scratch, 'system.json'), { $version: 4 });
-    json(join(scratch, 'defaults.json'), { $version: 4 });
     json(join(home, 'settings.json'), {
       security: {
         auth: { selectedType: 'openai' },
@@ -196,8 +194,6 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
           QWEN_HOME: home,
           QWEN_RUNTIME_DIR: runtimeDir,
           QWEN_CODE_TRUSTED_FOLDERS_PATH: trust,
-          QWEN_CODE_SYSTEM_SETTINGS_PATH: join(scratch, 'system.json'),
-          QWEN_CODE_SYSTEM_DEFAULTS_PATH: join(scratch, 'defaults.json'),
           TERM: 'xterm-256color',
           LANG: 'en_US.UTF-8',
           QWEN_CODE_LANG: 'en',

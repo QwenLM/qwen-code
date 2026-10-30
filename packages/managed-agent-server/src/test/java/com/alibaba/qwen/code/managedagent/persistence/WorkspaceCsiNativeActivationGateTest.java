@@ -907,13 +907,9 @@ class WorkspaceCsiNativeActivationGateTest {
         if (conversation) {
             Path settings = directory.resolve("settings");
             Files.createDirectories(settings);
-            Files.writeString(directory.resolve("system.json"), "{\"$version\":4}");
-            Files.writeString(directory.resolve("defaults.json"), "{\"$version\":4}");
             var env = builder.environment();
             env.put("QWEN_HOME", settings.toString());
             env.put("QWEN_RUNTIME_DIR", directory.resolve("runtime").toString());
-            env.put("QWEN_CODE_SYSTEM_SETTINGS_PATH", directory.resolve("system.json").toString());
-            env.put("QWEN_CODE_SYSTEM_DEFAULTS_PATH", directory.resolve("defaults.json").toString());
             env.put("OPENAI_API_KEY", "owned-dummy-key");
             env.put("OPENAI_MODEL", "owned-model");
             env.remove("OPENAI_BASE_URL");

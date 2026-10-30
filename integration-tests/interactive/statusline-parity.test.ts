@@ -99,8 +99,6 @@ describe.skipIf(process.platform === 'win32')(
         const cwd = join(scratch, 'workspace');
         const home = join(scratch, 'qwen-home');
         const settings = join(home, 'settings.json');
-        const system = join(scratch, 'system.json');
-        const defaults = join(scratch, 'defaults.json');
         const control = join(scratch, 'control.json');
         const log = join(scratch, 'command.jsonl');
         const script = join(
@@ -125,8 +123,8 @@ describe.skipIf(process.platform === 'win32')(
                 .map((line) => JSON.parse(line) as CommandRecord)
             : [];
         const snapshot = () =>
-          [settings, system, defaults, join(cwd, '.qwen/settings.json')].map(
-            (file) => (existsSync(file) ? readFileSync(file, 'utf8') : null),
+          [settings, join(cwd, '.qwen/settings.json')].map((file) =>
+            existsSync(file) ? readFileSync(file, 'utf8') : null,
           );
         const current = () => {
           if (!session) throw new Error('No active statusline test session');
@@ -163,8 +161,6 @@ describe.skipIf(process.platform === 'win32')(
               HOME: scratch,
               QWEN_HOME: home,
               QWEN_RUNTIME_DIR: join(scratch, 'runtime'),
-              QWEN_CODE_SYSTEM_SETTINGS_PATH: system,
-              QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaults,
               TERM: 'xterm-256color',
               COLORTERM: 'truecolor',
               LANG: 'en_US.UTF-8',
@@ -234,8 +230,6 @@ describe.skipIf(process.platform === 'win32')(
               total_tokens: 20,
             },
           }));
-          json(system, { $version: 4 });
-          json(defaults, { $version: 4 });
           json(control, { phase: 'A' });
           json(settings, {
             $version: 4,

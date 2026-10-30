@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -168,6 +169,270 @@ export function getGlobalQwenDirLite(
   return path.join(homeDir, SETTINGS_DIRECTORY_NAME);
 }
 
+/**
+ * Where a system file named `fileName` lives when no override applies.
+ */
+function getPlatformSystemFilePath(fileName: string): string {
+  if (os.platform() === 'darwin') {
+    return `/Library/Application Support/QwenCode/${fileName}`;
+  }
+  if (os.platform() === 'win32') {
+    return `C:\\ProgramData\\qwen-code\\${fileName}`;
+  }
+  return `/etc/qwen-code/${fileName}`;
+}
+
+// The system-wide settings directory on Windows, where the platform default
+// lives and an environment override may point.
+const WINDOWS_SYSTEM_SETTINGS_DIR = 'C:\\ProgramData\\qwen-code';
+
+/**
+ * Whether a Windows path names a location inside the system-wide settings
+ * directory. A UNC root is a remote share and never names the local system
+ * location, and a relative path is resolved against an arbitrary working
+ * directory, so both are rejected up front; what remains is an absolute
+ * drive path, and the platform canonicalizer — not a re-implementation of
+ * its rules — decides where it points: `..` cannot climb past the drive
+ * root, and case and separator spelling are folded.
+ */
+export function isInsideWindowsSystemSettingsDir(configured: string): boolean {
+  if (/^[\\/]{2}/.test(configured)) {
+    return false; // a UNC root is a remote share
+  }
+  if (!/^[a-zA-Z]:[\\/]/.test(configured)) {
+    return false; // not an absolute drive path
+  }
+  return path.win32
+    .resolve(configured)
+    .toLowerCase()
+    .startsWith(`${WINDOWS_SYSTEM_SETTINGS_DIR.toLowerCase()}\\`);
+}
+
+/**
+ * Whether the file actually read at `candidate` is an administrator file:
+ * links are resolved first, because an installed or mounted file may be
+ * delivered through one (the Kubernetes harness pool mounts its settings as
+ * a link), and the resolved target must be a regular file owned by root in
+ * a directory owned by root — both the content and the place it sits are
+ * under the administrator's control, so the current user cannot replace or
+ * remove either. A target a user can move or replace does not qualify.
+ */
+function isTrustedSystemFile(candidate: string): boolean {
+  let target: string;
+  try {
+    target = fs.realpathSync(candidate);
+  } catch {
+    return false;
+  }
+  try {
+    const stats = fs.statSync(target);
+    if (!stats.isFile() || stats.uid !== 0) return false;
+    const parent = fs.statSync(path.dirname(target));
+    return parent.isDirectory() && parent.uid === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a path supplied by `QWEN_CODE_SYSTEM_SETTINGS_PATH` or
+ * `QWEN_CODE_SYSTEM_DEFAULTS_PATH` is trusted to carry system-wide settings.
+ *
+ * The platform defaults sit in locations only the OS administrator can
+ * write, and that boundary is what keeps system settings under administrator
+ * control; an override honored unconditionally would let a process's
+ * environment point the system layer at a file its user controls. So an
+ * override is honored only while it names a location the operating system
+ * keeps out of reach of ordinary users, and fails closed to the platform
+ * default otherwise: on Unix, a root-owned regular file in a root-owned
+ * directory, judged on the file a link resolves to; on Windows, a path that
+ * stays inside the system-wide settings directory once normalized and names
+ * a file that is there — a name that resolves to nothing would read as an
+ * empty system layer and blank the installed administrator file.
+ */
+export function isSystemSettingsPathTrusted(configured: string): boolean {
+  if (os.platform() === 'win32') {
+    if (!isInsideWindowsSystemSettingsDir(configured)) return false;
+    return fs.existsSync(configured);
+  }
+  return isTrustedSystemFile(configured);
+}
+
+/**
+ * Whether the entry at `candidate` is an administrator-installed system
+ * file, proven rather than assumed: links are resolved first, because an
+ * installed or mounted file may be delivered through one, and the resolved
+ * entry must be a root-owned (`uid === 0`) file or directory in a
+ * root-owned directory, so the current user cannot create, replace, or
+ * remove either. A planted link that does not resolve to such an entry, and
+ * an entry whose ownership cannot be read, prove nothing and do not
+ * qualify.
+ */
+function isInstalledAdministratorFile(candidate: string): boolean {
+  let target: string;
+  try {
+    target = fs.realpathSync(candidate);
+  } catch {
+    return false;
+  }
+  let entry: fs.Stats;
+  try {
+    entry = fs.statSync(target);
+  } catch {
+    return false;
+  }
+  if (entry.uid !== 0 || (!entry.isFile() && !entry.isDirectory())) {
+    return false;
+  }
+  try {
+    const parent = fs.statSync(path.dirname(target));
+    return parent.isDirectory() && parent.uid === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The administrator file installed at a platform default location: the
+ * system settings file or, failing that, the system defaults file beside it.
+ * An entry at the platform path counts only while its root ownership can be
+ * proven (see `isInstalledAdministratorFile`); it is then the proof that the
+ * system layers are managed and a path override must not move them
+ * elsewhere. On Windows no entry counts: `C:\ProgramData` lets ordinary
+ * users create subdirectories they own, and Node exposes no ACL to tell a
+ * planted entry from an installed one, so an override keeps being honored
+ * there.
+ */
+function findInstalledAdministratorFile(): string | undefined {
+  if (os.platform() === 'win32') return undefined;
+  const candidates = [
+    getPlatformSystemFilePath('settings.json'),
+    getPlatformSystemFilePath('system-defaults.json'),
+  ];
+  for (const candidate of candidates) {
+    if (isInstalledAdministratorFile(candidate)) return candidate;
+  }
+  return undefined;
+}
+
+const warnedIgnoredOverrides = new Set<string>();
+
+/**
+ * The one-shot, per-variable breadcrumb for an override this resolver
+ * ignored: the variable, the path it was set to, and the reason. The
+ * resolver runs on every settings load, so one warning per variable per
+ * process, and it runs before the debug log file is available, so
+ * `console.warn` is the only channel left.
+ */
+function warnIgnoredOverride(name: string, message: string): void {
+  if (warnedIgnoredOverrides.has(name)) return;
+  warnedIgnoredOverrides.add(name);
+  // eslint-disable-next-line no-console -- one-shot warning; the debug log file is not available where this resolver runs
+  console.warn(message);
+}
+
+/**
+ * A system layer override the resolver is refusing to honor: the variable,
+ * the path it was set to, and why. `not-administrator-controlled` means the
+ * file it names is not an administrator file, so the platform default is
+ * used instead and the operator policy the variable names is dropped;
+ * `administrator-file-installed` means an administrator file is installed at
+ * the platform default, which the override may not move.
+ */
+export interface IgnoredSystemPathOverride {
+  name: string;
+  configured: string;
+  reason: 'not-administrator-controlled' | 'administrator-file-installed';
+}
+
+type SystemPathOverrideDecision =
+  | { honored: true }
+  | {
+      honored: false;
+      reason: IgnoredSystemPathOverride['reason'];
+      administratorFile?: string;
+    };
+
+/**
+ * The resolver's decision for one configured system layer: only while no
+ * administrator file is installed and the file it names is trusted (see
+ * `isSystemSettingsPathTrusted`) may it replace the layer.
+ */
+function systemPathOverrideDecision(
+  configured: string,
+): SystemPathOverrideDecision {
+  const administratorFile = findInstalledAdministratorFile();
+  if (administratorFile !== undefined) {
+    return {
+      honored: false,
+      reason: 'administrator-file-installed',
+      administratorFile,
+    };
+  }
+  if (!isSystemSettingsPathTrusted(configured)) {
+    return { honored: false, reason: 'not-administrator-controlled' };
+  }
+  return { honored: true };
+}
+
+/**
+ * The system layer overrides set in `env` that the resolver is refusing to
+ * honor, with the reason for each refusal. A consumer reading the resolved
+ * paths cannot tell a configured-but-rejected layer from an absent one
+ * otherwise, and the two are not the same: a rejected layer means the
+ * operator policy the variable names is dropped, not applied.
+ */
+export function ignoredSystemPathOverrides(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+): IgnoredSystemPathOverride[] {
+  const ignored: IgnoredSystemPathOverride[] = [];
+  for (const name of [
+    'QWEN_CODE_SYSTEM_SETTINGS_PATH',
+    'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
+  ]) {
+    const configured = readEnvironmentVariable(env, name);
+    if (!configured) continue;
+    const decision = systemPathOverrideDecision(configured);
+    if (!decision.honored) {
+      ignored.push({ name, configured, reason: decision.reason });
+    }
+  }
+  return ignored;
+}
+
+function isSystemPathOverrideHonored(
+  name: string,
+  configured: string,
+): boolean {
+  const decision = systemPathOverrideDecision(configured);
+  if (decision.honored) return true;
+  if (decision.reason === 'administrator-file-installed') {
+    warnIgnoredOverride(
+      name,
+      `${name} is set to ${JSON.stringify(configured)}, but administrator settings are installed at ${JSON.stringify(decision.administratorFile)}, so the override is ignored.`,
+    );
+  } else {
+    const reason =
+      os.platform() === 'win32'
+        ? !isInsideWindowsSystemSettingsDir(configured)
+          ? `does not point inside ${WINDOWS_SYSTEM_SETTINGS_DIR}\\`
+          : `does not name an existing file inside ${WINDOWS_SYSTEM_SETTINGS_DIR}\\`
+        : 'is not a regular root-owned file';
+    warnIgnoredOverride(
+      name,
+      `${name} is set to ${JSON.stringify(configured)}, which ${reason}, so the platform default is used instead.`,
+    );
+  }
+  return false;
+}
+
+/**
+ * The system settings file. `QWEN_CODE_SYSTEM_SETTINGS_PATH` replaces the
+ * platform default only while no administrator file is installed and the
+ * file it names is a root-owned regular file (Unix) or stays inside the
+ * system-wide settings directory (Windows); otherwise the platform default
+ * is used and a one-shot warning names the variable and the reason.
+ */
 export function getSystemSettingsPath(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
 ): string {
@@ -175,18 +440,24 @@ export function getSystemSettingsPath(
     env,
     'QWEN_CODE_SYSTEM_SETTINGS_PATH',
   );
-  if (configured) {
+  if (
+    configured &&
+    isSystemPathOverrideHonored('QWEN_CODE_SYSTEM_SETTINGS_PATH', configured)
+  ) {
     return configured;
   }
-  if (os.platform() === 'darwin') {
-    return '/Library/Application Support/QwenCode/settings.json';
-  }
-  if (os.platform() === 'win32') {
-    return 'C:\\ProgramData\\qwen-code\\settings.json';
-  }
-  return '/etc/qwen-code/settings.json';
+  return getPlatformSystemFilePath('settings.json');
 }
 
+/**
+ * The system defaults file. `QWEN_CODE_SYSTEM_DEFAULTS_PATH` replaces it
+ * only while no administrator file is installed and the file it names is
+ * trusted. A rejected override falls back to the platform default beside the
+ * platform settings file, never beside the (possibly relocated) settings
+ * override, so the rejected path cannot be re-derived as the layer; with no
+ * defaults override at all, the layer sits beside wherever the settings
+ * layer resolved.
+ */
 export function getSystemDefaultsPath(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
 ): string {
@@ -194,8 +465,14 @@ export function getSystemDefaultsPath(
     env,
     'QWEN_CODE_SYSTEM_DEFAULTS_PATH',
   );
-  if (configured) {
+  if (
+    configured &&
+    isSystemPathOverrideHonored('QWEN_CODE_SYSTEM_DEFAULTS_PATH', configured)
+  ) {
     return configured;
+  }
+  if (configured) {
+    return getPlatformSystemFilePath('system-defaults.json');
   }
   return path.join(
     path.dirname(getSystemSettingsPath(env)),

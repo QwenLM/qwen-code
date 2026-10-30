@@ -124,8 +124,6 @@ async function scenario(
   const workspace = join(scratch, 'workspace');
   const home = join(scratch, 'qwen-home');
   const runtimeDir = join(scratch, 'runtime');
-  const system = join(scratch, 'system.json');
-  const defaults = join(scratch, 'defaults.json');
   const temp = join(scratch, 'temp');
   for (const dir of [workspace, home, runtimeDir, temp]) mkdirSync(dir);
   const editor = join(scratch, 'owned-editor.mjs');
@@ -199,8 +197,6 @@ async function scenario(
     submittedCount++;
   };
   try {
-    json(system, { $version: 4 });
-    json(defaults, { $version: 4 });
     server = await startFakeOpenAIServer(({ requestIndex }) => {
       if (requestIndex === 0 && responseMode === 'held')
         return {
@@ -247,8 +243,6 @@ async function scenario(
           HOME: scratch,
           QWEN_HOME: home,
           QWEN_RUNTIME_DIR: runtimeDir,
-          QWEN_CODE_SYSTEM_SETTINGS_PATH: system,
-          QWEN_CODE_SYSTEM_DEFAULTS_PATH: defaults,
           TMPDIR: temp,
           TMP: temp,
           TEMP: temp,

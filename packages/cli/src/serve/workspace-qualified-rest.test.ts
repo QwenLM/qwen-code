@@ -29,6 +29,31 @@ import {
   WorkspaceSkillNotFoundError,
   type DaemonWorkspaceService,
 } from './workspace-service/types.js';
+import { trustedSystemSettingsDirs } from '../test-utils/trusted-system-settings.js';
+
+// The system settings overrides are only honored for a root-owned regular
+// file, which a non-root test host cannot arrange for its temp fixtures; the
+// fixtures stand in for administrator-created system files.
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../test-utils/trusted-system-settings.js');
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+  };
+});
+vi.mock('fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('fs')>();
+  const { trustedSystemSettingsLstat, trustedSystemSettingsStat } =
+    await import('../test-utils/trusted-system-settings.js');
+  return {
+    ...actual,
+    lstatSync: trustedSystemSettingsLstat(actual.lstatSync.bind(actual)),
+    statSync: trustedSystemSettingsStat(actual.statSync.bind(actual)),
+  };
+});
 
 const baseOpts: ServeOptions = {
   hostname: '127.0.0.1',
@@ -799,6 +824,10 @@ describe('workspace-qualified core REST', () => {
       systemSettingsPath,
       JSON.stringify({ experimental: { sessionWorkflow: false } }),
     );
+    // The trust gate (#13513) only honors a root-owned regular file; the
+    // lstat mock above reports this fixture as root-owned, so the override
+    // resolves here instead of the platform default.
+    trustedSystemSettingsDirs.add(h.scratch);
     const previousSystemPath = process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
     process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;
     try {
@@ -828,6 +857,7 @@ describe('workspace-qualified core REST', () => {
       } else {
         process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = previousSystemPath;
       }
+      trustedSystemSettingsDirs.delete(h.scratch);
       await fsp.rm(h.scratch, { recursive: true, force: true });
     }
   });

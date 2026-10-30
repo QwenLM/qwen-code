@@ -248,6 +248,10 @@ describe('Settings Loading and Merging', () => {
       dev: 1,
       ino: 1,
       mode: 0o600,
+      // The mocked file stands in for a system settings file, which the
+      // trust gate only honors while it is root-owned.
+      uid: 0,
+      gid: 0,
     };
     (fs.lstatSync as Mock).mockReturnValue(regular);
     (fs.fstatSync as Mock).mockReturnValue(regular);
@@ -265,6 +269,23 @@ describe('Settings Loading and Merging', () => {
     (fs.realpathSync as Mock).mockImplementation((p: fs.PathLike) =>
       p.toString(),
     );
+    // The trust gate stats the override (a root-owned regular file) and its
+    // parent directory (a root-owned directory); the factory stub above
+    // carries no isDirectory method. The platform defaults must stay absent:
+    // a root-owned object there would read as an installed administrator
+    // file and silence every override under test.
+    (fs.statSync as Mock).mockImplementation((p: fs.PathLike) => {
+      const s = p.toString();
+      if (s === '/etc/qwen-code' || s.startsWith('/etc/qwen-code/')) {
+        throw Object.assign(
+          new Error(`ENOENT: no such file or directory, stat '${s}'`),
+          { code: 'ENOENT' },
+        );
+      }
+      return s.endsWith('.json')
+        ? { ...regular, isDirectory: () => false }
+        : { ...regular, isFile: () => false, isDirectory: () => true };
+    });
     (mockFsMkdirSync as Mock).mockImplementation(() => undefined);
     vi.mocked(isWorkspaceTrusted).mockReturnValue({
       isTrusted: true,
