@@ -274,6 +274,7 @@ import {
 } from '@qwen-code/qwen-code-core/services/execution-environment.js';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
+  getApiHistoryPromptId,
   getLastApiHistoryPromptId,
   getLastApiPromptCancellation,
   markApiHistoryPrompt,
@@ -4917,9 +4918,65 @@ export class Session implements SessionContext {
     }
   }
 
+  async resolveRewindTarget(
+    promptId: string,
+  ): Promise<
+    | { turnIndex: number; snapshotIndex: number; sourceRecordId: string }
+    | undefined
+  > {
+    const snapshots = this.config.getFileHistoryService().getSnapshots();
+    const snapshotIndices = snapshots.flatMap((snapshot, index) =>
+      snapshot.promptId === promptId ? [index] : [],
+    );
+    if (snapshotIndices.length !== 1) return undefined;
+    const records = await this.config
+      .getChatRecordingService()
+      ?.readActiveTranscriptChain();
+    if (!records) return undefined;
+    // Match ChatRecordingService.rebuildTurnBoundaries: injected messages
+    // do not own a persisted rewind boundary.
+    const users = records.filter(
+      (record) =>
+        record.type === 'user' &&
+        ![
+          'goal_runtime',
+          'notification',
+          'cron',
+          'mid_turn_user_message',
+          'realtime_message',
+          'agent_mention',
+          'agent_message',
+        ].includes(record.subtype ?? ''),
+    );
+    const matches = users.flatMap((record, index) =>
+      record.promptId === promptId ? [{ record, index }] : [],
+    );
+    if (matches.length !== 1) return undefined;
+    const { record, index: turnIndex } = matches[0]!;
+    const history = this.captureHistorySnapshot();
+    const apiIndices = history.flatMap((content, index) =>
+      getApiHistoryPromptId(content) === promptId ? [index] : [],
+    );
+    // A partial/compacted history must never turn a local index into a
+    // destructive cut in the persisted conversation.
+    if (
+      apiIndices.length !== 1 ||
+      !record.uuid ||
+      this.#computeApiTruncationIndexForUserTurn(history, turnIndex) !==
+        apiIndices[0]
+    ) {
+      return undefined;
+    }
+    return {
+      turnIndex,
+      snapshotIndex: snapshotIndices[0]!,
+      sourceRecordId: record.uuid,
+    };
+  }
+
   rewindToTurn(
     targetTurnIndex: number,
-    opts?: { rewindFiles?: boolean },
+    opts?: { rewindFiles?: boolean; snapshotIndex?: number },
   ): {
     targetTurnIndex: number;
     apiTruncateIndex: number;
@@ -4969,21 +5026,11 @@ export class Session implements SessionContext {
 
     const rewindFiles = opts?.rewindFiles !== false;
     const fileHistoryService = this.config.getFileHistoryService();
-    // Every rewind surface resolves a turn through this array's positions:
-    // `getRewindSnapshots` hands out the index, and the agent resolves a
-    // promptId with `findIndex`. Positions therefore have to keep matching the
-    // current history's turn ordinals. A conversation-only rewind abandons the
-    // later turns without going through `FileHistoryService.rewind` — which
-    // trims inclusively itself — so the trim has to happen here. Without it the
-    // next rewind resolves onto a turn the history no longer has and cuts the
-    // wrong turn, while the recorded branch and the live view disagree.
-    //
-    // The file path keeps the target snapshot: the agent restores files by
-    // promptId after this returns, so that snapshot must still be findable.
     const snapshotsBeforeRewind = fileHistoryService.getSnapshots();
+    const snapshotIndex = opts?.snapshotIndex ?? targetTurnIndex;
     const survivingSnapshots = rewindFiles
-      ? snapshotsBeforeRewind.slice(0, targetTurnIndex + 1)
-      : snapshotsBeforeRewind.slice(0, targetTurnIndex);
+      ? snapshotsBeforeRewind.slice(0, snapshotIndex + 1)
+      : snapshotsBeforeRewind.slice(0, snapshotIndex);
     fileHistoryService.restoreFromSnapshots(survivingSnapshots);
 
     const approvalMode = this.config.getApprovalMode();
@@ -6572,6 +6619,22 @@ export class Session implements SessionContext {
               void recordDaemonSessionApprovalModeFromConfig(this.config);
             }
 
+            let previousTurnWasUserCancelled = false;
+            if (
+              !continuesCurrentWorkChain &&
+              !channelTurn &&
+              !isSlashInput &&
+              goalTurn?.origin !== 'runtime' &&
+              this.config.getChatRecordingService()
+            ) {
+              try {
+                previousTurnWasUserCancelled =
+                  (await this.#getTurnCancellation())?.reason === 'user';
+              } catch {
+                debugLogger.warn('Unable to read previous turn cancellation');
+              }
+            }
+
             if (goalTurn?.origin === 'runtime') {
               // The automatic Goal turn was recorded above with its runtime
               // provenance and must not also appear as real user input.
@@ -6851,7 +6914,8 @@ export class Session implements SessionContext {
             // very turn that may be asking about it (#10953).
             const continuesTodoWorkChain =
               continuesCurrentWorkChain ||
-              (this.activeTodoWorkChainPromptId !== undefined &&
+              (!previousTurnWasUserCancelled &&
+                this.activeTodoWorkChainPromptId !== undefined &&
                 this.config.getActiveTodoReminder(
                   this.activeTodoWorkChainPromptId,
                 ) !== undefined &&
@@ -6903,6 +6967,13 @@ export class Session implements SessionContext {
             // plan mode in ACP has no effect because the model never learns it
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
+            if (previousTurnWasUserCancelled) {
+              systemReminders.push({
+                text: wrapSystemReminder(
+                  'The user intentionally cancelled the preceding turn. Its unfinished actions are no longer pending and must not be retried or continued automatically. Keep that turn as historical context. Respond to the current user message; resume the cancelled work only if the current message explicitly requests it.',
+                ),
+              });
+            }
             if (systemReminders.length > 0 && !isRestoreAskUserQuestion) {
               // On an `interrupted_prompt` continuation the replayed orphaned
               // user run can already carry the reminders that were prepended on

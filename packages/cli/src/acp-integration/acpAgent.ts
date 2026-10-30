@@ -10594,22 +10594,23 @@ class QwenAgent implements Agent {
         }
         const fhs = session.getConfig().getFileHistoryService();
         const snapshots = fhs.getSnapshots();
-        const rewindableTurnCount = session.getRewindableUserTurnCount();
         const prefix = (sessionId as string) + '########';
         const results = await Promise.all(
           snapshots
-            .map((s, idx) => ({ s, idx }))
+            .map((s) => ({ s }))
             .filter(
               ({ s }) =>
                 s.promptId.startsWith(prefix) &&
                 /^\d+$/.test(s.promptId.slice(prefix.length)),
             )
-            .filter(({ idx }) => idx < rewindableTurnCount)
-            .map(async ({ s, idx }) => {
+            .map(async ({ s }) => {
+              const target = await session.resolveRewindTarget(s.promptId);
+              if (!target) return undefined;
               const stats = await fhs.getDiffStats(s.promptId);
               return {
                 promptId: s.promptId,
-                turnIndex: idx,
+                turnIndex: target.turnIndex,
+                sourceRecordId: target.sourceRecordId,
                 timestamp: s.timestamp.toISOString(),
                 diffStats: {
                   filesChanged: stats?.filesChanged?.length ?? 0,
@@ -10619,7 +10620,9 @@ class QwenAgent implements Agent {
               };
             }),
         );
-        return { snapshots: results } as unknown as Record<string, unknown>;
+        return {
+          snapshots: results.filter((result) => result !== undefined),
+        } as unknown as Record<string, unknown>;
       }
       case SERVE_STATUS_EXT_METHODS.workspaceHooks:
         return this.buildWorkspaceHooksStatus(this.config) as unknown as Record<
@@ -14201,9 +14204,17 @@ class QwenAgent implements Agent {
         let turnIndex: number | undefined = params['targetTurnIndex'] as
           | number
           | undefined;
-        const resolveFromPromptId =
-          promptId !== undefined &&
-          (turnIndex === undefined || turnIndex === null);
+        const resolveFromPromptId = promptId !== undefined;
+        if (
+          params['expectedRecordId'] !== undefined &&
+          (typeof params['expectedRecordId'] !== 'string' ||
+            !params['expectedRecordId'] ||
+            !resolveFromPromptId)
+        ) {
+          throw new RequestError(-32602, 'Invalid expectedRecordId', {
+            errorKind: 'invalid_rewind_target',
+          });
+        }
         if (resolveFromPromptId) {
           const prefix = sessionId + '########';
           if (!promptId.startsWith(prefix)) {
@@ -14227,24 +14238,22 @@ class QwenAgent implements Agent {
         }
 
         return await this.runExclusiveHistoryMutation(sessionId, async () => {
+          let snapshotIndex: number | undefined;
           if (resolveFromPromptId) {
-            // Derive turnIndex from the snapshot's position in the array,
-            // NOT from the promptId suffix. Session.turn is monotonic and
-            // does not reset on rewind, so after a rewind cycle the suffix
-            // no longer matches the turn's position in the current history.
-            const fhs = session.getConfig().getFileHistoryService();
-            const snapshots = fhs.getSnapshots();
-            const snapshotIdx = snapshots.findIndex(
-              (s) => s.promptId === promptId,
-            );
-            if (snapshotIdx < 0) {
+            const target = await session.resolveRewindTarget(promptId!);
+            if (
+              !target ||
+              (params['expectedRecordId'] !== undefined &&
+                params['expectedRecordId'] !== target.sourceRecordId)
+            ) {
               throw new RequestError(
                 -32602,
-                'Snapshot not found for the given promptId',
+                'Rewind target identity unavailable or changed',
                 { errorKind: 'invalid_rewind_target' },
               );
             }
-            turnIndex = snapshotIdx;
+            turnIndex = target.turnIndex;
+            snapshotIndex = target.snapshotIndex;
           }
 
           const rewindFiles = params['rewindFiles'] !== false;
@@ -14254,6 +14263,7 @@ class QwenAgent implements Agent {
           try {
             rewindResult = session.rewindToTurn(turnIndex as number, {
               rewindFiles,
+              ...(snapshotIndex === undefined ? {} : { snapshotIndex }),
             });
             releaseHistoryMutation = session.beginHistoryMutation();
           } catch (err) {

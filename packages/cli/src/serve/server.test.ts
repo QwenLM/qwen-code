@@ -13555,6 +13555,17 @@ describe('createServeApp', () => {
         { bridge },
       );
 
+    it('requests a draft only when explicitly opted in', async () => {
+      const bridge = fakeBridge();
+      const spy = vi.spyOn(bridge, 'getPendingPrompts');
+      const res = await request(pendingApp(bridge))
+        .get('/session/s-1/pending-prompts?includeDraft=true')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+      expect(res.status).toBe(200);
+      expect(spy).toHaveBeenCalledWith('s-1', undefined, true);
+    });
+
     it('200 with pending prompts list', async () => {
       const bridge = fakeBridge({
         getPendingPromptsImpl: () => [

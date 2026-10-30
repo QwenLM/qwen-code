@@ -2470,6 +2470,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         renderLegacyGoalSupersession: ReturnType<typeof vi.fn>;
         restoreHistory: ReturnType<typeof vi.fn>;
         rewindToTurn: ReturnType<typeof vi.fn>;
+        resolveRewindTarget: ReturnType<typeof vi.fn>;
         beginHistoryMutation: ReturnType<typeof vi.fn>;
         getRewindableUserTurnCount: ReturnType<typeof vi.fn>;
         clearActiveTodoPlanRevision: ReturnType<typeof vi.fn>;
@@ -6061,6 +6062,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
             .fn()
             .mockReturnValue([{ role: 'user', parts: [{ text: 'before' }] }]),
           restoreHistory: vi.fn(),
+          resolveRewindTarget: vi.fn().mockResolvedValue(undefined),
           rewindToTurn: vi
             .fn()
             .mockReturnValue({ targetTurnIndex: 1, apiTruncateIndex: 2 }),
@@ -25577,6 +25579,55 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([false, true])(
+    'checks persisted rewind identity before mutation (changed=%s)',
+    async (changed) => {
+      const sessionId = '11111111-1111-1111-1111-111111111111';
+      await setupSessionMocks(sessionId);
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      try {
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        lastSessionMock!.resolveRewindTarget.mockResolvedValue({
+          turnIndex: 34,
+          snapshotIndex: 10,
+          sourceRecordId: 'user-35',
+        });
+        const operation = agent.extMethod('rewindSession', {
+          sessionId,
+          promptId: `${sessionId}########35`,
+          targetTurnIndex: 10,
+          expectedRecordId: changed ? 'different-user' : 'user-35',
+          rewindFiles: false,
+        });
+        if (changed) {
+          await expect(operation).rejects.toThrow(
+            'identity unavailable or changed',
+          );
+          expect(lastSessionMock!.rewindToTurn).not.toHaveBeenCalled();
+        } else {
+          await operation;
+          expect(lastSessionMock!.rewindToTurn).toHaveBeenCalledWith(34, {
+            rewindFiles: false,
+            snapshotIndex: 10,
+          });
+        }
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('rewindSession fails fast with session_busy while a turn is active', async () => {
     const sessionId = '11111111-1111-1111-1111-111111111111';

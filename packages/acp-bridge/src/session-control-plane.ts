@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { pendingPromptDraft } from './pending-prompt-draft.js';
 import {
   applySessionStartupConfig,
   parseSessionStartupConfig,
@@ -11219,6 +11220,11 @@ export function createSessionControlPlane(
               ? IMAGE_ONLY_PROMPT_TEXT
               : '');
       const pendingEntry: PendingPromptEntry = {
+        ...(modelPrompt === undefined &&
+        channelDisplayText === undefined &&
+        !isPromotedMidTurn
+          ? { queueDraft: pendingPromptDraft(req) }
+          : {}),
         eventDetailMode,
         promptId,
         queuedAt,
@@ -14704,7 +14710,7 @@ export function createSessionControlPlane(
       return queue;
     },
 
-    getPendingPrompts(sessionId, context) {
+    getPendingPrompts(sessionId, context, includeDraft = false) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       // Authorize the caller against this session — mirrors /prompt.
@@ -14714,6 +14720,12 @@ export function createSessionControlPlane(
         .map((p) => ({
           promptId: p.promptId,
           text: p.text,
+          ...(includeDraft && p.queueDraft
+            ? {
+                queueDraft: structuredClone(p.queueDraft),
+                restoreComplete: true,
+              }
+            : {}),
           ...(p.content ? { content: p.content } : {}),
           queuedAt: p.queuedAt,
           state: p.state,
@@ -15736,6 +15748,9 @@ export function createSessionControlPlane(
               {
                 sessionId,
                 promptId: req.promptId,
+                ...(req.expectedRecordId
+                  ? { expectedRecordId: req.expectedRecordId }
+                  : {}),
                 rewindFiles: req.rewindFiles !== false,
               },
             ),
