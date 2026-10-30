@@ -16,7 +16,7 @@ const mockGh = vi.hoisted(() => vi.fn());
 const mocks = vi.hoisted(() => ({
   root: '',
   stdout: vi.fn((_line: string) => {}),
-  remoteRef: vi.fn((): string | null => null),
+  remoteRef: vi.fn((): string | null | undefined => null),
 }));
 vi.mock('../review/lib/gh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../review/lib/gh.js')>()),
@@ -300,5 +300,93 @@ describe('runSnapshot: the stale-base hint', () => {
     expect(line.events.map((event) => event.type)).toContain('ci_failed');
     expect(line.baseBehind).toBeUndefined();
     expect(compareCalls()).toHaveLength(0);
+  });
+
+  it('does not ask compare on a resync round, even with a failed check', () => {
+    mocks.remoteRef.mockReturnValue(NEXT_HEAD);
+    const moved = pr({ headRefOid: NEXT_HEAD }, [failed('Test')]);
+    moved.commits.nodes[0]!.commit.oid = NEXT_HEAD;
+    respond(moved);
+    runSnapshot({ pr: 7 });
+    const snapshot = JSON.parse(readFileSync(paths().snapshotPath, 'utf8')) as {
+      action: string;
+      baseBehind?: boolean;
+      events: Array<{ type: string }>;
+    };
+    expect(snapshot.action).toBe('resync');
+    // Both events are really there: the round is not empty.
+    const types = snapshot.events.map((event) => event.type);
+    expect(types).toContain('head_moved_externally');
+    expect(types).toContain('ci_failed');
+    expect(compareCalls()).toHaveLength(0);
+    expect(snapshot.baseBehind).toBeUndefined();
+  });
+
+  it('does not ask compare when the only item is a conflict', () => {
+    respond(pr({ mergeable: 'CONFLICTING' }));
+    runSnapshot({ pr: 7 });
+    const snapshot = JSON.parse(readFileSync(paths().snapshotPath, 'utf8')) as {
+      action: string;
+      baseBehind?: boolean;
+      events: Array<{ type: string }>;
+    };
+    expect(snapshot.action).toBe('fix');
+    expect(snapshot.events.map((event) => event.type)).toContain('conflict');
+    expect(compareCalls()).toHaveLength(0);
+    expect(snapshot.baseBehind).toBeUndefined();
+  });
+
+  it('does not ask compare when the only item is a trusted comment', () => {
+    respond(
+      pr({
+        comments: {
+          pageInfo: { hasPreviousPage: false },
+          nodes: [
+            {
+              id: 'IC_1',
+              author: { __typename: 'User', login: 'alice' },
+              authorAssociation: 'MEMBER',
+              body: 'please take a look',
+              url: 'https://github.com/o/r/pull/7#IC_1',
+            },
+          ],
+        },
+      }),
+    );
+    runSnapshot({ pr: 7 });
+    const snapshot = JSON.parse(readFileSync(paths().snapshotPath, 'utf8')) as {
+      action: string;
+      baseBehind?: boolean;
+      events: Array<{ type: string }>;
+    };
+    expect(snapshot.action).toBe('fix');
+    expect(snapshot.events.map((event) => event.type)).toContain(
+      'issue_comment',
+    );
+    expect(compareCalls()).toHaveLength(0);
+    expect(snapshot.baseBehind).toBeUndefined();
+  });
+
+  it('compares the head the watch itself pushed, not the old known head', () => {
+    writeState(
+      paths().statePath,
+      state({ lastKnownHeadSha: HEAD, pushedShas: [NEXT_HEAD] }),
+    );
+    // The push target cannot be read; the watch's own pushed head is not
+    // someone else's push, and the checks describe the new head.
+    mocks.remoteRef.mockReturnValue(undefined);
+    const pushed = pr({ headRefOid: NEXT_HEAD }, [failed('Test')]);
+    pushed.commits.nodes[0]!.commit.oid = NEXT_HEAD;
+    respond(pushed);
+    mockGh.mockReturnValueOnce('behind');
+    runSnapshot({ pr: 7 });
+    expect(compareCalls()).toHaveLength(1);
+    expect(mockGh).toHaveBeenLastCalledWith(
+      'api',
+      `repos/o/r/compare/main...${NEXT_HEAD}`,
+      '--jq',
+      '.status',
+    );
+    expect(written().baseBehind).toBe(true);
   });
 });

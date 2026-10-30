@@ -396,4 +396,22 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain('`subagent_type` = `general-purpose`');
     expect(BuiltinAgentRegistry.isBuiltinAgent('general-purpose')).toBe(true);
   });
+
+  it("keeps the brief's Events scoping consistent with the fields its instructions name", () => {
+    const { body } = loadSkill();
+    // The brief is the skill's only ```markdown block.
+    const template = body.split('```markdown')[1]?.split('```')[0] ?? '';
+    const named = [
+      ...template.matchAll(/the snapshot says `(\w+): true`/g),
+    ].map((match) => match[1]);
+    // The stale-base hint is a top-level snapshot field, not an event: the
+    // scoping sentence must exempt the fields the instructions name, or the
+    // brief forbids the very merge it commands.
+    expect(named).toContain('baseBehind');
+    const scoping = /Nothing else in that file is yours to act on([^\n]*)/.exec(
+      template,
+    );
+    expect(scoping).not.toBeNull();
+    expect(scoping![1]).toContain('beyond the fields these instructions name');
+  });
 });

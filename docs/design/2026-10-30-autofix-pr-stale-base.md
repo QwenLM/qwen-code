@@ -94,6 +94,10 @@ Verified against `origin/main` at `38337f7257` (2026-10-30):
   checks below.
 - The summary guidance says the base merge is reported like any other
   pushed fix.
+- The brief's Events scoping sentence exempts "the fields these
+  instructions name", so the brief does not forbid the base merge it
+  commands; a consistency pin in `SKILL.test.ts` keeps the two in
+  agreement.
 - The user guide's round description
   (`docs/users/features/autofix-pr.md`) gains the same behavior in one
   sentence: checks failing on a behind branch merge the base first.
@@ -146,6 +150,11 @@ Verified against `origin/main` at `38337f7257` (2026-10-30):
 
 - One extra REST read per failing round; on gh-link jitter the hint is
   silently absent (documented degradation, same as today's behavior).
+  The read shares the gh transport's transient-error retry (3 s + 6 s
+  backoff), so on a transient 5xx the degradation costs about nine
+  seconds before the round goes on without the hint (measured by the
+  verification round). The round path has no read budget to exceed; the
+  gate's 15 s budget is untouched.
 - A false positive adds one merge commit and consumes one of the watch's
   `MAX_PUSHES` (10). Accepted: the merge is what a behind branch needs to
   become mergeable anyway.

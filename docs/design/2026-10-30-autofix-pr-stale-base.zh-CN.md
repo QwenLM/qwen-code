@@ -49,6 +49,7 @@ CI 侧的 fleet workflow（`.github/workflows/qwen-autofix.yml`，rationale `af-
 - Round 步骤 2 在 `lagging` 与 `truncated` 旁边说明 `baseBehind: true`。
 - brief 模板的 "What to do" 在 "Failed check" 之前新增一条：当 snapshot 标有 `baseBehind: true` 时，先合并 base（`git fetch <remote> <baseRefName>` 后 `git merge --no-edit FETCH_HEAD`，绝不 rebase），并解决任何冲突。合并已修好的失败 check 不需要改代码；其余的按下方失败 check 的规则处理。
 - summary 指引说明：base 合并与其他已推送的修复一样报告。
+- brief 的 Events 范围句豁免"这些指令点名的字段"，使 brief 不会禁止它所命令的 base 合并；`SKILL.test.ts` 的一致性 pin 保持两者一致。
 - 用户指南的 round 描述（`docs/users/features/autofix-pr.md`）用一句话补上同一行为：分支落后时失败的 check 会先合入 base。
 
 ### 3. 测试
@@ -70,7 +71,7 @@ CI 侧的 fleet workflow（`.github/workflows/qwen-autofix.yml`，rationale `af-
 
 ## 约束与风险
 
-- 每个有失败的 round 多一个 REST 读取；gh 链路抖动时提示静默缺失（有文档的降级，与今天的行为一致）。
+- 每个有失败的 round 多一个 REST 读取；gh 链路抖动时提示静默缺失（有文档的降级，与今天的行为一致）。该读取共享 gh 传输层的瞬时错误重试（3 s + 6 s 退避），因此瞬时 5xx 下退化代价约 9 秒，随后 round 不带提示继续（验证轮实测）。round 路径没有读取预算可超；gate 的 15 s 预算不受影响。
 - 误报会多一个 merge commit，并消耗 watch 的 `MAX_PUSHES`（10）之一。接受：落后的分支要变得可合并，本来就需要这次合并。
 - merge commit 移动 head，所有 `synchronize` 触发的 workflow 会重跑——与任何修复推送的成本曲线相同。
 - autofix worktree 可能没有 `node_modules`，本地验证受限。这是 worktree 设置的既有约束，本设计不改变它。
