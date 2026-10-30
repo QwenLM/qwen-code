@@ -294,6 +294,10 @@ public final class JdbcExternalWorkspaceOwnership {
                 || saved.getState() != RuntimeSessionRecord.State.RELEASING && saved.getState() != RuntimeSessionRecord.State.RELEASED) {
             throw unavailable();
         }
+        if (!owner.empty() && !owner.matches(current, session)) {
+            member(connection, current, session, owner.registration().ownerKey(), false);
+            return;
+        }
         releaseMember(connection, owner, current, session);
         if (!owner.empty()) {
             try (var statement = connection.prepareStatement("UPDATE ma_storage_owner SET holder_key = NULL, binding_id = NULL,"

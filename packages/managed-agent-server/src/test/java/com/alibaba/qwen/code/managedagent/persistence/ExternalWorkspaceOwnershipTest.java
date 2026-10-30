@@ -221,6 +221,60 @@ class ExternalWorkspaceOwnershipTest {
     }
 
     @Test
+    void retiredNonHolderBeforeTheHolderDoesNotAbortPhysicalRelease() {
+        var nonHolder = retireWithNonHolder();
+        var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var rows = sessions.findByBinding(binding.getBindingId(), binding.getGeneration(), null, 100);
+        assertThat(rows).extracting(RuntimeSessionRecord::getRuntimeSessionId)
+                .containsExactly(nonHolder.getRuntimeSessionId(), session.getRuntimeSessionId());
+        ownership.releaseStopped(context, nonHolder, binding, bindings);
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
+        ownership.releaseStopped(context, session, binding, bindings);
+        var released = new java.util.HashMap<>(owner);
+        for (String column : java.util.List.of("holder_key", "binding_id", "runtime_generation", "runtime_session_id")) {
+            released.put(column, null);
+        }
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(released);
+        assertThat(bindings.findById(binding.getBindingId()).getDrainReceipt()).isEqualTo(binding.getDrainReceipt());
+    }
+
+    @Test
+    void retiredNonHolderStillRefusesSplitOrForeignPhysicalMembership() {
+        var nonHolder = retireWithNonHolder();
+        var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        for (var invalid : Map.of((String) owner.get("storage_key"), "workspace_busy",
+                "foreign-physical-owner", "workspace_close_identity_unverified").entrySet()) {
+            jdbc.update("UPDATE ma_runtime_session SET execution_storage_key = ? WHERE runtime_session_id = ?",
+                    invalid.getKey(), nonHolder.getRuntimeSessionId());
+            assertThatThrownBy(() -> ownership.releaseStopped(context, nonHolder, binding, bindings))
+                    .isInstanceOfSatisfying(RuntimeBrokerException.class, failure -> {
+                        assertThat(failure.getCode()).isEqualTo(invalid.getValue());
+                        assertThat(failure.isRetryable()).isEqualTo("workspace_busy".equals(invalid.getValue()));
+                    });
+            assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
+        }
+    }
+
+    private RuntimeSessionRecord retireWithNonHolder() {
+        var nonHolder = sessions.findOrCreate(new RuntimeSessionRecord(
+                new RuntimeSession("harness", "a-retired", "bootstrap", binding.getRequest().getScope()),
+                binding.getBindingId(), binding.getGeneration(), RuntimeSessionRecord.State.ACQUIRING, 0, Instant.now()));
+        nonHolder = sessions.compareAndSet(nonHolder, nonHolder.withState(RuntimeSessionRecord.State.READY, Instant.now()));
+        ownership.claim(context, session, binding, bindings);
+        ownership.release(context, session, binding, bindings);
+        binding = bindings.claimOperation(binding.getBindingId(), "drainer", Duration.ofMinutes(1));
+        binding = bindings.compareAndSet(binding, binding.withDrainRequested(true, Instant.now())
+                .withState(RuntimeBindingRecord.State.DRAINING, binding.getLease(), Instant.now()));
+        var receipt = new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
+                binding.getProvisionSeed().getProvisionRequestId(), binding.getResourceHandle(), Instant.now());
+        binding = bindings.compareAndSet(binding, binding.withDrainReceipt(receipt));
+        session = bindings.beginSessionRelease(sessions, executions, session);
+        session = bindings.completeSessionRelease(sessions, session);
+        nonHolder = bindings.beginSessionRelease(sessions, executions, nonHolder);
+        return bindings.completeSessionRelease(sessions, nonHolder);
+    }
+
+    @Test
     void retiredHolderRequiresTheCapturedLiveLifecycleClaimAfterReceiptPersistence() {
         ownership.claim(context, session, binding, bindings);
         ownership.release(context, session, binding, bindings);
