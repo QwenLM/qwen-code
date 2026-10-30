@@ -250,8 +250,7 @@ class ManagedAgentMySqlIT {
                 .isEqualTo(new ReplayWindow(6, 6));
         assertThat(store.findReplayWindow(tenant, admission.sessionId()))
                 .isEqualTo(new ReplayWindow(6, 6));
-        assertThat(store.findSnapshot(tenant, admission.sessionId()))
-                .get()
+        assertThat(store.findMessagePage(tenant, admission.sessionId(), null, 100, false))
                 .satisfies(
                         snapshot -> {
                             assertThat(snapshot.coveredSequence()).isEqualTo(6);
