@@ -1,5 +1,11 @@
+import { useContext } from 'react';
 import type { ContextCompressionControls } from '../hooks/useContextUsageControls';
 import { useI18n } from '../i18n';
+import {
+  ContextCompressionAnnouncementContext,
+  compressionMessageKey,
+  compressionPhaseTone,
+} from './ContextCompressionAnnouncer';
 
 export function ContextCompressionFeedback({
   controls,
@@ -9,34 +15,18 @@ export function ContextCompressionFeedback({
   className?: string;
 }) {
   const { t } = useI18n();
-  const result = controls?.result;
-  if (!controls?.compressing && !result) return null;
+  const announce = useContext(ContextCompressionAnnouncementContext);
+  const phase = controls?.compressing ? 'pending' : controls?.result?.kind;
+  if (!phase) return null;
+  const tone = compressionPhaseTone(phase);
   return (
     <div
       className={className}
-      role={
-        result?.kind === 'failed' || result?.kind === 'refreshFailed'
-          ? 'alert'
-          : 'status'
-      }
+      role={announce ? undefined : tone === 'error' ? 'alert' : 'status'}
+      data-tone={tone}
+      data-web-shell-compression-feedback
     >
-      {t(
-        controls?.compressing
-          ? 'contextUsage.compressing'
-          : result?.kind === 'completed'
-            ? 'contextUsage.compressed'
-            : result?.kind === 'compressed'
-              ? 'contextUsage.compressedUnknown'
-              : result?.kind === 'noop'
-                ? 'contextCompression.noop'
-                : result?.kind === 'cancelled'
-                  ? 'contextUsage.compressCancelled'
-                  : result?.kind === 'interrupted'
-                    ? 'contextUsage.compressInterrupted'
-                    : result?.kind === 'refreshFailed'
-                      ? 'contextUsage.compressRefreshFailed'
-                      : 'contextUsage.compressFailed',
-      )}
+      {t(compressionMessageKey(phase))}
     </div>
   );
 }

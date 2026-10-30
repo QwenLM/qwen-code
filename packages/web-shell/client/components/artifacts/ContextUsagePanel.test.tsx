@@ -8,6 +8,7 @@ import type {
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 import { ContextUsagePanel } from './ContextUsagePanel';
+import { ContextCompressionAnnouncementContext } from '../ContextCompressionAnnouncer';
 
 type ContextUsageControls = NonNullable<
   ComponentProps<typeof ContextUsagePanel>['controls']
@@ -82,11 +83,13 @@ function renderPanel(
     act(() =>
       root.render(
         <I18nProvider language="en">
-          <ContextUsagePanel
-            sessionActions={sessionActions}
-            sessionId={sessionId}
-            controls={nextControls}
-          />
+          <ContextCompressionAnnouncementContext.Provider value={vi.fn()}>
+            <ContextUsagePanel
+              sessionActions={sessionActions}
+              sessionId={sessionId}
+              controls={nextControls}
+            />
+          </ContextCompressionAnnouncementContext.Provider>
         </I18nProvider>,
       ),
     );
@@ -160,9 +163,11 @@ describe('ContextUsagePanel', () => {
     expect(button.disabled).toBe(true);
     expect(refresh(container).disabled).toBe(true);
     expect(button.parentElement?.title).toBe('');
-    expect(container.querySelector('[role="status"]')?.textContent).toBe(
-      'Compressing…',
-    );
+    expect(
+      container.querySelector('[data-web-shell-compression-feedback]')
+        ?.textContent,
+    ).toBe('Compressing…');
+    expect(container.querySelector('[role="status"]')).toBeNull();
     const updated = fixture();
     updated.usage.totalTokens = 30;
     updated.usage.breakdown.freeSpace = 60;
@@ -194,9 +199,11 @@ describe('ContextUsagePanel', () => {
       ...controls,
       result: { kind: 'refreshFailed' },
     });
-    expect(container.querySelector('[role="alert"]')?.textContent).toContain(
-      'Compression completed, but usage could not be refreshed.',
-    );
+    expect(
+      container.querySelector('[data-web-shell-compression-feedback]')
+        ?.textContent,
+    ).toContain('Compression completed, but usage could not be refreshed.');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
     await act(async () => refresh(container).click());
     expect(compress).not.toHaveBeenCalled();
     expect(get).toHaveBeenCalledTimes(2);
@@ -206,6 +213,9 @@ describe('ContextUsagePanel', () => {
       syncCounters: true,
     });
     expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-compression-feedback]'),
+    ).toBeNull();
   });
 
   it('retries through the live owner when a restored tab has a read-only adapter', async () => {
@@ -240,6 +250,9 @@ describe('ContextUsagePanel', () => {
       result: { kind: 'failed' },
     });
     expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-compression-feedback]'),
+    ).toBeNull();
     await act(async () => {});
     expect(get).toHaveBeenCalledWith({
       detail: true,
@@ -253,6 +266,9 @@ describe('ContextUsagePanel', () => {
       syncCounters: true,
     });
     expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-compression-feedback]'),
+    ).toBeNull();
     expect(container.querySelector('[class*="percentage"]')?.textContent).toBe(
       '60.0%',
     );
@@ -275,7 +291,10 @@ describe('ContextUsagePanel', () => {
         ...controls,
         result: { kind: outcome },
       });
-      expect(container.querySelector('[role="status"]')?.textContent).toBe(
+      expect(
+        container.querySelector('[data-web-shell-compression-feedback]')
+          ?.textContent,
+      ).toBe(
         outcome === 'cancelled'
           ? 'Cancellation requested. Refresh to check current usage.'
           : 'Connection changed during compression. Refresh to check current usage.',
@@ -506,6 +525,9 @@ describe('ContextUsagePanel', () => {
       syncCounters: true,
     });
     expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-compression-feedback]'),
+    ).toBeNull();
     expect(container.querySelector('[class*="percentage"]')?.textContent).toBe(
       '60.0%',
     );
