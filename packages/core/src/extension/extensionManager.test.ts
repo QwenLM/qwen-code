@@ -4091,6 +4091,22 @@ describe('extension tests', () => {
       expectHook(extensions, 'PostToolUse', command);
     });
 
+    it('should load hooks/hooks.json saved with a UTF-8 BOM', async () => {
+      const extensions = await loadHooks(
+        'hooks-bom-extension',
+        {},
+        {
+          'hooks/hooks.json':
+            '\uFEFF' +
+            JSON.stringify({
+              PostToolUse: [hookEntry('Run after install', 'echo "bom"')],
+            }),
+        },
+      );
+
+      expectHook(extensions, 'PostToolUse', 'echo "bom"');
+    });
+
     it('should substitute ${CLAUDE_PLUGIN_ROOT} variable in hooks', async () => {
       const extensions = await loadHooks('hooks-var-extension', {
         hooks: pre('Run before start with var', pluginRootScript),

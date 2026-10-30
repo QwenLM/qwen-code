@@ -2059,7 +2059,7 @@ export class ExtensionManager {
 
           try {
             const hooksContent = fs.readFileSync(hooksFilePath, 'utf-8');
-            const parsedHooks = JSON.parse(hooksContent);
+            const parsedHooks = JSON.parse(hooksContent.replace(/^\uFEFF/, ''));
 
             let hooksData;
             if (parsedHooks.hooks && typeof parsedHooks.hooks === 'object') {
