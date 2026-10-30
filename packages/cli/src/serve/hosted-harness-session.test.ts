@@ -456,6 +456,16 @@ const BOOT_ID = '11111111-1111-4111-8111-111111111111';
 const SESSION_ID = '22222222-2222-4222-8222-222222222222';
 const PROMPT_ID = '33333333-3333-4333-8333-333333333333';
 
+// R1-2: the finished-before-commit hold reads its switch once at module scope,
+// so a vi.stubEnv inside a case cannot arm it. Set the env before the static
+// import evaluates that read, under a dedicated Session id. The hold only fires
+// for the matching id, so every other Session in the file is unaffected.
+const crashBeforeCommitArm = vi.hoisted(() => {
+  const sessionId = '880e8400-e29b-41d4-a716-446655440004';
+  process.env['QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT'] = sessionId;
+  return { sessionId };
+});
+
 // Turn-settling waits poll the daemon until the pipeline reports a terminal
 // state. On a loaded runner that pipeline outlasts a fixed budget long before
 // anything is wrong with it: #14406 and #14023 both failed on waits running on
@@ -1445,6 +1455,147 @@ describe('Hosted Harness no-tool session', () => {
       retryDelay: 100,
     });
   });
+
+  // R1-2: the finished-before-commit hold must observe the Turn's abort signal.
+  // Without the release/addEventListener wiring a leaked flag would park the
+  // Session uncancellably; these cases drive a real turn into the hold and prove
+  // the abort settles it cancelled with no assistant commit, and that a
+  // non-matching Session never holds at all.
+  it('settles the finished-before-commit hold cancelled on abort without an assistant commit', async () => {
+    const sessionId = crashBeforeCommitArm.sessionId;
+    const key = { tenantId: 'tenant', workspaceId: 'workspace', sessionId };
+    const readJournal = () =>
+      LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${sessionId}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
+    const stderr = vi
+      .spyOn(stdio, 'writeStderrLineSafe')
+      .mockImplementation(() => {});
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'hold then cancel' }];
+    const promptId = randomUUID();
+    const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    try {
+      await headers(supertest(server).post(`/session/${sessionId}/prompt`))
+        .set('X-Qwen-Client-Id', clientId)
+        .send({ prompt, promptId, payloadDigest: digest })
+        .expect(202);
+      // The model resolves and the turn parks in the pre-assistant-commit hold.
+      await vi.waitFor(
+        () =>
+          expect(
+            stderr.mock.calls.some(([line]) =>
+              String(line).includes(
+                'E2E holding finished turn before assistant commit',
+              ),
+            ),
+          ).toBe(true),
+        { timeout: SETTLE_TIMEOUT_MS },
+      );
+      await headers(supertest(server).post(`/session/${sessionId}/cancel`))
+        .set('X-Qwen-Client-Id', clientId)
+        .expect(204);
+      // The abort-driven release must settle the turn; if the hold never
+      // releases this wait times out rather than passing trivially.
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${sessionId}/status`),
+          ).set('X-Qwen-Client-Id', clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: SETTLE_TIMEOUT_MS },
+      );
+      const events = (await readJournal()).events;
+      expect(
+        events
+          .filter(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === promptId,
+          )
+          .map((event) => event.payload['outcome']),
+      ).toEqual(['cancelled']);
+      expect(
+        events.some(
+          (event) =>
+            event.kind === 'message.committed' &&
+            event.payload['role'] === 'assistant',
+        ),
+      ).toBe(false);
+    } finally {
+      stderr.mockRestore();
+      await Promise.race([
+        headers(supertest(server).delete(`/session/${sessionId}`)),
+        new Promise((resolve) => setTimeout(resolve, 5_000)),
+      ]);
+    }
+  }, 60_000);
+
+  it('does not fire the finished-before-commit hold for a non-matching session', async () => {
+    const key = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: SESSION_ID,
+    };
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session')).send({
+      sessionId: SESSION_ID,
+      sessionScope: 'thread',
+      managedSessionStore: store(),
+    });
+    expect(created.status).toBe(200);
+    const clientId = created.body.clientId as string;
+    const prompt = [{ type: 'text', text: 'no hold' }];
+    const promptId = randomUUID();
+    const digest = `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`;
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({ prompt, promptId, payloadDigest: digest })
+      .expect(202);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: SETTLE_TIMEOUT_MS },
+    );
+    const events = (
+      await LocalJsonlManagedSessionJournalStore.read({
+        transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      })
+    ).events;
+    expect(
+      events
+        .filter(
+          (event) =>
+            event.kind === 'turn.settled' &&
+            event.payload['turnId'] === promptId,
+        )
+        .map((event) => event.payload['outcome']),
+    ).toEqual(['completed']);
+    expect(
+      events.some(
+        (event) =>
+          event.kind === 'message.committed' &&
+          event.payload['role'] === 'assistant',
+      ),
+    ).toBe(true);
+    await headers(supertest(server).delete(`/session/${SESSION_ID}`));
+  }, 60_000);
 
   it('refuses legacy teardown during compression even without a client id', async () => {
     const server = await app();
