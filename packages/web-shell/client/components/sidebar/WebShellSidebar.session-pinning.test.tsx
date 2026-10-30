@@ -891,6 +891,11 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
     colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
   };
 
+  // Tests here swap the group catalog; restore it even when one fails.
+  afterEach(() => {
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
   it('keeps pinned sessions inside their group section instead of rendering the group empty', async () => {
     workspaceActions.listSessionGroups.mockResolvedValue({
       groups: [
@@ -1050,6 +1055,57 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
       container.querySelectorAll('input[aria-label="Rename: Pinned member"]')
         .length,
     ).toBe(1);
+
+    workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
+  });
+
+  it('mounts a single rename editor on F2 when the group copy of a pinned member lacks isPinned', async () => {
+    mockDesignGroupCatalog();
+    const pinnedCopy = makeSession('pinned-member', {
+      displayName: 'Pinned member',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    // The all-sessions page has not caught up with the pin yet, so its copy
+    // of the same session carries no `isPinned` and stays in its group.
+    const {
+      isPinned: _isPinned,
+      pinnedAt: _pinnedAt,
+      ...staleCopy
+    } = pinnedCopy;
+    active.sessions = [staleCopy];
+    active.data = active.sessions;
+    pinned.sessions = [pinnedCopy];
+    pinned.data = pinned.sessions;
+    connection.sessionId = 'pinned-member';
+
+    renderSidebar();
+    await flushSidebar();
+
+    expect(sessionTitleCount('Pinned member')).toBe(2);
+    const group = container.querySelector<HTMLElement>(
+      'section[aria-label="Design"]',
+    );
+    expect(group).not.toBeNull();
+    const groupRow = Array.from(
+      group!.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('Pinned member'));
+    expect(groupRow).not.toBeUndefined();
+    await act(async () => {
+      groupRow!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'F2', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    await flushSidebar();
+
+    const inputs = container.querySelectorAll(
+      'input[aria-label="Rename: Pinned member"]',
+    );
+    expect(inputs.length).toBe(1);
+    // The Pinned section copy is the one that hosts the editor.
+    expect(inputs[0]!.closest('[class*="pinnedSessionList"]')).not.toBeNull();
 
     workspaceActions.listSessionGroups.mockResolvedValue(defaultGroupsCatalog);
   });
@@ -1444,6 +1500,136 @@ describe('WebShellSidebar pinned group members (issue #10391)', () => {
       container.querySelectorAll('input[aria-label="Rename: Secondary member"]')
         .length,
     ).toBe(1);
+  });
+
+  it('mounts a single rename editor on F2 when the workspace copy of a pinned member lacks isPinned', async () => {
+    // The secondary workspace's own page has not caught up with the pin, so
+    // its copy of the member carries no `isPinned` while the sidebar's
+    // pinned page does. Both copies render; only the Pinned row may host
+    // the editor.
+    connection.capabilities = {
+      ...organizationCapabilities,
+      // Qualified-rest rename for non-current secondary sessions.
+      features: [
+        ...organizationCapabilities.features,
+        'workspace_session_metadata',
+        'workspace_qualified_rest_core',
+      ],
+    };
+    workspace.capabilities = {
+      ...organizationCapabilities,
+      workspaces: [
+        { id: 'primary', cwd: '/tmp/project', primary: true, trusted: true },
+        {
+          id: 'secondary',
+          cwd: '/tmp/other',
+          primary: false,
+          trusted: true,
+        },
+      ],
+    };
+    const designGroupCatalog = {
+      groups: [
+        {
+          id: 'design-group',
+          name: 'Design',
+          color: 'blue',
+          order: 0,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    };
+    workspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    const member = makeSession('secondary-member', {
+      displayName: 'Secondary member',
+      workspaceCwd: '/tmp/other',
+      groupId: 'design-group',
+      isPinned: true,
+      pinnedAt: '2026-01-02T00:00:00.000Z',
+    });
+    const { isPinned: _isPinned, pinnedAt: _pinnedAt, ...staleMember } = member;
+    // The sidebar's secondary pinned page carries the grouped member.
+    useSessionCatalogQueries.mockImplementation(
+      (
+        _client: unknown,
+        queries: Array<{
+          workspaceCwd: string;
+          options?: Record<string, unknown>;
+        }>,
+      ) =>
+        queries.map((query) => {
+          if (
+            query.workspaceCwd === '/tmp/other' &&
+            query.options?.group === 'pinned'
+          ) {
+            return {
+              page: { sessions: [member] },
+              loading: false,
+              stale: false,
+            };
+          }
+          return {};
+        }),
+    );
+    // The secondary workspace section loads its own session and group pages.
+    workspace.client.workspaceByCwd.mockImplementation((cwd: string) => {
+      if (cwd === '/tmp/other') {
+        return {
+          listWorkspaceSessions: vi.fn().mockResolvedValue([
+            staleMember,
+            makeSession('secondary-plain', {
+              displayName: 'Secondary plain',
+              workspaceCwd: '/tmp/other',
+            }),
+          ]),
+          listSessionGroups: vi.fn().mockResolvedValue(designGroupCatalog),
+        };
+      }
+      return {
+        listWorkspaceSessions: vi.fn().mockResolvedValue([]),
+        listSessionGroups: vi.fn().mockResolvedValue({
+          groups: [],
+          colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+        }),
+      };
+    });
+    pinned.sessions = [];
+    pinned.data = pinned.sessions;
+    active.sessions = [];
+    active.data = active.sessions;
+    connection.sessionId = 'secondary-member';
+
+    renderSidebar();
+    await flushSidebar();
+    await flushSidebar();
+
+    expect(sessionTitleCount('Secondary member')).toBe(2);
+    const group = Array.from(
+      container.querySelectorAll<HTMLElement>('section[aria-label="Design"]'),
+    ).find((section) => section.textContent?.includes('Secondary member'));
+    expect(group).not.toBeUndefined();
+    const groupRow = Array.from(
+      group!.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((element) => element.textContent?.includes('Secondary member'));
+    expect(groupRow).not.toBeUndefined();
+    await act(async () => {
+      groupRow!.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'F2', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    await flushSidebar();
+
+    const inputs = container.querySelectorAll(
+      'input[aria-label="Rename: Secondary member"]',
+    );
+    expect(inputs.length).toBe(1);
+    expect(inputs[0]!.closest('[class*="pinnedSessionList"]')).not.toBeNull();
   });
 
   it('mounts the rename form on the workspace row while the pinned page is absent', async () => {

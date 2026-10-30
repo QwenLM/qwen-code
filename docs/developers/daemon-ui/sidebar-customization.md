@@ -232,7 +232,7 @@ the header row with its action buttons and the session search bar are removed.
 ```ts
 type WebShellSidebarSessionActionItem =
   | 'details' // 📝 Details (dropdown sub-menu)
-  | 'rename' // ✏️ Rename (dropdown menu)
+  | 'rename' // ✏️ Rename (inline button by default; dropdown when excluded from inlineItems)
   | 'group' // 📁 Group/Move to folder (dropdown menu)
   | 'export' // 📤 Export chat history (dropdown menu)
   | 'delete' // 🗑 Delete session (dropdown menu)
@@ -248,23 +248,25 @@ type WebShellSidebarSessionInlineActionItem =
 
 interface WebShellSidebarSessionActionsOptions {
   items?: readonly WebShellSidebarSessionActionItem[]; // which actions to show (default: all)
-  inlineItems?: readonly WebShellSidebarSessionInlineActionItem[]; // which items appear as inline buttons (default: ['pin'])
+  inlineItems?: readonly WebShellSidebarSessionInlineActionItem[]; // which items appear as inline buttons (default: ['pin', 'rename'])
 }
 ```
 
 Controls which action buttons appear on session rows:
 
 - **`items`**: Master control for all actions (both inline and dropdown). If an item is not in `items`, it's hidden everywhere.
-- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover). Defaults to `['pin']`. Only items with working inline handlers can be used: `'pin'`, `'rename'`, `'export'`, `'delete'`. `'details'`, `'group'`, and `'archive'` are dropdown-only.
+- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover). Defaults to `['pin', 'rename']`. Only items with working inline handlers can be used: `'pin'`, `'rename'`, `'export'`, `'delete'`. `'details'`, `'group'`, and `'archive'` are dropdown-only.
+
+When `rename` is available for a session, its row can take keyboard focus (active sessions; archived rows are not focusable), and the row is not busy with another action, pressing **F2** on the focused row also starts a rename, regardless of `inlineItems`. F2 is ignored while another row action is in flight, matching the disabled inline Rename button, and F2 with Ctrl, Alt or Meta held is left for the host. Workspace rows open the inline rename editor; standalone (No workspace) rows open their rename dialog instead. Rows in the Recent sessions list have no rename affordance, so F2 does nothing there. A pinned session can render twice (Pinned section and its group or workspace list); while the Pinned section is expanded it alone hosts the editor, so F2 on the other copy opens the editor on the Pinned row and focus follows it.
 
 **Visibility priority**: Both `items` AND the item's built-in condition AND `inlineItems` must all pass for the inline button to show. For example, `delete` as inline requires `items` to include `'delete'` AND `inlineItems` to include `'delete'`.
 
-| Value                                   | Effect                            |
-| --------------------------------------- | --------------------------------- |
-| `undefined` (default)                   | All actions shown, pin as inline  |
-| `{ inlineItems: ['pin', 'delete'] }`    | Pin + delete as inline buttons    |
-| `{ inlineItems: [] }`                   | No inline buttons at all          |
-| `{ inlineItems: ['rename', 'export'] }` | Rename + export as inline buttons |
+| Value                                   | Effect                                      |
+| --------------------------------------- | ------------------------------------------- |
+| `undefined` (default)                   | All actions shown, pin and rename as inline |
+| `{ inlineItems: ['pin', 'delete'] }`    | Pin + delete as inline buttons              |
+| `{ inlineItems: [] }`                   | No inline buttons at all                    |
+| `{ inlineItems: ['rename', 'export'] }` | Rename + export as inline buttons           |
 
 The dropdown trigger (⋮) is automatically hidden when no dropdown items
 are enabled. Inline buttons are only shown when both

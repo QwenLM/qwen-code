@@ -621,14 +621,15 @@ test('shows Qwen Live sessions in Tasks and excludes them from Channels @smoke',
   await expect(
     liveRow.getByRole('button', { name: 'Delete', exact: true }),
   ).toHaveCount(0);
-  await liveRow.getByRole('button', { name: 'More actions' }).click();
+  // Rename moved inline by default and it was the only dropdown item a
+  // qwen-live row had (archive/delete are excluded by source type, pin is
+  // inline), so the ⋮ trigger disappears entirely.
   await expect(
-    page.getByRole('menuitem', { name: 'Delete', exact: true }),
-  ).toHaveCount(0);
+    liveRow.getByRole('button', { name: 'Rename', exact: true }),
+  ).toBeVisible();
   await expect(
-    page.getByRole('menuitem', { name: 'Archive', exact: true }),
+    liveRow.getByRole('button', { name: 'More actions' }),
   ).toHaveCount(0);
-  await page.keyboard.press('Escape');
 
   const ordinaryRow = page
     .locator('[data-web-shell-session-title]', {

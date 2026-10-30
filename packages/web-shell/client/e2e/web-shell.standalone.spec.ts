@@ -377,7 +377,15 @@ test('standalone Recents keeps lifecycle actions on exact standalone routes @smo
     0,
   );
 
-  await openSessionAction(page, 'Other conversation', 'Rename');
+  // Rename is inline by default: the pencil opens the rename dialog that
+  // StandaloneRecents hosts, without going through the ⋮ dropdown.
+  const otherRow = page
+    .locator('[data-web-shell-session-title]', {
+      hasText: 'Other conversation',
+    })
+    .locator('..');
+  await otherRow.hover();
+  await otherRow.getByRole('button', { name: 'Rename', exact: true }).click();
   const renameDialog = page.getByRole('dialog', { name: 'Rename' });
   await renameDialog.getByRole('textbox').fill('Renamed conversation');
   await renameDialog.getByRole('button', { name: 'Save' }).click();

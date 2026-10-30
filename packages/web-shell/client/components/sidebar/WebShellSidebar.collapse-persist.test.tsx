@@ -1977,29 +1977,18 @@ describe('WebShellSidebar collapsed session group persistence', () => {
       '[data-web-shell-collapsed-session-switcher]',
     );
     expect(switcher).not.toBeNull();
-    const moreActions = Array.from(
+    const renameButton = Array.from(
       switcher!.querySelectorAll<HTMLButtonElement>(
-        'button[aria-label="More actions"]',
+        'button[aria-label="Rename"]',
       ),
     ).find((button) =>
       button
         .closest<HTMLElement>('[role="button"]')
         ?.textContent?.includes('API review'),
     );
-    expect(moreActions).not.toBeNull();
+    expect(renameButton).toBeDefined();
     act(() => {
-      moreActions!.dispatchEvent(
-        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
-      );
-    });
-    await flushSidebar();
-
-    const renameItem = Array.from(
-      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
-    ).find((item) => item.textContent?.includes('Rename'));
-    expect(renameItem).toBeDefined();
-    act(() => {
-      click(renameItem!, true);
+      click(renameButton!, true);
     });
     await flushSidebar();
 
@@ -2722,6 +2711,56 @@ describe('Recent sessions shared rows', () => {
     );
     expect(loadSession).not.toHaveBeenCalled();
     expect(recent.textContent).not.toContain('API review');
+  });
+
+  it('opens no rename editor or dialog when F2 is pressed on a Recent row', async () => {
+    enableRecentSessions();
+    // Make the session renamable so only the Recent-row guard keeps F2 out.
+    const renamableCapabilities = {
+      ...connection.capabilities!,
+      features: [
+        ...connection.capabilities!.features,
+        'workspace_session_metadata',
+      ],
+    };
+    connection.capabilities = renamableCapabilities;
+    workspace.capabilities = renamableCapabilities;
+    workspace.client.listWorkspaceSessionsPage.mockResolvedValue({
+      sessions: [active.sessions[0]],
+    });
+    renderSidebar();
+    await flushSidebar();
+    const recent = container.querySelector('[data-testid="recent-sessions"]')!;
+    const row = recent.querySelector<HTMLElement>(
+      `div.${sidebarStyles.sessionRow}`,
+    )!;
+    expect(row.textContent).toContain('API review');
+    // The Project copy of the same session does offer rename.
+    const projectRow = [
+      ...container.querySelectorAll<HTMLElement>(
+        `div.${sidebarStyles.sessionRow}`,
+      ),
+    ].find(
+      (entry) =>
+        !recent.contains(entry) && entry.textContent?.includes('API review'),
+    )!;
+    expect(
+      projectRow.querySelector('button[aria-label="Rename"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      row.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'F2', bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+    await flushSidebar();
+
+    // Recent rows carry no rename affordance, so F2 must not start a rename
+    // on any copy of the session (the Project row shares its identity).
+    expect(container.querySelector('input[aria-label^="Rename"]')).toBeNull();
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(loadSession).not.toHaveBeenCalled();
   });
 
   it('hides a stale recent row when the pinned catalog already contains it', async () => {
