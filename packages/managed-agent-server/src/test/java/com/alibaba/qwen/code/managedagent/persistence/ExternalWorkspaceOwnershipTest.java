@@ -19,6 +19,8 @@ import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisi
 import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.jdbc.datasource.DataSourceTransactionManager;
 import org.springframework.jdbc.datasource.DriverManagerDataSource;
 
@@ -140,6 +142,91 @@ class ExternalWorkspaceOwnershipTest {
                 .isInstanceOfSatisfying(RuntimeBrokerException.class,
                         error -> assertThat(error.getCode()).isEqualTo("workspace_close_identity_unverified"));
         assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
+    }
+
+    @Test
+    void lostStopEligibilityDoesNotReopenAcquisitionOrBypassActiveExecution() {
+        ownership.claim(context, session, binding, bindings);
+        var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        binding = bindings.claimOperation(binding.getBindingId(), "drainer", Duration.ofMinutes(1));
+        binding = bindings.compareAndSet(binding,
+                binding.withState(RuntimeBindingRecord.State.LOST, binding.getLease(), Instant.now()));
+        assertThat(binding.isDrainRequested()).isFalse();
+        assertThatThrownBy(() -> ownership.claim(context, session, binding, bindings))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_close_identity_unverified"));
+        assertThat(ownership.canStopExternalDrained(binding, bindings)).isFalse();
+        binding = bindings.compareAndSet(binding, binding.withDrainRequested(true, Instant.now()));
+        assertThat(binding.getDrainReceipt()).isNull();
+        assertThat(ownership.canStopExternalDrained(binding, bindings)).isTrue();
+        executions.findOrCreate(com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord.prepared(
+                "execution", "tenant", binding.getBindingId(), binding.getGeneration(), "harness",
+                session.getRuntimeSessionId(), "turn", "call", "digest", Map.of("sessionId", session.getRuntimeSessionId(),
+                        "promptId", "turn", "callId", "call", "argsDigest", "digest")));
+        assertThat(ownership.canStopExternalDrained(binding, bindings)).isFalse();
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void lostRetiredReleaseRequiresACommittedReceiptAtBothEntrypoints(boolean throughBroker) {
+        prepareLostRetiredHolder();
+        var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        java.util.function.Consumer<RuntimeBindingRecord> release = claim -> {
+            if (throughBroker) {
+                session = bindings.completeStoppedSessionRelease(sessions, executions, session, claim);
+            } else {
+                ownership.releaseStopped(context, session, claim, bindings);
+            }
+        };
+        assertThatThrownBy(() -> release.accept(binding))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("runtime_reconciliation_required"));
+        var receipt = new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
+                binding.getProvisionSeed().getProvisionRequestId(), binding.getResourceHandle(), Instant.now());
+        assertThatThrownBy(() -> release.accept(binding.withDrainReceipt(receipt)))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("runtime_reconciliation_required"));
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
+        binding = bindings.compareAndSet(binding, binding.withDrainReceipt(receipt));
+        release.accept(binding);
+        assertThat(jdbc.queryForMap("SELECT holder_key, binding_id, runtime_generation, runtime_session_id FROM ma_storage_owner").values())
+                .containsOnlyNulls();
+        assertThat(bindings.findById(binding.getBindingId()).getDrainReceipt()).isEqualTo(receipt);
+        if (throughBroker) {
+            assertThat(session.getState()).isEqualTo(RuntimeSessionRecord.State.RELEASED);
+        }
+    }
+
+    @Test
+    void lostRetiredReleaseRefusesReplacedAndExpiredOperationClaims() {
+        prepareLostRetiredHolder();
+        var receipt = new RuntimeDrainReceipt(binding.getBindingId(), binding.getGeneration(),
+                binding.getProvisionSeed().getProvisionRequestId(), binding.getResourceHandle(), Instant.now());
+        binding = bindings.compareAndSet(binding, binding.withDrainReceipt(receipt));
+        var owner = jdbc.queryForMap("SELECT * FROM ma_storage_owner");
+        var stale = binding;
+        bindings.releaseOperation(binding.getBindingId(), binding.getOperationOwner(), binding.getOperationGeneration());
+        binding = bindings.claimOperation(binding.getBindingId(), "next-drainer", Duration.ofMinutes(1));
+        assertThatThrownBy(() -> ownership.releaseStopped(context, session, stale, bindings))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_close_identity_unverified"));
+        jdbc.update("UPDATE ma_runtime_binding SET operation_lease_until = ?", java.sql.Timestamp.from(Instant.now().minusSeconds(1)));
+        assertThatThrownBy(() -> ownership.releaseStopped(context, session, binding, bindings))
+                .isInstanceOfSatisfying(RuntimeBrokerException.class,
+                        error -> assertThat(error.getCode()).isEqualTo("workspace_close_identity_unverified"));
+        assertThat(jdbc.queryForMap("SELECT * FROM ma_storage_owner")).isEqualTo(owner);
+    }
+
+    private void prepareLostRetiredHolder() {
+        ownership.claim(context, session, binding, bindings);
+        ownership.release(context, session, binding, bindings);
+        binding = bindings.claimOperation(binding.getBindingId(), "drainer", Duration.ofMinutes(1));
+        binding = bindings.compareAndSet(binding, binding.withDrainRequested(true, Instant.now())
+                .withState(RuntimeBindingRecord.State.DRAINING, binding.getLease(), Instant.now()));
+        session = bindings.beginSessionRelease(sessions, executions, session);
+        binding = bindings.compareAndSet(binding,
+                binding.withState(RuntimeBindingRecord.State.LOST, binding.getLease(), Instant.now()));
     }
 
     @Test

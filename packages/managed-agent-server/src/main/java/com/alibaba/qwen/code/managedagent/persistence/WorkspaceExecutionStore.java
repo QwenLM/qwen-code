@@ -795,7 +795,8 @@ public class WorkspaceExecutionStore {
 
     public boolean canStopExternalDrained(RuntimeBindingRecord saved, RuntimeBindingRepository repository) {
         if (!ExternalWorkspaceProvisioner.isWorkspaceRequest(saved.getRequest())
-                || saved.getState() != RuntimeBindingRecord.State.DRAINING || !saved.isDrainRequested()
+                || saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST
+                || !saved.isDrainRequested()
                 || saved.getOperationOwner() == null) {
             return false;
         }

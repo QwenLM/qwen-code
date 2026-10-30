@@ -127,7 +127,9 @@ public final class JdbcExternalWorkspaceOwnership {
                 || current.getOperationOwner() != null && !current.hasLiveOperationAt(JdbcRepositorySupport.databaseNowPrecise(connection))
                 || acquiring && (current.getState() != RuntimeBindingRecord.State.READY || current.isDrainRequested())
                 || !acquiring && current.getState() != RuntimeBindingRecord.State.READY
-                        && current.getState() != RuntimeBindingRecord.State.DRAINING) {
+                        && current.getState() != RuntimeBindingRecord.State.DRAINING
+                        && (current.getState() != RuntimeBindingRecord.State.LOST
+                                || !current.isDrainRequested() || current.getOperationOwner() == null)) {
             throw unavailable();
         }
         return current;

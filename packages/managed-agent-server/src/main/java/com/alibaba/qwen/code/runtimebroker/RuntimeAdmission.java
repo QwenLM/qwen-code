@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner;
 import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.provisioning.SshRuntimeProvisioner;
 
@@ -23,6 +24,7 @@ final class RuntimeAdmission {
                 || !binding.getRequest().getScope().equals(session.getSession().getScope())
                 || binding.getState() != RuntimeBindingRecord.State.READY
                         && binding.getState() != RuntimeBindingRecord.State.DRAINING
+                        && !receiptBackedExternalLoss(binding)
                         && (binding.getRequest().isManagedContext() || !binding.hasStoppedWriters())) {
             throw new RuntimeBrokerException(503, "runtime_reconciliation_required",
                     "Runtime release requires recovery of the original generation", true);
@@ -48,16 +50,17 @@ final class RuntimeAdmission {
         if (!binding.sameIdentity(claim) || !binding.getRequest().isManagedContext()
                 || !LocalProcessRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
                         && !SshRuntimeProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
-                        && !com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())
+                        && !ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())
                 || !(HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
                         || WorkspaceExecutionProfile.admitsIsolationClass(binding.getRequest().getScope().getIsolationClass())
                                 && binding.getRequest().getIsolationKey().equals(session.getSession().getHarnessSessionId()))
                 || session.getState() != RuntimeSessionRecord.State.RELEASING
-                || binding.getState() != RuntimeBindingRecord.State.DRAINING || !binding.isDrainRequested()
+                || binding.getState() != RuntimeBindingRecord.State.DRAINING && !receiptBackedExternalLoss(binding)
+                || !binding.isDrainRequested()
                 || binding.getDrainReceipt() == null || !binding.getDrainReceipt().matches(binding)
                 || !binding.getDrainReceipt().equals(claim.getDrainReceipt())
                 || !java.util.Objects.equals(binding.getResourceHandle(), claim.getResourceHandle())
-                || com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())
+                || ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())
                         && (binding.getResourceHandle() == null || binding.getProvisionSeed() == null
                                 || !binding.getProvisionSeed().equals(claim.getProvisionSeed())
                                 || !binding.getProvisionSeed().matches(binding.getLease()))
@@ -74,5 +77,11 @@ final class RuntimeAdmission {
             throw new RuntimeBrokerException(503, "runtime_close_claim_pending",
                     "Original stopped Session release was fenced", true);
         }
+    }
+
+    private static boolean receiptBackedExternalLoss(RuntimeBindingRecord binding) {
+        return ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())
+                && binding.getState() == RuntimeBindingRecord.State.LOST && binding.isDrainRequested()
+                && binding.getDrainReceipt() != null && binding.getDrainReceipt().matches(binding);
     }
 }
