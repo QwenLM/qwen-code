@@ -6298,17 +6298,13 @@ async function runQwenServeImpl(
         // that no other registry identity depends on it.
         let aliasesKnown = catalogEnumerated;
         const catalogSkills = [...(skills ?? [])];
-        if (
-          skillIdentities.some(
-            (identity) => identity.resolved && identity.authoredName,
-          )
-        ) {
+        if (skillIdentities.some((identity) => identity.resolved)) {
           for (const runtime of workspaceRegistryForPersistence.current?.listManaged() ??
             []) {
             if (runtime.workspaceCwd === workspace) continue;
             if (!runtime.trusted) {
               aliasesKnown = false;
-              break;
+              continue;
             }
             try {
               const status =
@@ -6319,18 +6315,16 @@ async function runQwenServeImpl(
                   },
                   { requireFresh: true },
                 );
+              catalogSkills.push(...status.skills);
               if (
                 !status.initialized ||
                 status.snapshot ||
                 status.errors?.length
               ) {
                 aliasesKnown = false;
-                break;
               }
-              catalogSkills.push(...status.skills);
             } catch {
               aliasesKnown = false;
-              break;
             }
           }
         }
@@ -6374,6 +6368,9 @@ async function runQwenServeImpl(
           const writtenName = (index: number) =>
             skillIdentities[index]!.registryName ??
             skillIdentities[index]!.name;
+          const isProvenUniqueSpelling = (name: string) =>
+            aliasesKnown &&
+            aliasOwners.get(name.trim().toLowerCase())?.size === 1;
           // Keep all identity spellings for block detection, but only exempt
           // aliases this write can safely remove from the User lists.
           const identityNames = (index: number): string[] => {
@@ -6404,13 +6401,15 @@ async function runQwenServeImpl(
           // cancels no longer forbids it, so refused names are rechecked
           // until the batch converges and the result does not depend on
           // request order.
-          const stillBlocked = (index: number) => {
+          const stillBlocked = (index: number, removesEntries = true) => {
             const block = skillToggleBlockForName(
               fresh,
               blockSkillIdentity(
                 skillIdentities[index]!,
                 writtenName(index),
-                identityNames(index),
+                removesEntries
+                  ? identityNames(index).filter(isProvenUniqueSpelling)
+                  : [],
               ),
               USER_SETTING_SCOPE,
             );
@@ -6446,10 +6445,37 @@ async function runQwenServeImpl(
                 };
                 continue;
               }
-              const block = enabled ? stillBlocked(index) : null;
+              // Default mode also removes a hard entry. Refuse that
+              // relaxation unless the exact spelling is proven unshared.
+              const relaxesSharedHardEntry =
+                mode === 'default' &&
+                !isProvenUniqueSpelling(skillName) &&
+                next.disabled.some(
+                  (name) =>
+                    name.trim().toLowerCase() ===
+                    skillName.trim().toLowerCase(),
+                );
+              // An existing grant may already cancel this default. Preserve
+              // its shared fallback instead of deleting it in a no-op enable.
+              const preservesDefault =
+                enabled &&
+                !isProvenUniqueSpelling(skillName) &&
+                next.defaultDisabled.some(
+                  (name) =>
+                    name.trim().toLowerCase() ===
+                    skillName.trim().toLowerCase(),
+                );
+              const block =
+                enabled || relaxesSharedHardEntry
+                  ? stillBlocked(index, !preservesDefault)
+                  : null;
               if (block) {
                 outcomes[index] = { skillName, changed: false, block };
                 refused.push(index);
+                continue;
+              }
+              if (preservesDefault) {
+                outcomes[index] = { skillName, changed: false };
                 continue;
               }
               const updated = updateSkillActivationLists(

@@ -318,7 +318,9 @@ export function buildHigherDisabled(
       if (def) {
         // A grant identical to the entry cancels it at resolve time — the
         // persisted qualified one, or any identical-spelling bare one.
-        const cancelled = spelling === written || enabledEntries.has(spelling);
+        const cancelled =
+          (spelling === written && writtenNames.has(spelling)) ||
+          enabledEntries.has(spelling);
         const removed =
           writtenNames.has(spelling) && targetDefaultDisabled.has(spelling);
         const higher = higherDefaultScopes.get(spelling);
