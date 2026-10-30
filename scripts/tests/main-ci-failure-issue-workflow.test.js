@@ -2232,7 +2232,7 @@ printf '%s\\n' '{"jobs":[]}'
       // The annotation read is per check-run id taken from the jobs payload's
       // own check_run_url, and the match is the same grep the PR scan uses.
       expect(infraScript).toContain(
-        'jq -r \'.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | index("Report the tier result")) | not) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv\'',
+        'jq -r \'.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | map(select(. == "Report the tier result" or . == "Require every macOS test group to pass")) | length) == 0) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv\'',
       );
       expect(infraScript).toContain(
         'gh api --paginate "repos/${REPO}/check-runs/${check_run_id}/annotations"',
@@ -2360,6 +2360,30 @@ printf '%s\\n' '{"jobs":[]}'
       );
       expect(out).toContain('infra_only=true');
     });
+
+    it.each([
+      ['No space left on device', 'true'],
+      ['AssertionError: expected the daemon to answer', 'false'],
+    ])(
+      'classifies the shard behind a failed macOS aggregate: %s',
+      (message, expected) => {
+        const out = classify(
+          [
+            failedJob(1001, 9001, [
+              { name: 'Run tests and generate reports', conclusion: 'failure' },
+            ]),
+            failedJob(1002, 9002, [
+              {
+                name: 'Require every macOS test group to pass',
+                conclusion: 'failure',
+              },
+            ]),
+          ],
+          { 9001: message, 9002: 'Process completed with exit code 1.' },
+        );
+        expect(out).toContain(`infra_only=${expected}`);
+      },
+    );
 
     it('keeps counting the reporter when its own runner died before any step', () => {
       // Filtering by the failing STEP name is what keeps this rerun: no step

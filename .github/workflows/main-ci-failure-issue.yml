@@ -372,14 +372,14 @@ jobs:
                 echo "Failed job ${job_id} carries no infrastructure annotation; the run gets an issue."
               fi
             done < <(
-              # The gate workflow's reporter job is always() and fails with
-              # only the tier-result error, which carries no infrastructure
-              # signature; excluding it by its failing step keeps a lane's
+              # The gate reporter and macOS aggregate mirror lane failures
+              # without an infrastructure signature of their own; excluding
+              # them by their failing step keeps a lane's
               # infra death classifiable. Filtering the step rather than the
               # job keeps the legitimate rerun: when the reporter's own
               # runner dies no step has failed, so the job still counts and
               # its GitHub-generated annotation still matches.
-              jq -r '.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | index("Report the tier result")) | not) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
+              jq -r '.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | map(select(. == "Report the tier result" or . == "Require every macOS test group to pass")) | length) == 0) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv' \
                 "${jobs_json}" 2>/dev/null
             )
             if [[ "${total}" -gt 0 && "${infra}" -eq "${total}" ]]; then
