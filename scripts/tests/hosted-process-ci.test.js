@@ -145,6 +145,18 @@ const failoverArms = [
     ],
   ],
   [
+    'Run takeover load reply-loss E2E',
+    'test:e2e:managed-harness-restart-approval-load-reply-lost',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'load-reply-lost',
+    ],
+  ],
+  [
     'Run committed terminal reply-loss E2E',
     'test:e2e:managed-harness-restart-approval-terminal-reply-lost',
     [
@@ -263,10 +275,11 @@ describe('Hosted real-process gates', () => {
 
   it.each([
     {
-      name: 'test_macos',
+      name: 'test_macos_shards',
       step: 'Hosted portable process smoke',
       after: /Install dependencies/i,
-      condition: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}",
+      condition:
+        "${{ needs.classify_pr.outputs.skip_ci != 'true' && matrix.group == 'scripts' }}",
       run: `npm run ${focused} -- -t 'portable startup'`,
       minutes: 5,
     },
@@ -296,14 +309,17 @@ describe('Hosted real-process gates', () => {
     },
   );
 
-  it('gates the Windows Hosted suite on a successful install', () => {
-    const steps = ci.jobs.test_windows.steps;
-    // An unknown step id reads as '' and silently disables the condition
-    // above, so the suite would never run again.
-    expect(steps.find((step) => step.name === 'Install dependencies').id).toBe(
-      'install',
-    );
-  });
+  it.each(['test_windows', 'test_macos_shards'])(
+    'gates the %s suite on a successful install',
+    (name) => {
+      // An unknown step id reads as '' and silently disables the condition
+      // above, so the suite would never run again.
+      expect(
+        ci.jobs[name].steps.find((step) => step.name === 'Install dependencies')
+          .id,
+      ).toBe('install');
+    },
+  );
 
   it('keeps Hosted MySQL separate from the non-Hosted MySQL slice and fails on missing tests', () => {
     const job = java.jobs['hosted-harness-mysql'];
@@ -613,8 +629,8 @@ describe('Hosted real-process gates', () => {
     // Step ceilings today (201 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
     ['hosted-harness-mysql', 291, 304],
-    // Twenty-three failover arms at 10 each.
-    ['hosted-failover-e2e', 230, 245],
+    // Twenty-four failover arms at 10 each.
+    ['hosted-failover-e2e', 240, 255],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling) => {

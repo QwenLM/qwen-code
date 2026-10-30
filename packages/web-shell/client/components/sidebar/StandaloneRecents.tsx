@@ -5,7 +5,12 @@ import {
   useState,
   type ReactNode,
 } from 'react';
-import { CircleDashedIcon, SquarePenIcon } from 'lucide-react';
+import {
+  ChevronDownIcon,
+  ChevronRightIcon,
+  CircleDashedIcon,
+  SquarePenIcon,
+} from 'lucide-react';
 import {
   STANDALONE_SESSIONS_CAPABILITY,
   type DaemonSessionArchiveState,
@@ -147,7 +152,7 @@ export function StandaloneRecents({
     readWorkspaceExpanded(expansionId),
   );
   const [showAll, setShowAll] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [loadError, setLoadError] = useState<{ cursor?: string }>();
   const [busySessionId, setBusySessionId] = useState<string>();
@@ -441,7 +446,6 @@ export function StandaloneRecents({
 
   if (!supported) return null;
   if (
-    archiveState === 'archived' &&
     !loadError &&
     !sessionError &&
     !loading &&
@@ -469,7 +473,11 @@ export function StandaloneRecents({
   return (
     <>
       <section
-        className={`${workspaceStyles.section} mb-3`}
+        className={
+          archiveState === 'active'
+            ? workspaceStyles.section
+            : `${workspaceStyles.section} mb-3`
+        }
         aria-label={
           archiveState === 'active'
             ? t('sidebar.noWorkspaceSessions')
@@ -477,10 +485,20 @@ export function StandaloneRecents({
         }
         data-testid={`standalone-${archiveState}-group`}
       >
-        <div className={`${workspaceStyles.headerRow} group`}>
+        <div
+          className={
+            archiveState === 'active'
+              ? sidebarStyles.projectsHeader
+              : `${workspaceStyles.headerRow} group`
+          }
+        >
           <button
             type="button"
-            className={workspaceStyles.header}
+            className={
+              archiveState === 'active'
+                ? sidebarStyles.projectsHeaderToggle
+                : workspaceStyles.header
+            }
             aria-expanded={expanded}
             disabled={Boolean(query)}
             onClick={(event) => {
@@ -490,22 +508,33 @@ export function StandaloneRecents({
               if (event.detail > 0) event.currentTarget.blur();
             }}
           >
-            <CircleDashedIcon
-              className={workspaceStyles.folderIcon}
-              size={14}
-              strokeWidth={1.4}
-              aria-hidden="true"
-            />
-            <span className={workspaceStyles.headerContent}>
-              <span className={workspaceStyles.name}>
-                {t('sidebar.noWorkspaceSessions')}
-              </span>
-            </span>
+            {archiveState === 'active' ? (
+              <>
+                <span>{t('sidebar.noWorkspaceSessions')}</span>
+                {expanded ? (
+                  <ChevronDownIcon size={14} aria-hidden="true" />
+                ) : (
+                  <ChevronRightIcon size={14} aria-hidden="true" />
+                )}
+              </>
+            ) : (
+              <>
+                <CircleDashedIcon
+                  className={workspaceStyles.folderIcon}
+                  size={14}
+                  strokeWidth={1.4}
+                  aria-hidden="true"
+                />
+                <span className={workspaceStyles.headerContent}>
+                  <span className={workspaceStyles.name}>
+                    {t('sidebar.noWorkspaceSessions')}
+                  </span>
+                </span>
+              </>
+            )}
           </button>
           {archiveState === 'active' && onNewSession && (
-            <div
-              className={`${sidebarStyles.workspaceHeaderActions} invisible group-hover:visible group-focus-within:visible`}
-            >
+            <div className={sidebarStyles.projectsHeaderActions}>
               <button
                 className={sidebarStyles.workspaceHeaderAction}
                 type="button"
@@ -549,7 +578,13 @@ export function StandaloneRecents({
           </div>
         )}
         {(expanded || Boolean(query)) && (
-          <div className="flex flex-col gap-0.5">
+          <div
+            className={
+              archiveState === 'active'
+                ? sidebarStyles.pinnedSessionList
+                : 'flex flex-col gap-0.5'
+            }
+          >
             {displayedSessions.map((session) => {
               const isCurrent = session.sessionId === currentSessionId;
               return renderSession(session, {
