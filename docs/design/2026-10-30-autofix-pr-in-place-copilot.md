@@ -214,7 +214,19 @@ into a worktree watch.
   co-driving win: the author's pushes arrive in the user's checkout), then
   align submodules with `keepWork = true` — a submodule holding work is
   left alone, and if that keeps the tree from being clean the answer is
-  `synced: false`.
+  `synced: false`. The merge runs with `--no-overwrite-ignore`: when the PR
+  head starts tracking a path the checkout holds as an ignored file, git
+  refuses and the answer is `synced: false` naming the collided paths —
+  the dirty gate ignores ignored files on purpose, and the merge must not
+  destroy them.
+- The PR head is fetched into the watch's private ref
+  (`refs/qwen-autofix/pr-<n>/head`, the same ref prepare uses) and read
+  from there — never from the shared `FETCH_HEAD`, which a concurrent
+  fetch in the user's checkout rewrites between the fetch and the read.
+- The checked-out branch is revalidated after the network round-trips and
+  immediately before the checkout is mutated: a user who switched branches
+  while the fetch waited gets the mid-round-switch refusal, and neither
+  branch advances.
 - Unpushed commits (the round's, the user's, or both) with the new head on
   top → `action: "merge"` as today; the merge runs in the foreground, in
   the user's checkout, attended.

@@ -99,7 +99,7 @@ When this session has the `autofix_pr` tool, run `"${QWEN_CODE_CLI:-qwen}" autof
    - `truncated` names lists that had more entries than one check reads: for `comments`, `reviews` or `reviewThreadComments` only the newest 100 were read, so a trusted comment older than those may be unanswered; for `checks` or `reviewThreads` only the first pages were, so a failure or a thread past them is not seen. Say so in the report (step 9); in a scheduled `wait` round, that is the one line reported.
    - A round restarts from step 1 at most once more in the same turn (step 6), and two `resync` answers in one turn stop the watch as above.
 3. **CI logs.** For each `ci_failed` event with a `runId`, run `"${QWEN_CODE_CLI:-qwen}" autofix-pr ci-log <n> <runId>` once per run id and note the log path per check. A failure without a `runId` (an external status) has only its `url`. A `ci_failed` event with `startupFailure: true` is a workflow GitHub could not start — usually an invalid workflow file — with no job, no log and nothing to re-run: it is `needs_human` (name the workflow and its `url`), and its `key` goes into `handledChecks`; it never goes into the brief's events — only under `## The round's own items`. If `ci-log` refuses because the run has no finished job that failed or timed out (it failed before any job started, or its failed jobs are still running), there is no log to fix from: leave its checks out of the brief's events, list them under `## The round's own items`, and treat them as items with outcome `rerun` in step 6. A job the log file marks `log unavailable` (it could not be read, or `ci-log` ran out of time) has no log either: leave its check out of the brief's events, list it under `## The round's own items`, and answer it `needs_human`, rather than spend the check's one re-run on a failure no one read.
-4. **Write the brief** with `write_file` to `.qwen/tmp/autofix-pr-<n>-brief.md` in the directory that holds the worktree (the parent of `worktreePath`), filling in this template; `<headSha>` is the `headSha` of this round's snapshot:
+4. **Write the brief** with `write_file` to `.qwen/tmp/autofix-pr-<n>-brief.md` in the directory that holds the worktree (the parent of `worktreePath`; with `--in-place`, `<worktreePath>/.qwen/tmp` inside the checkout — Section "In-place"), filling in this template; `<headSha>` is the `headSha` of this round's snapshot:
 
    ```markdown
    # Fix round for <owner>/<repo>#<n>
@@ -186,7 +186,7 @@ When this session has the `autofix_pr` tool, run `"${QWEN_CODE_CLI:-qwen}" autof
 
    With `--in-place`, replace the first paragraph of the brief with: "Your working directory is the user's own checkout <worktreePath> of the PR branch, at the PR head <headSha>. You share it with the user, who may edit alongside you: work only there, stage only the files you changed by name, and never touch the user's uncommitted edits." Also replace the last sentence of `## Verify, then commit` with: "If you cannot make the checks pass, say so (`verified: false`) and leave the checkout as it is: the round stops and asks the user what to keep — nothing is discarded." Every `## Never` item stays.
 
-   Read `remote` and `baseRefName` from the state file `.qwen/tmp/autofix-pr-<n>-state.json` beside the worktree.
+   Read `remote` and `baseRefName` from the state file `.qwen/tmp/autofix-pr-<n>-state.json` beside the worktree (with `--in-place`: `<worktreePath>/.qwen/tmp`).
 
    If nothing is left for the fix agent — every item is already `needs_human` or `rerun`, as a workflow that could not start is — write no brief and make no `agent` call: go on with step 6's re-runs, then step 7.
 
@@ -215,7 +215,7 @@ When this session has the `autofix_pr` tool, run `"${QWEN_CODE_CLI:-qwen}" autof
    - If `verified` is false, nothing is pushed: the items it attempted are `needs_human` ("my fix did not pass verification: …").
    - If `commits` is empty, nothing is pushed: an item it answered `fixed` is `needs_human` ("my fix left no commit"), as no reply may say "Fixed in" a commit that is not on the PR.
    - Whenever the round ends without pushing what the worktree holds — not verified, a refused push, a merge that did not push — run `"${QWEN_CODE_CLI:-qwen}" autofix-pr sync <n> --discard`, so the next round does not build on (or push) work already answered as `needs_human`. If it answers `synced: false`, the worktree cannot be cleaned: Section "Stop" with its `reason`.
-7. **Reply and record.** Write the plan with `write_file` to `.qwen/tmp/autofix-pr-<n>-plan.json` beside the worktree, then run `"${QWEN_CODE_CLI:-qwen}" autofix-pr reply <n> <plan path>`, adding `--no-post` with `--no-reply`. The plan:
+7. **Reply and record.** Write the plan with `write_file` to `.qwen/tmp/autofix-pr-<n>-plan.json` beside the worktree (with `--in-place`: `<worktreePath>/.qwen/tmp`), then run `"${QWEN_CODE_CLI:-qwen}" autofix-pr reply <n> <plan path>`, adding `--no-post` with `--no-reply`. The plan:
 
    ```json
    {
@@ -261,6 +261,7 @@ On "Start" run one round (Section "Round") with no `--task`, then the round's cl
 - `sync` answers `synced: false` for a dirty or diverged checkout: report its reason as a question to the user and end the round; the next step is theirs.
 - The fix agent runs in the foreground only, `working_dir` = the checkout (`worktreePath` of `prepare`'s report); the brief's first paragraph is the in-place variant (Round step 4). No background fix, no `unattended`.
 - The round's helpers take no `--task`.
+- Every artifact path — the brief, the state file the brief reads, and the reply plan — is `<worktreePath>/.qwen/tmp/autofix-pr-<n>-…`, inside the checkout. The inherited "beside the worktree" / parent-of-the-worktree wording does not apply: `worktreePath` is the checkout itself, and the tool accepts an in-place reply plan only in its `.qwen/tmp`.
 - At the round's end run `cleanup <n>` (as `--once` does): it removes only the watch's files — the checkout and the branch stay. Report what was pushed and what needs the user.
 
 **Status and stop.** `status` lists an in-place watch with `inPlace: true`; its `worktreeWork` is what the **user's checkout** holds — report it as the user's own work, never as a round's leftover to discard. `stop` of an in-place watch runs `cleanup`, which keeps the checkout and the branch whatever they hold; there is no task to delete. An in-place watch has no task, so `resume` never meets one: a leftover state is `cleanup`'d, and the next start prepares fresh.

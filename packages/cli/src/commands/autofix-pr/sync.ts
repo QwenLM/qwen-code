@@ -118,7 +118,11 @@ function syncLocked(
   const known = state.lastKnownHeadSha;
   // The state with the PR's base as GitHub names it now.
   let current = state;
-  // FETCH_HEAD is per worktree, so this leaves the user's checkout alone.
+  // FETCH_HEAD is per worktree, so in the worktree mode this leaves the
+  // user's checkout alone. An in-place watch IS the user's checkout, where
+  // a concurrent fetch (an IDE's autofetch, another terminal) rewrites
+  // FETCH_HEAD between the fetch and the read: fetch and read the watch's
+  // private ref instead, as prepare does.
   const fetchPrHead = (): string => {
     const live = liveDestination(state, prNumber);
     if (live.state !== 'OPEN') {
@@ -136,9 +140,16 @@ function syncLocked(
       '--quiet',
       '--no-recurse-submodules',
       state.pushTarget,
-      `refs/heads/${state.headRefName}`,
+      inPlace
+        ? `+refs/heads/${state.headRefName}:${paths.headRef}`
+        : `refs/heads/${state.headRefName}`,
     ]);
-    return git('-C', worktree, 'rev-parse', 'FETCH_HEAD^{commit}');
+    return git(
+      '-C',
+      worktree,
+      'rev-parse',
+      inPlace ? `${paths.headRef}^{commit}` : 'FETCH_HEAD^{commit}',
+    );
   };
   let prHead: string;
   if (discard) {
@@ -152,6 +163,18 @@ function syncLocked(
     }
   } else {
     prHead = fetchPrHead();
+  }
+  // The branch check in requireWorktree ran before the network round-trips;
+  // the user may have switched branches while they waited. Revalidate
+  // immediately before reading HEAD and moving the checkout — advancing the
+  // branch the user switched to is exactly the mid-round switch refusal.
+  if (inPlace) {
+    const nowBranch = gitOpt('-C', worktree, 'symbolic-ref', '-q', 'HEAD');
+    if (nowBranch !== `refs/heads/${state.branch}`) {
+      throw new Error(
+        `${worktree} has ${nowBranch ? `branch ${nowBranch.replace(/^refs\/heads\//, '')}` : 'a detached HEAD'} checked out, not ${state.branch}; switch it back before pushing or syncing.`,
+      );
+    }
   }
   const head = git('-C', worktree, 'rev-parse', 'HEAD');
   const moved = prHead !== known;
@@ -261,16 +284,59 @@ function syncLocked(
         `${worktree} has uncommitted changes; commit or discard them before moving it to the new PR head.`,
       );
     }
-    git(
-      '-c',
-      'submodule.recurse=false',
-      '-C',
-      worktree,
-      'merge',
-      '--ff-only',
-      '--quiet',
-      prHead,
-    );
+    if (inPlace) {
+      // The dirty gate ignores ignored files on purpose; the merge must not
+      // overwrite them when the PR head starts tracking the same path.
+      // --no-overwrite-ignore refuses instead, and the collision is the
+      // user's to resolve — an in-place watch never destroys their files.
+      try {
+        git(
+          '-c',
+          'submodule.recurse=false',
+          '-C',
+          worktree,
+          'merge',
+          '--ff-only',
+          '--quiet',
+          '--no-overwrite-ignore',
+          prHead,
+        );
+      } catch (err) {
+        const stderr = String((err as { stderr?: unknown }).stderr ?? '');
+        const lines = stderr.split('\n');
+        const header = lines.findIndex((line) =>
+          line.includes('would be overwritten by merge'),
+        );
+        const collided: string[] = [];
+        if (header !== -1) {
+          for (const line of lines.slice(header + 1)) {
+            const trimmed = line.trim();
+            if (trimmed === '' || trimmed.startsWith('Please')) break;
+            collided.push(trimmed);
+          }
+        }
+        return {
+          synced: false,
+          headSha: prHead,
+          moved,
+          reason:
+            collided.length > 0
+              ? `the PR head starts tracking ${collided.join(', ')}, which ${worktree} holds as ignored file(s); move aside or unignore them, then sync again — an in-place watch never overwrites your files`
+              : `the fast-forward of ${worktree} to ${prHead.slice(0, 12)} failed: ${stderr.trim().split('\n').slice(-3).join(' ') || (err as Error).message}`,
+        };
+      }
+    } else {
+      git(
+        '-c',
+        'submodule.recurse=false',
+        '-C',
+        worktree,
+        'merge',
+        '--ff-only',
+        '--quiet',
+        prHead,
+      );
+    }
     // In the user's checkout a submodule holding work is left alone.
     alignSubmodules(worktree, inPlace);
   }

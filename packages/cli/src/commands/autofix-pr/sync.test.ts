@@ -40,6 +40,9 @@ const mocks = vi.hoisted(() => ({
     headRepository: { name: 'r' },
     headRepositoryOwner: { login: 'o' },
   } as Record<string, unknown>,
+  // Runs right after a real networkGit call: a concurrent fetch or branch
+  // switch in the user's checkout, for the in-place race regressions.
+  afterFetch: null as (() => void) | null,
 }));
 vi.mock('../review/lib/gh.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../review/lib/gh.js')>()),
@@ -55,6 +58,17 @@ vi.mock('../review/lib/remote-match.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../review/lib/remote-match.js')>()),
   matchRemotes: () => ({ matched: ['origin'] }),
 }));
+vi.mock('./worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./worktree.js')>();
+  return {
+    ...actual,
+    networkGit: (args: string[]) => {
+      const out = actual.networkGit(args);
+      mocks.afterFetch?.();
+      return out;
+    },
+  };
+});
 
 import { runSync } from './sync.js';
 import {
@@ -180,6 +194,7 @@ describe('runSync (real git, bare remote)', () => {
   });
 
   afterEach(() => {
+    mocks.afterFetch = null;
     process.chdir(savedCwd);
     if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
@@ -1108,6 +1123,68 @@ describe('runSync (real git, bare remote)', () => {
       expect(outcome).toMatchObject({ synced: false, moved: true });
       expect(outcome.reason).toMatch(/could not be fetched/);
       expect(outcome.reason).not.toMatch(/--discard/);
+    });
+
+    it('refuses to overwrite an ignored user file the PR head starts tracking', () => {
+      writeFileSync(join(repo, 'secret.env'), 'LOCAL_WORK=do-not-delete');
+      writeFileSync(join(repo, '.git', 'info', 'exclude'), 'secret.env\n');
+      // The PR head starts tracking secret.env.
+      const author = join(base, 'author-ign');
+      run(base, 'clone', '-q', remote, author);
+      run(author, 'config', 'user.email', 'a@example.com');
+      run(author, 'config', 'user.name', 'a');
+      run(author, 'checkout', '-q', 'feat');
+      writeFileSync(join(author, 'secret.env'), 'REMOTE_REPLACEMENT=1');
+      run(author, 'add', 'secret.env');
+      run(author, 'commit', '-q', '-m', 'track secret');
+      run(author, 'push', '-q', 'origin', 'feat');
+      const sha = run(author, 'rev-parse', 'HEAD');
+      run(remote, 'update-ref', 'refs/pull/7/head', sha);
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/secret\.env/);
+      expect(outcome.reason).toMatch(/ignored/);
+      // The user's bytes and the branch tip both survive.
+      expect(readFileSync(join(repo, 'secret.env'), 'utf8')).toBe(
+        'LOCAL_WORK=do-not-delete',
+      );
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(featSha);
+      expect(known()).toBe(featSha);
+    });
+
+    it('reads the PR head from the private ref when a concurrent fetch rewrites FETCH_HEAD', () => {
+      // A descendant of the PR head on another remote branch: an
+      // interleaved fetch of it would fast-forward the user's branch to
+      // the wrong commit if sync read the shared FETCH_HEAD.
+      run(repo, 'switch', '-q', '-c', 'extra');
+      const wrong = commitIn(repo, 'extra.txt');
+      run(repo, 'push', '-q', 'origin', 'extra');
+      run(repo, 'switch', '-q', 'feat');
+      mocks.afterFetch = () => {
+        run(repo, 'fetch', '-q', 'origin', 'extra');
+      };
+      expect(runSync(7)).toMatchObject({
+        synced: true,
+        headSha: featSha,
+        moved: false,
+      });
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(featSha);
+      expect(known()).toBe(featSha);
+      expect(wrong).not.toBe(featSha);
+    });
+
+    it('refuses when the user switches branches during the fetch', () => {
+      const theirs = pushFromOther('theirs.txt');
+      const mainBefore = run(repo, 'rev-parse', 'main');
+      mocks.afterFetch = () => {
+        run(repo, 'switch', '-q', 'main');
+      };
+      expect(() => runSync(7)).toThrow(/branch main checked out/);
+      // Neither branch advanced.
+      expect(run(repo, 'rev-parse', 'feat')).toBe(featSha);
+      expect(run(repo, 'rev-parse', 'main')).toBe(mainBefore);
+      expect(known()).toBe(featSha);
+      expect(theirs).not.toBe(featSha);
     });
   });
 });

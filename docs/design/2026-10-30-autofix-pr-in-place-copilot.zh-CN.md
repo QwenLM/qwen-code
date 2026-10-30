@@ -179,6 +179,14 @@ worktree watch。
 - 干净且可 fast-forward → fast-forward 用户的分支（这正是共驾的收益：
   作者的 push 直接到达用户的检出），然后以 `keepWork = true` 对齐子模块
   ——持有工作的子模块原样保留；若因此树不干净，回答 `synced: false`。
+  merge 带 `--no-overwrite-ignore`：当 PR head 开始跟踪检出里以忽略文件
+  形式持有的路径时，git 拒绝，回答 `synced: false` 并点名冲突路径——
+  脏门禁刻意忽略 ignored 文件，merge 就绝不能销毁它们。
+- PR head fetch 进 watch 的私有 ref（`refs/qwen-autofix/pr-<n>/head`，与
+  prepare 同一个 ref）并从那里读——绝不读共享的 `FETCH_HEAD`，用户检出
+  里的并发 fetch 会在 fetch 与读之间覆写它。
+- 网络往返回来后、动检出之前，复检当前检出的分支：用户在 fetch 等待期间
+  切了分支，得到中途切换的拒绝，两个分支都不前进。
 - 有未推提交（轮次的、用户的、或两者）且新 head 在其上 → 与今天一样的
   `action: "merge"`；merge 在前台、在用户的检出里、有人值守地运行。
 
