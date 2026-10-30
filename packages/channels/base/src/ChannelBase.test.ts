@@ -24515,6 +24515,54 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('does not inject a message from another thread into the running turn', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({
+            text: 'start',
+            threadId: 'thread-a',
+            messageId: 'm-thread-1',
+          }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        await ch.handleInbound(
+          envelope({
+            text: 'other thread',
+            threadId: 'thread-b',
+            messageId: 'm-thread-2',
+          }),
+        );
+
+        expect(queueMidTurnMessage).not.toHaveBeenCalled();
+        const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+        expect(logged).not.toContain('inject: delivered');
+        expect(logged).toContain("is not the running turn's target");
+        expect(
+          collectBuffers(ch)
+            .get(sessionId)
+            ?.map((entry) => (entry as { text: string }).text),
+        ).toEqual([expect.stringContaining('other thread')]);
+
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        expect(bridge.prompt.mock.calls[1]?.[0]).toBe(sessionId);
+        expect(bridge.prompt.mock.calls[1]?.[1]).toContain('other thread');
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        stderr.mockRestore();
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
     it('refuses an image mid-turn instead of injecting a contentless prompt', async () => {
       const queueMidTurnMessage = enableInjection();
       const resolvers = resolvablePrompts();
@@ -24548,6 +24596,66 @@ describe('ChannelBase', () => {
         await running;
         await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(1));
       } finally {
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
+    it('parks an image from another chat instead of refusing it', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({
+        dispatchMode: 'inject',
+        sessionScope: 'single',
+        operators: ['user1', 'user2'],
+      });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({
+            chatId: 'chat-a',
+            senderId: 'user1',
+            text: 'start',
+            messageId: 'm-img-cross-1',
+          }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        // Ineligible for injection for a reason other than its media: it must
+        // park like text, not be refused and dropped.
+        await ch.handleInbound(
+          envelope({
+            chatId: 'chat-b',
+            senderId: 'user2',
+            text: 'cross-chat image',
+            imageBase64: 'AAA',
+            imageMimeType: 'image/png',
+            messageId: 'm-img-cross-2',
+          }),
+        );
+
+        expect(queueMidTurnMessage).not.toHaveBeenCalled();
+        // No visible refusal: the sender is not told their message was dropped.
+        expect(ch.threadMessages).toEqual([]);
+        const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+        expect(logged).not.toContain('refusing message with image(s)');
+        expect(logged).not.toContain('inject: delivered');
+        expect(
+          collectBuffers(ch)
+            .get(sessionId)
+            ?.map((entry) => (entry as { text: string }).text),
+        ).toEqual([expect.stringContaining('cross-chat image')]);
+
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        expect(bridge.prompt.mock.calls[1]?.[0]).toBe(sessionId);
+        expect(bridge.prompt.mock.calls[1]?.[1]).toContain('cross-chat image');
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        stderr.mockRestore();
         resolvers.forEach((resolve) => resolve('done'));
       }
     });
@@ -25073,6 +25181,48 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('replays only the undrained tail of the accepted injections', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-settle-tail-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+        // Two accepted injections; the child drains the head and leaves the
+        // tail behind.
+        await ch.handleInbound(
+          envelope({ text: 'drained first', messageId: 'm-settle-tail-2' }),
+        );
+        await ch.handleInbound(
+          envelope({ text: 'undrained second', messageId: 'm-settle-tail-3' }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(2);
+        (
+          bridge as unknown as {
+            takeUndrainedMidTurnMessages: ReturnType<typeof vi.fn>;
+          }
+        ).takeUndrainedMidTurnMessages.mockReturnValueOnce([
+          'undrained second',
+        ]);
+
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        // The recovered text is the ledger's TAIL, not its head: the head was
+        // already delivered to the turn that just ended.
+        const replay = String(bridge.prompt.mock.calls[1]?.[1]);
+        expect(replay).toContain('undrained second');
+        expect(replay).not.toContain('drained first');
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
     it('does not replay an injection the running turn drained', async () => {
       const queueMidTurnMessage = enableInjection();
       const resolvers = resolvablePrompts();
@@ -25110,6 +25260,54 @@ describe('ChannelBase', () => {
         expect(replay).toContain('parked later');
         expect(replay).not.toContain('drained injected');
         resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
+    it('resets the fallback gates when the turn ends so the next turn can inject', async () => {
+      const queueMidTurnMessage = enableInjection();
+      queueMidTurnMessage.mockReturnValueOnce({
+        accepted: false,
+        reason: 'capacity',
+      });
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-gate-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        // A rejected injection degrades the running turn and parks.
+        await ch.handleInbound(
+          envelope({ text: 'parked', messageId: 'm-gate-2' }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+        expect(collectBuffers(ch).get(sessionId)).toHaveLength(1);
+
+        // Turn 1 ends and the parked message replays as turn 2.
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+        // The gate sets are turn-scoped: a fresh message inside the replay turn
+        // is injected again instead of inheriting turn 1's degraded state.
+        await ch.handleInbound(
+          envelope({ text: 'fresh after replay', messageId: 'm-gate-3' }),
+        );
+
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(2);
+        expect(queueMidTurnMessage).toHaveBeenLastCalledWith(
+          sessionId,
+          'fresh after replay',
+        );
+        expect(collectBuffers(ch).get(sessionId)).toBeUndefined();
+
+        resolvers[1]!('second done');
         await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
       } finally {
         resolvers.forEach((resolve) => resolve('done'));
