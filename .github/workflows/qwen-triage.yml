@@ -5218,11 +5218,10 @@ jobs:
       contents: 'read'
       pull-requests: 'write'
     steps:
-      # Sparse — the uploader, its helper dependency, the artifact checker
-      # local rounds run before publishing, and the root package.json that
-      # marks the uploader's `.js` as ESM (without it the uploader only
-      # parses on the Node versions that infer module syntax, and this job
-      # pins no Node).
+      # Sparse — the uploader, the artifact checker, their helpers, and the
+      # root package.json that marks the uploader's `.js` as ESM (without it
+      # the uploader only parses on the Node versions that infer module
+      # syntax, and this job pins no Node).
       - name: 'Checkout the OSS publisher scripts'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -5940,7 +5939,14 @@ jobs:
             # Pin the artifact-dir shape and sort: a bare -name search takes
             # whatever directory find visits first, which is unordered.
             REPORT="$(find verify-results -mindepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
-            ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
+            # The counts must come from the report's own directory: another
+            # round directory's zero would headline this report.
+            if [ -n "$REPORT" ]; then
+              ASSERTIONS_FILE="$(dirname "$REPORT")/assertions.json"
+              [ -f "$ASSERTIONS_FILE" ] || ASSERTIONS_FILE=''
+            else
+              ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
+            fi
             # Exact root-level path, never a find: the staging step writes
             # this name last as root, and a same-named file nested inside a
             # collected agent artifact dir must not shadow it.
@@ -5977,22 +5983,22 @@ jobs:
                 echo "::warning::assertions.json missing or inconsistent; not treating it as evidence."
               fi
             fi
-            # The artifact checker local rounds run before publishing, from
-            # this trusted checkout: one implementation of the consistency
-            # rules for both paths, including the failure ledger and the
-            # per-commit mutation claim the counts above cannot see. A refusal
-            # is exit 1 plus the checker's own `failed:` summary line; node
-            # also exits 1 when the script cannot load, and an unchecked
-            # verdict is not trusted either. Only `error` lines are echoed:
-            # they carry fixed text, counts, hex ids and a JSON-escaped
-            # verdict, while warnings can name agent-chosen evidence files.
+            # The checker local rounds run before posting, from this trusted
+            # checkout, so both paths share one set of rules. It must pass on
+            # the report's directory and read the verdict this run reported.
+            # A refusal is exit 1 plus its `failed:` line; node also exits 1
+            # when the script cannot load. Only `error` lines are echoed:
+            # warnings can name agent-chosen evidence files.
             ARTIFACT_CHECK=''
             if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ] && [ -n "${AGENT_VERDICT:-}" ]; then
               check_log="${RUNNER_TEMP:-/tmp}/verify-pr-check.log"
               check_status=0
               node "${VERIFY_PR_CHECK:-scripts/verify-pr-check.mjs}" "$(dirname "$REPORT")" > "$check_log" 2>&1 || check_status=$?
-              if [ "$check_status" -eq 0 ]; then
+              if [ "$check_status" -eq 0 ] && grep -qF "  ok: verdict=${AGENT_VERDICT} (" "$check_log"; then
                 ARTIFACT_CHECK=ok
+              elif [ "$check_status" -eq 0 ]; then
+                ARTIFACT_CHECK=refused
+                echo "verdict.txt beside report.md is not the reported ${AGENT_VERDICT}"
               elif [ "$check_status" -eq 1 ] && grep -q '^  failed: verdict=' "$check_log"; then
                 ARTIFACT_CHECK=refused
                 grep '^  error ' "$check_log" | head -20 | cut -c1-300 || true
@@ -6022,12 +6028,9 @@ jobs:
             # or produced no usable verdict says nothing about the PR and
             # gets incomplete/inconclusive, never a pass or a fail.
             if [ "$TRUST_AGENT_VERDICT" = true ]; then
-              # A checked `findings` verdict with no failed assertion is
-              # advisory: every scripted check passed, and the rule that
-              # verdicts come from harness exits gives the prose no power to
-              # fail the PR. A failed assertion keeps it "not passed"; the
-              # checker has already refused a ledger that attributes none of
-              # the failures to the PR.
+              # Verdicts come from harness exits: `findings` with no failed
+              # assertion is advisory, and the checker has already refused
+              # failures none of which the ledger attributes to the PR.
               case "$AGENT_VERDICT" in
                 merge-ready) QUAL='✅ passed'; QUAL_ZH='✅ 通过'; HEADLINE='merge-ready (agent verdict)'; HEADLINE_ZH='可合入（agent 判定）' ;;
                 findings)
@@ -6115,12 +6118,12 @@ jobs:
                ! { [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "${A_FAIL:-0}" != '0' ]; }; then
               case "$ARTIFACT_CHECK" in
                 refused)
-                  CHECK_NOTE='its artifacts fail the consistency check local rounds run before publishing'
-                  CHECK_NOTE_ZH='其产物未通过本地轮次发布前运行的一致性检查'
+                  CHECK_NOTE='its artifacts fail the consistency check'
+                  CHECK_NOTE_ZH='其产物未通过一致性检查'
                   ;;
                 error)
-                  CHECK_NOTE='the consistency check local rounds run before publishing could not run on its artifacts'
-                  CHECK_NOTE_ZH='本地轮次发布前运行的一致性检查无法在其产物上运行'
+                  CHECK_NOTE='the consistency check could not run on its artifacts'
+                  CHECK_NOTE_ZH='一致性检查无法在其产物上运行'
                   ;;
               esac
             fi

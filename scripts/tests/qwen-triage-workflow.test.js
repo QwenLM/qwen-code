@@ -5529,7 +5529,8 @@ describe('qwen-triage verify publish fidelity', () => {
   // Render the publisher for a given outcome with a stubbed gh and the real
   // artifact checker, and return the comment body it would post plus the
   // step log. The verify job reads AGENT_VERDICT from the artifact's
-  // verdict.txt, so the fixture carries the same word.
+  // verdict.txt, so the fixture carries the same word unless VERDICT_TXT
+  // says otherwise.
   const publish = (dir, env) => {
     const out = join(dir, `body-${env.NAME}.md`);
     const work = join(dir, 'work');
@@ -5540,7 +5541,8 @@ describe('qwen-triage verify publish fidelity', () => {
       'verdict.txt',
     );
     rmSync(verdictFile, { force: true });
-    if (env.AGENT_VERDICT) writeFileSync(verdictFile, `${env.AGENT_VERDICT}\n`);
+    const word = env.VERDICT_TXT ?? env.AGENT_VERDICT;
+    if (word) writeFileSync(verdictFile, `${word}\n`);
     const res = spawnSync('bash', ['-c', publishScript()], {
       cwd: work,
       encoding: 'utf8',
@@ -5903,10 +5905,10 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(envOnly.body).toContain(UNTRUSTED);
       expect(envOnly.body).not.toContain('❌');
       expect(envOnly.body).toContain(
-        'The agent reported `findings`, but its artifacts fail the consistency check local rounds run before publishing (`verify-pr-check.mjs`)',
+        'The agent reported `findings`, but its artifacts fail the consistency check (`verify-pr-check.mjs`)',
       );
       expect(envOnly.body).toContain(
-        'agent 报告了 `findings`，但其产物未通过本地轮次发布前运行的一致性检查',
+        'agent 报告了 `findings`，但其产物未通过一致性检查（`verify-pr-check.mjs`）',
       );
       expect(envOnly.log).toContain(
         '  error findings with 2 failed assertions and none attributed to the PR',
@@ -5929,7 +5931,7 @@ describe('qwen-triage verify publish fidelity', () => {
       });
       expect(missing.body).toContain(UNTRUSTED);
       expect(missing.body).toContain(
-        'but the consistency check local rounds run before publishing could not run on its artifacts',
+        'but the consistency check could not run on its artifacts',
       );
       expect(missing.log).toContain('The artifact check could not run');
 
@@ -5943,6 +5945,89 @@ describe('qwen-triage verify publish fidelity', () => {
         'recorded 1 failures, so that claim was not trusted',
       );
       expect(mr).not.toContain('verify-pr-check.mjs');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // REPORT and the counts were picked by two independent finds, so a run
+  // that left an earlier directory holding only assertions.json headlined
+  // the later report with that directory's zero.
+  it("binds the headline to the report's own directory", () => {
+    const dir = fixture();
+    const results = join(dir, 'work', 'verify-results');
+    try {
+      mkdirSync(join(results, 'prA-verify-0'));
+      writeFileSync(
+        join(results, 'prA-verify-0', 'assertions.json'),
+        '{"pass":10,"fail":0,"total":10}',
+      );
+      writeFileSync(
+        join(results, 'prA-verify-1', 'assertions.json'),
+        '{"pass":9,"fail":1,"total":10,"failures":[{"id":"x","attribution":"pr"}]}',
+      );
+      const mixed = render(dir, { NAME: 'mix', AGENT_VERDICT: 'findings' });
+      expect(mixed).toContain(
+        '❌ not passed — findings reported (agent verdict)',
+      );
+      expect(mixed).toContain(
+        'Scripted assertions: 9 passed · 1 failed · 10 total',
+      );
+
+      // The verdict the run reported must be the one beside the report.
+      writeFileSync(
+        join(results, 'prA-verify-1', 'assertions.json'),
+        '{"pass":10,"fail":0,"total":10}',
+      );
+      const other = publish(dir, {
+        NAME: 'other',
+        AGENT_VERDICT: 'merge-ready',
+        VERDICT_TXT: 'findings',
+      });
+      expect(other.body).toContain(
+        '⚠️ inconclusive — completed without a usable structured verdict',
+      );
+      expect(other.log).toContain(
+        'verdict.txt beside report.md is not the reported merge-ready',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Every other case injects an absolute checker path. The production value
+  // is relative to the job's checkout, so pin both the layout it relies on
+  // and a run that resolves it.
+  it('resolves the checker at its production path', () => {
+    const wf = parse(workflow);
+    const steps = wf.jobs['publish-verify'].steps;
+    const checkout = steps.find(
+      (s) => s.name === 'Checkout the OSS publisher scripts',
+    );
+    const post = steps.find(
+      (s) => s.name === 'Post verification report comment',
+    );
+    expect(checkout.with.path).toBeUndefined();
+    expect(post['working-directory']).toBeUndefined();
+    expect(wf.jobs['publish-verify'].defaults).toBeUndefined();
+
+    const dir = fixture();
+    const work = join(dir, 'work');
+    try {
+      mkdirSync(join(work, 'scripts', 'lib'), { recursive: true });
+      for (const file of ['verify-pr-check.mjs', 'lib/entry-point.js']) {
+        writeFileSync(
+          join(work, 'scripts', file),
+          readFileSync(join('scripts', file), 'utf8'),
+        );
+      }
+      writeFileSync(join(work, 'package.json'), '{"type":"module"}');
+      const body = render(dir, {
+        NAME: 'rel',
+        AGENT_VERDICT: 'findings',
+        VERIFY_PR_CHECK: '',
+      });
+      expect(body).toContain('✅ passed with findings');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
