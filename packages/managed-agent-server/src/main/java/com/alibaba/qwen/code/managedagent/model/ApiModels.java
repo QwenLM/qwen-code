@@ -439,11 +439,7 @@ public final class ApiModels {
     public record WebShellSessionSkills(List<WebShellSkill> skills) { }
 
     public record WebShellTranscriptRequest(@NotBlank String sessionId,
-            String cursor, Integer limit,
-            @Pattern(regexp = "messages") String view) {
-        public WebShellTranscriptRequest(String sessionId, String cursor, Integer limit) {
-            this(sessionId, cursor, limit, null);
-        }
+            @Size(max = 4096) String cursor, @Min(1) @Max(100) Integer limit) {
     }
 
     public record WebShellStreamRequest(@NotBlank String sessionId,
@@ -1065,11 +1061,7 @@ public final class ApiModels {
     }
 
     public record WebShellExportRequest(@NotBlank String sessionId,
-            @Size(max = 4096) String cursor, @Min(1) @Max(100) Integer limit,
-            @Pattern(regexp = "messages") String view) {
-        public WebShellExportRequest(String sessionId, String cursor, Integer limit) {
-            this(sessionId, cursor, limit, null);
-        }
+            @Size(max = 4096) String cursor, @Min(1) @Max(100) Integer limit) {
     }
 
     public record WebShellExportPage(List<WebShellItem> items, String nextCursor,

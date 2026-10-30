@@ -30,7 +30,6 @@ import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationComma
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionMutationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import com.alibaba.qwen.code.managedagent.model.StoreModels.SnapshotRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnPage;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.TurnSummary;
@@ -838,28 +837,23 @@ public interface AgentStateStore {
     EventPage findTranscriptEvents(String tenantId, String sessionId,
             Long beforeSequence, int limit);
 
-    StoreModels.SnapshotPage findSnapshotPage(String tenantId, String sessionId, String cursor, long afterSequence, int limit);
-
-    StoreModels.SnapshotPage findRecentSnapshotPage(String tenantId, String sessionId, String cursor, int limit);
-
     StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
             String cursor, int limit, boolean backward);
 
-    Optional<SnapshotRecord> findSnapshot(String tenantId,
-            String sessionId);
+    StoreModels.MessagePage findMessagePage(String tenantId, String sessionId,
+            String cursor, int limit, boolean backward, long afterSequence);
 
-    /** The snapshot's covered sequence of each given Session, in one read. */
-    Map<String, Long> findSnapshotCoveredSequences(String tenantId,
+    /** The message projection coverage of each Session, in one read. */
+    Map<String, Long> findMessageCoveredSequences(String tenantId,
             List<String> sessionIds);
 
     ReplayWindow findReplayWindow(String tenantId, String sessionId);
 
-    /** The Sessions whose Snapshot covers more than their replay floor. */
+    /** The Sessions whose message projection covers more than their replay floor. */
     List<ReplayFloorTarget> findReplayFloorTargets(int limit);
 
     /**
-     * Raises the Session's replay floor, never above the Snapshot's covered
-     * sequence, so a client told to resync can resume from the Snapshot.
+     * Raises the Session's replay floor only through readable message coverage.
      */
     ReplayWindow advanceReplayFloor(String tenantId, String sessionId,
             long floorSequence);

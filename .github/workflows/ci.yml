@@ -1778,6 +1778,9 @@ jobs:
           echo "Using web-shell Playwright port ${port}"
 
       - name: 'Run transcript document browser gate'
+        env:
+          # Avoid the pool's shared /tmp tmpfs for Chromium temporary files.
+          TMPDIR: '${{ runner.temp }}'
         run: 'npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0'
 
       - name: 'Run web-shell browser smoke'
