@@ -97,6 +97,8 @@ adapter 在首次创建前持久化创建意图、请求摘要、不可变 boot 
 
 ## AgentSandbox 兼容性核验
 
+显式启用 `external-files/1` 的 worker 在两个监听端口上最多接收 64 个请求头字段，为 Cloud 代理的转发头保留空间，使请求能够进入应用鉴权。其他 profile 保持 32 个字段上限。原有请求头字节上限及 bearer、租约、incarnation 和存储 revision 检查继续生效。
+
 本 provider 面向 E2B Cloud 及其 Volume-ID API。阿里云[兼容清单](https://help.aliyun.com/zh/agent-sandbox/e2b-sdk-compatible-api-list)支持 Sandbox 和模板操作，但明确将 E2B Volume API 列为不兼容。仅修改 `E2B_API_URL`、`E2B_DOMAIN` 不能适配这里使用的 `Volume.connect` 和 Volume-ID 文件挑战。
 
 AgentSandbox 的 [AgenticFS Volume](https://help.aliyun.com/zh/agent-sandbox/create-an-agenticfs-volume) 是已有 Access Point 的原生控制面记录。[挂载接口](https://help.aliyun.com/zh/agent-sandbox/mount-agenticfs-volume-1)使用同一 Team 下的 Volume 名称、挂载角色和完整且网络可达的 VPC 配置。后续 backend 必须保留不可变物理存储身份和连续性证明；一次 sandbox 文件读写成功或可变挂载名称都不能单独作为该证明。原生存储管理、兼容 worker 镜像和 AgentSandbox 端到端验收不在本实现范围内。

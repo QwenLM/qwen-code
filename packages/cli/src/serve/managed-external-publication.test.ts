@@ -233,6 +233,14 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
       expect(worker.ready.publication?.url).not.toBe(worker.ready.url);
       const endpoint = `${worker.ready.publication!.url}/internal/managed-runtime/v2/publication:begin`;
       const headers = {
+        ...(profile === 'legacy'
+          ? {}
+          : Object.fromEntries(
+              Array.from({ length: 32 }, (_, index) => [
+                `x-proxy-${index}`,
+                'forwarded',
+              ]),
+            )),
         authorization: `Bearer ${boot.token}`,
         'cache-control': 'no-store',
         'content-type': 'application/json',
@@ -245,6 +253,61 @@ describe.skipIf(process.platform === 'win32')('external boot admission', () => {
         protocolVersion: 2,
         ...request,
         expiresAt: Date.now() + 60_000,
+      });
+      for (const origin of [worker.ready.url, worker.ready.publication!.url]) {
+        for (const extra of [
+          Object.fromEntries(
+            Array.from({ length: 64 }, (_, index) => [
+              `x-overflow-${index}`,
+              'forwarded',
+            ]),
+          ),
+          { 'x-oversized': 'a'.repeat(17 * 1024) },
+          ...(profile === 'legacy'
+            ? [
+                Object.fromEntries(
+                  Array.from({ length: 32 }, (_, index) => [
+                    `x-proxy-${index}`,
+                    'forwarded',
+                  ]),
+                ),
+              ]
+            : []),
+        ]) {
+          const response = await fetch(
+            origin + '/internal/managed-runtime/v3/attest',
+            {
+              method: 'POST',
+              headers: { ...headers, ...extra },
+              body: '{}',
+            },
+          );
+          expect(response.status).toBe(431);
+          await response.arrayBuffer();
+        }
+      }
+      const attest = await fetch(
+        `${worker.ready.url}/internal/managed-runtime/v3/attest`,
+        {
+          method: 'POST',
+          headers,
+          body: JSON.stringify({
+            protocolVersion: 3,
+            managedContext: 'managed-context/1',
+            provisionRequestId: boot.provisionRequestId,
+            tenantId: boot.tenantId,
+            workspaceId: boot.workspaceId,
+            workspaceGeneration: boot.workspaceGeneration,
+            storageId: boot.storageId,
+            mountRoot: boot.mountRoot,
+            capabilityDigest: boot.capabilityDigest,
+            isolationClass: boot.isolationClass,
+          }),
+        },
+      );
+      expect(attest.status).toBe(200);
+      expect(await attest.json()).toMatchObject({
+        runtimeIncarnation: boot.runtimeIncarnation,
       });
       for (const [header, value, status] of [
         ['authorization', 'Bearer incorrect', 401],

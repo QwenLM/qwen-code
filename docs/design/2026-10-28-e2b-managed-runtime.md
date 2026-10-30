@@ -97,6 +97,8 @@ Local fixture and worker HTTP evidence covers durable request replay, guarded fi
 
 ## AgentSandbox compatibility qualification
 
+The explicit `external-files/1` worker profile admits up to 64 request headers on both worker listeners so Cloud proxy forwarding headers fit before application authentication. Other profiles retain their 32-header limit. The existing header byte limit and bearer, lease, incarnation and storage revision checks still apply.
+
 This provider targets E2B Cloud with its Volume-ID APIs. Alibaba Cloud's [compatibility list](https://help.aliyun.com/zh/agent-sandbox/e2b-sdk-compatible-api-list) supports Sandbox and template operations but marks the E2B Volume API as incompatible. Changing only `E2B_API_URL` and `E2B_DOMAIN` does not adapt `Volume.connect` or the Volume-ID file challenge used here.
 
 AgentSandbox [AgenticFS Volumes](https://help.aliyun.com/zh/agent-sandbox/create-an-agenticfs-volume) are native control-plane records for an existing Access Point. Its [mount API](https://help.aliyun.com/zh/agent-sandbox/mount-agenticfs-volume-1) uses a same-Team Volume name, mount role and complete reachable VPC configuration. A future backend must preserve immutable physical-storage identity and continuity proof; a successful sandbox file round trip or a mutable mount name alone is insufficient. Native storage management, a compatible worker image and end-to-end AgentSandbox qualification are outside this implementation.
