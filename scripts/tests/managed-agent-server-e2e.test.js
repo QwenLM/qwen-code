@@ -481,6 +481,45 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain(
       'Finished-before-commit crash did not land after the approved result settled',
     );
+    // R1-1 (deeper): the settled execution is not the window. The barrier must
+    // also read the post-tool main attempt's durable Finished marker from the
+    // same journal the recovery reads, and assert no assistant commit follows
+    // it, before the SIGKILL. Pin this window-shaped — the journal assertion
+    // must sit between the B3a barrier and the crash, and its discriminator
+    // must mirror findHostedCommittedModelOutput — so deleting the assertion or
+    // moving the hold above the output_committed commit cannot stay green. A
+    // bare identifier check would survive both, since the recovery reader also
+    // accepts a saved request whose attempt is still started.
+    const b3aBarrier = source.indexOf(
+      "'Finished turn held before the assistant commit'",
+    );
+    const b3aCrash = source.indexOf('await crashChild(', b3aBarrier);
+    expect(b3aBarrier).toBeGreaterThan(-1);
+    expect(b3aCrash).toBeGreaterThan(b3aBarrier);
+    const b3aWindow = source.slice(b3aBarrier, b3aCrash);
+    expect(b3aWindow).toContain('finishedBeforeCommitWindow(');
+    expect(b3aWindow).toContain(
+      'SELECT prompt_id FROM qwen_managed_agent.ma_turn',
+    );
+    expect(source).toContain(
+      'Finished-before-commit crash landed before the model Finished marker committed',
+    );
+    expect(source).toContain(
+      'Finished-before-commit crash landed after the assistant commit',
+    );
+    const windowFn = source.indexOf('function finishedBeforeCommitWindow(');
+    expect(windowFn).toBeGreaterThan(-1);
+    const windowFnBody = source.slice(
+      windowFn,
+      source.indexOf('\n}', windowFn),
+    );
+    expect(windowFnBody).toContain('qwen_managed_agent.ma_session_journal_tx');
+    expect(windowFnBody).toContain(':main:');
+    expect(windowFnBody).toContain(
+      "latestAttempt.payload['state'] !== 'output_committed'",
+    );
+    expect(windowFnBody).toContain("event.payload['role'] === 'assistant'");
+    expect(windowFnBody).toContain('event.sequence > latestAttempt.sequence');
     // B3a must take the same deep-equal parity gate as after-result; pin the
     // combined condition so reverting it to after-result-only reds here rather
     // than silently deleting the arm's only deep-equal assertion.

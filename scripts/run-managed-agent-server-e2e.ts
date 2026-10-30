@@ -1202,6 +1202,87 @@ function assertStoredAnswer(
     );
 }
 
+// B3a: assert the crash window from the same durable journal the recovery
+// reader reads, not from the hook's log line. The window's left boundary is
+// the post-tool main attempt's usage-only Finished marker (state
+// output_committed); its right boundary is the assistant message.committed
+// that has not landed yet. This mirrors findHostedCommittedModelOutput's own
+// discriminator — a latest main attempt that is not output_committed, or an
+// assistant commit at/after that attempt, both fall outside the window — so a
+// hold moved above the Finished commit reds here instead of passing vacuously
+// (the recovery reader also accepts a saved request whose attempt is still
+// started, so request count / parity / answer equality cannot tell that
+// earlier crash apart from B3a). The journal is UTF-8 JSON Lines in
+// ma_session_journal_tx.record_bytes; read it back as HEX like the stored
+// answer probe so embedded newlines never split a row.
+function finishedBeforeCommitWindow(
+  port: number,
+  sessionFilter: string,
+  promptId: string,
+): { attemptId: string; attemptSequence: number } {
+  const rows = runMysql(
+    port,
+    `SELECT HEX(record_bytes) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} ORDER BY first_sequence`,
+  ).split('\n');
+  const events: Array<{
+    kind: unknown;
+    sequence: number;
+    payload: Record<string, unknown>;
+  }> = [];
+  for (const row of rows) {
+    if (!row || row === 'NULL') continue;
+    for (const line of Buffer.from(row, 'hex').toString('utf8').split('\n')) {
+      if (!line) continue;
+      const record = JSON.parse(line) as {
+        subtype?: unknown;
+        managedSession?: {
+          kind?: unknown;
+          sequence?: unknown;
+          payload?: Record<string, unknown>;
+        };
+      };
+      if (record.subtype !== 'managed_session_event_v1') continue;
+      const event = record.managedSession;
+      if (!event || typeof event.sequence !== 'number') continue;
+      events.push({
+        kind: event.kind,
+        sequence: event.sequence,
+        payload: event.payload ?? {},
+      });
+    }
+  }
+  events.sort((a, b) => a.sequence - b.sequence);
+  const mainAttempts = events.filter(
+    (event) =>
+      event.kind === 'model.attempt' &&
+      typeof event.payload['attemptId'] === 'string' &&
+      (event.payload['attemptId'] as string).startsWith(`${promptId}:main:`),
+  );
+  const latestAttempt = mainAttempts[mainAttempts.length - 1];
+  if (!latestAttempt)
+    throw new Error(
+      `Finished-before-commit crash window has no main model attempt: promptId=${promptId}`,
+    );
+  if (latestAttempt.payload['state'] !== 'output_committed')
+    throw new Error(
+      `Finished-before-commit crash landed before the model Finished marker committed: attemptState=${String(latestAttempt.payload['state'])} attemptId=${String(latestAttempt.payload['attemptId'])}`,
+    );
+  const assistantCommit = events.find(
+    (event) =>
+      event.kind === 'message.committed' &&
+      event.payload['role'] === 'assistant' &&
+      event.sequence > latestAttempt.sequence,
+  );
+  if (assistantCommit)
+    throw new Error(
+      `Finished-before-commit crash landed after the assistant commit: commitSequence=${assistantCommit.sequence} attemptSequence=${latestAttempt.sequence}`,
+    );
+  return {
+    attemptId: latestAttempt.payload['attemptId'] as string,
+    attemptSequence: latestAttempt.sequence,
+  };
+}
+
 function assertPublicAnswer(events: PublicEvent[], expected: string): void {
   const terminal = events.filter((event) => event.terminal);
   const text = events
@@ -2839,6 +2920,21 @@ try {
             `Finished-before-commit crash did not land after the approved result settled: executionAtCrash=${executionAtCrash}`,
           );
         }
+        // The settled execution alone does not prove the crash landed inside
+        // B3a: the post-tool round could have been held before its durable
+        // Finished marker committed. Read the window from the same journal the
+        // recovery reads and retain the attempt identity as evidence.
+        const finishedWindow =
+          approvalFault === 'finished-before-commit'
+            ? finishedBeforeCommitWindow(
+                mysqlPort,
+                sessionFilter,
+                runMysql(
+                  mysqlPort,
+                  `SELECT prompt_id FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY gmt_create DESC LIMIT 1`,
+                ),
+              )
+            : undefined;
         const publishedPrefix =
           approvalFault === 'after-result'
             ? await publicTranscript(replacementSpringUrl, tenant, session.id)
@@ -2854,6 +2950,7 @@ try {
           fault: approvalFault,
           crashedHarnessBootId: crashedBootId,
           executionAtCrash,
+          finishedBeforeCommitWindow: finishedWindow,
           heldExecutionStartPath: replacementBrokerProxy?.heldPath(),
           releaseFailures: replacementBrokerProxy?.releaseFailureCount(),
           turnStatusAtCrash:
