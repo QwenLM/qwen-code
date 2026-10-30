@@ -1794,6 +1794,10 @@ public final class RuntimeBrokerService implements AutoCloseable {
                         if (ExternalWorkspaceProvisioner.isWorkspaceRequest(context.binding().getRequest())
                                 && (v3 || record.getReference().containsKey("runtimeProtocol")
                                         || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
+                            executionRepository.settlePrepared(record, Map.of(
+                                    "executionStatus", "not_started", "responseParts", List.of(),
+                                    "error", Map.of("type", "workspace_tool_unsupported",
+                                            "message", "External Workspace requires a file Tool v2 payload")), clock.instant());
                             throw invalid("runtime_payload_invalid", "External Workspace requires a file Tool v2 payload");
                         }
                         if (JdbcCsiFilesRetirementGuard.isProfile(context.binding().getRequest().getScope())

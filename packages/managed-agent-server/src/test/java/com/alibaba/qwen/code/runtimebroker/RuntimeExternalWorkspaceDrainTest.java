@@ -208,10 +208,40 @@ class RuntimeExternalWorkspaceDrainTest {
             String payload = "{\"toolName\":\"web_fetch\",\"input\":{\"url\":\"https://example.test\"}}";
             var prepared = fixture.prepare(payload);
             fixture.events.clear();
-            assertThrows(CompletionException.class, () -> fixture.service.startExecution("harness", "runtime",
+            var error = assertThrows(CompletionException.class, () -> fixture.service.startExecution("harness", "runtime",
                     prepared.getExecutionCallId(), payload).toCompletableFuture().join());
+            var refusal = (RuntimeBrokerException) error.getCause();
+            assertEquals(400, refusal.getStatusCode());
+            assertEquals("runtime_payload_invalid", refusal.getCode());
             assertFalse(fixture.events.contains("execute"));
             assertFalse(fixture.events.contains("ack"));
+            var settled = fixture.executions.findByExecutionCallId(prepared.getExecutionCallId());
+            assertTrue(settled.isSettled());
+            assertEquals("not_started", settled.getExecutionStatus());
+            assertEquals("workspace_tool_unsupported", ((Map<?, ?>) settled.getResult().get("error")).get("type"));
+            assertTrue(fixture.service.release("harness", "runtime").toCompletableFuture().join());
+            fixture.service.requestHarnessDrain("tenant", "harness");
+            fixture.drain();
+            assertEquals(RuntimeSessionRecord.State.RELEASED, fixture.sessions.findById(fixture.scope, "runtime").getState());
+            assertEquals(RuntimeBindingRecord.State.RELEASED, fixture.binding().getState());
+            assertEquals(List.of("detach", "ack", "stop", "cleanup"), fixture.events);
+        }
+    }
+
+    @Test
+    void anAllowedPreparedExecutionStillBlocksReleaseAndDrain() {
+        try (var fixture = new Fixture()) {
+            fixture.service.acquire("harness", "runtime", "bootstrap").toCompletableFuture().join();
+            var prepared = fixture.prepare("{\"toolName\":\"read_file\",\"input\":{\"file_path\":\"note.txt\"}}");
+            fixture.events.clear();
+            var error = assertThrows(CompletionException.class,
+                    () -> fixture.service.release("harness", "runtime").toCompletableFuture().join());
+            assertEquals("runtime_session_busy", ((RuntimeBrokerException) error.getCause()).getCode());
+            fixture.service.requestHarnessDrain("tenant", "harness");
+            assertThrows(CompletionException.class, fixture::drain);
+            assertEquals(ToolExecutionRecord.State.PREPARED,
+                    fixture.executions.findByExecutionCallId(prepared.getExecutionCallId()).getState());
+            assertTrue(fixture.events.isEmpty());
         }
     }
 
