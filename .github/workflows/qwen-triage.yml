@@ -3226,7 +3226,7 @@ jobs:
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '${{ runner.temp }}/verify-maven-repo'
-          key: "verify-maven-repo-${{ hashFiles('packages/sdk-java/*/pom.xml', 'packages/managed-agent-server/pom.xml') }}"
+          key: "verify-maven-repo-${{ hashFiles('packages/sdk-java/*/pom.xml', 'packages/managed-agent-server/**/pom.xml') }}"
           restore-keys: 'verify-maven-repo-'
 
       - name: 'Install and build PR app'
