@@ -45,11 +45,12 @@ pub fn list_running_apps() -> Vec<AppInfo> {
     list_running_apps_native().0
 }
 
-fn list_running_apps_native() -> (Vec<AppInfo>, Vec<AppInfo>) {
+fn list_running_apps_native() -> (Vec<AppInfo>, Vec<AppInfo>, Vec<AppInfo>) {
     use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
 
     let mut apps = Vec::new();
     let mut accessory = Vec::new();
+    let mut background = Vec::new();
     let active_pid = frontmost_pid();
     unsafe {
         for pid in process_manager::running_pids() {
@@ -79,14 +80,14 @@ fn list_running_apps_native() -> (Vec<AppInfo>, Vec<AppInfo>) {
                 kind: Some("desktop".to_owned()),
                 last_used: None,
             };
-            if app.activationPolicy() == NSApplicationActivationPolicy::Regular {
-                apps.push(info);
-            } else {
-                accessory.push(info);
+            match app.activationPolicy() {
+                NSApplicationActivationPolicy::Regular => apps.push(info),
+                NSApplicationActivationPolicy::Accessory => accessory.push(info),
+                _ => background.push(info),
             }
         }
     }
-    (apps, accessory)
+    (apps, accessory, background)
 }
 
 /// Launch an app by bundle ID via NSWorkspace, background only (no focus
@@ -443,21 +444,23 @@ fn bundle_id_for_app_path(app_path: &str) -> Option<String> {
 ///   * `launch_path` (filesystem `.app` path when known, else `None`),
 ///   * `kind` (`"desktop"` on macOS).
 pub fn list_all_apps() -> Vec<AppInfo> {
-    let (running, accessory) = list_running_apps_native();
+    let (running, accessory, background) = list_running_apps_native();
     let installed = scan_installed_apps();
-    merge_app_lists(running, accessory, installed)
+    merge_app_lists(running, accessory, background, installed)
 }
 
 fn merge_app_lists(
     mut running: Vec<AppInfo>,
     accessory: Vec<AppInfo>,
+    background: Vec<AppInfo>,
     installed: Vec<AppInfo>,
 ) -> Vec<AppInfo> {
     let installed_by_path: std::collections::HashMap<_, _> = installed
         .iter()
         .filter_map(|app| app.launch_path.as_ref().map(|path| (path, app)))
         .collect();
-    running.extend(accessory.into_iter().filter(|app| {
+    running.extend(accessory);
+    running.extend(background.into_iter().filter(|app| {
         app.launch_path
             .as_ref()
             .is_some_and(|path| installed_by_path.contains_key(path))
@@ -761,7 +764,7 @@ mod tests {
     };
 
     #[test]
-    fn installed_accessories_keep_all_live_pids_without_matching_other_bundle_copies() {
+    fn installed_background_apps_keep_all_live_pids_without_matching_other_bundle_copies() {
         let app = |pid: i32, path: &str| AppInfo {
             name: "Fixture".to_owned(),
             pid,
@@ -774,6 +777,7 @@ mod tests {
         };
         let merged = merge_app_lists(
             vec![app(31, "/Apps/Editor.app")],
+            Vec::new(),
             vec![
                 app(41, "/Apps/Proxy.app"),
                 app(42, "/Apps/Proxy.app"),
@@ -795,6 +799,31 @@ mod tests {
         assert!(merged[2].active);
         assert!(!merged[3].running);
         assert_eq!(merged[3].launch_path.as_deref(), Some("/Apps/Copy.app"));
+    }
+
+    #[test]
+    fn uninstalled_accessories_keep_live_bundle_identity() {
+        let app = |pid, path: &str, bundle_id: &str| AppInfo {
+            name: "Menu App".to_owned(),
+            pid,
+            bundle_id: Some(bundle_id.to_owned()),
+            running: true,
+            active: false,
+            launch_path: Some(path.to_owned()),
+            kind: Some("desktop".to_owned()),
+            last_used: None,
+        };
+        let merged = merge_app_lists(
+            Vec::new(),
+            vec![app(4242, "/Task/reference/app/Menu.app", "test.menu")],
+            vec![app(9, "/Uninstalled/Helper.app", "test.helper")],
+            Vec::new(),
+        );
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].pid, 4242);
+        assert_eq!(merged[0].bundle_id.as_deref(), Some("test.menu"));
+        assert!(merged[0].running);
+        assert!(merged[0].last_used.is_none());
     }
 
     #[test]
