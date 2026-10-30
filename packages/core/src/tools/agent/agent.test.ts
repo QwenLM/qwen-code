@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
+import {
+  enforceFunctionResponseBudget,
+  finalizeToolResponses,
+} from '../tool-response-finalizer.js';
+
 import { goalTurnContext } from '../../goals/goal-turn-context.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
@@ -6321,6 +6327,90 @@ describe('AgentTool', () => {
         expect(text).toMatch(
           /subagents[\\/]test-session-id[\\/]agent-[A-Za-z0-9_-]+\.jsonl/,
         );
+      },
+    );
+
+    it.each([
+      [AgentTerminateMode.TIMEOUT, false, 'runConfig.max_time_minutes'],
+      [AgentTerminateMode.TIMEOUT, true, 'runConfig.max_time_minutes'],
+      [AgentTerminateMode.MAX_TURNS, false, 'runConfig.max_turns'],
+      [AgentTerminateMode.MAX_TURNS, true, 'runConfig.max_turns'],
+    ] as const)(
+      'preserves a real %s reason and transcript across two budgets (persistence failure: %s)',
+      async (mode, failPersistence, remediation) => {
+        await withTempDir('agent recovery ', async (dir) => {
+          loadForeground();
+          vi.mocked(mockAgent.getFinalText).mockReturnValue('x'.repeat(60_000));
+          vi.mocked(mockAgent.getTerminateMode).mockReturnValue(mode);
+          const result = await invoke(fg()).execute();
+          const original = textOf(result);
+          const marker = original
+            .split('\n')
+            .find((line) => line.startsWith('The full output is in '))!;
+          expect(marker).toBeDefined();
+          const finalizerConfig = {
+            getToolOutputBatchBudget: () => 1000,
+            getToolResultBytesWritten: () =>
+              failPersistence ? Number.MAX_SAFE_INTEGER : 0,
+            trackToolResultBytes: () => {},
+            storage: { getToolResultsDir: () => dir },
+          } as unknown as Config;
+          let entries = [
+            {
+              callId: 'timeout',
+              toolName: 'agent',
+              responseParts: convertToFunctionResponse(
+                'agent',
+                'timeout',
+                result.llmContent,
+                result,
+              ),
+            },
+          ];
+          entries = await finalizeToolResponses(finalizerConfig, entries);
+          for (const budget of [1000, 700]) {
+            entries = await finalizeToolResponses(
+              finalizerConfig,
+              entries.map(({ callId, toolName, responseParts }) => ({
+                callId,
+                toolName,
+                responseParts,
+              })),
+              undefined,
+              false,
+              false,
+              budget,
+              false,
+            );
+            entries = enforceFunctionResponseBudget(
+              entries.map(({ callId, toolName, responseParts }) => ({
+                callId,
+                toolName,
+                responseParts,
+              })),
+              budget,
+            );
+            const output = entries[0].responseParts[0].functionResponse!
+              .response!['output'] as string;
+            expect(output).toContain(original.split('\n\n')[0]);
+            expect(output).toContain(remediation);
+            expect(output).toContain(marker);
+            expect(output.length).toBeLessThanOrEqual(budget);
+          }
+          const preserved = entries;
+          expect(enforceFunctionResponseBudget(entries, 100)).toBe(preserved);
+          expect(
+            await finalizeToolResponses(
+              finalizerConfig,
+              entries,
+              undefined,
+              false,
+              false,
+              100,
+              false,
+            ),
+          ).toBe(preserved);
+        });
       },
     );
 
