@@ -64,6 +64,30 @@ it('renders instructions independently from auto memory', () => {
   expect(lastFrame()).not.toContain('Memory files');
 });
 
+it.each([false, true])(
+  'preserves the combined memory category in legacy Ink snapshots (details: %s)',
+  (showDetails) => {
+    const { lastFrame } = render(
+      <ContextUsage
+        modelName="legacy-model"
+        totalTokens={14200}
+        contextWindowSize={128000}
+        breakdown={makeBreakdown('safe', { freeSpace: 80_800 })}
+        builtinTools={[]}
+        mcpTools={[]}
+        skills={[]}
+        memoryFiles={[{ path: 'QWEN.md', tokens: 200 }]}
+        showDetails={showDetails}
+      />,
+    );
+    const frame = lastFrame() ?? '';
+    expect(frame).toMatch(/Memory files\s+200 tokens/);
+    expect(frame).not.toContain('Instruction files');
+    expect(frame).not.toContain('Auto memory');
+    expect(frame.includes('QWEN.md')).toBe(showDetails);
+  },
+);
+
 describe('ContextUsage — CompactionThresholds section (review #4168 R1.6)', () => {
   it('keeps a loaded skill name and listing cost on one line with one body-cost label', () => {
     const name = 'agent-reproduce-feature';

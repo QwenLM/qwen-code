@@ -428,6 +428,41 @@ describe('collectContextData (contextCommand)', () => {
       },
     );
 
+    it('scales nonzero instruction and auto-memory rows and their details together', async () => {
+      const sources = {
+        getUserMemory: () =>
+          '--- Context from: QWEN.md ---\n' +
+          'Project instructions. '.repeat(100) +
+          '\n--- End of Context from: QWEN.md ---',
+        getAutoMemoryPrompt: () => 'Automatic memory policy. '.repeat(50),
+        getAutoMemoryContext: () => '',
+      };
+      const collect = (total: number) =>
+        collectContextData(
+          Object.assign(makeChatConfig({ total, history: [] }), sources),
+          true,
+        );
+      const raw = await collect(0);
+      const total = 1000;
+      const scale = total / sumRows(raw.breakdown);
+      expect(scale).toBeLessThan(1);
+      const scaled = await collect(total);
+
+      for (const category of ['instructionFiles', 'memoryFiles'] as const) {
+        const expected = Math.floor(raw.breakdown[category]! * scale);
+        expect(expected).toBeGreaterThan(0);
+        expect(scaled.breakdown[category]).toBe(expected);
+        expect(scaled[category]).toEqual(
+          raw[category]!.map((entry) => ({
+            ...entry,
+            tokens: Math.round(entry.tokens * scale),
+          })),
+        );
+      }
+      expect(scaled.breakdown.unattributed).toBe(0);
+      expect(sumRows(scaled.breakdown)).toBe(total);
+    });
+
     function sumRows(breakdown: ContextCategoryBreakdown): number {
       return (
         breakdown.systemPrompt +
@@ -2209,6 +2244,40 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.skills.map((skill) => skill.name)).toEqual(['enabled-skill']);
   });
 });
+
+it.each([false, true])(
+  'preserves the combined memory category in legacy text snapshots (details: %s)',
+  (showDetails) => {
+    const text = formatContextUsageText({
+      type: 'context_usage',
+      modelName: 'legacy-model',
+      totalTokens: 200,
+      contextWindowSize: 1000,
+      breakdown: {
+        systemPrompt: 0,
+        builtinTools: 0,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        messages: 0,
+        freeSpace: 600,
+        autocompactBuffer: 200,
+        thresholds: { effectiveWindow: 1000, warn: 700, auto: 800, hard: 900 },
+        currentTier: 'safe',
+      },
+      builtinTools: [],
+      mcpTools: [],
+      skills: [],
+      memoryFiles: [{ path: 'QWEN.md', tokens: 200 }],
+      showDetails,
+    });
+    expect(text).toMatch(/Memory files\s+200 tokens/);
+    expect(text).not.toContain('Instruction files');
+    expect(text).not.toContain('Auto memory');
+    expect(text.includes('QWEN.md')).toBe(showDetails);
+    expect(text.includes('**Memory files**')).toBe(showDetails);
+  },
+);
 
 describe('/context shows three-tier thresholds', () => {
   beforeEach(() => {
