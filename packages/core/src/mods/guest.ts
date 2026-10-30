@@ -260,13 +260,23 @@ export const MOD_GUEST_FACTORY = String.raw`
         run.inputs.set(hook.id, input);
         if (hook.matcher !== undefined && !matches(hook.matcher, input)) return invoke(index + 1, input, frames);
         const nested = [...frames, hook.id];
+        let last;
         const next = nextFor(run, async e => {
           status(run.id, 'validate', encode(e));
-          const result = await invoke(index + 1, frozen(e), nested);
+          last = invoke(index + 1, frozen(e), nested);
+          const result = await last;
           if (!result) throw new Error('Mod hook returned no result');
           return result;
         });
-        return hook.handler(api(run.id, nested), frozen(input), next);
+        const answer = await hook.handler(api(run.id, nested), frozen(input), next);
+        if (run.event !== 'prompt.submit' || !last) return answer;
+        status(run.id, 'validateResult', encode(answer));
+        const below = await last;
+        if (object(answer) && 'drop' in answer && (!object(below) || answer.drop !== below.drop)) {
+          status(run.id, 'promptFallback', encode(below));
+          throw new Error('a drop after its next(e) was answered');
+        }
+        return below;
       };
       return encode(await invoke(0, run.input, []));
     },

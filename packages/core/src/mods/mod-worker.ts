@@ -204,14 +204,23 @@ class Realm {
     const status = this.vm.newFunction('modStatus', (id, key, input) => {
       const call = calls.get(this.vm.getNumber(id));
       const name = this.vm.getString(key);
-      if (name === 'validate' || name === 'validateResult') {
+      if (
+        name === 'validate' ||
+        name === 'validateResult' ||
+        name === 'promptFallback'
+      ) {
         if (!call?.live || callAbandoned(call))
           throw new Error('Mod continuation is no longer active.');
         const json = this.vm.getString(input);
+        if (name !== 'validate' && Buffer.byteLength(json) > MOD_MAX_BYTES)
+          throw new Error('Mod result is too large.');
         assertModDepth(json, 'Mod value');
         const value = JSON.parse(json);
-        if (name === 'validateResult') validateResult(call.event, value);
-        else validateInput(call.event, value, call.input);
+        if (name === 'validate') validateInput(call.event, value, call.input);
+        else {
+          validateResult(call.event, value, call.input);
+          if (name === 'promptFallback') call.last = Promise.resolve(value);
+        }
         return this.vm.undefined;
       }
       if (name === 'aborted')
@@ -531,6 +540,8 @@ async function dispatch(
         if (value !== undefined) {
           validateResult(event, value, call.input);
           await assertDropBeforeNext(event, value, recovery.last ?? call.last);
+          if (event === 'prompt.submit' && (recovery.last ?? call.last))
+            return await (recovery.last ?? call.last);
           if (event === 'tool.check')
             return await ownCheck(
               value as ModToolCheckResult,

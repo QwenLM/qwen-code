@@ -1103,6 +1103,89 @@ describe('ModRuntime with the real QuickJS worker', () => {
     ]);
   });
 
+  it.each([false, true])(
+    'retains a downstream drop after a text answer (same plugin: %s)',
+    async (samePlugin) => {
+      const handlers = [
+        `on('prompt.submit', async ($, e, next) => {
+          await next(e);
+          return {text: e.text};
+        });`,
+        `on('prompt.*', () => ({drop: 'secret guard'}));`,
+      ];
+      const runtime = await createTurns(
+        (samePlugin ? [handlers.join('\n')] : handlers).map(
+          (handler) => `export function register(on) { ${handler} }`,
+        ),
+      );
+
+      expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+        drop: 'secret guard',
+        byHook: true,
+      });
+      expect(logs).toEqual([]);
+    },
+  );
+
+  it.each([false, true])(
+    'retains a downstream drop after a catch answers (next already called: %s)',
+    async (called) => {
+      const runtime = await createTurns([
+        `export function register(on) {
+          on('prompt.submit', async ($, e, next) => {
+            ${called ? 'await next(e);' : ''}
+            throw new Error('broken');
+          }).catch(async ($, e, next) => {
+            if (!next.called) await next(e);
+            return {text: e.text};
+          });
+        }`,
+        `export function register(on) {
+          on('prompt.submit', () => ({drop: 'secret guard'}));
+        }`,
+      ]);
+
+      expect(await runtime.submitPrompt(prompt, signal())).toEqual({
+        drop: 'secret guard',
+        byHook: true,
+      });
+      expect(logs).toEqual([]);
+    },
+  );
+
+  it.each([false, true])(
+    'retains the downstream outcome when rejecting a late drop (same plugin: %s)',
+    async (samePlugin) => {
+      const handlers = [
+        `on('prompt.submit', async ($, e, next) => {
+          await next(e);
+          return {drop: 'too late'};
+        });`,
+        `on('prompt.*', ($, e) =>
+          e.text === 'drop' ? {drop: 'secret guard'} : {text: 'held'});`,
+      ];
+      const runtime = await createTurns(
+        (samePlugin ? [handlers.join('\n')] : handlers).map(
+          (handler) => `export function register(on) { ${handler} }`,
+        ),
+      );
+
+      expect(
+        await runtime.submitPrompt({ ...prompt, text: 'drop' }, signal()),
+      ).toEqual({ drop: 'secret guard', byHook: true });
+      expect(
+        await runtime.submitPrompt({ ...prompt, text: 'answer' }, signal()),
+      ).toEqual({
+        drop: 'a hook answered without passing the prompt on',
+        byHook: false,
+      });
+      expect(logs.map((log) => log.text)).toEqual([
+        expect.stringContaining('a drop after its next(e) was answered'),
+        expect.stringContaining('a drop after its next(e) was answered'),
+      ]);
+    },
+  );
+
   it('skips a hook that fails, drops after its next or changes what is pinned', async () => {
     const runtime = await createTurns([
       `export function register(on) {

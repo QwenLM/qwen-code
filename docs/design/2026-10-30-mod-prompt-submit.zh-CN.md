@@ -100,6 +100,7 @@ drop 在 UserPromptSubmit 和任何模型请求之前拦下提示，不开始回
   - 哪些插件收到该事件，以及不触发它的宿主跳过它的 hook；
   - 到达链底的提示和上下文，以及 `next` 之后的答复不起作用；
   - hook 的 drop，以及不调 `next` 就答复的 hook；
+  - 跨插件、同一插件内和恢复路径中，`next` 返回后的文本答复都保留下层 drop 的原因；
   - `next` 之后 drop、改动 `origin` 或 `wait`、上下文不是列表、答复格式错误、抛错，均被跳过；
   - 守卫失败时由 `.catch` 丢弃。
 - Mod session 测试：没有 hook、origin、带上下文的改写、drop 的单行和 4,096 字符、worker 出错、提示被取消、超过负载的提示。
