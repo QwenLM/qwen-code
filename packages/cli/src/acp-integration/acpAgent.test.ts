@@ -312,6 +312,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).tryResolveModelProtocol,
 
+  Config: (await importOriginal<typeof import('@qwen-code/qwen-code-core')>())
+    .Config,
   SessionSourceService: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).SessionSourceService,
@@ -29822,6 +29824,42 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
       liveSessionId,
     );
     expect(innerConfig.shutdown).toHaveBeenCalledTimes(2);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('stops the session lsp client when an unstored config is cleaned up (#14751)', async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const { Config: RealConfig } = await import('@qwen-code/qwen-code-core');
+    const realConfig = new RealConfig({
+      targetDir: '/tmp',
+      cwd: '/tmp',
+      debugMode: false,
+      model: 'test-model',
+      chatRecording: false,
+      lspClient: { stop } as never,
+    });
+    await realConfig.initialize({
+      skipLlmInitialization: true,
+      skipHooks: true,
+      skipMcpDiscovery: true,
+      skipSkillManager: true,
+      skipFileCheckpointing: true,
+      // SkillTool's constructor requires the SkillManager this Config
+      // deliberately skips; warm the registry leniently so it is logged and
+      // skipped instead of aborting initialize().
+      lenientToolWarmup: true,
+    });
+
+    const { agent, agentPromise } = await bootAgent(
+      makeLiveSessionInnerConfig(makeRecordingService()),
+    );
+    const cleanup = agent as unknown as {
+      cleanupUnstoredConfig(config: Config): Promise<void>;
+    };
+    await cleanup.cleanupUnstoredConfig(realConfig);
+    expect(stop).toHaveBeenCalledTimes(1);
 
     mockConnectionState.resolve();
     await agentPromise;
