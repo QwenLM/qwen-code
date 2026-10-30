@@ -302,6 +302,27 @@ it(`acquires a real source through Discover and cold reload on ${runtime}+${rend
       }, label);
       expect(server!.requests).toHaveLength(0);
     }
+    await key('\x03');
+    await until(async () => {
+      frames['source-clear-empty'] = await session!.viewport();
+      return (
+        frames['source-clear-empty'].includes('Add Marketplace') &&
+        frames['source-clear-empty'].includes('Press Ctrl+C again to exit.') &&
+        /^[ \t]*│ >[ \t]*│[ \t]*$/m.test(frames['source-clear-empty'])
+      );
+    }, 'source-clear-empty');
+    expect(session!.exitResult()).toBeUndefined();
+    expect(server!.requests).toHaveLength(0);
+    await key('\x1a');
+    await until(async () => {
+      frames['source-clear-undo'] = await session!.viewport();
+      return (
+        frames['source-clear-undo'].includes('Add Marketplace') &&
+        /^[ \t]*│ > RbZ[ \t]*│[ \t]*$/m.test(frames['source-clear-undo'])
+      );
+    }, 'source-clear-undo');
+    expect(session!.exitResult()).toBeUndefined();
+    expect(server!.requests).toHaveLength(0);
     await key('\x1b');
     await screen('source-add-cancelled', ['No marketplaces added yet.']);
     sourceStates['post-cancel'] = sourceState();

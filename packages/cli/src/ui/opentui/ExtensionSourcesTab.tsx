@@ -13,6 +13,7 @@ import type { ExtensionManager } from '@qwen-code/qwen-code-core/extension/exten
 import { redactUrlCredentials } from '@qwen-code/qwen-code-core/extension/redaction.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { t } from '../../i18n/index.js';
+import { Command, keyMatchers } from '../keyMatchers.js';
 import { getErrorMessage } from '../../utils/errors.js';
 import { clampDialogHeight } from '../utils/layoutUtils.js';
 import { stripUnsafeCharacters, truncateToWidth } from '../utils/textUtils.js';
@@ -515,6 +516,8 @@ export function OpenTuiExtensionSourcesTab({
           line.settle();
           void submitInput(activeView, value);
         }
+      } else if (keyMatchers[Command.CLEAR_INPUT](key)) {
+        line.clear();
       } else if (!line.handleKey(key) && isPrintableKeyInput(event))
         line.insert(event.sequence);
     } else if (activeView === 'detail') {
