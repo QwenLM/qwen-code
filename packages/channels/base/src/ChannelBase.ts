@@ -7434,10 +7434,13 @@ export abstract class ChannelBase {
             }
             if (injectFallback) {
               // Bounded fallback: retained only until this turn ends, then
-              // replayed in arrival order. It bounds only messages a bridge
-              // REJECTED from its mid-turn queue (bounds shared from
-              // ChannelAgentBridge); plain collect-mode buffering is unbounded
-              // and unchanged.
+              // replayed in arrival order. It bounds the injections the bridge
+              // REJECTED from its mid-turn queue together with the later
+              // same-turn messages parked behind them to keep that order
+              // (bounds shared from ChannelAgentBridge); plain collect-mode
+              // buffering is unbounded and unchanged. A single rejected message
+              // whose own text exceeds the character bound is kept in that
+              // ordinary collect buffer instead of being refused.
               const fallbackEntries = (
                 this.collectBuffers.get(sessionId) ?? []
               ).filter((entry) => entry.injectFallback);
