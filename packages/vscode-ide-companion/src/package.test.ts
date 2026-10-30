@@ -50,20 +50,37 @@ describe('package.json command metadata', () => {
 });
 
 describe('generated settings schema', () => {
-  it('does not advertise the removed dynamic command translation setting', () => {
-    const schema = JSON.parse(
+  function readSettingsSchema(): {
+    properties?: {
+      general?: { properties?: Record<string, unknown> };
+      ui?: {
+        properties?: Record<string, { description?: string }>;
+      };
+    };
+  } {
+    return JSON.parse(
       readFileSync(
         resolve(import.meta.dirname, '../schemas/settings.schema.json'),
         'utf8',
       ),
-    ) as {
-      properties?: {
-        general?: { properties?: Record<string, unknown> };
-      };
-    };
+    );
+  }
+
+  it('does not advertise the removed dynamic command translation setting', () => {
+    const schema = readSettingsSchema();
 
     expect(schema.properties?.general?.properties).not.toHaveProperty(
       'dynamicCommandTranslation',
+    );
+  });
+
+  it('describes the two-way tool-details click gesture', () => {
+    const schema = readSettingsSchema();
+
+    expect(
+      schema.properties?.ui?.properties?.showToolCallDetails?.description,
+    ).toContain(
+      'click the summary to expand it and the first row of the expanded group to collapse it again',
     );
   });
 });
