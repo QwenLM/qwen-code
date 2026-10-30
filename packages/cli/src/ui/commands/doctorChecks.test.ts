@@ -337,4 +337,33 @@ describe('runDoctorChecks', () => {
     // In non-interactive mode, servers are never connected — must not report as fail
     expect(mcpCheck!.status).toBe('pass');
   });
+
+  it('reports the reason and the install hint when the ripgrep probe throws', async () => {
+    // The startup banner stays one line and carries none of the probe's output,
+    // so for a default run `/doctor` is the only place the reason survives —
+    // `debugLogger.warn` is gated behind QWEN_DEBUG_LOG_FILE, which `--debug`
+    // sets and a plain `qwen` run does not. A bundled binary that cannot run
+    // prints a loader/allocator dump that reads like a Qwen Code crash, so only
+    // the first line may reach the report.
+    vi.mocked(allProviders.canUseRipgrep).mockRejectedValueOnce(
+      new Error(
+        'Command failed: /app/vendor/ripgrep/arm64-linux/rg --version\n' +
+          '<jemalloc>: Unsupported system page size\n' +
+          'memory allocation of 160 bytes failed\n',
+      ),
+    );
+
+    const results = await runDoctorChecks(mockContext);
+    const ripgrepCheck = results.find((r) => r.name === 'Ripgrep');
+
+    expect(ripgrepCheck).toBeDefined();
+    expect(ripgrepCheck!.status).toBe('warn');
+    expect(ripgrepCheck!.message).toBe('check failed');
+    expect(ripgrepCheck!.detail).toContain(
+      'https://github.com/BurntSushi/ripgrep',
+    );
+    expect(ripgrepCheck!.detail).toContain('Command failed');
+    expect(ripgrepCheck!.detail).not.toContain('jemalloc');
+    expect(ripgrepCheck!.detail).not.toContain('memory allocation');
+  });
 });
