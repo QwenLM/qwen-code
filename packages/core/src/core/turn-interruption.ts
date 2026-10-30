@@ -10,6 +10,7 @@ import {
   isSystemReminderContent,
 } from './environmentContext.js';
 import { isAgentEnvelopeContent } from '../agents/session-agents/envelope.js';
+import { isApiHistoryDirectoryContext } from '../utils/api-history-metadata.js';
 
 /**
  * Classification of how a session's last turn ended, computed from persisted
@@ -256,12 +257,10 @@ export function effectiveHistoryEnd(
       : history.length - trailingSystemNotifications;
   while (end > 0) {
     const entry = history[end - 1]!;
-    // A session multi-agent record (agent reply or @-mention) is durable
-    // conversation the main model was never asked to answer, so a trailing
-    // one is not an unfinished turn.
+    // Agent envelopes and marked directory refreshes do not ask for a reply.
     // TODO(multi-agent): an agent entry after trailing notifications shifts
     // the authoritative notification window below; revisit if that mixes.
-    if (isAgentEnvelopeContent(entry)) {
+    if (isAgentEnvelopeContent(entry) || isApiHistoryDirectoryContext(entry)) {
       end--;
       continue;
     }
@@ -317,7 +316,8 @@ export function detectTurnInterruption(
     // Walk from the REAL end, not the trimmed one, while the verdict above
     // still reads `history[end - 1]`. The Retry send path
     // (`stripOrphanedUserEntriesFromHistory`) pops the ENTIRE trailing user
-    // run — its only break-guard is `isSystemReminderContent`, which is false
+    // run, including marked directory context that must be replayed with input.
+    // Its structural break-guard is `isSystemReminderContent`, which is false
     // for an envelope — so the re-submission has to carry every entry the
     // strip removes. Collecting from `end - 1` instead would drop a
     // recorded-but-undelivered notification from live history permanently:
@@ -336,6 +336,12 @@ export function detectTurnInterruption(
         break;
       }
       trailingUserEntries.unshift(entry);
+    }
+    if (
+      isSystemReminderContent(last) &&
+      trailingUserEntries.every(isApiHistoryDirectoryContext)
+    ) {
+      return { kind: 'none' };
     }
     // Capture every part, including any per-turn system-reminder parts riding
     // alongside the prompt. The Retry send path does not re-inject per-turn

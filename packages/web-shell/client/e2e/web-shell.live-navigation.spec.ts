@@ -112,7 +112,7 @@ test('Live combines existing settings, voice entry and history without starting 
     column.getByRole('button', { name: 'Open Live Voice' }),
   ).toBeVisible();
   await expect(
-    column.getByRole('button', { name: 'Project', exact: true }),
+    column.getByRole('button', { name: 'Workspaces', exact: true }),
   ).toBeHidden();
   await expect(
     column.getByRole('button', { name: 'Add workspace' }),

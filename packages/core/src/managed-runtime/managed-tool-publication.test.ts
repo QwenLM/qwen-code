@@ -46,6 +46,11 @@ const fixtures = JSON.parse(
   digestVectors: Array<{ id: string; binding: unknown; digest: string }>;
   tokenVector: { token: string; hash: string };
   bindingDigest: string;
+  referenceSizeCases: Array<{
+    field: 'argsRef' | 'checkpointRef';
+    byteLength: number;
+    valid: boolean;
+  }>;
   cases: Array<{
     id: string;
     kind: 'binding' | 'request' | 'grant';
@@ -81,6 +86,21 @@ describe('managed-tool-publication/1', () => {
       else expect(parse).toThrow();
     });
   }
+
+  it.each(fixtures.referenceSizeCases)(
+    'bounds $field at $byteLength bytes',
+    ({ field, byteLength, valid }) => {
+      const binding = parseToolPublicationBinding(fixtures.cases[0].value);
+      const value = {
+        ...binding,
+        [field]: { ...binding[field], byteLength },
+      };
+      expect(ajv.getSchema('publication#/$defs/binding')!(value)).toBe(valid);
+      const parse = () => parseToolPublicationBinding(value);
+      if (valid) expect(parse).not.toThrow();
+      else expect(parse).toThrow();
+    },
+  );
 
   it('matches independent Unicode, key-order and integer digest vectors', () => {
     for (const vector of fixtures.digestVectors) {

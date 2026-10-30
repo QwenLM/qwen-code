@@ -1454,6 +1454,9 @@ describe('ContentGenerationPipeline', () => {
       ],
       [TOKEN_PLAN_URL, 'enable_thinking'],
       [DASHSCOPE_URL, 'enable_thinking'],
+      ['https://model-proxy.alibaba-inc.com/v1', 'enable_thinking'],
+      ['https://model-proxy.aliyun-inc.com/v1', 'enable_thinking'],
+      ['https://model-proxy.alicloudapi.com/v1', 'enable_thinking'],
     ])(
       'sends built-in DeepSeek selection and defaults through %s',
       async (baseUrl, field) => {
@@ -1490,6 +1493,7 @@ describe('ContentGenerationPipeline', () => {
     it.each([
       ['https://api.deepseek.com/v1', 'thinking'],
       [TOKEN_PLAN_URL, 'enable_thinking'],
+      ['https://model-proxy.alibaba-inc.com/v1', 'enable_thinking'],
     ])(
       'preserves static overrides with built-in and legacy capabilities on %s',
       async (baseUrl, field) => {
@@ -1653,21 +1657,28 @@ describe('ContentGenerationPipeline', () => {
       expect(wire.reasoning).toBeUndefined();
     });
 
-    it('keeps explicit other profiles ahead of the built-in DeepSeek serializer', async () => {
-      const wire = await deepSeekWire(
-        {
-          samplingParams: { reasoning: { effort: 'medium' } },
-        },
-        {
-          profile: 'openai-reasoning',
-          efforts: ['low', 'medium', 'high'],
-          defaultEffort: 'medium',
-        },
-      );
-      expect(wire.reasoning).toEqual({ effort: 'medium' });
-      expect(wire.reasoning_effort).toBeUndefined();
-      expect(wire.thinking).toBeUndefined();
-    });
+    it.each([
+      'https://api.deepseek.com/v1',
+      'https://model-proxy.alibaba-inc.com/v1',
+    ])(
+      'keeps explicit profiles ahead of built-in DeepSeek on %s',
+      async (baseUrl) => {
+        const wire = await deepSeekWire(
+          {
+            baseUrl,
+            samplingParams: { reasoning: { effort: 'medium' } },
+          },
+          {
+            profile: 'openai-reasoning',
+            efforts: ['low', 'medium', 'high'],
+            defaultEffort: 'medium',
+          },
+        );
+        expect(wire.reasoning).toEqual({ effort: 'medium' });
+        expect(wire.reasoning_effort).toBeUndefined();
+        expect(wire.thinking).toBeUndefined();
+      },
+    );
 
     it('honors legacy capability tier subsets after normalizing a DeepSeek alias', async () => {
       const wire = await deepSeekWire(
@@ -1708,23 +1719,33 @@ describe('ContentGenerationPipeline', () => {
       ['moonshot', 'kimi-k2.7-code-highspeed', undefined, undefined, true],
       ['moonshot', 'kimi-k2.6', undefined, 'thinking', false],
       ['deepseek', 'deepseek-v4-pro', 'low', 'thinking', false],
-      ['deepseek', 'deepseek-v4-flash', 'low', 'thinking', false],
+      ['deepseek', 'deepseek-flash', 'low', 'thinking', false],
       [std, 'qwen3.8-max', 'low', 'reasoning_effort', false],
       [std, 'qwen3.8-max-0902', 'medium', 'reasoning_effort', false],
       [std, 'qwen3.8-flash', 'xhigh', 'reasoning_effort', false],
       [std, 'qwen3.7-plus', undefined, 'enable_thinking', false],
       [std, 'deepseek-v4-pro', 'high', 'enable_thinking', false],
       [std, 'deepseek-v4-pro', 'max', 'enable_thinking', false],
-      [std, 'deepseek-v4-flash', 'high', 'enable_thinking', false],
+      [std, 'qwen3.8-max', 'max', 'reasoning_effort', false],
+      [std, 'qwen3.8-flash', 'max', 'reasoning_effort', false],
+      [std, 'deepseek-v4.1-flash', 'low', 'enable_thinking', false],
+      [std, 'glm-5.2', undefined, 'enable_thinking', false],
+      [std, 'glm-5.1', undefined, 'enable_thinking', false],
+      [std, 'glm-5.3', undefined, undefined, true],
       [std, 'deepseek-v4-pro-0813', 'low', 'enable_thinking', false],
       [std, 'deepseek-v4-flash-0731', 'low', 'enable_thinking', false],
       [std, 'kimi-k3', 'low', undefined, true],
       [std, 'kimi-k2.7-code', undefined, undefined, true],
       [std, 'kimi-k2.6', undefined, 'enable_thinking', false],
-      ['token-plan', 'qwen3.8-max', 'low', undefined, true],
-      ['token-plan', 'qwen3.8-max-preview', 'medium', undefined, true],
+      ['token-plan', 'qwen3.8-max', 'low', 'reasoning_effort', false],
+      ['token-plan', 'qwen3.8-max', 'max', 'reasoning_effort', false],
       ['token-plan', 'qwen3.8-flash', 'low', 'reasoning_effort', false],
+      ['token-plan', 'qwen3.8-flash', 'max', 'reasoning_effort', false],
       ['token-plan', 'deepseek-v4-pro-0813', 'low', 'enable_thinking', false],
+      ['token-plan', 'deepseek-v4.1-flash', 'low', 'enable_thinking', false],
+      ['token-plan', 'glm-5.2', undefined, 'enable_thinking', false],
+      ['token-plan', 'glm-5.3', undefined, undefined, true],
+      ['token-plan', 'MiniMax-M2.5', undefined, undefined, true],
       ['coding-plan', 'qwen3.5-plus', undefined, 'enable_thinking', false],
       ['coding-plan', 'kimi-k2.5', undefined, 'enable_thinking', false],
     ] as const)(

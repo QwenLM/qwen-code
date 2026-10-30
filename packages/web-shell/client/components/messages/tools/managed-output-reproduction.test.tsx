@@ -22,7 +22,11 @@ it('does not render empty execution details when the Managed tool only has elaps
         type: 'tool_started',
         sessionId: 'managed-repro',
         turnId: 'turn-1',
-        data: { toolCallId: 'call-1', toolName: 'run_shell_command' },
+        data: {
+          itemId: 'item-1',
+          toolCallId: 'call-1',
+          toolName: 'run_shell_command',
+        },
       },
       {
         id: 2,
@@ -30,7 +34,11 @@ it('does not render empty execution details when the Managed tool only has elaps
         type: 'tool_completed',
         sessionId: 'managed-repro',
         turnId: 'turn-1',
-        data: { toolCallId: 'call-1', toolName: 'run_shell_command' },
+        data: {
+          itemId: 'item-1',
+          toolCallId: 'call-1',
+          toolName: 'run_shell_command',
+        },
       },
     ],
     '[truncated]',

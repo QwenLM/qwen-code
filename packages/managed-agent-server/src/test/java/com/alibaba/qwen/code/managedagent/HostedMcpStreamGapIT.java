@@ -1,5 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.daemon.HarnessSessionRef;
+import com.alibaba.qwen.code.managedagent.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -46,6 +48,8 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 import java.util.stream.LongStream;
 
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
 
@@ -54,11 +58,15 @@ import static org.awaitility.Awaitility.await;
 // the client is cut mid-call, and the resumed client must continue the same
 // ledger exactly once. The public route resumes with Last-Event-ID, the
 // WebShell route with afterSequence; a cursor that is ignored replays and
-// reddens the union, it does not time out.
+// reddens the union, it does not time out. The FG12e cell replaces the
+// Runtime MCP connection itself while the call is held.
 class HostedMcpStreamGapIT {
     private static final String PROFILE = "hosted-workspace-mcp/1";
     private static final String TOKEN = "extension-process-fixture-token";
     private static final String CAPABILITY = "sha256:" + "a".repeat(64);
+    // The only prompt sent after the Runtime replacement, so the only call
+    // revision 2 answers.
+    private static final String REPLACED = "EXT_REPLACED";
     private final ObjectMapper json = new ObjectMapper();
     private final HttpClient http = HttpClient.newBuilder()
             .connectTimeout(Duration.ofSeconds(3)).build();
@@ -234,7 +242,147 @@ class HostedMcpStreamGapIT {
         assertThat(modelFailure.get()).isNull();
     }
 
-    /** All three cases pin the physical side effect, not only the frame. */
+    /**
+     * FG12e (issue #14447): the Runtime MCP connection itself is replaced
+     * while the call is held and both streams are cut. Spring never sends
+     * an explicit replacement, so the case sends the Harness-private
+     * configure command under the attachment Spring holds for its own
+     * Session. The Runtime opens revision 2 beside revision 1 and retires
+     * revision 1 only once its held call drains: both streams resume with
+     * no gap and no duplicate, the held call is answered once by the
+     * connection it started on, and the next call runs on the replacement.
+     */
+    @Test
+    @Timeout(240)
+    void runtimeConnectionReplacementDuringTheHeldCallKeepsBothStreamsOnMySql()
+            throws Exception {
+        String agent = api("POST", "/v1/agents", definition(1), "definition",
+                202).path("id").asText();
+        String session = createSession(agent, "connection");
+        Observer cutPublic = new Observer("public", session, 0);
+        Observer cutWebShell = new Observer("webshell", session, 0);
+        String turn = submit(session, "EXT_HOLD");
+        holdParked();
+        cutPublic.awaitToolCall();
+        cutWebShell.awaitToolCall();
+        cutPublic.abort();
+        cutWebShell.abort();
+        JsonNode original = events("mcp.start").getFirst();
+        long held = events("mcp.hold").getFirst().path("pid").asLong();
+        assertThat(held).as("the held call runs on revision 1")
+                .isEqualTo(original.path("pid").asLong());
+
+        JsonNode configured = harness("POST", "/session/" + session
+                + "/mcp/configurations", Map.of("operationId",
+                        UUID.randomUUID().toString(), "expectedRevision", 1,
+                        "server", Map.of("serverId", "fixture",
+                                "serverRevision", 2, "definitionDigest",
+                                DigestUtils.sha256Hex(mcpDigest + 2))),
+                session, 202);
+        assertThat(configured.path("state").asText()).isEqualTo("settled");
+        List<JsonNode> starts = events("mcp.start");
+        assertThat(starts.stream().map(start -> start.path("revision")
+                .asInt()).toList())
+                .as("the replacement starts its own server process")
+                .containsExactly(1, 2);
+        long replacement = starts.getLast().path("pid").asLong();
+        assertThat(replacement).isNotEqualTo(held);
+        assertThat(alive(held))
+                .as("revision 1 is retiring, not closed, while its call holds")
+                .isTrue();
+        List<JsonNode> records = configurations(session);
+        assertThat(records.stream().map(record -> record.path("configRevision")
+                .asInt() + "/" + record.path("serverRevision").asInt() + "/"
+                + record.at("/run/state").asText()).toList())
+                .as("the replacement is a second settled configuration")
+                .containsExactly("1/1/settled", "2/2/settled");
+        assertThat(records.getLast().path("connectionGeneration").asLong())
+                .as("the replacement is a new connection generation")
+                .isGreaterThan(records.getFirst().path("connectionGeneration")
+                        .asLong());
+        JsonNode catalog = api("GET", "/v1/agents/sessions/" + session
+                + "/mcp-catalog", null, null, 200);
+        assertThat(catalog.at("/servers/0/server_revision").asInt())
+                .as("the public catalog shows the committed replacement")
+                .isEqualTo(2);
+        assertThat(events("mcp.effect"))
+                .as("the replacement neither resends nor settles the call")
+                .isEmpty();
+
+        release();
+        awaitCompleted(session, turn);
+        Observer resumedPublic = new Observer("public", session,
+                cutPublic.lastSequence());
+        Observer resumedWebShell = new Observer("webshell", session,
+                cutWebShell.lastSequence());
+        assertOneToolResult(resumedPublic.continueFrom(cutPublic, session));
+        assertOneToolResult(resumedWebShell.continueFrom(cutWebShell,
+                session));
+        assertOneEffect();
+        assertThat(events("mcp.effect").getFirst().path("pid").asLong())
+                .as("the connection the call started on answers it")
+                .isEqualTo(held);
+        waitFor(() -> assertThat(alive(held))
+                .as("revision 1 closes once its call drained").isFalse());
+        assertThat(alive(replacement)).isTrue();
+
+        String next = submit(session, REPLACED);
+        awaitCompleted(session, next);
+        List<JsonNode> effects = events("mcp.effect");
+        assertThat(effects.stream().map(effect -> effect.path("value")
+                .asText() + "@" + effect.path("pid").asLong()).toList())
+                .as("the next call runs on the replacement, the held one"
+                        + " is not repeated")
+                .containsExactly("EXT_HOLD@" + held,
+                        REPLACED + "@" + replacement);
+        assertThat(Files.readAllLines(workspace.resolve("mcp-proof.jsonl")))
+                .hasSize(2);
+        assertThat(events("mcp.start")).as("no third server process")
+                .hasSize(2);
+        assertThat(modelFailure.get()).isNull();
+    }
+
+    private static boolean alive(long pid) {
+        return ProcessHandle.of(pid).map(ProcessHandle::isAlive).orElse(false);
+    }
+
+    /** The Session's MCP configuration records by revision. */
+    private List<JsonNode> configurations(String session) {
+        return HostedGateTestSupport.extensionRecords(jdbc, tenant, session,
+                "mcp_configuration").stream()
+                .sorted(java.util.Comparator.comparingInt(record -> record
+                        .path("configRevision").asInt()))
+                .toList();
+    }
+
+    /**
+     * A Harness-private command under Spring's attachment to the Session:
+     * the client id its attach minted and the boot it attached to.
+     */
+    private JsonNode harness(String method, String path, Object body,
+            String session, int expected) throws Exception {
+        HarnessSessionRef attachment = attachment(
+                spring.getBean(HarnessConnector.class), session);
+        assertThat(attachment).as("Spring's attachment to %s", session)
+                .isNotNull();
+        var response = http.send(HttpRequest.newBuilder(URI.create(
+                "http://127.0.0.1:" + harnessPort + path))
+                .timeout(Duration.ofSeconds(60))
+                .header("Authorization", "Bearer " + TOKEN)
+                .header("X-Qwen-Client-Id", attachment.getHarnessClientId())
+                .header("X-Qwen-Harness-Protocol-Version", "1")
+                .header("X-Qwen-Harness-Boot-Id",
+                        attachment.getHarnessBootId())
+                .header("Content-Type", "application/json")
+                .method(method, HttpRequest.BodyPublishers.ofString(
+                        json.writeValueAsString(body))).build(),
+                HttpResponse.BodyHandlers.ofString());
+        assertThat(response.statusCode()).as("%s %s: %s", method, path,
+                response.body()).isEqualTo(expected);
+        return json.readTree(response.body());
+    }
+
+    /** All four cases pin the physical side effect, not only the frame. */
     private void assertOneEffect() throws Exception {
         List<JsonNode> effects = events("mcp.effect");
         assertThat(effects).as("the held call appends exactly once")
@@ -258,9 +406,12 @@ class HostedMcpStreamGapIT {
         Files.writeString(workspace.resolve("EXT_HOLD.release"), "release");
     }
 
+    /** A Turn that fails reddens here at once instead of at the timeout. */
     private void awaitCompleted(String session, String turn) {
-        waitFor(() -> assertThat(turnStatus(session, turn)).isEqualTo(
-                "COMPLETED"));
+        waitFor(() -> assertThat(turnStatus(session, turn)).isIn("COMPLETED",
+                "FAILED", "CANCELLED"));
+        assertThat(turnStatus(session, turn)).as("Turn %s", turn)
+                .isEqualTo("COMPLETED");
     }
 
     /**
@@ -352,8 +503,8 @@ class HostedMcpStreamGapIT {
                         .put("arguments", json.writeValueAsString(
                                 Map.of("value", prompt)));
             } else {
-                assertThat(results.getLast().toString())
-                        .contains("EXT_MCP_1_" + prompt);
+                assertThat(results.getLast().toString()).contains("EXT_MCP_"
+                        + (REPLACED.equals(prompt) ? 2 : 1) + "_" + prompt);
                 delta.put("content", "FG12F_DONE_" + prompt);
             }
             choice.putNull("finish_reason");
@@ -550,19 +701,6 @@ class HostedMcpStreamGapIT {
             }
         });
         return json.readTree(json.writeValueAsString(node));
-    }
-
-    private static String camel(String key) {
-        StringBuilder out = new StringBuilder();
-        for (int i = 0; i < key.length(); i++) {
-            char c = key.charAt(i);
-            if (c == '_' && i + 1 < key.length()) {
-                out.append(Character.toUpperCase(key.charAt(++i)));
-            } else {
-                out.append(c);
-            }
-        }
-        return out.toString();
     }
 
     private JsonNode api(String method, String path, Object body, String key,

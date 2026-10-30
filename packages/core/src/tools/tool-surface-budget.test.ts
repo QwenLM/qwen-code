@@ -12,6 +12,7 @@ import { AdvisorTool } from './advisor.js';
 import { ArtifactTool } from './artifact/artifact-tool.js';
 import type { ArtifactPublisher } from './artifact/publisher.js';
 import { AskUserQuestionTool } from './askUserQuestion.js';
+import { AutofixPrTool } from './autofix-pr.js';
 import { CreateSubSessionTool } from './create-sub-session.js';
 import { CronCreateTool } from './cron-create.js';
 import { CronDeleteTool } from './cron-delete.js';
@@ -178,6 +179,7 @@ const DEFERRED: ReadonlyArray<[name: string, build: Build]> = [
   ['update_goal', (c) => new UpdateGoalTool(c)],
   ['advisor', (c) => new AdvisorTool(c)],
   ['create_sub_session', (c) => new CreateSubSessionTool(c)],
+  ['autofix_pr', (c) => new AutofixPrTool(c)],
   ['cron_create', (c) => new CronCreateTool(c)],
   ['cron_delete', (c) => new CronDeleteTool(c)],
   ['cron_list', (c) => new CronListTool(c)],

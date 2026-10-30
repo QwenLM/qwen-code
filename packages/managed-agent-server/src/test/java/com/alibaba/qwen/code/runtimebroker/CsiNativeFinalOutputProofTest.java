@@ -58,6 +58,57 @@ class CsiNativeFinalOutputProofTest {
     }
 
     @Test
+    void pagedReceiptsPreserveTheNativeExpectedTransitionAndRejectSubstitution() {
+        var before = prefix(21);
+        var expectedState = advance(21, before).checkpoint().state();
+        for (boolean substitute : List.of(false, true)) {
+            ObjectNode logical = expectedState.deepCopy();
+            ObjectNode page = JSON.createObjectNode().put("storageProfile", ManagedCheckpointHistory.KIND + "/1");
+            page.set("sessionKey", logical.path("identity").path("sessionKey").deepCopy());
+            page.set("turnId", logical.path("identity").path("turnId").deepCopy());
+            page.set("promptId", logical.path("identity").path("promptId").deepCopy());
+            page.putNull("previous");
+            page.set("items", logical.path("tools").path("items").deepCopy());
+            page.set("bindings", logical.path("runtime").path("bindings").deepCopy());
+            page.put("toolCount", page.path("items").size()).put("bindingCount", page.path("bindings").size());
+            if (substitute) {
+                ((ObjectNode) page.path("items").get(0)).put("inputDigest", "0".repeat(64));
+            }
+            ObjectNode pageRef = pagingResource(ManagedCheckpointHistory.KIND, page);
+            ((ObjectNode) logical.path("tools")).putArray("items");
+            ((ObjectNode) logical.path("runtime")).putArray("bindings");
+            logical.put("storageProfile", ManagedCheckpointHistory.PROFILE);
+            ObjectNode history = logical.putObject("history").put("toolCount", page.path("items").size())
+                    .put("bindingCount", page.path("bindings").size());
+            history.set("ref", pageRef);
+            ObjectNode rootRef = pagingResource("managed-checkpoint", logical);
+            var tx = transaction(21);
+            var events = tx.events().stream().<JsonNode>map(JsonNode::deepCopy).toList();
+            ((ObjectNode) events.getLast().path("payload")).set("stateRef", rootRef);
+            ObjectNode metadata = requests.get(21).deepCopy();
+            metadata.put("contentDigest", rootRef.path("digest").textValue());
+            metadata.put("latestCheckpointResourceId", rootRef.path("resourceId").textValue());
+            var changed = new CsiNativeActivationProof.Transaction(events, tx.lastRecordUuid());
+            if (substitute) {
+                assertEquals("csi_original_activation_unavailable", assertThrows(RuntimeBrokerException.class,
+                        () -> advance(changed, metadata, before)).getCode());
+            } else {
+                var restored = advance(changed, metadata, before).checkpoint();
+                assertEquals(rootRef, restored.ref());
+                assertEquals(CsiNativeActivationProof.canonical(expectedState), CsiNativeActivationProof.canonical(restored.state()));
+            }
+        }
+    }
+
+    private ObjectNode pagingResource(String kind, JsonNode body) {
+        byte[] raw = CsiNativeActivationProof.utf8(body.toString());
+        String id = java.util.UUID.randomUUID().toString();
+        bodies.put(id, raw);
+        return JSON.createObjectNode().put("resourceId", id).put("kind", kind).put("schemaVersion", 1)
+                .put("byteLength", raw.length).put("digest", CsiNativeActivationProof.sha256(raw));
+    }
+
+    @Test
     void retainsTheMarkerOnlyLegacyShapeWithoutGivingItCompleteOutputProof() {
         var tx = transaction(20);
         ObjectNode metadata = requests.get(20).deepCopy();

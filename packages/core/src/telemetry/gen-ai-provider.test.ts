@@ -10,6 +10,7 @@ import {
   resolveGenAiOutputType,
   resolveGenAiProviderName,
 } from './gen-ai-provider.js';
+import { QWENCLOUD_MAAS_HOSTS } from '../core/dashscope-source-config.js';
 
 describe('GenAI provider resolution', () => {
   it('always identifies Qwen OAuth as DashScope', () => {
@@ -65,6 +66,30 @@ describe('GenAI provider resolution', () => {
     expect(resolveGenAiProviderName({ authType: 'openai', baseUrl })).toBe(
       expected,
     );
+  });
+
+  // The QwenCloud host list is owned by the attribution leaf (#15107). Deriving
+  // the cases from that constant rather than restating them means adding a host
+  // there cannot leave this classifier behind on a stale copy of the literals.
+  it.each(
+    QWENCLOUD_MAAS_HOSTS.flatMap((host) => [
+      host,
+      `token-plan.${host}`,
+      `site.${host}`,
+    ]),
+  )('classifies QwenCloud host %s as DashScope', (host) => {
+    expect(
+      resolveGenAiProviderName({
+        authType: 'openai',
+        baseUrl: `https://${host}/compatible-mode/v1`,
+      }),
+    ).toBe('dashscope');
+    expect(
+      resolveGenAiProviderName({
+        authType: 'openai',
+        baseUrl: `https://${host}.attacker.example/v1`,
+      }),
+    ).toBe('openai');
   });
 
   it('rejects forged hostname suffixes and falls back to the protocol', () => {

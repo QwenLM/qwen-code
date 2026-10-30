@@ -28,7 +28,10 @@ import {
 import { computeManagedContextDigest } from './managed-workspace-binding.js';
 import { PUBLICATION_INSTALL_ROUTE } from './remote-shell-result-publication.js';
 import { managedToolDigest } from '@qwen-code/qwen-code-core/tools/managed-tool-protocol.js';
-import { MANAGED_MCP_WORKER_ROUTE } from './managed-mcp-routes.js';
+import {
+  MANAGED_MCP_WORKER_ROUTE,
+  MANAGED_MCP_DEFINITIONS_WORKER_ROUTE,
+} from './managed-mcp-routes.js';
 import { MANAGED_HOOK_WORKER_ROUTE } from './managed-hook-routes.js';
 import { MANAGED_SHELL_WORKER_ROUTE } from './managed-shell-routes.js';
 import { MANAGED_MONITOR_WORKER_ROUTE } from './managed-monitor-routes.js';
@@ -303,6 +306,7 @@ describe.skipIf(!['linux', 'darwin'].includes(process.platform))(
       const input = { file_path: 'existing.txt' };
       for (const route of [
         MANAGED_MCP_WORKER_ROUTE,
+        MANAGED_MCP_DEFINITIONS_WORKER_ROUTE,
         MANAGED_HOOK_WORKER_ROUTE,
         MANAGED_SHELL_WORKER_ROUTE,
         MANAGED_MONITOR_WORKER_ROUTE,

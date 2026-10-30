@@ -20,13 +20,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class ManagedSchemaTest {
     @Test
-    void upgradesV4WithoutChangingExistingSessionOrTurnModels() throws Exception {
+    void preservesSessionAndTurnModelsAcrossRestart() throws Exception {
         DataSource source = source();
-        executeResource(source, ManagedSchema.RESOURCE);
-        executeResource(source, ManagedSchema.PRIVATE_AUTHORITY);
-        executeResource(source, ManagedSchema.SESSION_LIST);
-        executeResource(source, ManagedSchema.WORKSPACE_CREATION);
-        assertEquals(4, ManagedSchema.schemaVersion(source));
+        ManagedSchema.initialize(source);
+        assertEquals(1, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
             statement.execute("INSERT INTO ma_session (tenant_id,session_id,agent_id,gmt_create,gmt_modified)"
                     + " VALUES ('tenant','session','qwen-code',1,1)");
@@ -35,7 +32,7 @@ class ManagedSchemaTest {
                     + "'prompt','[]','digest','COMPLETED',1,1)");
         }
         ManagedSchema.initialize(source);
-        assertEquals(14, ManagedSchema.schemaVersion(source));
+        assertEquals(1, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection(); var statement = connection.createStatement()) {
             try (var row = statement.executeQuery("SELECT model_id,model_revision FROM ma_session")) {
                 assertTrue(row.next());
@@ -58,46 +55,35 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void initializesExactly32TablesAndValidatesWithoutRewriting() throws Exception {
+    void initializesExactlyTheTargetTablesAndValidatesWithoutRewriting() throws Exception {
         DataSource source = source();
         ManagedSchema.initialize(source);
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
-        assertEquals(14, ManagedSchema.schemaVersion(source));
+        assertEquals(1, ManagedSchema.schemaVersion(source));
         try (var connection = source.getConnection()) {
             assertEquals(
                     ManagedSchemaContract.TABLES, ManagedSchemaCatalog.tables(connection).keySet());
-            assertEquals(32, ManagedSchemaCatalog.tables(connection).size());
+            assertEquals(ManagedSchemaContract.TABLES.size(), ManagedSchemaCatalog.tables(connection).size());
         }
     }
 
     @Test
-    void upgradesUnversionedV1AndV2WhilePreservingReceipts() throws Exception {
-        for (int version : new int[] {1, 2}) {
-            DataSource source = source();
-            executeResource(source, ManagedSchema.RESOURCE);
-            if (version == 2) {
-                executeResource(source, ManagedSchema.PRIVATE_AUTHORITY);
+    void preservesReceiptsAndNamespaceConstraintsAcrossRestart() throws Exception {
+        DataSource source = initialized();
+        try (var connection = source.getConnection()) {
+            receipt(connection, "session", "SESSION_COMMAND");
+            receipt(connection, "workspace", "WORKSPACE_CREATE");
+        }
+        ManagedSchema.initialize(source);
+        assertEquals(1, ManagedSchema.schemaVersion(source));
+        try (var connection = source.getConnection(); var statement = connection.createStatement()) {
+            try (var row = statement.executeQuery("SELECT COUNT(*) FROM ma_request_receipt")) {
+                assertTrue(row.next());
+                assertEquals(2, row.getInt(1));
             }
-            assertEquals(version, ManagedSchema.schemaVersion(source));
-            try (var connection = source.getConnection()) {
-                receipt(connection, "old", "SESSION_COMMAND");
-                assertThrows(
-                        SQLException.class,
-                        () -> receipt(connection, "unsupported", "WORKSPACE_CREATE"));
-            }
-            ManagedSchema.initialize(source);
-            assertEquals(14, ManagedSchema.schemaVersion(source));
-            try (var connection = source.getConnection();
-                    var statement = connection.createStatement()) {
-                receipt(connection, "new", "WORKSPACE_CREATE");
-                try (var row = statement.executeQuery("SELECT COUNT(*) FROM ma_request_receipt")) {
-                    assertTrue(row.next());
-                    assertEquals(2, row.getInt(1));
-                }
-                for (String invalid : Set.of("WORKSPACE_CREATE ", "workspace_create", "OTHER")) {
-                    assertThrows(SQLException.class, () -> receipt(connection, invalid, invalid));
-                }
+            for (String invalid : Set.of("WORKSPACE_CREATE ", "workspace_create", "OTHER")) {
+                assertThrows(SQLException.class, () -> receipt(connection, invalid, invalid));
             }
         }
     }
@@ -134,6 +120,28 @@ class ManagedSchemaTest {
                         + ";MODE=MySQL;DB_CLOSE_DELAY=-1");
         ManagedSchema.initialize(source);
         ManagedSchema.validate(source);
+    }
+
+    @Test
+    void reportsMissingAndChangedProjectionExpressionsAsSchemaErrors() throws Exception {
+        DataSource source = source();
+        try (var connection = source.getConnection();
+                var statement = connection.createStatement()) {
+            int variant = 0;
+            for (String declaration : Set.of("BOOLEAN",
+                    "BOOLEAN GENERATED ALWAYS AS (last_sequence >= covered_sequence)")) {
+                String table = "ma_generated_drift_" + variant++;
+                statement.execute("CREATE TABLE " + table
+                        + " (last_sequence BIGINT, covered_sequence BIGINT, projection_pending "
+                        + declaration + ")");
+                var error = assertThrows(SQLException.class,
+                        () -> ManagedSchemaCatalog.validateGeneratedColumns(connection, table,
+                                "    projection_pending BOOLEAN GENERATED ALWAYS AS"
+                                        + " (last_sequence > covered_sequence)"));
+                assertTrue(error.getMessage().contains(
+                        "Managed schema generated column differs: " + table + ".projection_pending"));
+            }
+        }
     }
 
     @Test
@@ -335,70 +343,6 @@ class ManagedSchemaTest {
     }
 
     @Test
-    void snapshotPageDirectoryRequiresCompleteTypedMetadataAndUniqueOrdinals() throws Exception {
-        DataSource source = initialized();
-        try (var connection = source.getConnection()) {
-            snapshotPage(connection, "first", "managed-snapshot-page", "snapshot", 0, 1L, 100L);
-            assertThrows(
-                    SQLException.class,
-                    () ->
-                            snapshotPage(
-                                    connection,
-                                    "duplicate",
-                                    "managed-snapshot-page",
-                                    "snapshot",
-                                    0,
-                                    1L,
-                                    100L));
-            assertThrows(
-                    SQLException.class,
-                    () ->
-                            snapshotPage(
-                                    connection,
-                                    "incomplete",
-                                    "managed-snapshot-page",
-                                    "snapshot",
-                                    null,
-                                    1L,
-                                    100L));
-            assertThrows(
-                    SQLException.class,
-                    () ->
-                            snapshotPage(
-                                    connection,
-                                    "missing",
-                                    "managed-snapshot-page",
-                                    null,
-                                    null,
-                                    null,
-                                    null));
-            assertThrows(
-                    SQLException.class,
-                    () ->
-                            snapshotPage(
-                                    connection,
-                                    "backward",
-                                    "managed-snapshot-page",
-                                    "snapshot",
-                                    1,
-                                    101L,
-                                    100L));
-            assertThrows(
-                    SQLException.class,
-                    () ->
-                            snapshotPage(
-                                    connection,
-                                    "wrong-kind",
-                                    "managed-context",
-                                    "snapshot",
-                                    1,
-                                    101L,
-                                    200L));
-        }
-        ManagedSchema.validate(source);
-    }
-
-    @Test
     void harnessBarrierHasNoInventedJournalAndStorageFenceHasNoInventedPhysicalOwner()
             throws Exception {
         DataSource source = initialized();
@@ -406,9 +350,9 @@ class ManagedSchemaTest {
                 var statement = connection.createStatement()) {
             statement.execute(
                     "INSERT INTO ma_session_head"
-                        + " (tenant_key,harness_key,tenant_id,session_id,harness_session_id,head_kind,gmt_create,gmt_modified,o3_backfill_pending)"
+                        + " (tenant_key,harness_key,tenant_id,session_id,harness_session_id,head_kind,gmt_create,gmt_modified)"
                         + " VALUES ('tenant',"
-                        + "'harness','tenant','harness','harness','HARNESS'," + ManagedSchemaTime.SQL_NOW + "," + ManagedSchemaTime.SQL_NOW + ",FALSE)");
+                        + "'harness','tenant','harness','harness','HARNESS'," + ManagedSchemaTime.SQL_NOW + "," + ManagedSchemaTime.SQL_NOW + ")");
             try (var row =
                     statement.executeQuery(
                             "SELECT journal_revision,writer_generation,activation_epoch FROM"
@@ -483,8 +427,7 @@ class ManagedSchemaTest {
         }
     }
 
-    // Each migration re-adds ck_ma_operation_kind whole, so one built from a
-    // stale chain silently drops a kind a shipped route writes.
+    // Server and Broker must admit every operation kind their routes write.
     @Test
     void theCurrentOperationKindCheckAdmitsEveryShippedKind() throws Exception {
         DataSource migrated = source();
@@ -580,8 +523,10 @@ class ManagedSchemaTest {
                                         !tables.isEmpty()
                                                 && ManagedSchemaContract.TABLES.containsAll(
                                                         tables)));
+        Set<String> originalTargets = new java.util.HashSet<>(ManagedSchemaContract.TABLES);
+        originalTargets.removeAll(Set.of("ma_extension_package", "ma_extension_settings", "ma_extension_operation", "ma_session_worktree"));
         assertEquals(
-                ManagedSchemaContract.TABLES,
+                originalTargets,
                 inventory.values().stream()
                         .flatMap(java.util.Collection::stream)
                         .collect(java.util.stream.Collectors.toSet()));
@@ -609,37 +554,6 @@ class ManagedSchemaTest {
         assertEquals(64, ManagedSchemaKeys.key("identity").length());
         assertThrows(IllegalArgumentException.class, () -> ManagedSchemaKeys.key("\ud800"));
         assertThrows(IllegalArgumentException.class, ManagedSchemaKeys::key);
-    }
-
-    private static void snapshotPage(
-            Connection connection,
-            String key,
-            String kind,
-            String snapshot,
-            Integer ordinal,
-            Long first,
-            Long last)
-            throws SQLException {
-        try (var statement =
-                connection.prepareStatement(
-                        "INSERT INTO ma_resource"
-                            + " (resource_key,session_scope_key,tenant_id,session_id,resource_id,kind,schema_version,byte_length,"
-                            + "sha256,storage_kind,inline_bytes,state,gmt_create,snapshot_id,snapshot_page_ordinal,snapshot_page_first_sequence,snapshot_page_last_sequence)"
-                            + " VALUES"
-                            + " (?,'scope',?,?,?,?,1,0,?,'MYSQL_INLINE',?,'REFERENCED'," + ManagedSchemaTime.SQL_NOW + ",?,?,?,?)")) {
-            statement.setString(1, key);
-            statement.setBytes(2, ManagedSchemaKeys.identity("tenant"));
-            statement.setBytes(3, ManagedSchemaKeys.identity("session"));
-            statement.setBytes(4, ManagedSchemaKeys.identity(key));
-            statement.setBytes(5, ManagedSchemaKeys.identity(kind));
-            statement.setString(6, "a".repeat(64));
-            statement.setBytes(7, new byte[0]);
-            statement.setBytes(8, snapshot == null ? null : ManagedSchemaKeys.identity(snapshot));
-            statement.setObject(9, ordinal);
-            statement.setObject(10, first);
-            statement.setObject(11, last);
-            statement.executeUpdate();
-        }
     }
 
     private static void session(Connection connection, String tenant, String session, String kind)
@@ -690,21 +604,6 @@ class ManagedSchemaTest {
         DataSource source = source();
         ManagedSchema.initialize(source);
         return source;
-    }
-
-    private static void executeResource(DataSource source, String resource) throws Exception {
-        try (var connection = source.getConnection();
-                var statement = connection.createStatement();
-                var input = ManagedSchema.class.getResourceAsStream(resource)) {
-            for (String sql :
-                    new String(input.readAllBytes(), java.nio.charset.StandardCharsets.UTF_8)
-                            .replaceAll("(?m)^--[^\\n]*", "")
-                            .split(";")) {
-                if (!sql.isBlank()) {
-                    statement.execute(sql);
-                }
-            }
-        }
     }
 
     private static void receipt(Connection connection, String key, String namespace)

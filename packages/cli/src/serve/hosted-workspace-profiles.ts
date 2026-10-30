@@ -11,7 +11,11 @@
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
 export const HOSTED_WORKSPACE_FILE_PROFILE_V2 = 'hosted-workspace-files/2';
-export const HOSTED_WORKSPACE_SHELL_PROFILE_V2 = 'hosted-workspace-shell/2';
+// #15076: `files/3` adds `todo_write` to its `/2` counterpart. A new version
+// rather than a wider `/2`: admission rests on what a Session's own profile
+// offered, so widening `/2` would make a saved `/2` Session expose a tool its
+// earlier turns never had.
+export const HOSTED_WORKSPACE_FILE_PROFILE_V3 = 'hosted-workspace-files/3';
 export const HOSTED_WORKSPACE_TEAM_LEAD_PROFILE =
   'hosted-workspace-team-lead/1';
 // #13753 I3: a snapshot child's profile, `read_file` and `glob` only. The
@@ -23,7 +27,7 @@ export type HostedWorkspaceToolProfile =
   | typeof HOSTED_WORKSPACE_FILE_PROFILE
   | typeof HOSTED_WORKSPACE_SHELL_PROFILE
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V2
-  | typeof HOSTED_WORKSPACE_SHELL_PROFILE_V2
+  | typeof HOSTED_WORKSPACE_FILE_PROFILE_V3
   | typeof HOSTED_WORKSPACE_TEAM_LEAD_PROFILE
   | typeof HOSTED_WORKSPACE_READ_PROFILE;
 
@@ -34,7 +38,7 @@ export function isHostedWorkspaceProfile(
     profile === HOSTED_WORKSPACE_FILE_PROFILE ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2 ||
+    profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
     profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE ||
     profile === HOSTED_WORKSPACE_READ_PROFILE
   );
@@ -43,7 +47,6 @@ export function isHostedWorkspaceProfile(
 export function isHostedWorkspaceShellProfile(profile: unknown): boolean {
   return (
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_TEAM_LEAD_PROFILE
   );
 }
@@ -56,16 +59,17 @@ export function hostedShellLaneAttachesChildAgents(
   return shellLane && !suppressChildAgents;
 }
 
-/** The `/2` profiles; the read profile is not one (see the glob predicate). */
+/** The file-search and Shell profiles; read-only children use their own list. */
 export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
   return (
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
-    profile === HOSTED_WORKSPACE_SHELL_PROFILE_V2
+    profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
+    profile === HOSTED_WORKSPACE_FILE_PROFILE_V3
   );
 }
 
 /**
- * The profiles that declare `glob`, so approval pre-approves it: the `/2`
+ * The profiles that declare `glob`, so approval pre-approves it: the
  * search profiles and the read profile (#13753 I3).
  */
 export function isHostedWorkspaceGlobProfile(profile: unknown): boolean {

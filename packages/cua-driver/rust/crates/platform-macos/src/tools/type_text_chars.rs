@@ -9,12 +9,12 @@ use std::sync::Arc;
 use super::ToolState;
 
 pub struct TypeTextCharsTool {
-    state: Arc<ToolState>,
+    _state: Arc<ToolState>,
 }
 
 impl TypeTextCharsTool {
     pub fn new(state: Arc<ToolState>) -> Self {
-        Self { state }
+        Self { _state: state }
     }
 }
 
@@ -84,12 +84,14 @@ impl Tool for TypeTextCharsTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let (element_index, window_id) = match resolved {
             cua_driver_core::element_token::ResolvedElement::None => (None, window_id_arg),
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id: wid,
                 element_index: idx,
                 via_token: _,
+                ..
             } => (Some(idx), wid),
         };
         let type_chars_only = args.bool_or("type_chars_only", false);
@@ -98,7 +100,7 @@ impl Tool for TypeTextCharsTool {
         // get_window_state can't free it during the gate/focus below
         // (use-after-free → daemon crash). Guard lives past the focus call.
         let element_guard = if let (Some(idx), Some(wid)) = (element_index, window_id) {
-            match self.state.element_cache.get_element_retained(pid, wid, idx) {
+            match element_cache.get_element_retained(pid, wid, idx) {
                 Some(guard) => Some(guard),
                 None => {
                     return ToolResult::error(format!(

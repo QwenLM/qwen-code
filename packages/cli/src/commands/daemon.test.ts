@@ -31,27 +31,40 @@ vi.mock('../serve/daemon-discovery.js', async (importOriginal) => {
 import {
   buildDaemonStartArgs,
   buildDaemonStartEnv,
+  buildDaemonRestartPlan,
   canonicalizeStartWorkspaces,
   daemonCommand,
+  daemonRejectsToken,
   formatDaemonAge,
   formatDaemonDetail,
   formatDaemonStartSummary,
   fetchDaemonDetail,
   followFile,
+  isProcessAncestor,
   listenerIdentityVerified,
   pidResolvableHere,
   probeHealth,
+  processParentTable,
   processStartMatchesRecord,
   processStartTime,
   resolveStartEnvPath,
+  runDaemonRestart,
   selectDaemonEntries,
+  selectRestartTarget,
   summarizeDaemonStatus,
   sweepStaleStartLogs,
   tailLines,
   terminateTree,
   waitForDaemonReady,
+  type DaemonRestartDeps,
+  type DaemonRestartPlan,
 } from './daemon.js';
-import type { DaemonDiscoveryEntry } from '../serve/daemon-discovery.js';
+import {
+  readDaemonToken,
+  writeDaemonToken,
+  type DaemonDiscoveryEntry,
+  type DaemonDiscoveryRecord,
+} from '../serve/daemon-discovery.js';
 
 function entry(port: number): DaemonDiscoveryEntry {
   return {
@@ -77,7 +90,7 @@ describe('qwen daemon command', () => {
     expect(typeof daemonCommand.handler).toBe('function');
   });
 
-  it('registers start, status, logs and stop subcommands', () => {
+  it('registers start, status, logs, stop, restart and token subcommands', () => {
     const mockYargs = {
       command: vi.fn().mockReturnThis(),
       demandCommand: vi.fn().mockReturnThis(),
@@ -90,8 +103,477 @@ describe('qwen daemon command', () => {
     builder(mockYargs as unknown as Argv);
 
     expect(mockYargs.command.mock.calls.map((call) => call[0].command)).toEqual(
-      ['start', 'status', 'logs', 'stop'],
+      ['start', 'status', 'logs', 'stop', 'restart', 'token'],
     );
+  });
+
+  describe('restart', () => {
+    const cli = '/opt/qwen/index.js';
+    const plan = (
+      record: DaemonDiscoveryRecord,
+      options: Parameters<typeof buildDaemonRestartPlan>[1] = {},
+      baseEnv: NodeJS.ProcessEnv = {},
+    ) => buildDaemonRestartPlan(record, options, cli, [], baseEnv);
+    const recorded = (
+      overrides: Partial<DaemonDiscoveryRecord> = {},
+    ): DaemonDiscoveryRecord => ({
+      ...entry(4170).record,
+      workspaces: ['/tmp/project-4170', '/tmp/restored-4170'],
+      startupWorkspaces: ['/tmp/project-4170'],
+      web: true,
+      requireAuth: false,
+      ...overrides,
+    });
+    const bearer = (overrides: Partial<DaemonDiscoveryRecord> = {}) =>
+      recorded({ auth: 'bearer', ...overrides });
+
+    it('refuses an HTTPS daemon before stopping it', () => {
+      const result = plan(recorded({ url: 'https://127.0.0.1:4170' }));
+      expect(result.error).toContain('HTTPS');
+      expect(result.stopArgs).toBeUndefined();
+    });
+
+    it('replays only the recorded startup settings', () => {
+      const result = plan(
+        recorded({
+          startupWorkspaces: ['/tmp/project-4170', '/tmp/second-4170'],
+          web: false,
+        }),
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.notices).toEqual([]);
+      expect(result.stopArgs).toEqual([
+        cli,
+        'daemon',
+        'stop',
+        '--port',
+        '4170',
+      ]);
+      expect(result.startArgs).toEqual([
+        cli,
+        'daemon',
+        'start',
+        '--port',
+        '4170',
+        '--hostname',
+        '127.0.0.1',
+        '--wait',
+        '--workspace',
+        '/tmp/project-4170',
+        '--workspace',
+        '/tmp/second-4170',
+        '--no-web',
+      ]);
+      expect(result.workspaces).toEqual([
+        '/tmp/project-4170',
+        '/tmp/second-4170',
+      ]);
+    });
+
+    it('refuses an older record whose workspaces may include restored registrations', () => {
+      const result = plan(
+        recorded({ startupWorkspaces: undefined, web: undefined }),
+      );
+      expect(result.error).toContain('did not record its startup workspaces');
+      expect(result.stopArgs).toBeUndefined();
+    });
+
+    it('names the defaults it assumes for an older single-workspace record', () => {
+      const none = plan(entry(4170).record);
+      expect(none.error).toBeUndefined();
+      expect(none.startArgs).toEqual([
+        cli,
+        'daemon',
+        'start',
+        '--port',
+        '4170',
+        '--hostname',
+        '127.0.0.1',
+        '--wait',
+        '--workspace',
+        '/tmp/project-4170',
+      ]);
+      expect(none.notices).toEqual([
+        expect.stringContaining('Web Shell was enabled'),
+      ]);
+
+      const legacyBearer = plan(
+        { ...entry(4170).record, auth: 'bearer' },
+        { web: true },
+        { QWEN_SERVER_TOKEN: 'secret' },
+      );
+      expect(legacyBearer.startArgs).toContain('--require-auth');
+      expect(legacyBearer.notices).toEqual([
+        expect.stringContaining('--require-auth was set'),
+      ]);
+    });
+
+    it('lets explicit flags override the record', () => {
+      const result = plan(
+        bearer({ requireAuth: true }),
+        { web: false, requireAuth: false },
+        { QWEN_SERVER_TOKEN: 'secret' },
+      );
+      expect(result.startArgs).toContain('--no-web');
+      expect(result.startArgs).not.toContain('--require-auth');
+      expect(result.env?.['QWEN_SERVER_TOKEN']).toBe('secret');
+    });
+
+    it('requires a token before hardening an auth-none daemon', () => {
+      const result = plan(recorded(), { requireAuth: true });
+      expect(result.error).toBe(
+        '--require-auth requires --token or QWEN_SERVER_TOKEN.',
+      );
+      expect(result.stopArgs).toBeUndefined();
+    });
+
+    it('keeps an explicit token when hardening an auth-none daemon', () => {
+      const result = plan(recorded(), { token: 'secret', requireAuth: true });
+      expect(result.error).toBeUndefined();
+      expect(result.env?.['QWEN_SERVER_TOKEN']).toBe('secret');
+      expect(result.startArgs).toContain('--require-auth');
+    });
+
+    it('lets an explicit token configure bearer auth, as daemon start does', () => {
+      const result = plan(recorded(), { token: 'secret' });
+      expect(result.error).toBeUndefined();
+      expect(result.env?.['QWEN_SERVER_TOKEN']).toBe('secret');
+      expect(result.startArgs).not.toContain('--require-auth');
+      expect(result.notices).toEqual([
+        expect.stringContaining('--token is visible'),
+      ]);
+    });
+
+    it('does not add an inherited token to an auth-none daemon', () => {
+      const result = plan(
+        recorded(),
+        {},
+        { QWEN_SERVER_TOKEN: 'ambient', PATH: '/usr/bin' },
+      );
+      expect(result.error).toBeUndefined();
+      expect(result.env).toEqual({ PATH: '/usr/bin' });
+      expect(result.notices).toEqual([]);
+    });
+
+    it('requires a token for a bearer daemon before stopping it', () => {
+      const result = plan(bearer());
+      expect(result.error).toContain('restarting a bearer daemon requires');
+      expect(result.error).toContain('.env');
+      expect(result.stopArgs).toBeUndefined();
+
+      const generated = plan(bearer({ tokenGenerated: true }));
+      expect(generated.error).toContain('generated at startup');
+      expect(generated.stopArgs).toBeUndefined();
+    });
+
+    it('takes a bearer token from the environment and keeps the recorded require-auth', () => {
+      const open = plan(bearer(), {}, { QWEN_SERVER_TOKEN: ' secret ' });
+      expect(open.error).toBeUndefined();
+      expect(open.env?.['QWEN_SERVER_TOKEN']).toBe('secret');
+      expect(open.startArgs).not.toContain('--require-auth');
+
+      const strict = plan(
+        bearer({ requireAuth: true }),
+        {},
+        { QWEN_SERVER_TOKEN: 'secret' },
+      );
+      expect(strict.startArgs).toContain('--require-auth');
+    });
+
+    it('adds --force only when restart explicitly asks for it', () => {
+      expect(plan(recorded()).stopArgs).not.toContain('--force');
+      expect(plan(recorded(), { force: true }).stopArgs).toContain('--force');
+    });
+
+    it('preserves Node loader arguments for a TypeScript entry', () => {
+      const result = buildDaemonRestartPlan(
+        recorded(),
+        {},
+        '/opt/qwen/index.ts',
+        ['--import', 'tsx'],
+        {},
+      );
+      expect(result.stopArgs?.slice(0, 3)).toEqual([
+        '--import',
+        'tsx',
+        '/opt/qwen/index.ts',
+      ]);
+      expect(result.startArgs?.slice(0, 3)).toEqual([
+        '--import',
+        'tsx',
+        '/opt/qwen/index.ts',
+      ]);
+    });
+
+    it('selects one target without advising --all', () => {
+      expect(
+        selectRestartTarget([entry(4170), entry(4171)], undefined),
+      ).toEqual({
+        error: '2 daemons are registered; pass --port <port> to choose one.',
+      });
+      expect(selectRestartTarget([], undefined).error).toBe(
+        'no daemon is registered. Start one with `qwen serve`.',
+      );
+      expect(selectRestartTarget([entry(4170)], 4171).error).toBe(
+        'No daemon is registered on port 4171.',
+      );
+      expect(selectRestartTarget([entry(4170), entry(4171)], 4171)).toEqual({
+        entry: entry(4171),
+      });
+    });
+
+    it('finds an ancestor on the parent chain', () => {
+      const parents = new Map([
+        [30, 20],
+        [20, 10],
+        [10, 1],
+        [40, 41],
+        [41, 40],
+      ]);
+      expect(isProcessAncestor(10, 30, parents)).toBe(true);
+      expect(isProcessAncestor(20, 30, parents)).toBe(true);
+      expect(isProcessAncestor(99, 30, parents)).toBe(false);
+      expect(isProcessAncestor(30, 10, parents)).toBe(false);
+      expect(isProcessAncestor(99, 40, parents)).toBe(false);
+    });
+
+    it('reads this process from the live parent table', () => {
+      if (process.platform === 'win32') return;
+      const parents = processParentTable();
+      expect(parents?.get(process.pid)).toBe(process.ppid);
+      expect(isProcessAncestor(process.ppid, process.pid, parents!)).toBe(true);
+    });
+
+    it('detects a token the running daemon rejects', async () => {
+      const responses = [
+        new Response(null, { status: 401 }),
+        new Response('{}', { status: 200 }),
+        new Response(null, { status: 403 }),
+      ];
+      const fetchMock = vi.fn(
+        async (_input: URL | string, _init?: RequestInit) =>
+          responses.shift() ?? Promise.reject(new Error('offline')),
+      );
+      vi.stubGlobal('fetch', fetchMock);
+      try {
+        const record = bearer();
+        await expect(daemonRejectsToken(record, 'wrong', true)).resolves.toBe(
+          true,
+        );
+        expect(fetchMock.mock.calls[0]?.[1]?.headers).toEqual({
+          Authorization: 'Bearer wrong',
+        });
+        await expect(daemonRejectsToken(record, 'right', true)).resolves.toBe(
+          false,
+        );
+        // Only a 401 proves a mismatch; another gate's 403 does not.
+        await expect(daemonRejectsToken(record, 'right', true)).resolves.toBe(
+          false,
+        );
+        await expect(daemonRejectsToken(record, 'any', true)).resolves.toBe(
+          false,
+        );
+        await expect(daemonRejectsToken(record, 'any', false)).resolves.toBe(
+          false,
+        );
+        expect(fetchMock).toHaveBeenCalledTimes(4);
+      } finally {
+        vi.unstubAllGlobals();
+      }
+    });
+
+    describe('sequencing', () => {
+      const restartedRecord = { ...recorded(), pid: 9999 };
+      const harness = (
+        overrides: Partial<DaemonRestartDeps> = {},
+        after: Array<readonly DaemonDiscoveryEntry[]> = [
+          [{ path: '/tmp/daemon-4170.json', record: restartedRecord }],
+        ],
+      ) => {
+        const run = vi.fn(
+          (_command: string, _args: readonly string[]) =>
+            ({ status: 0 }) as { status: number | null; error?: Error },
+        );
+        const lines: string[] = [];
+        const stderr = vi
+          .spyOn(process.stderr, 'write')
+          .mockImplementation((chunk) => {
+            lines.push(String(chunk));
+            return true;
+          });
+        const stdout = vi
+          .spyOn(process.stdout, 'write')
+          .mockImplementation((chunk) => {
+            lines.push(String(chunk));
+            return true;
+          });
+        const deps: DaemonRestartDeps = {
+          run,
+          entries: vi.fn(() => after.shift() ?? []),
+          hostedBy: vi.fn(() => false),
+          validateWorkspaces: vi.fn(async () => undefined),
+          rejectsToken: vi.fn(async () => false),
+          ...overrides,
+        };
+        return {
+          deps,
+          run,
+          output: () => lines.join(''),
+          restore: () => {
+            stderr.mockRestore();
+            stdout.mockRestore();
+          },
+        };
+      };
+      const restart = async (
+        h: ReturnType<typeof harness>,
+        record: DaemonDiscoveryRecord = recorded(),
+        restartPlan: DaemonRestartPlan = plan(record),
+      ) => {
+        try {
+          return await runDaemonRestart(record, restartPlan, h.deps);
+        } finally {
+          h.restore();
+        }
+      };
+
+      it('stops, starts, and confirms the daemon is back on its port', async () => {
+        const h = harness();
+        await expect(restart(h)).resolves.toBe(0);
+        expect(h.run.mock.calls.map((call) => call[1][2])).toEqual([
+          'stop',
+          'start',
+        ]);
+      });
+
+      it('preserves a persisted token for the restarted pid', async () => {
+        const dir = await fsp.mkdtemp(
+          path.join(os.tmpdir(), 'qwen-restart-token-'),
+        );
+        const previous = process.env['QWEN_RUNTIME_DIR'];
+        process.env['QWEN_RUNTIME_DIR'] = dir;
+        try {
+          const record = recorded();
+          writeDaemonToken(record.port, record.pid, 'secret-token');
+          const h = harness();
+          await expect(restart(h, record)).resolves.toBe(0);
+          expect(readDaemonToken(record.port, restartedRecord.pid)).toBe(
+            'secret-token',
+          );
+        } finally {
+          if (previous === undefined) {
+            delete process.env['QWEN_RUNTIME_DIR'];
+          } else {
+            process.env['QWEN_RUNTIME_DIR'] = previous;
+          }
+          await fsp.rm(dir, { recursive: true, force: true });
+        }
+      });
+
+      it('refuses before stopping when this command runs inside the daemon', async () => {
+        const h = harness({ hostedBy: vi.fn(() => true) });
+        await expect(restart(h)).resolves.toBe(1);
+        expect(h.run).not.toHaveBeenCalled();
+        expect(h.output()).toContain('Web Shell terminal');
+      });
+
+      it('refuses before stopping when a startup workspace is gone', async () => {
+        const h = harness({
+          validateWorkspaces: vi.fn(async () => {
+            throw new Error(
+              'Invalid --workspace "/tmp/project-4170": directory does not exist.',
+            );
+          }),
+        });
+        await expect(restart(h)).resolves.toBe(1);
+        expect(h.run).not.toHaveBeenCalled();
+        expect(h.output()).toContain(
+          'cannot restart: Invalid --workspace "/tmp/project-4170"',
+        );
+      });
+
+      it('refuses before stopping when the running daemon rejects the token', async () => {
+        const record = bearer();
+        const h = harness({ rejectsToken: vi.fn(async () => true) });
+        await expect(
+          restart(h, record, plan(record, {}, { QWEN_SERVER_TOKEN: 'wrong' })),
+        ).resolves.toBe(1);
+        expect(h.deps.rejectsToken).toHaveBeenCalledWith(record, 'wrong');
+        expect(h.run).not.toHaveBeenCalled();
+        expect(h.output()).toContain('rejected the supplied token');
+      });
+
+      it('does not start after a stop refusal that kept the record', async () => {
+        const h = harness({}, [[entry(4170)]]);
+        h.run.mockReturnValueOnce({ status: 1 });
+        await expect(restart(h)).resolves.toBe(1);
+        expect(h.run).toHaveBeenCalledTimes(1);
+      });
+
+      it('starts when the daemon exited on its own during the stop leg', async () => {
+        const h = harness({}, [
+          [],
+          [{ path: '/tmp/daemon-4170.json', record: restartedRecord }],
+        ]);
+        h.run.mockReturnValueOnce({ status: 1 });
+        await expect(restart(h)).resolves.toBe(0);
+        expect(h.run).toHaveBeenCalledTimes(2);
+        expect(h.output()).toContain('already exited; starting it again');
+      });
+
+      it('reports a stop leg that could not be launched', async () => {
+        const h = harness();
+        h.run.mockReturnValueOnce({
+          status: null,
+          error: new Error('spawnSync /opt/qwen/index.js ENOENT'),
+        });
+        await expect(restart(h)).resolves.toBe(1);
+        expect(h.run).toHaveBeenCalledTimes(1);
+        expect(h.output()).toContain('could not run daemon stop: spawnSync');
+      });
+
+      it('reports a start leg that could not be launched', async () => {
+        const h = harness();
+        h.run.mockReturnValueOnce({ status: 0 }).mockReturnValueOnce({
+          status: null,
+          error: new Error('spawnSync /opt/qwen/index.js EACCES'),
+        });
+        await expect(restart(h)).resolves.toBe(1);
+        expect(h.output()).toContain('could not run daemon start');
+        expect(h.output()).toContain('port 4170 is stopped');
+      });
+
+      it('fails when the daemon came back on another port', async () => {
+        const h = harness({}, [
+          [
+            {
+              path: '/tmp/daemon-4171.json',
+              record: { ...restartedRecord, port: 4171 },
+            },
+          ],
+        ]);
+        await expect(restart(h)).resolves.toBe(1);
+        expect(h.output()).toContain('is not on port 4170');
+      });
+
+      it('fails when the start leg fails', async () => {
+        const h = harness();
+        h.run.mockReturnValueOnce({ status: 0 }).mockReturnValueOnce({
+          status: 1,
+        });
+        await expect(restart(h)).resolves.toBe(1);
+        expect(h.deps.entries).not.toHaveBeenCalled();
+      });
+
+      it('runs nothing for a refused plan', async () => {
+        const h = harness();
+        await expect(
+          restart(h, recorded(), { error: 'restarting an HTTPS daemon' }),
+        ).resolves.toBe(1);
+        expect(h.run).not.toHaveBeenCalled();
+        expect(h.deps.hostedBy).not.toHaveBeenCalled();
+      });
+    });
   });
 
   it('builds a detached serve invocation for a JavaScript entry', () => {

@@ -11,6 +11,7 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.autoconfigure.web.servlet.MockMvcPrint;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -73,6 +74,7 @@ class ManagedEventReplayTest {
     private ManagedAgentStore store;
 
     @Autowired
+    @Qualifier("managedJdbcTemplate")
     private org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     @Autowired
@@ -342,10 +344,6 @@ class ManagedEventReplayTest {
         await().atMost(Duration.ofSeconds(10)).until(() ->
                 store.findReplayWindow(tenant, sessionId)
                         .snapshotThroughSequence() == last);
-        // Older cursors have passed their thirty-minute retention window in this scenario.
-        jdbc.update("UPDATE ma_snapshot SET retain_until = 0 WHERE tenant_id = ? AND session_id = ?"
-                + " AND snapshot_id <> (SELECT current_snapshot_id FROM ma_event_stream WHERE tenant_id = ? AND session_id = ?"
-                + " AND stream_kind = 'SESSION' AND stream_id = X'')", tenant, sessionId, tenant, sessionId);
         return store.advanceReplayFloor(tenant, sessionId, floor);
     }
 

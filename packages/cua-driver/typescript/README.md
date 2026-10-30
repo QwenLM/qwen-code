@@ -5,7 +5,7 @@ Rust-backed TypeScript/Node SDK for Cua Driver client applications.
 The package root exposes the complete typed driver SDK. The
 `@qwen-code/cua-sdk/computer-use` subpath exposes the smaller high-level API for
 application discovery, revision observations, element-token actions, and state
-verification. Both entrypoints ship in this one npm package.
+verification. Both entrypoints ship in this one npm package. The `/runtime` entrypoint supplies global `cua` to Node REPL, including explicit desktop input and the repository browser SDK facade. SDK, browser SDK and native release use version 0.27.0; Node REPL ships the same version.
 
 ## Product boundary
 
@@ -32,6 +32,19 @@ typed Rust-backed SDK shown below; agent code supplies `qwen-cua-driver mcp` to 
 agent SDK.
 
 ## SDK example
+
+On macOS, the package root supplies a main-thread AppKit pump for the default
+native cursor and live PiP. Construct the SDK on Node's main thread; Worker
+threads cannot initialize this UI. `shutdown()` waits for the owning preview
+and cursor cleanup. Pass `--no-overlay` or `--no-pip` to the Node script to
+disable either surface. PiP also respects `experimental_pip: false` in
+`~/.cua-driver/config.json`. Raw Rust/Python embedding must supply its own
+main-thread UI host and remains UI-disabled by default on macOS.
+
+The preview is a transparent, borderless floating window, initially near the
+lower-right. Each source keeps its aspect ratio in an independent card. Hover
+a rear card to bring it forward; drag a card or the Move preview handle to
+reposition the whole window. Floating controls appear on hover.
 
 ```ts
 import {
@@ -72,8 +85,7 @@ try {
 SDK operations are asynchronous and require a native library matching the host
 OS and architecture. The package postinstall downloads the SDK library and
 Node runtime from the exact same-version `qwen-cua-driver` GitHub Release and
-verifies the archive against that release's `checksums.txt`. It caches the native library and Node adapter. On Windows it also stages the
-UIAccess worker under Program Files and requires a valid trusted signature. It
+verifies the archive against that release's `checksums.txt`. It caches the native library and Node adapter. Windows installs use the normal input path by default. Explicit `CUA_DRIVER_USE_UIACCESS=1` stages the optional worker under Program Files and requires a valid trusted signature. It
 does not install the driver application or daemon. The
 macOS payload requires macOS 13 or newer.
 Desktop calls return a typed `ToolResult` with text,

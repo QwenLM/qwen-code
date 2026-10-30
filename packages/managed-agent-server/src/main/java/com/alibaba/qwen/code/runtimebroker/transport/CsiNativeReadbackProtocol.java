@@ -293,7 +293,8 @@ public final class CsiNativeReadbackProtocol {
         closed(reference, Set.of("resourceId", "kind", "schemaVersion", "byteLength", "digest"));
         id(reference.get("resourceId"));
         require(kind.equals(reference.get("kind")) && counter(reference.get("schemaVersion")) == 1
-                && counter(reference.get("byteLength")) > 0 && counter(reference.get("byteLength")) <= 64 * 1024);
+                && counter(reference.get("byteLength")) > 0
+                && counter(reference.get("byteLength")) <= ("managed-checkpoint".equals(kind) ? 1024 * 1024 : 64 * 1024));
         digest(reference.get("digest"), false);
         return reference;
     }

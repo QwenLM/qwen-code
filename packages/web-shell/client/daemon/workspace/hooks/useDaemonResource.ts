@@ -4,6 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../../availability-context.js';
+import { isDaemonUnavailableError } from '../../availability.js';
+
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type {
   DaemonResourceOptions,
@@ -16,6 +22,8 @@ export function useDaemonResource<T>(
   options: DaemonResourceOptions,
 ): ResourceResult<T> {
   const { autoLoad = false, enabled = true } = options;
+  const available = useDaemonAvailability() === 'available';
+  const controller = useDaemonAvailabilityController();
   const [state, setState] = useState<ResourceState<T>>({
     data: undefined,
     loading: false,
@@ -24,7 +32,12 @@ export function useDaemonResource<T>(
   const requestSeqRef = useRef(0);
 
   const reload = useCallback(async (): Promise<T | undefined> => {
-    if (!enabled) return undefined;
+    if (
+      !enabled ||
+      !available ||
+      (controller && controller.getSnapshot() !== 'available')
+    )
+      return undefined;
     const seq = ++requestSeqRef.current;
     setState((current) => ({
       ...current,
@@ -38,6 +51,13 @@ export function useDaemonResource<T>(
       return data;
     } catch (error) {
       if (seq !== requestSeqRef.current) return undefined;
+      if (
+        isDaemonUnavailableError(error) ||
+        (controller && controller.getSnapshot() !== 'available')
+      ) {
+        setState((current) => ({ ...current, loading: false }));
+        return undefined;
+      }
       const normalized =
         error instanceof Error ? error : new Error(String(error));
       setState((current) => ({
@@ -47,7 +67,7 @@ export function useDaemonResource<T>(
       }));
       return undefined;
     }
-  }, [enabled, load]);
+  }, [available, controller, enabled, load]);
 
   useEffect(() => {
     if (!autoLoad || !enabled) return;

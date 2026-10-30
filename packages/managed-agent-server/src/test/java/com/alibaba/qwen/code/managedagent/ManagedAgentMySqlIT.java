@@ -28,6 +28,7 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.WriterGrant;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
 import com.alibaba.qwen.code.runtimebroker.JdbcRepositoryContract;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -91,6 +92,47 @@ class ManagedAgentMySqlIT {
         }
         if (database != null) {
             database.close();
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"default", "auto-edit", "yolo"})
+    @Order(0)
+    void freezesInitialCatalogModelAndApprovalInOneTransaction(String mode) {
+        var source = dataSource();
+        Flyway.configure().dataSource(source).locations("classpath:db/managed-schema").load().migrate();
+        JdbcTemplate jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
+        String tenant = "initial-model-" + UUID.randomUUID();
+        jdbc.update("INSERT INTO ma_workspace (tenant_id,workspace_id,workspace_generation,storage_id,"
+                + "display_name,config_ref,policy_ref,state) VALUES (?,'ws',1,'storage','Workspace',?,?,'ACTIVE')",
+                tenant, WorkspaceExecutionProfile.CONFIG_REF,
+                WorkspaceExecutionProfile.POLICY_REF);
+        jdbc.update("INSERT INTO ma_workspace_access (tenant_id,workspace_id,actor_id,role) VALUES (?,'ws',?,'OWNER')",
+                tenant, "actor".getBytes(StandardCharsets.UTF_8));
+        var properties = new ManagedAgentProperties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        properties.getRuntimeBroker().setWorkspaceMounts(List.of(
+                new ManagedAgentProperties.RuntimeBroker.WorkspaceMount(tenant, "storage", "/tmp/initial-model")));
+        properties.setModelCatalog(List.of("model-a", "model-b").stream().map(id -> {
+            var option = new ManagedAgentProperties.ModelOption();
+            option.setModelId(id);
+            return option;
+        }).toList());
+        var store = new ManagedAgentStore(jdbc, new ObjectMapper(), Clock.systemUTC(), ignored -> {},
+                new ManagedWorkspaceRegistry(jdbc), properties);
+        var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
+        for (String model : List.of("model-a", "model-b")) {
+            var input = List.<Map<String, Object>>of(Map.of("type", "input_text", "text", "first"));
+            var admitted = transactions.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor", model,
+                    "digest-" + model, "qwen-code", null, null, input,
+                    com.alibaba.qwen.code.daemon.SubmitHarnessTurn.computePayloadDigest(input),
+                    new com.alibaba.qwen.code.managedagent.workspace.WorkspaceSelection("ws", "."),
+                    mode, true, null, false, List.of(), false, model));
+            assertThat(jdbc.queryForMap("SELECT model_id,model_revision,approval_mode,approval_revision FROM ma_turn"
+                    + " WHERE tenant_id=? AND session_id=?", tenant, admitted.sessionId()))
+                    .containsEntry("model_id", model).containsEntry("model_revision", 1L)
+                    .containsEntry("approval_mode", mode).containsEntry("approval_revision", 0L);
+            assertThat(store.requireSession(tenant, admitted.sessionId()).agentDefinitionDigest()).isNull();
         }
     }
 
@@ -208,8 +250,7 @@ class ManagedAgentMySqlIT {
                 .isEqualTo(new ReplayWindow(6, 6));
         assertThat(store.findReplayWindow(tenant, admission.sessionId()))
                 .isEqualTo(new ReplayWindow(6, 6));
-        assertThat(store.findSnapshot(tenant, admission.sessionId()))
-                .get()
+        assertThat(store.findMessagePage(tenant, admission.sessionId(), null, 100, false))
                 .satisfies(
                         snapshot -> {
                             assertThat(snapshot.coveredSequence()).isEqualTo(6);
@@ -1837,6 +1878,8 @@ class ManagedAgentMySqlIT {
         com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryContract.verify(
                 source, jdbc, store, authority);
         com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryContract.verifyOperatorPrepare(
+                source, jdbc, store, authority);
+        com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRecoveryContract.verifySharedExecution(
                 source, jdbc, store, authority);
     }
 

@@ -315,6 +315,7 @@ describe('createChannelWorkerSupervisor', () => {
     vi.stubEnv('QWEN_SERVER_TOKEN', 'serve-token');
     vi.stubEnv('QWEN_DAEMON_TOKEN', 'stale-daemon-token');
     vi.stubEnv('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN', 'guard-secret');
+    vi.stubEnv('QWEN_MANAGED_RUNTIME_BROKER_TOKEN', 'broker-secret');
     vi.stubEnv('OPENAI_API_KEY', 'openai-secret');
     vi.stubEnv('ANTHROPIC_API_KEY', 'anthropic-secret');
     vi.stubEnv('AWS_SECRET_ACCESS_KEY', 'aws-secret');
@@ -370,6 +371,7 @@ describe('createChannelWorkerSupervisor', () => {
       .env;
     expect(env).not.toHaveProperty('QWEN_SERVER_TOKEN');
     expect(env).not.toHaveProperty('QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN');
+    expect(env).not.toHaveProperty('QWEN_MANAGED_RUNTIME_BROKER_TOKEN');
     expect(env).toHaveProperty('CUSTOM', 'value');
     expect(env).toHaveProperty('QWEN_DAEMON_TOKEN', 'secret-token');
     expect(env).toHaveProperty('OPENAI_API_KEY', 'openai-secret');
