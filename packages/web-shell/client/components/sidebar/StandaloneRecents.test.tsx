@@ -39,6 +39,7 @@ vi.mock('../dialogs/DialogShell', () => ({
 }));
 
 import { StandaloneRecents } from './StandaloneRecents';
+import sidebarStyles from './WebShellSidebar.module.css';
 
 const summary = (
   sessionId: string,
@@ -195,7 +196,7 @@ describe('StandaloneRecents', () => {
       '[data-testid="standalone-active-group"] button[aria-label="sidebar.newTask"]',
     );
     expect(newSession?.parentElement?.className).toContain(
-      'projectsHeaderActions',
+      sidebarStyles.projectsHeaderActions,
     );
     const sessions = container.querySelector(
       '[data-testid="standalone-active-group"] > div:nth-child(2)',
@@ -204,18 +205,8 @@ describe('StandaloneRecents', () => {
     const header = container.querySelector<HTMLButtonElement>(
       '[data-testid="standalone-active-group"] > div > button',
     )!;
-    header.focus();
-    await act(async () =>
-      header.dispatchEvent(
-        new MouseEvent('click', { bubbles: true, detail: 1 }),
-      ),
-    );
-    expect(document.activeElement).not.toBe(header);
-    await act(async () =>
-      header.dispatchEvent(
-        new MouseEvent('click', { bubbles: true, detail: 1 }),
-      ),
-    );
+    await act(async () => header.click());
+    await act(async () => header.click());
     await act(async () => newSession?.click());
     expect(onNewSession).toHaveBeenCalledOnce();
     expect(container.textContent).toContain('Active chat');

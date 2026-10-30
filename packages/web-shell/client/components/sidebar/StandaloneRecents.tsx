@@ -483,11 +483,10 @@ export function StandaloneRecents({
             className={sidebarStyles.projectsHeaderToggle}
             aria-expanded={expanded}
             disabled={Boolean(query)}
-            onClick={(event) => {
+            onClick={() => {
               const nextExpanded = !expanded;
               writeWorkspaceExpanded(expansionId, nextExpanded);
               setExpanded(nextExpanded);
-              if (event.detail > 0) event.currentTarget.blur();
             }}
           >
             <span>{t('sidebar.noWorkspaceSessions')}</span>
@@ -542,7 +541,7 @@ export function StandaloneRecents({
           </div>
         )}
         {(expanded || Boolean(query)) && (
-          <div className="flex flex-col gap-0.5">
+          <div className="flex flex-col gap-0.5 pb-3">
             {displayedSessions.map((session) => {
               const isCurrent = session.sessionId === currentSessionId;
               return renderSession(session, {
