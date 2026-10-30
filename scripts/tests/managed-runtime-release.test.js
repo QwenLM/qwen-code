@@ -707,7 +707,17 @@ describe.skipIf(process.platform === 'win32')('release gate execution', () => {
       ALIYUN_OSS_ACCESS_KEY_SECRET: '',
       ALIYUN_OSS_ENDPOINT: 'https://example.invalid',
     };
-    expect(run(configure, env).status).not.toBe(0);
+    for (const missing of [
+      'ALIYUN_OSS_ACCESS_KEY_ID',
+      'ALIYUN_OSS_ACCESS_KEY_SECRET',
+    ]) {
+      const result = run(configure, {
+        ...env,
+        ALIYUN_OSS_ACCESS_KEY_SECRET: 'fixture-secret',
+        [missing]: '',
+      });
+      expect(result.status, result.stderr).not.toBe(0);
+    }
     expect(fs.existsSync(path.join(temporary, 'oss-called'))).toBe(false);
     expect(
       run(configure, { ...env, ALIYUN_OSS_ACCESS_KEY_SECRET: 'fixture-secret' })

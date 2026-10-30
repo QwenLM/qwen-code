@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore;
@@ -114,7 +115,11 @@ class ManagedMessagePagingTest {
         jdbc.update("UPDATE ma_event_stream SET last_sequence=20 WHERE tenant_id=? AND session_id=?",
                 "tenant", "session");
         assertThat(read(null, 100, true).coveredSequence()).isEqualTo(2);
-        assertThatThrownBy(() -> read(null, 100, false)).hasMessageContaining("pending messages");
+        assertThatThrownBy(() -> read(null, 100, false))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(503);
+                    assertThat(error.getCode()).isEqualTo("message_projection_pending");
+                }).hasMessageContaining("pending messages");
     }
 
     @Test
@@ -122,7 +127,11 @@ class ManagedMessagePagingTest {
         seed(2, false);
         jdbc.update("UPDATE ma_event_stream SET last_sequence=20,replay_floor_sequence=10"
                 + " WHERE tenant_id=? AND session_id=?", "tenant", "session");
-        assertThatThrownBy(() -> read(null, 100, true)).hasMessageContaining("pending messages");
+        assertThatThrownBy(() -> read(null, 100, true))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(503);
+                    assertThat(error.getCode()).isEqualTo("message_projection_pending");
+                }).hasMessageContaining("pending messages");
     }
 
     @Test
