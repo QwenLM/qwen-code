@@ -597,6 +597,13 @@
   overflow: visible;
 }
 
+/* 托管 home（managedHome 分支）的空态与 standalone 一致：内容收缩，由 chatPane 垂直居中，
+   避免欢迎区贴顶、composer 贴底的两段式布局。 */
+.appChatEmpty .managedHome .content {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
 .missingSessionState {
   flex: 1 1 auto;
   min-height: 0;

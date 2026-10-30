@@ -4046,7 +4046,7 @@ describe('ManagedSessionsPage', () => {
     await render();
     await input('Do the work');
     await click('Send');
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
     expect(container.querySelector('textarea')?.disabled).toBe(true);
     await click('Retry the same request');
     const [first, retry] = mocks.client.createSession.mock.calls;
@@ -4059,6 +4059,29 @@ describe('ManagedSessionsPage', () => {
     expect(onSelect).toHaveBeenLastCalledWith('created');
   });
 
+  it('keeps an uncertain create with its original page when viewing another session', async () => {
+    mocks.client.createSession.mockRejectedValueOnce(new TypeError('Network failed'));
+    await render();
+    await input('CHECK_CREATE');
+    await click('Send');
+    const original = mocks.client.createSession.mock.calls[0];
+
+    await render('s1');
+    expect(container.textContent).not.toContain('not confirmed as submitted');
+    expect(container.textContent).not.toContain('Retry the same request');
+    expect(container.textContent).toContain('Another conversation has an unconfirmed request');
+    expect(container.querySelector('textarea')?.disabled).toBe(true);
+    expect(mocks.client.createSession).toHaveBeenCalledTimes(1);
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+    await click('Open the original conversation');
+    expect(onSelect).toHaveBeenLastCalledWith(undefined);
+
+    await render();
+    await click('Retry the same request');
+    expect(mocks.client.createSession.mock.calls[1]).toEqual(original);
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
+  });
+
   it('discards a permanently failing pending prompt and restores the draft', async () => {
     mocks.client.createSession.mockRejectedValue(
       new TypeError('Network failed'),
@@ -4066,7 +4089,7 @@ describe('ManagedSessionsPage', () => {
     await render();
     await input('Do the work');
     await click('Send');
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
     const textarea = () => container.querySelector('textarea');
     expect(textarea()?.disabled).toBe(true);
     expect(container.querySelectorAll('p[role="alert"]')).toHaveLength(1);
@@ -4082,7 +4105,7 @@ describe('ManagedSessionsPage', () => {
       await flush();
     });
     expect(container.textContent).not.toContain(
-      'request outcome is unconfirmed',
+      'not confirmed as submitted',
     );
     expect(textarea()?.disabled).toBe(false);
     expect(textarea()?.value).toBe('Do the work');
@@ -4101,7 +4124,7 @@ describe('ManagedSessionsPage', () => {
     root = createRoot(container);
     await render();
     expect(container.textContent).not.toContain(
-      'request outcome is unconfirmed',
+      'not confirmed as submitted',
     );
   });
 
@@ -4112,7 +4135,7 @@ describe('ManagedSessionsPage', () => {
     await render();
     await input('Do the work');
     await click('Send');
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
     const originalKey =
       mocks.client.createSession.mock.calls[0]?.[1].idempotencyKey;
 
@@ -4139,15 +4162,21 @@ describe('ManagedSessionsPage', () => {
     await render('s1');
     await input('For session A only');
     await click('Send');
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
 
     await click('Task s2Completed');
     await render('s2');
-    // The composer is wedged on the other session's pending record: the
-    // explanation stays, but the destructive escape is offered only where
-    // the draft can be restored.
-    expect(container.querySelector('textarea')?.disabled).toBe(true);
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    // The pending belongs to s1: a foreign session only offers a redirect to
+    // the owning conversation, never the retry/discard escape (the draft that
+    // would be restored lives over there).
+    expect(container.textContent).toContain(
+      'Another conversation has an unconfirmed request',
+    );
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (item) => item.textContent === 'Open the original conversation',
+      ),
+    ).toBe(true);
     expect(
       [...container.querySelectorAll('button')].some(
         (item) => item.textContent === 'Discard this request',
@@ -4159,7 +4188,7 @@ describe('ManagedSessionsPage', () => {
     await render('s1');
     await click('Discard this request');
     expect(container.textContent).not.toContain(
-      'request outcome is unconfirmed',
+      'not confirmed as submitted',
     );
     expect(container.querySelector('textarea')?.value).toBe(
       'For session A only',
@@ -4179,7 +4208,7 @@ describe('ManagedSessionsPage', () => {
     );
   }
 
-  it('preserves another session draft when retrying a restored pending prompt', async () => {
+  it('preserves another session draft when opening the owner of a restored pending prompt', async () => {
     seedPending({
       idempotencyKey: 'restored-a',
       sessionId: 's1',
@@ -4190,12 +4219,10 @@ describe('ManagedSessionsPage', () => {
     expect(container.querySelector('textarea')?.value).toBe(
       'Saved draft for session B',
     );
-    await click('Retry the same request');
-    expect(mocks.client.submitPrompt).toHaveBeenCalledWith(
-      's1',
-      { text: 'For session A' },
-      expect.objectContaining({ idempotencyKey: 'restored-a' }),
-    );
+    await click('Open the original conversation');
+    // Redirecting only navigates to the owning session; it does not resubmit
+    // from the foreign session, and the foreign draft stays intact.
+    expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
     expect(container.querySelector('textarea')?.value).toBe(
       'Saved draft for session B',
     );
@@ -4203,7 +4230,7 @@ describe('ManagedSessionsPage', () => {
   });
 
   it.each(['  For session A  ', 'A newer different draft'])(
-    'only clears matching accepted storage after restoring a foreign retry: %s',
+    'leaves both drafts untouched when opening the pending owner from a foreign session: %s',
     async (storedDraft) => {
       seedPending({
         idempotencyKey: 'restored-a',
@@ -4224,22 +4251,18 @@ describe('ManagedSessionsPage', () => {
       mocks.restoreEditorDraft.mockReturnValue('Saved draft for session B');
       await render('s2');
 
-      await click('Retry the same request');
+      await click('Open the original conversation');
 
-      expect(localStorage.getItem(ownerKey)).toBe(
-        storedDraft === '  For session A  ' ? null : storedDraft,
-      );
+      // A redirect is not a retry: nothing is submitted and neither draft is
+      // cleared; the owner's draft is only reconciled when it retries there.
+      expect(localStorage.getItem(ownerKey)).toBe(storedDraft);
       expect(localStorage.getItem(foreignKey)).toBe(
         'Saved draft for session B',
       );
       expect(container.querySelector('textarea')?.value).toBe(
         'Saved draft for session B',
       );
-      expect(mocks.client.submitPrompt).toHaveBeenCalledWith(
-        's1',
-        { text: 'For session A' },
-        expect.objectContaining({ idempotencyKey: 'restored-a' }),
-      );
+      expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
       expect(onSelect).toHaveBeenLastCalledWith('s1');
     },
   );
@@ -4276,7 +4299,7 @@ describe('ManagedSessionsPage', () => {
     expect(mocks.clearEditor).toHaveBeenCalledOnce();
   });
 
-  it('preserves the visible foreign draft when retrying a live retained commit', async () => {
+  it('preserves the visible foreign draft when opening the owner of a live retained commit', async () => {
     mocks.client.submitPrompt.mockRejectedValueOnce(
       new TypeError('Lost response'),
     );
@@ -4286,17 +4309,16 @@ describe('ManagedSessionsPage', () => {
     mocks.restoreEditorDraft.mockReturnValue('Saved draft for session B');
     await render('s2');
 
-    await click('Retry the same request');
+    await click('Open the original conversation');
 
-    expect(mocks.client.submitPrompt).toHaveBeenCalledTimes(2);
-    expect(mocks.client.submitPrompt.mock.calls[1]).toEqual(
-      mocks.client.submitPrompt.mock.calls[0],
-    );
+    // Only the original send was submitted; the redirect does not retry, and
+    // the foreign draft stays visible.
+    expect(mocks.client.submitPrompt).toHaveBeenCalledTimes(1);
     expect(container.querySelector('textarea')?.value).toBe(
       'Saved draft for session B',
     );
     expect(onSelect).toHaveBeenLastCalledWith('s1');
-    expect(mocks.commitAccepted).toHaveBeenCalledTimes(1);
+    expect(mocks.commitAccepted).not.toHaveBeenCalled();
   });
 
   it('clears the owning editor after a restored pending prompt is accepted', async () => {
@@ -4331,7 +4353,7 @@ describe('ManagedSessionsPage', () => {
     await render();
     await input('Keep this prompt');
     await click('Send');
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
 
     // A real remount empties the text state: the composer is fed from the
     // persisted pending record alone.
@@ -4345,7 +4367,7 @@ describe('ManagedSessionsPage', () => {
     expect(container.querySelector('textarea')?.value).toBe('Keep this prompt');
     expect(container.querySelector('textarea')?.disabled).toBe(false);
     expect(container.textContent).not.toContain(
-      'request outcome is unconfirmed',
+      'not confirmed as submitted',
     );
   });
 
@@ -4363,12 +4385,12 @@ describe('ManagedSessionsPage', () => {
     await render(undefined, 'en', bindingProvider);
     // The workspace-binding creator replaces the composer form entirely.
     expect(container.querySelector('textarea')).toBeNull();
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
 
     await focusAndClickDiscard();
 
     expect(container.textContent).not.toContain(
-      'request outcome is unconfirmed',
+      'not confirmed as submitted',
     );
     expect(document.activeElement).not.toBe(document.body);
     expect(document.activeElement).toBe(container.querySelector('nav'));
@@ -4385,7 +4407,7 @@ describe('ManagedSessionsPage', () => {
     });
     await render('s1');
     expect(container.querySelector('textarea')?.disabled).toBe(true);
-    expect(container.textContent).toContain('request outcome is unconfirmed');
+    expect(container.textContent).toContain('not confirmed as submitted');
 
     await focusAndClickDiscard();
 
@@ -4540,7 +4562,7 @@ describe('ManagedSessionsPage', () => {
     // The unconfirmed row unmounted with the click; the persistent visually
     // hidden status region still announces the outcome.
     expect(container.textContent).not.toContain(
-      'request outcome is unconfirmed',
+      'not confirmed as submitted',
     );
     expect(
       Array.from(

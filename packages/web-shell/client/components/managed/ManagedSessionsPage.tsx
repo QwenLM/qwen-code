@@ -556,6 +556,9 @@ function ManagedSessionsContent({
   const [pending, setPending] = useState<PendingPrompt | undefined>(() =>
     readPending(pendingKey),
   );
+  // 未确认记录仍按原 client key 保存；切会话只改变展示归属，不能覆盖或重放别人的请求。
+  const pendingHere = pending?.sessionId === sessionId ? pending : undefined;
+  const pendingElsewhere = pending !== undefined && pendingHere === undefined;
   const pendingRef = useRef(pending);
   const encoding = useRef(false);
   const focusComposer = useRef<{ sessionId: string | undefined } | undefined>(
@@ -793,6 +796,11 @@ function ManagedSessionsContent({
     return () => abort.abort();
   }, [pendingKey]);
 
+  useEffect(() => {
+    setError(undefined);
+    setDiscarded(false);
+  }, [provider, sessionId]);
+
   // The Discard button unmounts itself, dropping focus to <body>: land it on
   // the composer that just got the draft back. The move must wait for the
   // clear to commit — the textarea is disabled while pending is set — and
@@ -998,10 +1006,8 @@ function ManagedSessionsContent({
   ) {
     const abort = lifetime.current;
     if (
-      (hostSessionOnly &&
-        (!sessionId ||
-          (pendingRef.current &&
-            pendingRef.current.sessionId !== sessionId))) ||
+      (hostSessionOnly && !sessionId) ||
+      (pendingRef.current && pendingRef.current.sessionId !== sessionId) ||
       !abort ||
       abort.signal.aborted ||
       busy ||
@@ -1626,7 +1632,10 @@ function ManagedSessionsContent({
         ...new Set(
           [detail.stoppedReason, detail.error, error].filter(
             (message): message is string =>
-              Boolean(message) && (interactive || message !== error),
+              Boolean(message) &&
+              (interactive || message !== error) &&
+              // summary.failure 已在会话信息区渲染（下方失败区块），告警通道不再重复。
+              message !== failureMessage,
           ),
         ),
       ].map((message) => (
@@ -1831,9 +1840,7 @@ function ManagedSessionsContent({
                 compact={home}
               />
             )}
-          {summary?.failure && (
-            <p className="text-sm text-destructive">{failureMessage}</p>
-          )}
+
           {recovery.value && (
             <ManagedRecoveryPanel
               recovery={recovery.value}
@@ -1931,7 +1938,13 @@ function ManagedSessionsContent({
             </p>
           )}
           {!(!sessionId && provider.workspaceBinding) && (
-            <div className={shellStyles.content} style={{ flex: '1 1 auto' }}>
+            // 空态（未选中会话且无消息）时内容收缩，由 chatPane 垂直居中，
+            // 与 standalone 空态（.appChatEmpty .content { flex: 0 0 auto }）布局一致；
+            // 有会话/消息时保持铺满。注意 inline style 优先级高于样式表，不能写死。
+            <div
+              className={shellStyles.content}
+              style={{ flex: !sessionId && messages.length === 0 ? '0 0 auto' : '1 1 auto' }}
+            >
               <ToolDetailsContext.Provider value={loadToolDetails}>
                 <MessageList
                   messages={messages}
@@ -1949,8 +1962,10 @@ function ManagedSessionsContent({
                   loadingOlderHistory={detail.loadingOlder}
                   onLoadOlderHistory={detail.loadOlder}
                   hideSessionTimeline
+                  // 空转录仍显示欢迎头；但当会话已有失败态（如服务端已删除）时，
+                  // 由 failure 横幅说明状态，不再叠欢迎文案。
                   welcomeHeader={
-                    messages.length === 0 && !detail.loading ? (
+                    messages.length === 0 && !detail.loading && !summary?.failure ? (
                       <WelcomeHeader
                         version=""
                         cwd=""
@@ -1963,9 +1978,35 @@ function ManagedSessionsContent({
               </ToolDetailsContext.Provider>
             </div>
           )}
-          {pending && !busy && (
-            <div className="flex items-center gap-2" role="status">
-              <p className="text-sm text-muted-foreground">
+          {/* 会话级状态统一在 composer 上方透出（与 renderComposerHeader 的位置一致），
+              失败与未决提交同区相邻，不再散落在会话信息区。 */}
+          {summary?.failure && (
+            <div
+              role="alert"
+              className="mx-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-[10px] text-xs leading-relaxed text-destructive"
+            >
+              <span aria-hidden="true" className="mt-0.5 shrink-0">⚠</span>
+              <p className="min-w-0 flex-1">{failureMessage}</p>
+            </div>
+          )}
+          {pendingElsewhere && !busy && (
+            <div role="status" className="mb-2 flex items-center gap-3 text-sm text-muted-foreground">
+              <p>{t('managed.pendingElsewhere')}</p>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => onSelectSession(pending?.sessionId)}
+              >
+                {t('managed.openPendingOwner')}
+              </Button>
+            </div>
+          )}
+          {pendingHere && !busy && (
+            <div
+              role="status"
+              className="mx-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] items-start justify-between gap-3 rounded-lg border bg-muted/40 px-3 py-[10px] text-xs leading-relaxed text-muted-foreground"
+            >
+              <p className="min-w-0 flex-1">
                 {t('managed.uncertain')}
               </p>
               <Button
@@ -1978,7 +2019,7 @@ function ManagedSessionsContent({
               {/* Offered only where the handler can restore the draft:
                   destroying the only copy from a foreign session would lose
                   it for good. */}
-              {pending.sessionId === sessionId && (
+              {pendingHere.sessionId === sessionId && (
                 <Button
                   variant="ghost"
                   size="sm"
@@ -1991,12 +2032,12 @@ function ManagedSessionsContent({
                     // The pending record is client-scoped but the draft
                     // belongs to the session it was written for: restore it
                     // only there.
-                    if (pending.sessionId === sessionId) {
-                      setText(pending.text);
-                      composerRef.current?.setText(pending.text);
+                    if (pendingHere.sessionId === sessionId) {
+                      setText(pendingHere.text);
+                      composerRef.current?.setText(pendingHere.text);
                       restoreManagedAttachments(
                         composerRef.current,
-                        pending.input,
+                        pendingHere.input,
                       );
                     }
                     composerCommit.current = undefined;
@@ -2004,7 +2045,7 @@ function ManagedSessionsContent({
                     // A create that committed server-side before an
                     // unconfirmed failure is otherwise invisible until the
                     // user happens to press Refresh.
-                    if (pending.sessionId === undefined)
+                    if (pendingHere.sessionId === undefined)
                       setListRevision((current) => current + 1);
                     focusComposer.current = { sessionId };
                     setDiscarded(true);

@@ -88,7 +88,11 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
-function injectCssModules(): Plugin {
+function injectCssModules(mode: string): Plugin {
+  // app-host 作为整页宿主，直接用全局样式；scoped 选择器会依赖
+  // [data-web-shell-root] 作为祖先锚点，而 App 的 appChatEmpty 等状态类正好挂在该
+  // 根元素上，导致 .appChatEmpty .content 这类规则在 scoped 形态下永不匹配。
+  const skipScope = mode === 'app-host';
   return {
     name: 'inject-web-shell-css-modules',
     enforce: 'post',
@@ -103,7 +107,7 @@ function injectCssModules(): Plugin {
             typeof item.source === 'string'
               ? item.source
               : Buffer.from(item.source).toString('utf8');
-          return scopeComponentCss(source);
+          return skipScope ? source : scopeComponentCss(source);
         })
         .join('\n');
       if (!css) return;
@@ -130,6 +134,8 @@ function injectCssModules(): Plugin {
         // every match rather than taking the first.
         const entry = item.facadeModuleId?.endsWith('/client/managed-host.tsx')
           ? 'managed-host'
+          : item.facadeModuleId?.endsWith('/client/app-host.tsx')
+            ? 'app-host'
           : item.facadeModuleId?.endsWith('/client/transcript.ts')
             ? 'transcript'
             : item.facadeModuleId?.endsWith('/client/index.tsx')
@@ -262,7 +268,7 @@ export default defineConfig(({ mode }) => ({
     ...(mode === 'transcript' ? [stubTranscriptModules()] : []),
     react(),
     tailwindcss(),
-    injectCssModules(),
+    injectCssModules(mode),
   ],
   resolve: {
     alias: {
@@ -282,7 +288,12 @@ export default defineConfig(({ mode }) => ({
   },
   build: {
     emptyOutDir: false,
-    outDir: mode === 'managed-host' ? 'dist/managed-host' : 'dist',
+    outDir:
+      mode === 'managed-host'
+        ? 'dist/managed-host'
+        : mode === 'app-host'
+          ? 'dist/app-host'
+          : 'dist',
     // Same floor as the app build: the lib bundle minifies the same xterm
     // (it is not external), and Vite 5's default target lowers its logical
     // assignments into code that throws on the first mode query. Also covers
@@ -292,7 +303,9 @@ export default defineConfig(({ mode }) => ({
       entry:
         mode === 'managed-host'
           ? { index: 'client/managed-host.tsx' }
-          : mode === 'transcript'
+          : mode === 'app-host'
+            ? { index: 'client/app-host.tsx' }
+            : mode === 'transcript'
             ? { transcript: 'client/transcript.ts' }
             : {
                 index: 'client/index.tsx',
@@ -304,7 +317,7 @@ export default defineConfig(({ mode }) => ({
     },
     rollupOptions: {
       external: (id, importer) => {
-        if (mode === 'managed-host') return false;
+        if (mode === 'managed-host' || mode === 'app-host') return false;
         // Pierre requires Shiki 3/4; keep its copy inside the lazy preview bundle.
         if (id === 'shiki') return !importer?.includes('/@pierre/');
         return [
@@ -348,8 +361,13 @@ export default defineConfig(({ mode }) => ({
     },
   },
   define: {
-    ...(mode === 'managed-host'
-      ? { 'process.env.NODE_ENV': JSON.stringify('production') }
+    // 完整 App 入口（app-host）会读 process.env，浏览器宿主里必须静态替换。
+    ...(mode === 'managed-host' || mode === 'app-host'
+      ? {
+          'process.env.NODE_ENV': JSON.stringify('production'),
+          ...(mode === 'app-host' ? { 'process.env': '{}' } : {}),
+          ...(mode === 'app-host' ? { 'process': JSON.stringify({ env: {} }) } : {}),
+        }
       : {}),
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),
   },
