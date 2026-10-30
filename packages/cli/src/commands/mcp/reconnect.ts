@@ -132,6 +132,7 @@ async function createMinimalConfig(): Promise<Config> {
   await config.initialize({
     skipMcpDiscovery: true,
     skipFileWatching: true,
+    skipLlmInitialization: true,
   });
 
   return config;
