@@ -97,6 +97,8 @@ async function fixture(root) {
     'docs/users/managed-agent-reference-deployment.zh-CN.md': '部署\n',
     'docs/users/hosted-workspace-recovery.md': 'recover\n',
     'docs/users/hosted-workspace-recovery.zh-CN.md': '恢复\n',
+    'docs/users/managed-agent-configuration-reference.md': 'configure\n',
+    'docs/users/managed-agent-configuration-reference.zh-CN.md': '配置\n',
     'packages/managed-agent-server/README.md': 'server reference\n',
   };
   for (const [, main] of ADMIN_COMMANDS) {
@@ -199,6 +201,20 @@ test('packages an independently verifiable reference distribution', async () => 
       '#!/usr/bin/env sh\nupgrade\n',
     );
     assert.equal((await stat(upgrade)).mode & 0o777, 0o755);
+    for (const [page, contents] of [
+      ['docs/configuration.md', 'configure\n'],
+      ['docs/configuration.zh-CN.md', '配置\n'],
+    ]) {
+      assert.equal(await readFile(path.join(bundle, page), 'utf8'), contents);
+    }
+    assert.equal(
+      result.manifest.documentation.configuration,
+      'docs/configuration.md',
+    );
+    assert.equal(
+      result.manifest.documentation.configurationChinese,
+      'docs/configuration.zh-CN.md',
+    );
     for (const module of [
       'qwen-managed-agent-bootstrap.mjs',
       'qwen-managed-agent-upgrade.mjs',

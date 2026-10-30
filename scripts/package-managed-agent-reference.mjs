@@ -488,6 +488,14 @@ export async function createReferenceDistribution({
       'docs/users/managed-agent-reference-deployment.zh-CN.md',
       'docs/deployment.zh-CN.md',
     ],
+    [
+      'docs/users/managed-agent-configuration-reference.md',
+      'docs/configuration.md',
+    ],
+    [
+      'docs/users/managed-agent-configuration-reference.zh-CN.md',
+      'docs/configuration.zh-CN.md',
+    ],
     ['packages/managed-agent-server/README.md', 'docs/server-reference.md'],
     [
       'docs/users/hosted-workspace-recovery.md',
@@ -587,6 +595,8 @@ export async function createReferenceDistribution({
     documentation: {
       deployment: 'docs/deployment.md',
       deploymentChinese: 'docs/deployment.zh-CN.md',
+      configuration: 'docs/configuration.md',
+      configurationChinese: 'docs/configuration.zh-CN.md',
       serverReference: 'docs/server-reference.md',
       operatorRecovery: 'docs/hosted-workspace-recovery.md',
     },
