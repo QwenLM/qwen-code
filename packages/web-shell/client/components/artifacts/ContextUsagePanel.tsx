@@ -212,7 +212,14 @@ export function ContextUsagePanel({
           compact
           onOpenMemoryFile={
             onOpenMemoryFile
-              ? (file) => onOpenMemoryFile(file, status.workspaceCwd)
+              ? (file) =>
+                  // Resolve the owner from the stable admission root, not the
+                  // live cwd: a worktree/relocated session's cwd is under the
+                  // registered root and would not match it exactly.
+                  onOpenMemoryFile(
+                    file,
+                    status.workspaceRoot ?? status.workspaceCwd,
+                  )
               : undefined
           }
         />

@@ -109,4 +109,38 @@ describe('readContextInstructionFile', () => {
       ),
     ).rejects.toThrow('No readable memory file');
   });
+
+  it('opens a worktree instruction file through the registered admission root', async () => {
+    // Capabilities advertise the registered repository root, not the worktree
+    // the session relocated into.
+    const repoCapabilities = {
+      workspaceCwd: '/repo',
+      workspaces: [{ id: 'repo', cwd: '/repo', primary: true, trusted: true }],
+    } as unknown as DaemonCapabilities;
+    const worktreeFile = '/repo/.qwen/worktrees/task/AGENTS.md';
+    const { client, primaryRead, byCwd } = makeClient();
+
+    // The admission root resolves the registered owner and reads the file.
+    const content = await readContextInstructionFile(
+      client,
+      repoCapabilities,
+      '/repo',
+      worktreeFile,
+    );
+    expect(content).toBe(`primary:${worktreeFile}`);
+    expect(primaryRead).toHaveBeenCalledWith(worktreeFile, {
+      maxBytes: 256 * 1024,
+    });
+    expect(byCwd).not.toHaveBeenCalled();
+
+    // The live worktree cwd is not a registered owner, so it must not be used.
+    await expect(
+      readContextInstructionFile(
+        client,
+        repoCapabilities,
+        '/repo/.qwen/worktrees/task',
+        worktreeFile,
+      ),
+    ).rejects.toThrow('workspace');
+  });
 });
