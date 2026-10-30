@@ -99,8 +99,8 @@ describe('QwenSubscriptionSidebarStatus', () => {
         'Open plans again',
         'Use Alibaba ModelStudio instead',
         'Sign out',
-        'Cancel',
       ]);
+      expect(options?.querySelectorAll('p')).toHaveLength(0);
       click('Open plans again');
       expect(container.textContent).not.toContain('Check again');
       expect(callbacks.onRetry).not.toHaveBeenCalled();
@@ -109,8 +109,7 @@ describe('QwenSubscriptionSidebarStatus', () => {
       click('Sign out');
       expect(callbacks.onSignOut).toHaveBeenCalledOnce();
       expect(callbacks.onOpenPurchase).toHaveBeenCalledOnce();
-      click('Cancel');
-      expect(callbacks.onCancel).toHaveBeenCalledOnce();
+      expect(callbacks.onCancel).not.toHaveBeenCalled();
     },
   );
 
@@ -182,7 +181,7 @@ describe('QwenSubscriptionSidebarStatus', () => {
     expect(container.textContent).not.toContain('Esc to');
   });
 
-  it('matches the English purchase reference in a Chinese host', () => {
+  it('shows only purchase action buttons in a Chinese host', () => {
     const callbacks = render(
       {
         status: 'purchase-required',
@@ -195,18 +194,26 @@ describe('QwenSubscriptionSidebarStatus', () => {
     expect(container.textContent).toContain(
       "You're signed in with a Free account",
     );
-    expect(container.textContent).toContain(
+    expect(container.textContent).not.toContain(
       'Opens the Qwen Code plans page in your browser',
     );
-    expect(container.textContent).toContain(
+    expect(container.textContent).not.toContain(
       'Coding Plan, Token Plan, or Standard API Key',
     );
-    expect(container.textContent).toContain(
+    expect(container.textContent).not.toContain(
       'Disconnect this device from your Qwen account',
     );
+    expect(
+      [...container.querySelectorAll('button')].map(
+        (button) => button.textContent,
+      ),
+    ).toEqual([
+      'Open plans again',
+      'Use Alibaba ModelStudio instead',
+      'Sign out',
+    ]);
     click('Open plans again');
     expect(callbacks.onOpenPurchase).toHaveBeenCalledOnce();
-    click('取消');
-    expect(callbacks.onCancel).toHaveBeenCalledOnce();
+    expect(callbacks.onCancel).not.toHaveBeenCalled();
   });
 });

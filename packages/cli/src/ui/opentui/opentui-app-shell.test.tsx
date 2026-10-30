@@ -51,6 +51,11 @@ import {
 } from '../utils/layoutUtils.js';
 import { STATUS_INDICATOR_WIDTH } from './messages.js';
 import { C } from './theme.js';
+import { AuthType } from '@qwen-code/qwen-code-core/utils/auth-type.js';
+import {
+  logoutCommand,
+  upgradeCommand,
+} from '../commands/subscription-commands.js';
 import {
   CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
   hasSlashCommandPathSeparator,
@@ -1075,14 +1080,17 @@ describe('OpenTuiApp shell wiring', () => {
 
   it('keeps the session model across a scoped override and adopts model-change events', async () => {
     let model = 'session-model';
-    let notify: (model: string) => void = () => {};
+    const listeners = new Set<(model: string) => void>();
     const unsubscribe = vi.fn();
     const config = {
       ...CONFIG,
       getModel: () => model,
-      onModelChange: (listener: typeof notify) => {
-        notify = listener;
-        return unsubscribe;
+      onModelChange: (listener: (model: string) => void) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+          unsubscribe();
+        };
       },
     } as unknown as Config;
     const props = {
@@ -1097,10 +1105,46 @@ describe('OpenTuiApp shell wiring', () => {
     model = 'fast-subagent';
     view.rerender(<OpenTuiApp {...props} streaming />);
     expect(mocks.state.statusLineState?.currentModel).toBe('session-model');
-    act(() => notify('selected-model'));
+    act(() => listeners.forEach((listener) => listener('selected-model')));
     expect(mocks.state.statusLineState?.currentModel).toBe('selected-model');
     view.unmount();
-    expect(unsubscribe).toHaveBeenCalledOnce();
+    expect(unsubscribe).toHaveBeenCalledTimes(2);
+    expect(listeners.size).toBe(0);
+  });
+
+  it('updates subscription entries in help as the connection changes', async () => {
+    let authType = AuthType.QWEN_SUBSCRIPTION;
+    const listeners = new Set<(model: string) => void>();
+    const config = {
+      ...CONFIG,
+      getAuthType: () => authType,
+      onModelChange: (listener: (model: string) => void) => {
+        listeners.add(listener);
+        return () => listeners.delete(listener);
+      },
+    } as unknown as Config;
+    renderApp({
+      config,
+      commands: [logoutCommand, upgradeCommand],
+      initialDialog: { dialog: 'help' },
+    });
+    await settle();
+    const entries = () =>
+      mocks.state.dialogProps?.['commands'] as readonly SlashCommand[];
+    expect(entries()).toHaveLength(2);
+    expect(entries().every((command) => !command.hidden)).toBe(true);
+
+    act(() => {
+      authType = AuthType.USE_OPENAI;
+      listeners.forEach((listener) => listener('same-model'));
+    });
+    expect(entries().every((command) => command.hidden)).toBe(true);
+
+    act(() => {
+      authType = AuthType.QWEN_SUBSCRIPTION;
+      listeners.forEach((listener) => listener('same-model'));
+    });
+    expect(entries().every((command) => !command.hidden)).toBe(true);
   });
 
   it('projects active worktree details and confirmation state into the status command input', async () => {

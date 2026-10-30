@@ -2406,6 +2406,9 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         (attached.provider as unknown as { authState: boolean }).authState,
       ).toBe(false);
       expect(attached.postMessage).toHaveBeenCalledWith({
+        type: 'authSignedOut',
+      });
+      expect(attached.postMessage).not.toHaveBeenCalledWith({
         type: 'authState',
         data: { authenticated: false },
       });
@@ -2682,8 +2685,7 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         });
         if (action === 'logout')
           expect(attached.postMessage).toHaveBeenCalledWith({
-            type: 'authState',
-            data: { authenticated: false },
+            type: 'authSignedOut',
           });
       },
     );
@@ -2706,8 +2708,7 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
       finish({ kind: 'signed-out' });
       await pending;
       expect(attached.postMessage).toHaveBeenCalledWith({
-        type: 'authState',
-        data: { authenticated: false },
+        type: 'authSignedOut',
       });
       expect(attached.postMessage).not.toHaveBeenCalledWith({
         type: 'authSuccess',
@@ -2766,7 +2767,7 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         expect(result).toBeUndefined();
         expect(attached.postMessage).toHaveBeenCalledWith(
           kind === 'signed-out'
-            ? { type: 'authState', data: { authenticated: false } }
+            ? { type: 'authSignedOut' }
             : { type: 'authCancelled' },
         );
         expect(attached.postMessage).not.toHaveBeenCalledWith({
@@ -2805,8 +2806,7 @@ describe('WebViewProvider web-shell daemon bootstrap', () => {
         finish({ kind: 'signed-out' });
         await expect(pending).resolves.toBeUndefined();
         expect(attached.postMessage).not.toHaveBeenCalledWith({
-          type: 'authState',
-          data: { authenticated: false },
+          type: 'authSignedOut',
         });
       },
     );

@@ -131,6 +131,7 @@ import {
 import { OpenTuiVoiceIndicator } from './OpenTuiVoiceIndicator.js';
 import { Command, matchesCommand, toOriginalKey } from './key-map.js';
 import { loadInteractiveCommands } from './slash-dispatch.js';
+import { useSubscriptionCommandVisibility } from '../hooks/use-subscription-command-visibility.js';
 import {
   CompletionMode,
   EscapeClearModel,
@@ -562,7 +563,15 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   const unknownHistoryInputRef = useRef(false);
   const restoredQueueDraftRef = useRef<OpenTuiRestoredDraft | null>(null);
   const dismissedUntilChangeRef = useRef<string | null>(null);
-  const commandsRef = useRef<readonly SlashCommand[]>([]);
+  const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
+  const presentedCommands = useSubscriptionCommandVisibility(
+    commands,
+    config ?? null,
+  );
+  const commandsRef = useRef(presentedCommands);
+  useLayoutEffect(() => {
+    commandsRef.current = presentedCommands;
+  }, [presentedCommands]);
   // Query-relative replacement range for the current buffer's SLASH target.
   // The perfect-match verdict is deliberately not cached alongside it: Enter
   // recomputes that one from the buffer (see the Enter branch below).
@@ -675,7 +684,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
     let cancelled = false;
     loadInteractiveCommands(config ?? null)
       .then((commands) => {
-        if (!cancelled) commandsRef.current = commands;
+        if (!cancelled) setCommands(commands);
       })
       .catch(() => {});
     return () => {
@@ -844,7 +853,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
   // way useCommandSuggestions re-runs when its recentCommands dep changes.
   useEffect(() => {
     refreshCompletion();
-  }, [recentSlashCommands, refreshCompletion]);
+  }, [recentSlashCommands, presentedCommands, refreshCompletion]);
 
   const applyTextToEditor = useCallback(
     (line: string, cursorCol?: number) => {

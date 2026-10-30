@@ -36,12 +36,10 @@
 }
 
 .muted,
-.description,
 .content > p[role='status'] {
   color: var(--muted-foreground);
 }
 
-.actionGroup,
 .linkGroup {
   display: flex;
   min-width: 0;
@@ -60,10 +58,6 @@
   font-weight: 600;
   white-space: normal;
   overflow-wrap: anywhere;
-}
-
-.description {
-  font-size: 12px;
 }
 
 .content .link {

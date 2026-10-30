@@ -499,6 +499,9 @@ describe('EmbeddedApp host wiring', () => {
           (item) => item.textContent === 'Get Started',
         );
         expect(button).toBeDefined();
+        expect(document.body.textContent).not.toContain(
+          'Supports Coding Plan, ModelStudio API Key, and OpenAI-compatible providers.',
+        );
         await act(async () => button!.click());
       }
       expect(postMessagesOfType('auth')).toEqual([
@@ -917,6 +920,59 @@ describe('EmbeddedApp host wiring', () => {
 
     expect(container.textContent).toContain('Get Started');
   });
+
+  it.each([false, true])(
+    'keeps the composer after logout and waits for explicit /auth (sidebar flow: %s)',
+    async (sidebarFlow) => {
+      await renderApp();
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: { type: 'authState', data: { authenticated: true } },
+          }),
+        );
+        if (sidebarFlow)
+          window.dispatchEvent(
+            new MessageEvent('message', {
+              data: {
+                type: 'qwenSubscriptionAuth',
+                data: { flowId: 'flow-a' },
+              },
+            }),
+          );
+      });
+      mocks.embeddedProps.current = null;
+      await act(async () => {
+        window.dispatchEvent(
+          new MessageEvent('message', { data: { type: 'authSignedOut' } }),
+        );
+        window.dispatchEvent(
+          new MessageEvent('message', {
+            data: { type: 'authState', data: { authenticated: false } },
+          }),
+        );
+        window.dispatchEvent(
+          new MessageEvent('message', { data: { type: 'authCancelled' } }),
+        );
+      });
+      expect(mocks.embeddedProps.current).not.toBeNull();
+      expect(document.body.textContent).not.toContain('Get Started');
+      expect(
+        document.querySelector('[data-testid="subscription-real"]'),
+      ).toBeNull();
+      expect(document.body.textContent).toContain(
+        'Signed out of Qwen. Use /auth to sign in again.',
+      );
+      expect(postMessagesOfType('auth')).toHaveLength(0);
+      await act(async () => {
+        callback<(command: { command: string; input: string }) => boolean>(
+          mocks.embeddedProps.current!,
+          'onSlashCommand',
+        )({ command: 'auth', input: '/auth' });
+      });
+      expect(postMessagesOfType('auth')).toHaveLength(1);
+    },
+  );
 
   it('keeps an explicit active-file exclusion across editor changes', async () => {
     await renderApp();

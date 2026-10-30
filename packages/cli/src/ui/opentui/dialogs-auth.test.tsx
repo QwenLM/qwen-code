@@ -278,6 +278,7 @@ function createMockSettings(
 
 function renderDialog(overrides?: {
   authType?: AuthType;
+  openedViaCommand?: boolean;
   initialError?: string;
   merged?: Record<string, unknown>;
   availableTerminalHeight?: number;
@@ -293,6 +294,7 @@ function renderDialog(overrides?: {
       onClose={onClose}
       notify={notify}
       initialError={overrides?.initialError}
+      openedViaCommand={overrides?.openedViaCommand}
       availableTerminalHeight={availableTerminalHeight}
     />
   );
@@ -378,6 +380,25 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     const { onClose } = renderDialog({ authType: AuthType.USE_OPENAI });
     await pressEsc();
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('closes a command-opened dialog after logout without authenticating', async () => {
+    const { onClose, config } = renderDialog({ openedViaCommand: true });
+    await pressEsc();
+    expect(onClose).toHaveBeenCalledOnce();
+    expect(screen.queryByText(/You must connect a provider/)).toBeNull();
+    expect(config.getAuthType()).toBeUndefined();
+    expect(config.refreshAuth).not.toHaveBeenCalled();
+  });
+
+  it('returns to the main menu before dismissing a command-opened dialog', async () => {
+    const { onClose } = renderDialog({ openedViaCommand: true });
+    await press('return');
+    await pressEsc();
+    expect(onClose).not.toHaveBeenCalled();
+    expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    await pressEsc();
+    expect(onClose).toHaveBeenCalledOnce();
   });
 
   it('closes via Esc when the error was seeded from boot (R2-1)', async () => {

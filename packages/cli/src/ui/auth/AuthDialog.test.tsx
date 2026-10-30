@@ -46,6 +46,7 @@ const createMockUIState = (overrides: UIStateOverrides = {}): UIState => {
     auth: {
       authError: null,
       isAuthDialogOpen: false,
+      isAuthDialogDismissible: false,
       isAuthenticating: false,
       pendingAuthType: undefined,
       externalAuthState: null,
@@ -905,6 +906,41 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       );
       expect(closeAuthDialog).not.toHaveBeenCalled();
       unmount();
+    },
+  );
+
+  itWhenTuiInputReliable.each([null, 'Authentication failed'])(
+    'allows Escape after logout from a command-opened dialog with error %s',
+    async (authError) => {
+      const empty = { settings: {}, originalSettings: {}, path: '' };
+      const settings = new LoadedSettings(
+        empty,
+        empty,
+        empty,
+        empty,
+        true,
+        new Set(),
+      );
+      const closeAuthDialog = vi.fn();
+      const ui = renderAuthDialog(
+        settings,
+        {
+          auth: {
+            ...createMockUIState().auth,
+            isAuthDialogDismissible: true,
+            authError,
+          },
+        },
+        { closeAuthDialog },
+      );
+      try {
+        await waitForSelectedOption(ui.lastFrame, QWENCLOUD_MAIN_LABEL);
+        ui.stdin.write('\u001b');
+        await vi.waitFor(() => expect(closeAuthDialog).toHaveBeenCalledOnce());
+        expect(ui.lastFrame()).not.toContain('You must connect a provider');
+      } finally {
+        ui.unmount();
+      }
     },
   );
 

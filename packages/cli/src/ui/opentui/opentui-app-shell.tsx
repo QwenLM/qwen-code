@@ -60,6 +60,7 @@ import type { SessionStatsState } from '../contexts/SessionContext.js';
 import { useWorktreeSession } from '../hooks/useWorktreeSession.js';
 import { useGitBranchName } from '../hooks/useGitBranchName.js';
 import { useStatusLineState } from '../hooks/useStatusLine.js';
+import { useSubscriptionCommandVisibility } from '../hooks/use-subscription-command-visibility.js';
 import { isNarrowWidth } from '../utils/isNarrowWidth.js';
 import {
   MessageType,
@@ -337,6 +338,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const [noticeText, setNoticeText] = useState<string | null>(null);
   const [commandList, setCommandList] = useState<readonly SlashCommand[]>(
     commands ?? [],
+  );
+  const presentedCommands = useSubscriptionCommandVisibility(
+    commandList,
+    config,
   );
 
   const notify = useCallback((text: string) => setNoticeText(text), []);
@@ -1648,7 +1653,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 host={host}
                 config={config}
                 settings={settings}
-                commands={commandList}
+                commands={presentedCommands}
                 onClose={() => setDialog(null)}
                 onSubscriptionActivated={() =>
                   setSubscriptionHintsDismissed(false)

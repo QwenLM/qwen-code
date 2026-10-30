@@ -838,7 +838,7 @@ describe('subscription development entry', () => {
     ['plus', 'zh-CN'],
     ['pro', 'zh-CN'],
   ] as const)(
-    'updates the welcome model and appends the CLI summary after %s activation (%s)',
+    'refreshes models before completing welcome %s activation (%s)',
     async (memberType, language) => {
       actions.getSubscriptionConfig.mockResolvedValue({
         enabled: true,
@@ -854,6 +854,10 @@ describe('subscription development entry', () => {
         },
       });
       let finishActivation!: () => void;
+      let finishRefresh!: () => void;
+      sessionActions.refreshModels.mockImplementation(
+        () => new Promise<void>((resolve) => (finishRefresh = resolve)),
+      );
       actions.activateSubscription.mockImplementation(
         () =>
           new Promise((resolve) => {
@@ -873,6 +877,10 @@ describe('subscription development entry', () => {
       expect(completion.onClose).not.toHaveBeenCalled();
       expect(completion.onMessage).not.toHaveBeenCalled();
       await act(async () => finishActivation());
+      expect(sessionActions.refreshModels).toHaveBeenCalledOnce();
+      expect(completion.onModelActivated).not.toHaveBeenCalled();
+      expect(completion.onClose).not.toHaveBeenCalled();
+      await act(async () => finishRefresh());
       expect(completion.onModelActivated).toHaveBeenCalledExactlyOnceWith(
         'qwen3.8-max(qwen-subscription)',
       );

@@ -837,6 +837,16 @@ describe('OpenTuiDialogMount routing', () => {
     expect(recordSlashCommand).not.toHaveBeenCalled();
   });
 
+  it.each([true, undefined])(
+    'passes the auth command origin %s to the dialog',
+    (openedViaCommand) => {
+      mount({ dialog: 'auth', openedViaCommand });
+      expect(mocks.state.dialogProps['auth']?.['openedViaCommand']).toBe(
+        openedViaCommand,
+      );
+    },
+  );
+
   it('throws for an unhandled dialog kind', () => {
     const bad = { dialog: 'nope' } as unknown as OpenTuiDialogRequest;
     expect(() => mount(bad)).toThrow(/Unhandled OpenTUI dialog request/);

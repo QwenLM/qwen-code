@@ -315,7 +315,7 @@ export function AuthDialog({
   availableTerminalHeight?: number;
 }): React.JSX.Element {
   const {
-    auth: { authError },
+    auth: { authError, isAuthDialogDismissible },
     mainAreaWidth,
   } = useUIState();
   const {
@@ -523,9 +523,12 @@ export function AuthDialog({
           return;
         }
         if (
-          settings.merged.security?.auth?.selectedType ===
+          isAuthDialogDismissible ||
+          (settings.merged.security?.auth?.selectedType ===
             AuthType.QWEN_SUBSCRIPTION &&
-          authError?.includes(subscriptionModelUnavailable(config.getModel()))
+            authError?.includes(
+              subscriptionModelUnavailable(config.getModel()),
+            ))
         ) {
           closeAuthDialog();
           return;

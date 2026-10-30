@@ -484,6 +484,7 @@ describe('AppContainer State Management', () => {
       authError: null,
       onAuthError: vi.fn(),
       isAuthDialogOpen: false,
+      isAuthDialogDismissible: false,
       isAuthenticating: false,
       pendingAuthType: undefined,
       externalAuthState: null,
@@ -495,6 +496,7 @@ describe('AppContainer State Management', () => {
       state: {
         authError: null,
         isAuthDialogOpen: false,
+        isAuthDialogDismissible: false,
         isAuthenticating: false,
         pendingAuthType: undefined,
         externalAuthState: null,
@@ -8112,6 +8114,7 @@ describe('AppContainer State Management', () => {
         authError: null,
         onAuthError: vi.fn(),
         isAuthDialogOpen: false,
+        isAuthDialogDismissible: false,
         isAuthenticating: true,
         pendingAuthType: undefined,
         externalAuthState: null,
@@ -8123,6 +8126,7 @@ describe('AppContainer State Management', () => {
         state: {
           authError: null,
           isAuthDialogOpen: false,
+          isAuthDialogDismissible: false,
           isAuthenticating: true,
           pendingAuthType: undefined,
           externalAuthState: null,

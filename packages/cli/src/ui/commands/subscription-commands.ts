@@ -29,7 +29,7 @@ export const logoutCommand: SlashCommand = {
         type: 'message',
         messageType: 'info',
         content: t(
-          'No active Qwen Subscription session. Use /auth to change providers.',
+          'This connection does not require /logout. Use /auth to switch model providers.',
         ),
       };
     }
@@ -108,6 +108,15 @@ export const upgradeCommand: SlashCommand = {
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive'],
   action: async (context) => {
+    if (context.services.config?.getAuthType() !== AuthType.QWEN_SUBSCRIPTION) {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: t(
+          'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.',
+        ),
+      };
+    }
     const url = getQwenSubscriptionPlansUrl();
     if (!context.services.config?.isBrowserLaunchSuppressed()) {
       try {

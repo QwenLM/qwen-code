@@ -1274,6 +1274,9 @@ export function AuthMessage({
             signal.throwIfAborted();
             if (!owner.isCurrent()) throw new Error('Session changed.');
           } else {
+            await sessionActions.refreshModels();
+            signal.throwIfAborted();
+            if (!owner.isCurrent()) throw new Error('Session changed.');
             onModelActivated?.(`${result.modelId}(qwen-subscription)`);
           }
           return result.modelId;

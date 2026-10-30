@@ -119,11 +119,13 @@ describe('useAuthCommand', () => {
       result.current.openAuthDialog();
     });
     expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.state.isAuthDialogDismissible).toBe(true);
 
     act(() => {
       result.current.closeAuthDialog();
     });
     expect(result.current.isAuthDialogOpen).toBe(false);
+    expect(result.current.state.isAuthDialogDismissible).toBe(false);
     expect(result.current.authError).toBe(null);
   });
 
@@ -143,8 +145,26 @@ describe('useAuthCommand', () => {
     act(() => result.current.openAuthDialog());
     expect(result.current.authState).toBe(AuthState.Unauthenticated);
     expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.state.isAuthDialogDismissible).toBe(true);
     expect(result.current.pendingAuthType).toBeUndefined();
     expect(onAuthChange).toHaveBeenCalledOnce();
+  });
+
+  it('keeps startup authentication required after a command dialog was closed', () => {
+    const config = createConfig();
+    config.getAuthType.mockReturnValue(undefined);
+    const { result } = renderHook(() =>
+      useAuthCommand(createSettings() as never, config as never, vi.fn()),
+    );
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.state.isAuthDialogDismissible).toBe(false);
+    act(() => result.current.openAuthDialog());
+    expect(result.current.state.isAuthDialogDismissible).toBe(true);
+    act(() => result.current.closeAuthDialog());
+    act(() => result.current.onAuthError('Authentication required'));
+    expect(result.current.isAuthDialogOpen).toBe(true);
+    expect(result.current.state.isAuthDialogDismissible).toBe(false);
+    expect(config.getAuthType()).toBeUndefined();
   });
 
   it('keeps first-time authentication open after saving only a preset image model', async () => {

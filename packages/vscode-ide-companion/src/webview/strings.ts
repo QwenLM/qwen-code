@@ -67,9 +67,8 @@ const EN = {
   'onboarding.subtitle': 'Connect a model provider to start coding with Qwen.',
   'onboarding.cta': 'Get Started',
   'onboarding.connecting': 'Connecting…',
-  'onboarding.providers':
-    'Supports Coding Plan, ModelStudio API Key, and OpenAI-compatible providers.',
   'auth.signedIn': 'Signed in successfully.',
+  'auth.signedOut': 'Signed out of Qwen. Use /auth to sign in again.',
   'auth.failed': 'Failed to connect to Qwen Code.',
   'account.title': 'Account Information',
   'account.authType': 'Auth Method',
@@ -159,9 +158,8 @@ const ZH: Record<ChromeStringKey, string> = {
   'onboarding.subtitle': '连接一个模型服务商，开始使用 Qwen 编码。',
   'onboarding.cta': '开始使用',
   'onboarding.connecting': '连接中…',
-  'onboarding.providers':
-    '支持 Coding Plan、百炼 API Key 以及兼容 OpenAI 的服务商。',
   'auth.signedIn': '登录成功。',
+  'auth.signedOut': '已退出 Qwen 登录。使用 /auth 重新登录。',
   'auth.failed': '连接 Qwen Code 失败。',
   'account.title': '账号信息',
   'account.authType': '认证方式',

@@ -374,6 +374,7 @@ export function EmbeddedApp() {
   runtimeRef.current = runtime;
   const [runtimeError, setRuntimeError] = useState<string>();
   const [authenticated, setAuthenticated] = useState<boolean | null>(null);
+  const [signedOut, setSignedOut] = useState(false);
   const [authConnecting, setAuthConnecting] = useState(false);
   const [authError, setAuthError] = useState<string>();
   const [subscriptionFlowId, setSubscriptionFlowId] = useState<string>();
@@ -471,6 +472,7 @@ export function EmbeddedApp() {
   );
   useEffect(() => {
     setAuthConnecting(false);
+    setSignedOut(false);
     setSubscriptionFlowId(undefined);
     return () => {
       authRequest.current?.abort();
@@ -1062,14 +1064,24 @@ export function EmbeddedApp() {
           setAuthConnecting(false);
           clearInsight();
         } else if (state === true) {
+          setSignedOut(false);
           setAuthConnecting(false);
           setAuthError(undefined);
         }
+      } else if (message.type === 'authSignedOut') {
+        setAuthenticated(false);
+        setSignedOut(true);
+        setAuthConnecting(false);
+        setAuthError(undefined);
+        setSubscriptionFlowId(undefined);
+        setHostNotice({ tone: 'info', text: t('auth.signedOut') });
+        clearInsight();
       } else if (
         message.type === 'authSuccess' ||
         message.type === 'agentConnected'
       ) {
         setAuthenticated(true);
+        setSignedOut(false);
         setAuthConnecting(false);
         setAuthError(undefined);
         if (message.type === 'authSuccess') {
@@ -1098,6 +1110,7 @@ export function EmbeddedApp() {
               ? data.error
               : t('auth.failed');
         setAuthenticated(false);
+        setSignedOut(false);
         setAuthConnecting(false);
         setAuthError(text);
         clearInsight();
@@ -1723,7 +1736,7 @@ export function EmbeddedApp() {
             onActivate={activateSubscription}
           />
         </QwenOnboarding>
-      ) : authenticated === false ? (
+      ) : authenticated === false && !signedOut ? (
         <QwenOnboarding
           connecting={authConnecting}
           error={authError}

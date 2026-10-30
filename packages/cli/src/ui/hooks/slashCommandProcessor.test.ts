@@ -28,6 +28,10 @@ import { McpPromptLoader } from '../../services/McpPromptLoader.js';
 import * as interactiveMods from '../../services/interactive-mod-session.js';
 import { helpCommand } from '../commands/helpCommand.js';
 import { quitCommand } from '../commands/quitCommand.js';
+import {
+  logoutCommand,
+  upgradeCommand,
+} from '../commands/subscription-commands.js';
 import { clearCommand } from '../commands/clearCommand.js';
 import { rewindCommand } from '../commands/rewindCommand.js';
 import { ExtensionRefreshState } from '../../config/extension-refresh-state.js';
@@ -335,6 +339,44 @@ describe('useSlashCommandProcessor', () => {
 
     return result;
   };
+
+  it('hides subscription commands from presentation while manually dispatching their informational guards', async () => {
+    const authType = vi
+      .spyOn(mockConfig, 'getAuthType')
+      .mockReturnValue(undefined);
+    try {
+      const result = setupProcessorHook([logoutCommand, upgradeCommand]);
+      await waitFor(() => expect(result.current.slashCommands).toHaveLength(2));
+      expect(
+        result.current.slashCommands.every((command) => command.hidden),
+      ).toBe(true);
+
+      for (const command of [logoutCommand, upgradeCommand]) {
+        await act(async () => {
+          await result.current.handleSlashCommand(`/${command.name}`);
+        });
+      }
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining('does not require /logout'),
+        }),
+        expect.any(Number),
+      );
+      expect(mockAddItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: MessageType.INFO,
+          text: expect.stringContaining(
+            'only available with Qwen Subscription login',
+          ),
+        }),
+        expect.any(Number),
+      );
+      expect(mockOpenAuthDialog).not.toHaveBeenCalled();
+    } finally {
+      authType.mockRestore();
+    }
+  });
 
   it.each([
     ['direct builtin restore', 'restore', CommandKind.BUILT_IN, false, false],

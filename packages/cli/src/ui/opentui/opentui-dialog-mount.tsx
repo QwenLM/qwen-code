@@ -459,6 +459,7 @@ export function OpenTuiDialogMount(props: OpenTuiDialogMountProps) {
           config={config}
           settings={settings}
           initialError={request.initialError}
+          openedViaCommand={request.openedViaCommand}
           onClose={onClose}
           notify={(text, presentation) => {
             reportResult(

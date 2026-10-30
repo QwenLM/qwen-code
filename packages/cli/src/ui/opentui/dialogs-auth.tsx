@@ -1250,6 +1250,7 @@ type AuthDialogProps = {
   /** Startup auth failure surfaced by the auto-open (U-6); null when the
    * dialog opened because no auth type is configured. */
   initialError?: string;
+  openedViaCommand?: boolean;
   /** The popup region's row budget; the wizard's radio lists window from it. */
   availableTerminalHeight?: number;
 };
@@ -1546,6 +1547,7 @@ function AuthDialogFlow({
   onClose,
   notify,
   initialError,
+  openedViaCommand,
   availableTerminalHeight,
 }: AuthDialogProps & { config: Config }) {
   const [errorMessage, setErrorMessage] = useState<string | null>(
@@ -1960,6 +1962,10 @@ function AuthDialogFlow({
         onClose();
         return true;
       }
+      if (openedViaCommand) {
+        onClose();
+        return true;
+      }
       // The swallow is for an error the dialog armed itself; a boot-seeded
       // initialError must fall through, or the auto-opened dialog could never
       // be dismissed with Esc.
@@ -1990,6 +1996,7 @@ function AuthDialogFlow({
     goBack,
     errorMessage,
     initialError,
+    openedViaCommand,
     config,
     onClose,
     mainWindow,

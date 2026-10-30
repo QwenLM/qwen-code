@@ -81,7 +81,7 @@ type MessageValue =
 type Messages = Record<string, MessageValue>;
 
 const EN: Messages = {
-  'subscription.entryTitle': 'Qwen',
+  'subscription.entryTitle': 'Qwen Account with Subscription',
   'subscription.entryDescription':
     'Unlock Qwen Code + Agent with Plus/Pro Plan at chat.qwen.ai',
   'subscription.new': 'New',
@@ -106,6 +106,14 @@ const EN: Messages = {
   'subscription.signInAgain': 'Sign in again',
   'subscription.switchProvider': 'Use Alibaba ModelStudio instead',
   'subscription.signOut': 'Sign out',
+  'subscription.signedOut': 'Signed out of Qwen. Use /auth to sign in again.',
+  'subscription.signedOutLocally':
+    'You are signed out locally, but the remote session could not be revoked.',
+  'subscription.signOutFailed': 'Could not sign out of Qwen. Please try again.',
+  'subscription.logoutNotRequired':
+    'This connection does not require /logout. Use /auth to switch model providers.',
+  'subscription.unavailable':
+    'Qwen subscription is not available in this build.',
   'subscription.cancel': 'Cancel',
   'subscription.connecting': 'Loading models from provider…',
   'subscription.refreshFailed':
@@ -4712,7 +4720,7 @@ const ZH: Messages = {
     '选择内置供应商并使用 API Key 连接',
   'Manually connect a local server, proxy, or unsupported provider':
     '手动连接本地服务、代理或其他供应商',
-  'subscription.entryTitle': 'Qwen',
+  'subscription.entryTitle': 'Qwen Account with Subscription',
   'subscription.entryDescription':
     '在 chat.qwen.ai 订阅 Plus/Pro，解锁 Qwen Code 和智能体能力',
   'subscription.new': '新',
@@ -4734,6 +4742,12 @@ const ZH: Messages = {
   'subscription.signInAgain': '重新登录',
   'subscription.switchProvider': '改用阿里云百炼',
   'subscription.signOut': '退出登录',
+  'subscription.signedOut': '已退出 Qwen 登录。使用 /auth 重新登录。',
+  'subscription.signedOutLocally': '已在本地退出登录，但未能撤销远端会话。',
+  'subscription.signOutFailed': '无法退出 Qwen 登录，请重试。',
+  'subscription.logoutNotRequired':
+    '当前连接无需通过 /logout 退出。如需切换模型服务，请使用 /auth。',
+  'subscription.unavailable': '当前版本暂不支持 Qwen 订阅。',
   'subscription.cancel': '取消',
   'subscription.connecting': '正在加载模型…',
   'subscription.refreshFailed': '无法刷新 Qwen 登录凭证，请重试。',

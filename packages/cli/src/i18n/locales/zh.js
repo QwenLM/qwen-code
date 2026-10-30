@@ -2808,8 +2808,10 @@ export default {
     '无法打开浏览器，请访问 {{url}}',
   'Qwen subscription plans: {{url}}': 'Qwen 订阅套餐：{{url}}',
   'Sign out of your Qwen account': '退出 Qwen 账号',
-  'No active Qwen Subscription session. Use /auth to change providers.':
-    '当前没有启用 Qwen 会员会话，请使用 /auth 切换提供商。',
+  'This connection does not require /logout. Use /auth to switch model providers.':
+    '当前连接无需通过 /logout 退出。如需切换模型服务，请使用 /auth。',
+  'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.':
+    '此命令仅适用于 Qwen 订阅登录。如需使用 Qwen 订阅，请通过 /auth 登录。',
   'Wait for the current response to finish before signing out.':
     '请等待当前回复结束后再退出登录。',
   'You are signed out, but the saved authentication selection could not be cleared.':

@@ -12,6 +12,18 @@ const zh = getTranslator('zh-CN');
 const en = getTranslator('en');
 
 describe('getLocalCommands', () => {
+  it('adds the subscription logout entry only when available', () => {
+    expect(
+      getLocalCommands(en).some((command) => command.name === 'logout'),
+    ).toBe(false);
+    expect(
+      getLocalCommands(zh, { subscriptionAvailable: true }),
+    ).toContainEqual({
+      name: 'logout',
+      description: '断开此设备与你的 Qwen 账号的连接',
+      source: 'builtin-command',
+    });
+  });
   it('translates fallback command descriptions to the active language', () => {
     const byName = new Map(getLocalCommands(zh).map((c) => [c.name, c]));
     expect(byName.get('status')?.description).toBe('查看版本信息');

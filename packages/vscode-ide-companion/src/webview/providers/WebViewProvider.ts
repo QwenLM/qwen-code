@@ -1024,11 +1024,7 @@ export class WebViewProvider {
       });
       assertOwner();
       if (result.kind === 'signed-out') {
-        this.authState = false;
-        this.sendMessageToWebView({
-          type: 'authState',
-          data: { authenticated: false },
-        });
+        this.sendMessageToWebView({ type: 'authSignedOut' });
       } else {
         this.sendMessageToWebView({ type: 'authCancelled' });
       }
@@ -1740,6 +1736,7 @@ export class WebViewProvider {
         break;
       case 'agentConnectionError':
       case 'authError':
+      case 'authSignedOut':
         this.authState = false;
         break;
       case 'authCancelled':
@@ -2014,10 +2011,7 @@ export class WebViewProvider {
         });
       } else if (message.type === 'qwenSubscriptionSignedOut') {
         flow.controller.abort();
-        this.sendMessageToWebView({
-          type: 'authState',
-          data: { authenticated: false },
-        });
+        this.sendMessageToWebView({ type: 'authSignedOut' });
       } else if (
         message.type === 'qwenSubscriptionCancel' ||
         message.type === 'qwenSubscriptionOtherProviders'

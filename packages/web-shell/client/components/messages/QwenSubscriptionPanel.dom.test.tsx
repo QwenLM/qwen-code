@@ -140,6 +140,15 @@ it.each(['free', 'go'])(
     expect(open.mock.calls.map(([url]) => url)).toEqual([
       'https://pre4-chat.qwen.ai/?memberPlan=qwen_code',
     ]);
+    expect(
+      [...container.querySelectorAll('button')].map(
+        (button) => button.textContent,
+      ),
+    ).toEqual([
+      'Open plans again',
+      'Use Alibaba ModelStudio instead',
+      'Sign out',
+    ]);
     await click('Open plans again');
     expect(open).toHaveBeenCalledTimes(2);
     expect(open).toHaveBeenLastCalledWith(

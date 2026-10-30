@@ -54,6 +54,7 @@ export type { QwenAuthState } from '../hooks/useQwenAuth.js';
 export type AuthUiState = {
   authError: string | null;
   isAuthDialogOpen: boolean;
+  isAuthDialogDismissible: boolean;
   isAuthenticating: boolean;
   pendingAuthType: AuthType | undefined;
   externalAuthState: {
@@ -96,6 +97,7 @@ export const useAuthCommand = (
   const [authError, setAuthError] = useState<string | null>(null);
   const [isAuthenticating, setIsAuthenticating] = useState(false);
   const [isAuthDialogOpen, setIsAuthDialogOpen] = useState(unAuthenticated);
+  const [isAuthDialogDismissible, setIsAuthDialogDismissible] = useState(false);
   const [pendingAuthType, setPendingAuthType] = useState<AuthType | undefined>(
     undefined,
   );
@@ -157,6 +159,7 @@ export const useAuthCommand = (
     setAuthState(AuthState.Authenticated);
     setPendingAuthType(undefined);
     setIsAuthDialogOpen(false);
+    setIsAuthDialogDismissible(false);
     setIsAuthenticating(false);
     onAuthChange?.();
   }, [onAuthChange]);
@@ -277,11 +280,13 @@ export const useAuthCommand = (
       onAuthChange?.();
     }
     openedViaCommandRef.current = true;
+    setIsAuthDialogDismissible(true);
     setIsAuthDialogOpen(true);
   }, [config, onAuthChange]);
 
   const closeAuthDialog = useCallback(() => {
     openedViaCommandRef.current = false;
+    setIsAuthDialogDismissible(false);
     setIsAuthDialogOpen(false);
     setAuthError(null);
   }, []);
@@ -328,6 +333,7 @@ export const useAuthCommand = (
     () => ({
       authError,
       isAuthDialogOpen,
+      isAuthDialogDismissible,
       isAuthenticating,
       pendingAuthType,
       externalAuthState,
@@ -336,6 +342,7 @@ export const useAuthCommand = (
     [
       authError,
       isAuthDialogOpen,
+      isAuthDialogDismissible,
       isAuthenticating,
       pendingAuthType,
       externalAuthState,

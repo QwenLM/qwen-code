@@ -3036,8 +3036,10 @@ export default {
     'Could not open your browser. Visit {{url}}',
   'Qwen subscription plans: {{url}}': 'Qwen subscription plans: {{url}}',
   'Sign out of your Qwen account': 'Sign out of your Qwen account',
-  'No active Qwen Subscription session. Use /auth to change providers.':
-    'No active Qwen Subscription session. Use /auth to change providers.',
+  'This connection does not require /logout. Use /auth to switch model providers.':
+    'This connection does not require /logout. Use /auth to switch model providers.',
+  'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.':
+    'This command is only available with Qwen Subscription login. Use /auth to sign in to Qwen Subscription.',
   'Wait for the current response to finish before signing out.':
     'Wait for the current response to finish before signing out.',
   'You are signed out, but the saved authentication selection could not be cleared.':

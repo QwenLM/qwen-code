@@ -62,6 +62,7 @@ import {
   type DaemonWorkspaceGitStatus,
   type DaemonWorkspaceVoiceStatus,
   type DaemonWorkspaceProviderStatus,
+  type DaemonWorkspaceProvidersStatus,
   type GoalSnapshotV2,
   type SessionSource,
   type SessionSourcesResult,
@@ -268,6 +269,7 @@ type MockConnection = {
   titleSource?: 'manual' | 'auto';
   workspaceCwd: string;
   currentModel: string | undefined;
+  providers?: DaemonWorkspaceProvidersStatus;
   currentMode: string | undefined;
   planExecutionMode?: string;
   models: Array<{
@@ -809,6 +811,8 @@ const {
       }),
       loadSkillsStatus,
       loadProviders: vi.fn().mockResolvedValue({ current: null }),
+      getSubscriptionConfig: vi.fn().mockResolvedValue({ enabled: false }),
+      signOutSubscription: vi.fn().mockResolvedValue(undefined),
       loadPreflight: vi.fn().mockResolvedValue(null),
       loadEnv: vi.fn().mockResolvedValue(null),
       loadMcpStatus: vi.fn().mockResolvedValue({ servers: [] }),
@@ -12268,6 +12272,7 @@ beforeEach(() => {
   mockConnection.currentMode = 'default';
   mockConnection.planExecutionMode = undefined;
   mockConnection.currentModel = 'qwen';
+  mockConnection.providers = undefined;
   mockConnection.models = [{ id: 'qwen', label: 'Qwen' }];
   mockConnection.error = undefined;
   mockConnection.errorStatus = undefined;
@@ -12650,6 +12655,12 @@ beforeEach(() => {
     modifiedMs: 0,
   });
   mockWorkspaceActions.loadProviders.mockResolvedValue({ current: null });
+  mockWorkspaceActions.getSubscriptionConfig.mockReset();
+  mockWorkspaceActions.getSubscriptionConfig.mockResolvedValue({
+    enabled: false,
+  });
+  mockWorkspaceActions.signOutSubscription.mockReset();
+  mockWorkspaceActions.signOutSubscription.mockResolvedValue(undefined);
   mockWorkspaceActions.controlGoal.mockResolvedValue({
     snapshot: { v: 2, activity: 'idle', goal: null },
   });
@@ -12720,6 +12731,230 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe('App subscription logout command', () => {
+  beforeEach(() => {
+    mockConnection.providers = {
+      v: 1,
+      workspaceCwd: '/tmp/project',
+      initialized: true,
+      providers: [],
+      current: { authType: 'qwen-subscription', modelId: 'qwen' },
+    };
+    mockWorkspaceActions.loadProviders.mockResolvedValue(
+      mockConnection.providers,
+    );
+    mockWorkspaceActions.getSubscriptionConfig.mockResolvedValue({
+      enabled: true,
+    });
+    testState.prompt = '/logout';
+  });
+
+  it('signs out locally through the account API without dispatching an ACP prompt', async () => {
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'logout' })]),
+    );
+    await clickSubmit(container);
+    await flush();
+    expect(mockWorkspaceActions.signOutSubscription).toHaveBeenCalledOnce();
+    expect(mockWorkspaceActions.loadProviders).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
+    expect(onToast).toHaveBeenCalledWith(
+      'success',
+      'Signed out of Qwen. Use /auth to sign in again.',
+    );
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('opens authentication only when requested after logout', async () => {
+    const { container } = renderApp();
+    await flush();
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+    testState.prompt = '/auth';
+    await clickSubmit(container);
+    await flush();
+    expect(
+      container.querySelector('[data-testid="dialog-shell"]'),
+    ).not.toBeNull();
+  });
+
+  it('hides logout after switching connections and safely handles manual invocation', async () => {
+    const onToast = vi.fn();
+    const { container, rerender } = renderApp({ onToast });
+    await flush();
+    const nextProviders = {
+      ...mockConnection.providers!,
+      current: { authType: 'openai', modelId: 'qwen' },
+    };
+    mockConnection.currentModel = 'other-model';
+    mockWorkspaceActions.loadProviders.mockResolvedValue(nextProviders);
+    rerender({ onToast });
+    await flush();
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'logout' })]),
+    );
+    await clickSubmit(container);
+    await flush();
+    expect(mockWorkspaceActions.signOutSubscription).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'info',
+      'This connection does not require /logout. Use /auth to switch model providers.',
+    );
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    mockConnection.currentModel = 'qwen';
+    mockWorkspaceActions.loadProviders.mockResolvedValue(
+      mockConnection.providers,
+    );
+    rerender({ onToast });
+    await flush();
+    expect(testState.latestChatEditorProps?.commands).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'logout' })]),
+    );
+  });
+
+  it('preserves the DEV gate for both completion and manual invocation', async () => {
+    mockWorkspaceActions.getSubscriptionConfig.mockResolvedValue({
+      enabled: false,
+    });
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+    expect(testState.latestChatEditorProps?.commands).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: 'logout' })]),
+    );
+    await clickSubmit(container);
+    await flush();
+    expect(mockWorkspaceActions.signOutSubscription).not.toHaveBeenCalled();
+    expect(onToast).toHaveBeenCalledWith(
+      'info',
+      'Qwen subscription is not available in this build.',
+    );
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+  });
+
+  it('does not revoke credentials while a response is active', async () => {
+    testState.streamingState = 'responding';
+    const { container } = renderApp();
+    await flush();
+    await clickSubmit(container);
+    await flush();
+    expect(mockWorkspaceActions.signOutSubscription).not.toHaveBeenCalled();
+    expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+  });
+
+  it('ignores repeated submissions while logout is pending', async () => {
+    const pending = deferred<void>();
+    mockWorkspaceActions.signOutSubscription.mockReturnValue(pending.promise);
+    const { container } = renderApp();
+    await flush();
+    await clickSubmit(container);
+    testState.prompt = '/logout';
+    await clickSubmit(container);
+    expect(mockWorkspaceActions.signOutSubscription).toHaveBeenCalledOnce();
+    pending.resolve();
+    await flush();
+  });
+
+  it('does not revoke credentials if the session changes during preflight', async () => {
+    const pending = deferred<{ enabled: boolean }>();
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+    mockWorkspaceActions.getSubscriptionConfig.mockReturnValueOnce(
+      pending.promise,
+    );
+    await clickSubmit(container);
+    testState.ownerVersion += 1;
+    pending.resolve({ enabled: true });
+    await flush();
+    expect(mockWorkspaceActions.signOutSubscription).not.toHaveBeenCalled();
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it('does not sign out if a response starts during preflight', async () => {
+    const pending = deferred<{ enabled: boolean }>();
+    const { container, rerender } = renderApp();
+    await flush();
+    mockWorkspaceActions.getSubscriptionConfig.mockReturnValueOnce(
+      pending.promise,
+    );
+    await clickSubmit(container);
+    testState.sessionHasActivePrompt = true;
+    rerender({});
+    pending.resolve({ enabled: true });
+    await flush();
+    expect(mockWorkspaceActions.signOutSubscription).not.toHaveBeenCalled();
+  });
+
+  it('does not update the new session when an earlier logout completes', async () => {
+    const pending = deferred<void>();
+    mockWorkspaceActions.signOutSubscription.mockReturnValue(pending.promise);
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+    await clickSubmit(container);
+    expect(mockWorkspaceActions.signOutSubscription).toHaveBeenCalledOnce();
+    testState.ownerVersion += 1;
+    pending.resolve();
+    await flush();
+    expect(onToast).not.toHaveBeenCalled();
+    expect(container.querySelector('[data-testid="dialog-shell"]')).toBeNull();
+  });
+
+  it.each([
+    {
+      stage: 'cleanup',
+      severity: 'error',
+      message: 'Could not sign out of Qwen. Please try again.',
+    },
+    {
+      stage: 'revoke',
+      severity: 'warning',
+      message:
+        'You are signed out locally, but the remote session could not be revoked.',
+    },
+  ])(
+    'handles a $stage failure without misreporting account state',
+    async ({ stage, severity, message }) => {
+      mockWorkspaceActions.signOutSubscription.mockRejectedValue({
+        body: { errorStage: stage },
+      });
+      const onToast = vi.fn();
+      const { container } = renderApp({ onToast });
+      await flush();
+      await clickSubmit(container);
+      await flush();
+      expect(onToast).toHaveBeenCalledWith(
+        severity,
+        expect.stringContaining(message),
+      );
+      expect(
+        container.querySelector('[data-testid="dialog-shell"]'),
+      ).toBeNull();
+      expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    },
+  );
+
+  it('preserves project commands that shadow logout', async () => {
+    mockConnection.commands = [
+      { name: 'logout', description: 'Project logout', source: 'project' },
+    ];
+    const { container } = renderApp();
+    await flush();
+    await clickSubmit(container);
+    await flush();
+    expect(mockWorkspaceActions.signOutSubscription).not.toHaveBeenCalled();
+    expect(mockSessionActions.sendPrompt).toHaveBeenCalled();
+  });
 });
 
 describe('App live transcript boundary', () => {

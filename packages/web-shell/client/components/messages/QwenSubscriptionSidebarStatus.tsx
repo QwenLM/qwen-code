@@ -30,7 +30,6 @@ export function QwenSubscriptionSidebarStatus({
             {
               key: 'check',
               label: 'Check again',
-              description: '',
               onClick: onRetry,
               disabled: state.checking,
             },
@@ -39,19 +38,16 @@ export function QwenSubscriptionSidebarStatus({
       {
         key: 'plans',
         label: 'Open plans again',
-        description: 'Opens the Qwen Code plans page in your browser',
         onClick: onOpenPurchase,
       },
       {
         key: 'provider',
         label: 'Use Alibaba ModelStudio instead',
-        description: 'Coding Plan, Token Plan, or Standard API Key',
         onClick: onSwitchProvider,
       },
       {
         key: 'signout',
         label: 'Sign out',
-        description: 'Disconnect this device from your Qwen account',
         onClick: onSignOut,
       },
     ];
@@ -84,30 +80,18 @@ export function QwenSubscriptionSidebarStatus({
         </div>
         <div className={styles.actions}>
           {actions.map((action) => (
-            <div key={action.key} className={styles.actionGroup}>
-              <Button
-                type="button"
-                variant={action.key === 'plans' ? 'default' : 'outline'}
-                aria-label={action.label}
-                className={styles.action}
-                onClick={action.onClick}
-                disabled={action.disabled}
-              >
-                {action.label}
-              </Button>
-              {action.description && (
-                <p className={styles.description}>{action.description}</p>
-              )}
-            </div>
+            <Button
+              key={action.key}
+              type="button"
+              variant={action.key === 'plans' ? 'default' : 'outline'}
+              aria-label={action.label}
+              className={styles.action}
+              onClick={action.onClick}
+              disabled={action.disabled}
+            >
+              {action.label}
+            </Button>
           ))}
-          <Button
-            type="button"
-            variant="outline"
-            className={styles.action}
-            onClick={onCancel}
-          >
-            {t('subscription.cancel')}
-          </Button>
         </div>
       </section>
     );

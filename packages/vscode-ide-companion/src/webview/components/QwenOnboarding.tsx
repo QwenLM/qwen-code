@@ -147,15 +147,6 @@ export function QwenOnboarding({
                 </div>
               )}
             </div>
-            <div
-              style={{
-                color: 'var(--vscode-descriptionForeground)',
-                fontSize: 11,
-                lineHeight: 1.45,
-              }}
-            >
-              {t('onboarding.providers')}
-            </div>
           </>
         )}
       </div>

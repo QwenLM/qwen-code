@@ -90,6 +90,7 @@ import {
 import { useKeypress } from './useKeypress.js';
 import { isPickerOnlyModelInvocation } from '../commands/modelCommand.js';
 import { quitCommand } from '../commands/quitCommand.js';
+import { useSubscriptionCommandVisibility } from './use-subscription-command-visibility.js';
 import {
   type ExtensionUpdateAction,
   type ExtensionUpdateStatus,
@@ -268,6 +269,7 @@ export const useSlashCommandProcessor = (
 
   const { stats: sessionStats, startNewSession } = useSessionStats();
   const [commands, setCommands] = useState<readonly SlashCommand[]>([]);
+  const presentedCommands = useSubscriptionCommandVisibility(commands, config);
   const [recentCommands, setRecentCommands] = useState<
     ReadonlyMap<string, RecentSlashCommand>
   >(new Map());
@@ -1697,7 +1699,7 @@ export const useSlashCommandProcessor = (
 
   return {
     handleSlashCommand,
-    slashCommands: commands,
+    slashCommands: presentedCommands,
     recentSlashCommands: recentCommands,
     pendingHistoryItems,
     btwItem,
