@@ -6437,6 +6437,33 @@ export abstract class ChannelBase {
     }
   }
 
+  private peekPendingGroupHistory(envelope: Envelope): GroupHistoryEntry[] {
+    const limit = this.groupHistoryLimit(envelope);
+    if (limit <= 0) {
+      return [];
+    }
+    try {
+      const entries = this.groupHistory.peek(
+        this.groupHistoryKey(envelope),
+        limit,
+      );
+      if (
+        this.config.groupPolicy === 'pairing' &&
+        !this.groupGate.isGroupApproved(envelope.chatId)
+      ) {
+        return [];
+      }
+      return envelope.messageId === undefined
+        ? entries
+        : entries.filter((entry) => entry.messageId !== envelope.messageId);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to peek group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
+      return [];
+    }
+  }
+
   private forgetPendingGroupHistory(envelope: Envelope): void {
     if (envelope.messageId === undefined) return;
     try {
@@ -7402,19 +7429,24 @@ export abstract class ChannelBase {
               } else {
                 // The injected text must carry the same group-history backfill
                 // a queued turn would get, or the agent answers a reference
-                // ("the third one") it cannot resolve. Drained only once the
-                // inject path is actually taken; a rejected injection keeps the
-                // composed text so the backfill is not lost.
+                // ("the third one") it cannot resolve. The pending history is
+                // only PEEKED here: a rejected injection parks the unwrapped
+                // text so the replay composes a single fresh wrapper, and an
+                // accepted one drains it right after the queue accepts it.
                 const injectText = this.prependGroupHistoryContext(
                   envelope,
                   promptText,
-                  this.drainPendingGroupHistory(envelope),
+                  this.peekPendingGroupHistory(envelope),
                 );
                 const receipt = this.bridge.queueMidTurnMessage(
                   sessionId,
                   injectText,
                 );
                 if (receipt.accepted) {
+                  // Consume the history this injection carried. No await
+                  // between the accepted queue call and this drain, so the
+                  // replayed turn cannot also deliver the same backfill.
+                  this.drainPendingGroupHistory(envelope);
                   this.recordInjectedMessage(sessionId, injectText, envelope);
                   process.stderr.write(
                     `[${this.name}] inject: delivered mid-turn message from ${envelope.senderId} into session ${sessionId}\n`,
@@ -7429,7 +7461,6 @@ export abstract class ChannelBase {
                 // A rejected injection opens the fallback for the rest of this
                 // turn: messages must stay in arrival order.
                 this.injectDegradedSessions.add(sessionId);
-                promptText = injectText;
                 injectFallback = true;
                 injectRejectReason = receipt.reason;
               }

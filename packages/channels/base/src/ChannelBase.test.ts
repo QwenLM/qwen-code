@@ -24975,6 +24975,83 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('composes the group-history context once when a rejected injection is replayed', async () => {
+      const queueMidTurnMessage = enableInjection();
+      queueMidTurnMessage.mockReturnValueOnce({
+        accepted: false,
+        reason: 'capacity',
+      });
+      const resolvers = resolvablePrompts();
+      const ch = createChannel(
+        {
+          dispatchMode: 'inject',
+          groupPolicy: 'open',
+          groupHistoryLimit: 5,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+      try {
+        const running = ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            text: 'start',
+            messageId: 'm-hist-once-1',
+          }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: false,
+            text: 'the staging one',
+            messageId: 'm-hist-once-2',
+          }),
+        );
+        // Rejected, so it parks the UNWRAPPED text: the replay must compose
+        // the wrapper itself rather than re-wrapping already-wrapped text.
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            text: 'do the third one',
+            messageId: 'm-hist-once-3',
+          }),
+        );
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+
+        // Recorded between the rejection and the turn end: fresh history the
+        // replay must pick up.
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: false,
+            text: 'arrived later',
+            messageId: 'm-hist-once-4',
+          }),
+        );
+
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        const replay = String(bridge.prompt.mock.calls[1]?.[1]);
+        const contextMarker =
+          '[Chat messages since your last reply - for context]';
+        const currentMarker = '[Current message - respond to this]';
+        expect(replay.split(contextMarker)).toHaveLength(2);
+        expect(replay.split(currentMarker)).toHaveLength(2);
+        expect(replay).toContain('the staging one');
+        expect(replay).toContain('arrived later');
+        expect(replay).toContain('do the third one');
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
     it('keeps the group-history backfill for an injection after a refused image', async () => {
       const queueMidTurnMessage = enableInjection();
       const resolvers = resolvablePrompts();
