@@ -186,8 +186,9 @@ worktree watch。
   的 ignored 文件与目标提交跟踪的路径匹配——精确路径，以及双向的文件/
   目录转换（目标把 ignored 目录当 blob 跟踪，或把 ignored 文件当目录在
   其下跟踪）。有冲突就原样保留该子模块，回答 `synced: false` 并以
-  `子模块: 路径` 点名。路径列表读不出来（枚举失败或超出命令缓冲）同样
-  是拒绝——绝不假设没有可丢失的东西。
+  `子模块: 路径` 点名。匹配尊重子模块的 `core.ignorecase`，大小写不敏感
+  文件系统上不同大小写的同名路径算冲突。路径列表读不出来（枚举失败或
+  超出命令缓冲）同样是拒绝——绝不假设没有可丢失的东西。
 - PR head fetch 进 watch 的私有 ref（`refs/qwen-autofix/pr-<n>/head`，与
   prepare 同一个 ref）并从那里读——绝不读共享的 `FETCH_HEAD`，用户检出
   里的并发 fetch 会在 fetch 与读之间覆写它。

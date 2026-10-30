@@ -224,9 +224,11 @@ into a worktree watch.
   the exact path and file/directory transitions in either direction (an
   ignored directory the target tracks as a blob, or an ignored file the
   target tracks under as a directory). A collision leaves the submodule
-  untouched and answers `synced: false` naming `submodule: path`. A path
-  listing that cannot be read (a failed or over-buffer enumeration) is a
-  refusal too — never an assumption that there is nothing to lose.
+  untouched and answers `synced: false` naming `submodule: path`.
+  Comparisons honor the submodule's `core.ignorecase`, so differently
+  cased names collide on a case-insensitive filesystem. A path listing
+  that cannot be read (a failed or over-buffer enumeration) is a refusal
+  too — never an assumption that there is nothing to lose.
 - The PR head is fetched into the watch's private ref
   (`refs/qwen-autofix/pr-<n>/head`, the same ref prepare uses) and read
   from there — never from the shared `FETCH_HEAD`, which a concurrent

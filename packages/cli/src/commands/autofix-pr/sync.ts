@@ -555,9 +555,11 @@ function submoduleCollisionReason(collisions: string[]): string {
  * overwrite: the exact path, or a file/directory transition in either
  * direction (an ignored directory whose path the target tracks as a blob,
  * or an ignored file the target tracks under as a directory). Both listings
- * are NUL-delimited, so a C-quoted path cannot dodge the match. Returns
- * null when either listing cannot be read — the caller must then refuse the
- * reset, not assume there is nothing to lose.
+ * are NUL-delimited, so a C-quoted path cannot dodge the match. Comparisons
+ * honor the submodule's core.ignorecase: on a case-insensitive filesystem
+ * differently cased names are the same path. Returns null when either
+ * listing cannot be read — the caller must then refuse the reset, not
+ * assume there is nothing to lose.
  */
 function ignoredCollisions(dir: string, sha: string): string[] | null {
   const decode = (buf: Buffer): string | null => {
@@ -593,12 +595,18 @@ function ignoredCollisions(dir: string, sha: string): string[] | null {
   } catch {
     return null;
   }
+  // Git's own view of the filesystem: core.ignorecase is set where
+  // differently cased names identify the same path. Folding more than git
+  // does (Unicode case) only over-refuses, which is the safe direction.
+  const ignoreCase =
+    gitOpt('-C', dir, 'config', '--bool', 'core.ignorecase') === 'true';
+  const norm = (p: string): string => (ignoreCase ? p.toLowerCase() : p);
   const ignoredSet = new Set<string>();
   const ignoredAncestors = new Set<string>();
   for (const raw of ignoredRaw.split('\0')) {
     if (raw === '') continue;
     // An entirely ignored directory is listed with a trailing slash.
-    const p = raw.endsWith('/') ? raw.slice(0, -1) : raw;
+    const p = norm(raw.endsWith('/') ? raw.slice(0, -1) : raw);
     ignoredSet.add(p);
     const parts = p.split('/');
     for (let i = 1; i < parts.length; i++) {
@@ -607,18 +615,19 @@ function ignoredCollisions(dir: string, sha: string): string[] | null {
   }
   if (ignoredSet.size === 0) return [];
   const collisions: string[] = [];
-  for (const t of trackedRaw.split('\0')) {
-    if (t === '') continue;
+  for (const raw of trackedRaw.split('\0')) {
+    if (raw === '') continue;
+    const t = norm(raw);
     // The target tracks an ignored path itself, or a path under it.
     if (ignoredSet.has(t) || ignoredAncestors.has(t)) {
-      collisions.push(t);
+      collisions.push(raw);
       continue;
     }
     // The target tracks a directory where an ignored file sits.
     const parts = t.split('/');
     for (let i = 1; i < parts.length; i++) {
       if (ignoredSet.has(parts.slice(0, i).join('/'))) {
-        collisions.push(t);
+        collisions.push(raw);
         break;
       }
     }

@@ -1288,6 +1288,46 @@ describe('runSync (real git, bare remote)', () => {
       expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
     });
 
+    it('refuses a differently cased collision when the submodule is case-insensitive', () => {
+      const { s1, inSub } = withSubmodule();
+      // Git's own view of a case-insensitive filesystem: differently cased
+      // names identify the same path, so the guard must fold case too.
+      run(inSub, 'config', 'core.ignorecase', 'true');
+      writeFileSync(
+        join(inSub, 'CaseSecret.env'),
+        'CASE_COLLISION_USER_BYTES=keep',
+      );
+      ignoreInSubmodule(inSub, 'CaseSecret.env');
+      bumpSubmoduleTo({ 'casesecret.env': 'REMOTE_BYTES=1' });
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: false, moved: true });
+      expect(outcome.reason).toMatch(/vendor\/sub: casesecret\.env/);
+      expect(readFileSync(join(inSub, 'CaseSecret.env'), 'utf8')).toBe(
+        'CASE_COLLISION_USER_BYTES=keep',
+      );
+      expect(run(inSub, 'rev-parse', 'HEAD')).toBe(s1);
+    });
+
+    it('does not fold case on a case-sensitive submodule', () => {
+      const { inSub } = withSubmodule();
+      // Default core.ignorecase on a case-sensitive filesystem: the two
+      // names are different files, and the alignment must still proceed.
+      writeFileSync(
+        join(inSub, 'CaseSecret.env'),
+        'CASE_COLLISION_USER_BYTES=keep',
+      );
+      ignoreInSubmodule(inSub, 'CaseSecret.env');
+      bumpSubmoduleTo({ 'casesecret.env': 'REMOTE_BYTES=1' });
+      const outcome = runSync(7);
+      expect(outcome).toMatchObject({ synced: true, moved: true });
+      expect(readFileSync(join(inSub, 'CaseSecret.env'), 'utf8')).toBe(
+        'CASE_COLLISION_USER_BYTES=keep',
+      );
+      expect(readFileSync(join(inSub, 'casesecret.env'), 'utf8')).toBe(
+        'REMOTE_BYTES=1',
+      );
+    });
+
     it('reads the PR head from the private ref when a concurrent fetch rewrites FETCH_HEAD', () => {
       // A descendant of the PR head on another remote branch: an
       // interleaved fetch of it would fast-forward the user's branch to
