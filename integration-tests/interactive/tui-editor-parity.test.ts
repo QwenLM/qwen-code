@@ -323,6 +323,14 @@ async function scenario(
         },
       ],
       [
+        'copy project settings',
+        () => {
+          const file = join(workspace, '.qwen', 'settings.json');
+          if (existsSync(file))
+            copyFileSync(file, join(evidence, 'project-settings.json'));
+        },
+      ],
+      [
         'remove scratch',
         () => rmSync(scratch, { recursive: true, force: true }),
       ],
@@ -888,3 +896,130 @@ it('vim-insert-controls-and-disable', () =>
     await context.submit('ordinary again');
     expect(context.server.requests).toHaveLength(2);
   }));
+
+it(
+  'permissions-edits-and-completes-without-model',
+  () =>
+    scenario(
+      'permissions-edits-and-completes-without-model',
+      async ({
+        session,
+        server,
+        workspace,
+        ownedTemp,
+        type,
+        press,
+        paste,
+        frame,
+      }) => {
+        const settingsFile = join(workspace, '.qwen', 'settings.json');
+        const settings = () =>
+          JSON.parse(readFileSync(settingsFile, 'utf8')) as {
+            permissions?: { allow?: string[] };
+            context?: { includeDirectories?: string[] };
+          };
+        const parent = join(ownedTemp, 'permission-parent');
+        mkdirSync(parent);
+        mkdirSync(join(parent, 'alpha'));
+        mkdirSync(join(parent, '.hidden'));
+        writeFileSync(join(parent, 'ordinary.txt'), 'fixture');
+        await until(
+          async () =>
+            (await frame('permissions-ready')).includes('Type your message'),
+          'composer ready',
+        );
+        await type('/permissions');
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('permissions-list')).includes('Add a new rule'),
+          'permission list',
+        );
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('rule-input')).includes('Enter permission rule'),
+          'rule input',
+        );
+        await paste('Bash(lx)');
+        await press(keys.left);
+        await press('\x7f');
+        await type('s');
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('scope')).includes('Where should this rule be saved?'),
+          'scope',
+        );
+        await press('\r');
+        await until(
+          () =>
+            existsSync(settingsFile) &&
+            settings().permissions?.allow?.includes('Bash(ls)') === true,
+          'exact persisted rule',
+        );
+        expect(settings().permissions?.allow).not.toContain('Bash(lx)');
+        expect(settings().permissions?.allow).not.toContain('Bash(lxs)');
+        for (let i = 0; i < 3; i++) await press('\t');
+        await until(
+          async () => (await frame('workspace-list')).includes('Add directory'),
+          'workspace list',
+        );
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('directory-input')).includes(
+              'Enter the path to the directory:',
+            ),
+          'directory input',
+        );
+        await paste(parent + '/al');
+        await until(
+          async () => /alpha\/\s+directory/.test(await frame('candidate')),
+          'real visible alpha candidate',
+        );
+        const candidates = await frame('candidate-qualified');
+        expect(candidates).not.toMatch(/\.hidden\/\s+directory/);
+        expect(candidates).not.toMatch(/ordinary\.txt\/\s+directory/);
+        await press('\t');
+        await press('\r');
+        const selected = realpathSync(join(parent, 'alpha'));
+        await until(
+          () =>
+            settings().context?.includeDirectories?.includes(selected) === true,
+          'exact selected directory committed',
+        );
+        expect(settings().context?.includeDirectories).not.toContain(
+          realpathSync(parent),
+        );
+        const beforeCancel = readFileSync(settingsFile, 'utf8');
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('cancel-input')).includes(
+              'Enter the path to the directory:',
+            ),
+          'new directory form',
+        );
+        await paste(join(parent, 'missing'));
+        await press('\x1b');
+        await until(
+          async () => (await frame('cancelled')).includes('Add directory'),
+          'cancelled directory form',
+        );
+        expect(readFileSync(settingsFile, 'utf8')).toBe(beforeCancel);
+        await press('\x1b');
+        await until(
+          async () => (await frame('composer')).includes('Type your message'),
+          'composer',
+        );
+        await type('/quit');
+        await press('\r');
+        await until(() => session.exitResult() !== undefined, 'natural quit');
+        expect(session.exitResult()?.exitCode).toBe(0);
+        expect(session.exitResult()?.signal ?? 0).toBe(0);
+        expect(server.requests).toHaveLength(0);
+      },
+    ),
+  90_000,
+);

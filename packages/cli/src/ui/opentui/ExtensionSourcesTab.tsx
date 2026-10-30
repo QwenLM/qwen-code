@@ -629,6 +629,8 @@ export function OpenTuiExtensionSourcesTab({
       { text: input, cursor: line.caret },
       Math.max(0, contentWidth - 3),
     );
+    const before = stripUnsafeCharacters(spans.before);
+    const after = stripUnsafeCharacters(spans.after);
     return (
       <box flexDirection="column" maxHeight={bodyRows} overflow="hidden">
         <text fg={C.accent} attributes={1}>
@@ -662,7 +664,7 @@ export function OpenTuiExtensionSourcesTab({
         ) : (
           <box flexDirection="row">
             <text fg={C.accent}>{'> '}</text>
-            <text fg={C.text}>{stripUnsafeCharacters(spans.before)}</text>
+            {before ? <text fg={C.text}>{before}</text> : null}
             {isActive ? (
               <text bg={C.accent}>
                 {stripUnsafeCharacters(spans.at) || ' '}
@@ -670,7 +672,7 @@ export function OpenTuiExtensionSourcesTab({
             ) : (
               <text fg={C.text}>{stripUnsafeCharacters(spans.at)}</text>
             )}
-            <text fg={C.text}>{stripUnsafeCharacters(spans.after)}</text>
+            {after ? <text fg={C.text}>{after}</text> : null}
           </box>
         )}
       </box>

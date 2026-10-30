@@ -341,6 +341,8 @@ function ExtensionSettingInput({
       }
     : state.current;
   const spans = windowLineAtCaret(visible, Math.max(0, width - 3));
+  const before = sanitizeTerminalText(spans.before);
+  const after = sanitizeTerminalText(spans.after);
   return (
     <DialogFrame>
       <text fg={C.accent}>
@@ -361,9 +363,9 @@ function ExtensionSettingInput({
       />
       <box flexDirection="row">
         <text fg={C.accent}>{'> '}</text>
-        <text fg={C.text}>{sanitizeTerminalText(spans.before)}</text>
+        {before ? <text fg={C.text}>{before}</text> : null}
         <text bg={C.accent}>{sanitizeTerminalText(spans.at) || ' '}</text>
-        <text fg={C.text}>{sanitizeTerminalText(spans.after)}</text>
+        {after ? <text fg={C.text}>{after}</text> : null}
       </box>
       <FooterHint text={t('Press Enter to submit, Escape to cancel')} />
     </DialogFrame>

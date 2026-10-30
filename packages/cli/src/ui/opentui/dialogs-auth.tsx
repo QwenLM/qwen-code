@@ -348,9 +348,11 @@ function FieldText({
     );
   }
   const spans = caretSpans({ text: value, cursor: caret });
+  const before = sanitizeTerminalText(spans.before);
+  const after = sanitizeTerminalText(spans.after);
   return (
     <>
-      <text fg={C.text}>{sanitizeTerminalText(spans.before)}</text>
+      {before ? <text fg={C.text}>{before}</text> : null}
       {/* The character belongs to the value whatever owns the focus; only the
           highlight says which field the caret is in. Dropping it while inactive
           would print a value one character shorter than the one held. */}
@@ -359,7 +361,7 @@ function FieldText({
       ) : (
         <text fg={C.text}>{sanitizeTerminalText(spans.at)}</text>
       )}
-      <text fg={C.text}>{sanitizeTerminalText(spans.after)}</text>
+      {after ? <text fg={C.text}>{after}</text> : null}
     </>
   );
 }
@@ -1039,10 +1041,8 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
       return;
     }
     if (o.name === 'space') {
-      // On the context row Space inserts a space into the field; the flow's
-      // toggleFocusedAdvancedOption has no case for ctxIdx (ink parity).
-      if (onCtxRow) ctxField.insert(' ');
-      else flow.toggleFocusedAdvancedOption();
+      // Space belongs to this row but is not a numeric edit.
+      if (!onCtxRow) flow.toggleFocusedAdvancedOption();
       return;
     }
     if (o.name === 'return') {
@@ -1051,7 +1051,7 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
       return;
     }
     if (onCtxRow && !ctxField.handleKey(o) && isPrintableKeyInput(key)) {
-      ctxField.insert(key.sequence);
+      ctxField.insert(key.sequence.replace(/[^0-9]/g, ''));
     }
   });
   // Only the context-window field accepts text; a paste while another row is
@@ -1061,7 +1061,7 @@ function AdvancedConfigStep({ flow }: { flow: ProviderSetupFlow }) {
     const text = normalizePastedText(decodePasteBytes(event.bytes));
     if (!text) return;
     event.preventDefault();
-    ctxField.insert(text);
+    ctxField.insert(text.replace(/[^0-9]/g, ''));
   });
   const checkmark = (v: boolean) => (v ? ICON.RADIO_FILLED : ICON.CIRCLE_EMPTY);
   const cursor = (index: number) => (focusedConfigIndex === index ? '›' : ' ');
