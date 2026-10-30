@@ -267,6 +267,9 @@ class AskUserQuestionToolInvocation extends BaseToolInvocation<
         return {
           llmContent: cancellationMessage,
           returnDisplay: cancellationMessage,
+          // When the turn itself was cancelled the questions went unanswered;
+          // a plain decline leaves the scheduler on its normal path.
+          interruptedBeforeCompletion: true,
         };
       }
 

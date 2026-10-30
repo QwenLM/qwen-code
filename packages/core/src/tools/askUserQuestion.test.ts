@@ -302,6 +302,8 @@ describe('AskUserQuestionTool', () => {
         ToolConfirmationOutcome.Cancel,
       );
       expect(result.llmContent).toContain('declined to answer');
+      // Nothing was answered, so a cancelled turn must not read as completed.
+      expect(result.interruptedBeforeCompletion).toBe(true);
     });
 
     it('should return formatted answers when user provides them', async () => {

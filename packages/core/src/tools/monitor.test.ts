@@ -869,6 +869,9 @@ describe('MonitorTool', () => {
       expect(result.llmContent).toContain(
         'Monitor was cancelled before it could start.',
       );
+      // The tool returns on abort rather than throwing, so the scheduler needs
+      // this to report an interruption instead of a completed call.
+      expect(result.interruptedBeforeCompletion).toBe(true);
       expect(result.error).toBeUndefined();
     });
 
