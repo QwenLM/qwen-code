@@ -58,8 +58,8 @@ it('renders instructions independently from auto memory', () => {
       showDetails={true}
     />,
   );
-  expect(lastFrame()).toContain('Instruction files');
-  expect(lastFrame()).toContain('Auto memory');
+  expect(lastFrame()).toMatch(/Instruction files\s+100 tokens/);
+  expect(lastFrame()).toMatch(/Auto memory\s+200 tokens/);
   expect(lastFrame()).toContain('QWEN.md');
   expect(lastFrame()).not.toContain('Memory files');
 });

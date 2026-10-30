@@ -15554,6 +15554,24 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
       formattedText: expect.stringContaining('## Context Usage'),
     });
+    const { collectContextData } = await import(
+      '../ui/commands/contextCommand.js'
+    );
+    vi.mocked(collectContextData).mockRejectedValueOnce(
+      new Error('Context not initialized'),
+    );
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionContextUsage, {
+        sessionId,
+      }),
+    ).resolves.toMatchObject({
+      usage: {
+        breakdown: { instructionFiles: 0, memoryFiles: 0 },
+        instructionFiles: [],
+        memoryFiles: [],
+        isEstimated: true,
+      },
+    });
     expect(lsp).toEqual({
       v: 1,
       sessionId,

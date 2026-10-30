@@ -1873,7 +1873,7 @@ export default {
   'Built-in tools': 'Integrierte Tools',
   'MCP tools': 'MCP tools',
   'Instruction files': 'Anweisungsdateien',
-  'Auto memory': 'Automatisches Gedächtnis',
+  'Auto memory': 'Auto-Speicher',
   'Memory files': 'Speicherdateien',
   Skills: 'Fähigkeiten',
   Messages: 'Nachrichten',

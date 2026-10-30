@@ -438,8 +438,11 @@ describe('projectContextUsage', () => {
     };
     expectCoherentBreakdown(item);
     const split = projectContextUsage(item);
-    expect(split).toContain('Instruction files');
-    expect(split).toContain('Auto memory');
+    expect(split).toContain('█ Instruction files 20 tokens (20.0%)');
+    expect(split).toContain('█ Auto memory 10 tokens (10.0%)');
+    const summary = projectContextUsage({ ...item, showDetails: false });
+    expect(summary).toContain('█ Instruction files 20 tokens (20.0%)');
+    expect(summary).toContain('█ Auto memory 10 tokens (10.0%)');
     expect(split).toContain('QWEN.md');
     expect(split).not.toContain('Memory files');
     const text = projectContextUsage({

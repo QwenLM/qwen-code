@@ -402,7 +402,15 @@ describe('collectContextData (contextCommand)', () => {
             estimateContextTextTokens(policy),
           );
         }
-        if (total) expect(sumRows(data.breakdown)).toBe(total);
+        if (total) {
+          expect(sumRows(data.breakdown)).toBe(total);
+        } else {
+          expect(data.breakdown.freeSpace).toBe(
+            data.contextWindowSize -
+              sumRows(data.breakdown) -
+              data.breakdown.autocompactBuffer,
+          );
+        }
         const summary = await collectContextData(config, false);
         expect(summary.breakdown).toEqual(data.breakdown);
         expect(summary.instructionFiles).toEqual([]);
@@ -410,6 +418,12 @@ describe('collectContextData (contextCommand)', () => {
         const text = formatContextUsageText(data);
         expect(text).toContain('**Instruction files**');
         expect(text).toContain('**Auto memory**');
+        expect(formatContextUsageText(summary)).toMatch(
+          /Instruction files\s+\S+ tokens/,
+        );
+        expect(formatContextUsageText(summary)).toMatch(
+          /Auto memory\s+\S+ tokens/,
+        );
         expect(text).not.toContain('Memory files');
       },
     );
