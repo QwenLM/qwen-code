@@ -67,6 +67,16 @@ describe('recordFailure', () => {
     expect(await readReconnectState('http://127.0.0.1:5000')).toBeNull();
     expect(await recordFailure('http://127.0.0.1:5000')).toBe(RECONNECT_MIN_MS);
   });
+
+  it('does not evict the ladder when a failure has no known base', async () => {
+    await recordFailure(BASE);
+    await recordFailure(BASE);
+    // A config-read failure arrives with an empty base URL. Recording it must
+    // not rewrite the single-slot state and evict the real daemon's ladder.
+    expect(await recordFailure('')).toBe(RECONNECT_MIN_MS);
+    const state = await readReconnectState(BASE);
+    expect(state?.failures).toBe(2);
+  });
 });
 
 describe('isBackingOff', () => {

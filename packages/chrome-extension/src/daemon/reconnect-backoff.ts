@@ -77,6 +77,13 @@ export async function readReconnectState(
  * the next attempt may run.
  */
 export async function recordFailure(baseUrl: string): Promise<number> {
+  // A failure with no known daemon base (e.g. the config read itself failed
+  // before a base URL was known) must not rewrite the single-slot state: it
+  // would land under an empty key and evict the real daemon's ladder. Report
+  // the floor delay without persisting (#14022).
+  if (!baseUrl) {
+    return RECONNECT_MIN_MS;
+  }
   const prev = await readReconnectState(baseUrl);
   const failures = (prev?.failures ?? 0) + 1;
   const delay = computeBackoffMs(failures - 1);
