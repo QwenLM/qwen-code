@@ -1342,6 +1342,80 @@ describe('e2e workflow', () => {
     });
   });
 
+  describe('artifact download time-boxing', () => {
+    // #12132: each leg downloads the shared archive twice — once, and again
+    // from the retry that only fires when the first attempt failed. Only the
+    // first attempt was time-boxed, so a stalling retry held its runner with
+    // no ceiling at all, and two legs had no job-level ceiling either.
+    const legs = [
+      'e2e-test-linux',
+      'e2e-test-macos',
+      'e2e-interactive-opentui',
+      'isolated-nightly',
+    ];
+    const downloads = (leg) =>
+      yml.jobs[leg].steps.filter((step) =>
+        String(step.name).startsWith('Download build artifact'),
+      );
+
+    it('caps every artifact-consuming leg at the job level', () => {
+      // 60 is the ceiling e2e-test-linux and e2e-interactive-opentui already
+      // carried; the other two legs consume the same archive on the same
+      // runners, so they get that budget instead of a new number.
+      for (const leg of legs) {
+        expect(yml.jobs[leg]['timeout-minutes'], leg).toBe(60);
+      }
+    });
+
+    it('time-boxes the retry as tightly as the first attempt', () => {
+      // 10 is the value every first-attempt download already pins. Without it
+      // the retry — the step that exists precisely because the first attempt
+      // misbehaved — was the only unbounded step in the download leg.
+      for (const leg of legs) {
+        const steps = downloads(leg);
+        expect(
+          steps.map((step) => step.name),
+          leg,
+        ).toEqual([
+          'Download build artifact',
+          'Download build artifact (retry)',
+        ]);
+        for (const step of steps) {
+          expect(step['timeout-minutes'], `${leg}/${step.name}`).toBe(10);
+        }
+      }
+    });
+
+    it('keeps the retry step red when the retry itself fails', () => {
+      // The first attempt's continue-on-error is what makes the retry
+      // reachable. Copying it onto the retry would leave a stalled download
+      // invisible: the leg would go on to unpack a missing archive and report
+      // a failure with the wrong cause.
+      for (const leg of legs) {
+        const retry = downloads(leg)[1];
+        expect(retry.name, leg).toBe('Download build artifact (retry)');
+        expect(retry['continue-on-error']).toBeUndefined();
+      }
+    });
+
+    it('leaves the already-landed ceilings where they are', () => {
+      // Regression guard. `build` produces the archive on a 30-minute budget
+      // while the legs consume it on 60, and 60 is also the number the
+      // shard-retry budget gate in run-e2e-tests.sh takes its 25-minute
+      // reserve out of. A later pass that "unifies" these values would move
+      // either the producer's ceiling or the retry arithmetic with every
+      // other witness green.
+      expect(yml.jobs.build['timeout-minutes']).toBe(30);
+      expect(yml.jobs['e2e-test-linux']['timeout-minutes']).toBe(60);
+      expect(yml.jobs['e2e-interactive-opentui']['timeout-minutes']).toBe(60);
+      for (const leg of legs) {
+        const first = downloads(leg)[0];
+        expect(first['timeout-minutes'], leg).toBe(10);
+        expect(first['continue-on-error'], leg).toBe(true);
+      }
+    });
+  });
+
   describe('one build for every leg', () => {
     // Each leg used to build and bundle on its own runner — 4–8 minutes on a
     // hosted VM, 10–17 on a busy pool host, eleven times per run. The `build`
