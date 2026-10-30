@@ -76,12 +76,13 @@ export QQ_APP_SECRET=<your-app-secret>
 
 ### QQ-Specific Options
 
-| Option                | Default | Description                                                                       |
-| --------------------- | ------- | --------------------------------------------------------------------------------- |
-| `appID`               | —       | QQ Bot AppID from developer portal. If omitted, QR code login is used.            |
-| `appSecret`           | —       | QQ Bot AppSecret. Supports `$ENV_VAR` syntax. If omitted, QR code login is used.  |
-| `sandbox`             | `false` | Set to `true` to use the QQ sandbox API environment (`sandbox.api.sgroup.qq.com`) |
-| `purgeLegacySessions` | `false` | Delete legacy single-scope and user-scope session routes — see below.             |
+| Option                | Default | Description                                                                                                                      |
+| --------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| `appID`               | —       | QQ Bot AppID from developer portal. If omitted, QR code login is used.                                                           |
+| `appSecret`           | —       | QQ Bot AppSecret. Supports `$ENV_VAR` syntax. If omitted, QR code login is used.                                                 |
+| `sandbox`             | `false` | Set to `true` to use the QQ sandbox API environment (`sandbox.api.sgroup.qq.com`)                                                |
+| `purgeLegacySessions` | `false` | Delete legacy single-scope and user-scope session routes — see below.                                                            |
+| `forwardBotMessages`  | `false` | Deliver messages authored by other bots with a `[bot]` sender prefix instead of dropping them — see [Group Chats](#group-chats). |
 
 All standard channel options (see [Channel Overview](./overview#options)) are also supported:
 `privatePolicy`, `allowedUsers`, `sessionScope`, `cwd`, `instructions`, `groupPolicy`, `groups`, `dispatchMode`.
@@ -108,6 +109,8 @@ To use the bot in QQ groups:
 4. If using `groupPolicy: "pairing"`, approve the group's pairing request once before responses start. Note that once a group is approved, **any member of that group** can use the bot by default (restrict with the group's `senders: "allowlist"` and `allowedUsers`); `privatePolicy` and the top-level `allowedUsers` do not gate members of an approved group.
 
 QQ Bot API V2 only delivers group messages that @mention the bot — the bot does not see all group messages. By default, `requireMention` is `true` and should be left that way for QQ.
+
+Messages authored by another bot are dropped by default, so two bots in the same group cannot answer each other indefinitely. Set `forwardBotMessages: true` to deliver them instead: such a message reaches the model with a `[bot]` prefix on the sender line, and the model decides whether replying makes sense.
 
 ### Session Isolation
 

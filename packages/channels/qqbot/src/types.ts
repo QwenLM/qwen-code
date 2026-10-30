@@ -84,6 +84,15 @@ export interface QQChannelConfig {
    * When false, `<@OPENID>` tags are stripped before reaching the LLM.
    */
   allowMention?: boolean;
+  /**
+   * When true, messages authored by another bot (or by this bot's own echo)
+   * are delivered to the agent with a `[bot]` prefix on the sender line and
+   * the model decides whether to reply. Default false: such messages are
+   * dropped before they reach the agent, so two bots in one group cannot
+   * answer each other indefinitely. Enable it only when you intentionally
+   * run bot-to-bot conversation.
+   */
+  forwardBotMessages?: boolean;
   /** Route overrides for chat IDs that haven't been seen inbound yet.
    *  Key: chat openid (group_openid or user_openid).
    *  Value: 'group' or 'c2c'.

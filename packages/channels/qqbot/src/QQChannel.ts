@@ -1034,7 +1034,11 @@ export class QQChannel extends ChannelBase {
         '你是通过 QQ Bot 与用户对话的 AI 助手。',
         '支持 Markdown 格式，回复自然流畅即可。',
         '消息前缀 [atMention=true] 表示该消息 @了你，[atMention=false] 表示未 @你。',
-        '消息前缀 [bot] 表示该消息来自另一个机器人（不是人类成员）；是否回复由你自主判断。',
+        ...(this.qqConfig.forwardBotMessages === true
+          ? [
+              '消息前缀 [bot] 表示该消息来自另一个机器人（不是人类成员）；是否回复由你自主判断。',
+            ]
+          : []),
         '不想回复时只输出 <noreply> 即可，消息不会发出。',
         '',
         '以下规则仅适用于群聊消息。C2C 私聊中请始终正常回复。',
@@ -5666,13 +5670,15 @@ export class QQChannel extends ChannelBase {
     const isSlash = effectiveIsAtBot && rawCommandText.startsWith('/');
     const commandText = sanitizePromptText(rawCommandText);
 
-    // Bot-authored messages are deliberately NOT dropped. QQ delivers other
-    // bots' messages to the group handlers and an operator may explicitly
-    // configure bot-to-bot conversation, so the channel reports the sender as
-    // `[bot]` and lets the model decide whether a reply makes sense. A
-    // user-supplied `[bot]` is stripped above, so the tag cannot be forged.
-    const isBot = event.author?.bot === true;
-    const botTag = isBot ? '[bot] ' : '';
+    // Bot-authored messages are forwarded with a `[bot]` sender tag only when
+    // the operator opted in: QQ delivers other bots' messages to these
+    // handlers, and dropping them by default keeps two bots in one group from
+    // answering each other forever. A user-supplied `[bot]` is stripped above,
+    // so the tag cannot be forged.
+    const botTag =
+      event.author?.bot === true && this.qqConfig.forwardBotMessages === true
+        ? '[bot] '
+        : '';
 
     const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
     const openIdSuffix =
@@ -5870,6 +5876,10 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
+    if (event.author.bot && this.qqConfig.forwardBotMessages !== true) {
+      process.stderr.write(`[QQ:${this.name}] Bot C2C message dropped\n`);
+      return;
+    }
     const chatId = event.author.user_openid || event.author.id;
     if (!chatId) {
       process.stderr.write(
@@ -5887,7 +5897,10 @@ export class QQChannel extends ChannelBase {
     this.setReplyMsgId(chatId, event.id);
     const senderName = event.author.username || event.author.id || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
-    const botTag = event.author.bot === true ? '[bot] ' : '';
+    const botTag =
+      event.author.bot === true && this.qqConfig.forwardBotMessages === true
+        ? '[bot] '
+        : '';
     const cleanText = rawContent.trim();
     // Strip system-reserved tags that could be forged by users
     const safeContent = cleanText
@@ -5934,6 +5947,12 @@ export class QQChannel extends ChannelBase {
     if (!event.author) {
       process.stderr.write(
         `[QQ:${this.name}] Group message dropped: missing author\n`,
+      );
+      return;
+    }
+    if (event.author.bot && this.qqConfig.forwardBotMessages !== true) {
+      process.stderr.write(
+        `[QQ:${this.name}] Bot message dropped in group ${sanitizeLogText(event.group_openid, 64)}\n`,
       );
       return;
     }
@@ -6028,6 +6047,13 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
+    if (event.author.bot && this.qqConfig.forwardBotMessages !== true) {
+      process.stderr.write(
+        `[QQ:${this.name}] Bot message dropped in group ${sanitizeLogText(event.group_openid, 64)}\n`,
+      );
+      return;
+    }
+
     const chatId = event.group_openid;
     if (!isValidChatId(chatId)) {
       process.stderr.write(
