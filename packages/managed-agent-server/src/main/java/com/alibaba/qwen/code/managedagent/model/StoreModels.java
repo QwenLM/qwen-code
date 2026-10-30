@@ -99,11 +99,9 @@ public final class StoreModels {
     }
 
     /**
-     * Events at or below {@code floorSequence} may be pruned. A client that
-     * falls below it reloads the Snapshot, which covers events through
-     * {@code snapshotThroughSequence}. A stream reconciliation discards the
-     * Snapshot without lowering the floor, so the floor can exceed the
-     * coverage while the Items rebuild; the cursor is still served then.
+     * Events at or below the floor may be pruned. Resynchronization reads the
+     * message projection through snapshotThroughSequence, a retained wire name.
+     * Reads wait when projection rebuild temporarily falls behind the floor.
      */
     public record ReplayWindow(long floorSequence,
             long snapshotThroughSequence) {
@@ -320,15 +318,8 @@ public final class StoreModels {
             long updatedAt, long revision, List<ItemPartRecord> content) {
     }
 
-    public record SnapshotPage(List<ItemRecord> items, boolean hasMore, String nextCursor, long coveredSequence) {}
-
     public record MessagePage(List<ItemRecord> items, List<EventRecord> events,
             boolean hasMore, String nextCursor, long coveredSequence, long throughSequence) {}
-
-    public record SnapshotRecord(String tenantId, String sessionId,
-            long version, long coveredSequence, List<ItemRecord> items,
-            long createdAt, long updatedAt) {
-    }
 
     public record MaterializationTarget(String tenantId, String sessionId) {
     }
