@@ -1727,6 +1727,11 @@ describe('bundled review skill', () => {
       "the artifact's `locations[].line` is the agent's claim",
     );
     expect(posting).toContain("nor the resolver's INPUT `…-anchors.json`");
+    expect(posting).toContain('raw `…-anchors-resolved.json` output');
+    expect(posting).toContain(
+      'only `path`, `line`, `start_line`, and optional carried `id`',
+    );
+    expect(posting).toContain('drop `anchor` and all other resolver metadata');
     expect(posting).toContain(
       'spells the range field `startLine`, so rename it',
     );
@@ -1735,6 +1740,9 @@ describe('bundled review skill', () => {
     );
     expect(posting).toContain(
       "an aggregate's locations carry `<id>-k`, which this shape refuses",
+    );
+    expect(posting).toContain(
+      'never blindly strip a trailing `-<n>`, because a standalone ledger ID such as `R3-2` is already complete',
     );
     expect(posting).toContain(
       'must never be written over the canonical artifact',

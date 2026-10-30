@@ -12,6 +12,8 @@ import {
   parseFindingsFile,
   type CompareSummary,
 } from './presubmit.js';
+import { resolveAnchors } from './lib/anchors.js';
+import { DOWNGRADE_REASON_MAX_CHARS } from './compose-review.js';
 
 // A `skipped` check run arrives as `status: completed` with `conclusion:
 // "skipped"`. It used to fall through both branches of the classifier and land
@@ -708,7 +710,7 @@ describe('presubmitCommand', () => {
       '{path, line, start_line?, id?}',
     );
     expect(result.downgradeReasons.join(' ')).toContain(
-      'not the artifact, nor …-anchors.json',
+      'Not the artifact or raw anchor files',
     );
   });
 
@@ -763,6 +765,107 @@ describe('presubmitCommand', () => {
 
     expect(result.findingsFileInvalid).toBe(true);
     expect(result.downgradeApprove).toBe(true);
+  });
+
+  it('rejects raw resolved metadata and accepts its minimal projection without losing overlap', async () => {
+    const added = [
+      'charge(amount);',
+      'const receipt = createReceipt();',
+      'receipt.setAmount(amount);',
+      'receipt.setCurrency(currency);',
+      'receipt.save();',
+      'notify(receipt);',
+      'return receipt;',
+    ];
+    const [resolved] = resolveAnchors(
+      [
+        'diff --git a/src/a.ts b/src/a.ts',
+        '--- a/src/a.ts',
+        '+++ b/src/a.ts',
+        '@@ -0,0 +42,7 @@',
+        ...added.map((line) => `+${line}`),
+      ].join('\n'),
+      [
+        {
+          id: 'R3-2',
+          path: 'src/a.ts',
+          anchor: added.join('\n'),
+          line: 999,
+        },
+      ],
+    );
+    expect(resolved).toMatchObject({
+      status: 'resolved',
+      startLine: 42,
+      line: 48,
+      claimedLine: 999,
+    });
+
+    const raw = await presubmitWithRawFindings(
+      JSON.stringify([{ ...resolved, start_line: resolved.startLine }]),
+    );
+    expect(raw.findingsFileInvalid).toBe(true);
+    expect(raw.downgradeApprove).toBe(true);
+    expect(raw.downgradeReasons.join(' ')).toContain('unexpected key "anchor"');
+
+    const projected = {
+      path: resolved.path,
+      line: resolved.line ?? 0,
+      start_line: resolved.startLine ?? 0,
+      id: resolved.id,
+    };
+    const withAnchor = await presubmitWithRawFindings(
+      JSON.stringify([{ ...projected, anchor: resolved.anchor }]),
+    );
+    expect(withAnchor.findingsFileInvalid).toBe(true);
+
+    const minimal = await presubmitWithComments(
+      [
+        {
+          id: 9,
+          body: '**[Critical]** existing finding via Qwen Code /review (v0.25.3)',
+          path: resolved.path,
+          line: 45,
+          commit_id: 'abc123',
+          user: { login: 'another-reviewer' },
+        },
+      ],
+      [projected],
+    );
+    expect(minimal.findingsFileInvalid).toBe(false);
+    expect(minimal.existingComments.byBucket.overlap).toBe(1);
+    expect(minimal.existingComments.byBucket.noConflict).toBe(0);
+  });
+
+  it.each(['startLine', 'claimedLine', 'status', 'futureMetadata', ''])(
+    'names the unexpected key %j instead of silently discarding it',
+    async (key) => {
+      const result = await presubmitWithRawFindings(
+        JSON.stringify([{ path: 'src/a.ts', line: 48, [key]: 42 }]),
+      );
+      expect(result.findingsFileInvalid).toBe(true);
+      expect(result.downgradeApprove).toBe(true);
+      expect(result.downgradeReasons.join(' ')).toContain(
+        `unexpected key ${JSON.stringify(key)}`,
+      );
+    },
+  );
+
+  it('keeps the invalid-input remedy within the downstream reason limit for a long key', async () => {
+    const result = await presubmitWithRawFindings(
+      JSON.stringify([
+        { path: 'src/a.ts', line: 48, ['\n"😀'.repeat(200)]: true },
+      ]),
+    );
+    const reason: string = result.downgradeReasons.find((r: string) =>
+      r.startsWith('the --new-findings file was malformed'),
+    );
+    expect(reason).toContain('unexpected key');
+    expect(reason).toContain('{path, line, start_line?, id?}');
+    expect(reason).toContain('id only on carried findings');
+    expect(reason).toContain('id-less placeholder per body-only Critical');
+    expect(reason).toContain('regenerate and re-run');
+    expect([...reason].length).toBeLessThanOrEqual(DOWNGRADE_REASON_MAX_CHARS);
   });
 
   it('refuses an aggregate’s <id>-k join key — the resolved file is not this list either (#9218 review, R1-5)', async () => {
@@ -2303,6 +2406,17 @@ describe('parseFindingsFile (via mocked fs)', () => {
     ['{"path":"a.ts"}', null], // object, not array
     ['[{"line":5}]', null], // entry without a string path → reject WHOLE file
     ['[{"path":"a.ts","line":5}]', [{ path: 'a.ts', line: 5 }]],
+    ['[{"path":"a.ts","line":5,"startLine":3}]', null],
+    ['[{"path":"a.ts","line":5,"anchor":"a"}]', null],
+    ['[{"path":"a.ts","line":5,"status":"resolved"}]', null],
+    ['[{"path":"a.ts","line":5,"futureMetadata":false}]', null],
+    ['[{"path":"a.ts","line":5,"futureMetadata":0}]', null],
+    ['[{"path":"a.ts","line":5,"futureMetadata":""}]', null],
+    ['[{"path":"a.ts","line":5},{"path":"b.ts","startLine":3}]', null],
+    [
+      '[{"path":"a.ts","line":5,"start_line":3,"id":null,"anchor":null,"startLine":null,"status":null}]',
+      [{ path: 'a.ts', line: 5, startLine: 3 }],
+    ],
     [
       '[{"path":"a.ts","start_line":3,"line":5}]',
       [{ path: 'a.ts', startLine: 3, line: 5 }],

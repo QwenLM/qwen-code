@@ -272,16 +272,15 @@ interface PresubmitArgs {
  * The skill therefore writes this file from the RESOLVED anchors; the artifact
  * is what `findings` and `resolve-anchors` read, never what this reads.
  *
- * Neither of the OTHER two files in that working directory is this list
- * either, and one of them would slip through silently: the artifact is an
- * object, rejected below by `Array.isArray`, while the resolver's INPUT
- * `…-anchors.json` is a bare array of `{id, path, anchor, line}` that passes
- * every check here — it carries the agent's claimed line and an id on every
- * entry, the exact two quantities named above. It sits one suffix from the
- * resolved file in the same directory, so the `anchor` key is refused
- * explicitly as its signature.
+ * Neither raw resolver file is this list: both input and resolved entries
+ * carry `anchor`, and resolved entries also carry metadata such as `status`
+ * and `claimedLine`. Only the minimal list's keys are accepted, so a missed
+ * `startLine` rename cannot silently collapse a range to a single line.
  */
-export function parseFindingsFile(path: string): FindingAnchor[] | null {
+export function parseFindingsFile(
+  path: string,
+  onUnexpectedKey?: (key: string) => void,
+): FindingAnchor[] | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
@@ -302,16 +301,18 @@ export function parseFindingsFile(path: string): FindingAnchor[] | null {
       path: string;
       line?: unknown;
       start_line?: unknown;
-      anchor?: unknown;
       id?: unknown;
     };
-    // The resolver's INPUT file, not this list. `anchor` is the one key the
-    // minimal shape never carries, so its presence identifies `…-anchors.json`
-    // — which would otherwise be accepted whole and dedup on claimed lines
-    // with an id on every entry (#9218 review). Whole-file rejection, like
-    // every other check here: a skipped entry is the shorter-than-real list
-    // this contract calls the dangerous outcome.
-    if (e.anchor !== undefined) return null;
+    // Null optional fields are absent, as with `id` below; other metadata
+    // must not be silently discarded from either resolver file.
+    const unexpectedKey = Object.entries(entry).find(
+      ([key, value]) =>
+        value != null && !['path', 'line', 'start_line', 'id'].includes(key),
+    )?.[0];
+    if (unexpectedKey !== undefined) {
+      onUnexpectedKey?.(unexpectedKey);
+      return null;
+    }
     // Same fail-safe as `path`: an `id` of the wrong type or shape is a
     // malformed file, and silently ignoring it would let a carried re-post
     // read as a fresh duplicate at the very location it belongs (a typo'd
@@ -1046,8 +1047,11 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   // will not parse, is not an array, or holds an entry without a string
   // `path` collapses to `null` (unknown → fail-safe at-risk), never to a
   // silently-shorter set that could make a real overlap read as disjoint.
+  let unexpectedFindingsKey: string | undefined;
   const newFindings = newFindingsPath
-    ? parseFindingsFile(newFindingsPath)
+    ? parseFindingsFile(newFindingsPath, (key) => {
+        unexpectedFindingsKey = key;
+      })
     : null;
   // A path was given but did not parse into a usable list. The drift path
   // already fails safe (findingPaths=null → anchorsAtRisk true), but the SAME
@@ -1152,6 +1156,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     driftReason,
     metaUnavailable,
     findingsFileInvalid,
+    unexpectedFindingsKey,
   });
 }
 
@@ -1181,6 +1186,7 @@ function writePresubmitReport(input: {
   driftReason?: string;
   metaUnavailable: boolean;
   findingsFileInvalid: boolean;
+  unexpectedFindingsKey?: string;
 }): void {
   const {
     prNumber,
@@ -1195,6 +1201,7 @@ function writePresubmitReport(input: {
     driftReason,
     metaUnavailable,
     findingsFileInvalid,
+    unexpectedFindingsKey,
   } = input;
 
   const downgradeReasons: string[] = [];
@@ -1222,23 +1229,18 @@ function writePresubmitReport(input: {
     );
   }
   if (findingsFileInvalid) {
-    // Name the expected shape, not just the failure. The report is read by an
-    // orchestrator that has to PRODUCE a usable file, and "regenerate it" left
-    // the shape to a `--new-findings` help text the dogfood run that filed
-    // #9218 never needed to read — the file it handed over was the artifact
-    // Step 6 had just told it to write, and nothing said that was not this.
-    // Two copies of this contract tail the line that names the SOURCE: the
-    // resolved anchors supply `line`/`start_line` but not the SET (the
-    // resolver never sees a body-only Critical), and they carry an id on
-    // every entry — the finding's own carried id is what belongs here
-    // (#9218 review). 372 code points, inside compose-review's 400 cap.
+    // Bound the quoted key so the actionable contract survives the downstream
+    // 400-code-point per-reason limit, even for arbitrary JSON property names.
+    const keyDetail =
+      unexpectedFindingsKey === undefined
+        ? ''
+        : ` (unexpected key ${JSON.stringify(unexpectedFindingsKey).slice(0, 40)})`;
     downgradeReasons.push(
-      'the --new-findings file was malformed — overlap dedup was disabled and ' +
-        'anchor-risk defaulted to at-risk; expected [{path, line, start_line?, ' +
-        'id?}] with line/start_line from the resolved anchors and id only on ' +
-        "carried findings (collapse an aggregate's -k), plus one id-less " +
-        'placeholder per body-only Critical — not the artifact, nor ' +
-        '…-anchors.json; regenerate it and re-run',
+      `the --new-findings file was malformed${keyDetail} — overlap dedup disabled; ` +
+        'anchor-risk at-risk. Expected [{path, line, start_line?, id?}]: use ' +
+        'resolved lines, rename startLine, strip other keys; id only on carried ' +
+        'findings, plus an id-less placeholder per body-only Critical. Not the ' +
+        'artifact or raw anchor files; regenerate and re-run',
     );
   }
 
@@ -1374,8 +1376,11 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
   // but presubmit does not re-fetch: `compare` stays null, which rules
   // `anchorsAtRisk` true on ANY drift — the fail-safe default that sends
   // the skill back to re-review the amended head.
+  let unexpectedFindingsKey: string | undefined;
   const newFindings = newFindingsPath
-    ? parseFindingsFile(newFindingsPath)
+    ? parseFindingsFile(newFindingsPath, (key) => {
+        unexpectedFindingsKey = key;
+      })
     : null;
   const findingsFileInvalid =
     newFindingsPath !== undefined && newFindings === null;
@@ -1466,6 +1471,7 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
     driftReason,
     metaUnavailable,
     findingsFileInvalid,
+    unexpectedFindingsKey,
   });
 }
 
@@ -1504,7 +1510,7 @@ export const presubmitCommand: CommandModule = {
       .option('new-findings', {
         type: 'string',
         describe:
-          "Path to a JSON file shaped as [{path, line, start_line?, id?}] — the anchors of the comments you are about to post, one entry per location plus one id-less placeholder per body-only Critical. `line`/`start_line` come from the RESOLVED anchors (`resolve-anchors` writes them to `…-anchors-resolved.json` and names the range field `startLine`); `id` is the FINDING's carried ledger id (`R<round>-<n>`, from the carried-ledger set) — collapse an aggregate's `<id>-k`, and omit it on fresh findings of this round. This is NOT the canonical findings artifact, and NOT the resolver's input `…-anchors.json` (an `anchor` key is refused). When provided, existing comments are checked for same-(path, line) overlap with the new findings: an id-matched own-account comment — a root at the same location, or the pipeline's own carry-reply in that id's thread at any location — is reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
+          "Path to a JSON file shaped as [{path, line, start_line?, id?}] — the anchors of the comments you are about to post, one entry per location plus one id-less placeholder per body-only Critical. `line`/`start_line` come from the RESOLVED anchors (`resolve-anchors` writes them to `…-anchors-resolved.json` and names the range field `startLine`); rename `startLine` to `start_line` and keep only the four listed keys, dropping `anchor` and all other resolver metadata. An unexpected non-null key is refused and named in the report. `id` is the FINDING's carried ledger id (`R<round>-<n>`, from the carried-ledger set): join an aggregate's `<id>-k` back to the artifact's actual finding IDs, never blindly strip a trailing `-<n>`, and omit id on fresh findings. This is NOT the canonical findings artifact or either raw resolver file. When provided, existing comments are checked for same-(path, line) overlap with the new findings: an id-matched own-account comment — a root at the same location, or the pipeline's own carry-reply in that id's thread at any location — is reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
       }),
   handler: async (argv) => {
     const host = (argv as { host?: string }).host;
