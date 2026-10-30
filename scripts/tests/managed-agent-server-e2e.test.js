@@ -541,6 +541,94 @@ describe('managed-agent-server e2e runner', () => {
     );
   });
 
+  // R4-2 (behavioural): the source pins above assert the window helper's
+  // spelling; this exercises finishedBeforeCommitWindow itself on injected
+  // journal rows, so the latest-attempt selection and both throw branches are
+  // proven on data, not on text. runMysql is injected through load() (the
+  // parameter must be spelled exactly runMysql to shadow the free identifier);
+  // the helper stays a top-level declaration so extracted() can walk it.
+  it('behaves finishedBeforeCommitWindow on injected journal rows', () => {
+    const promptId = 'turn_b3a';
+    const attempt = (sequence, state, prompt = promptId) => ({
+      kind: 'model.attempt',
+      sequence,
+      payload: { attemptId: `${prompt}:main:${sequence}`, state },
+    });
+    const assistantCommit = (sequence) => ({
+      kind: 'message.committed',
+      sequence,
+      payload: { role: 'assistant' },
+    });
+    // The helper reads HEX(record_bytes) rows; each row decodes to UTF-8 JSON
+    // Lines of managed_session_event_v1 records. Encode the events the way the
+    // journal writer does, as one HEX blob the helper splits back into lines.
+    const rows = (events) =>
+      Buffer.from(
+        events
+          .map((event) =>
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: event,
+            }),
+          )
+          .join('\n'),
+        'utf8',
+      ).toString('hex');
+    const run = (events) =>
+      load(
+        ['finishedBeforeCommitWindow'],
+        'finishedBeforeCommitWindow',
+        'runMysql',
+      )(() => rows(events)).finishedBeforeCommitWindow(0, 'filter', promptId);
+
+    // output_committed with no following assistant commit: the window holds.
+    expect(run([attempt(25, 'output_committed')])).toEqual({
+      attemptId: `${promptId}:main:25`,
+      attemptSequence: 25,
+    });
+    // An assistant commit before the attempt does not close the window.
+    expect(run([assistantCommit(20), attempt(25, 'output_committed')])).toEqual(
+      {
+        attemptId: `${promptId}:main:25`,
+        attemptSequence: 25,
+      },
+    );
+    // A non-assistant commit after the attempt does not close the window.
+    expect(
+      run([
+        attempt(25, 'output_committed'),
+        { kind: 'message.committed', sequence: 27, payload: { role: 'user' } },
+      ]),
+    ).toEqual({ attemptId: `${promptId}:main:25`, attemptSequence: 25 });
+    // The latest main attempt wins, even when rows arrive unsorted.
+    expect(
+      run([attempt(30, 'output_committed'), attempt(25, 'output_committed')]),
+    ).toEqual({ attemptId: `${promptId}:main:30`, attemptSequence: 30 });
+    // Another prompt's attempts are not this window's.
+    expect(() => run([attempt(25, 'output_committed', 'other_turn')])).toThrow(
+      /no main model attempt/,
+    );
+    // A still-started latest attempt: the crash landed before the Finished
+    // marker committed (a mutation the source pins alone cannot catch).
+    expect(() => run([attempt(25, 'started')])).toThrow(
+      /before the model Finished marker committed: attemptState=started/,
+    );
+    // A newer started attempt after an older completed one is still before the
+    // window: the recovery reader accepts a started attempt, so only the latest
+    // attempt's state discriminates.
+    expect(() =>
+      run([attempt(25, 'output_committed'), attempt(30, 'started')]),
+    ).toThrow(
+      /before the model Finished marker committed: attemptState=started/,
+    );
+    // An assistant commit after the attempt: the crash landed after the commit.
+    expect(() =>
+      run([attempt(25, 'output_committed'), assistantCommit(27)]),
+    ).toThrow(
+      /after the assistant commit: commitSequence=27 attemptSequence=25/,
+    );
+  });
+
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,
   // but the ordering assertion was gated at 20 s, so a --runtime-delay-ms 15000
   // run silently skipped it. Pin the threshold to the criterion's delay and
