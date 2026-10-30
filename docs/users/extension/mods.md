@@ -137,6 +137,7 @@ this recovery exception.
 | API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
 | Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits, described in [Turn events](#turn-events)                                                             |
+| Prompts    | `prompt.submit` in headless runs, described in [Submitted prompts](#submitted-prompts)                                                                                                  |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
 | Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
 | Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
@@ -157,18 +158,18 @@ command names are matched against the resulting name.
 ## Middleware and recovery
 
 Patterns select among the engine events `session.start`, `session.end`,
-`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete` and, in the Ink and OpenTUI terminals, `ui.render`, and the API event of each supported
+`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete`, in headless runs `prompt.submit`, in the Ink and OpenTUI terminals `ui.render`, and the API event of each supported
 `$` method, which `$.session.version()` lists. Use an exact name, a prefix such as `command.*`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
 
 Claude Code 2.1.310 also defines events that Qwen Code does not run yet, such as
-`prompt.submit` or `classic.Stop`, and `ui.render` runs only where a host draws
-it. A registration for one of them,
+`prompt.fill` or `classic.Stop`. `prompt.submit` runs only in headless runs, and
+`ui.render` only where a host draws it. A registration for one of them,
 or for a prefix such as `prompt.*` that matches none of the events above, loads
 but never runs, so the rest of the Mod keeps working. At startup each plugin
 reports its skipped patterns once, where transcript logs appear:
-`Hooks for unsupported events will not run: prompt.submit, ui.render`. A skipped
+`Hooks for unsupported events will not run: prompt.fill, ui.render`. A skipped
 hook never runs, including a guard and its `.catch`. Names that Claude Code does
 not define, such as `tool.calls`, still reject initialization.
 
@@ -200,8 +201,9 @@ registrations with matchers, including equal matchers. Each wildcard or negated
 pattern can be registered once. Within a plugin, registration order determines
 the chain; consumers run before their declared dependency providers. A handler
 can answer early, including at `session.start`, preventing later handlers from
-running. Only command `args` can be rewritten on `command.run`; lifecycle and
-command identity fields stay pinned.
+running. Only command `args` can be rewritten on `command.run`, and only a
+prompt's `text` and `context` on `prompt.submit`; lifecycle and command identity
+fields stay pinned.
 
 ## Tool interception
 
@@ -624,6 +626,80 @@ ending. In a headless run the turn ends with the error result
 `A Mod ended the turn.` and exit code 130, and a stream-json session goes on to
 its next message. Qwen Code has no `$.prompt.submit` yet, so a Mod cannot send a
 prompt after it ends a turn.
+
+## Submitted prompts
+
+In headless runs, `prompt.submit` fires for each prompt a person submits, before
+UserPromptSubmit hooks and before `@` references are read. A hook can rewrite the
+prompt, attach context the model reads beside it, or drop it:
+
+```javascript
+export function register(on) {
+  on('prompt.submit', ($, e, next) => {
+    if (/AKIA[0-9A-Z]{16}/.test(e.text))
+      return { drop: 'the prompt holds an AWS access key' };
+    return next({
+      ...e,
+      text: e.text.replace(/\bprod\b/g, 'production'),
+      context: [...(e.context ?? []), 'Answer in British English.'],
+    });
+  });
+}
+```
+
+The hook receives:
+
+| Field     | Value                                                                                 |
+| --------- | ------------------------------------------------------------------------------------- |
+| `text`    | the prompt as submitted                                                               |
+| `context` | absent; each hook that attaches context passes the list on with its own entries added |
+| `wait`    | `false`                                                                               |
+| `origin`  | `{kind: 'sdk'}`                                                                       |
+
+`origin`, `wait` and `turnId` are pinned. The prompt that enters is the one that
+arrives beneath the hooks: `next(e)` resolves to `{text, context?, origin}`, and
+what a hook answers after its `next` resolved changes nothing. The rewritten text
+is what the model reads, what `turn.start` hears and what the transcript keeps.
+The context goes to the model after the prompt, in the block that holds
+UserPromptSubmit's context, ahead of it, and is never shown as part of the
+prompt.
+
+`{drop: reason}` stops the prompt before UserPromptSubmit and before any model
+request. The run ends with the error result `Prompt dropped by a hook: <reason>`
+and exit code 1; a stream-json session goes on to its next message. The reason
+is one line, kept to its first 4,096 characters. A hook that answers without
+calling `next` and without a drop also stops the prompt, with the result
+`Prompt not submitted: a hook answered without passing the prompt on`. A hook
+that calls `next` and then answers a drop fails, and its `next` stands.
+
+A hook that fails or times out is skipped, so a broken guard never blocks a
+prompt. Give a guard a `.catch` that drops instead:
+
+```javascript
+on('prompt.submit', guard).catch(($, e, next) =>
+  next.called ? next(e) : { drop: 'the guard failed' },
+);
+```
+
+A prompt longer than 128 KiB as JSON reaches no hook, and the line
+`prompt.submit hook skipped: the prompt is too long for a Mod payload` appears
+where transcript logs do.
+
+These differ from Claude Code:
+
+- `prompt.submit` runs only in headless runs; the Ink and OpenTUI terminals skip
+  its hooks at startup.
+- Slash commands, background notifications and the continuation of an
+  interrupted turn raise no `prompt.submit`, so `command` and `isMeta` never
+  appear.
+- `attachments` never appears, and `$.prompt.media` does not exist.
+- A UserPromptSubmit hook that blocks the prompt beneath does not turn `next(e)`
+  into `{drop}`: the Mod hooks have settled by the time it runs.
+- `next(e)` resolves once the hooks beneath have answered, not once the turn
+  starts.
+- A context block the conversation already holds word for word, UserPromptSubmit's
+  context included, is not sent again, as for UserPromptSubmit alone.
+- `$.prompt.submit` does not exist yet.
 
 ## Elements
 

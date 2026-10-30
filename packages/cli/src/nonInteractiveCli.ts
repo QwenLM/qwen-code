@@ -1174,7 +1174,7 @@ export async function runNonInteractive(
         options.userMessage,
       );
       const userMessageContent = options.userMessage?.message.content;
-      const submittedPrompt =
+      let submittedPrompt =
         typeof userMessageContent === 'string'
           ? userMessageContent
           : Array.isArray(userMessageContent)
@@ -1188,6 +1188,10 @@ export async function runNonInteractive(
       // submitted prompt runs on the chosen model without a session switch.
       let inlineModelOverride: string | undefined;
       let promptAdmission: UserPromptAdmission | undefined;
+      // The prompt as the Mods' prompt.submit hooks passed it on, and the
+      // context they attached for the model.
+      let prompt = input;
+      let promptContext: string[] | undefined;
 
       if (options.continueInterrupted) {
         // Read the full history, not a bounded tail: the Retry send path in
@@ -1399,8 +1403,41 @@ export async function runNonInteractive(
         }
 
         if (!slashHandled) {
+          if (
+            modSession &&
+            (options.sendMessageType ?? SendMessageType.UserQuery) ===
+              SendMessageType.UserQuery
+          ) {
+            let submitted: Awaited<ReturnType<ModSession['submitPrompt']>>;
+            try {
+              submitted = await modSession.submitPrompt(
+                input,
+                abortController.signal,
+              );
+            } catch (error) {
+              if (abortController.signal.aborted) await routeAbort();
+              throw error;
+            }
+            if ('drop' in submitted) {
+              await emitNonInteractiveFinalMessage({
+                message: submitted.drop,
+                isError: true,
+                adapter,
+                config,
+                startTimeMs: startTime,
+                beforeEmit: settleBeforeTerminalOutput,
+              });
+              return 1;
+            }
+            if (submitted.text !== input) {
+              prompt = submitted.text;
+              // The transcript shows the prompt the model reads.
+              submittedPrompt = prompt;
+            }
+            promptContext = submitted.context;
+          }
           const { processedQuery, shouldProceed } = await handleAtCommand({
-            query: input,
+            query: prompt,
             config,
             onDebugMessage: () => {},
             messageId: Date.now(),
@@ -1419,7 +1456,7 @@ export async function runNonInteractive(
       }
 
       if (!initialPartList) {
-        initialPartList = [{ text: input }];
+        initialPartList = [{ text: prompt }];
       }
 
       // Inject a worktree context notice into the model's first prompt.
@@ -2901,7 +2938,9 @@ export async function runNonInteractive(
                 modTurn = modSession.startTurn(
                   options.continueInterrupted
                     ? ''
-                    : (options.humanInput?.text ?? input),
+                    : prompt !== input
+                      ? prompt
+                      : (options.humanInput?.text ?? input),
                   abortController.signal,
                   () => {
                     if (abortController.signal.aborted) return false;
@@ -2919,8 +2958,12 @@ export async function runNonInteractive(
             !isSlashCommand(input) &&
             options.humanInput &&
             !isSlashCommand(options.humanInput.text) && {
-              humanInput: options.humanInput,
+              humanInput:
+                prompt !== input ? { text: prompt } : options.humanInput,
             }),
+          ...(isFirstTurn &&
+            sendType === SendMessageType.UserQuery &&
+            promptContext?.length && { promptContext }),
           ...(isFirstTurn &&
             sendType === SendMessageType.UserQuery &&
             !options.continueInterrupted &&

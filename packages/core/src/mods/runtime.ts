@@ -41,6 +41,8 @@ import {
   type ModReply,
   type ModRequest,
   type ModSessionFacts,
+  type ModPromptSubmit,
+  type ModPromptSubmitted,
   type ModTurnComplete,
   type ModTurnStart,
   type ModWorkerReply,
@@ -85,6 +87,7 @@ export class ModRuntime {
     start: false,
     complete: [],
   };
+  private prompts: string[] = [];
   private renders: string[] = [];
   // Asked for during the load, before the host knows which plugins draw.
   private early?: Set<string> = new Set();
@@ -198,6 +201,8 @@ export class ModRuntime {
     facts?: () => ModSessionFacts,
     abortTurn?: (turnId: string) => void,
     render?: ModRenderHost,
+    // Whether this host raises `prompt.submit` for the prompts submitted.
+    prompts = false,
   ): Promise<ModRuntime> {
     if (
       plugins.length > 32 ||
@@ -236,6 +241,7 @@ export class ModRuntime {
           surface,
           version,
           sites: render?.sites ?? [],
+          prompts,
         },
         signal,
         60_000,
@@ -245,10 +251,12 @@ export class ModRuntime {
         value.every((name) => plugins.some((plugin) => plugin.name === name));
       const turnComplete = record(result) ? result['turnComplete'] : undefined;
       const renders = record(result) ? result['render'] : undefined;
+      const promptSubmit = record(result) ? result['promptSubmit'] : undefined;
       if (
         !record(result) ||
         typeof result['tools'] !== 'boolean' ||
         typeof result['turnStart'] !== 'boolean' ||
+        !names(promptSubmit) ||
         !names(turnComplete) ||
         !names(renders)
       )
@@ -275,6 +283,7 @@ export class ModRuntime {
         start: result['turnStart'],
         complete: turnComplete,
       };
+      runtime.prompts = promptSubmit;
       runtime.renders = renders;
       const early = runtime.early!;
       runtime.early = undefined;
@@ -303,6 +312,11 @@ export class ModRuntime {
     readonly complete: readonly string[];
   } {
     return this.turns;
+  }
+
+  /** The plugins whose hooks hear `prompt.submit`. */
+  get promptHooks(): readonly string[] {
+    return this.prompts;
   }
 
   /** The plugins whose `ui.render` hooks may draw where this host draws. */
@@ -552,6 +566,32 @@ export class ModRuntime {
       'turn.start',
       await this.request({ type: 'turn-start', input }, signal),
     );
+  }
+
+  /**
+   * Raises `prompt.submit`: the prompt that arrived beneath the hooks, or why
+   * it did not enter.
+   */
+  async submitPrompt(
+    input: ModPromptSubmit,
+    signal: AbortSignal,
+  ): Promise<ModPromptSubmitted> {
+    const result = await this.request({ type: 'prompt-submit', input }, signal);
+    if (
+      record(result) &&
+      (typeof result['drop'] === 'string'
+        ? Object.keys(result).length === 2 &&
+          typeof result['byHook'] === 'boolean'
+        : typeof result['text'] === 'string' &&
+          Object.keys(result).every(
+            (key) => key === 'text' || key === 'context',
+          ) &&
+          (result['context'] === undefined ||
+            (Array.isArray(result['context']) &&
+              result['context'].every((item) => typeof item === 'string'))))
+    )
+      return result as ModPromptSubmitted;
+    throw new Error('Invalid Mod prompt.submit result.');
   }
 
   async completeTurn(
