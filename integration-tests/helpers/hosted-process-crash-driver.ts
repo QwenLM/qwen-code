@@ -50,8 +50,8 @@ const report = {
   promptSubmissions: 0,
   continuationsAfterFailure: 0,
   postFailureLoads: [] as boolean[],
-  // Which caller produced each entry above. The boolean says a post-failure
-  // load was not cancellation-only; it does not say which of the connector's
+  // Which caller produced each entry above. The boolean records whether a
+  // load was cancellation-only; it does not say which of the connector's
   // load paths sent it. #15898 shows the sequence changing shape between runs,
   // so a failing entry has to name its own origin.
   postFailureLoadOrigins: [] as string[],
@@ -161,7 +161,9 @@ const proxy = createServer(async (req, res) => {
           `/session/${config.sessionId}/managed-runtime/continue`
       )
         report.continuationsAfterFailure++;
+      let postFailureLoadIndex: number | undefined;
       if (injected && target.pathname.endsWith('/load')) {
+        postFailureLoadIndex = report.postFailureLoads.length;
         report.postFailureLoads.push(fields.cancellationTakeover === true);
         report.postFailureLoadOrigins.push(
           [
@@ -170,6 +172,8 @@ const proxy = createServer(async (req, res) => {
             `drive=${fields.driveRuntimeRecovery === true}`,
             `mcpOnly=${fields.mcpManagementOnly === true}`,
             `promptId=${typeof fields.cancellationPromptId === 'string'}`,
+            `cleanup=${typeof fields.recoveryCleanupPromptId === 'string'}`,
+            `lifecycle=${fields.lifecycleAuthority !== undefined}`,
           ].join(' '),
         );
       }
@@ -196,6 +200,10 @@ const proxy = createServer(async (req, res) => {
         headers,
         ...(body.length ? { body } : {}),
       });
+      if (postFailureLoadIndex !== undefined) {
+        report.postFailureLoadOrigins[postFailureLoadIndex] +=
+          ` status=${upstream.status}`;
+      }
       if (target.pathname.endsWith('/events') && upstream.body) {
         res.writeHead(upstream.status, relayedHeaders(upstream.headers));
         const reader = upstream.body.getReader();
