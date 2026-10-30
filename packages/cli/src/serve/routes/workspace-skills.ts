@@ -111,16 +111,16 @@ function bindArchiveGeneration(
   entry: WorkspaceEntry | undefined,
   runtime: WorkspaceRuntime,
 ) {
-  const generation = entry?.current;
+  const guard = entry?.current?.guard;
   return () => {
-    generation?.guard.assertOpen();
+    guard?.assertOpen();
     if (
       !runtime.trusted ||
       (registry &&
         (!entry ||
           registry.getEntryByWorkspaceId(entry.workspaceId) !== entry ||
           entry.state !== 'active' ||
-          entry.current !== generation))
+          entry.current?.guard !== guard))
     ) {
       throw new WorkspaceSkillManagementError(
         'workspace_generation_closed',
@@ -607,14 +607,19 @@ export function registerWorkspaceSkillsRoutes(
               entry,
               runtime,
             ),
-            install: (request, options) =>
-              deps.installSkillConfig(owner.workspaceCwd, request, options),
-            reconcile: () => {
-              invalidateGlobalConfigStatus(owner.workspaceCwd);
-              return reconcileSkills(
-                deps.workspaceRegistry?.list() ?? [runtime],
-              );
+            install: async (request, options) => {
+              try {
+                return await deps.installSkillConfig(
+                  owner.workspaceCwd,
+                  request,
+                  options,
+                );
+              } finally {
+                invalidateGlobalConfigStatus(owner.workspaceCwd);
+              }
             },
+            reconcile: () =>
+              reconcileSkills(deps.workspaceRegistry?.list() ?? [runtime]),
           });
         } catch (error) {
           sendSkillArchiveError(res, error);
@@ -1030,20 +1035,22 @@ export function registerWorkspaceQualifiedSkillsRoutes(
               entry,
               runtime,
             ),
-            install: (request, options) =>
-              coordinator.runManagementOperation(() =>
-                runtime.workspaceService.installWorkspaceSkill(
-                  createBuildWorkspaceCtx(runtime.workspaceCwd)(
-                    'POST /workspaces/:workspace/config/skills/install-archive',
+            install: async (request, options) => {
+              try {
+                return await coordinator.runManagementOperation(() =>
+                  runtime.workspaceService.installWorkspaceSkill(
+                    createBuildWorkspaceCtx(runtime.workspaceCwd)(
+                      'POST /workspaces/:workspace/config/skills/install-archive',
+                    ),
+                    request,
+                    { ...options, refreshRuntime: false },
                   ),
-                  request,
-                  { ...options, refreshRuntime: false },
-                ),
-              ),
-            reconcile: () => {
-              deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
-              return reconcileSkills([runtime]);
+                );
+              } finally {
+                deps.invalidateSkillsConfigStatus(runtime.workspaceCwd);
+              }
             },
+            reconcile: () => reconcileSkills([runtime]),
           });
         } catch (error) {
           sendSkillArchiveError(res, error);

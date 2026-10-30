@@ -212,6 +212,7 @@ describe('useDaemonSkills', () => {
         result!.ensureRuntime({ throwOnError: true }),
       ).rejects.toThrow('activation unavailable');
     });
+    expect(result!.error).toBeUndefined();
     mocks.workspaceClient.ensureRuntime.mockResolvedValue({
       runtimeLive: true,
       capabilities: {

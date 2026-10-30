@@ -95,10 +95,10 @@ export function useDaemonSkills(options: DaemonSkillsOptions = {}) {
         }
         return await reloadRuntime();
       } catch (error) {
+        if (options?.throwOnError) throw error;
         setPrepareError(
           error instanceof Error ? error : new Error(String(error)),
         );
-        if (options?.throwOnError) throw error;
         return undefined;
       } finally {
         setPreparing(false);

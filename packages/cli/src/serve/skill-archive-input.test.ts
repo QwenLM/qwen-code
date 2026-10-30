@@ -5,7 +5,12 @@
  */
 
 import { createHash } from 'node:crypto';
-import { promises as fs, truncateSync, writeFileSync } from 'node:fs';
+import {
+  promises as fs,
+  truncateSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Readable } from 'node:stream';
@@ -88,7 +93,10 @@ describe('owned Skill archives', () => {
           const result = stream(options);
           result.once('data', () => {
             if (change === 'truncated') truncateSync(file, 0);
-            else writeFileSync(file, 'modified');
+            else {
+              writeFileSync(file, 'modified');
+              utimesSync(file, 1, 1);
+            }
           });
           return result;
         });

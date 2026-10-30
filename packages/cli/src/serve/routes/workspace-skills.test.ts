@@ -1126,6 +1126,60 @@ describe('native Skill archive routes', () => {
   const sha256 = createHash('sha256').update(payload).digest('hex');
 
   it.each([
+    '/workspace/config/skills',
+    '/workspaces/workspace-1/config/skills',
+  ])(
+    'keeps a valid generation through a policy-only update at %s',
+    async (base) => {
+      const h = createHarness();
+      const original = h.installWorkspaceSkill.getMockImplementation()!;
+      const guard = h.workspaceRegistry.primaryEntry.current!.guard;
+      h.installWorkspaceSkill.mockImplementationOnce(async (...args) => {
+        h.workspaceRegistry.advancePolicyRevision(
+          h.workspaceRegistry.primaryEntry,
+          'unrelated-policy-change',
+        );
+        expect(h.workspaceRegistry.primaryEntry.current!.guard).toBe(guard);
+        return original(...args);
+      });
+      const id = randomUUID();
+      await request(h.app)
+        .post(`${base}/install-archive?name=demo-skill&attemptId=${id}`)
+        .type('application/octet-stream')
+        .send(payload)
+        .expect(200);
+      const receipt = await request(h.app).get(
+        `${base}/install-attempts/${id}`,
+      );
+      expect(receipt.body.state).toBe('committed');
+    },
+  );
+
+  it.each([
+    '/workspace/config/skills',
+    '/workspaces/workspace-1/config/skills',
+  ])(
+    'invalidates cached config after recovery is required at %s',
+    async (base) => {
+      const h = createHarness();
+      h.installWorkspaceSkill.mockRejectedValueOnce(
+        new WorkspaceSkillRecoveryError(
+          ['/backup'],
+          new Error('restore failed'),
+        ),
+      );
+      await request(h.app)
+        .post(
+          `${base}/install-archive?name=demo-skill&attemptId=${randomUUID()}`,
+        )
+        .type('application/octet-stream')
+        .send(payload)
+        .expect(500);
+      expect(h.invalidateSkillsConfigStatus).toHaveBeenCalledWith('/workspace');
+    },
+  );
+
+  it.each([
     ['/workspace/config/skills/install', 'global'],
     ['/workspaces/workspace-1/config/skills/install', 'workspace'],
   ])(
@@ -1573,6 +1627,10 @@ describe('native Skill archive routes', () => {
       .type('application/octet-stream')
       .send(payload)
       .expect(200);
+    const trustedReceipt = await request(h.app)
+      .get(`/workspace/config/skills/install-attempts/${id}`)
+      .expect(200);
+    expect(trustedReceipt.body.state).toBe('committed');
     folderTrustEnabled = true;
     h.workspaceRegistry.beginReplacement(
       h.workspaceRegistry.primaryEntry,

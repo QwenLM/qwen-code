@@ -10,7 +10,7 @@ import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { DaemonWorkspaceSkillStatus } from '@qwen-code/web-shell/daemon-react-sdk';
-import type { DaemonCapabilities } from '@qwen-code/web-shell/daemon-sdk';
+import type { DaemonCapabilities } from '@qwen-code/sdk/daemon';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
@@ -221,39 +221,51 @@ describe('SkillsManagerPage', () => {
     expect(skillsState.current.install).not.toHaveBeenCalled();
   });
 
-  it('keeps a confirmed archive installation successful when runtime activation fails', async () => {
-    workspaceState.current.capabilities.features = [
-      'workspace_skill_manage',
-      'skill_archive_install',
-    ];
-    skillsState.current.installArchive.mockResolvedValue({
-      skillName: 'demo',
-      scope: 'workspace',
-      attemptId: 'attempt',
-      archiveSha256: 'a'.repeat(64),
-    });
-    skillsState.current.ensureRuntime.mockImplementation(
-      async (options?: { throwOnError?: boolean }) => {
-        if (options?.throwOnError) throw new Error('runtime unavailable');
-      },
-    );
-    const file = await uploadArchive(20 * 1024 * 1024);
-    expect(skillsState.current.installArchive).toHaveBeenCalledWith(
-      expect.objectContaining({ name: 'demo', data: file }),
-      'workspace',
-    );
-    expect(skillsState.current.reloadConfig).toHaveBeenCalledOnce();
-    expect(skillsState.current.ensureRuntime).toHaveBeenCalledTimes(2);
-    expect(skillsState.current.ensureRuntime).toHaveBeenLastCalledWith({
-      throwOnError: true,
-    });
-    expect(document.body.textContent).toContain('installed successfully');
-    expect(document.body.textContent).toContain(
-      'runtime activation failed: runtime unavailable',
-    );
-    expect(skillsState.current.install).not.toHaveBeenCalled();
-    expect(skillsState.current.lookupInstallAttempt).not.toHaveBeenCalled();
-  });
+  it.each(['client', 'daemon'])(
+    'keeps a confirmed archive installation successful with a %s activation warning',
+    async (source) => {
+      workspaceState.current.capabilities.features = [
+        'workspace_skill_manage',
+        'skill_archive_install',
+      ];
+      skillsState.current.installArchive.mockResolvedValue({
+        skillName: 'demo',
+        scope: 'workspace',
+        attemptId: 'attempt',
+        archiveSha256: 'a'.repeat(64),
+        ...(source === 'daemon'
+          ? { activationWarning: 'runtime unavailable' }
+          : {}),
+      });
+      skillsState.current.ensureRuntime.mockImplementation(
+        async (options?: { throwOnError?: boolean }) => {
+          if (options?.throwOnError && source === 'client')
+            throw new Error('runtime unavailable');
+        },
+      );
+      const file = await uploadArchive(20 * 1024 * 1024);
+      expect(skillsState.current.installArchive).toHaveBeenCalledWith(
+        expect.objectContaining({ name: 'demo', data: file }),
+        'workspace',
+      );
+      expect(skillsState.current.reloadConfig).toHaveBeenCalledOnce();
+      expect(skillsState.current.ensureRuntime).toHaveBeenCalledTimes(2);
+      expect(skillsState.current.ensureRuntime).toHaveBeenLastCalledWith({
+        throwOnError: true,
+      });
+      expect(document.body.textContent).toContain('installed successfully');
+      expect(document.body.textContent).toContain(
+        'runtime activation failed: runtime unavailable',
+      );
+      expect(skillsState.current.install).not.toHaveBeenCalled();
+      expect(skillsState.current.lookupInstallAttempt).not.toHaveBeenCalled();
+      await renderPage('/another-workspace');
+      expect(document.body.textContent).not.toContain(
+        'runtime activation failed',
+      );
+      expect(document.body.textContent).not.toContain('installed successfully');
+    },
+  );
 
   const disabledSkill: DaemonWorkspaceSkillStatus = {
     kind: 'skill',

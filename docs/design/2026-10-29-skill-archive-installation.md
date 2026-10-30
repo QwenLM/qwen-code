@@ -184,7 +184,7 @@ Implementation validation found that yauzl 2.10's fd-slicer dependency marks a f
 
 Do not move the mutation lock, add cross-process locking, rewrite folder copying, or build an archive framework merely to add the new input. New routes must participate in the existing lock; this design does not claim cross-daemon serialization.
 
-A failed rollback reports `recovery_required` with retained paths. Subsequent installs must preserve abandoned backups; successful installs still remove the backup they created. Fault-injection tests cover failed restoration followed by another install. No automatic recovery program or publisher rewrite is introduced.
+A failed rollback reports `recovery_required` with retained paths. Subsequent installs must preserve abandoned backups; successful installs still remove the backup they created. This protection applies to every source, including legacy base64, directories and GitHub: after receipt expiry or process restart, an installer cannot safely distinguish disposable backups from the only recoverable copy. Fault-injection tests cover failed restoration followed by another install. No automatic recovery program or publisher rewrite is introduced.
 
 ## Validation and acceptance
 

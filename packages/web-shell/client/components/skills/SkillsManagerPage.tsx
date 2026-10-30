@@ -223,6 +223,8 @@ export function SkillsManagerPage({
   useLayoutEffect(() => {
     setNotice(null);
     setBusySkill(null);
+    setListNotice(null);
+    setInstallWarning(null);
     return () => {
       toggleScopeEpoch.current += 1;
     };
