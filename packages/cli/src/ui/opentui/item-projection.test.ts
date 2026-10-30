@@ -213,6 +213,7 @@ function expectCoherentBreakdown(item: {
     (breakdown.systemPrompt ?? 0) +
     (breakdown.builtinTools ?? 0) +
     (breakdown.mcpTools ?? 0) +
+    (breakdown.instructionFiles ?? 0) +
     (breakdown.memoryFiles ?? 0) +
     (breakdown.skills ?? 0) +
     (breakdown.startupContext ?? 0) +
@@ -421,15 +422,22 @@ describe('projectContextUsage', () => {
   });
 
   it('renders per-item detail sections when showDetails is on (ytahdn-3)', () => {
-    const split = projectContextUsage({
+    const item = {
       modelName: 'm',
       totalTokens: 30,
       contextWindowSize: 100,
-      breakdown: { instructionFiles: 20, memoryFiles: 10 },
+      breakdown: {
+        instructionFiles: 20,
+        memoryFiles: 10,
+        freeSpace: 70,
+        autocompactBuffer: 0,
+      },
       showDetails: true,
       instructionFiles: [{ path: 'QWEN.md', tokens: 20 }],
       memoryFiles: [{ path: 'auto memory', tokens: 10 }],
-    });
+    };
+    expectCoherentBreakdown(item);
+    const split = projectContextUsage(item);
     expect(split).toContain('Instruction files');
     expect(split).toContain('Auto memory');
     expect(split).toContain('QWEN.md');
