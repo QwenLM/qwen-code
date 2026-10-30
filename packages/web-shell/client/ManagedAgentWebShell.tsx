@@ -5,6 +5,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ComponentProps,
   type CSSProperties,
 } from 'react';
 import { BrandProvider, type WebShellBrand } from './brandContext';
@@ -14,6 +15,7 @@ import {
   createJavaManagedAgentProvider,
   type JavaManagedAgentProviderOptions,
 } from './components/managed/java-managed-agent-provider';
+import type { ManagedAgentProvider } from './components/managed/managed-agent-provider';
 import { RootErrorFallback } from './components/RootErrorFallback';
 import { WebShellCustomizationProvider } from './customization';
 import { I18nProvider, normalizeLanguage, type WebShellLanguage } from './i18n';
@@ -25,9 +27,26 @@ import {
 } from './themeContext';
 import { CompactModeContext, TodoContextsProvider } from './WebShellContexts';
 
+/**
+ * 会话列表 portal 到宿主导航槽位所需的 props，直接从 ManagedSessionsPage 的
+ * props 推导，避免在入口层维护第二份类型。
+ */
+type ManagedSessionsNavigationProps = Pick<
+  ComponentProps<typeof ManagedSessionsPage>,
+  | 'navigationTarget'
+  | 'archivedNavigationTarget'
+  | 'onArchivedSessionsStatusChange'
+  | 'navigationActive'
+  | 'navigationSearch'
+>;
+
 /** Change productScope with tenant/actor identity so saved selections and output caches are discarded. */
 export interface ManagedAgentWebShellProps
-  extends JavaManagedAgentProviderOptions {
+  extends JavaManagedAgentProviderOptions,
+    ManagedSessionsNavigationProps {
+  managedAgentProvider?: ManagedAgentProvider;
+  /** Only open the existing Session explicitly selected by the host. */
+  hostSessionOnly?: boolean;
   sessionId?: string;
   onSessionChange?: (sessionId: string | undefined) => void;
   language?: WebShellLanguage;
@@ -41,6 +60,8 @@ export interface ManagedAgentWebShellProps
 export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   const {
     sessionId,
+    managedAgentProvider,
+    hostSessionOnly = false,
     onSessionChange,
     language,
     theme = WebShellThemeId.Dark,
@@ -56,6 +77,11 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     enableWorkspaceBinding,
     modelPresets,
     saveArtifact,
+    navigationTarget,
+    archivedNavigationTarget,
+    onArchivedSessionsStatusChange,
+    navigationActive,
+    navigationSearch,
   } = props;
   const resolvedLanguage = normalizeLanguage(language);
   // Function props may be inline closures: route them through a ref so the
@@ -75,6 +101,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   const hasSaveArtifact = saveArtifact !== undefined;
   const provider = useMemo(
     () =>
+      managedAgentProvider ??
       createJavaManagedAgentProvider({
         baseUrl,
         credentials,
@@ -95,6 +122,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
               Promise.resolve(),
       }),
     [
+      managedAgentProvider,
       baseUrl,
       credentials,
       agentId,
@@ -108,6 +136,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   );
   const [selection, setSelection] = useState(() => ({
     storageKey: provider.storageKey,
+    hostSessionOnly,
     externalSessionId: sessionId,
     selectedSessionId: sessionId,
   }));
@@ -115,10 +144,13 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
   // onSelectSession suppresses the internal write, but the echoed value
   // still passes through the same state machine — otherwise a host can never
   // return to "no selection" and a scope switch forwards the carried-over id.
-  const controlled = sessionId !== undefined && onSessionChange !== undefined;
+  const controlled =
+    hostSessionOnly ||
+    (sessionId !== undefined && onSessionChange !== undefined);
   let selectedSessionId: string | undefined;
   if (
     selection.storageKey !== provider.storageKey ||
+    selection.hostSessionOnly !== hostSessionOnly ||
     selection.externalSessionId !== sessionId
   ) {
     // Adjust during render (React's adjusting-state-when-props-change
@@ -132,6 +164,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
         : sessionId;
     setSelection({
       storageKey: provider.storageKey,
+      hostSessionOnly,
       externalSessionId: sessionId,
       selectedSessionId,
     });
@@ -179,7 +212,15 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
                             }));
                           onSessionChange?.(next);
                         }}
+                        hostSessionOnly={hostSessionOnly}
                         managedAgentProvider={provider}
+                        navigationTarget={navigationTarget}
+                        archivedNavigationTarget={archivedNavigationTarget}
+                        onArchivedSessionsStatusChange={
+                          onArchivedSessionsStatusChange
+                        }
+                        navigationActive={navigationActive}
+                        navigationSearch={navigationSearch}
                       />
                     </div>
                   </CompactModeContext.Provider>
