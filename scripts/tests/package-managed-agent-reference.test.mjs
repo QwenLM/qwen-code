@@ -432,7 +432,7 @@ test('a shipped document links to another by its name in the archive', () => {
   // An unshipped file, a URL, an anchor and an absolute path stay as
   // written, even an absolute path that would join to a shipped one.
   const kept =
-    '[runtime](docs/runtime-broker.md) [web](https://example.com/guide.zh-CN.md) [here](#top) [root](/guide.zh-CN.md)';
+    '[notes](notes/unshipped.md) [web](https://example.com/guide.zh-CN.md) [here](#top) [root](/guide.zh-CN.md)';
   assert.equal(links(kept, 'docs/users/guide.md'), kept);
 });
 
