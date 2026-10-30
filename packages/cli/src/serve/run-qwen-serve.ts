@@ -5952,6 +5952,7 @@ async function runQwenServeImpl(
     ) => {
       let skills: ServeWorkspaceSkillStatus[] | undefined;
       let catalogAvailable = false;
+      let catalogEnumerated = false;
       try {
         const workspaceRuntime =
           workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace);
@@ -5968,6 +5969,8 @@ async function runQwenServeImpl(
           // An untrusted workspace's catalog omits Extension Skills, so an
           // unresolved name there is not evidence that the name is invalid.
           catalogAvailable = isWorkspaceTrustedForPersistence(workspace);
+          catalogEnumerated =
+            catalogAvailable && !status.snapshot && !status.errors?.length;
         }
       } catch {
         // Preserve the legacy name heuristic when the catalog is unavailable.
@@ -6032,7 +6035,7 @@ async function runQwenServeImpl(
           resolved: false,
         };
       });
-      return { identities, catalogAvailable };
+      return { identities, catalogAvailable, catalogEnumerated, skills };
     };
     // Which standing entries can block is a catalog question (both
     // spellings), while which entry the write removes is a spelling
@@ -6284,8 +6287,69 @@ async function runQwenServeImpl(
         // Resolving a catalog identity can block on ACP. Do it before taking
         // the settings write lock so an enable does not serialize every other
         // settings write for this workspace behind a cold read.
-        const { identities: skillIdentities, catalogAvailable } =
-          await resolveSkillToggleIdentities(workspace, skillNames);
+        const {
+          identities: skillIdentities,
+          catalogAvailable,
+          catalogEnumerated,
+          skills,
+        } = await resolveSkillToggleIdentities(workspace, skillNames);
+        // A User restriction also applies outside the primary workspace.
+        // Only remove an authored alias when every managed catalog establishes
+        // that no other registry identity depends on it.
+        let aliasesKnown = catalogEnumerated;
+        const catalogSkills = [...(skills ?? [])];
+        if (
+          skillIdentities.some(
+            (identity) => identity.resolved && identity.authoredName,
+          )
+        ) {
+          for (const runtime of workspaceRegistryForPersistence.current?.listManaged() ??
+            []) {
+            if (runtime.workspaceCwd === workspace) continue;
+            if (!runtime.trusted) {
+              aliasesKnown = false;
+              break;
+            }
+            try {
+              const status =
+                await runtime.workspaceService.getWorkspaceSkillsStatus(
+                  {
+                    route: 'user skill settings persistence',
+                    workspaceCwd: runtime.workspaceCwd,
+                  },
+                  { requireFresh: true },
+                );
+              if (
+                !status.initialized ||
+                status.snapshot ||
+                status.errors?.length
+              ) {
+                aliasesKnown = false;
+                break;
+              }
+              catalogSkills.push(...status.skills);
+            } catch {
+              aliasesKnown = false;
+              break;
+            }
+          }
+        }
+        const aliasOwners = new Map<string, Set<string>>();
+        for (const skill of catalogSkills) {
+          const name = skill.name.trim().toLowerCase();
+          const authored =
+            skill.level === 'extension' && skill.extensionName
+              ? skill.name
+                  .slice(skill.extensionName.length + 1)
+                  .trim()
+                  .toLowerCase()
+              : name;
+          for (const spelling of new Set([name, authored])) {
+            const owners = aliasOwners.get(spelling) ?? new Set<string>();
+            owners.add(name);
+            aliasOwners.set(spelling, owners);
+          }
+        }
         return withSettingsLock(workspace, async () => {
           assertGenerationOpen?.();
           const {
@@ -6310,15 +6374,20 @@ async function runQwenServeImpl(
           const writtenName = (index: number) =>
             skillIdentities[index]!.registryName ??
             skillIdentities[index]!.name;
-          // A catalog identity can be stored under its registry spelling or
-          // the authored one (`pdf` for `rust:pdf`): a disable that ran before
-          // the name resolved wrote the request spelling. An enable removes
-          // every spelling from the target lists, so a legacy entry cannot
-          // outlive the grant that contradicts it.
+          // Keep all identity spellings for block detection, but only exempt
+          // aliases this write can safely remove from the User lists.
           const identityNames = (index: number): string[] => {
             const written = writtenName(index);
-            const authoredName = skillIdentities[index]!.authoredName;
-            return authoredName &&
+            const identity = skillIdentities[index]!;
+            const authoredName = identity.authoredName;
+            const owners = aliasOwners.get(
+              authoredName?.trim().toLowerCase() ?? '',
+            );
+            return identity.resolved &&
+              aliasesKnown &&
+              authoredName &&
+              owners?.size === 1 &&
+              owners.has(written.trim().toLowerCase()) &&
               authoredName.trim().toLowerCase() !== written.trim().toLowerCase()
               ? [written, authoredName]
               : [written];
@@ -6346,7 +6415,12 @@ async function runQwenServeImpl(
               USER_SETTING_SCOPE,
             );
             if (
-              block?.reason === 'default' &&
+              block &&
+              (block.reason === 'default' ||
+                (block.scope === 'User' &&
+                  !next.disabled.some(
+                    (name) => name.trim().toLowerCase() === block.entry,
+                  ))) &&
               next.enabled.some(
                 (name) => name.trim().toLowerCase() === block.entry,
               )

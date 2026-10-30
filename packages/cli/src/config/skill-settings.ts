@@ -418,9 +418,10 @@ export interface SkillActivationSettingLists {
  * `defaultDisabled` (per `mode`) when disabling.
  *
  * `aliases` names the same skill under its other spellings (`pdf` for
- * `rust:pdf`). An enable drops them from both disable lists, because a
- * leftover alias still disables the skill; only `skillName` is recorded as
- * the grant. Other spellings and unrelated entries are preserved verbatim.
+ * `rust:pdf`), verified by the caller not to restrict another identity.
+ * Each change drops them from both disable lists so a leftover hard alias
+ * cannot defeat an enable or conversion to default mode. Only `skillName`
+ * is recorded; other spellings and unrelated entries are preserved verbatim.
  */
 export function updateSkillActivationLists(
   lists: SkillActivationSettingLists,
@@ -429,27 +430,20 @@ export function updateSkillActivationLists(
   mode: SkillDisableMode = 'hard',
   aliases: readonly string[] = [],
 ): SkillActivationSettingLists {
-  if (enabled) {
-    let disabled = lists.disabled;
-    let defaultDisabled = lists.defaultDisabled;
-    for (const alias of aliases) {
-      disabled = updateTarget(disabled, alias, false);
-      defaultDisabled = updateTarget(defaultDisabled, alias, false);
-    }
-    return {
-      disabled: updateTarget(disabled, skillName, false),
-      defaultDisabled: updateTarget(defaultDisabled, skillName, false),
-      enabled: updateTarget(lists.enabled, skillName, true),
-    };
+  let disabled = lists.disabled;
+  let defaultDisabled = lists.defaultDisabled;
+  for (const alias of aliases) {
+    disabled = updateTarget(disabled, alias, false);
+    defaultDisabled = updateTarget(defaultDisabled, alias, false);
   }
   return {
-    disabled: updateTarget(lists.disabled, skillName, mode === 'hard'),
+    disabled: updateTarget(disabled, skillName, !enabled && mode === 'hard'),
     defaultDisabled: updateTarget(
-      lists.defaultDisabled,
+      defaultDisabled,
       skillName,
-      mode === 'default',
+      !enabled && mode === 'default',
     ),
-    enabled: updateTarget(lists.enabled, skillName, false),
+    enabled: updateTarget(lists.enabled, skillName, enabled),
   };
 }
 
