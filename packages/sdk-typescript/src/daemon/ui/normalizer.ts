@@ -14,6 +14,7 @@ import type {
 import { DAEMON_ERROR_KINDS, parseDaemonBackgroundTurn } from '../types.js';
 import { asKnownDaemonEvent, isSettingsChangedData } from '../events.js';
 import type {
+  DaemonAgentIdentity,
   DaemonLoopStop,
   DaemonUiEvent,
   DaemonUiPermissionOption,
@@ -1012,6 +1013,7 @@ function normalizeSessionUpdate(
     case 'agent_message_chunk': {
       const text = getTextContent(update['content']);
       const parentToolCallId = extractParentToolCallId(update);
+      const agent = extractAgentIdentity(update);
       const meta = extractUpdateMeta(update);
       if (
         meta?.['source'] === 'background_task_completed' ||
@@ -1040,6 +1042,7 @@ function normalizeSessionUpdate(
           type: 'assistant.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
+          ...(agent ? { agent } : {}),
           ...(meta ? { meta } : {}),
         });
       }
@@ -1061,6 +1064,7 @@ function normalizeSessionUpdate(
       const text = getTextContent(update['content']);
       if (!text) return [];
       const parentToolCallId = extractParentToolCallId(update);
+      const agent = extractAgentIdentity(update);
       const meta = extractUpdateMeta(update);
       return [
         {
@@ -1068,6 +1072,7 @@ function normalizeSessionUpdate(
           type: 'thought.text.delta' as const,
           text,
           ...(parentToolCallId ? { parentToolCallId } : {}),
+          ...(agent ? { agent } : {}),
           ...(meta ? { meta } : {}),
         },
       ];
@@ -1164,6 +1169,34 @@ function extractParentToolCallId(
 ): string | undefined {
   const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
   return meta ? getString(meta, 'parentToolCallId') : undefined;
+}
+
+/**
+ * Reads the producer identity the daemon stamps as `_meta.agent`.
+ *
+ * Rejects partial or malformed shapes rather than half-populating them: a
+ * client that keys rendering or policy on `agentName` must never see an
+ * identity whose `depth`/`kind` disagree with it. Absent means the frame came
+ * from the session's root agent, which callers render unattributed.
+ */
+function extractAgentIdentity(
+  update: Record<string, unknown>,
+): DaemonAgentIdentity | undefined {
+  const meta = isRecord(update['_meta']) ? update['_meta'] : undefined;
+  const agent = meta && isRecord(meta['agent']) ? meta['agent'] : undefined;
+  if (!agent) return undefined;
+  const agentName = getString(agent, 'agentName');
+  const kind = getString(agent, 'kind');
+  const depth = numberField(agent, 'depth');
+  if (
+    !agentName ||
+    (kind !== 'root' && kind !== 'subagent' && kind !== 'teammate') ||
+    depth === undefined ||
+    depth < 0
+  ) {
+    return undefined;
+  }
+  return { agentName, depth, kind };
 }
 
 function extractUpdateMeta(
@@ -1305,6 +1338,7 @@ function normalizeToolUpdate(
   const subagentType =
     getString(update, 'subagentType') ??
     (metadata ? getString(metadata, 'subagentType') : undefined);
+  const agent = extractAgentIdentity(update);
   const startedAt = numberField(metadata, 'startedAt');
   const durationMs = numberField(metadata, 'durationMs');
   return {
@@ -1323,6 +1357,7 @@ function normalizeToolUpdate(
     ...(serverId ? { serverId } : {}),
     ...(parentToolCallId ? { parentToolCallId } : {}),
     ...(subagentType ? { subagentType } : {}),
+    ...(agent ? { agent } : {}),
     ...(typeof subagentSessionReady === 'boolean'
       ? { subagentSessionReady }
       : {}),

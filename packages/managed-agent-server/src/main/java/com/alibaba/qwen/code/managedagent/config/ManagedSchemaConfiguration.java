@@ -20,7 +20,7 @@ public class ManagedSchemaConfiguration {
     }
 
     @Bean
-    FlywayMigrationStrategy freshManagedSchema(DataSource source) {
+    public FlywayMigrationStrategy freshManagedSchema(DataSource source) {
         return flyway -> {
             boolean populated;
             boolean history;

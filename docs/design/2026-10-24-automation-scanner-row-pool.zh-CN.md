@@ -71,6 +71,13 @@ scanner-threads`，它仍是正确的后续方向。
   里串行执行，所以一个 Session 的执行仍然一次一个。这是接受的语义，由
   `twoDefinitionsSharingOneSessionBothFireWhenDueTogether` 钉住（#15442 验证
   lane 发现 1）。
+- 关于共享 Session 排队的决定（#15667）：线程池不按 Session 对行分组。第二个
+  fire 因此会在前一个探针之后、在自己 30 秒的中继预算内排队，并可能丢掉应答；
+  该 occurrence 会按退避重新驱动，Harness 仍会完成这次运行，重驱动要么重放已
+  认领的运行、要么读回已结算的收据，因此同一修订内不会运行两次。在 Harness
+  池中，一次丢失的应答还可能让该 Harness 退出选择，直到下一次成功刷新
+  （#15666）。这里判定为预期语义而不串行化：funnel 跨节点共享、也公共中继共享，
+  单节点排序并不能消除排队。运维建议：探针较慢的带闸门定义单独使用一个 Session。
 - 冷 Session 加载时（中继开始前最长 120 秒），一次 fire 仍可能超过 60 秒租约。
   fence 会拒绝旧持有者的写入，occurrence 保持 `firing`，后续 tick 用派生 run id
   幂等地重新驱动它。本次改动不增加续期运行。
