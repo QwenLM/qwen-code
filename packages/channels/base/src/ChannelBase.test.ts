@@ -24660,6 +24660,81 @@ describe('ChannelBase', () => {
       }
     });
 
+    it('parks an image behind a rejected injection instead of refusing it', async () => {
+      const queueMidTurnMessage = enableInjection();
+      // The first injection is REJECTED by the bridge, which flips the session
+      // into the degraded fallback for the rest of this turn.
+      queueMidTurnMessage.mockReturnValueOnce({
+        accepted: false,
+        reason: 'capacity',
+      });
+      const resolvers = resolvablePrompts();
+      const ch = createChannel({ dispatchMode: 'inject' });
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({ text: 'start', messageId: 'm-img-degraded-1' }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+        const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+          .calls[0]![0] as string;
+
+        await ch.handleInbound(
+          envelope({
+            text: 'keep this order',
+            messageId: 'm-img-degraded-2',
+          }),
+        );
+        // Injectable on its own, but the turn is degraded now: it must park
+        // behind the rejected message, not be refused for its media.
+        await ch.handleInbound(
+          envelope({
+            text: 'look at this',
+            imageBase64: 'AAA',
+            imageMimeType: 'image/png',
+            messageId: 'm-img-degraded-3',
+          }),
+        );
+
+        // Only the first follower reached the bridge.
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+        expect(String(queueMidTurnMessage.mock.calls[0]?.[1])).toContain(
+          'keep this order',
+        );
+        // No visible refusal: the sender is not told the image was dropped.
+        expect(ch.threadMessages).toEqual([]);
+        const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+        expect(logged).not.toContain('refusing message with image(s)');
+        expect(logged).toContain(
+          'inject: NOT delivered mid-turn (ordered after a parked message)',
+        );
+        // Parked in the BOUNDED fallback (not plain collect) in arrival order.
+        const parked = collectBuffers(ch).get(sessionId) as Array<{
+          text: string;
+          injectFallback?: boolean;
+        }>;
+        expect(parked.map((entry) => entry.text)).toEqual([
+          'keep this order',
+          'look at this',
+        ]);
+        expect(parked.map((entry) => entry.injectFallback)).toEqual([
+          true,
+          true,
+        ]);
+
+        // Replayed as its own turn once the running one ends.
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+        expect(bridge.prompt.mock.calls[1]?.[1]).toContain('look at this');
+        resolvers[1]?.('second done');
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(2));
+      } finally {
+        stderr.mockRestore();
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
     it('buffers a file attachment mid-turn so its saved path reaches a turn', async () => {
       const queueMidTurnMessage = enableInjection();
       const resolvers = resolvablePrompts();
@@ -24796,6 +24871,87 @@ describe('ChannelBase', () => {
         await running;
         await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(1));
       } finally {
+        resolvers.forEach((resolve) => resolve('done'));
+      }
+    });
+
+    it('keeps the group-history backfill for an injection after a refused image', async () => {
+      const queueMidTurnMessage = enableInjection();
+      const resolvers = resolvablePrompts();
+      const ch = createChannel(
+        {
+          dispatchMode: 'inject',
+          groupPolicy: 'open',
+          groupHistoryLimit: 5,
+          groups: { '*': { requireMention: true } },
+        },
+        { groupHistoryPath: groupHistoryPath() },
+      );
+      const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+      try {
+        const running = ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            text: 'start',
+            messageId: 'm-hist-refuse-1',
+          }),
+        );
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+        // Recorded while the turn runs: an unmentioned member message.
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: false,
+            text: 'the staging one',
+            messageId: 'm-hist-refuse-2',
+          }),
+        );
+        // Refused rather than injected, because mid-turn injection is
+        // text-only. The refusal must not consume the pending backfill.
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            text: 'see this',
+            imageBase64: 'AAA',
+            imageMimeType: 'image/png',
+            messageId: 'm-hist-refuse-3',
+          }),
+        );
+        expect(ch.threadMessages).toEqual([
+          expect.objectContaining({
+            text: expect.stringContaining('text-only'),
+          }),
+        ]);
+        const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+        expect(logged).toContain('refusing message with image(s)');
+
+        // The next text message is injected and must still carry the backfill
+        // the refused image would have drained had it not been refused.
+        await ch.handleInbound(
+          envelope({
+            isGroup: true,
+            isMentioned: true,
+            text: 'do the third one',
+            messageId: 'm-hist-refuse-4',
+          }),
+        );
+
+        expect(queueMidTurnMessage).toHaveBeenCalledTimes(1);
+        const injected = String(queueMidTurnMessage.mock.calls[0]?.[1]);
+        expect(injected).toContain(
+          '[Chat messages since your last reply - for context]',
+        );
+        expect(injected).toContain('the staging one');
+        expect(injected).toContain('do the third one');
+
+        resolvers[0]!('done');
+        await running;
+        await vi.waitFor(() => expect(ch.promptEnds).toHaveLength(1));
+      } finally {
+        stderr.mockRestore();
         resolvers.forEach((resolve) => resolve('done'));
       }
     });
