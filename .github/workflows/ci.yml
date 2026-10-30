@@ -1196,7 +1196,7 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
-          DOCUMENT='packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json'
+          DOCUMENT='packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json'
           gh api "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" --paginate --jq '.[] | .filename, .previous_filename // empty' > "${RUNNER_TEMP}/contract-pr-files.txt"
           if ! grep -qxF "${DOCUMENT}" "${RUNNER_TEMP}/contract-pr-files.txt"; then
             exit 0
@@ -1204,7 +1204,7 @@ jobs:
           BASE_DOCUMENT="${RUNNER_TEMP}/contract-base.json"
           git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"
           if ! git show "FETCH_HEAD:${DOCUMENT}" > "${BASE_DOCUMENT}" 2>/dev/null; then
-            PREVIOUS_DOCUMENT="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" --paginate --jq '.[] | select(.filename == "packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json") | .previous_filename // empty')"
+            PREVIOUS_DOCUMENT="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" --paginate --jq '.[] | select(.filename == "packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json") | .previous_filename // empty')"
             if [ -n "${PREVIOUS_DOCUMENT}" ]; then
               git show "FETCH_HEAD:${PREVIOUS_DOCUMENT}" > "${BASE_DOCUMENT}"
             else

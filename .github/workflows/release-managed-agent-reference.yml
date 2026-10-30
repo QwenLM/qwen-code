@@ -217,7 +217,7 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
       - name: 'Set up Maven (self-hosted)'
@@ -326,7 +326,7 @@ jobs:
             # PR's build must never reach the host-shared ~/.m2.
             repo="${RUNNER_TEMP}/m2-repo"
             cp -aln "${HOME}/.m2/repository" "${repo}" 2>/dev/null || true
-            rm -rf -- "${repo}/com/alibaba/qwencode-sdk" "${repo}/com/alibaba/qwen-managed-agent-server"
+            rm -rf -- "${repo}/com/alibaba/qwencode-sdk" "${repo}/com/alibaba/"qwen-managed-agent-*
             MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"
           fi
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true clean install

@@ -24,7 +24,7 @@
 
 新增三个独立脚本，并让 skill 在流程需要的位置指向它们，而不是放在文末。
 
-- `scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>` 负责解析坐标：用 lane 相同的字段列表抓取快照、校验两个 OID 在本克隆中存在、创建带 `evidence/` 子目录的产物目录，并报告当前进程能观测到的隔离信号。它不据此设闸：解析元数据需要 `gh`，而 `gh` 与边界互斥，因此这条路径总是在宿主上运行。闸门是 `--require-isolation`，用于在边界内、轮次执行任何东西之前运行。
+- `scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>` 负责解析坐标：用 lane 相同的字段列表抓取快照、校验两个 OID 在本克隆中存在、拒绝不是 PR head 干净检出的树、创建带 `evidence/` 子目录的产物目录，并报告当前进程能观测到的隔离信号。它不据此设闸：解析元数据需要 `gh`，而 `gh` 与边界互斥，因此这条路径总是在宿主上运行。闸门是 `--require-isolation`，用于在边界内、轮次执行任何东西之前运行。
 - `scripts/verify-pr-check.mjs <dir>` 把发布侧的规则套到本地产物目录：必需文件、四个判定词、为正且自洽的断言三元组、以及不允许带失败断言的 `merge-ready`。报告形态与证据命名只作为警告，因为纯文档轮次没有截图，检查器也无法知道是否跑过 harness。
 - `scripts/verify-pr-guard.mjs` 接管发布前守卫的两个半程。`--pr <n> --repo <owner>/<repo> --snapshot <file>` 抓取 head、PR 状态以及三个评论列表（带 `--paginate`），只有每次调用都成功才写文件。`--compare --start <a> --now <b>` 列出本轮 dirty 的全部原因并退出 1。
 
@@ -33,7 +33,7 @@
 - `assertions.json` 在 `fail` 非零时带 `failures: [{ id, attribution }]`，每条失败断言一项，归因为 `pr`、`harness` 或 `environment`。若 `findings`/`blocked` 的账本里没有任何一条归因为 `pr`，报错；账本长度与 `fail` 不一致，同样报错。有失败但没有账本只报警告，因此旧产物仍能通过。
 - `mutations.json` 可以声明 `coverageClaim: "per-commit"`，并给出来自 `git log --no-merges <previous>..<head> --not <target>` 的 `productionCommits` 与 `rows[].commit`。列出的提交没有对应行时报错，并点名这些提交；列表为空同样报错——对空集合做的声明恒真。
 
-每个已准备的产物目录保存只含 `headRefOid` 的 `context.json`。检查器优先使用该轮快照，并注明实际使用的来源。旧目录回退到按 PR 共享的快照；该轮快照不可读或无效时只报警告，不会改用后续轮次的共享提交号。
+每个已准备的产物目录保存带完整坐标的 `context.json`——`repo`、`pr`、`baseRefOid` 与 `headRefOid`——本地轮次因此从一个文件读出两个 OID，而不是从 `HEAD` 推导。prepare 只在当前树是 `headRefOid` 的干净检出时才写它：轮次复用这棵树作为 A/B 的 head 侧，所以 HEAD 不对会退出 3 并点名要跑的 `git checkout`，树脏会退出 3 并要求维护者自己提交或 stash——脚本绝不代为 stash，且拒绝时不创建任何产物目录。检查器优先使用该轮快照，并注明实际使用的来源。旧目录回退到按 PR 共享的快照；该轮快照不可读或无效时只报警告，不会改用后续轮次的共享提交号。
 
 ## 署名页脚
 
@@ -50,7 +50,7 @@
 ## 设计决策
 
 1. **`--repo` 必填。** 脚本无法区分维护者克隆与贡献者 fork，而在 fork 上 `origin` 会把同一个 PR 号解析成另一个无关 PR。fail closed 的代价是一个参数，消掉的正是 skill 已经警告的那种失败。
-2. **脚本不碰轮次本身，坐标路径也不对隔离设闸。** prepare 只抓元数据、建目录；它不建 worktree、不构建、不执行 PR 代码。它也无法判断本进程是否有资格执行那些代码：解析元数据必须访问 `gh`，而边界按设计排除 `gh`，所以它总是在宿主上运行。在那里设闸会让每一轮都触发，并让覆盖开关变成常规路径，因此检查被拆成独立模式，用于在边界内运行。
+2. **脚本不碰轮次本身，坐标路径也不对隔离设闸。** prepare 只抓元数据、建目录；它不建 worktree、不构建、不执行 PR 代码。但它对树设闸，因为轮次在当前树里跑 A/B 的 head 侧：HEAD 不是 PR head、或有任何未提交改动，测到的就是报告没有点名的代码，所以两者都在写出任何东西之前被拒绝。它也无法判断本进程是否有资格执行那些代码：解析元数据必须访问 `gh`，而边界按设计排除 `gh`，所以它总是在宿主上运行。在那里设闸会让每一轮都触发，并让覆盖开关变成常规路径，因此检查被拆成独立模式，用于在边界内运行。
 3. **本地检查器镜像发布侧，而不是替换它。** 把发布 job 里的断言抽成共享代码会动到 workflow 及其 meta 测试；规则只有四条、稳定，且集中在一处。代价是可能漂移，记录在下方。
 4. **报告形态只报警告。** 发布侧同样不强制报告结构。比发布侧更严格的检查器会拒绝 lane 本来接受的产物，结果只会教会维护者忽略它。
 5. **归因是一份账本，不是第五个判定词。** 面对环境红项，最诱人的修法是加一个 `merge-ready-with-caveats` 之类的判定，但那要同时改发布侧、它的 case 标签和对应 pin。判定词仍是四个：红项被改写成它本来就是的那条断言——两臂都因原因 R 失败——账本则记录谁造成了什么。检查器于是读归因，而不是从 prose 里猜。
@@ -60,6 +60,7 @@
 ## 约束与风险
 
 - 隔离检测只把容器类信号计为边界。内置 macOS 沙箱设置 `SANDBOX=sandbox-exec`，但其默认 profile 仍能读取宿主文件，因此只作为注意事项报告，不算边界。仅有标记也不等于无凭据就绪：CLI 自带的 Docker/Podman 启动器会挂载 gcloud 配置与 ADC 文件并复制模型 key，因此闸门还要求显式声明，并在看到已知信号时拒绝。
+- 树闸门只证明源码身份。`dist/` 与 `node_modules/` 都被 gitignore，head 的干净检出仍可能带着更早提交的构建——评审中已复现：prepare 退出 0，而被忽略的构建以新 head 的名义跑旧代码。因此 install/build 的复用是有条件的：轮次必须先确立产物确为本 head 所建（否则按本地安装策略重建），prepare 的成功行也相应写成「先校验或刷新其 install/build」，而不是宣传无条件复用构建。
 - 发布规则存在两份实现，可能漂移。一条 workflow 元测试把检查器的判定词表钉到发布侧的 case 标签上，任一侧新增第五个词都会让套件失败。CI 发布侧仍是权威。
 - PR 标题是不可信输入且会到达维护者终端，因此在打印前剥离控制字符。
 - 这些是本地辅助脚本：lane 从基线分支钉住 `.qwen`，因此引用它们的 skill 文本要在本改动合入后才生效。
@@ -82,7 +83,8 @@
 
 ## 验收标准
 
-- 在同时含有两个 OID 的克隆上，`prepare` 写出的快照其 `baseRefOid`/`headRefOid` 与 PR 一致，创建符合 glob 的目录，且在宿主上退出 0。`--require-isolation` 只有在容器标记存在、`QWEN_VERIFY_CREDENTIAL_FREE=1` 声明边界干净、且看不到已知凭据信号时才通过；否则退出 4。
+- 在同时含有两个 OID 的克隆上，`prepare` 写出的快照其 `baseRefOid`/`headRefOid` 与 PR 一致，创建符合 glob 的目录，其中 `context.json` 带 `repo`、`pr`、`baseRefOid` 与 `headRefOid`，且在宿主上退出 0。`--require-isolation` 只有在容器标记存在、`QWEN_VERIFY_CREDENTIAL_FREE=1` 声明边界干净、且看不到已知凭据信号时才通过；否则退出 4。
+- HEAD 不是 PR head（点名要跑的 `git checkout`）、树带有未提交改动（无论已跟踪还是未跟踪，消息点名条目并给出能清掉未跟踪文件的 stash 形式）、或索引标志隐藏了已跟踪状态（skip-worktree / assume-unchanged，sparse checkout 会批量设置）时，`prepare` 退出 3，任何拒绝都不写产物目录；它绝不代维护者 stash。detached 于 PR head 的 HEAD 会通过：身份是 OID 而非分支，且有测试钉住消息里打印的 checkout 补救确实能走到退出 0。
 - OID 缺失时失败，并给出用 `--repo` 指定仓库（而非 `origin`）的 fetch 命令。
 - `check` 拒绝带失败断言的 `merge-ready`、不一致的三元组、未知判定词；对相同计数下的 `findings` 予以通过。
 - 当失败账本里没有任何一条归因为 PR 时，`check` 拒绝 `findings` 与 `blocked`；账本长度与 `fail` 不一致时拒绝；对带 `harness` 失败的 `inconclusive` 予以通过；旧产物没有账本时只报警告。

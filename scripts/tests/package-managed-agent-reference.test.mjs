@@ -39,7 +39,7 @@ import {
 } from '../package-managed-agent-reference.mjs';
 
 function mainSource(main) {
-  return `packages/managed-agent-server/src/main/java/${main.replaceAll('.', '/')}.java`;
+  return `packages/managed-agent-server/server/src/main/java/${main.replaceAll('.', '/')}.java`;
 }
 
 async function fixture(root) {
@@ -50,15 +50,15 @@ async function fixture(root) {
     }),
     LICENSE: 'license\n',
     'packages/managed-agent-server/pom.xml': `
-      <artifactId>qwen-managed-agent-server</artifactId>
+      <artifactId>qwen-managed-agent-parent</artifactId>
       <version>0.4.0-alpha</version>
       <java.version>21</java.version>
     `,
-    'packages/managed-agent-server/target/qwen-managed-agent-server-0.4.0-alpha-exec.jar':
+    'packages/managed-agent-server/server/target/qwen-managed-agent-server-0.4.0-alpha-exec.jar':
       'server',
-    'packages/managed-agent-server/target/qwen-managed-agent-server-0.4.0-alpha-operator-recovery.jar':
+    'packages/managed-agent-server/server/target/qwen-managed-agent-server-0.4.0-alpha-operator-recovery.jar':
       'recovery',
-    'packages/managed-agent-server/src/main/resources/application.yml':
+    'packages/managed-agent-server/server/src/main/resources/application.yml':
       "workspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:false}'\n",
     'packages/managed-agent-server/distribution/config/application.example.yml':
       'template\n',
@@ -81,9 +81,9 @@ async function fixture(root) {
       '#!/usr/bin/env sh\nupgrade\n',
     'packages/managed-agent-server/distribution/bin/qwen-managed-agent-upgrade.mjs':
       'export {};\n',
-    'packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json':
+    'packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json':
       JSON.stringify({ info: { version: '1.46.0' } }),
-    'packages/managed-agent-server/src/main/resources/db/managed-schema/V1__baseline.sql':
+    'packages/managed-agent-server/persistence/src/main/resources/db/managed-schema/V1__baseline.sql':
       'select 1;',
     'packages/managed-agent-server/src/main/java/db/migration/V9__latest.java':
       'class Latest {}',
@@ -302,7 +302,7 @@ test('launchers load the distribution config only when it exists', async () => {
     assert.deepEqual(
       registration.split('\n').filter((line) => line.startsWith('ARG=')),
       [
-        'ARG=-Dloader.main=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain',
+        'ARG=-Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceStorageRegistrationMain',
         'ARG=-cp',
         `ARG=${bundle}/lib/qwen-managed-agent-server-0.4.0-alpha.jar`,
         'ARG=org.springframework.boot.loader.launch.PropertiesLauncher',
@@ -389,7 +389,7 @@ test('maps every admin command to an entry point in the server', async () => {
   // application is the one main the admin launcher does not run.
   const sources = path.join(
     root,
-    'packages/managed-agent-server/src/main/java',
+    'packages/managed-agent-server/server/src/main/java',
   );
   const mains = [];
   for (const file of await readdir(sources, { recursive: true })) {
@@ -994,7 +994,7 @@ test('rejects stale or ambiguous safety defaults', async (context) => {
   const cases = [
     {
       name: 'commented public Shell default',
-      file: 'packages/managed-agent-server/src/main/resources/application.yml',
+      file: 'packages/managed-agent-server/server/src/main/resources/application.yml',
       contents:
         "# workspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:false}'\nworkspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:true}'\n",
       error: /Public Shell must default to false/,
@@ -1009,7 +1009,7 @@ test('rejects stale or ambiguous safety defaults', async (context) => {
     },
     {
       name: 'duplicate public Shell default',
-      file: 'packages/managed-agent-server/src/main/resources/application.yml',
+      file: 'packages/managed-agent-server/server/src/main/resources/application.yml',
       contents:
         "workspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:false}'\nworkspace-shell-enabled: '${QWEN_MANAGED_AGENT_WORKSPACE_SHELL_ENABLED:false}'\n",
       error: /Cannot uniquely read public Shell default/,

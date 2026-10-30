@@ -331,7 +331,17 @@ describe('SDK Java self-hosted workflow guards', () => {
         pruneMarkers.push([jobName, markersOf(prune)]);
       }
     }
-    const expected = ['qwen-managed-agent-server', 'qwencode-sdk'];
+    const expected = [
+      'qwen-managed-agent-adapters',
+      'qwen-managed-agent-contracts',
+      'qwen-managed-agent-control-plane',
+      'qwen-managed-agent-parent',
+      'qwen-managed-agent-persistence',
+      'qwen-managed-agent-runtime-broker',
+      'qwen-managed-agent-server',
+      'qwen-managed-agent-verification',
+      'qwencode-sdk',
+    ];
     expect(drops.length).toBeGreaterThan(0);
     expect(prunes.length).toBeGreaterThan(0);
     for (const [jobName, set] of [...drops, ...prunes]) {
@@ -458,6 +468,24 @@ describe('SDK Java self-hosted workflow guards', () => {
         mkdirSync(runnerTemp, { recursive: true });
         const hostRepo = join(home, '.m2', 'repository');
         const hostJars = [
+          ...[
+            'qwen-managed-agent-parent',
+            'qwen-managed-agent-contracts',
+            'qwen-managed-agent-control-plane',
+            'qwen-managed-agent-runtime-broker',
+            'qwen-managed-agent-persistence',
+            'qwen-managed-agent-adapters',
+            'qwen-managed-agent-server',
+            'qwen-managed-agent-verification',
+          ]
+            .filter((name) => name !== 'qwen-managed-agent-server')
+            .map((name) => [
+              'com',
+              'alibaba',
+              name,
+              '0.1.0-alpha',
+              'module.jar',
+            ]),
           ['com', 'alibaba', 'qwencode-sdk', '0.1.0-alpha', 'sdk.jar'],
           [
             'com',
@@ -497,8 +525,15 @@ describe('SDK Java self-hosted workflow guards', () => {
           expect(result.error, name).toBeUndefined();
           expect(result.status, name + result.stderr).toBe(0);
           for (const coordinate of [
-            'qwencode-sdk',
+            'qwen-managed-agent-parent',
+            'qwen-managed-agent-contracts',
+            'qwen-managed-agent-control-plane',
+            'qwen-managed-agent-runtime-broker',
+            'qwen-managed-agent-persistence',
+            'qwen-managed-agent-adapters',
             'qwen-managed-agent-server',
+            'qwen-managed-agent-verification',
+            'qwencode-sdk',
           ]) {
             expect(
               existsSync(
@@ -1103,8 +1138,8 @@ describe('SDK Java self-hosted workflow guards', () => {
       paths: [
         'packages/sdk-java/qwencode/target/surefire-reports/*.txt',
         'packages/sdk-java/qwencode/target/surefire-reports/*.dumpstream',
-        'packages/managed-agent-server/target/surefire-reports/*.txt',
-        'packages/managed-agent-server/target/surefire-reports/*.dumpstream',
+        'packages/managed-agent-server/verification/target/surefire-reports/*.txt',
+        'packages/managed-agent-server/verification/target/surefire-reports/*.dumpstream',
       ],
       testStep: 'Run Runtime Broker state tests',
     },
@@ -1112,10 +1147,10 @@ describe('SDK Java self-hosted workflow guards', () => {
       name: 'mysql-integration',
       artifact: 'sdk-java-test-reports-mysql-integration-java-21',
       paths: [
-        'packages/managed-agent-server/target/surefire-reports/*.txt',
-        'packages/managed-agent-server/target/surefire-reports/*.dumpstream',
-        'packages/managed-agent-server/target/failsafe-reports/*.txt',
-        'packages/managed-agent-server/target/failsafe-reports/*.dumpstream',
+        'packages/managed-agent-server/verification/target/surefire-reports/*.txt',
+        'packages/managed-agent-server/verification/target/surefire-reports/*.dumpstream',
+        'packages/managed-agent-server/verification/target/failsafe-reports/*.txt',
+        'packages/managed-agent-server/verification/target/failsafe-reports/*.dumpstream',
       ],
       testStep:
         'Install and verify Managed Agent dependencies, tests, Checkstyle, and MySQL integration',
@@ -1215,7 +1250,7 @@ describe('SDK Java self-hosted workflow guards', () => {
   );
 
   it('keeps the Broker matrix selector matched to every default test including nested packages', () => {
-    const cwd = 'packages/managed-agent-server/src/test/java';
+    const cwd = 'packages/managed-agent-server/verification/src/test/java';
     const prefix = 'com/alibaba/qwen/code/runtimebroker';
     const selected = [
       ...new Set(
@@ -1237,7 +1272,10 @@ describe('SDK Java self-hosted workflow guards', () => {
       true,
     );
     expect(
-      readFileSync('packages/managed-agent-server/pom.xml', 'utf8'),
+      readFileSync(
+        'packages/managed-agent-server/verification/pom.xml',
+        'utf8',
+      ),
     ).toContain('<failIfNoTests>true</failIfNoTests>');
   });
 
@@ -2074,7 +2112,7 @@ describe('SDK Java MySQL lane on the ECS pool', () => {
     // artifact in the shared cache the next seed hardlinks from.
     expect(step.run).toContain('cd "${RUNNER_TEMP}/m2-repo"');
     expect(step.run).toContain(
-      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
+      "timeout 300 find . \\( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \\) -prune -o -type f -links 1 -exec cp -ln --parents -t \"${HOME}/.m2/repository\" {} + 9>&- || write_back=$?",
     );
     expect(step.run).not.toMatch(/tar [^\n]*-xf/);
     expect(step.run).toContain(
