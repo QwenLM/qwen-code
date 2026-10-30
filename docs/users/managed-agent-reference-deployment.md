@@ -4,6 +4,11 @@
 
 The Managed Agent reference distribution is experimental. Its accepted initial topology is one Java control plane and its embedded Runtime Broker on one trusted Linux host, one MySQL database, and one compatible Qwen Hosted Harness. The compatibility manifest in each release is authoritative for that release.
 
+For a source-based Kubernetes installation with optional trusted-node tools and
+WebShell, see the separate
+[Helm deployment guide](https://github.com/QwenLM/qwen-code/tree/main/deploy/kubernetes).
+That chart does not extend this reference distribution's acceptance scope.
+
 ## Verify and extract
 
 Download the archive, its detached manifest, and `SHA256SUMS.txt` from the same GitHub prerelease. Verify them before extraction:
@@ -75,7 +80,7 @@ curl --fail http://127.0.0.1:8080/actuator/health
 
 The enabled Harness turns on the Managed Session Store. The Store's base URL defaults to this server's plaintext loopback listener. Its workspace ID defaults to the one the Runtime Broker derives from `QWEN_MANAGED_AGENT_WORKSPACE_CWD`, so the identity stays the same when the tool path below is enabled. A deployment that already set `QWEN_MANAGED_AGENT_WORKSPACE_ID` must keep it: unbound Sessions resolve their Store scope from that ID. Set `QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL` only when the Harness reaches this server through another address, or when the listener serves TLS.
 
-This base configuration supports text-only Hosted Sessions. Keep the listener on loopback unless a signed or authenticated ingress is configured. The complete authentication, API, and capability configuration is bundled as `docs/server-reference.md`.
+This base configuration supports text-only Hosted Sessions. Keep the listener on loopback unless a signed or authenticated ingress is configured. Every setting, with its variable and default, is listed in the [configuration reference](managed-agent-configuration-reference.md), bundled as `docs/configuration.md`. The complete authentication, API, and capability configuration is bundled as `docs/server-reference.md`.
 
 ## Bootstrap credentials
 
