@@ -20,6 +20,7 @@ import {
   isNegationExcluded,
   affectedWorkspaces,
   buildSetFor,
+  dependencyClosure,
   chainsCommands,
   declaredBuildHeapMb,
   hasUnmodeledWorkspaceGlob,
@@ -816,6 +817,17 @@ const PKGS: WorkspacePackage[] = [
     deps: [],
   },
 ];
+
+describe('dependencyClosure', () => {
+  it('takes what a package depends on, and none of its consumers', () => {
+    expect(dependencyClosure(['packages/bridge'], PKGS)).toEqual([
+      'packages/bridge',
+      'packages/core',
+    ]);
+    // `buildSetFor` of the same package adds its consumer.
+    expect(buildSetFor(['packages/bridge'], PKGS)).toContain('packages/leaf');
+  });
+});
 
 describe('buildSetFor', () => {
   it('orders dependencies before the package that needs them', () => {

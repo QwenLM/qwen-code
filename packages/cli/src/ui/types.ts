@@ -211,6 +211,7 @@ export interface HistoryItemBase {
 export type HistoryItemUser = HistoryItemBase & {
   type: 'user';
   text: string;
+  recallText?: string;
   promptId?: string;
   /** Source-record link for conversation rewind, never for file restore. */
   rewindId?: string;
@@ -530,6 +531,8 @@ export interface ContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
   mcpTools: number;
+  /** Instructions are separate when present; older producers combine them with memory. */
+  instructionFiles?: number;
   memoryFiles: number;
   /** Skill tool definition + the `<available_skills>` listing as sent + loaded bodies. */
   skills: number;
@@ -592,6 +595,7 @@ export type HistoryItemContextUsage = HistoryItemBase & {
   breakdown: ContextCategoryBreakdown;
   builtinTools: ContextToolDetail[];
   mcpTools: ContextToolDetail[];
+  instructionFiles?: ContextMemoryDetail[];
   memoryFiles: ContextMemoryDetail[];
   skills: ContextSkillDetail[];
   /** True when totalTokens is absent or derived from a local estimate rather than provider usage. */

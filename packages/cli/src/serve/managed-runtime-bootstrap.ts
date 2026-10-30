@@ -13,7 +13,9 @@ import { getCliVersion } from '../utils/version.js';
 import {
   readWorkspaceFiles,
   WorkspaceFileError,
+  sessionWorkspaceFileScope,
   workspaceFilePath,
+  type SessionWorkspaceFileScope,
 } from './managed-workspace-files.js';
 import {
   inspectWorkspaceUpload,
@@ -687,10 +689,12 @@ async function workspaceUpload(
   request: Record<string, unknown>,
   expected: { device: string; inode: string },
   verifyStorage: () => Promise<void>,
+  sessionScope?: SessionWorkspaceFileScope,
 ): Promise<WorkspaceUploadResult> {
   const { metadata, bytes } = workspaceUploadRequest(request['files']);
   const root = absolute(request['root']);
-  const cwd = workspaceFilePath(request['cwdRelative']);
+  const cwd =
+    sessionScope?.cwdRelative ?? workspaceFilePath(request['cwdRelative']);
   const target = {
     nodeId: request['nodeId'],
     root,
@@ -698,6 +702,7 @@ async function workspaceUpload(
     expected,
     identity: request['identity'] ?? null,
     marker: request['marker'] ?? null,
+    ...(sessionScope ? { sessionFileScope: sessionScope } : {}),
     ...metadata,
   };
   const canonical = (value: unknown): unknown =>
@@ -779,6 +784,7 @@ async function workspaceUpload(
       bytes,
       expected,
       verifyStorage,
+      sessionScope,
     );
   } else {
     let live = true;
@@ -794,6 +800,7 @@ async function workspaceUpload(
       metadata,
       expected,
       verifyStorage,
+      sessionScope,
     );
   }
   await writeSshPrivateJson(receiptPath, result);
@@ -844,19 +851,31 @@ export async function executeSshBootstrap(
       if (identity && !uploading) await verifySshStorage(identity, marker);
       const expected = identity ?? object(request['localRootIdentity']);
       try {
+        if (request['sessionFileScope'] !== undefined && identity)
+          refuse('Session file scopes require local storage.');
+        const sessionScope = sessionWorkspaceFileScope(
+          request['sessionFileScope'],
+          request['cwdRelative'],
+        );
         const fileIdentity = {
           device: text(expected.device),
           inode: text(expected.inode),
         };
         const files = uploading
-          ? await workspaceUpload(request, fileIdentity, async () => {
-              if (identity) await verifySshStorage(identity, marker);
-            })
+          ? await workspaceUpload(
+              request,
+              fileIdentity,
+              async () => {
+                if (identity) await verifySshStorage(identity, marker);
+              },
+              sessionScope,
+            )
           : await readWorkspaceFiles(
               root,
               text(request['cwdRelative']),
               request['files'],
               fileIdentity,
+              sessionScope,
             );
         if (identity && !uploading) await verifySshStorage(identity, marker);
         return { qwenVersion: await getCliVersion(), files };

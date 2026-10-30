@@ -11,6 +11,12 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useDaemonResource } from './useDaemonResource.js';
 
+const availability = vi.hoisted(() => ({ state: 'available' }));
+vi.mock('../../availability-context', () => ({
+  useDaemonAvailability: () => availability.state,
+  useDaemonAvailabilityController: () => undefined,
+}));
+
 function createDeferred<T>() {
   let resolve!: (v: T) => void;
   let reject!: (e: Error) => void;
@@ -26,6 +32,7 @@ describe('useDaemonResource', () => {
   let root: Root;
 
   beforeEach(() => {
+    availability.state = 'available';
     container = document.createElement('div');
     document.body.appendChild(container);
     root = createRoot(container);
@@ -51,6 +58,38 @@ describe('useDaemonResource', () => {
 
     expect(result?.data).toBe('hello');
     expect(result?.loading).toBe(false);
+  });
+
+  it('keeps cached data while paused and refreshes automatically after recovery', async () => {
+    const load = vi
+      .fn()
+      .mockResolvedValueOnce('cached')
+      .mockResolvedValue('fresh');
+    let result: ReturnType<typeof useDaemonResource<string>> | undefined;
+    function TestComponent() {
+      result = useDaemonResource(load, { autoLoad: true });
+      return null;
+    }
+    await act(async () => {
+      root.render(<TestComponent />);
+    });
+    expect(result?.data).toBe('cached');
+    availability.state = 'unavailable';
+    await act(async () => {
+      root.render(<TestComponent />);
+    });
+    await act(async () => {
+      await result?.reload();
+    });
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(result?.data).toBe('cached');
+    expect(result?.error).toBeUndefined();
+    availability.state = 'available';
+    await act(async () => {
+      root.render(<TestComponent />);
+    });
+    expect(load).toHaveBeenCalledTimes(2);
+    expect(result?.data).toBe('fresh');
   });
 
   it('does not load when enabled is false', async () => {

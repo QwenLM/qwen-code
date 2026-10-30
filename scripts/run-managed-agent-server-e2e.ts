@@ -70,15 +70,20 @@ let freeze = false;
 let modelRoundFailover = false;
 let frozenControlPlane = false;
 let g3VerifyArgument: string | undefined;
-// Step 3 A5/A5a barriers and the A4/C4 lost-reply arms layer one fault point
-// on the Allow arm; every other mode answers a different question and would
-// make the same crash prove two things at once.
+// Step 3 A5/A5a barriers, the A4/C4 lost-reply arms, and the C1-C3
+// cleanup/terminal arms layer one fault point on the Allow arm; every other
+// mode answers a different question and would make the same crash prove two
+// things at once.
 const approvalFaults = [
   'after-decision',
   'after-prepare',
   'after-result',
+  'cleanup-failed',
   'decision-reply-lost',
   'admission-reply-lost',
+  'load-reply-lost',
+  'terminal-reply-lost',
+  'terminal-write-failed',
 ] as const;
 type ApprovalFault = (typeof approvalFaults)[number];
 let g3FaultArgument: string | undefined;
@@ -119,7 +124,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     index += 1;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|decision-reply-lost|admission-reply-lost]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
     );
   }
 }
@@ -241,7 +246,7 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 
 const cliBundle = path.join(root, 'dist', 'cli.js');
 const springModule = path.join(root, 'packages', 'managed-agent-server');
-const springTarget = path.join(springModule, 'target');
+const springTarget = path.join(springModule, 'server', 'target');
 // The pom attaches classified repackage executions alongside the
 // unclassified server jar, so a wildcard over target/ matches several
 // artifacts. Read the project version from the
@@ -252,7 +257,7 @@ const springTarget = path.join(springModule, 'target');
 // re-indenting the element cannot flow newlines into the jar path.
 const pomXml = readFileSync(path.join(springModule, 'pom.xml'), 'utf8');
 const pomVersion = pomXml.match(
-  /<artifactId>qwen-managed-agent-server<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
+  /<artifactId>qwen-managed-agent-parent<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
 )?.[1];
 if (!pomVersion) {
   throw new Error(
@@ -261,7 +266,7 @@ if (!pomVersion) {
 }
 const springJar = path.join(
   springTarget,
-  `qwen-managed-agent-server-${pomVersion}.jar`,
+  `qwen-managed-agent-server-${pomVersion}-exec.jar`,
 );
 for (const required of [
   cliBundle,
@@ -599,15 +604,25 @@ type HeldExecutionStartProxy = {
   close: () => Promise<void>;
   heldPath: () => string | undefined;
   observations: () => string[];
+  // C3: every Runtime cleanup release is refused until allowRelease(), so
+  // the doomed generation cannot discharge its own cleanup debt before the
+  // crash lands.
+  releaseFailureCount: () => number;
+  releaseSuccessCount: () => number;
+  allowRelease: () => void;
 };
 
 async function startHeldExecutionStartProxy(
   targetOrigin: string,
   holdExecutionStart = true,
+  failRelease = false,
 ): Promise<HeldExecutionStartProxy> {
   let heldPath: string | undefined;
   const observations: string[] = [];
   let closed = false;
+  let releaseAllowed = !failRelease;
+  let releaseFailureCount = 0;
+  let releaseSuccessCount = 0;
   const server: Server = createServer((request, response) => {
     void (async () => {
       const chunks: Buffer[] = [];
@@ -617,6 +632,21 @@ async function startHeldExecutionStartProxy(
       const target = new URL(request.url ?? '/', targetOrigin);
       const method = request.method ?? 'GET';
       observations.push(`${method} ${target.pathname} received`);
+      if (
+        failRelease &&
+        method === 'POST' &&
+        target.pathname.endsWith(':release') &&
+        !target.pathname.endsWith(':release-mount')
+      ) {
+        if (!releaseAllowed) {
+          releaseFailureCount += 1;
+          observations.push(`${method} ${target.pathname} refused`);
+          response.writeHead(500, { 'content-type': 'application/json' });
+          response.end('{"error":"e2e_cleanup_release_failed"}');
+          return;
+        }
+        releaseSuccessCount += 1;
+      }
       if (
         holdExecutionStart &&
         method === 'POST' &&
@@ -693,6 +723,12 @@ async function startHeldExecutionStartProxy(
     baseUrl: `http://127.0.0.1:${address.port}`,
     heldPath: () => heldPath,
     observations: () => [...observations],
+    releaseFailureCount: () => releaseFailureCount,
+    releaseSuccessCount: () => releaseSuccessCount,
+    allowRelease: () => {
+      releaseAllowed = true;
+      observations.push('release allowed');
+    },
     close: async () => {
       if (closed) return;
       closed = true;
@@ -752,6 +788,184 @@ function postAndDropReply(
     request.once('error', reject);
     request.end(body);
   });
+}
+
+type StoreTerminalFault = 'drop-reply' | 'reject';
+type StoreFaultProxy = {
+  baseUrl: string;
+  observations: () => string[];
+  armTerminal: (sessionId: string, fault: StoreTerminalFault) => void;
+  terminalFaulted: () => boolean;
+  terminalRejectCount: () => number;
+  terminalAcceptCount: () => number;
+  allowTerminal: () => void;
+  close: () => Promise<void>;
+};
+
+// C1/C2: the Harness reaches the Session Store over the URL the control
+// plane advertises. This proxy fronts that boundary so one matching
+// `turn.settled` commit can lose its reply (committed, not delivered) or
+// be refused before it lands (payable checkpoint, terminal missing).
+function startStoreFaultProxy(targetOrigin: string): Promise<StoreFaultProxy> {
+  return (async () => {
+    let armed: { sessionId: string; fault: StoreTerminalFault } | undefined;
+    let terminalFaulted = false;
+    let terminalAllowed = false;
+    let terminalRejectCount = 0;
+    let terminalAcceptCount = 0;
+    let closed = false;
+    const observations: string[] = [];
+    const server: Server = createServer((request, response) => {
+      void (async () => {
+        const chunks: Buffer[] = [];
+        for await (const chunk of request) {
+          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+        }
+        const body = Buffer.concat(chunks);
+        const target = new URL(request.url ?? '/', targetOrigin);
+        const method = request.method ?? 'GET';
+        const commit = target.pathname.match(
+          /^\/internal\/managed-session-store\/v1\/sessions\/([^/]+)\/transactions:commit(?:-v2)?$/,
+        );
+        const sessionId = commit ? decodeURIComponent(commit[1]) : undefined;
+        const terminal =
+          armed !== undefined &&
+          sessionId === armed.sessionId &&
+          commitCarriesTurnSettled(body);
+        if (terminal && armed?.fault === 'reject' && !terminalAllowed) {
+          terminalRejectCount += 1;
+          terminalFaulted = true;
+          observations.push(`${method} ${target.pathname} rejected`);
+          response.writeHead(500, { 'content-type': 'application/json' });
+          response.end('{"error":"e2e_terminal_commit_failed"}');
+          return;
+        }
+        const headers = new Headers();
+        for (const [name, value] of Object.entries(request.headers)) {
+          if (
+            value === undefined ||
+            [
+              'connection',
+              'content-length',
+              'host',
+              'transfer-encoding',
+            ].includes(name)
+          ) {
+            continue;
+          }
+          headers.set(name, Array.isArray(value) ? value.join(', ') : value);
+        }
+        const upstream = await fetch(target, {
+          method,
+          headers,
+          ...(['GET', 'HEAD'].includes(method) ? {} : { body }),
+        });
+        const upstreamBody = Buffer.from(await upstream.arrayBuffer());
+        if (terminal) {
+          if (armed?.fault === 'drop-reply' && !terminalAllowed) {
+            // Keep dropping every bounded retry until the crash. Arm the
+            // barrier only on a confirmed 200: a rejected first commit did
+            // not land, and letting it pass would turn C1 into C2 while the
+            // later compensation satisfies the final accept count.
+            if (upstream.status === 200) {
+              terminalFaulted = true;
+              terminalAcceptCount += 1;
+              observations.push(
+                `${method} ${target.pathname} forwarded 200 dropped reply`,
+              );
+            } else {
+              observations.push(
+                `${method} ${target.pathname} forwarded ${upstream.status} dropped reply (not committed)`,
+              );
+            }
+            response.destroy();
+            return;
+          }
+          if (upstream.status === 200) terminalAcceptCount += 1;
+        }
+        observations.push(
+          `${method} ${target.pathname} forwarded ${upstream.status}`,
+        );
+        const responseHeaders: Record<string, string> = {};
+        upstream.headers.forEach((value, name) => {
+          if (
+            ![
+              'connection',
+              'content-encoding',
+              'content-length',
+              'transfer-encoding',
+            ].includes(name)
+          ) {
+            responseHeaders[name] = value;
+          }
+        });
+        response.writeHead(upstream.status, responseHeaders);
+        response.end(upstreamBody);
+      })().catch((error: unknown) => {
+        if (response.destroyed) return;
+        if (!response.headersSent) response.writeHead(502);
+        response.end(String(error));
+      });
+    });
+    const port = await freePort();
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(port, '127.0.0.1', () => {
+        server.off('error', reject);
+        resolve();
+      });
+    });
+    return {
+      baseUrl: `http://127.0.0.1:${port}`,
+      observations: () => [...observations],
+      armTerminal: (sessionId, fault) => {
+        armed = { sessionId, fault };
+        terminalFaulted = false;
+        terminalAllowed = false;
+        observations.push(`armed ${fault} for ${sessionId}`);
+      },
+      terminalFaulted: () => terminalFaulted,
+      terminalRejectCount: () => terminalRejectCount,
+      terminalAcceptCount: () => terminalAcceptCount,
+      allowTerminal: () => {
+        terminalAllowed = true;
+        observations.push('terminal commits allowed');
+      },
+      close: async () => {
+        if (closed) return;
+        closed = true;
+        server.closeAllConnections();
+        await new Promise<void>((resolve, reject) => {
+          server.close((error) => (error ? reject(error) : resolve()));
+        });
+      },
+    };
+  })();
+}
+
+function commitCarriesTurnSettled(body: Buffer): boolean {
+  try {
+    const parsed = JSON.parse(body.toString('utf8')) as {
+      recordBytesBase64?: unknown;
+    };
+    if (typeof parsed.recordBytesBase64 !== 'string') return false;
+    const records = Buffer.from(parsed.recordBytesBase64, 'base64').toString(
+      'utf8',
+    );
+    return records.split('\n').some((line) => {
+      if (!line.trim()) return false;
+      const record = JSON.parse(line) as {
+        subtype?: unknown;
+        managedSession?: { kind?: unknown };
+      };
+      return (
+        record.subtype === 'managed_session_event_v1' &&
+        record.managedSession?.kind === 'turn.settled'
+      );
+    });
+  } catch {
+    return false;
+  }
 }
 
 async function waitUntil(
@@ -1196,6 +1410,7 @@ function advanceModelRound(): void {
 let fake: Awaited<ReturnType<typeof startFakeOpenAIServer>> | undefined;
 let heldStartProxy: HeldExecutionStartProxy | undefined;
 let replacementBrokerProxy: HeldExecutionStartProxy | undefined;
+let storeFaultProxy: StoreFaultProxy | undefined;
 let failure: unknown;
 let dumpPort: number | undefined;
 // The success JSON, assembled inside the try and printed only after
@@ -1203,6 +1418,9 @@ let dumpPort: number | undefined;
 // on stdout for a run the operator explicitly stopped.
 let resultJson: string | undefined;
 let approvalResultJson: string | undefined;
+// Snapshot before the relief Turn so the summary cannot report the relief's
+// store/broker traffic as part of the original fault arm.
+let originalFaultObservations: Record<string, number> | undefined;
 let g3SummaryJson: string | undefined;
 // The freeze arm's wake record reads as a pass line too, so it defers the
 // same way and prints after the main result, as in the base's ordering.
@@ -1337,6 +1555,20 @@ try {
   const springPort = await freePort();
   const harnessPort = await freePort();
   const brokerPort = await freePort();
+  // C1/C2 replace the Harness's Session Store reply/write after the
+  // payable checkpoint, so the store URL the control plane advertises
+  // must point at this proxy from the first load onward. Other arms keep
+  // the direct URL and an unchanged path.
+  if (
+    approvalFault === 'terminal-reply-lost' ||
+    approvalFault === 'terminal-write-failed'
+  ) {
+    storeFaultProxy = await startStoreFaultProxy(
+      `http://127.0.0.1:${springPort}`,
+    );
+  }
+  const sessionStoreUrl =
+    storeFaultProxy?.baseUrl ?? `http://127.0.0.1:${springPort}`;
 
   const initialized = spawnSync(
     mysqld,
@@ -1447,7 +1679,7 @@ try {
               QWEN_MANAGED_AGENT_DISPATCH_LEASE_DURATION: '2s',
               QWEN_MANAGED_AGENT_DISPATCH_LEASE_RENEW_INTERVAL: '500ms',
               QWEN_MANAGED_AGENT_DISPATCH_SCAN_DELAY: '200ms',
-              QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: `http://127.0.0.1:${springPort}`,
+              QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: sessionStoreUrl,
               QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED: 'true',
               QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '5s',
               QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
@@ -1469,7 +1701,7 @@ try {
               QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID: 'e2e-local-v1',
               QWEN_MANAGED_AGENT_RUNTIME_STATE_DIRECTORY: runtimeState,
               QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY: cliBundle,
-              QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: `http://127.0.0.1:${springPort}`,
+              QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL: sessionStoreUrl,
               QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED: 'true',
               QWEN_MANAGED_AGENT_SESSION_STORE_WRITER_LEASE_DURATION: '60s',
               QWEN_MANAGED_AGENT_WORKSPACE_ID: workspaceId,
@@ -1509,7 +1741,7 @@ try {
       [
         '-cp',
         springJar,
-        '-Dloader.main=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain',
+        '-Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceStorageRegistrationMain',
         'org.springframework.boot.loader.launch.PropertiesLauncher',
         'register',
         tenant,
@@ -2115,12 +2347,16 @@ try {
       // to commit. after-result must NOT be held here: its barrier is the
       // committed result, so holding :start would keep the execution at
       // PREPARED and its own wait for SETTLED could never succeed.
+      // cleanup-failed keeps :start live and refuses the release instead.
       if (
         approvalFault === 'after-decision' ||
-        approvalFault === 'after-prepare'
+        approvalFault === 'after-prepare' ||
+        approvalFault === 'cleanup-failed'
       ) {
         replacementBrokerProxy = await startHeldExecutionStartProxy(
           `http://127.0.0.1:${brokerPort}`,
+          approvalFault !== 'cleanup-failed',
+          approvalFault === 'cleanup-failed',
         );
       }
       replacementBrokerUrl =
@@ -2270,6 +2506,11 @@ try {
             QWEN_MODEL: 'fake-model',
             QWEN_RUNTIME_BROKER_TOKEN: brokerToken,
             QWEN_RUNTIME_BROKER_URL: replacementBrokerUrl,
+            // A4: the replacement loses its first load attach reply once, so
+            // the control plane must redrive into the now-active driver.
+            ...(approvalFault === 'load-reply-lost'
+              ? { QWEN_E2E_DROP_LOAD_REPLY: session.id }
+              : {}),
           },
         },
         name,
@@ -2305,6 +2546,18 @@ try {
         120_000,
         replacementHarness,
       );
+      if (approvalFault === 'load-reply-lost') {
+        // The fault must actually have landed: the replacement lost its first
+        // load attach reply (after its driver started). A redrive that never
+        // lost a reply would prove nothing about the active-driver handoff.
+        await waitUntil(
+          'Takeover load reply lost',
+          () =>
+            replacementHarness.log().includes('E2E dropping first load reply'),
+          120_000,
+          replacementHarness,
+        );
+      }
       const actionBeforeResponse = await fetchJson<Record<string, unknown>>(
         `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${originalApprovalId}`,
         { headers: tenantHeaders(tenant) },
@@ -2358,6 +2611,18 @@ try {
             releaseApprovalResultHold = resolve;
           });
         }
+        // C1/C2: arm the store boundary before the decision can drive the
+        // approved batch to its turn.settled commit. The fault must land on
+        // that terminal commit, not on an earlier record.
+        if (
+          approvalFault === 'terminal-reply-lost' ||
+          approvalFault === 'terminal-write-failed'
+        ) {
+          storeFaultProxy?.armTerminal(
+            session.id,
+            approvalFault === 'terminal-reply-lost' ? 'drop-reply' : 'reject',
+          );
+        }
         if (approvalFault === 'decision-reply-lost') {
           await postAndDropReply(decisionUrl, decisionBody, decisionHeaders);
         }
@@ -2403,10 +2668,14 @@ try {
           );
       }
       let publishedPrefixSequences: number[] = [];
+      let terminalAcceptsAtBarrier = 0;
       if (
         approvalFault === 'after-decision' ||
         approvalFault === 'after-prepare' ||
-        approvalFault === 'after-result'
+        approvalFault === 'after-result' ||
+        approvalFault === 'cleanup-failed' ||
+        approvalFault === 'terminal-reply-lost' ||
+        approvalFault === 'terminal-write-failed'
       ) {
         // A5/A5a: kill the generation that holds the committed decision (or,
         // for after-result, the committed result with its model round still
@@ -2465,7 +2734,46 @@ try {
             120_000,
             replacementHarness,
           );
-        } else {
+        } else if (
+          approvalFault === 'terminal-reply-lost' ||
+          approvalFault === 'terminal-write-failed'
+        ) {
+          // C1/C2: wait until the terminal commit met the store boundary.
+          // C1 already committed it and lost only the reply; C2 refused the
+          // write, leaving the payable checkpoint without its terminal.
+          await waitUntil(
+            'Terminal commit store fault observed',
+            () => storeFaultProxy?.terminalFaulted() === true,
+            120_000,
+            replacementHarness,
+          );
+          // The barrier only arms on a confirmed 200, so this count proves
+          // the terminal was committed before the crash. The replacement
+          // projects it; a second store commit is not required.
+          terminalAcceptsAtBarrier =
+            storeFaultProxy?.terminalAcceptCount() ?? 0;
+        } else if (approvalFault === 'cleanup-failed') {
+          // C3: the release refusal is the fault; the crash must land after
+          // the control plane projected the terminal, or the dispatch scan
+          // would take a RUNNING Turn over and pay the debt through that
+          // path. Only a terminal Turn proves the cleanup-only retry.
+          await waitUntil(
+            'Runtime cleanup release refused',
+            () => (replacementBrokerProxy?.releaseFailureCount() ?? 0) > 0,
+            120_000,
+            replacementHarness,
+          );
+          await waitUntil(
+            'Original Turn projected before the cleanup crash',
+            () =>
+              runMysql(
+                mysqlPort,
+                `SELECT status FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY gmt_create DESC LIMIT 1`,
+              ) === 'COMPLETED',
+            120_000,
+            replacementHarness,
+          );
+        } else if (approvalFault === 'after-decision') {
           // The 202 admitted the response operation, not the decision. Wait
           // for the durable decision row and its receipt before SIGKILL.
           await waitUntil(
@@ -2479,6 +2787,13 @@ try {
               ),
             120_000,
             replacementHarness,
+          );
+        } else {
+          // The enclosing condition lists every crash-type fault. A new one
+          // added without a barrier here must fail loudly instead of
+          // reaching SIGKILL with no wait at all.
+          throw new Error(
+            `Unhandled approval fault barrier: ${String(approvalFault)}`,
           );
         }
         const executionAtCrash = runMysql(
@@ -2501,6 +2816,21 @@ try {
           crashedHarnessBootId: crashedBootId,
           executionAtCrash,
           heldExecutionStartPath: replacementBrokerProxy?.heldPath(),
+          releaseFailures: replacementBrokerProxy?.releaseFailureCount(),
+          turnStatusAtCrash:
+            approvalFault === 'cleanup-failed'
+              ? runMysql(
+                  mysqlPort,
+                  `SELECT status FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY gmt_create DESC LIMIT 1`,
+                )
+              : undefined,
+          terminalFault: storeFaultProxy
+            ? {
+                rejected: storeFaultProxy.terminalRejectCount(),
+                accepted: storeFaultProxy.terminalAcceptCount(),
+                acceptedAtBarrier: terminalAcceptsAtBarrier,
+              }
+            : undefined,
           publishedPrefix:
             approvalFault === 'after-result'
               ? {
@@ -2517,10 +2847,25 @@ try {
           releaseApprovalResultHold();
           approvalResultHold = undefined;
         }
+        // C1/C2's doomed generation must not land or deliver the terminal after
+        // the injected fault; the replacement may, including a replayed commit
+        // for C1.
+        if (
+          approvalFault === 'terminal-reply-lost' ||
+          approvalFault === 'terminal-write-failed'
+        ) {
+          storeFaultProxy?.allowTerminal();
+        }
         if (replacementBrokerProxy) {
-          await replacementBrokerProxy.close();
-          replacementBrokerProxy = undefined;
-          replacementBrokerUrl = `http://127.0.0.1:${brokerPort}`;
+          if (approvalFault === 'cleanup-failed') {
+            // Keep the proxy so the replacement's successful release of the
+            // original identity is witnessed on the same fault boundary.
+            replacementBrokerProxy.allowRelease();
+          } else {
+            await replacementBrokerProxy.close();
+            replacementBrokerProxy = undefined;
+            replacementBrokerUrl = `http://127.0.0.1:${brokerPort}`;
+          }
         }
         // The crashed generation's disk is scrapped like every replaced
         // Harness home; the fresh one must recover from MySQL alone.
@@ -2546,18 +2891,31 @@ try {
         replacementHarness = await startReplacementHarness(
           'Post-fault recovery Harness',
         );
-        await waitUntil(
-          'Post-fault recovery Harness adopted the Session',
-          () => {
-            const boot = runMysql(
-              mysqlPort,
-              `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
-            );
-            return boot.length > 0 && boot !== crashedBootId;
-          },
-          120_000,
-          replacementHarness,
-        );
+        if (approvalFault === 'cleanup-failed') {
+          // C3 has no Turn left to adopt: the replacement's first contact is
+          // the cleanup-only load the debt scan issues, and it must not
+          // rebind the Session's turn identity. The release it performs on
+          // the still-open proxy is the proof that the retry reached it.
+          await waitUntil(
+            'Post-fault cleanup retry reached the replacement',
+            () => (replacementBrokerProxy?.releaseSuccessCount() ?? 0) > 0,
+            120_000,
+            replacementHarness,
+          );
+        } else {
+          await waitUntil(
+            'Post-fault recovery Harness adopted the Session',
+            () => {
+              const boot = runMysql(
+                mysqlPort,
+                `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
+              );
+              return boot.length > 0 && boot !== crashedBootId;
+            },
+            120_000,
+            replacementHarness,
+          );
+        }
       }
       const recovered = await waitForTerminal(
         replacementSpringUrl,
@@ -2577,6 +2935,22 @@ try {
         );
       }
       verifiedOriginalTerminal = terminals[0].type;
+      // A terminal is not the answer. The surviving public transcript must
+      // still carry the one model response the recovered Turn produced, or
+      // a compensation that only projects a terminal would pass. The
+      // result-commit arm already owns the same check with its retraction
+      // diagnostic, so it keeps that message.
+      if (verificationMode === 'allow' && approvalFault !== 'after-result') {
+        const transcript = await publicTranscript(
+          replacementSpringUrl,
+          tenant,
+          session.id,
+        );
+        if (transcript.text !== continuationResponse)
+          throw new Error(
+            `Approval recovery answer differs: ${JSON.stringify(transcript.text)}`,
+          );
+      }
       if (approvalFault === 'after-result') {
         // The reissue must retract the held prefix: only the recovered
         // answer may remain in the public transcript.
@@ -2793,8 +3167,59 @@ try {
         throw new Error(
           `Original cleanup did not release the original Runtime: state=${runtimeAfter.join(',')} confirmed=${cleanupConfirmed}`,
         );
+      if (approvalFault === 'terminal-reply-lost') {
+        if (
+          storeFaultProxy?.terminalFaulted() !== true ||
+          terminalAcceptsAtBarrier < 1
+        )
+          throw new Error(
+            `Terminal reply loss did not commit the terminal before recovery: barrierAccepts=${terminalAcceptsAtBarrier} observations=${storeFaultProxy?.observations().join(' | ')}`,
+          );
+      }
+      if (approvalFault === 'terminal-write-failed') {
+        if (
+          (storeFaultProxy?.terminalRejectCount() ?? 0) < 1 ||
+          (storeFaultProxy?.terminalAcceptCount() ?? 0) < 1
+        )
+          throw new Error(
+            `Terminal write fault was not compensated: reject=${storeFaultProxy?.terminalRejectCount()} accept=${storeFaultProxy?.terminalAcceptCount()} observations=${storeFaultProxy?.observations().join(' | ')}`,
+          );
+      }
+      if (approvalFault === 'cleanup-failed') {
+        const failures = replacementBrokerProxy?.releaseFailureCount() ?? 0;
+        const successes = replacementBrokerProxy?.releaseSuccessCount() ?? 0;
+        // The debt projection is the scan's input; a confirmed cleanup
+        // removes it. A surviving row here means only the Turn's own driver
+        // (or an operator) could still pay it — exactly the gap this arm
+        // exists to keep closed.
+        const debt = Number(
+          runMysql(
+            mysqlPort,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_resource_ref WHERE ${sessionFilter} AND owner_kind='HOSTED_CLEANUP'`,
+          ),
+        );
+        if (failures < 1 || successes < 1 || debt !== 0)
+          throw new Error(
+            `Cleanup fault was not retried after the replacement: failures=${failures} successes=${successes} debt=${debt}`,
+          );
+      }
+      const faultObservations = {
+        releaseFailures: replacementBrokerProxy?.releaseFailureCount() ?? 0,
+        releaseSuccesses: replacementBrokerProxy?.releaseSuccessCount() ?? 0,
+        terminalRejects: storeFaultProxy?.terminalRejectCount() ?? 0,
+        terminalAccepts: storeFaultProxy?.terminalAcceptCount() ?? 0,
+        terminalAcceptsAtBarrier,
+        postCrashTerminalAccepts: Math.max(
+          0,
+          (storeFaultProxy?.terminalAcceptCount() ?? 0) -
+            terminalAcceptsAtBarrier,
+        ),
+      };
+      originalFaultObservations = faultObservations;
       saveEvidence('approval-result.json', {
         mode: verificationMode,
+        fault: approvalFault ?? null,
+        faultObservations,
         sessionId: session.id,
         actionId: originalApprovalId,
         replacementActionBeforeResponse: actionBeforeResponse,
@@ -4024,6 +4449,14 @@ try {
       const summary = {
         mode: verificationMode,
         fault: approvalFault ?? null,
+        // C1/C2 must not report the later relief Turn's terminal commit as
+        // part of the original fault window.
+        faultObservations: originalFaultObservations ?? {
+          terminalRejects: 0,
+          terminalAccepts: 0,
+          terminalAcceptsAtBarrier: 0,
+          postCrashTerminalAccepts: 0,
+        },
         sessionId: session.id,
         originalRuntimeSessionId,
         originalActionId: originalApprovalId,
@@ -4266,6 +4699,12 @@ try {
   }
   await heldStartProxy?.close();
   await replacementBrokerProxy?.close();
+  await storeFaultProxy?.close();
+  // A failed G3 arm still owes the operator the model traffic that decided
+  // whether the recovery resumed, replayed or never inferred at all.
+  if (verificationMode && failure) {
+    saveEvidence('model-requests.json', { requests: fake?.requests ?? [] });
+  }
   releaseContinuationHold();
   for (const hold of modelRoundHolds) hold.release();
   await fake?.close();
