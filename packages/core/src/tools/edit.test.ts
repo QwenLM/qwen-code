@@ -31,6 +31,15 @@ import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.j
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import {
+  canonicalWorktreePath,
+  grantUnattendedFixes,
+  openBackgroundFix,
+  recordConfirmedWatch,
+  recordWatchTask,
+  resetUnattendedFixGrantsForTests,
+} from './autofix-pr-grants.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 const readText = (filePath: string) => fs.readFileSync(filePath, 'utf8');
 
@@ -538,6 +547,50 @@ describe('EditTool', () => {
           edit(teamFile(), '', 'Use real DBs in integration tests.'),
         ),
       ).toBeNull();
+    });
+
+    it("asks the user for a write into a background fix's worktree, but for its own agent", async () => {
+      const worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-pr-wt-'));
+      try {
+        await openFixAt(worktree, 'fix-agent');
+        const file = path.join(worktree, 'src', 'a.ts');
+        expect(
+          tool
+            .build({ file_path: file, old_string: '', new_string: 'x' })
+            .requiresUserInteraction?.(),
+        ).toBe(true);
+        expect(
+          await runWithAgentContext('fix-agent', async () =>
+            tool
+              .build({ file_path: file, old_string: '', new_string: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(false);
+        // An agent the fix agent started is its own; another agent is not.
+        expect(
+          await runWithAgentContext('fix-agent-child', async () =>
+            tool
+              .build({ file_path: file, old_string: '', new_string: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(false);
+        expect(
+          await runWithAgentContext('session-agent', async () =>
+            tool
+              .build({ file_path: file, old_string: '', new_string: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(true);
+        const outside = path.join(path.dirname(worktree), 'elsewhere.ts');
+        expect(
+          tool
+            .build({ file_path: outside, old_string: '', new_string: 'x' })
+            .requiresUserInteraction?.(),
+        ).toBe(false);
+      } finally {
+        resetUnattendedFixGrantsForTests();
+        fs.rmSync(worktree, { recursive: true, force: true });
+      }
     });
 
     it('proposes (asks) team writes — never auto-allowed like private memory', async () => {
@@ -1629,3 +1682,35 @@ describe('EditTool', () => {
     });
   });
 });
+
+async function openFixAt(worktree: string, agentId: string) {
+  grantUnattendedFixes('s-write', {
+    pr: 3,
+    worktree: canonicalWorktreePath(worktree),
+    check: async () => true,
+    open: async () => ({ task: 't' }),
+    close: async () => {},
+  });
+  recordConfirmedWatch('s-write', {
+    pr: 3,
+    repo: 'o/r',
+    host: null,
+    targetDir: path.dirname(worktree),
+    preparedAt: null,
+    worktree: canonicalWorktreePath(worktree),
+    authorCanPush: true,
+  });
+  recordWatchTask('s-write', 3, { task: 't', reply: true, instructions: '' });
+  const fix = await openBackgroundFix(
+    's-write',
+    worktree,
+    new AbortController().signal,
+  );
+  // The fix agent started `${agentId}-child`.
+  fix.attach(
+    agentId,
+    () => {},
+    (id) => id === `${agentId}-child`,
+  );
+  return fix;
+}

@@ -27,18 +27,22 @@ import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
 import { advertisedMaxSessions } from '../serve/server/serve-features.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
 import {
+  getRestartRequiredFromModified,
+  requiresRestart,
+} from './settingsUtils.js';
+import {
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
   MAX_TRACKED_SPAWNED_SESSIONS,
 } from '../serve/create-sub-session.js';
 
 describe('SettingsSchema', () => {
-  it('exposes a default-off Generated UI setting that requires restarting its owner', () => {
+  it('exposes a default-on Generated UI setting that requires restarting its owner', () => {
     expect(
       getSettingsSchema().experimental.properties.generatedUi,
     ).toMatchObject({
       type: 'boolean',
-      default: false,
+      default: true,
       category: 'Experimental',
       requiresRestart: true,
       showInDialog: true,
@@ -208,6 +212,16 @@ describe('SettingsSchema', () => {
         getSettingsSchema().ui?.properties?.accessibility.properties
           ?.enableLoadingPhrases.type,
       ).toBe('boolean');
+    });
+
+    it('keeps loading phrase changes restart-required for terminal settings', () => {
+      const key = 'ui.accessibility.enableLoadingPhrases';
+      expect(
+        getSettingsSchema().ui.properties.accessibility.properties
+          .enableLoadingPhrases.requiresRestart,
+      ).toBe(true);
+      expect(requiresRestart(key)).toBe(true);
+      expect(getRestartRequiredFromModified(new Set([key]))).toEqual([key]);
     });
 
     it('should have fileFiltering nested properties', () => {

@@ -368,6 +368,13 @@ public final class AutomationHarnessFake {
                 .count();
     }
 
+    /** The runs the funnel carries for a Session: a replayed fire never mints a second. */
+    public synchronized int runCount(String sessionId) {
+        return (int) runs.keySet().stream()
+                .filter(key -> key.startsWith(sessionId + "|"))
+                .count();
+    }
+
     /** The committed definition summary, or null when none committed. */
     public synchronized Map<String, Object> scheduleOf(String sessionId,
             String scheduleId) {

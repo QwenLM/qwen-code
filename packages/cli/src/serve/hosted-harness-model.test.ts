@@ -345,6 +345,120 @@ describe('Hosted Harness model boundary', () => {
     }
   });
 
+  it('commits queued guidance in FIFO order before requesting the model', async () => {
+    const model = config([{ type: LlmEventType.Finished, value: {} }]);
+    const commit = vi.fn().mockResolvedValue(undefined);
+    const claim = vi
+      .fn()
+      .mockResolvedValueOnce([
+        { id: 'umsg_first:1', text: 'first', parts: [{ text: 'first' }] },
+        { id: 'umsg_second:1', text: 'second', parts: [{ text: 'second' }] },
+      ])
+      .mockResolvedValue([]);
+    await runHostedHarnessTextTurn({
+      ...input,
+      userMessages: {
+        claim,
+        commit,
+        commitAssistant: vi.fn(),
+      },
+    });
+    expect(commit.mock.calls.map(([id]) => id)).toEqual([
+      'umsg_first:1',
+      'umsg_second:1',
+    ]);
+    expect(model.requests).toEqual([[{ text: 'second' }]]);
+    expect(model.setHistory).toHaveBeenLastCalledWith(
+      expect.arrayContaining([
+        { role: 'user', parts: [{ text: 'hello' }] },
+        { role: 'user', parts: [{ text: 'first' }] },
+      ]),
+    );
+    expect(commit.mock.invocationCallOrder[1]).toBeLessThan(
+      model.sendMessageStream.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('continues after final output when guidance arrived during generation', async () => {
+    const model = config([{ type: LlmEventType.Finished, value: {} }]);
+    const commitAssistant = vi.fn().mockResolvedValue(undefined);
+    const commit = vi.fn().mockResolvedValue(undefined);
+    const claim = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 'umsg_late:1',
+          text: 'follow up',
+          parts: [{ text: 'follow up' }],
+        },
+      ])
+      .mockResolvedValue([]);
+    await runHostedHarnessTextTurn({
+      ...input,
+      userMessages: { claim, commit, commitAssistant },
+    });
+    expect(model.requests).toEqual([
+      [{ text: 'hello' }],
+      [{ text: 'follow up' }],
+    ]);
+    expect(commitAssistant).toHaveBeenCalledOnce();
+    expect(commit).toHaveBeenCalledWith('umsg_late:1', [{ text: 'follow up' }]);
+    expect(commitAssistant.mock.invocationCallOrder[0]).toBeLessThan(
+      commit.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('keeps suppressed output private when late guidance continues the Turn', async () => {
+    config([{ type: LlmEventType.Finished }]);
+    const hooks = hostedHooks([HookEventName.MessageDisplay]);
+    hooks.fire.mockImplementation(async (event) =>
+      event === HookEventName.MessageDisplay
+        ? { suppressOutput: true }
+        : undefined,
+    );
+    const commitAssistant = vi.fn().mockResolvedValue(undefined);
+    const claim = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([
+        {
+          id: 'umsg_late:1',
+          text: 'follow up',
+          parts: [{ text: 'follow up' }],
+        },
+      ])
+      .mockResolvedValue([]);
+    await runHostedHarnessTextTurn({
+      ...input,
+      hooks: hooks.session,
+      userMessages: { claim, commit: vi.fn(), commitAssistant },
+    });
+    expect(commitAssistant).toHaveBeenCalledWith([], expect.any(String));
+  });
+
+  it('does not dispatch a model request after uncertain guidance persistence', async () => {
+    const model = config([{ type: LlmEventType.Finished, value: {} }]);
+    const failed = new ManagedSessionRecordError('receipt unavailable');
+    await expect(
+      runHostedHarnessTextTurn({
+        ...input,
+        userMessages: {
+          claim: vi.fn().mockResolvedValue([
+            {
+              id: 'umsg_unknown:1',
+              text: 'hello',
+              parts: [{ text: 'hello' }],
+            },
+          ]),
+          commit: vi.fn().mockRejectedValue(failed),
+          commitAssistant: vi.fn(),
+        },
+      }),
+    ).rejects.toThrow('receipt unavailable');
+    expect(model.sendMessageStream).not.toHaveBeenCalled();
+  });
+
   it('keeps the immutable default runtime model and fails closed on route drift', async () => {
     const model = config([
       { type: LlmEventType.Content, value: 'done' },
@@ -608,6 +722,47 @@ describe('Hosted Harness model boundary', () => {
       expect(getRuntimeContentGenerator()).toBeUndefined();
     },
   );
+
+  it('keeps queued file content when a prompt Hook replaces guidance text', async () => {
+    const model = config([{ type: LlmEventType.Finished }]);
+    const hook = hostedHooks([HookEventName.UserPromptSubmit]);
+    hook.fire.mockImplementation(async (event) =>
+      event === HookEventName.UserPromptSubmit
+        ? {
+            hookSpecificOutput: {
+              hookEventName: HookEventName.UserPromptSubmit,
+              updatedPrompt: 'updated guidance',
+            },
+          }
+        : undefined,
+    );
+    const attachments = [{ text: 'Pinned file notes.md: contents' }];
+    const claim = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          id: 'umsg_file:1',
+          text: 'guidance',
+          parts: [{ text: 'guidance' }, ...attachments],
+          attachments,
+        },
+      ])
+      .mockResolvedValue([]);
+    const commit = vi.fn().mockResolvedValue(undefined);
+    await runHostedHarnessTextTurn({
+      ...input,
+      hooks: hook.session,
+      userMessages: { claim, commit, commitAssistant: vi.fn() },
+    });
+    expect(model.requests[0]).toEqual([
+      { text: 'updated guidance' },
+      ...attachments,
+    ]);
+    expect(commit).toHaveBeenCalledWith('umsg_file:1', [
+      { text: 'updated guidance' },
+      ...attachments,
+    ]);
+  });
 
   it('passes attachments as real model parts while a prompt Hook only replaces the text', async () => {
     const model = config([
@@ -925,7 +1080,12 @@ describe('Hosted Harness model boundary', () => {
     expect(hooks.setHistory).toHaveBeenCalledWith([]);
     expect(hooks.shutdown).toHaveBeenCalledOnce();
     const args = vi.mocked(loadCliConfig).mock.calls[0];
-    expect(args?.[1]).toMatchObject({ safeMode: true, chatRecording: false });
+    expect(args?.[1]).toMatchObject({
+      safeMode: true,
+      chatRecording: false,
+      sessionId: input.sessionId,
+      sessionIdGenerated: true,
+    });
     expect(args?.[9]?.toolInvocationGuard?.({} as never)).toMatchObject({
       allowed: false,
     });
@@ -986,7 +1146,7 @@ describe('Hosted Harness model boundary', () => {
     );
     await runHostedHarnessTextTurn({ ...input, history });
     expect(model.setHistory).toHaveBeenCalledWith([
-      { role: 'user', parts: answered },
+      expect.objectContaining({ role: 'user', parts: answered }),
       { role: 'model', parts: visible },
     ]);
     expect(history[1]!.message!.parts).toEqual(thoughtOnly);
@@ -2806,6 +2966,83 @@ it('keeps agent instructions ahead of refreshed project context', async () => {
   expect(mocks.setUserMemory).toHaveBeenLastCalledWith(
     '# Agent instructions\n\nAGENT_SECTION\n\nPROJECT_SECTION',
   );
+});
+
+it('preserves pinned instruction sources when Todo changes after a tool batch', async () => {
+  const mocks = config([]);
+  const observed: string[] = [];
+  const skills = new HostedSkillCatalog([
+    { name: 'published', description: 'SKILL_SECTION', body: 'body' },
+  ]);
+  let todo = 'TODO_FIRST';
+  let round = 0;
+  const call = {
+    callId: 'context-call',
+    name: 'read_file',
+    args: {},
+    isClientInitiated: false,
+    prompt_id: input.promptId,
+  };
+  mocks.getHistory.mockImplementation(() => [
+    {
+      role: 'model',
+      parts:
+        round === 1
+          ? [{ functionCall: { name: call.name } }]
+          : [{ text: 'done' }],
+    },
+  ]);
+  mocks.sendMessageStream.mockImplementation(async function* () {
+    observed.push(mocks.setUserMemory.mock.calls.at(-1)?.[0] ?? '');
+    round++;
+    if (round === 1) yield { type: LlmEventType.ToolCallRequest, value: call };
+    else yield { type: LlmEventType.Content, value: 'done' };
+    yield { type: LlmEventType.Finished };
+  });
+  const execute = vi.fn(async () => {
+    todo = 'TODO_UPDATED';
+    return [
+      {
+        functionResponse: {
+          id: call.callId,
+          name: call.name,
+          response: { output: 'contents' },
+        },
+      },
+    ];
+  });
+  await runHostedHarnessTextTurn({
+    ...input,
+    agentInstructions: 'AGENT_SECTION',
+    extensionInstructions: 'EXTENSION_SECTION',
+    skills,
+    workspaceContext: { read: () => 'WORKSPACE_SECTION' },
+    toolTurn: {
+      declarations: async () => [{ name: call.name }],
+      consumeResults: async () => undefined,
+      execute,
+      planModeInstructions: () => 'PLAN_SECTION',
+      todoInstructions: async () => todo,
+    },
+  });
+  expect(execute).toHaveBeenCalledOnce();
+  expect(observed).toHaveLength(2);
+  for (const [index, prompt] of observed.entries()) {
+    let position = -1;
+    for (const marker of [
+      'AGENT_SECTION',
+      'EXTENSION_SECTION',
+      'SKILL_SECTION',
+      'PLAN_SECTION',
+      index === 0 ? 'TODO_FIRST' : 'TODO_UPDATED',
+      'WORKSPACE_SECTION',
+    ]) {
+      const next = prompt.indexOf(marker);
+      expect(next).toBeGreaterThan(position);
+      position = next;
+    }
+  }
+  expect(observed[1]).not.toContain('TODO_FIRST');
 });
 
 it('advertises only the published Skill catalog while keeping host Skill discovery disabled', async () => {

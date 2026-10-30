@@ -1,3 +1,4 @@
+import { requireExtensionSnapshot } from './managed-extension-types';
 import type { components } from './generated/managed-agent-api';
 import {
   isJavaAgentResyncRequired,
@@ -113,6 +114,8 @@ export function createJavaManagedAgentProvider(
       approvalMode?: ManagedApprovalMode;
       planMode?: boolean;
       skills?: import('./managed-agent-provider').ManagedSessionSkill[];
+      extensionPins?: import('./managed-extension-types').ManagedExtensionPin[];
+      worktree?: { baseRef?: string };
     },
     command: ManagedAgentCommandOptions,
   ) {
@@ -124,8 +127,14 @@ export function createJavaManagedAgentProvider(
         requestId: managedRequestId(),
         idempotencyKey: command.idempotencyKey,
         agentId: request.agentId,
+        ...(request.worktree === undefined
+          ? {}
+          : { worktree: request.worktree }),
         ...(request.modelId === undefined ? {} : { modelId: request.modelId }),
         ...(request.skills?.length ? { skills: request.skills } : {}),
+        ...(request.extensionPins === undefined
+          ? {}
+          : { extensionPins: request.extensionPins }),
         // Without a title the Session list and header fall back to a UUID
         // prefix, unlike the standard shell's prompt-derived title.
         ...(request.text === undefined
@@ -155,6 +164,17 @@ export function createJavaManagedAgentProvider(
     return { sessionId: result.sessionId };
   }
   return {
+    userMessages: {
+      query: (sessionId, options) =>
+        client.queryUserMessages(sessionId, options.signal),
+      command: (sessionId, command, options) =>
+        client.commandUserMessages(
+          sessionId,
+          command,
+          options.idempotencyKey,
+          options.signal,
+        ),
+    },
     lifecycle: {
       submit: (kind, sessionId, command) =>
         client.lifecycleCommand(
@@ -193,12 +213,17 @@ export function createJavaManagedAgentProvider(
         { sessionId, cursor: request.cursor, limit: 100 },
         request.signal,
       ),
+    exportConsistency: 'live',
     storageKey: storageKey(options),
     workspaceFiles: {
       query: (request, command) =>
         client.queryWorkspaceFiles(request, command.signal),
       read: (request, command) =>
         client.readWorkspaceFile(request, command.signal),
+      upload: (request, data, command) =>
+        client.uploadWorkspaceFile(request, data, command.signal),
+      queryUpload: (uploadId, command) =>
+        client.queryWorkspaceFileUpload(uploadId, command.signal),
     },
     canCancel: true,
     titleSearch: true,
@@ -247,6 +272,74 @@ export function createJavaManagedAgentProvider(
     mcp: {
       list: (sessionId, request) =>
         client.getSessionMcp(sessionId, request.signal),
+    },
+    extensions: {
+      storageScope: options.productScope?.trim()
+        ? storageKey(options)
+        : undefined,
+      list: (workspaceId, request) =>
+        client.listExtensionPackages(workspaceId, request.signal),
+      publish: (workspaceId, extensionId, digest, manifest, archive, request) =>
+        client.publishExtensionPackage(
+          workspaceId,
+          extensionId,
+          digest,
+          manifest,
+          archive,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      settings: (workspaceId, extensionId, request) =>
+        client.getExtensionSettings(workspaceId, extensionId, request.signal),
+      saveSettings: (workspaceId, extensionId, revision, values, request) =>
+        client.saveExtensionSettings(
+          workspaceId,
+          extensionId,
+          revision,
+          values,
+          request.idempotencyKey,
+          request.signal,
+        ),
+      query: async (sessionId, request) =>
+        requireExtensionSnapshot(
+          await client.queryExtensionConfiguration(
+            sessionId,
+            undefined,
+            request.signal,
+          ),
+          sessionId,
+        ),
+      apply: async (sessionId, selection, request) =>
+        requireExtensionSnapshot(
+          await client.applyExtensionConfiguration(
+            sessionId,
+            selection,
+            request.idempotencyKey,
+            request.signal,
+          ),
+          sessionId,
+        ),
+      operation: async (sessionId, operationId, request) =>
+        requireExtensionSnapshot(
+          await client.queryExtensionConfiguration(
+            sessionId,
+            operationId,
+            request.signal,
+          ),
+          sessionId,
+        ),
+      resume: async (sessionId, operationId, recoverPrevious, request) =>
+        requireExtensionSnapshot(
+          await client.resumeExtensionConfiguration(
+            sessionId,
+            operationId,
+            recoverPrevious,
+            request.signal,
+          ),
+          sessionId,
+        ),
+      package: (workspaceId, pin, request) =>
+        client.getExtensionPackage(workspaceId, pin, request.signal),
     },
     mcpManagement: {
       storageScope: options.productScope?.trim()
@@ -499,34 +592,6 @@ export function createJavaManagedAgentProvider(
               };
             },
           },
-          cwdChange: {
-            async submit(sessionId, request, command) {
-              return requireCwdOperation(
-                await client.changeCwd(
-                  {
-                    ...request,
-                    sessionId,
-                    idempotencyKey: command.idempotencyKey,
-                    requestId: managedRequestId(),
-                  },
-                  command.signal,
-                ),
-                sessionId,
-              );
-            },
-            async query(sessionId, operationId, request) {
-              const result = requireCwdOperation(
-                await client.queryOperation(
-                  { sessionId, operationId },
-                  request.signal,
-                ),
-                sessionId,
-              );
-              if (result.operationId !== operationId)
-                throw new Error('Cwd operation identity mismatch');
-              return result;
-            },
-          },
           contextCompression: {
             async submit(sessionId, request, command) {
               return requireContextCompressionOperation(
@@ -742,6 +807,8 @@ export function createJavaManagedAgentProvider(
                 approvalMode,
                 planMode,
                 skills,
+                extensionPins,
+                worktree,
               },
               command,
             ) =>
@@ -754,10 +821,33 @@ export function createJavaManagedAgentProvider(
                   approvalMode,
                   planMode,
                   skills,
+                  extensionPins,
+                  worktree,
                 },
                 command,
               ),
             createSession: createWorkspaceSession,
+          },
+          sessionWorktrees: {
+            options: (request, options) =>
+              client.worktreeOptions(request, options.signal),
+            list: (workspaceId, options) =>
+              client.listSessionWorktrees(workspaceId, options.signal),
+            inspect: (workspaceId, worktreeId, options) =>
+              client.inspectSessionWorktree(
+                workspaceId,
+                worktreeId,
+                options.signal,
+              ),
+            cleanup: (workspaceId, worktreeId, options) =>
+              client.cleanupSessionWorktree(
+                {
+                  workspaceId,
+                  worktreeId,
+                  idempotencyKey: options.idempotencyKey,
+                },
+                options.signal,
+              ),
           },
         }
       : {}),
@@ -790,6 +880,12 @@ export function createJavaManagedAgentProvider(
         },
         request.signal,
       );
+      if (
+        !Number.isSafeInteger(transcript.coveredSequence) ||
+        transcript.coveredSequence < 0
+      ) {
+        throw new Error('Invalid message transcript coverage.');
+      }
       const itemEvents = transcript.items.flatMap(projectJavaAgentItem);
       const tailEvents = transcript.events.flatMap((event) => {
         const projected = projectJavaAgentEvent(event);
@@ -800,7 +896,8 @@ export function createJavaManagedAgentProvider(
           (left, right) => left.id - right.id,
         ),
         olderCursor: transcript.olderCursor ?? undefined,
-        lastEventId: transcript.lastSequence,
+        lastEventId: transcript.coveredSequence,
+        history: 'items',
       };
     },
     async createSession(request, command) {
@@ -944,6 +1041,7 @@ function toSessionSummary(
     ...(session.recovery ? { recovery: session.recovery } : {}),
     title: session.title || session.sessionId,
     workspace: session.workspace,
+    ...(session.worktree ? { worktree: session.worktree } : {}),
     createdAt: session.createdAt,
     admittedAt: session.activeTurn?.submittedAt ?? session.createdAt,
     updatedAt: session.updatedAt,
@@ -983,7 +1081,6 @@ function toSessionSummary(
         turnStatus !== 'cancelling' &&
         session.recovery?.actions.cancel !== false,
       ...(workspaceTurns ? { workspaceTurns: true } : {}),
-      ...(session.capabilities?.cwdChange === true ? { cwdChange: true } : {}),
       ...(session.capabilities?.modelChange === true
         ? { modelChange: true }
         : {}),
@@ -1060,20 +1157,6 @@ function modelContext(value: unknown): ManagedModelContext | undefined {
       ? { contextWindowSize }
       : {}),
   };
-}
-
-function requireCwdOperation(
-  operation: Awaited<ReturnType<JavaManagedAgentClient['queryOperation']>>,
-  sessionId: string,
-) {
-  if (
-    operation.type !== 'cwd_change' ||
-    operation.sessionId !== sessionId ||
-    !operation.operationId
-  ) {
-    throw new Error('Cwd operation identity mismatch');
-  }
-  return operation;
 }
 
 function requireContextCompressionOperation(

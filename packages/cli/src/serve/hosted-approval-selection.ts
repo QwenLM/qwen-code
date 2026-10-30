@@ -82,8 +82,11 @@ export async function readHostedTurnApprovalSelection(
   if (accepted?.payload['source'] !== 'hosted-harness') {
     if (!accepted || !readWakeSelection) return undefined;
     const selection = parseHostedApprovalSelection(await readWakeSelection());
-    if (!selection)
-      throw new Error('Hosted wake approval selection is unavailable.');
+    // A wake whose store holds no selection has nothing to pin: fall back to
+    // the Session's own approval settings, exactly as a hosted-harness input
+    // without an admission does. Only a malformed stored selection is an
+    // error, and parseHostedApprovalSelection raises that itself.
+    if (!selection) return undefined;
     return selection;
   }
   const rawRef = accepted?.payload['admissionRef'];

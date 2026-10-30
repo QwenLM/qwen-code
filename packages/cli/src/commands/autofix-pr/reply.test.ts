@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import type { PrData } from './snapshot.js';
 
 const mocks = vi.hoisted(() => ({
@@ -388,6 +388,40 @@ describe('runReply', () => {
     );
   });
 
+  it("reads the round's snapshot a background fix claimed, until a round prepares another", () => {
+    const gate = `Gate@${HEAD}@#on:9:pull_request_review`;
+    const claimed = join(
+      dirname(paths.statePath),
+      'autofix-pr-7-fix-snapshot.json',
+    );
+    writeFileSync(
+      claimed,
+      JSON.stringify({
+        events: [{ type: 'ci_failed', check: 'Gate', key: gate, runId: 90 }],
+      }),
+    );
+    // Started again while the fix ran: the head no longer reports it.
+    const moved = prData();
+    moved.commits.nodes[0]!.commit.statusCheckRollup!.contexts.nodes.push({
+      __typename: 'CheckRun',
+      databaseId: 9,
+      name: 'Gate',
+      status: 'QUEUED',
+      conclusion: null,
+      detailsUrl: 'https://github.com/o/r/actions/runs/90/job/9',
+    });
+    mocks.fetchPrData.mockImplementation(() => ({ pr: moved, viewer: 'me' }));
+    // A round prepared its own snapshot since: the claimed one says nothing.
+    writeFileSync(paths.snapshotPath, JSON.stringify({ events: [] }));
+    expect(() => reply({ handledChecks: [gate] })).toThrow(
+      /not a failure snapshot reports/,
+    );
+    rmSync(paths.snapshotPath);
+    expect(reply({ handledChecks: [gate] })).toMatchObject({
+      handledChecks: 1,
+    });
+  });
+
   it("checks bot threads opened since the snapshot leniently: they are not the plan's", () => {
     reply({ handled: ['IC_1'] });
     expect(mocks.fetchPrData.mock.calls[0]![1]).toMatchObject({
@@ -543,6 +577,107 @@ describe('runReply', () => {
     });
   });
 
+  it('lists what the round left for a person on its head, once, newest last', () => {
+    const plan: ReplyPlan = {
+      handledChecks: [`Test@${HEAD}@#5`],
+      needsHuman: [
+        'Test:   fails\u202e again\n after\u001b[2J its re-run',
+        `${'😀'.repeat(400)}`,
+      ],
+    };
+    reply(plan);
+    const first = state().needsHuman!;
+    expect(first.map(({ sha, text }) => ({ sha, text }))).toEqual([
+      // Control and format characters do not reach the list.
+      { sha: HEAD, text: 'Test: fails again after [2J its re-run' },
+      // Cut by code point: no half of a surrogate pair is kept.
+      { sha: HEAD, text: `${'😀'.repeat(299)}…` },
+    ]);
+    expect(Date.parse(first[0].at)).not.toBeNaN();
+    // The same plan run again lists nothing twice.
+    reply(plan);
+    expect(state().needsHuman).toEqual(first);
+    reply({ needsHuman: ['IC_9: a design call'] }, false);
+    expect(state().needsHuman!.map(({ text }) => text)).toEqual([
+      'Test: fails again after [2J its re-run',
+      `${'😀'.repeat(299)}…`,
+      'IC_9: a design call',
+    ]);
+  });
+
+  // FIFOs are POSIX only.
+  it.skipIf(process.platform === 'win32')(
+    'never blocks on a snapshot that is not a regular file',
+    () => {
+      execFileSync('mkfifo', [paths.snapshotPath]);
+      expect(reply({ handled: [] })).toMatchObject({ posted: [], skipped: 0 });
+    },
+  );
+
+  it('posts nothing for a round its task no longer drives', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      watch: { every: 2, reply: false, instructions: '', task: 'bbbbbbbbbbbb' },
+    });
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        replies: [{ replyTo: 101, body: 'x', handled: ['PRRC_101'] }],
+      }),
+    );
+    // A later start turned replies off: the old task's round is not heard.
+    expect(() =>
+      runReply({ pr: 7, planPath, post: true, task: 'aaaaaaaaaaaa' }),
+    ).toThrow(/task aaaaaaaaaaaa no longer drives/);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
+  it('posts nothing on a watch started with --no-reply, whatever the round passes', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      watch: { every: 2, reply: false, instructions: '', task: 'aaaaaaaaaaaa' },
+    });
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        replies: [{ replyTo: 101, body: 'x', handled: ['PRRC_101'] }],
+      }),
+    );
+    expect(() =>
+      runReply({ pr: 7, planPath, post: true, task: 'aaaaaaaaaaaa' }),
+    ).toThrow(/started with --no-reply: run reply with --no-post/);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+    expect(() =>
+      runReply({ pr: 7, planPath, post: false, task: 'aaaaaaaaaaaa' }),
+    ).not.toThrow();
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+    // A `--once` round, with no task, has options of its own.
+    expect(() => runReply({ pr: 7, planPath, post: true })).not.toThrow(
+      /--no-reply/,
+    );
+  });
+
+  it('posts nothing for a watch cleanup ended', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      ended: { at: '2026-10-25T00:00:00.000Z', reason: 'kept' },
+    });
+    expect(() =>
+      reply({ replies: [{ replyTo: 101, body: 'x', handled: ['PRRC_101'] }] }),
+    ).toThrow(/watch was stopped/);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
+  it('keeps only the newest items a person has to look at', () => {
+    reply({
+      needsHuman: Array.from({ length: 25 }, (_, i) => `item ${i}`),
+    });
+    const texts = state().needsHuman!.map(({ text }) => text);
+    expect(texts).toHaveLength(20);
+    expect(texts[0]).toBe('item 5');
+    expect(texts.at(-1)).toBe('item 24');
+  });
+
   it('after a failed post, a retry of the same plan posts only what is missing', () => {
     mocks.fetchPrData.mockImplementation(() => ({
       pr: prData({
@@ -591,6 +726,53 @@ describe('runReply', () => {
       summarySkipped: true,
     });
     expect(mocks.ghWithInput).toHaveBeenCalledTimes(4);
+  });
+
+  it('keeps what a round left for a person when a later post fails', () => {
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        reviewThreads: {
+          pageInfo: { hasNextPage: false },
+          nodes: [
+            thread('T1', [comment('PRRC_101', 'alice', 'COLLABORATOR')]),
+            thread('T3', [comment('PRRC_301', 'carol', 'OWNER')]),
+          ],
+        },
+      }),
+      viewer: 'me',
+    }));
+    let calls = 0;
+    mocks.ghWithInput.mockImplementation(() => {
+      calls += 1;
+      if (calls === 2) throw new Error('HTTP 502');
+      return JSON.stringify({ node_id: `POSTED_${calls}`, html_url: '' });
+    });
+    const second = {
+      replyTo: 301,
+      body: 'Fixed in abc: two.',
+      handled: ['PRRC_301'],
+    };
+    expect(() =>
+      reply({
+        replies: [
+          {
+            replyTo: 101,
+            body: 'Needs a human decision: the API.',
+            handled: ['PRRC_101'],
+          },
+          second,
+        ],
+        needsHuman: ['PRRC_101: whether to keep the API'],
+      }),
+    ).toThrow(/HTTP 502/);
+    // The first reply marked its comment handled: the next round answers
+    // only the second, and has nothing to say about the first.
+    expect(state()).toMatchObject({ handledCommentIds: ['PRRC_101'] });
+    reply({ replies: [second] });
+    expect(state().handledCommentIds).toEqual(['PRRC_101', 'PRRC_301']);
+    expect(state().needsHuman!.map(({ text }) => text)).toEqual([
+      'PRRC_101: whether to keep the API',
+    ]);
   });
 
   it('recognizes a reply whose answer was lost by what it was posted for, not by the next plan', () => {
@@ -836,12 +1018,16 @@ describe('parsePlan', () => {
         summary: { body: 'y', handled: ['a'] },
       }),
     ).toThrow(/handled more than once in the plan: a/);
+    expect(() => parsePlan({ needsHuman: ['ok', 3] })).toThrow(
+      /needsHuman must be an array of non-empty strings/,
+    );
     expect(parsePlan({})).toEqual({
       replies: [],
       summary: null,
       handled: [],
       handledChecks: [],
       handledConflict: false,
+      needsHuman: [],
     });
   });
 });

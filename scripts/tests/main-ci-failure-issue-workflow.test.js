@@ -47,6 +47,7 @@ describe('main CI failure issue workflow', () => {
       'SDK Python': 'sdk-python',
       'Qwen Code CI': 'ci',
       'Desktop Checks': 'desktop-packaging-check',
+      'tui-parity': 'tui-parity',
     };
     // workflow_run matches the list as a set, so its order is not pinned.
     expect([...yml.on.workflow_run.workflows].sort()).toEqual(
@@ -83,7 +84,7 @@ describe('main CI failure issue workflow', () => {
         "((github.event.workflow_run.head_branch == 'main' && " +
         "(github.event.workflow_run.event == 'push' || " +
         "(github.event.workflow_run.event == 'schedule' && " +
-        'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks"]\'), github.event.workflow.name)))) || ' +
+        'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]\'), github.event.workflow.name)))) || ' +
         "(github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') || " +
         "(github.event.workflow.name == 'Managed Agent gate' && " +
         'contains(fromJSON(\'["pull_request","pull_request_review"]\'), github.event.workflow_run.event))) }}',
@@ -104,6 +105,14 @@ describe('main CI failure issue workflow', () => {
     ['SDK Java', 'workflow_dispatch', 'feature', 'failure', true],
     ['SDK Python', 'workflow_dispatch', 'main', 'failure', false],
     ['SDK Java', 'schedule', 'main', 'failure', true],
+    ['tui-parity', 'schedule', 'main', 'failure', true],
+    ['tui-parity', 'schedule', 'main', 'success', false],
+    ['tui-parity', 'schedule', 'main', 'cancelled', false],
+    ['tui-parity', 'schedule', 'main', 'skipped', false],
+    ['tui-parity', 'schedule', 'feature', 'failure', false],
+    ['tui-parity', 'pull_request', 'feature', 'failure', false],
+    ['tui-parity', 'workflow_dispatch', 'feature', 'failure', false],
+    ['tui-parity', 'workflow_dispatch', 'main', 'failure', false],
     ['Managed Agent gate', 'push', 'main', 'failure', true],
     ['Managed Agent gate', 'pull_request_review', 'feature', 'failure', true],
     ['Managed Agent gate', 'pull_request', 'feature', 'failure', true],
@@ -170,6 +179,8 @@ cat "\${RUNNER_TEMP}/pulls.json"
               // and the fork cases below keep passing it to document that.
               HEAD_REPO: 'QwenLM/qwen-code',
               HEAD_SHA: 'tested-head',
+              // A fresh approval run, which is what the guard keeps filing.
+              RUN_ATTEMPT: '1',
               ...overrides,
             },
           },
@@ -217,9 +228,79 @@ cat "\${RUNNER_TEMP}/pulls.json"
       ]);
       expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
     });
+    it('passes the attempt to the destination guard', () => {
+      // Without this wiring the guard reads an empty attempt and every
+      // rerun files exactly as before.
+      expect(destination.env.RUN_ATTEMPT).toBe(
+        '${{ github.event.workflow_run.run_attempt }}',
+      );
+    });
+    it('wires the filed issue URL into the PR commenter', () => {
+      // A renamed output renders ISSUE_URL empty, which now selects the
+      // recovery branch instead of linking a first comment to its issue.
+      expect(jobs.report_pr.steps[0].env.ISSUE_URL).toBe(
+        '${{ needs.file_issue.outputs.issue_url }}',
+      );
+      expect(jobs.file_issue.outputs.issue_url).toBe(
+        '${{ steps.issue.outputs.issue_url }}',
+      );
+    });
     it('also files an issue when the failed PR already merged', () => {
       expect(resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })]).output).toBe(
         'pr_number=14472\nfile_issue=true\n',
+      );
+    });
+    it.each(['pull_request', 'pull_request_review'])(
+      'does not file for a %s rerun of a merged PR workflow',
+      (eventName) => {
+        // Run 39768204855's attempt 2 re-ran the PR's pre-merge workflow; the
+        // lock timeout it hit could not describe main, and filing it created
+        // #15239. Main's own push and nightly runs carry that signal. That
+        // rerun carried `pull_request`; a rerun of an approval run carries
+        // the harness's default. Both are the PR's pre-merge workflow.
+        const resolved = resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
+          EVENT_NAME: eventName,
+          RUN_ATTEMPT: '2',
+        });
+        expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
+        expect(resolved.stdout).toContain(
+          "Attempt 2 of the PR's pre-merge workflow",
+        );
+      },
+    );
+    it('files a fresh dispatch on a merged PR branch', () => {
+      // A maintainer's manual run is attempt 1 even when it starts long
+      // after the merge; only reruns are stale.
+      expect(
+        resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
+          EVENT_NAME: 'workflow_dispatch',
+          HEAD_BRANCH: 'ci/java',
+        }).output,
+      ).toBe('pr_number=14472\nfile_issue=true\n');
+    });
+
+    it('files a rerun of a fresh dispatch on a merged PR branch', () => {
+      // A dispatch's attempt counts its own manual runs, not a rerun of the
+      // PR's pre-merge workflow; suppressing it would drop a real failure of
+      // the tree the merged branch now carries.
+      expect(
+        resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
+          EVENT_NAME: 'workflow_dispatch',
+          HEAD_BRANCH: 'ci/java',
+          RUN_ATTEMPT: '2',
+        }).output,
+      ).toBe('pr_number=14472\nfile_issue=true\n');
+    });
+    it('falls back to filing when the attempt is unreadable', () => {
+      // The guard must not turn a missing payload field into silence: before
+      // this change every merged-PR failure filed, and an unreadable attempt
+      // keeps that direction — and says so.
+      const resolved = resolve([pr({ merged_at: '2026-10-17T16:15:57Z' })], {
+        RUN_ATTEMPT: '',
+      });
+      expect(resolved.output).toBe('pr_number=14472\nfile_issue=true\n');
+      expect(resolved.stdout).toContain(
+        'No run_attempt in the workflow_run payload',
       );
     });
     it('does not report a superseded head, wherever the same-named branch lives', () => {
@@ -268,14 +349,29 @@ cat "\${RUNNER_TEMP}/pulls.json"
       );
       expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
     });
-    it('files a main dispatch failure without a PR', () => {
-      const resolved = resolve([], {
-        EVENT_NAME: 'workflow_dispatch',
-        HEAD_BRANCH: 'main',
-      });
-      expect(resolved.output).toBe('pr_number=\nfile_issue=true\n');
-      expect(resolved.args).toBe('');
-      expect(resolved.stdout).not.toContain('::warning::');
+    it.each(['workflow_dispatch', 'schedule'])(
+      'files a main %s failure without a PR',
+      (event) => {
+        const resolved = resolve([], {
+          EVENT_NAME: event,
+          HEAD_BRANCH: 'main',
+        });
+        expect(resolved.output).toBe('pr_number=\nfile_issue=true\n');
+        expect(resolved.args).toBe('');
+        expect(resolved.stdout).not.toContain('::warning::');
+      },
+    );
+    it('still files for a later attempt of a main run', () => {
+      // The attempt guard lives in the PR-lookup else branch, so a main run
+      // files at every attempt; hoisting it below the `fi` would silently
+      // delete main's attempt-2 recovery path.
+      expect(
+        resolve([], {
+          EVENT_NAME: 'push',
+          HEAD_BRANCH: 'main',
+          RUN_ATTEMPT: '2',
+        }).output,
+      ).toBe('pr_number=\nfile_issue=true\n');
     });
     it('warns and reports nothing when the run resolves to no destination', () => {
       // A manual dispatch on a branch with no open PR is admitted and then
@@ -397,7 +493,7 @@ fi
         },
         { mainTip: 'new-head' },
       );
-      expect(resolved.output).toBe('superseded=true\n');
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
       expect(resolved.stdout).toContain('::warning::');
       expect(resolved.stdout).not.toContain('main is now');
       expect(resolved.calls).not.toContain('commits/main');
@@ -428,22 +524,22 @@ fi
       );
     });
     it('reports the attempt that is still the latest', () => {
-      expect(detect('1').output).toBe('superseded=false\n');
+      expect(detect('1').output).toBe('superseded=false\nprovisional=false\n');
       expect(detect('2', { RUN_ATTEMPT: '2' }).output).toBe(
-        'superseded=false\n',
+        'superseded=false\nprovisional=false\n',
       );
       // Stale-attempt supersession is independent of the tip comparison:
       // a bare event never reaches the push arm, and the nightly schedule
       // arm is exempt from it. Folding the attempt check inside that arm
       // would file an issue for an already-green rerun (#14768's shape).
-      expect(detect('2').output).toBe('superseded=true\n');
+      expect(detect('2').output).toBe('superseded=true\nprovisional=false\n');
       expect(
         detect('2', {
           EVENT_NAME: 'schedule',
           HEAD_BRANCH: 'main',
           HEAD_SHA: 'old-head',
         }).output,
-      ).toBe('superseded=true\n');
+      ).toBe('superseded=true\nprovisional=false\n');
     });
     it('skips a push run when main has advanced past its head', () => {
       // Run 39777472391's push run tested 06e59666, main moved on to
@@ -460,7 +556,7 @@ fi
         },
         { mainTip: '3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e' },
       );
-      expect(resolved.output).toBe('superseded=true\n');
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
       expect(resolved.stdout).toContain(
         'main is now 3d65e23cf62e00da033dccb8f60f9cfdd9c1b76e',
       );
@@ -487,7 +583,7 @@ fi
         },
         { mainTip: 'new-head', successor: 'none' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('no newer push run');
       expect(resolved.calls).toContain(
         'actions/workflows/12345/runs?event=push&branch=main&head_sha=new-head&per_page=1',
@@ -506,25 +602,43 @@ fi
         },
         { mainTip: 'new-head', successor: 'completed cancelled' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('completed cancelled');
       expect(resolved.stdout).toContain('does not report');
       expect(resolved.summary).toBe('');
     });
-    it('skips a push run while its successor is still queued', () => {
-      // A queued or in-progress successor is a genuine deferral: its own
-      // completion event reports the result if it fails.
-      const resolved = detect(
-        '1',
-        {
-          EVENT_NAME: 'push',
-          HEAD_BRANCH: 'main',
-          HEAD_SHA: 'old-head',
-        },
-        { mainTip: 'new-head', successor: 'in_progress' },
-      );
-      expect(resolved.output).toBe('superseded=true\n');
-      expect(resolved.stdout).toContain('the newer push run owns its result');
+    it('reports a push run whose successor has not settled, flagged provisional', () => {
+      // A running successor proves nothing yet, and this job cannot wait for
+      // it: the hosted pool queued the reporter for 20-100 minutes, so the
+      // tip's run is usually young. The successor's own re-entry covers only
+      // the failure conclusion, so discarding here loses a real regression
+      // whenever that run ends cancelled (#15470). The report is filed with
+      // the caveat instead, and the per-signature route hands it to a human
+      // rather than autofix, so a stale one costs a close.
+      // Every not-yet-final status counts, matching the vocabulary
+      // qwen-autofix.yml uses for the same question.
+      for (const successor of [
+        'in_progress',
+        'queued',
+        'waiting',
+        'requested',
+        'pending',
+      ]) {
+        const resolved = detect(
+          '1',
+          {
+            EVENT_NAME: 'push',
+            HEAD_BRANCH: 'main',
+            HEAD_SHA: 'old-head',
+          },
+          { mainTip: 'new-head', successor },
+        );
+        expect(resolved.output).toBe('superseded=false\nprovisional=true\n');
+        expect(resolved.stdout).toContain(
+          `${successor}, so this report is provisional`,
+        );
+        expect(resolved.summary).toBe('');
+      }
     });
     it('fails open when the newer-run lookup cannot be read', () => {
       const resolved = detect(
@@ -536,7 +650,7 @@ fi
         },
         { mainTip: 'new-head', failCall: 'newer-runs' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain(
         'Could not list the newer runs of workflow 12345',
       );
@@ -555,7 +669,7 @@ fi
         },
         { mainTip: 'new-head', successor: 'completed failure' },
       );
-      expect(resolved.output).toBe('superseded=true\n');
+      expect(resolved.output).toBe('superseded=true\nprovisional=false\n');
       expect(resolved.stdout).toContain('main is now new-head');
       expect(resolved.calls).toContain('commits/main');
     });
@@ -573,7 +687,7 @@ fi
         },
         { mainTip: 'new-head', successor: 'none' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('no newer push run');
       expect(resolved.calls).toContain('commits/main');
     });
@@ -587,7 +701,7 @@ fi
         },
         { mainTip: 'tested-head' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).not.toContain('::warning::');
       expect(resolved.calls).toContain('commits/main');
     });
@@ -603,7 +717,7 @@ fi
         },
         { mainTip: '' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
     });
     it('does not compare a scheduled run with the tip of main', () => {
       // A schedule runs at its own head and is the only signal macOS and
@@ -618,7 +732,7 @@ fi
         },
         { mainTip: 'new-head' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.calls).not.toContain('commits/main');
     });
     it.each([['pull_request'], ['pull_request_review'], ['workflow_dispatch']])(
@@ -637,7 +751,7 @@ fi
           },
           { mainTip: 'new-head' },
         );
-        expect(resolved.output).toBe('superseded=false\n');
+        expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
         expect(resolved.calls).not.toContain('commits/main');
       },
     );
@@ -651,7 +765,7 @@ fi
         },
         { mainTip: 'new-head', failCall: 'tip' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('Could not read the tip of main');
       expect(resolved.calls).toContain('commits/main');
     });
@@ -667,7 +781,7 @@ fi
         },
         { mainTip: 'new-head' },
       );
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.calls).not.toContain('commits/main');
     });
     it('fails open when the live run cannot be read', () => {
@@ -675,7 +789,7 @@ fi
       // for a real failure beats silently dropping it.
       const gh = `#!/usr/bin/env bash\nprintf '%s' '{"message":"Bad credentials"}'\nexit 1\n`;
       const resolved = detect('', {}, { ghScript: gh });
-      expect(resolved.output).toBe('superseded=false\n');
+      expect(resolved.output).toBe('superseded=false\nprovisional=false\n');
       expect(resolved.stdout).toContain('::warning::');
       expect(resolved.stdout).toContain('Could not read run 39237270547');
     });
@@ -683,7 +797,7 @@ fi
       // -gt coerces an empty operand to 0, so a field-less event would read
       // as superseded and suppress every report.
       expect(detect('2', { RUN_ATTEMPT: '' }).output).toBe(
-        'superseded=false\n',
+        'superseded=false\nprovisional=false\n',
       );
     });
     it('gates every failure reader on the supersession check', () => {
@@ -751,6 +865,7 @@ fi
         runAt = '2026-10-24T01:02:03Z',
         markerIssues = [],
         closedIssues = [],
+        provisional = false,
       } = opts;
       const tmp = mkdtempSync(join(tmpdir(), 'ci-issue-reuse-'));
       try {
@@ -848,6 +963,7 @@ fi
               RUN_ATTEMPT: '2',
               SIGNATURE_TITLE: signatureTitle,
               TEST_MARKERS: testMarkers,
+              PROVISIONAL: provisional ? 'true' : 'false',
               RUN_AT: runAt,
               LOOKUP_FAILURES: String(lookupFailures),
               FAIL_COMMENT_ONCE: failCommentOnce ? '1' : '0',
@@ -904,6 +1020,19 @@ fi
         expect(result.body).toContain('Run attempt: 2');
       },
     );
+
+    it('heads a provisional aggregate occurrence with the caveat', () => {
+      // The caveat is prepended once, ahead of the route split, so the
+      // aggregate's own body file is a third write site: a prepend narrowed to
+      // the per-signature branch would silently drop it here.
+      const result = run([botIssue(42)], { provisional: true });
+      expect(result.status).toBe(0);
+      expect(result.calls).toContain('issue comment 42');
+      expect(result.body).toMatch(
+        /^> \*\*Provisional\.\*\* Main advanced past this head/,
+      );
+      expect(result.body).toContain('Run 123 failed at commit abcdef123456');
+    });
 
     it('retires the autofix route when adopting a legacy issue without the workflow marker', () => {
       const result = run([botIssue(42, ' on abc123')], {
@@ -1386,6 +1515,18 @@ fi
         'jq -r \'.searchMarkers[]?\' "${RUNNER_TEMP}/analysis.json"',
       );
     });
+
+    it('wires the provisional flag from the live step through to the writer', () => {
+      // Same chain shape, same failure mode: a retyped binding leaves
+      // PROVISIONAL empty, so every provisional filing silently loses its
+      // caveat; a dropped one is unbound and kills the writer outright.
+      expect(jobs.analyze.outputs.provisional).toBe(
+        '${{ steps.live.outputs.provisional }}',
+      );
+      expect(writer.env.PROVISIONAL).toBe(
+        '${{ needs.analyze.outputs.provisional }}',
+      );
+    });
     describe('per-signature routing', () => {
       const signatureTitle =
         'Main CI failed: SDK Java — src/Foo.test > Suite … > case bar';
@@ -1418,6 +1559,37 @@ fi
         expect(result.body).toContain('<!-- main-ci-failure-scope:1234 -->');
         expect(result.body).not.toContain('main-ci-failure-aggregate');
         expect(result.calls).not.toMatch(/ready-for-agent|autofix|assignee/);
+      });
+
+      it('leads a provisional filing with the caveat and still files it', () => {
+        // The successor had not settled when the report was prepared, so the
+        // issue is filed anyway; the caveat is what lets a reader close it
+        // when the newer run turns out to cover the failure.
+        const result = run([botIssue(42)], {
+          signatureTitle,
+          testMarkers: markerA,
+          provisional: true,
+        });
+        expect(result.status).toBe(0);
+        expect(result.body).toMatch(
+          /^> \*\*Provisional\.\*\* Main advanced past this head/,
+        );
+        expect(result.body).toContain('Run 123 failed at commit abcdef123456');
+        expect(result.body).toContain(`<!-- ${markerA} -->`);
+        // A provisional issue is still a human-triage unit, never autofix
+        // work — the whole reason reporting it is affordable.
+        expect(result.calls).toContain(
+          'issue edit 999 --repo QwenLM/qwen-code --add-label type/bug --add-label status/needs-triage',
+        );
+        expect(result.calls).not.toMatch(/ready-for-agent|autofix|assignee/);
+      });
+
+      it('omits the caveat when the tip was settled', () => {
+        const result = run([botIssue(42)], {
+          signatureTitle,
+          testMarkers: markerA,
+        });
+        expect(result.body).not.toContain('Provisional.');
       });
 
       it('comments on the issue whose body carries the test marker and accretes new ones', () => {
@@ -1464,6 +1636,27 @@ fi
         expect(result.status).toBe(0);
         expect(result.calls).toContain('issue comment 7');
         expect(result.calls).not.toContain('issue edit');
+      });
+
+      it('heads a provisional recurrence comment with the caveat', () => {
+        // A recurrence is written from a separate file than the certified-miss
+        // create, so it is its own write site: scoping the prepend to the
+        // filing paths would leave a provisional recurrence unmarked.
+        const tracked = `<!-- ${markerA} -->\n<!-- main-ci-failure-scope:1234 -->\n`;
+        const result = run([botIssue(7, ' — Foo.test')], {
+          signatureTitle,
+          testMarkers: markerA,
+          issueBodies: { 7: tracked },
+          provisional: true,
+        });
+        expect(result.status).toBe(0);
+        expect(result.calls).toContain('issue comment 7');
+        expect(result.commentBody).toMatch(
+          /^> \*\*Provisional\.\*\* Main advanced past this head/,
+        );
+        expect(result.commentBody).toContain(
+          'Run 123 failed at commit abcdef123456',
+        );
       });
 
       it('keeps the recorded recurrence when the accretion edit fails', () => {
@@ -1977,7 +2170,8 @@ printf '%s\\n' '{"jobs":[]}'
     // auto-rerun this annotation class for months (qwen-autofix.md#af-076);
     // this lane now does the same for main runs — once, because the rerun's
     // own completion re-enters this workflow at attempt 2 and files then if
-    // the break persists.
+    // the break persists (a merged PR's rerun is suppressed as a stale
+    // pre-merge head).
     const infraStep = jobs.analyze.steps.find((step) => step.id === 'infra');
     const rerunJob = jobs.rerun_infra;
     const infraScript = oneLine(infraStep.run);
@@ -2002,6 +2196,11 @@ printf '%s\\n' '{"jobs":[]}'
       // run.
       expect(String(rerunJob.if)).toContain(
         "needs.analyze.outputs.file_issue == 'true'",
+      );
+      // A provisional report is for a head main already replaced: the rerun
+      // would spend pool capacity on it and could not re-enter here.
+      expect(String(rerunJob.if)).toContain(
+        "needs.analyze.outputs.provisional != 'true'",
       );
     });
 
@@ -2046,9 +2245,9 @@ printf '%s\\n' '{"jobs":[]}'
     });
 
     it('fails closed: later attempts, empty failure lists, and unreadable annotations all file', () => {
-      // The attempt guard is what stops a rerun loop: a persistent break
-      // re-fails at attempt 2 and files then. Negate it and the pin below
-      // goes red.
+      // The attempt guard is what stops a rerun loop: on main a persistent
+      // break re-fails at attempt 2 and files then. Negate it and the pin
+      // below goes red.
       expect(infraScript).toContain('if [[ "${RUN_ATTEMPT}" == \'1\' ]]; then');
       // Without the count guard an empty failure set is vacuously "all
       // infrastructure" and a run whose job list could not be fetched would
@@ -2206,6 +2405,57 @@ printf '%s\\n' '{"jobs":[]}'
       // A rerun that could not be dispatched must not swallow the report:
       // the issue is then the only record of a red main.
       expect(condition).toContain("needs.rerun_infra.result != 'success'");
+    });
+
+    it('reports an open PR infra-only run without rerunning or filing', () => {
+      // infra_only is only ever true at attempt 1, so this fixture is an
+      // open PR's infra death, not a merged PR rerun: an untrusted run gets
+      // neither actions: write nor an issue, only the comment on the PR.
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            infra_only: 'true',
+            file_issue: 'false',
+            comment_body: 'body',
+            pr_number: '14472',
+          },
+        },
+        rerun_infra: { result: 'skipped' },
+      };
+      expect(evaluate(String(rerunJob.if), needs)).toBe(false);
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
+    });
+
+    it('keeps the comment but suppresses the issue and rerun for a merged PR rerun', () => {
+      // The reachable shape for a merged PR's attempt >= 2: infra_only is
+      // forced false outside attempt 1, and the destination cleared
+      // file_issue. The comment is then the failure's only record.
+      const evaluate = (condition, needs) =>
+        new Function('needs', 'always', `return (${condition.slice(3, -2)});`)(
+          needs,
+          () => true,
+        );
+      const needs = {
+        analyze: {
+          result: 'success',
+          outputs: {
+            infra_only: 'false',
+            file_issue: 'false',
+            comment_body: 'body',
+            pr_number: '14472',
+          },
+        },
+        rerun_infra: { result: 'skipped' },
+      };
+      expect(evaluate(String(rerunJob.if), needs)).toBe(false);
+      expect(evaluate(String(jobs.file_issue.if), needs)).toBe(false);
+      expect(evaluate(String(jobs.report_pr.if), needs)).toBe(true);
     });
 
     it.each([
@@ -2383,13 +2633,49 @@ printf '%s\\n' '{"jobs":[]}'
       'issues/comments/456',
       'https://github.com/QwenLM/qwen-code/issues/14500',
       0,
+      false,
     ],
-    ['contributor', 'POST', 'issues/14472/comments', '', 0],
-    ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 1],
-    ['github-actions[bot]', null, null, '', 3],
+    ['contributor', 'POST', 'issues/14472/comments', '', 0, false],
+    // The first report on a fresh issue is a POST carrying the link; a
+    // regrouping that emits it only on PATCH would drop it from that comment.
+    [
+      'contributor',
+      'POST',
+      'issues/14472/comments',
+      'https://github.com/QwenLM/qwen-code/issues/14500',
+      0,
+      false,
+    ],
+    ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 1, false],
+    // A suppressed rerun finds the comment an earlier attempt linked to a
+    // still-open issue; the whole-body PATCH must not drop that link.
+    ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 0, true, 0],
+    // A publish failure on attempt 1 re-enters the loop with the body already
+    // written once; the assembly truncate must keep the link single.
+    ['github-actions[bot]', 'PATCH', 'issues/comments/456', '', 0, true, 1],
+    // A freshly filed issue outranks a link recovered from the earlier
+    // attempt's comment, which pointed at a different issue.
+    [
+      'github-actions[bot]',
+      'PATCH',
+      'issues/comments/456',
+      'https://github.com/QwenLM/qwen-code/issues/14500',
+      0,
+      true,
+      0,
+    ],
+    ['github-actions[bot]', null, null, '', 3, false, 0],
   ])(
-    'upserts a %s comment via %s with %s and issue=%s after %s lookup errors',
-    (login, method, endpoint, issueUrl, failures) => {
+    'upserts a %s comment via %s with %s and issue=%s after %s lookup errors (existing tracking: %s)',
+    (
+      login,
+      method,
+      endpoint,
+      issueUrl,
+      failures,
+      existingTracking,
+      publishFailures = 0,
+    ) => {
       const tmp = mkdtempSync(join(tmpdir(), 'java-ci-comment-'));
       try {
         const step = jobs.report_pr.steps[0];
@@ -2402,10 +2688,17 @@ printf '%s\\n' '{"jobs":[]}'
               'https://github.com/QwenLM/qwen-code/actions/runs/39045740099',
           },
         });
+        const existingBody = existingTracking
+          ? `${comment}\n[Tracking issue](https://github.com/QwenLM/qwen-code/issues/15240)\n`
+          : comment;
         writeFileSync(
           join(tmp, 'comments.json'),
           JSON.stringify(
-            [123, 456].map((id) => ({ id, user: { login }, body: comment })),
+            [123, 456].map((id) => ({
+              id,
+              user: { login },
+              body: existingBody,
+            })),
           ),
         );
         writeFileSync(
@@ -2418,6 +2711,10 @@ if [[ "$*" == *--paginate* ]]; then
   if [[ "$count" -le "\${LOOKUP_FAILURES}" ]]; then exit 1; fi
   cat "\${RUNNER_TEMP}/comments.json"
 else
+  count=$(cat "\${RUNNER_TEMP}/publishes" 2>/dev/null || echo 0)
+  count=$((count + 1))
+  echo "$count" > "\${RUNNER_TEMP}/publishes"
+  if [[ "$count" -le "\${PUBLISH_FAILURES:-0}" ]]; then exit 1; fi
   printf '%s\n' "$@" > "\${RUNNER_TEMP}/published-args"
 fi
 `,
@@ -2437,20 +2734,55 @@ fi
             COMMENT_BODY: comment,
             ISSUE_URL: issueUrl,
             LOOKUP_FAILURES: String(failures),
+            PUBLISH_FAILURES: String(publishFailures),
           },
         });
         expect(result.status, result.stderr).toBe(method ? 0 : 1);
         const published = join(tmp, 'published-args');
-        if (method)
-          expect(readFileSync(published, 'utf8')).toContain(
+        if (method) {
+          const publishedArgs = readFileSync(published, 'utf8');
+          expect(publishedArgs).toContain(
             `${method}\nrepos/QwenLM/qwen-code/${endpoint}\n`,
           );
-        else expect(existsSync(published)).toBe(false);
-        expect(
-          readFileSync(join(tmp, 'pr-comment.md'), 'utf8').includes(
-            '[Tracking issue]',
-          ),
-        ).toBe(Boolean(issueUrl));
+          // Tie the body assertions to the publish call itself: a repointed
+          // body argument would ship a linkless comment while the assembly
+          // file this test inspects still looked right.
+          expect(publishedArgs).toContain(
+            `-F\nbody=@${join(tmp, 'pr-comment.md')}\n`,
+          );
+          const publishedBody = readFileSync(
+            join(tmp, 'pr-comment.md'),
+            'utf8',
+          );
+          expect(publishedBody).toContain(comment);
+          const expectedTracking =
+            issueUrl ||
+            (existingTracking
+              ? 'https://github.com/QwenLM/qwen-code/issues/15240'
+              : '');
+          if (expectedTracking) {
+            expect(publishedBody).toContain(
+              `[Tracking issue](${expectedTracking})`,
+            );
+            expect(publishedBody.match(/\[Tracking issue\]\(/g)).toHaveLength(
+              1,
+            );
+          } else {
+            expect(publishedBody.includes('[Tracking issue]')).toBe(false);
+          }
+          // The emitter's line must stay the one the recovery grep accepts;
+          // decorating it would silently drop the link on a suppressed rerun.
+          if (issueUrl) {
+            const recoveryPattern = step.run.match(/grep -m1 -E '([^']*)'/)[1];
+            expect(new RegExp(recoveryPattern, 'm').test(publishedBody)).toBe(
+              true,
+            );
+          }
+        } else {
+          // A lookup-exhausted run must not publish, or every failed lookup
+          // duplicates the bot comment.
+          expect(existsSync(published)).toBe(false);
+        }
         expect(JSON.stringify(jobs.report_pr)).not.toContain(
           'actions/checkout',
         );

@@ -6,6 +6,14 @@
 
 // T7 (PR #4732 R1): `vi` directly, like every other test file in the repo.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import {
+  grantUnattendedFixes,
+  openBackgroundFix,
+  recordConfirmedWatch,
+  recordWatchTask,
+  resetUnattendedFixGrantsForTests,
+} from '../../tools/autofix-pr-grants.js';
+import { runWithAgentContext } from './agent-context.js';
 import * as os from 'node:os';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
@@ -4582,6 +4590,145 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       /incompatible options/,
     );
     expect(worktreeStubs.instances).toHaveLength(0);
+  });
+
+  it('workingDir refuses a worktree a background fix of /autofix-pr works in', async () => {
+    const wt = '/fake/repo/.qwen/tmp/review-pr-7';
+    grantUnattendedFixes('wf-session', {
+      pr: 7,
+      worktree: wt,
+      check: async () => true,
+      open: async () => ({ task: 't' }),
+      close: async () => {},
+    });
+    recordConfirmedWatch('wf-session', {
+      pr: 7,
+      repo: 'o/r',
+      host: null,
+      targetDir: '/fake/repo',
+      preparedAt: null,
+      worktree: wt,
+      authorCanPush: true,
+    });
+    recordWatchTask('wf-session', 7, {
+      task: 't',
+      reply: true,
+      instructions: '',
+    });
+    try {
+      await openBackgroundFix('wf-session', wt, new AbortController().signal);
+      await expectRefused(
+        {},
+        'hi',
+        PINNED,
+        /a background fix agent of \/autofix-pr is working/,
+      );
+    } finally {
+      resetUnattendedFixGrantsForTests();
+    }
+  });
+
+  it("refuses an agent in the session's own directory when it is a background fix's worktree", async () => {
+    const wt = '/fake/repo';
+    grantUnattendedFixes('wf-session', {
+      pr: 7,
+      worktree: wt,
+      check: async () => true,
+      open: async () => ({ task: 't' }),
+      close: async () => {},
+    });
+    recordConfirmedWatch('wf-session', {
+      pr: 7,
+      repo: 'o/r',
+      host: null,
+      targetDir: '/fake/repo',
+      preparedAt: null,
+      worktree: wt,
+      authorCanPush: true,
+    });
+    recordWatchTask('wf-session', 7, {
+      task: 't',
+      reply: true,
+      instructions: '',
+    });
+    try {
+      await openBackgroundFix('wf-session', wt, new AbortController().signal);
+      await expectRefused(
+        {},
+        'hi',
+        {},
+        /a background fix agent of \/autofix-pr is working/,
+      );
+    } finally {
+      resetUnattendedFixGrantsForTests();
+    }
+  });
+
+  /** A background fix of /autofix-pr at `wt`, its agent `agent-x`. */
+  const fixAt = async (wt: string) => {
+    grantUnattendedFixes('wf-session', {
+      pr: 7,
+      worktree: wt,
+      check: async () => true,
+      open: async () => ({ task: 't' }),
+      close: async () => {},
+    });
+    recordConfirmedWatch('wf-session', {
+      pr: 7,
+      repo: 'o/r',
+      host: null,
+      targetDir: '/fake/repo',
+      preparedAt: null,
+      worktree: wt,
+      authorCanPush: true,
+    });
+    recordWatchTask('wf-session', 7, {
+      task: 't',
+      reply: true,
+      instructions: '',
+    });
+    const fix = await openBackgroundFix(
+      'wf-session',
+      wt,
+      new AbortController().signal,
+    );
+    fix.attach('agent-x', () => {});
+    return fix;
+  };
+
+  // Only the top-level session dispatches (no subagent runs a workflow), but
+  // the guard is the agent tool's: a fix's own agent is not held off.
+  it("dispatches what the fix's own agent asks for in the session's directory there", async () => {
+    try {
+      await fixAt('/fake/repo');
+      await expect(
+        runWithAgentContext(
+          'agent-x',
+          () =>
+            dispatchVia({ onCreate: ends('own') }, 'hi', { model: 'qwen3-max' })
+              .result,
+        ),
+      ).resolves.toBe('own');
+    } finally {
+      resetUnattendedFixGrantsForTests();
+    }
+  });
+
+  it("waits for a dropped fix's agent to settle before it pins an agent to that worktree", async () => {
+    try {
+      const fix = await fixAt('/fake/repo/.qwen/tmp/review-pr-7');
+      fix.drop();
+      let returned = false;
+      const pinned = dispatchVia({ onCreate: ends('pinned') }, 'hi', PINNED);
+      void pinned.result.then(() => (returned = true));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(returned).toBe(false);
+      expect(pinned.calls).toHaveLength(0);
+      fix.bodySettled();
+      await expect(pinned.result).resolves.toBe('pinned');
+    } finally {
+      resetUnattendedFixGrantsForTests();
+    }
   });
 
   // A refused pin must not fall through to an agent in the parent tree.

@@ -23,6 +23,32 @@ import java.util.Set;
  * exactly one rule class.
  */
 public enum SurfaceRegistry {
+    WEBSHELL_WORKTREE_OPTIONS(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/options",
+            Surface.WEBSHELL, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    WEBSHELL_WORKTREE_QUERY(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/query",
+            Surface.WEBSHELL, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    WEBSHELL_WORKTREE_INSPECT(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/inspect",
+            Surface.WEBSHELL, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    WEBSHELL_WORKTREE_CLEANUP(Method.POST, "/api/agent/web-shell/v1/workspaces/worktrees/cleanup",
+            Surface.WEBSHELL, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    PUBLIC_WORKTREE_OPTIONS(Method.GET, "/v1/agents/workspaces/{workspaceId}/worktrees/options",
+            Surface.PUBLIC, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    PUBLIC_WORKTREE_QUERY(Method.GET, "/v1/agents/workspaces/{workspaceId}/worktrees",
+            Surface.PUBLIC, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    PUBLIC_WORKTREE_INSPECT(Method.GET, "/v1/agents/workspaces/{workspaceId}/worktrees/{worktreeId}",
+            Surface.PUBLIC, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    PUBLIC_WORKTREE_CLEANUP(Method.POST, "/v1/agents/workspaces/{workspaceId}/worktrees/{worktreeId}/cleanup",
+            Surface.PUBLIC, RuleClass.SESSION_WORKTREE, EnumSet.of(Capability.SESSION_WORKTREE)),
+    PUBLIC_USER_MESSAGES_QUERY(Method.GET, "/v1/agents/sessions/{sessionId}/user-messages",
+            Surface.PUBLIC, RuleClass.OPERATOR, EnumSet.of(Capability.USER_MESSAGE_QUERY)),
+    PUBLIC_USER_MESSAGES_COMMAND(Method.POST, "/v1/agents/sessions/{sessionId}/user-messages",
+            Surface.PUBLIC, RuleClass.OPERATOR, EnumSet.of(Capability.USER_MESSAGE_COMMAND)),
+    WEBSHELL_USER_MESSAGES_QUERY(Method.POST, "/api/agent/web-shell/v1/user-messages/query",
+            Surface.WEBSHELL, RuleClass.OPERATOR, EnumSet.of(Capability.USER_MESSAGE_QUERY)),
+    WEBSHELL_USER_MESSAGES_COMMAND(Method.POST, "/api/agent/web-shell/v1/user-messages/command",
+            Surface.WEBSHELL, RuleClass.OPERATOR, EnumSet.of(Capability.USER_MESSAGE_COMMAND)),
+    INTERNAL_USER_MESSAGES_CLAIM(Method.POST, "/internal/managed-session-store/v1/sessions/{sessionId}/user-messages:claim",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_USER_MESSAGE_CLAIM)),
     // PublicAgentController: public Session surfaces.
     PUBLIC_SESSION_CREATE(Method.POST, "/v1/agents/sessions",
             Surface.PUBLIC, RuleClass.WORKSPACE_CREATE,
@@ -63,9 +89,6 @@ public enum SurfaceRegistry {
             EnumSet.of(Capability.SESSION_OPERATION_GET)),
     PUBLIC_CONTEXT_COMPRESSION(Method.POST, "/v1/agents/sessions/{sessionId}/compress",
             Surface.PUBLIC, RuleClass.OPERATOR, EnumSet.of(Capability.SESSION_CONTEXT_COMPRESSION)),
-    PUBLIC_CWD_CHANGE(Method.POST, "/v1/agents/sessions/{sessionId}/cwd",
-            Surface.PUBLIC, RuleClass.OPERATOR,
-            EnumSet.of(Capability.SESSION_CWD_CHANGE)),
     PUBLIC_TURN_EVENTS(Method.POST, "/v1/agents/sessions/{sessionId}/events",
             Surface.PUBLIC, RuleClass.OPERATOR,
             EnumSet.of(Capability.TURN_SUBMIT, Capability.TURN_CANCEL)),
@@ -152,6 +175,52 @@ public enum SurfaceRegistry {
     PUBLIC_WORKSPACE_GET(Method.GET, "/v1/agents/workspaces/{workspaceId}",
             Surface.PUBLIC, RuleClass.WORKSPACE_DISCOVERY,
             EnumSet.of(Capability.WORKSPACE_GET)),
+    PUBLIC_SESSION_EXTENSIONS_GET(Method.GET, "/v1/agents/sessions/{sessionId}/extensions",
+            Surface.PUBLIC, RuleClass.SESSION_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_CONFIG_GET)),
+    PUBLIC_SESSION_EXTENSIONS_APPLY(Method.POST, "/v1/agents/sessions/{sessionId}/extensions",
+            Surface.PUBLIC, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_CONFIG_APPLY)),
+    PUBLIC_SESSION_EXTENSIONS_OPERATION(Method.GET, "/v1/agents/sessions/{sessionId}/extensions/operations/{operationId}",
+            Surface.PUBLIC, RuleClass.SESSION_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_CONFIG_GET)),
+    PUBLIC_SESSION_EXTENSIONS_CONTINUE(Method.POST, "/v1/agents/sessions/{sessionId}/extensions/operations/{operationId}/continue",
+            Surface.PUBLIC, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_CONFIG_APPLY)),
+    PUBLIC_SESSION_EXTENSIONS_RECOVER(Method.POST, "/v1/agents/sessions/{sessionId}/extensions/operations/{operationId}/recover-previous",
+            Surface.PUBLIC, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_CONFIG_APPLY)),
+    WEBSHELL_SESSION_EXTENSIONS_GET(Method.POST, "/api/agent/web-shell/v1/session-extensions/query",
+            Surface.WEBSHELL, RuleClass.SESSION_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_CONFIG_GET)),
+    WEBSHELL_SESSION_EXTENSIONS_APPLY(Method.POST, "/api/agent/web-shell/v1/session-extensions/submit",
+            Surface.WEBSHELL, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_CONFIG_APPLY)),
+    WEBSHELL_SESSION_EXTENSIONS_CONTINUE(Method.POST, "/api/agent/web-shell/v1/session-extensions/continue",
+            Surface.WEBSHELL, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_CONFIG_APPLY)),
+    WEBSHELL_SESSION_EXTENSIONS_RECOVER(Method.POST, "/api/agent/web-shell/v1/session-extensions/recover-previous",
+            Surface.WEBSHELL, RuleClass.SESSION_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_CONFIG_APPLY)),
+    PUBLIC_EXTENSION_LIST(Method.GET, "/v1/agents/workspaces/{workspaceId}/extensions",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_LIST)),
+    PUBLIC_EXTENSION_CREATE(Method.POST, "/v1/agents/workspaces/{workspaceId}/extensions",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_PUBLISH)),
+    PUBLIC_EXTENSION_PUBLISH(Method.PUT, "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/packages/{packageDigest}",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_PUBLISH)),
+    PUBLIC_EXTENSION_GET(Method.GET, "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/packages/{packageRevision}",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_GET)),
+    PUBLIC_EXTENSION_ARCHIVE(Method.GET, "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/packages/{packageRevision}/archive",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_ARCHIVE)),
+    PUBLIC_EXTENSION_SETTINGS_GET(Method.GET, "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/settings",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_SETTINGS_GET)),
+    PUBLIC_EXTENSION_SETTINGS_SET(Method.POST, "/v1/agents/workspaces/{workspaceId}/extensions/{extensionId}/settings",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_SETTINGS_SET)),
+    PUBLIC_EXTENSION_OPERATION(Method.GET, "/v1/agents/workspaces/{workspaceId}/extensions/operations/{operationId}",
+            Surface.PUBLIC, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_OPERATION)),
+    WEBSHELL_EXTENSION_LIST(Method.POST, "/api/agent/web-shell/v1/workspace-extensions/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_LIST)),
+    WEBSHELL_EXTENSION_PUBLISH(Method.POST, "/api/agent/web-shell/v1/workspace-extensions/publish",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_PUBLISH)),
+    WEBSHELL_EXTENSION_GET(Method.POST, "/api/agent/web-shell/v1/workspace-extensions/packages/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_GET)),
+    WEBSHELL_EXTENSION_SETTINGS_GET(Method.POST, "/api/agent/web-shell/v1/workspace-extensions/settings/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_SETTINGS_GET)),
+    WEBSHELL_EXTENSION_SETTINGS_SET(Method.POST, "/api/agent/web-shell/v1/workspace-extensions/settings/submit",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_EXTENSION_OPERATOR, EnumSet.of(Capability.EXTENSION_SETTINGS_SET)),
+    WEBSHELL_EXTENSION_OPERATION(Method.POST, "/api/agent/web-shell/v1/workspace-extensions/operations/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_EXTENSION_READER, EnumSet.of(Capability.EXTENSION_OPERATION)),
     // ManagedChannelController: tenant-scoped channel resources (H5c), read
     // over the registered connections and filtered below the Workspace read
     // grant inside the service.
@@ -241,6 +310,10 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/transcript/query",
             Surface.WEBSHELL, RuleClass.READER,
             EnumSet.of(Capability.TRANSCRIPT_QUERY)),
+    WEBSHELL_TRANSCRIPT_ITEMS(Method.POST,
+            "/api/agent/web-shell/v1/transcript/items/query",
+            Surface.WEBSHELL, RuleClass.READER,
+            EnumSet.of(Capability.ITEM_LIST)),
     WEBSHELL_EVENT_STREAM(Method.POST, "/api/agent/web-shell/v1/events/stream",
             Surface.WEBSHELL, RuleClass.READER,
             EnumSet.of(Capability.TAIL_EVENTS)),
@@ -275,10 +348,6 @@ public enum SurfaceRegistry {
             EnumSet.of(Capability.SESSION_OPERATION_GET)),
     WEBSHELL_CONTEXT_COMPRESSION(Method.POST, "/api/agent/web-shell/v1/sessions/compress",
             Surface.WEBSHELL, RuleClass.OPERATOR, EnumSet.of(Capability.SESSION_CONTEXT_COMPRESSION)),
-    WEBSHELL_CWD_CHANGE(Method.POST,
-            "/api/agent/web-shell/v1/sessions/cwd/change",
-            Surface.WEBSHELL, RuleClass.OPERATOR,
-            EnumSet.of(Capability.SESSION_CWD_CHANGE)),
     WEBSHELL_ACTION_LIST(Method.POST, "/api/agent/web-shell/v1/actions/query",
             Surface.WEBSHELL, RuleClass.READER,
             EnumSet.of(Capability.ACTION_LIST)),
@@ -344,6 +413,14 @@ public enum SurfaceRegistry {
             "/api/agent/web-shell/v1/workspaces/files/read",
             Surface.WEBSHELL, RuleClass.WORKSPACE_FILES,
             EnumSet.of(Capability.WORKSPACE_FILES_READ)),
+    WEBSHELL_WORKSPACE_FILES_UPLOAD(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/files/upload",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_FILES,
+            EnumSet.of(Capability.WORKSPACE_FILES_UPLOAD)),
+    WEBSHELL_WORKSPACE_FILES_UPLOAD_QUERY(Method.POST,
+            "/api/agent/web-shell/v1/workspaces/files/uploads/query",
+            Surface.WEBSHELL, RuleClass.WORKSPACE_FILES,
+            EnumSet.of(Capability.WORKSPACE_FILES_UPLOAD_QUERY)),
     WEBSHELL_SESSION_OPTIONS(Method.POST,
             "/api/agent/web-shell/v1/session-options/query",
             Surface.WEBSHELL, RuleClass.SESSION_OPTIONS,
@@ -382,6 +459,10 @@ public enum SurfaceRegistry {
             Surface.WEBSHELL, RuleClass.OWNER,
             EnumSet.of(Capability.SESSION_APPROVAL_CHANGE)),
     // ManagedSessionStoreController: internal writer routes.
+    INTERNAL_EXTERNAL_STORAGE_REGISTER(Method.POST,
+            "/internal/managed-workspaces/v1/storage:register-external",
+            Surface.INTERNAL, RuleClass.INTERNAL_OPERATOR,
+            EnumSet.of(Capability.EXTERNAL_STORAGE_REGISTER)),
     INTERNAL_APPROVAL_QUERY(Method.POST,
             "/internal/managed-session-store/v1/sessions/{sessionId}/approval:query",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
@@ -446,11 +527,28 @@ public enum SurfaceRegistry {
                     + "/transactions",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
             EnumSet.of(Capability.STORE_TRANSACTION_LIST)),
+    INTERNAL_TRANSACTION_RECENT(Method.GET,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/transactions:recent",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_TRANSACTION_LIST)),
+    INTERNAL_TRANSACTION_LOOKUP(Method.GET,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/transactions:lookup",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
+            EnumSet.of(Capability.STORE_TRANSACTION_LIST)),
     INTERNAL_RESOURCE_GET(Method.GET,
             "/internal/managed-session-store/v1/sessions/{sessionId}"
                     + "/resources/{resourceId}",
             Surface.INTERNAL, RuleClass.INTERNAL_WRITER,
             EnumSet.of(Capability.STORE_RESOURCE_GET)),
+    INTERNAL_SNAPSHOT_PUBLISH(Method.POST,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/journal-snapshots:publish",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_SNAPSHOT_PUBLISH)),
+    INTERNAL_SNAPSHOT_GET(Method.GET,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/journal-snapshots/{snapshotId}",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_SNAPSHOT_GET)),
+    INTERNAL_SNAPSHOT_PAGES(Method.GET,
+            "/internal/managed-session-store/v1/sessions/{sessionId}/journal-snapshots/{snapshotId}/pages",
+            Surface.INTERNAL, RuleClass.INTERNAL_WRITER, EnumSet.of(Capability.STORE_SNAPSHOT_PAGES)),
     // ToolPublicationController: internal publication routes.
     INTERNAL_PUB_GRANT(Method.POST,
             "/internal/managed-tool-publications/v1/sessions/{sessionId}"
@@ -575,7 +673,7 @@ public enum SurfaceRegistry {
 
     /** HTTP methods as the mapping annotations declare them. */
     private enum Method {
-        GET("GET"), POST("POST"), PATCH("PATCH"), DELETE("DELETE");
+        GET("GET"), POST("POST"), PUT("PUT"), PATCH("PATCH"), DELETE("DELETE");
 
         private final String value;
 
@@ -601,6 +699,9 @@ public enum SurfaceRegistry {
      * carries both {@link #TURN_SUBMIT} and {@link #TURN_CANCEL}.
      */
     public enum Capability {
+        SESSION_WORKTREE,
+        EXTERNAL_STORAGE_REGISTER,
+        USER_MESSAGE_QUERY, USER_MESSAGE_COMMAND, STORE_USER_MESSAGE_CLAIM,
         SESSION_CREATE,
         SESSION_LIST,
         SESSION_GET,
@@ -612,7 +713,6 @@ public enum SurfaceRegistry {
         SESSION_UNARCHIVE,
         SESSION_DELETE,
         SESSION_OPERATION_GET,
-        SESSION_CWD_CHANGE,
         SESSION_CONTEXT_COMPRESSION,
         TURN_SUBMIT,
         TURN_CANCEL,
@@ -639,6 +739,8 @@ public enum SurfaceRegistry {
         WORKSPACE_DIRECTORIES,
         WORKSPACE_FILES_QUERY,
         WORKSPACE_FILES_READ,
+        WORKSPACE_FILES_UPLOAD,
+        WORKSPACE_FILES_UPLOAD_QUERY,
         SESSION_OPTIONS,
         SESSION_APPROVAL,
         SESSION_APPROVAL_CHANGE,
@@ -648,6 +750,15 @@ public enum SurfaceRegistry {
         SESSION_MODEL_CHANGE,
         WORKSPACE_LIST,
         WORKSPACE_GET,
+        EXTENSION_CONFIG_GET,
+        EXTENSION_CONFIG_APPLY,
+        EXTENSION_LIST,
+        EXTENSION_PUBLISH,
+        EXTENSION_GET,
+        EXTENSION_ARCHIVE,
+        EXTENSION_SETTINGS_GET,
+        EXTENSION_SETTINGS_SET,
+        EXTENSION_OPERATION,
         RUNTIME_NODE_LIST,
         WORKSPACE_DIRECTORY_CHECK,
         WORKSPACE_REGISTER,
@@ -676,6 +787,9 @@ public enum SurfaceRegistry {
         STORE_RESTORE,
         STORE_TOOL_RESULT_PUBLISH,
         STORE_TRANSACTION_LIST,
+        STORE_SNAPSHOT_PUBLISH,
+        STORE_SNAPSHOT_GET,
+        STORE_SNAPSHOT_PAGES,
         STORE_RESOURCE_GET,
         PUB_GRANT,
         PUB_SEGMENT,
@@ -698,6 +812,13 @@ public enum SurfaceRegistry {
      * acceptance suite walks these classes to build its probe matrix.
      */
     public enum RuleClass {
+        SESSION_WORKTREE,
+        /** Trusted actor with a read grant on the persisted Workspace; operation reads also retain actor ownership. */
+        SESSION_EXTENSION_READER,
+        SESSION_EXTENSION_OPERATOR,
+        WORKSPACE_EXTENSION_READER,
+        /** ACTIVE Workspace operator plus the explicit extension publication deployment allowlist. */
+        WORKSPACE_EXTENSION_OPERATOR,
         /**
          * Bound-Session creation: a trusted actor ({@code 401
          * actor_required} without one) holding READER or above ({@code
@@ -845,6 +966,7 @@ public enum SurfaceRegistry {
          * read). On a dedicated internal listener the routing filter
          * answers a public-connector caller {@code 404}.
          */
-        INTERNAL_WRITER
+        INTERNAL_WRITER,
+        INTERNAL_OPERATOR
     }
 }

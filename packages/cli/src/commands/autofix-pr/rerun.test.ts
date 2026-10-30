@@ -451,6 +451,24 @@ describe('runRerun', () => {
     expect(mocks.ghWithInput).not.toHaveBeenCalled();
   });
 
+  it('re-runs nothing for a round its task no longer drives', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      watch: { every: 2, reply: true, instructions: '', task: 'bbbbbbbbbbbb' },
+    });
+    expect(() => runRerun(7, 50, 'aaaaaaaaaaaa')).toThrow(/no longer drives/);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
+  it('re-runs nothing for a watch cleanup ended', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      ended: { at: '2026-10-25T00:00:00.000Z', reason: 'kept' },
+    });
+    expect(() => runRerun(7, 50)).toThrow(/watch was stopped/);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
   it('refuses a run with no failed check on the head', () => {
     expect(() => runRerun(7, 99)).toThrow(
       /run 99 is no failed GitHub Actions run/,

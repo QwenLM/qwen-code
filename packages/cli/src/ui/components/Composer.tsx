@@ -18,6 +18,9 @@ import { useConfig } from '../contexts/ConfigContext.js';
 import { theme } from '../semantic-colors.js';
 import { StreamingState } from '../types.js';
 import { FeedbackDialog } from '../FeedbackDialog.js';
+import { useModBand } from '../hooks/use-mod-band.js';
+import { ModBand } from './ModBand.js';
+import { modBandMaxRows } from '../utils/mod-band-tree.js';
 import { t } from '../../i18n/index.js';
 
 interface ComposerProps {
@@ -30,6 +33,7 @@ export const Composer = ({ footerRef }: ComposerProps) => {
   const uiState = useUIState();
   const uiActions = useUIActions();
   const { vimEnabled } = useVimModeState();
+  const modBand = useModBand(config);
 
   const {
     showAutoAcceptIndicator,
@@ -114,6 +118,13 @@ export const Composer = ({ footerRef }: ComposerProps) => {
       <QueuedMessageDisplay messageQueue={uiState.messageQueue} />
 
       {uiState.isFeedbackDialogOpen && <FeedbackDialog />}
+
+      {uiState.isInputActive && (
+        <ModBand
+          band={modBand}
+          maxRows={modBandMaxRows(uiState.terminalHeight)}
+        />
+      )}
 
       {uiState.isInputActive && (
         <InputPrompt

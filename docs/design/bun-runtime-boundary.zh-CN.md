@@ -2,6 +2,10 @@
 
 [English](bun-runtime-boundary.md) | [简体中文](bun-runtime-boundary.zh-CN.md)
 
+运行时后续批次（2026-10-23）：本候选将 npm 私有运行时与 standalone preview 的 Bun pin 及对应 runner 契约固定为 **1.4.4**。早期 **1.3.14** 实测证据保留原始归属；本次版本更新不代表新的安装产物或平台验收。OpenTUI 保持 **0.5.10**。
+
+正常 standalone updater 矩阵在真实 Node 24.19 与 Bun 1.4.4 宿主通过 152 个场景（各 76），使用验证证书的 loopback HTTPS 与合成无签名 CLI/版本归档。Node registry 调度采用注入 npm executor；Bun probe 不可观察，不宣称零分配或真实 npm 子进程身份。发布版 standalone 升级与其他平台仍待验收，上述证据早于本地 `a28ba265` 和本次整合 main `949a71e2` 的提案，最终安装产物和平台矩阵仍须重新验收。
+
 状态：MYWO-8 S1 已实现（本变更）。读者：S2（Bun PTY）、S3（运行时兼容矩阵）、S4（打包）以及 qoder 的 PTY 对接工作。
 
 ## 问题
@@ -67,13 +71,13 @@ worker 不同的 CA/TLS 实现。本次不改变 daemon 运行时或 npm 的 Nod
 
 ### 更新 / 安装身份（必须保持宿主 Node）
 
-| 位置                                                                   | 备注                                                                                                                           |
-| ---------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `packages/cli/src/utils/managed-npm-update.ts`                         | 经 `process.execPath` 运行 npm 的 `cli.js`；npm **必须**在 Node 身份下运行，绝不能落入私有内置 Bun —— 这里要保持宿主 Node 解析 |
-| `packages/cli/src/ui/handleAutoUpdate.ts`                              | 选择更新命令；Node 身份路径                                                                                                    |
-| `packages/cli/src/serve/daemon-update-restart.ts`                      | 已在 Bun 下禁用（`process.versions['bun']`）且对 execve 做特性检测                                                             |
-| `packages/cli/src/utils/installationInfo.ts`                           | npm CLI 路径解析默认使用 `process.execPath`（宿主 Node）                                                                       |
-| `scripts/build-standalone-release.js` / `create-standalone-package.js` | 固定 Bun 1.3.14、五个 target、`manifest.json`（`runtime`、版本）；布局 `bun/bin/bun`、`node/bin/node`                          |
+| 位置                                                                   | 备注                                                                                                 |
+| ---------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `packages/cli/src/utils/managed-npm-update.ts`                         | 经 `getNpmNodePath()` 运行 npm 的 `cli.js`；私有 Bun handoff 后仍保留原 Node 身份                    |
+| `packages/cli/src/ui/handleAutoUpdate.ts`                              | 选择更新命令；Node 身份路径                                                                          |
+| `packages/cli/src/serve/daemon-update-restart.ts`                      | 已在 Bun 下禁用（`process.versions['bun']`）且对 execve 做特性检测                                   |
+| `packages/cli/src/utils/installationInfo.ts`                           | npm CLI 路径解析默认使用 `getNpmNodePath()`（原 Node）                                               |
+| `scripts/build-standalone-release.js` / `create-standalone-package.js` | 固定 Bun 1.4.4、五个 target、`manifest.json`（`runtime`、版本）；布局 `bun/bin/bun`、`node/bin/node` |
 
 ### 固定父提交的完整字面调用点复核
 
@@ -156,6 +160,20 @@ S1 已接入选择器的三处是 `core/src/code-mode/host-client.ts`、`core/sr
 
 迁移规则：任意 JS worker 使用 `getJsInterpreterCommand`；上文明确列出的宿主工具和 worker-runtime 探针保留宿主身份。再唤起应用的位置使用 `QWEN_CODE_CLI` / 入口回退。
 
+### 3. npm 私有 Bun 启动选项
+
+`BUN_OPTIONS` 复用既有 loader-key 策略：所有作用域的 `.env`、`settings.env`、reload 和运行时快照均不可提供该键，daemon 的 loader 清理也删除继承副本。npm handoff 还会拒绝启动环境中非空的 `BUN_OPTIONS`，与 `NODE_OPTIONS` 及不兼容 Node flags 一致：普通模式保留既有回退，strict 模式在启动 Bun 前抛错。这阻止项目 preload 在私有解释器中执行，不改变 launcher 或配置模型。
+
+## 跨运行时加密文件身份
+
+加密文件密钥保留既有 hostname/OS 用户名盐、scrypt 参数与 AES-256-GCM 格式。Node 使用 `os.userInfo().username`；Bun 在受支持 POSIX 平台通过绝对 `/usr/bin/id -un` 查询 effective OS 账户，无 shell，限制为1000ms和4096输出字节。仅删除一个末尾换行；空、NUL、多行、超时或命令不可用均在文件访问或写入前拒绝。`USER`、`LOGNAME`、home 目录名不是 canonical 身份来源。不依赖 Node parent、不改环境，即覆盖 npm handoff、standalone 和 direct Bun；Windows classic Node 不变。
+
+POSIX Node、Bun 先认证 canonical key；为读取 Bun 环境用户名行为写出的旧文件，之后只可尝试当前 `USER`（包含显式空串）与 `unknown`，并对 canonical 用户名去重。只有 GCM 认证成功才接受 legacy 结果；全部失败保留原错误及原文件，已认证但 JSON 非法仍正常失败。读取不重写、不创建空 store；后续 mutation 用 canonical key 和既有原子写，保留其他全部服务条目。
+
+该共享 authority 服务 `HybridTokenStorage` 的 OAuth/file fallback、已选 encrypted 扩展设置及扩展 Git 凭证；`mcp-oauth-tokens-v2.json`、`extension-secrets-v1.json` 的 schema/权限不变，keychain 不变。历史任意 `USER` 若当前已丢失，不能猜测；文件保持原样并失败。原 hostname 绑定限制也保留。不新增 key registry、格式版本、provider、FFI 或自动读迁移。
+
+保留真实 Node 写/Bun 读原反例与 crypto/身份诊断。回归以独立已认证密文覆盖 OAuth、多服务 secret、两运行时 canonical/legacy 读取、空 `USER`、失败不写和 canonical 原子更新。源码测试不能代替新的真实运行时、cold scoped-reader、最终产物或平台验收；每个受支持 POSIX 平台仍须验证 OS 工具及其失败合同。
+
 ## 跨运行时测试覆盖
 
 `packages/core/src/utils/runtime-boundary.node-bun.test.ts` 在 Node 和可用的
@@ -163,7 +181,7 @@ Bun 解释器下运行同一 fixture，覆盖身份与 stdio JSON 行、退出�
 SIGTERM 处理、显式 shutdown 的 IPC 往返、`--expose-gc` 和
 `--input-type=commonjs --eval`。这些是测试契约，不代表全部平台或打包制品已经通过。
 Windows 跳过可捕获 SIGTERM 用例；缺少 Bun 二进制时跳过 Bun 腿。报告执行结果时必须
-记录实际运行时版本与 skip。交付 Bun 1.3.14 固定版本及 standalone 制品仍需独立打包验收。
+记录实际运行时版本与 skip。交付 Bun 1.4.4 固定版本及 standalone 制品仍需独立打包验收。
 
 此 fixture 不探测 `process.execve`、原生 PTY 加载、fd-3 状态管道或进程组信号。
 重新启动位置的 `process.execve` 特性检测和 `getPty` 的 Bun 门禁属于源码机制，
@@ -233,7 +251,7 @@ smoke 探测通过 `--version` 实际加载随包 `cli.js`；两种运行时还�
 CLI 单测覆盖 registry 选择、Node 传输保持、空 HOME 信任边界、归档与
 manifest 验证、身份变化、版本不匹配、smoke 隔离、激活及回滚。构建后
 运行 `npm run test:standalone:runtimes`；`PINNED_NODE` 和 `PINNED_BUN`
-指定 Node 24.19.0 与 Bun 1.3.14。两个宿主分别测试两种 payload 解释器，
+指定 Node 24.19.0 与 Bun 1.4.4。两个宿主分别测试两种 payload 解释器，
 使用证书验证开启的本地 HTTPS。真实安装布局夹具调用实际安装检测与查询
 入口：Bun 访问 HTTPS registry，Node 委托 npm 执行器。即便启动器元数据
 返回请求版本，CLI 文件缺失或语法损坏仍会拒绝更新。启动器损坏也必须在替换

@@ -28,12 +28,15 @@ existing MySQL defaults. Design:
 [简体中文](../../docs/design/2026-10-20-managed-local-serve.zh-CN.md).
 
 The `central-release` Maven profile attaches sources, Javadoc and GPG signatures
-for the main executable server JAR, without attaching the auxiliary operator
-JARs. Ordinary builds keep the existing attachments and do not activate Central
+for server publication, without attaching the auxiliary operator JARs. The
+executable server JAR uses the `exec` classifier. Ordinary builds keep the existing attachments and do not activate Central
 publishing. The protected `Release Managed server runtime` workflow sets the
 artifact version from an existing CLI release tag and publishes identical JAR
-bytes to Central, GitHub Release assets and the official OSS mirror. The CLI's
-first-use download uses OSS/GitHub and requires no Maven installation. See the
+bytes and checksums to GitHub Release assets and the official OSS mirror after
+full SDK/server verification. Distribution does not require Central credentials,
+GPG signing or a successful Central publication. Signed Maven publication remains
+an independent operation using the existing profile. The CLI's first-use download
+uses OSS/GitHub and requires no Maven installation. See the
 [release procedure](../../docs/users/managed-local-serve.md#publish-the-first-use-jar)
 and its [Chinese version](../../docs/users/managed-local-serve.zh-CN.md#发布首次使用的-jar).
 
@@ -142,9 +145,20 @@ Items and resumes after their `snapshot_through_sequence`. A
 cursor below a Session's replay floor gets `409 cursor_expired` from the JSON
 event query and one `agent.session.resync_required` frame from either stream
 whenever the cursor is below the durable floor. Rebuilding projections or pruning
-all retained events never resets that floor. Snapshot-backed pages keep their immutable
-version during concurrent message changes; their scoped opaque cursor expires after
-30 minutes and retains the required snapshot and subsequent replay interval.
+all retained events never resets that floor. Message queries page directly over
+`ma_message`; a scoped opaque cursor fixes the membership range and complete
+ordering position while message bodies and statuses remain live. Projection
+rebuild invalidates the cursor. The default transcript returns recent Items and
+the actual materialized coverage for SSE handoff, without reading the whole
+history or unmaterialized event tail. Export reads forward within its initial
+membership range and does not promise a fixed content version. Its retained
+`snapshotThroughSequence` field names that fixed range; transcript coverage
+names the current read watermark. A projection behind the replay floor or an
+initial export behind committed events returns retryable
+`message_projection_pending`. The historical `reload_snapshot` resync action
+now means reload the live message view. See the
+[removal design](../../docs/design/2026-10-29-managed-message-snapshot-removal.md)
+([简体中文](../../docs/design/2026-10-29-managed-message-snapshot-removal.zh-CN.md)).
 `GET /v1/agents/sessions/{id}/turns` lists a Session's Turns newest first with
 an opaque cursor, and `GET /v1/agents/sessions/{id}/turns/{turnId}` reads one.
 Design: [English](../../docs/design/2026-09-27-managed-agent-api-contract.md) |
@@ -270,16 +284,18 @@ Design and client migration contract:
 The independent Hosted Java reference distribution packages the runnable
 server, operator-recovery entry point, embedded Broker component, a
 configuration template, systemd unit templates, a credential bootstrap,
-provenance manifest, checksums,
-and deployment/upgrade instructions. Pull requests and manual dry runs build
+a phased upgrade command for the systemd layout, provenance manifest,
+checksums, and deployment/upgrade instructions. Pull requests and manual dry runs build
 and boot the same Linux archive; only a protected-main production dispatch
 publishes an immutable prerelease. See
 [Managed Agent reference deployment](../../docs/users/managed-agent-reference-deployment.md)
 and the [distribution design](../../docs/design/2026-10-14-managed-agent-reference-distribution.md).
 The bundled launcher also supports `--check`, a read-only preflight for
-configuration, Harness reachability, ports and database grants. When the
-database check succeeds, the output includes a `capacity` line with grouped
-counts from `ma_runtime_binding`, `ma_runtime_session` and `ma_operation`.
+configuration, the compatibility of a single configured Harness, ports,
+leftover Runtime workers and database grants; add `--online` while the server
+runs. When the database check succeeds, the output includes a `capacity` line
+with grouped counts from `ma_runtime_binding`, `ma_runtime_session` and
+`ma_operation`.
 These are durable logical records for capacity triage; they are not a count of
 physical worker processes or memory usage. The line explicitly reports
 physical processes and memory as unknown, and does not infer idle work or
@@ -290,6 +306,11 @@ reclaim anything. If the database check fails, capacity remains skipped.
 - Java 21
 - Maven 3.8.9+ (the SpotBugs gate's plugin declares that floor)
 - MySQL 8
+
+MySQL is the supported database family; full integration CI uses MySQL 8.4.
+MariaDB no longer has a CI lane or an ongoing compatibility guarantee.
+Existing dialect handling remains in place; this change does not reject
+connections that previously worked or introduce a catalog migration.
 
 Run the packaged CLI with `qwen serve --profile hosted-harness` as a separate
 process (the credentialed launch is spelled out in the Full WebShell
@@ -318,15 +339,23 @@ mvn spring-boot:run
 ```
 
 Instead of the token and digest, `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`
-can name the Harness's own environment file. The server then reads
-`QWEN_SERVER_TOKEN` and `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` from it into its
-configuration, never into its process environment, and refuses to start when
-either direct value is also set. Write each credential as `KEY=value` on one
-line, with no whitespace around the `=` and only letters, digits and `._:/+=-`
-in the value, and start comments with `#`. The server refuses, by file and
-line, any line it might read differently from systemd or a shell, such as a
-continuation, a carriage return from CRLF line endings, a `;` comment, an
-unterminated quote or text after a closing quote.
+can name the Harness's own environment file. While the Harness is enabled,
+the server then reads `QWEN_SERVER_TOKEN` and
+`QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` from it, and
+`QWEN_MANAGED_RUNTIME_BROKER_TOKEN` when the file sets it, into its
+configuration, never into its process environment. It refuses to start when a
+direct `QWEN_MANAGED_AGENT_HARNESS_TOKEN` or
+`QWEN_MANAGED_AGENT_CAPABILITY_DIGEST` is also set, or a direct
+`QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` beside a file Broker token. The file
+sets the Harness's `QWEN_MANAGED_RUNTIME_BROKER_URL` and
+`QWEN_MANAGED_RUNTIME_BROKER_TOKEN` together or neither; a file with only one
+of them, or with either one empty, refuses startup. Write each of these keys as `KEY=value` on one line,
+with no whitespace around the `=` and only letters, digits and `._:/+=-` in the
+value (the Broker URL may also use `[` and `]` to bracket an IPv6 literal, as
+in `http://[::1]:4182`), and start comments with `#`. The server
+refuses, by file and line, any line it might read differently from systemd or
+a shell, such as a continuation, a carriage return from CRLF line endings, a
+`;` comment, an unterminated quote or text after a closing quote.
 
 Create a Session:
 
@@ -467,7 +496,7 @@ and requires the retention deployment gates. With both
 `qwen.managed-agent.tool-publication.enabled` and
 `qwen.managed-agent.tool-publication.gc-enabled` true, a typed
 `SESSION_RESOURCE_GC` operation in `ma_operation` releases retired journal,
-message, record, snapshot and artifact owners and their `ma_resource_ref`
+message, record, native journal snapshot and artifact owners and their `ma_resource_ref`
 references in bounded transactions after the deletion grace. Unreferenced
 `PUBLISHED` or `REFERENCED` immutable `MYSQL_INLINE` bodies in `ma_resource`
 are then byte-dropped, keeping their identities with state `COLLECTED`.
@@ -476,7 +505,8 @@ intent before physical deletion and retains its claim generation and cursor
 until the outcome is settled. Live readers, recovery protection and unresolved
 object writes block collection. Session/head tombstones and event-stream tail
 and retention-floor counters remain. Unreferenced bodies of active Sessions
-remain retained until Session retirement. Reads of the retired Session stay fenced with
+remain retained until Session retirement, except released public message bodies
+that the reader-aware projection collector can reclaim. Reads of the retired Session stay fenced with
 `tool_output_session_retired` exactly as before; a workspace-recovery read
 that physically reaches a collected byte copy fails the named check
 `resource_collected` instead of the generic `resource_layout_unsupported` or
@@ -643,15 +673,16 @@ land. Design:
 
 All settings below use the `qwen.managed-agent.automation` prefix:
 
-| Setting              | Default | Meaning                                                                                                                                                                                            |
-| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`            | `false` | Run the scanner and admit the mutation routes (`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`); the read routes answer either way.                                                                        |
-| `scan-delay`         | `10s`   | Fixed delay between scanner ticks.                                                                                                                                                                 |
-| `lease`              | `60s`   | How long one scanner holds a definition; a stalled scanner yields it afterwards, and the fence it held no longer writes.                                                                           |
-| `late-tolerance`     | `5m`    | A slot older than this when the scanner sees it is late and follows the definition's catch-up policy (`none`, `latest`, `bounded`).                                                                |
-| `lookback`           | `24h`   | Slots older than this are neither fired nor recorded; it bounds every catch-up by age.                                                                                                             |
-| `max-slots-per-tick` | `1000`  | Slots **returned** per definition per tick: the walk itself follows the lookback window (its minutes are enumerated regardless), and the result set's surplus is cut at the oldest end and logged. |
-| `concurrency`        | `4`     | Non-terminal runs an `allow` definition may hold at once; beyond it an occurrence is recorded `skipped` with reason `count_limit`.                                                                 |
+| Setting              | Default | Meaning                                                                                                                                                                                                              |
+| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`            | `false` | Run the scanner and admit the mutation routes (`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`); the read routes answer either way.                                                                                          |
+| `scan-delay`         | `10s`   | Fixed delay between scanner ticks.                                                                                                                                                                                   |
+| `lease`              | `60s`   | How long one scanner holds a definition; a stalled scanner yields it afterwards, and the fence it held no longer writes.                                                                                             |
+| `late-tolerance`     | `5m`    | A slot older than this when the scanner sees it is late and follows the definition's catch-up policy (`none`, `latest`, `bounded`).                                                                                  |
+| `lookback`           | `24h`   | Slots older than this are neither fired nor recorded; it bounds every catch-up by age.                                                                                                                               |
+| `max-slots-per-tick` | `1000`  | Slots **returned** per definition per tick: the walk itself follows the lookback window (its minutes are enumerated regardless), and the result set's surplus is cut at the oldest end and logged.                   |
+| `concurrency`        | `4`     | Non-terminal runs an `allow` definition may hold at once; beyond it an occurrence is recorded `skipped` with reason `count_limit`.                                                                                   |
+| `scanner-threads`    | `4`     | Definition rows one tick works at once on its bounded pool; the tick joins them before returning. A row leases from its claim time, never from the tick's start, so a long tick hands out no already-expired leases. |
 
 ## Full WebShell dual-path development entry
 
@@ -731,10 +762,11 @@ It is read once at JVM startup, so if `mvn spring-boot:run` is already up
 on the 4170 value exported in Prerequisites, restart it with the override in
 place.
 
-`--port` is a request, not a guarantee: `qwen serve` moves to the next free
+The ordinary daemon treats `--port` as a request and moves to the next free
 port on a collision, and 4171 is exactly where a daemon displaced from 4170
-lands. Confirm each server's bound port in its startup line before exporting
-the base URL above.
+lands. The Hosted Harness profile never moves: it fails to start when its
+port is taken, naming the port. Start the Harness first, or confirm the
+daemon's bound port in its startup line.
 
 With both up, run from the repository root:
 
@@ -834,6 +866,12 @@ packaged-stack E2E, which have no ingress,
 then trusted as the actor for the request's tenant. It is disabled by default;
 never enable it where untrusted clients can reach the server.
 
+### Upload files into a Workspace
+
+With Workspace file access enabled and compatible Server, CLI and WebShell artifacts, select a persisted LOCAL or SSH_LOCAL Workspace and choose **Add file → Upload to workspace**. Uploads accept binary and empty files up to 8 MiB each, use an existing destination directory, and reject occupied paths without overwriting them. The composer inserts a scoped path reference for tools to use; binary bytes are not converted into a small-text snapshot or message attachment. Old CLIs leave upload disabled. CSI, folder uploads and automatic directory creation are unsupported.
+
+Uploads require an authenticated actor with OPERATOR or OWNER access and verified storage. An execution-storage member, including a retained MCP Runtime, keeps the Workspace busy. A durable physical-storage hold excludes new execution and retirement until the original upload has a definite result. If the response is uncertain, query the original upload ID; recovery does not replay the write on another Runtime. Cancelling the browser request does not delete a file already committed. See the [English design](../../docs/design/2026-10-26-managed-workspace-upload.md) and [Chinese design](../../docs/design/2026-10-26-managed-workspace-upload.zh-CN.md) for the protocol, recovery and acceptance boundaries.
+
 ### Create empty Workspaces from WebShell
 
 Set `QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT` to an existing canonical, server-owned directory to enable **New workspace → Start from scratch** in the Managed composer. The default is disabled. The root must be separate from static Workspace mounts, the default Workspace cwd, and private Runtime state. Enable Workspace files, the Session Store, the durable Session-isolated local-process Broker and verified local Workspace recovery first. Enabling this setting authorizes authenticated tenant actors to allocate independent empty roots and receive OWNER access; only enable it for tenants allowed to consume this host's storage.
@@ -853,8 +891,7 @@ Then **Workspace → Choose existing directory** browses this computer directly,
 without a pre-registered parent or grant. Import keeps the project in place,
 automatically registers its projects parent outside Git worktrees, grants the
 current actor OWNER access, and sets the project as the initial working directory.
-The parent shares file access and its physical-owner lease across projects; this
-is not a filesystem sandbox. Existing owned roots are reused while sessions run.
+The parent shares file access and catalog-local leases across projects; this is not a filesystem sandbox or a global parent-directory claim. New imports use `imported-<receipt key>` storage IDs and private registration metadata below `runtime-broker.state-directory/imported-projects/<storage ID>`. Independent local catalogs may import the same project while leaving any global storage marker untouched. Whole-storage migration, physical recovery and exclusive file-history rewind are unavailable for these shared imports; own-process Runtime recovery remains available. Existing owned roots are reused while sessions run.
 Private Runtime state and creation roots must stay outside imported parents.
 Remote listeners cannot enable this local feature, including with the insecure
 bind override. Signed mode retains signature validation and does not accept a
@@ -867,7 +904,7 @@ and idempotency key. These fields are exclusive with Workspace-relative source
 fields. `localDirectoryImport` advertises the capability independently; pending
 receipts pin native root identity and completed receipts resolve imported roots
 after restart or disabling further imports. Neither retry nor restart repairs a
-missing/foreign marker or restores revoked access. See the
+missing or mismatched registration metadata or restores revoked access. Legacy `created-` imports and application-owned roots keep their global marker contract; no existing receipt or marker is converted automatically. See the
 [local import design](../../docs/design/2026-10-21-managed-local-directory-import.md).
 
 For other deployments, the existing authorized-root flow remains available.
@@ -916,7 +953,14 @@ Session Store uses the persisted Workspace ID; public callers cannot choose the
 profile. W1c offline migration remains files/1-only and refuses persisted Shell
 definitions with `migration_profile_unsupported`. Configure the
 Harness's deployment-owned `--managed-runtime-broker-url` and
-`--managed-runtime-broker-token` options to reach this Broker. A repeated creation key returns
+`--managed-runtime-broker-token` options, or the `QWEN_MANAGED_RUNTIME_BROKER_URL`
+and `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` variables they fall back to, to reach
+this Broker. The variables keep the token off the command line, and `qwen
+serve` removes them from its environment once read, so no process the Harness
+starts inherits the token. When
+`QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE` names that environment file
+and it sets the token, the control plane takes its Broker token from it and
+refuses a second, direct `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN`. A repeated creation key returns
 the original Session/Turn; changed input conflicts. Disabling the Workspace files
 opt-in refuses creation with input, including replays, while empty bound creation
 remains available. The Shell opt-in selects the persisted profile; it does not
@@ -997,51 +1041,11 @@ model-generated commands) should configure a binding key even on loopback.
 Design: [English](../../docs/design/managed-agent-broker-auth.md)
 | [简体中文](../../docs/design/managed-agent-broker-auth.zh-CN.md).
 
-### Controlled cwd change (W2)
+### Session working directory
 
-Under the same `QWEN_MANAGED_AGENT_WORKSPACE_FILES_ENABLED` opt-in, any caller
-holding OPERATOR on a bound Session's Workspace moves its relative directory
-within the same Workspace:
+Select the Workspace-relative working directory when creating the Session. Directory-change submission and the WebShell Change directory action have been retired. Previously admitted `CWD_CHANGE` operations still settle through their original coordinator and remain readable through operation queries; their records, fences and `session.context.changed` events are retained. Daemon/ACP relocation and tool-level directories are separate capabilities.
 
-```bash
-curl -sS -X POST \
-  http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/cwd \
-  -H 'Content-Type: application/json' \
-  -H 'X-Qwen-Tenant-Id: demo' \
-  -H 'Idempotency-Key: cwd-1' \
-  -d '{"cwd_relative":"services/api","expected_context_revision":1}'
-```
-
-`202` admits a durable `cwd_change` operation; it does not activate the
-directory. The change is same-Workspace only and requires the caller's OPERATOR
-role plus the Session's creator-keyed execution facts (the registry still backs
-the binding and stays `ACTIVE`, and the recorded create actor keeps OPERATOR or
-above; the V56-persisted initiator is re-checked at settlement the same way, so
-demoting either actor fails the operation with `workspace_unavailable`), an idle
-Session (`409 session_context_busy` while a Turn or another operation is open)
-and a matching `expected_context_revision` (`409 context_revision_conflict`
-otherwise); a retry with the same key returns the original operation even after
-it completes. A background worker verifies the target against the deployment
-mounts and commits one transaction that bumps `cwd_relative` and
-`context_revision`, marks the operation completed and appends
-`session.context.changed`; poll the operation through the existing query route
-or await the event. A target the mount cannot verify fails the operation with
-`failure_code` and leaves the Session's binding untouched; refused changes
-never retry, while a mount fault the probe cannot reach (a stale export)
-retries internally up to an 8-attempt budget and then fails the same type,
-releasing the Session back to turns and lifecycle operations. Legacy Sessions answer `400 unsupported_feature`, an unreadable
-actor `404 session_not_found` and a readable actor below OPERATOR `403
-session_operation_forbidden`, matching the sibling lifecycle refusals; a
-probe refusal the turn layer would share also uses `409
-workspace_unavailable`, and so does an admitted OPERATOR once the
-creator-keyed facts moved. The WebShell adapter offers the same flow as
-`/api/agent/web-shell/v1/sessions/cwd/change` plus `/operations/query`.
-Subsequent turns acquire a fresh Runtime Session and install the new context
-before tools run, so an unverifiable change can never redirect tool execution.
-
-Design:
-[English](../../docs/design/2026-10-02-managed-workspace-w2-cwd-change.md) |
-[简体中文](../../docs/design/2026-10-02-managed-workspace-w2-cwd-change.zh-CN.md).
+Design: [English](../../docs/design/2026-10-26-retire-managed-cwd-change.md) | [简体中文](../../docs/design/2026-10-26-retire-managed-cwd-change.zh-CN.md).
 
 ### Broker deployment
 
@@ -1053,6 +1057,8 @@ For the single-node local-process provisioner, also set:
 
 ```bash
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED='true'
+# Omit when QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE names a file that sets
+# QWEN_MANAGED_RUNTIME_BROKER_TOKEN; setting both refuses startup.
 export QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN='replace-me'
 export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID='local-dev-v1'
 export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY='replace-with-base64-encoded-32-byte-key'
@@ -1062,9 +1068,48 @@ export QWEN_MANAGED_AGENT_NODE_EXECUTABLE='/absolute/path/to/node'
 export QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY='/absolute/path/to/dist/cli.js'
 ```
 
+For the external scratch provisioner, set these instead of the node executable,
+worker entry and state directory (the Broker token and credential key pair are
+still required). External scratch also requires an explicit Workspace ID: the
+worker-side cwd cannot be hashed on the Broker host, so no ID can be derived
+for this kind.
+
+```bash
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ENABLED='true'
+export QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN="$QWEN_EXTERNAL_BROKER_TOKEN"
+export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY_ID='external-dev-v1'
+export QWEN_MANAGED_AGENT_RUNTIME_CREDENTIAL_KEY="$QWEN_EXTERNAL_CREDENTIAL_KEY_BASE64"
+export QWEN_MANAGED_AGENT_CAPABILITY_DIGEST="$QWEN_EXTERNAL_CAPABILITY_DIGEST"
+export QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER='external-scratch'
+export QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY='false'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_URL='https://provider.example/'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_TOKEN="$QWEN_EXTERNAL_PROVIDER_TOKEN"
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_PROVIDER_ID='external'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_REQUEST_TIMEOUT='30s'
+export QWEN_MANAGED_AGENT_EXTERNAL_RUNTIME_STARTUP_TIMEOUT='2m'
+export QWEN_MANAGED_AGENT_WORKSPACE_ID="$QWEN_EXTERNAL_WORKSPACE_ID"
+export QWEN_MANAGED_AGENT_WORKSPACE_CWD='/workspace'
+```
+
+Keep Workspace files and Shell disabled. Fill the `$QWEN_EXTERNAL_*` variables
+with your own values from a secret store and pick a stable Workspace ID; they
+are placeholders for operator-supplied values, not usable defaults. Set the
+capability digest (`sha256:` plus 64 lowercase hexadecimal characters) even
+with Harness disabled; the embedded Broker requires it. The provider URL must
+be HTTP(S) without credentials, query or fragment, and the cwd is the
+worker-side path. The provider implements authenticated `provision`
+and `observe` routes and must persist its mapping from the Broker's logical
+handle to one immutable physical resource across restarts. There is no release
+route, so a closed Session's worker is not stopped and its provider TTL must be
+budgeted. This increment has no tool consumer yet: Session Turns warm the worker
+but the model receives no tools until the Workspace extension lands. See the
+[Broker guide](docs/runtime-broker.md#external-scratch-runtime-opt-in) and the
+[bilingual design](../../docs/design/2026-10-23-external-runtime-provider.md).
+
 Local-process workers run model-directed tools, so the Broker starts them
 without any environment variable whose name begins, in any letter case, with
-`QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `SPRING_` or `OSS_`. Every other
+`QWEN_MANAGED_AGENT_`, `QWEN_MANAGEDAGENT_`, `QWEN_MANAGED_RUNTIME_BROKER_`,
+`SPRING_` or `OSS_`. Every other
 variable of the server process still reaches the worker and its tools. Keep
 unrelated secrets out of the service environment. A worker that uses the
 artifact tool's `oss` publisher therefore needs its credentials under the
@@ -1144,14 +1189,18 @@ warns. Cadences bound through `@Scheduled` placeholders —
 `artifacts.projection-interval`, `channels.scan-delay`,
 `child-relay.scan-delay`, `child-workspace.scan-delay`,
 `dispatch.scan-delay`, `events.replay-floor-interval`,
-`message-relay.scan-delay` and `wake-recovery.scan-delay` — also read a bare number as milliseconds,
+`message-relay.scan-delay`, `session-worktree.scan-delay` and
+`wake-recovery.scan-delay` — also read a bare number as milliseconds,
 and the startup warning cannot see them, so always write the suffix
 there.
 
-When `QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
+For the local-process and Kubernetes provisioners, when
+`QWEN_MANAGED_AGENT_WORKSPACE_ID` is omitted, the server derives the same
 16-character SHA-256 workspace ID that Qwen Code uses from the canonical
 workspace path. An explicitly configured ID must match that value or startup
-fails before traffic is accepted.
+fails before traffic is accepted. The derivation does not apply to
+`external-scratch`, which requires an explicit ID because its worker-side cwd
+cannot be hashed on the Broker host.
 
 The Hosted file profile connects through the private Broker endpoint, which
 defaults to `http://127.0.0.1:4182`. When enabled, the embedded
@@ -1218,7 +1267,7 @@ standalone reference keeps the one configured directory for legacy unbound
 Sessions. Persisted bound Sessions use the private Workspace execution path
 below.
 
-Managed Server and Runtime Broker share the single 32-table baseline in
+Managed Server and Runtime Broker share the single 38-table baseline in
 [`src/main/resources/db/managed-schema/V1__managed_schema.sql`](src/main/resources/db/managed-schema/V1__managed_schema.sql).
 Until the first formal Managed Agent release, schema changes update this V1 baseline
 in place. Do not add V2+ migrations or increment the database schema version before
@@ -1276,7 +1325,7 @@ Publication and CSI ACK references retain executions and their parent sessions a
 bindings regardless of age, including COLLECTED publications.
 After cleanup, existing missing-record responses apply. Callers must not reuse
 expired Runtime Session IDs or idempotency keys. Initialize a fresh database with
-the single canonical 32-table V1 baseline and keep cleanup disabled. Legacy
+the single canonical 38-table V1 baseline and keep cleanup disabled. Legacy
 catalogs are rejected; no in-place upgrade or old-data migration is provided.
 Verify repeated initialization preserves terminal receipts, retain the old
 environment for historical reads and settle its in-flight work before cutover.
@@ -1366,7 +1415,7 @@ for record capacity and rewind semantics.
 
 ### Verified original-mount recovery (W1a)
 
-The current fresh 32-table baseline requires this physical mount guard for LOCAL tool and child Git execution in a trusted, single-host OpenJDK 21 `local-process` deployment on Linux or macOS with a persistent, unambiguous root birth time. Enable `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` and complete offline registration before admitting that work. Text-only Turns can run without registration; LOCAL tool acquisition fails with `409 workspace_unavailable` when the physical mapping is absent. Taking the next tool Turn after a Broker restart also requires `durable-local-process=true`. macOS requires `trusted-local-reboot-recovery=false` and supports same-boot adoption only. Linux whole-host restart succeeds only while the registered physical identity still matches. The shared V1 baseline stores registration, independent `mount_birth_time` and mount fence in `ma_storage` and `ma_storage_owner`. An unregistered mount is never registered from the directory found at startup.
+The current fresh 38-table baseline requires this physical mount guard for LOCAL tool and child Git execution in a trusted, single-host OpenJDK 21 `local-process` deployment on Linux or macOS with a persistent, unambiguous root birth time. Enable `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED=true` and complete offline registration before admitting that work. Text-only Turns can run without registration; LOCAL tool acquisition fails with `409 workspace_unavailable` when the physical mapping is absent. Taking the next tool Turn after a Broker restart also requires `durable-local-process=true`. macOS requires `trusted-local-reboot-recovery=false` and supports same-boot adoption only. Linux whole-host restart succeeds only while the registered physical identity still matches. The shared V1 baseline stores registration, independent `mount_birth_time` and mount fence in `ma_storage` and `ma_storage_owner`. An unregistered mount is never registered from the directory found at startup.
 
 Marker v2 stores birth time as a canonical `Instant` string. Linux reads creation time, mtime, device and inode in one JDK `unix` attribute snapshot and rejects creation time at/before epoch or equal to mtime, which OpenJDK 21 may return when birth time is unsupported. A real Linux birth time equal to mtime is also conservatively refused; prepare the project layout or update the root's mtime offline before retrying. macOS reads native nanosecond birth time with `stat` and cross-checks its device/inode against the JDK canonical-directory snapshot, because JDK 21 truncates macOS birth time to seconds. A positive native macOS birth time is independent even when it equals mtime; fresh empty roots keep their original birth time. Mtime is not an identity field, and ordinary mtime changes do not invalidate an unchanged birth time. The marker contains an application-specific HMAC-SHA256 host ID with `Qwen-Code/verified-workspace/v2` as input. Its key is the trimmed machine-id UTF-8 bytes on Linux or the original `IOPlatformUUID` UTF-8 bytes on macOS; neither raw identity is stored in the marker.
 
@@ -1387,7 +1436,10 @@ mvn -q -DskipTests compile exec:java \
   -Dexec.args='register tenant-a storage-a /absolute/canonical/workspace-a <operation-uuid> --offline-confirmed'
 ```
 
-The same entry is available from a shipped Spring Boot fat jar, without the source checkout or Maven:
+In the reference distribution, run it as
+`bin/qwen-managed-agent-admin storage-registration register tenant-a storage-a /absolute/canonical/workspace-a '<operation-uuid>' --offline-confirmed`;
+`bin/qwen-managed-agent-admin` with no arguments lists every maintenance entry it
+wraps. The same entry is available from a shipped Spring Boot fat jar, without the source checkout or Maven:
 
 ```bash
 java -cp /path/to/app.jar \
@@ -1499,7 +1551,7 @@ Checkstyle and the Spring Boot repackage, and the full suite includes
 environment-sensitive timing tests that can fail on a local machine, so CI is
 the arbiter; for SpotBugs alone, run `mvn compile spotbugs:check`. The
 optional real-MySQL profile also verifies schema upgrade,
-exact bytes, public Item/Snapshot projection, and the independent-JVM Managed
+exact bytes, public Item projection, and the independent-JVM Managed
 Session Store crash/takeover path:
 
 ```bash
@@ -1522,6 +1574,55 @@ still stop all contexts and child processes. State is preserved between methods,
 nested classes, and context restarts inside one class. See the
 [isolation design](../../docs/design/2026-10-20-hosted-it-database-isolation.md)
 ([简体中文](../../docs/design/2026-10-20-hosted-it-database-isolation.zh-CN.md)).
+
+## Managed extension packages
+
+Complete package distribution and the seven-component Managed profile are opt-in.
+Set `QWEN_MANAGED_AGENT_EXTENSION_PACKAGES_ENABLED=true`,
+`QWEN_MANAGED_AGENT_EXTENSION_ARTIFACT_DIRECTORY` to a durable private directory,
+and `QWEN_MANAGED_AGENT_EXTENSION_ALLOWED_ACTORS` to the permitted operator actor
+keys. The configured Workspace OPERATOR grant is also required. See the
+[configuration example](distribution/config/application.example.yml) for the
+separate Runtime execution profile: Linux LOCAL and SSH require delegated cgroup
+v2; native macOS requires the explicit `developer-process-group` mode. Existing
+Runtime bindings do not acquire the new execution contract automatically.
+Replicas must share the authoritative artifact directory. A Runtime cache is
+reconstructible and cannot replace that directory. Published versions and encrypted
+settings revisions are retained; this increment does not implement garbage
+collection.
+
+In WebShell, select the Managed Workspace and Session, open Extensions, prepare an
+original Git/npm/directory/archive source for its target platform, then publish it.
+An update explicitly selects the catalog extension ID. Select package versions and
+an exact saved settings revision before applying to an idle Session. Saving settings
+creates a complete immutable revision; values never appear in read responses.
+Upgrading a package preserves its selected settings revision. An unfinished apply
+has separate Continue original operation and Restore previous version controls;
+unknown outcomes continue to block inference until the original owner reconciles.
+
+Public clients use `/v1/agents/workspaces/{workspaceId}/extensions` for bounded
+binary publication and catalog queries and `/v1/agents/sessions/{sessionId}/extensions`
+for configuration queries and application. The OpenAPI contract documents the
+settings and operation subresources. The Java SDK exposes `ManagedExtensionsClient`;
+the TypeScript daemon SDK can prepare and stream an original package. Creation's
+optional `extensionPins` freezes the initial selection before the first model call.
+Omitting it retains the existing Session path.
+
+Package assets use an explicit read-only extension source. Model tool schemas list
+the selected public pins; `read_file` and `glob` accept package-relative paths or
+`extension://<extensionId>/<path>`. Shell selects `extension_context` and receives
+`QWEN_EXTENSION_ROOT`, while its working directory remains the Session directory.
+Ordinary Workspace tools retain their existing containment rules. Executable
+preflight checks target interpreters and directly resolvable commands without
+running Hooks or connecting MCP; complex authored Shell expressions are checked
+when their approved invocation executes. Argument placeholders inside nested Shell
+substitution, backticks or heredocs are rejected explicitly.
+
+See the linked [English design](../../docs/design/2026-10-24-managed-extension-packages.md)
+and [Chinese design](../../docs/design/2026-10-24-managed-extension-packages.zh-CN.md).
+Local focused tests, macOS developer receipts and the existing Linux static-extension
+gate below establish different boundaries. Complete package Linux/SSH cleanup,
+fault injection and real-provider qualification remain separate acceptance gates.
 
 ## Linux extension process acceptance
 
@@ -1652,19 +1753,18 @@ npm run test:e2e:managed-harness-restart-approval-expiry
 npm run test:e2e:managed-harness-restart-continuation-closeout
 ```
 
-Five additional arms layer one fault on the Allow path (#14481 step 2). The
-first crashes the replacement Harness as soon as the decision is durably
-recorded; the second holds the Runtime Broker's execution `:start` so the
-crash lands after the `PREPARED` row and before the physical dispatch; the
-third crashes after the approved result commits while the post-tool model
-round is held, so its reissue must reuse the saved request and retract the
-published prefix. All three leave the original Action, prepare key, digest
-and Runtime identity in place, start a third Harness generation, and require
-exactly one settled execution, one file effect and one terminal. The other
-two drop the control plane's reply after it committed; the retry under the
-same `Idempotency-Key` must land on the original record, so a lost decision
-produces one `ACTION_RESPONSE` operation and a lost Turn admission produces
-one Turn row:
+Five arms from #14481 step 2 layer one fault on the Allow path. The first
+crashes the replacement Harness as soon as the decision is durably recorded;
+the second holds the Runtime Broker's execution `:start` so the crash lands
+after the `PREPARED` row and before the physical dispatch; the third crashes
+after the approved result commits while the post-tool model round is held, so
+its reissue must reuse the saved request and retract the published prefix. All
+three leave the original Action, prepare key, digest and Runtime identity in
+place, start a third Harness generation, and require exactly one settled
+execution, one file effect and one terminal. The other two drop the control
+plane's reply after it committed; the retry under the same `Idempotency-Key`
+must land on the original record, so a lost decision produces one
+`ACTION_RESPONSE` operation and a lost Turn admission produces one Turn row:
 
 ```bash
 npm run test:e2e:managed-harness-restart-approval-after-decision
@@ -1674,12 +1774,61 @@ npm run test:e2e:managed-harness-restart-approval-decision-reply-lost
 npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
 ```
 
+Two more cover the next barriers of the same matrix. The terminal
+reply-loss arm commits `turn.settled`, loses its reply (and every bounded
+retry of it) until the crash, and restarts the Harness; the replacement
+projects the committed terminal, and no second store commit is required. The
+missing-terminal arm refuses the write itself, so the replacement must
+compensate the payable checkpoint exactly once. Both keep one original
+Action, one settled execution, one file effect, one terminal, the recovered
+model answer and the original cleanup:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-terminal-reply-lost
+npm run test:e2e:managed-harness-restart-approval-terminal-write-failed
+```
+
+A refused cleanup release followed by another crash (C3) refuses the release
+until the Turn is terminal and its Harness is killed. The owed cleanup is then
+paid by the replacement through the control plane's debt retry, not by the
+Turn path: the arm requires the replacement's own release, one `confirmed`
+event and no remaining `HOSTED_CLEANUP` projection:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-cleanup-failed
+```
+
+The control plane retries that debt itself. A periodic scan reads the dedicated
+managed database (never an embedded host's business database), lists outstanding
+`HOSTED_CLEANUP` owners whose Session has no active Turn, resolves the owed
+Turn from the cleanup descriptor, and issues the same prompt-scoped
+cleanup-only load an operator recheck uses. The scan is keyset-paginated and
+wraps around, advancing past unreadable descriptors so a stuck prefix cannot
+starve later debts. Retries back off in memory from 10 seconds to 5 minutes; an
+attempt that loses the daemon or its reference drops the connector's cached
+attachment so the next one loads the replacement generation, while a named
+refusal of live work only backs off. A Session with live work, an unsupported
+profile or unreadable evidence keeps its debt and waits for the operator
+recheck route. See
+[the cleanup debt design](../../docs/design/2026-10-28-hosted-cleanup-debt-retry.md).
+
+A lost takeover-load reply (A4's load half) drops the reply to the replacement's
+first drive load once, via a test-gated Harness hook (`QWEN_E2E_DROP_LOAD_REPLY`,
+never set in production). The control plane redrives the same load into the
+now-active driver; the arm asserts the reply was actually lost, then requires the
+original Turn to project exactly one terminal with the recovered answer — the
+redrive restates the active attachment instead of wedging the Turn:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-load-reply-lost
+```
+
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
-`G3_VERIFY_REPORT_DIR` overrides the directory. The approval path still has no
-packaged arm for a lost load reply, a failed cleanup followed by another
-crash, a committed terminal that was not delivered, or a payable checkpoint
-whose terminal write is missing; those rows stay focused or integration
-tested (#14481).
+`G3_VERIFY_REPORT_DIR` overrides the directory. The remaining rows stay
+focused or integration tested for now: mixed calls and rewritten inputs
+across a replacement, Hook/MCP/child uncertainty, the attempt and stream
+identities plus the live SSE view, the round and cost budgets, and the
+mixed-version reader/bundle closure (#14481).
 
 Two arms keep a former owner alive while its replacement finishes the Turn
 and then wake it with `SIGCONT`:
@@ -1776,7 +1925,7 @@ See the [English design](../../docs/design/workspace-storage-migration.md) and [
 
 The current baseline includes the Workspace migration schema. Earlier development catalogs require fresh disposable fixtures; do not edit Flyway history to reuse them.
 
-The private artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-migration.jar`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full request file contains `version` (the JSON integer `1`), `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Fence admission is storage-scoped for bound Sessions; unbound legacy Sessions are outside that ownership. Metadata transactions share the tenant placement lock, so other storages of the same tenant may wait until those transactions finish; file scans and physical retirement hold no such lock. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
+The private artifact is `qwen-managed-agent-server-0.1.0-alpha-workspace-migration.jar`; the reference distribution runs the same entry as `bin/qwen-managed-agent-admin workspace-migration`. Set `W1_JDBC_URL`, `W1_JDBC_USER`, `W1_JDBC_PASSWORD`, `W1_RUNTIME_CREDENTIAL_KEY_ID`, and `W1_RUNTIME_CREDENTIAL_KEY` to the original deployment database and Broker credential key. The full request file contains `version` (the JSON integer `1`), `migrationOperationId`, `tenantId`, `storageId`, `fenceOperationId`, `captureOperationId`, `mountRevision`, `sourceRoot`, `targetRoot`, `bundleRoot`, `fileHistoryRoot`, `stateDirectory`, `nodeExecutable`, and `cliEntry`. Fence admission is storage-scoped for bound Sessions; unbound legacy Sessions are outside that ownership. Metadata transactions share the tenant placement lock, so other storages of the same tenant may wait until those transactions finish; file scans and physical retirement hold no such lock. Paths must be canonical absolute deployment paths; roots and the durable Runtime state directory cannot overlap. IDs must be distinct UUIDs. Keep this exact request file for retries.
 
 Before starting a new operation, the original Runtime state directory and retained history directory must exist at canonical paths, and the unchanged Linux identity reader must prove the history volume, including unambiguous birth time. Run maintenance as the original service user; the Runtime state directory must belong to that UID with exact POSIX `0700` permissions, checked by the same durable provider validator without creating or changing it. Failure returns `migration_state_unavailable` or `migration_history_unverified` before creating a migration row/fence or retiring placements. The target copy is still prepared after retirement. Run `java -jar <migration.jar> retire <request.json> --offline-confirmed` first. Then use the existing registration command to fence the original revision with the request's fence ID, and capture the W1b bundle with the request's capture ID. Prepare the target Workspace through the external offline copy procedure, preserving modes and the copied source marker. Run `prepare` and then `promote` with the same arguments. The first `prepare` and every new `promote` attempt verify sealed content, live source, target, retained history and original physical identities. Replaying `prepare` after PREPARED or any completed operation returns the saved receipt without rescanning; use `promote` for fresh transition verification. `inspect <request.json>` reads progress and the original receipt. `abort <request.json> --offline-confirmed` requires all placements retired and W1a still fenced; it does not restart anything or remove target artifacts. After abort or invalidation, prepare a fresh external target copy matching the new capture before starting a new operation; foreign marker or temporary files are rejected.
 

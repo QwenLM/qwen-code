@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.api;
 
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.TenantContext;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedNativeJournalSnapshots;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.AcquireWriterRequest;
@@ -18,6 +19,9 @@ import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.ToolResultResourceRef;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.TransactionPage;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStoreModels.WriterGrant;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedUserMessageStore;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonUnwrapped;
 import jakarta.validation.Valid;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.HttpHeaders;
@@ -32,15 +36,33 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+@org.springframework.beans.factory.annotation.Qualifier("managedAgentTransactionManager")
 @RestController
 @ConditionalOnProperty(prefix = "qwen.managed-agent.session-store",
         name = "enabled", havingValue = "true")
 @RequestMapping("/internal/managed-session-store/v1/sessions/{sessionId}")
 public class ManagedSessionStoreController {
     private final ManagedSessionStore store;
+    private final ManagedUserMessageStore userMessages;
+    private final ManagedNativeJournalSnapshots snapshots;
 
-    public ManagedSessionStoreController(ManagedSessionStore store) {
+    public ManagedSessionStoreController(ManagedSessionStore store, ManagedUserMessageStore userMessages,
+            ManagedNativeJournalSnapshots snapshots) {
         this.store = store;
+        this.userMessages = userMessages;
+        this.snapshots = snapshots;
+    }
+
+    public record QueueClaim(String workspaceId, String writerId, long writerGeneration, String promptId, boolean initialOnly) { }
+
+    @PostMapping("/user-messages:claim")
+    @org.springframework.transaction.annotation.Transactional
+    public Object claimUserMessages(TenantContext tenant, @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestBody QueueClaim request) {
+        store.authorizeOrdinary(tenant.tenantId(), sessionId, writerToken,
+                new ManagedSessionStoreModels.AuthorizeLifecycleRequest(request.workspaceId(), request.writerId(), request.writerGeneration(), null));
+        return userMessages.claim(tenant.tenantId(), sessionId, request.promptId(), request.initialOnly());
     }
 
     @PostMapping("/approval:query")
@@ -152,14 +174,20 @@ public class ManagedSessionStoreController {
                 writerToken, request, lifecycleAuthority(headers));
     }
 
+    @JsonInclude(JsonInclude.Include.NON_NULL)
+    public record RestoreResponse(@JsonUnwrapped RestoreHead head,
+            ManagedNativeJournalSnapshots.Descriptor nativeSnapshot) { }
+
     @GetMapping("/restore")
-    public RestoreHead restore(TenantContext tenant,
+    public RestoreResponse restore(TenantContext tenant,
             @PathVariable String sessionId,
             @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER)
                     String writerToken,
-            @RequestParam String workspaceId) {
-        return store.restore(tenant.tenantId(), workspaceId, sessionId,
-                writerToken);
+            @RequestParam String workspaceId,
+            @RequestParam(defaultValue = "false") boolean includeNativeSnapshot) {
+        RestoreHead head = store.restore(tenant.tenantId(), workspaceId, sessionId, writerToken);
+        return new RestoreResponse(head, includeNativeSnapshot
+                ? snapshots.select(tenant.tenantId(), workspaceId, sessionId, writerToken, head) : null);
     }
 
     @PostMapping("/tool-results:publish")
@@ -180,6 +208,54 @@ public class ManagedSessionStoreController {
             @RequestParam(defaultValue = "100") int limit) {
         return store.transactions(tenant.tenantId(), workspaceId,
                 sessionId, writerToken, afterRevision, limit);
+    }
+
+    @GetMapping("/transactions:recent")
+    public ManagedSessionStoreModels.RecentTransactionPage recentTransactions(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId,
+            @RequestParam(required = false) Long throughRevision,
+            @RequestParam(required = false) Long beforeRevision,
+            @RequestParam(defaultValue = "100") int limit) {
+        return store.recentTransactions(tenant.tenantId(), workspaceId, sessionId, writerToken,
+                throughRevision, beforeRevision, limit);
+    }
+
+    @GetMapping("/transactions:lookup")
+    public ManagedSessionStoreModels.CommandTransaction commandTransaction(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId,
+            @RequestParam String operation, @RequestParam String commandId,
+            @RequestParam(required = false) Long throughRevision) {
+        return store.commandTransaction(tenant.tenantId(), workspaceId, sessionId, writerToken,
+                throughRevision, operation, commandId);
+    }
+
+    @PostMapping("/journal-snapshots:publish")
+    public ManagedNativeJournalSnapshots.Descriptor publishSnapshot(TenantContext tenant,
+            @PathVariable String sessionId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @Valid @RequestBody ManagedNativeJournalSnapshots.PublishRequest request) {
+        return snapshots.publish(tenant.tenantId(), sessionId, writerToken, request);
+    }
+
+    @GetMapping("/journal-snapshots/{snapshotId}")
+    public ManagedNativeJournalSnapshots.Descriptor snapshot(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String snapshotId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId) {
+        return snapshots.read(tenant.tenantId(), workspaceId, sessionId, writerToken, snapshotId);
+    }
+
+    @GetMapping("/journal-snapshots/{snapshotId}/pages")
+    public ManagedNativeJournalSnapshots.PageResult snapshotPages(TenantContext tenant,
+            @PathVariable String sessionId, @PathVariable String snapshotId,
+            @RequestHeader(ManagedSessionStoreModels.WRITER_TOKEN_HEADER) String writerToken,
+            @RequestParam String workspaceId, @RequestParam(defaultValue = "0") long afterRevision,
+            @RequestParam(defaultValue = "100") int limit) {
+        return snapshots.pages(tenant.tenantId(), workspaceId, sessionId, writerToken, snapshotId, afterRevision, limit);
     }
 
     @GetMapping(value = "/resources/{resourceId}",

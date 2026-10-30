@@ -76,6 +76,34 @@ export class SystemController extends BaseController {
           signal,
         );
 
+      case 'get_workflow_mode':
+      case 'set_workflow_mode': {
+        const sessionId = this.context.config.getSessionId();
+        await this.context.waitForInitialization?.();
+        if (
+          signal.aborted ||
+          this.context.config.getSessionId() !== sessionId
+        ) {
+          throw new Error('Session changed or request aborted');
+        }
+        if (!this.context.config.isWorkflowModeSupported()) {
+          throw new Error('Session Workflow mode is unsupported');
+        }
+        if (payload.subtype === 'set_workflow_mode') {
+          const committed = await this.context.config.setWorkflowMode(
+            payload.enabled,
+          );
+          if (
+            signal.aborted ||
+            this.context.config.getSessionId() !== sessionId
+          ) {
+            throw new Error('Session changed or request aborted');
+          }
+          return { ...committed };
+        }
+        return { ...this.context.config.getWorkflowMode() };
+      }
+
       case 'set_effort':
         return this.handleSetEffort(
           payload as CLIControlSetEffortRequest,
@@ -163,6 +191,9 @@ export class SystemController extends BaseController {
     }
 
     this.context.config.setSdkMode(true);
+    if (payload.workflowMode !== undefined) {
+      this.context.config.stageInitialWorkflowMode(payload.workflowMode);
+    }
     let effortStatus:
       | {
           effort: string;
@@ -356,6 +387,9 @@ export class SystemController extends BaseController {
       can_set_model: typeof this.context.config.setModel === 'function',
       can_set_effort:
         typeof this.context.config.setReasoningEffort === 'function',
+      ...(this.context.config.isWorkflowModeSupported?.()
+        ? { can_set_workflow_mode: true, can_get_workflow_mode: true }
+        : {}),
       can_get_context_usage: true,
       can_get_available_models:
         typeof this.context.config.getAvailableModels === 'function',

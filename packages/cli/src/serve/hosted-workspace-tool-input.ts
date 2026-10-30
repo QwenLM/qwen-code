@@ -26,11 +26,8 @@ export const HOSTED_TODO_MAX_DEPENDENCIES = 32;
 /**
  * The serialized-size ceiling for one incoming list. It keeps an admitted call
  * inside the store's encoded-input limit, so the refusal happens before
- * acquisition. It does not bound the stored list: core re-injects the
- * `blockedBy` edges it preserved from earlier calls, nothing re-counts them,
- * and the success result echoes the stored list, so a long-lived list can grow
- * past this value. Bounding the stored list needs the Worker to account for
- * the merged result, which is follow-up work.
+ * acquisition. The durable writer applies the same bound after preserving
+ * dependencies.
  */
 export const HOSTED_TODO_MAX_SERIALIZED_BYTES = 16 * 1024;
 

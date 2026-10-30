@@ -4,9 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { ManagedExtensionExecutionUnknownError } from './managed-extension-error.js';
 import path from 'node:path';
 import type { RetainedFileHistoryStorage } from '@qwen-code/qwen-code-core/services/fileHistoryService.js';
 import { promises as fs } from 'node:fs';
+import type { ShellRawCaptureSink } from '@qwen-code/qwen-code-core/services/shellExecutionService.js';
 import { lstat, readlink, realpath } from 'node:fs/promises';
 import { isDeepStrictEqual } from 'node:util';
 import {
@@ -209,6 +211,12 @@ export class ManagedToolUnavailableError extends Error {
 
 /** The admitted tools, keyed by name, over one configuration. */
 export interface ManagedToolSet {
+  readonly extensionAssets?: true;
+  readonly runShell?: (
+    input: Readonly<Record<string, unknown>>,
+    signal: AbortSignal,
+    capture?: ShellRawCaptureSink,
+  ) => Promise<ToolResult>;
   readonly retainedFileHistory?: RetainedFileHistoryStorage;
   readonly fileHistory?: ManagedRuntimeFileHistory;
   /**
@@ -238,6 +246,10 @@ export interface ManagedToolSet {
  */
 export type ManagedToolSetResolver = (
   reference: ManagedToolReference,
+  invocation?: {
+    readonly toolName: string;
+    readonly input: Readonly<Record<string, unknown>>;
+  },
 ) => Promise<ManagedToolSet | undefined>;
 
 const ADMITTED_TOOL_NAMES: ReadonlySet<string> = new Set([
@@ -373,6 +385,18 @@ export class ManagedToolExecutor {
   private csiClosing: Promise<void> | undefined;
   private retirementId?: string;
   private providerWasUsed = false;
+  private extensionLifecycle?: {
+    readonly mode: 'linux-cgroup' | 'developer-process-group';
+    readonly drain: () => Promise<void>;
+  };
+
+  attachExtensionLifecycle(
+    value: NonNullable<ManagedToolExecutor['extensionLifecycle']>,
+  ): void {
+    if (this.extensionLifecycle)
+      throw new Error('Extension lifecycle is already attached.');
+    this.extensionLifecycle = value;
+  }
   private capturePreparationStarted = false;
   private historyControlOutcomeUnknown = false;
   private ledgerIntegrityFailed = false;
@@ -1017,7 +1041,10 @@ export class ManagedToolExecutor {
       if (existing?.refusal) return existing.refusal;
       if (!existing) {
         this.assertAdmissionOpen();
-        const tools = await this.toolsFor(reference);
+        const tools =
+          input['managedExtension'] === undefined
+            ? await this.toolsFor(reference)
+            : await this.toolsFor(reference, { toolName, input });
         this.assertLegacySession(reference.sessionId);
         if (!this.isAdmissionOpen || !tools || tools.isActive?.() === false)
           throw new ManagedToolUnavailableError(
@@ -1079,7 +1106,10 @@ export class ManagedToolExecutor {
       return join(existing, reference, toolName, inputJson);
     }
     this.assertAdmissionOpen();
-    const tools = await this.toolsFor(reference);
+    const tools =
+      input['managedExtension'] === undefined
+        ? await this.toolsFor(reference)
+        : await this.toolsFor(reference, { toolName, input });
     this.assertLegacySession(reference.sessionId);
     // A concurrent execute of the same call may have journaled it meanwhile.
     const joined = this.entries.get(reference.callId);
@@ -1212,7 +1242,10 @@ export class ManagedToolExecutor {
         'Tool v3 capture is not available.',
       );
     }
-    const tools = await this.toolsFor(reference);
+    const tools =
+      input['managedExtension'] === undefined
+        ? await this.toolsFor(reference)
+        : await this.toolsFor(reference, { toolName, input });
     this.assertLegacySession(reference.sessionId);
     const joined = this.entries.get(reference.callId);
     if (joined) return this.executeV3(request);
@@ -1227,6 +1260,15 @@ export class ManagedToolExecutor {
       return this.executeV3Monitor(request, tools, structuredClone(input));
     }
     const normalized = structuredClone(input);
+    delete normalized['managedExtension'];
+    if (
+      input['managedExtension'] !== undefined &&
+      (normalized['is_background'] === true ||
+        normalized['is_monitor'] === true)
+    )
+      throw new ManagedToolConflictError(
+        'Extension Shell requires a foreground invocation.',
+      );
     // The background and monitor families reject long waits' shell-side
     // policies such as the foreground sleep guard — they exist exactly so
     // that a wait is durable rather than blocked. Validate with their own
@@ -1909,6 +1951,25 @@ export class ManagedToolExecutor {
   }
 
   /** Read-only lookup; never creates or advances an invocation. */
+  isSessionConfigurationIdle(sessionId: string): boolean {
+    return (
+      !this.closing &&
+      !this.retirementId &&
+      this.pendingStarts.size === 0 &&
+      !this.historyControls.has(sessionId) &&
+      this.hooks?.hasHolds(sessionId) !== true &&
+      this.mcp?.hasPendingWork(sessionId) !== true &&
+      this.provider?.hasActiveSession(sessionId) !== true &&
+      !this.backgroundRegistry.hasHolds(sessionId) &&
+      !this.monitorRegistry.hasHolds(sessionId) &&
+      ![...this.entries.values()].some(
+        (entry) =>
+          entry.reference.sessionId === sessionId &&
+          !['settled', 'acknowledged'].includes(entry.state),
+      )
+    );
+  }
+
   hasActiveSession(sessionId: string): boolean {
     return (
       this.hooks?.hasHolds(sessionId) === true ||
@@ -2085,9 +2146,13 @@ export class ManagedToolExecutor {
       this.pendingStarts.size > 0 ||
       this.historyControls.size > 0 ||
       this.providerWasUsed ||
-      this.mcpCalls.size > 0 ||
-      this.mcp?.getDrainInspection().hasActivity ||
-      this.hooks?.getDrainInspection().hasActivity ||
+      (!this.extensionLifecycle &&
+        (this.mcpCalls.size > 0 ||
+          this.mcp?.getDrainInspection().hasActivity ||
+          this.hooks?.getDrainInspection().hasActivity)) ||
+      (this.extensionLifecycle &&
+        (this.mcp?.hasUnsettledExtensionOperations() ||
+          this.hooks?.hasUnsettledExtensionOperations())) ||
       [...this.entries.values()].some((entry) =>
         entry.version === 3
           ? entry.state !== 'settled' ||
@@ -2106,6 +2171,7 @@ export class ManagedToolExecutor {
       this.backgroundRegistry.stopAll(5_000),
       this.monitorRegistry.stopAll(5_000),
     ]);
+    await this.extensionLifecycle?.drain();
     const remaining = await ledger.killOutstanding();
     if (
       ledger.hasIntegrityFailure ||
@@ -2180,6 +2246,7 @@ export class ManagedToolExecutor {
       // Runs start only from a fresh journal entry, which still carries its
       // input; only an acknowledged entry loses it, and nothing runs that.
       const params = structuredClone(entry.input!);
+      delete params['managedExtension'];
       let fileInvocation: AnyToolInvocation | undefined;
       if (
         directory &&
@@ -2350,6 +2417,12 @@ export class ManagedToolExecutor {
         return sessionIdContext.run(sessionId, () => {
           const invocation = fileInvocation ?? tool.build(params);
           invocationStarted = true;
+          if (entry.toolName === ShellTool.Name && tools.runShell)
+            return tools.runShell(
+              params,
+              entry.controller.signal,
+              entry.captureSink,
+            );
           const ledger = this.options.ledger;
           const trackGroup = (pid: number) => {
             if (!ledger) return;
@@ -2402,9 +2475,11 @@ export class ManagedToolExecutor {
           return invocation.execute(entry.controller.signal);
         });
       };
-      const registeredHistory = this.fileHistories.get(
-        entry.reference.sessionId,
-      );
+      const registeredHistory =
+        tools.extensionAssets === true &&
+        [ReadFileTool.Name, GlobTool.Name].includes(entry.toolName)
+          ? undefined
+          : this.fileHistories.get(entry.reference.sessionId);
       const history = tools.fileHistory ?? registeredHistory;
       const mutating = [WriteFileTool.Name, EditTool.Name].includes(
         entry.toolName,
@@ -2502,6 +2577,11 @@ export class ManagedToolExecutor {
       }
       payload = toPayload(result, ManagedToolExecutor.isCancelRequested(entry));
     } catch (error) {
+      if (error instanceof ManagedExtensionExecutionUnknownError) {
+        entry.state = 'unknown';
+        entry.lastSequence++;
+        return;
+      }
       const message = error instanceof Error ? error.message : String(error);
       payload = {
         executionStatus:

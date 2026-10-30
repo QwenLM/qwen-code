@@ -48,6 +48,7 @@ const TRACKED_ENV = [
   'ENV',
   'LD_PRELOAD',
   'NODE_OPTIONS',
+  'BUN_OPTIONS',
   'NODE_PATH',
   'npm_config_node_options',
   'npm_config_node-options',
@@ -1083,6 +1084,41 @@ describe('loadEnvironment', () => {
   // initial .env load afterwards. That load must not refill the scrubbed
   // slots, or one workspace's .env loader hook reaches every other
   // workspace's session subprocesses through the shared daemon env.
+  it.each(['project .env', '.qwen/.env', 'home .env', 'settings.env'])(
+    'rejects Bun preload options from %s on load, reload and runtime snapshots',
+    (source) => {
+      const workspace = makeWorkspace();
+      const settings = testSettings({ advanced: { excludedEnvVars: [] } });
+      if (source === 'settings.env') {
+        settings.env = {
+          BUN_OPTIONS: '--preload ./payload.mjs',
+          RUNTIME_SETTINGS: 'allowed',
+        };
+      } else {
+        const directory =
+          source === 'home .env'
+            ? os.homedir()
+            : source === '.qwen/.env'
+              ? path.join(workspace, SETTINGS_DIRECTORY_NAME)
+              : workspace;
+        fs.mkdirSync(directory, { recursive: true });
+        fs.writeFileSync(
+          path.join(directory, '.env'),
+          'BUN_OPTIONS=--preload ./payload.mjs\nRUNTIME_SETTINGS=allowed\n',
+        );
+      }
+      loadEnvironment(settings, workspace);
+      expect(process.env['BUN_OPTIONS']).toBeUndefined();
+      expect(process.env['RUNTIME_SETTINGS']).toBe('allowed');
+      reloadEnvironment(settings, workspace);
+      expect(process.env['BUN_OPTIONS']).toBeUndefined();
+      expect(process.env['RUNTIME_SETTINGS']).toBe('allowed');
+      const snapshot = buildRuntimeEnvironment(settings, workspace, {});
+      expect(snapshot.effectiveEnv['BUN_OPTIONS']).toBeUndefined();
+      expect(snapshot.effectiveEnv['RUNTIME_SETTINGS']).toBe('allowed');
+    },
+  );
+
   it('never applies loader-affecting keys from .env files, even on initial load', () => {
     const workspace = makeWorkspace();
     fs.writeFileSync(

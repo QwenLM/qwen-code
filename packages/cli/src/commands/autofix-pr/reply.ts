@@ -31,10 +31,14 @@ import {
   type Snapshot,
 } from './snapshot.js';
 import {
+  MAX_NEEDS_HUMAN,
   REPLY_MARKER,
-  assertOwnedBySession,
+  assertWatching,
+  isRegularFile,
+  TASK_OPTION,
+  taskArg,
   autofixPrPaths,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   withWatchLock,
   writeState,
@@ -42,9 +46,13 @@ import {
   type AutofixPrState,
   type PendingPost,
 } from './state.js';
+import { assertNoFixInFlight, fixSnapshotPath } from './fix.js';
 
 /** GitHub refuses a comment body longer than this. */
 const MAX_BODY_CHARS = 65_536;
+
+/** Longest `needsHuman` line kept; a longer one is cut. */
+const MAX_NEEDS_HUMAN_CHARS = 300;
 
 export interface ReplyPlan {
   /** Replies to review threads, by the thread's first comment. */
@@ -57,6 +65,8 @@ export interface ReplyPlan {
   handledChecks?: string[];
   /** The head's merge conflict was left for a human. */
   handledConflict?: boolean;
+  /** One line per item the round left for a person, for `status`. */
+  needsHuman?: string[];
 }
 
 export interface ReplyOutcome {
@@ -115,6 +125,7 @@ export function parsePlan(raw: unknown): Required<ReplyPlan> {
     'handled',
     'handledChecks',
     'handledConflict',
+    'needsHuman',
   ]);
   const unknown = Object.keys(plan).filter((key) => !known.has(key));
   if (unknown.length > 0) {
@@ -188,6 +199,19 @@ export function parsePlan(raw: unknown): Required<ReplyPlan> {
     handled,
     handledChecks: stringList(plan['handledChecks'], 'handledChecks'),
     handledConflict: conflict === true,
+    // Shown in a list, one line each.
+    needsHuman: stringList(plan['needsHuman'], 'needsHuman').map((text) => {
+      // By code point, so a cut never splits a surrogate pair.
+      const line = [
+        ...text
+          .replace(/\p{Cf}/gu, '')
+          .replace(/[\s\p{Cc}]+/gu, ' ')
+          .trim(),
+      ];
+      return line.length > MAX_NEEDS_HUMAN_CHARS
+        ? `${line.slice(0, MAX_NEEDS_HUMAN_CHARS - 1).join('')}…`
+        : line.join('');
+    }),
   };
 }
 
@@ -204,6 +228,8 @@ function keyHead(key: string): string | null {
  * the head carries.
  */
 function snapshotChecks(path: string): Set<string> {
+  // A FIFO in its place would block, the lock held.
+  if (!isRegularFile(path)) return new Set();
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
@@ -301,11 +327,13 @@ export interface ReplyArgs {
   planPath: string;
   /** `--no-post`: record what was handled, post nothing (`--no-reply`). */
   post: boolean;
+  /** The scheduled task that woke the round. */
+  task?: string;
 }
 
 export function runReply(args: ReplyArgs): ReplyOutcome {
   const plan = parsePlan(JSON.parse(readFileSync(args.planPath, 'utf8')));
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   return withWatchLock(paths, args.pr, () => replyLocked(args, plan, paths));
 }
 
@@ -315,7 +343,15 @@ function replyLocked(
   paths: AutofixPrPaths,
 ): ReplyOutcome {
   let state = requireState(paths.statePath, args.pr);
-  assertOwnedBySession(state);
+  assertWatching(state, args.task);
+  assertNoFixInFlight(paths, args.pr);
+  // The option the watch was started with holds for its rounds, whatever
+  // a round's turn remembers of it; a `--once` round has options of its own.
+  if (args.post && args.task !== undefined && state.watch?.reply === false) {
+    throw new Error(
+      `PR #${args.pr}'s watch was started with --no-reply: run reply with --no-post.`,
+    );
+  }
   setGhHost(state.host);
   ensureAuthenticated();
   // Every bot thread the plan may name was asked about by the round's
@@ -417,7 +453,13 @@ function replyLocked(
   // pushed while it ran — is history: prepared snapshots read only the
   // current head, so it is not recorded.
   const knownChecks = new Set(state.handledChecks ?? []);
-  const roundChecks = snapshotChecks(paths.snapshotPath);
+  // The round of a background fix claimed its snapshot under another
+  // name, and no round prepared one since.
+  const roundChecks = snapshotChecks(
+    isRegularFile(paths.snapshotPath)
+      ? paths.snapshotPath
+      : fixSnapshotPath(paths, args.pr),
+  );
   const held = heldKeys(pr, state);
   const currentChecks: string[] = [];
   let ignoredChecks = 0;
@@ -451,6 +493,26 @@ function replyLocked(
     }
     currentChecks.push(key);
   }
+
+  // Kept per head, newest last: a later round answers new events only, so
+  // what an earlier one left stays listed until the watch ends. Recorded
+  // before anything is posted: a reply that reaches the PR marks its
+  // comments handled at once, and a round after a later failure would not
+  // see them again.
+  const now = new Date().toISOString();
+  const needsHuman = [
+    ...(state.needsHuman ?? []),
+    ...[...new Set(plan.needsHuman)]
+      .filter(
+        (text) =>
+          text !== '' &&
+          !(state.needsHuman ?? []).some(
+            (item) => item.sha === head && item.text === text,
+          ),
+      )
+      .map((text) => ({ sha: head, at: now, text })),
+  ].slice(-MAX_NEEDS_HUMAN);
+  if (needsHuman.length > 0) record({ needsHuman });
 
   const outcome: ReplyOutcome = {
     posted: [],
@@ -599,7 +661,8 @@ export const replyCommand: CommandModule = {
         default: true,
         describe:
           'Post the replies and the summary; --no-post only records what was handled',
-      }),
+      })
+      .option('task', TASK_OPTION),
   handler: (argv) => {
     writeStdoutLine(
       JSON.stringify(
@@ -607,6 +670,7 @@ export const replyCommand: CommandModule = {
           pr: Number(argv['pr']),
           planPath: String(argv['plan']),
           post: Boolean(argv['post']),
+          task: taskArg(argv),
         }),
       ),
     );

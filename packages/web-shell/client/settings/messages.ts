@@ -28,7 +28,7 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
     'Show rotating loading phrases. Turn off to hide both built-in and host-provided phrases.',
   'settings.label.experimental.generatedUi': 'Generated UI',
   'settings.description.experimental.generatedUi':
-    'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.',
+    'Show interactive views from bundled Generated UI in supported local sessions, such as Web Shell. Enabled by default. Restart the owning session to apply changes.',
 
   'settings.models.editWindow': 'Edit context window',
   'settings.models.windowHint':
@@ -45,6 +45,7 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.description.voiceModel':
     'Model used for voice transcription. Add a custom model with Voice transcription purpose, then select it here.',
 
+  'settings.category.Archived': 'Archived conversations',
   'settings.title': 'Settings',
   'settings.loading': 'Loading settings...',
   'settings.empty': 'No settings available.',
@@ -125,7 +126,7 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
 export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.experimental.generatedUi': 'Generated UI 生成式界面',
   'settings.description.experimental.generatedUi':
-    '在受支持的本地会话中启用内置 Generated UI。重新创建所属会话后生效。',
+    '在 Web Shell 等受支持的本地会话中，用内置 Generated UI 展示交互视图。默认开启。重新创建所属会话后生效。',
 
   'settings.models.editWindow': '配置窗口大小',
   'settings.models.windowHint':
@@ -217,6 +218,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.category.Tools': '工具',
   'settings.category.Daemon': '守护进程',
   'settings.category.Connections': '连接',
+  'settings.category.Archived': '归档会话',
   'settings.category.Experimental': '实验性',
   'settings.category.Advanced': '高级',
   'settings.label.general.enableAutoUpdate': '启用自动更新',
@@ -432,6 +434,9 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.label.experimental.agentCollaboration': '启用 Agent 协作',
   'settings.description.experimental.agentCollaboration':
     '启用持久化的工作区 Agent 在共享任务线程上协作（实验性）。与 Agent Team 相互独立：两个开关互不隐含。启用只表示允许协作；把 Agent 开放给外部调用方、信任某个连接、注册 host 仍各自需要显式配置。也可通过 QWEN_CODE_ENABLE_AGENT_COLLABORATION=1 环境变量启用。',
+  'settings.label.experimental.unifiedAgentLoop': '统一 Agent Loop',
+  'settings.description.experimental.unifiedAgentLoop':
+    '让 headless 会话（`-p` 与 stream-json）以及 ACP 用户 prompt 的模型轮次（Zed、VS Code、Web Shell）运行在共享的 agent loop 上（实验性）。其他轮次与入口暂时保留各自现有的 loop。也可通过 QWEN_CODE_ENABLE_UNIFIED_AGENT_LOOP=1 环境变量启用。',
   'settings.label.experimental.artifact': '启用 Artifacts',
   'settings.description.experimental.artifact':
     '启用 artifact 工具，默认开启。在交互式非 SDK 会话中，模型可以把自包含 HTML 页面发布为交互式 Artifact 并在浏览器中打开；非 SDK 的 daemon 会话可使用仅记录元数据的 record_artifact 工具。设为 false 或用 QWEN_CODE_DISABLE_ARTIFACT=1 可同时禁用两者。',
