@@ -488,18 +488,63 @@ describe('extractShellOperations', () => {
 
   // After an unquoted `>&`, `N>&` or `<&`, bash reads an unquoted `-` as
   // "close" and starts a new word: `rm >&-notes.txt` closes stdout and
-  // removes notes.txt.
+  // removes notes.txt. The command gets that word as an argument, and the
+  // whole word also stays a file operation (`&-word`), because the parser
+  // doesn't know every command and drops numbers and `$` words as arguments:
+  // `tee >&-2` writes `2`, `my-tool >&-notes.txt` may write notes.txt.
   it.each<[command: string, expected: ShellOperation[]]>([
-    ['rm >&-notes.txt', [edit(`${CWD}/notes.txt`)]],
-    ['rm 1>&-notes.txt', [edit(`${CWD}/notes.txt`)]],
-    ['rm 2>&-notes.txt', [edit(`${CWD}/notes.txt`)]],
-    ['rm <&-notes.txt', [edit(`${CWD}/notes.txt`)]],
-    ['rm >&-"notes.txt"', [edit(`${CWD}/notes.txt`)]],
-    ['cat <&-notes.txt', [read(`${CWD}/notes.txt`)]],
-    ['printf TXT >&-x', []],
+    [
+      'rm >&-notes.txt',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&-notes.txt`)],
+    ],
+    [
+      'rm 1>&-notes.txt',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&-notes.txt`)],
+    ],
+    [
+      'rm 2>&-notes.txt',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&-notes.txt`)],
+    ],
+    ['rm <&-notes.txt', [edit(`${CWD}/notes.txt`), read(`${CWD}/&-notes.txt`)]],
+    [
+      'rm >&-"notes.txt"',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&-notes.txt`)],
+    ],
+    [
+      'cat <&-notes.txt',
+      [read(`${CWD}/&-notes.txt`), read(`${CWD}/notes.txt`)],
+    ],
+    ['printf TXT >&-x', [write(`${CWD}/&-x`)]],
+    ['tee >&-2', [write(`${CWD}/&-2`)]],
+    ['tee 2>&-2', [write(`${CWD}/&-2`)]],
+    ['cat <&-2', [read(`${CWD}/&-2`)]],
+    ['tee >&-$HOME/.bashrc', [write(`${CWD}/&-$HOME/.bashrc`)]],
+    ['tee >&-{a,b}', [write(`${CWD}/&-{a,b}`)]],
+    ['my-tool >&-notes.txt', [write(`${CWD}/&-notes.txt`)]],
+    ['rm -- >&--x', [write(`${CWD}/&--x`)]],
+    ['printf X >&->&"-x"', [write(`${CWD}/-x`), write(`${CWD}/&->&-x`)]],
+    ['df -hT / >&-', []],
     ['df -hT / >&"-"', []],
   ])('unquoted - closes the descriptor: %s', (command, expected) => {
     expectSorted(command, expected);
+  });
+
+  // `>&` and `<&` aimed at a device: bash discards the output or opens a
+  // socket, so no file operation.
+  it.each<string>([
+    'df -hT / >&/dev/null',
+    'df -hT / 1>&/dev/null',
+    'cat <&/dev/null',
+    'printf TXT >&/dev/tcp/127.0.0.1/80',
+  ])('fd redirect to a device is not a file operation: %s', (command) => {
+    expectSorted(command, []);
+  });
+
+  // A quoted `>` is not a redirect, so `2">"&1` is not fd duplication; bash
+  // reads the unquoted `&` as "run in background", and the check keeps the
+  // literal write.
+  it('2">"&1 is not fd duplication', () => {
+    expect(ops('printf X 2">"&1')).toContainEqual(write(`${CWD}/&1`));
   });
 
   // A quoted or escaped `-` is part of the file name: `>&"-x"` writes `-x`.

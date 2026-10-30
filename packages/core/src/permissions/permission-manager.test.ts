@@ -3370,12 +3370,20 @@ describe('PermissionManager — compound shell write attribution', () => {
     // descriptor and the rest of the word is an argument (`rm` removes it).
     ['printf TXT >&"-x"', 'Edit', 'deny'],
     ['printf TXT >&\\-x', 'Edit', 'deny'],
-    ['printf TXT >&-x', 'Edit', 'allow'],
+    ['printf TXT >&-x', 'Edit', 'deny'],
     ['rm >&-notes.txt', 'Edit', 'deny'],
     ['rm >&-notes.txt', 'Edit(notes.txt)', 'deny'],
     ['rm 2>&-notes.txt', 'Edit(notes.txt)', 'deny'],
     ['cat <&-notes.txt', 'Read', 'deny'],
     ['cat <&-notes.txt', 'Read(notes.txt)', 'deny'],
+    // The command decides what the rest of the word is, so the whole word
+    // stays a file operation: these stay denied under a bare deny.
+    ['tee >&-2', 'Edit', 'deny'],
+    ['tee >&-$HOME/.bashrc', 'Edit', 'deny'],
+    ['cat <&-2', 'Read', 'deny'],
+    ['my-tool >&-notes.txt', 'Edit', 'deny'],
+    ['rm -- >&--x', 'Edit', 'deny'],
+    ['df -hT / >&/dev/null', 'Edit', 'allow'],
   ])(
     'Bash(*) allow, %s with %s denied → %s',
     async (command, deny, expected) => {
