@@ -37,6 +37,81 @@ const VERSION_PATTERN = new RegExp(
   `^(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)-${PRERELEASE_IDENTIFIER}(?:\\.${PRERELEASE_IDENTIFIER})*$`,
 );
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
+const MAIN_SOURCE_ROOT = 'packages/managed-agent-server/server/src/main/java';
+const PERSISTENCE = 'com.alibaba.qwen.code.managedagent.maintenance';
+const PREFLIGHT = 'com.alibaba.qwen.code.managedagent.preflight';
+const WORKSPACE_RUNTIME = 'com.alibaba.qwen.code.managedagent.maintenance';
+
+// The offline maintenance entry points, each a main class in the server jar.
+// bin/qwen-managed-agent-admin runs them through Spring Boot's
+// PropertiesLauncher, so the distribution ships no jar per command.
+export const ADMIN_COMMANDS = Object.freeze([
+  [
+    'storage-registration',
+    `${PERSISTENCE}.WorkspaceStorageRegistrationMain`,
+    'Register, fence, restore or inspect a native Workspace storage root.',
+  ],
+  [
+    'workspace-recovery',
+    `${PERSISTENCE}.WorkspaceRecoveryMain`,
+    'Capture, verify or inspect a Workspace recovery bundle.',
+  ],
+  [
+    'workspace-migration',
+    `${WORKSPACE_RUNTIME}.WorkspaceMigrationMain`,
+    'Retire, prepare, promote, abort or inspect a Workspace migration.',
+  ],
+  [
+    'maintenance-recovery',
+    `${PERSISTENCE}.WorkspaceMaintenanceRecoveryMain`,
+    'Inspect or reconcile a Workspace held by maintenance.',
+  ],
+  [
+    'operator-recovery',
+    `${WORKSPACE_RUNTIME}.WorkspaceRecoveryCommand`,
+    'Prepare, complete or inspect a Hosted Shell lease recovery.',
+  ],
+  [
+    'csi-registration',
+    `${PERSISTENCE}.WorkspaceCsiRegistrationMain`,
+    'Register or inspect a reviewed CSI Workspace registration.',
+  ],
+  [
+    'csi-protection',
+    `${WORKSPACE_RUNTIME}.WorkspaceCsiProtectionMain`,
+    'Render the protection policy for a CSI registration.',
+  ],
+  [
+    'csi-session',
+    `${PERSISTENCE}.WorkspaceCsiSessionMain`,
+    'Create a reviewed CSI Session offline.',
+  ],
+  [
+    'csi-runtime',
+    `${PERSISTENCE}.WorkspaceCsiRuntimeMain`,
+    'Serve, prompt or retire one reviewed CSI Session Runtime.',
+  ],
+  [
+    'csi-retirement',
+    `${PERSISTENCE}.WorkspaceCsiRetirementMain`,
+    'Inspect or begin a CSI Workspace retirement.',
+  ],
+  [
+    'csi-worker-ack',
+    `${PERSISTENCE}.WorkspaceCsiWorkerAckMain`,
+    'Acknowledge or inspect a CSI worker publication.',
+  ],
+  [
+    'resident-retirement',
+    `${PERSISTENCE}.ResidentWorkspaceRetirementMain`,
+    'Inspect, begin or delete the pod of a resident Workspace retirement.',
+  ],
+  [
+    'resolved-configuration',
+    `${PREFLIGHT}.ResolvedConfiguration`,
+    'Print the Runtime state directory and auth mode the configuration resolves to.',
+  ],
+]);
 
 async function sha256(file) {
   return createHash('sha256')
@@ -157,8 +232,9 @@ async function copy(root, stage, source, destination) {
   return target;
 }
 
-function launcher(jar) {
-  return `#!/usr/bin/env sh
+// Every launcher reads config/application.yml the same way, so the
+// operator's configuration cannot depend on which one they ran.
+const LAUNCHER_PREAMBLE = `#!/usr/bin/env sh
 set -eu
 base="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"
 config="$base/config/application.yml"
@@ -166,8 +242,60 @@ if [ -f "$config" ] && [ -z "\${SPRING_CONFIG_ADDITIONAL_LOCATION:-}" ]; then
   SPRING_CONFIG_ADDITIONAL_LOCATION="file:\${config}"
   export SPRING_CONFIG_ADDITIONAL_LOCATION
 fi
-exec java -jar "$base/lib/${jar}" "$@"
 `;
+
+function launcher(jar) {
+  return `${LAUNCHER_PREAMBLE}exec java -jar "$base/lib/${jar}" "$@"
+`;
+}
+
+function adminLauncher(jar) {
+  const width = Math.max(...ADMIN_COMMANDS.map(([name]) => name.length));
+  const usage = ADMIN_COMMANDS.map(
+    ([name, , summary]) => `  ${name.padEnd(width)}  ${summary}`,
+  );
+  const cases = ADMIN_COMMANDS.map(
+    ([name, main]) => `  ${name}) main=${main} ;;`,
+  );
+  return `${LAUNCHER_PREAMBLE}usage() {
+  cat <<'USAGE'
+Usage: qwen-managed-agent-admin <command> [arguments]
+
+Offline maintenance commands. Run one without arguments for its usage.
+
+${usage.join('\n')}
+USAGE
+}
+case "\${1:-}" in
+${cases.join('\n')}
+  ''|help|-h|--help) usage; exit 0 ;;
+  *) echo "qwen-managed-agent-admin: unknown command: $1" >&2; usage >&2; exit 2 ;;
+esac
+shift
+exec java "-Dloader.main=$main" -cp "$base/lib/${jar}" \\
+  org.springframework.boot.loader.launch.PropertiesLauncher "$@"
+`;
+}
+
+// A renamed or removed entry point fails packaging instead of shipping a
+// command that cannot start.
+async function verifyAdminCommands(root) {
+  for (const [name, main] of ADMIN_COMMANDS) {
+    const source = path.join(
+      root,
+      MAIN_SOURCE_ROOT,
+      `${main.replaceAll('.', '/')}.java`,
+    );
+    let text;
+    try {
+      text = await readFile(source, 'utf8');
+    } catch {
+      throw new Error(`Admin command ${name} names a missing class ${main}.`);
+    }
+    if (!/public static void main\(String/.test(text)) {
+      throw new Error(`Admin command ${name}: ${main} has no main method.`);
+    }
+  }
 }
 
 async function createDeterministicArchive(output, rootName, stage, archive) {
@@ -246,7 +374,7 @@ export async function createReferenceDistribution({
   const serverPom = path.join(root, 'packages/managed-agent-server/pom.xml');
   const serverVersion = await pomVersion(
     serverPom,
-    'qwen-managed-agent-server',
+    'qwen-managed-agent-parent',
   );
   const packageJson = JSON.parse(
     await readFile(path.join(root, 'package.json')),
@@ -268,7 +396,7 @@ export async function createReferenceDistribution({
   const applicationConfiguration = await readFile(
     path.join(
       root,
-      'packages/managed-agent-server/src/main/resources/application.yml',
+      'packages/managed-agent-server/server/src/main/resources/application.yml',
     ),
     'utf8',
   );
@@ -291,8 +419,10 @@ export async function createReferenceDistribution({
     /^[ \t]*process\.env\[HOSTED_LIFECYCLE_V2_PROFILES_ENV\][ \t]*\?\?[ \t]*'([^'\r\n]*)'[ \t]*$/gm,
     'Hosted lifecycle v2 profile default',
   );
-  if (lifecycleV2ProfilesDefault !== '') {
-    throw new Error('Hosted lifecycle v2 profiles must default to empty.');
+  if (lifecycleV2ProfilesDefault !== 'hosted-workspace-shell/1') {
+    throw new Error(
+      'Hosted lifecycle v2 profiles must default to canonical Shell only.',
+    );
   }
 
   const serverJar = `qwen-managed-agent-server-${serverVersion}.jar`;
@@ -301,14 +431,14 @@ export async function createReferenceDistribution({
     {
       name: 'qwen-managed-agent-server',
       version: serverVersion,
-      source: `packages/managed-agent-server/target/${serverJar}`,
+      source: `packages/managed-agent-server/server/target/qwen-managed-agent-server-${serverVersion}-exec.jar`,
       destination: `lib/${serverJar}`,
       role: 'control-plane',
     },
     {
       name: 'qwen-managed-agent-operator-recovery',
       version: serverVersion,
-      source: `packages/managed-agent-server/target/${recoveryJar}`,
+      source: `packages/managed-agent-server/server/target/${recoveryJar}`,
       destination: `lib/${recoveryJar}`,
       role: 'operator-recovery',
     },
@@ -342,6 +472,8 @@ export async function createReferenceDistribution({
   for (const file of [
     'qwen-managed-agent-bootstrap',
     'qwen-managed-agent-bootstrap.mjs',
+    'qwen-managed-agent-upgrade',
+    'qwen-managed-agent-upgrade.mjs',
   ]) {
     await copy(
       root,
@@ -376,14 +508,18 @@ export async function createReferenceDistribution({
     stage,
     'bin/qwen-managed-agent-operator-recovery',
   );
+  const adminCommand = path.join(stage, 'bin/qwen-managed-agent-admin');
+  await verifyAdminCommands(root);
   await mkdir(path.dirname(serverLauncher), { recursive: true });
   await Promise.all([
     writeFile(serverLauncher, launcher(serverJar)),
     writeFile(recoveryLauncher, launcher(recoveryJar)),
+    writeFile(adminCommand, adminLauncher(serverJar)),
   ]);
   await Promise.all([
     chmod(serverLauncher, 0o755),
     chmod(recoveryLauncher, 0o755),
+    chmod(adminCommand, 0o755),
   ]);
 
   const components = [];
@@ -470,7 +606,12 @@ export async function createReferenceDistribution({
     `${rootName}/SHA256SUMS`,
     `${rootName}/bin/qwen-managed-agent-server`,
     `${rootName}/bin/qwen-managed-agent-operator-recovery`,
+    `${rootName}/bin/qwen-managed-agent-admin`,
+    // The two launchers exec these modules.
     `${rootName}/bin/qwen-managed-agent-bootstrap`,
+    `${rootName}/bin/qwen-managed-agent-bootstrap.mjs`,
+    `${rootName}/bin/qwen-managed-agent-upgrade`,
+    `${rootName}/bin/qwen-managed-agent-upgrade.mjs`,
     `${rootName}/config/application.example.yml`,
     ...systemdFiles.map((file) => `${rootName}/systemd/${file}`),
   ]) {

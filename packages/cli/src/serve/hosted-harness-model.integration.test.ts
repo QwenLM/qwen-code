@@ -411,6 +411,38 @@ it.each([
     ['OLD_UNANSWERED_PROMPT'],
     ['OLD_PROMPT', 'OLD_RESPONSE'],
   ],
+  [
+    'completed turn with queued guidance following an unanswered turn',
+    [
+      record('user', 'OLD_UNANSWERED_PROMPT'),
+      record('user', 'OLD_PROMPT'),
+      {
+        ...record('user', 'FIRST_GUIDANCE'),
+        subtype: 'mid_turn_user_message' as const,
+      },
+      {
+        ...record('user', 'SECOND_GUIDANCE'),
+        subtype: 'mid_turn_user_message' as const,
+      },
+      record('assistant', 'OLD_RESPONSE'),
+    ],
+    ['OLD_UNANSWERED_PROMPT'],
+    ['OLD_PROMPT', 'FIRST_GUIDANCE', 'SECOND_GUIDANCE', 'OLD_RESPONSE'],
+  ],
+  [
+    'completed turn with guidance after an initial answer',
+    [
+      record('user', 'OLD_PROMPT'),
+      record('assistant', 'INITIAL_RESPONSE'),
+      {
+        ...record('user', 'LATE_GUIDANCE'),
+        subtype: 'mid_turn_user_message' as const,
+      },
+      record('assistant', 'FINAL_RESPONSE'),
+    ],
+    [],
+    ['OLD_PROMPT', 'INITIAL_RESPONSE', 'LATE_GUIDANCE', 'FINAL_RESPONSE'],
+  ],
 ])(
   'sends the current prompt after a %s',
   async (_label, history, omitted, retained) => {

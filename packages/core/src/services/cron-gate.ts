@@ -194,7 +194,18 @@ export async function suggestedGateRule(gate: string): Promise<string> {
  * `!{}` shell processor use. In the daemon that is the ACP child's `Config`,
  * so the command sees the workspace environment, not the daemon's.
  */
-export function createCronGateRunner(config: Config): CronGateRunner {
+export function createCronGateRunner(
+  config: Config,
+  options: {
+    readonly timeoutMs?: number;
+    /**
+     * Handed the command's process group as soon as it starts, for a host
+     * that stops or sweeps groups it tracks; a throw stops the command.
+     */
+    readonly onProcessGroup?: (pgid: number) => void;
+  } = {},
+): CronGateRunner {
+  const timeoutMs = options.timeoutMs ?? CRON_GATE_TIMEOUT_MS;
   return async (gate, { signal, approvedInProcess }) => {
     const cwd = config.getTargetDir();
     const verdict = await unattendedVerdict(
@@ -214,9 +225,16 @@ export function createCronGateRunner(config: Config): CronGateRunner {
     // Durations run on the monotonic clock: a wall clock stepped back
     // mid-run would report a negative one.
     const startedAt = performance.now();
-    const timeout = AbortSignal.timeout(CRON_GATE_TIMEOUT_MS);
+    const timeout = AbortSignal.timeout(timeoutMs);
     const binary = new AbortController();
-    const combined = AbortSignal.any([signal, timeout, binary.signal]);
+    const untracked = new AbortController();
+    const combined = AbortSignal.any([
+      signal,
+      timeout,
+      binary.signal,
+      untracked.signal,
+    ]);
+    let trackingError: unknown;
     let stdout = '';
     let stdoutBytes = 0;
     let truncated = false;
@@ -275,17 +293,28 @@ export function createCronGateRunner(config: Config): CronGateRunner {
         { streamStdout: true },
       );
       pid = handle.pid;
+      if (options.onProcessGroup && pid !== undefined) {
+        try {
+          options.onProcessGroup(pid);
+        } catch (error) {
+          // A group its host cannot track must not run on: stop it, and
+          // fail the call rather than answer an outcome.
+          trackingError = error;
+          untracked.abort();
+        }
+      }
       result = await handle.result;
     } catch (error) {
       return failed(`could not start: ${getErrorMessage(error)}`);
     }
+    if (trackingError !== undefined) throw trackingError;
     if (result.stdoutHeldAfterExit && pid !== undefined) {
       stopLeftovers(pid);
     }
     if (result.error) return failed(`could not start: ${result.error.message}`);
     if (binary.signal.aborted) return failed('printed binary output');
     if (timeout.aborted) {
-      return failed(`timed out after ${CRON_GATE_TIMEOUT_MS / 1000} s`);
+      return failed(`timed out after ${timeoutMs / 1000} s`);
     }
     if (result.aborted) return failed('was cancelled');
     if (result.exitCode !== 0) {
@@ -397,13 +426,25 @@ function sanitizeGateText(text: string): string {
     .trim();
 }
 
-function stderrTail(stderr: string): string {
+/** Gate output as the model may see it; storing it this way also bounds
+ * its JSON encoding (no control character survives to escape to 6 bytes). */
+export function sanitizeGateOutput(text: string): string {
+  return sanitizeGateText(text);
+}
+
+/**
+ * The sanitized last lines of a failed gate's stderr, cut to its newest
+ * `maxChars` characters: what a failure notice shows, and what a managed
+ * automation keeps as the failure's detail.
+ */
+export function gateStderrTail(
+  stderr: string,
+  maxChars: number = CRON_GATE_STDERR_CAP_BYTES,
+): string {
+  if (maxChars <= 0) return '';
   const lines = sanitizeGateText(stderr).split('\n');
   const tail = lines.slice(-CRON_GATE_STDERR_LINES).join('\n');
-  const cut =
-    tail.length > CRON_GATE_STDERR_CAP_BYTES
-      ? tail.slice(-CRON_GATE_STDERR_CAP_BYTES)
-      : tail;
+  const cut = tail.length > maxChars ? tail.slice(-maxChars) : tail;
   // Not the low half of a pair whose high half was cut off, here or by the
   // runner's rolling stderr buffer: the notice is a model prompt, and an
   // unpaired surrogate breaks its serialization.
@@ -442,7 +483,7 @@ export function buildGateFailureNotice(
   job: GateJob,
   result: Extract<CronGateResult, { kind: 'failed' }>,
 ): string {
-  const tail = stderrTail(result.stderr);
+  const tail = gateStderrTail(result.stderr);
   const stderrBlock = tail
     ? `stderr, last ${CRON_GATE_STDERR_LINES} lines, each \`<\` written \`&lt;\`:\n<gate-stderr>\n${tail}\n</gate-stderr>\n`
     : 'It printed nothing on stderr.\n';

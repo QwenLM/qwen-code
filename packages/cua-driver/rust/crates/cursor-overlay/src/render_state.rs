@@ -47,6 +47,7 @@ pub const SESSION_BADGE_FADE_SECS: f64 = 0.4;
 ///
 /// Each platform wraps this in its own struct that adds OS-specific fields
 /// (e.g. `virt_x/y/w/h` on Windows, `focus_rect` on macOS).
+#[derive(Clone)]
 pub struct RenderStateCore {
     /// Frozen copy of the launch-time CursorConfig.
     pub cfg: CursorConfig,

@@ -225,7 +225,7 @@ interface ServeArgs {
   'managed-data-dir'?: string;
   'hosted-harness-capability-digest'?: string;
   token?: string;
-  'max-sessions': number;
+  'max-sessions'?: number;
   'max-total-sessions'?: number;
   'max-pending-prompts-per-session': number;
   'max-connections': number;
@@ -345,10 +345,11 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
       })
       .option('max-sessions', {
         type: 'number',
-        default: 32,
         description:
           'Cap on concurrent live sessions. New spawn requests beyond this return 503; ' +
-          'attach to existing sessions still works. Set to 0 to disable.',
+          'attach to existing sessions still works. Set to 0 to disable. ' +
+          'Defaults to 32, or to the serve.maxSessions setting (user, system, and ' +
+          'system-defaults scopes only); the flag wins when passed.',
       })
       .option('max-total-sessions', {
         type: 'number',
@@ -745,7 +746,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         type: 'string',
         requiresArg: true,
         description:
-          'Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN.',
+          'Private Broker credential for --profile hosted-harness; required together with URL for Workspace tool turns. Falls back to QWEN_MANAGED_RUNTIME_BROKER_TOKEN; prefer the variable, since this option puts the credential in the process list.',
       })
       .option('writer-idle-timeout-ms', {
         type: 'number',
@@ -927,6 +928,14 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         'qwen serve: --token is visible in the process command line; ' +
           'prefer the QWEN_SERVER_TOKEN env var for any non-trivial ' +
           'deployment.',
+      );
+    }
+    if (argv['managed-runtime-broker-token'] !== undefined) {
+      // Same exposure for the Broker credential the Harness holds.
+      writeStderrLine(
+        'qwen serve: --managed-runtime-broker-token is visible in the ' +
+          'process command line; prefer the ' +
+          'QWEN_MANAGED_RUNTIME_BROKER_TOKEN env var.',
       );
     }
     let channelSelection: ServeChannelSelection | undefined;

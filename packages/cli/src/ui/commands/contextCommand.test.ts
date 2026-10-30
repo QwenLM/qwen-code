@@ -22,6 +22,7 @@ import {
   resolveSlimmingConfig,
   wrapSystemReminder,
 } from '@qwen-code/qwen-code-core';
+import { AUTO_MEMORY_SNAPSHOT_METADATA } from '@qwen-code/qwen-code-core/memory/request-context.js';
 import { t } from '../../i18n/index.js';
 import type { ContextCategoryBreakdown } from '../types.js';
 import {
@@ -372,11 +373,102 @@ describe('collectContextData (contextCommand)', () => {
       } as unknown as Config;
     }
 
+    it.each([0, 1, 100_000])(
+      'separates instruction and auto-memory accounting at total %s',
+      async (total) => {
+        const config = makeChatConfig({ total, history: [] });
+        const instructions = 'Project instructions. '.repeat(100);
+        const policy = 'Automatic memory policy. '.repeat(50);
+        Object.assign(config, {
+          getUserMemory: () =>
+            '--- Context from: QWEN.md ---\n' +
+            instructions +
+            '\n--- End of Context from: QWEN.md ---',
+          getAutoMemoryPrompt: () => policy,
+          getAutoMemoryContext: () => '',
+        });
+        const data = await collectContextData(config, true);
+        expect(data.instructionFiles?.map((file) => file.path)).toEqual([
+          'QWEN.md',
+        ]);
+        expect(data.memoryFiles.map((file) => file.path)).toEqual([
+          t('auto memory'),
+        ]);
+        if (total !== 1) {
+          expect(data.breakdown.instructionFiles).toBe(
+            estimateContextTextTokens(instructions + '\n'),
+          );
+          expect(data.breakdown.memoryFiles).toBe(
+            estimateContextTextTokens(policy),
+          );
+        }
+        if (total) {
+          expect(sumRows(data.breakdown)).toBe(total);
+        } else {
+          expect(data.breakdown.freeSpace).toBe(
+            data.contextWindowSize -
+              sumRows(data.breakdown) -
+              data.breakdown.autocompactBuffer,
+          );
+        }
+        const summary = await collectContextData(config, false);
+        expect(summary.breakdown).toEqual(data.breakdown);
+        expect(summary.instructionFiles).toEqual([]);
+        expect(summary.memoryFiles).toEqual([]);
+        const text = formatContextUsageText(data);
+        expect(text).toContain('**Instruction files**');
+        expect(text).toContain('**Auto memory**');
+        expect(formatContextUsageText(summary)).toMatch(
+          /Instruction files\s+\S+ tokens/,
+        );
+        expect(formatContextUsageText(summary)).toMatch(
+          /Auto memory\s+\S+ tokens/,
+        );
+        expect(text).not.toContain('Memory files');
+      },
+    );
+
+    it('scales nonzero instruction and auto-memory rows and their details together', async () => {
+      const sources = {
+        getUserMemory: () =>
+          '--- Context from: QWEN.md ---\n' +
+          'Project instructions. '.repeat(100) +
+          '\n--- End of Context from: QWEN.md ---',
+        getAutoMemoryPrompt: () => 'Automatic memory policy. '.repeat(50),
+        getAutoMemoryContext: () => '',
+      };
+      const collect = (total: number) =>
+        collectContextData(
+          Object.assign(makeChatConfig({ total, history: [] }), sources),
+          true,
+        );
+      const raw = await collect(0);
+      const total = 1000;
+      const scale = total / sumRows(raw.breakdown);
+      expect(scale).toBeLessThan(1);
+      const scaled = await collect(total);
+
+      for (const category of ['instructionFiles', 'memoryFiles'] as const) {
+        const expected = Math.floor(raw.breakdown[category]! * scale);
+        expect(expected).toBeGreaterThan(0);
+        expect(scaled.breakdown[category]).toBe(expected);
+        expect(scaled[category]).toEqual(
+          raw[category]!.map((entry) => ({
+            ...entry,
+            tokens: Math.round(entry.tokens * scale),
+          })),
+        );
+      }
+      expect(scaled.breakdown.unattributed).toBe(0);
+      expect(sumRows(scaled.breakdown)).toBe(total);
+    });
+
     function sumRows(breakdown: ContextCategoryBreakdown): number {
       return (
         breakdown.systemPrompt +
         breakdown.builtinTools +
         breakdown.mcpTools +
+        (breakdown.instructionFiles ?? 0) +
         breakdown.memoryFiles +
         breakdown.skills +
         (breakdown.startupContext ?? 0) +
@@ -384,6 +476,149 @@ describe('collectContextData (contextCommand)', () => {
         (breakdown.unattributed ?? 0)
       );
     }
+
+    it.each([
+      {
+        name: 'unchanged retained catalogs',
+        retained: ['old', 'new'],
+        current: 'new',
+        billed: ['old', 'new'],
+        total: 0,
+      },
+      {
+        name: 'changed pending catalog',
+        retained: ['old'],
+        current: 'new',
+        billed: ['old', 'new'],
+        total: 0,
+      },
+      {
+        name: 'compacted history without snapshots',
+        summary:
+          '<state_snapshot>Earlier user work is complete.</state_snapshot>',
+        retained: [],
+        current: 'new',
+        billed: ['new'],
+        total: 0,
+      },
+      {
+        name: 'suppressed retained catalogs',
+        retained: ['old', 'new'],
+        current: '',
+        billed: [],
+        total: 0,
+      },
+      {
+        name: 'a pending version seen before the latest retained version',
+        retained: ['new', 'old'],
+        current: 'new',
+        billed: ['new', 'old', 'new'],
+        total: 0,
+      },
+      {
+        name: 'provider-reported total',
+        retained: ['old', 'new'],
+        current: 'new',
+        billed: ['old', 'new'],
+        total: 40_000,
+      },
+    ])(
+      'accounts for memory snapshots once: $name',
+      async ({ retained, current, billed, total, summary }) => {
+        const catalog = (version: string) =>
+          `${version} catalog entry\n`.repeat(version === 'old' ? 17 : 40);
+        const snapshotText = (version: string) =>
+          'Current memory catalog (full snapshot; supersedes all earlier memory catalogs):\n' +
+          catalog(version);
+        const policy = 'Stable auto-memory policy.';
+        const realUser = {
+          text: 'Please inspect my actual request.',
+          partMetadata: { user_note: true },
+        };
+        const reply = 'I inspected the request.';
+        // A user can quote a catalog; only marked parts belong to memory.
+        const quotedCatalog = {
+          text: snapshotText('quoted'),
+          partMetadata: { user_note: true },
+        };
+        const compacted: Content[] = summary
+          ? [
+              { role: 'user', parts: [{ text: summary }] },
+              { role: 'model', parts: [{ text: reply }] },
+            ]
+          : [];
+        const history: Content[] = [
+          prelude,
+          ...compacted,
+          ...retained.flatMap((version): Content[] => [
+            {
+              role: 'user',
+              parts: [
+                realUser,
+                {
+                  text: snapshotText(version),
+                  partMetadata: { [AUTO_MEMORY_SNAPSHOT_METADATA]: true },
+                },
+              ],
+            },
+            { role: 'model', parts: [{ text: reply }] },
+          ]),
+          { role: 'user', parts: [realUser, quotedCatalog] },
+        ];
+        const before = structuredClone(history);
+        const getHistoryShallow = vi.fn().mockReturnValue(history);
+        const config = makeChatConfig({ total, history });
+        const chat = config.getLlmClient().getChat();
+        Object.assign(chat, { getHistoryShallow });
+        Object.assign(config, {
+          getAutoMemoryPrompt: () => policy,
+          getAutoMemoryContext: () => (current ? catalog(current) : ''),
+        });
+
+        const data = await collectContextData(config, true);
+        const expectedMemory =
+          estimateContextTextTokens(policy) +
+          billed.reduce(
+            (sum, version) =>
+              sum + estimateContextTextTokens(snapshotText(version)),
+            0,
+          );
+        const expectedMessages =
+          (retained.length + 1) * estimateContextTextTokens(realUser.text) +
+          retained.length * estimateContextTextTokens(reply) +
+          estimateContextTextTokens(quotedCatalog.text) +
+          (summary
+            ? estimateContextTextTokens(summary) +
+              estimateContextTextTokens(reply)
+            : 0);
+        expect(data.breakdown.messages).toBe(expectedMessages);
+        expect(data.breakdown.memoryFiles).toBe(expectedMemory);
+        expect(data.memoryFiles).toEqual([
+          { path: t('auto memory'), tokens: expectedMemory },
+        ]);
+        expect(data.breakdown.startupContext).toBe(
+          estimateContextTextTokens(environmentReminder),
+        );
+        expect(data.breakdown.skills).toBe(
+          estimateContextTextTokens(listingReminder),
+        );
+        expect(data.totalTokens).toBe(total);
+        if (total) {
+          expect(sumRows(data.breakdown)).toBe(total);
+        } else {
+          expect(data.breakdown.freeSpace).toBe(
+            200_000 -
+              sumRows(data.breakdown) -
+              data.breakdown.autocompactBuffer,
+          );
+        }
+        expect(getHistoryShallow).toHaveBeenCalledWith();
+        expect(chat.getHistory).not.toHaveBeenCalled();
+        expect(history).toEqual(before);
+        expect(history.at(-1)?.parts?.[0]).toBe(realUser);
+        expect(history.at(-1)?.parts?.[1]).toBe(quotedCatalog);
+      },
+    );
 
     it('bills the skill listing as sent under skills and the rest of the prelude as startup context', async () => {
       const data = await collectContextData(
@@ -1693,8 +1928,10 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(1);
-    expect(data.memoryFiles[0].path).toBe(path.join('~', '.qwen', 'QWEN.md'));
+    expect(data.instructionFiles!).toHaveLength(1);
+    expect(data.instructionFiles![0].path).toBe(
+      path.join('~', '.qwen', 'QWEN.md'),
+    );
   });
 
   it('renders project-local markers as relative paths when workingDir != cwd', async () => {
@@ -1719,9 +1956,9 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(2);
-    expect(data.memoryFiles[0].path).toBe('QWEN.md');
-    expect(data.memoryFiles[1].path).toBe(path.join('docs', 'QWEN.md'));
+    expect(data.instructionFiles!).toHaveLength(2);
+    expect(data.instructionFiles![0].path).toBe('QWEN.md');
+    expect(data.instructionFiles![1].path).toBe(path.join('docs', 'QWEN.md'));
   });
 
   it('attributes all injected skill bodies after refresh, removal and disable', async () => {
@@ -1857,10 +2094,10 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(2);
+    expect(data.instructionFiles!).toHaveLength(2);
     // The project file keeps its path; only the extension's file is renamed.
-    expect(data.memoryFiles[0].path).toBe('QWEN.md');
-    expect(data.memoryFiles[1].path).toBe(
+    expect(data.instructionFiles![0].path).toBe('QWEN.md');
+    expect(data.instructionFiles![1].path).toBe(
       `${t('Extension')}: Report Tools · QWEN.md`,
     );
   });
@@ -1896,14 +2133,14 @@ describe('collectContextData (contextCommand)', () => {
 
     const after = await collectContextData(config, true);
 
-    expect(after.memoryFiles.map((file) => file.path)).toEqual(
+    expect(after.instructionFiles!.map((file) => file.path)).toEqual(
       ['docs', 'prompts'].map(
         (dir) =>
           `${t('Extension')}: Report Tools · ${path.join(dir, 'QWEN.md')}`,
       ),
     );
-    expect(after.memoryFiles.map((file) => file.tokens)).toEqual(
-      before.memoryFiles.map((file) => file.tokens),
+    expect(after.instructionFiles!.map((file) => file.tokens)).toEqual(
+      before.instructionFiles!.map((file) => file.tokens),
     );
   });
 
@@ -1924,8 +2161,8 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
 
-    expect(data.memoryFiles).toHaveLength(1);
-    expect(data.memoryFiles[0].path).toBe('QWEN.md');
+    expect(data.instructionFiles!).toHaveLength(1);
+    expect(data.instructionFiles![0].path).toBe('QWEN.md');
   });
 
   it('measures the listing a session would send before a chat exists (#12235)', async () => {
@@ -2007,6 +2244,40 @@ describe('collectContextData (contextCommand)', () => {
     expect(data.skills.map((skill) => skill.name)).toEqual(['enabled-skill']);
   });
 });
+
+it.each([false, true])(
+  'preserves the combined memory category in legacy text snapshots (details: %s)',
+  (showDetails) => {
+    const text = formatContextUsageText({
+      type: 'context_usage',
+      modelName: 'legacy-model',
+      totalTokens: 200,
+      contextWindowSize: 1000,
+      breakdown: {
+        systemPrompt: 0,
+        builtinTools: 0,
+        mcpTools: 0,
+        memoryFiles: 200,
+        skills: 0,
+        messages: 0,
+        freeSpace: 600,
+        autocompactBuffer: 200,
+        thresholds: { effectiveWindow: 1000, warn: 700, auto: 800, hard: 900 },
+        currentTier: 'safe',
+      },
+      builtinTools: [],
+      mcpTools: [],
+      skills: [],
+      memoryFiles: [{ path: 'QWEN.md', tokens: 200 }],
+      showDetails,
+    });
+    expect(text).toMatch(/Memory files\s+200 tokens/);
+    expect(text).not.toContain('Instruction files');
+    expect(text).not.toContain('Auto memory');
+    expect(text.includes('QWEN.md')).toBe(showDetails);
+    expect(text.includes('**Memory files**')).toBe(showDetails);
+  },
+);
 
 describe('/context shows three-tier thresholds', () => {
   beforeEach(() => {

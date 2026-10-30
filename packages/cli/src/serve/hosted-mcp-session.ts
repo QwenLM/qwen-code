@@ -121,6 +121,7 @@ export class HostedMcpSession {
     string,
     { configuration: McpConfiguration; catalog: ManagedMcpCatalog }
   >();
+  private extensionServers?: readonly HostedMcpServerPin[];
 
   constructor(
     private readonly options: HostedWorkspaceBrokerOptions,
@@ -128,8 +129,10 @@ export class HostedMcpSession {
     private readonly admissionServers: readonly HostedMcpServerPin[],
     settings?: HostedMcpSettings,
     sharedBroker?: HostedWorkspaceBroker,
+    extensionView = false,
   ) {
     this.settings = settings;
+    if (extensionView) this.extensionServers = admissionServers;
     const configurations = this.configurations();
     const owners = new Set(
       configurations
@@ -163,6 +166,7 @@ export class HostedMcpSession {
   }
 
   get servers(): readonly HostedMcpServerPin[] {
+    if (this.extensionServers) return this.extensionServers;
     return [
       ...new Map(
         [...this.admissionServers, ...(this.settings?.servers ?? [])].map(
@@ -173,6 +177,11 @@ export class HostedMcpSession {
   }
 
   get selectedServers(): readonly HostedMcpSelection[] {
+    if (this.extensionServers)
+      return this.extensionServers.map((pin) => ({
+        ...pin,
+        state: 'enabled' as const,
+      }));
     return (
       this.settings?.servers ??
       this.admissionServers.map((pin) => ({
@@ -180,6 +189,10 @@ export class HostedMcpSession {
         state: 'enabled' as const,
       }))
     );
+  }
+
+  get managementRevision(): number {
+    return this.settings?.revision ?? 0;
   }
 
   private enabled(serverId: string): boolean {
@@ -260,11 +273,102 @@ export class HostedMcpSession {
     signal?.throwIfAborted();
     if (this.configuring.size)
       throw new HostedMcpConflictError('MCP configuration is in progress.');
-    this.ready ??= this.initialize(signal).catch((cause: unknown) => {
+    this.ready ??= (
+      this.extensionServers
+        ? this.installExtensionServers(
+            this.extensionServers,
+            `extension-load-${digest(this.extensionServers).slice(0, 24)}`,
+            signal,
+          )
+        : this.initialize(signal)
+    ).catch((cause: unknown) => {
       this.ready = undefined;
       throw cause;
     });
     await waitForTurn(this.ready, signal);
+  }
+
+  async drainForExtensionConfiguration(
+    servers: readonly HostedMcpServerPin[],
+    forceServerId?: string,
+  ): Promise<void> {
+    await this.reconcileEffects();
+    const changed = this.configurations().filter(
+      (entry) =>
+        entry.releaseState !== 'released' &&
+        (entry.serverId === forceServerId ||
+          !servers.some(
+            (pin) =>
+              pin.serverId === entry.serverId &&
+              pin.serverRevision === entry.serverRevision &&
+              pin.definitionDigest === entry.run.definition?.definitionDigest,
+          )),
+    );
+    await this.drainConfigurations(changed);
+    for (const entry of changed) {
+      const latest = this.configurations().find(
+        (value) => value.configurationId === entry.configurationId,
+      )!;
+      if (latest.releaseState !== 'released')
+        await this.commitConfiguration({ ...latest, releaseState: 'released' });
+      this.catalogs.delete(entry.serverId);
+      for (const [key, binding] of this.bindings)
+        if (binding.configuration.serverId === entry.serverId)
+          this.bindings.delete(key);
+    }
+    this.extensionServers = servers;
+    this.settings = undefined;
+  }
+
+  async enableExtensionConfiguration(
+    servers: readonly HostedMcpServerPin[],
+    operationId: string,
+  ): Promise<void> {
+    this.extensionServers = servers;
+    this.settings = undefined;
+    await this.installExtensionServers(servers, operationId);
+    this.ready = Promise.resolve();
+  }
+
+  private async installExtensionServers(
+    servers: readonly HostedMcpServerPin[],
+    operationId: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    for (const pin of servers) {
+      const matching = this.configurations()
+        .filter(
+          (entry) =>
+            entry.serverId === pin.serverId &&
+            entry.serverRevision === pin.serverRevision &&
+            entry.run.definition?.definitionDigest === pin.definitionDigest &&
+            entry.releaseState === 'active' &&
+            entry.run.state === 'settled',
+        )
+        .at(-1);
+      if (matching) {
+        if (
+          this.catalogs.get(pin.serverId)?.configuration.configurationId !==
+          matching.configurationId
+        )
+          await this.install(pin, matching, undefined, undefined, signal);
+        continue;
+      }
+      const id = `extension-mcp-${digest([operationId, pin.serverId]).slice(0, 48)}`;
+      const previous = this.session.authority.extensionRecord(
+        'mcp_configuration',
+        id,
+      );
+      const revision = previous
+        ? parseMcpConfiguration(previous.record).configRevision - 1
+        : Math.max(
+            0,
+            ...this.configurations()
+              .filter((entry) => entry.serverId === pin.serverId)
+              .map((entry) => entry.configRevision),
+          );
+      await this.configure(id, pin, revision, signal);
+    }
   }
 
   async refresh(signal?: AbortSignal): Promise<void> {
@@ -664,7 +768,7 @@ export class HostedMcpSession {
     for (const { catalog, configuration } of this.bindings.values()) {
       if (
         !this.enabled(catalog.serverId) ||
-        (this.settings &&
+        ((this.settings || this.extensionServers !== undefined) &&
           parseMcpConfiguration(
             this.session.authority.extensionRecord(
               'mcp_configuration',

@@ -24,11 +24,14 @@ import {
 import { ManagedSessionStoreHttpError } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import {
   AUTOMATION_INPUT_SOURCE,
+  AUTOMATION_RESOURCE_KINDS,
   AUTOMATION_RUN_INSTRUCTION,
   automationInputId,
   automationRunClaimBody,
   automationRunId,
+  decodeAutomationGateOutput,
   decodeAutomationInputEnvelope,
+  encodeAutomationGateOutput,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-automation-operations.js';
 import { pendingSessionInputs } from './hosted-wake-intake.js';
 import { settlePendingMonitorInputs } from './hosted-monitor-wake.js';
@@ -36,10 +39,17 @@ import {
   AutomationNotFoundError,
   AutomationOperationConflictError,
   AutomationQuotaError,
+  AutomationGateUnsupportedError,
   AutomationRetiredError,
   AutomationRevisionStaleError,
   HostedAutomationSession,
+  type HostedAutomationSessionOptions,
 } from './hosted-automation-session.js';
+import {
+  HostedAutomationGateHeld,
+  type HostedAutomationGateRequest,
+  type HostedAutomationGateResult,
+} from './hosted-automation-gate.js';
 
 // The H6b gates are real: both domains are enabled and the persistent mode
 // is admitted, so this suite drives the hosted funnel with no enablement
@@ -100,7 +110,7 @@ async function withSession<T>(
     automations: HostedAutomationSession,
     authority: LocalManagedSessionAuthority,
   ) => Promise<T>,
-  options: { create?: boolean } = {},
+  options: { create?: boolean } & HostedAutomationSessionOptions = {},
 ): Promise<T> {
   const lease = await SessionWriterLease.acquire({
     runtimeBaseDir: harness.runtimeBaseDir,
@@ -141,6 +151,16 @@ async function withSession<T>(
         sink: { project: async () => [...harness.records] },
       },
       sessionKey,
+      {
+        ...(options.gate ? { gate: options.gate } : {}),
+        ...(options.releaseGate ? { releaseGate: options.releaseGate } : {}),
+        ...(options.shellAvailable
+          ? { shellAvailable: options.shellAvailable }
+          : {}),
+        ...(options.hooksConfigured
+          ? { hooksConfigured: options.hooksConfigured }
+          : {}),
+      },
     );
     return await run(automations, authority);
   } finally {
@@ -262,11 +282,11 @@ describe('hosted automation definitions', () => {
         turnResult(fired.inputId, 'completed'),
       );
       expect(
-        (await automations.requestCancel(fired.run.automationRunId)).run.state,
+        (await automations.requestCancel(fired.run!.automationRunId)).run.state,
       ).toBe('settled');
       expect(automations.cancelRequested(fired.inputId)).toBe(false);
       const before = authority.committedSequence;
-      await automations.requestCancel(fired.run.automationRunId);
+      await automations.requestCancel(fired.run!.automationRunId);
       expect(authority.committedSequence).toBe(before);
     });
   });
@@ -306,7 +326,7 @@ describe('hosted automation definitions', () => {
       expect(automations.schedule(SCHEDULE_ID)?.enabled).toBe(true);
       expect((await automations.fire(fireParams())).run).toEqual(cancelled);
       expect(
-        (await automations.fire(fireParams(1, 'manual:next'))).run.run.state,
+        (await automations.fire(fireParams(1, 'manual:next'))).run!.run.state,
       ).toBe('running');
     });
   });
@@ -649,7 +669,7 @@ describe('hosted automation definitions', () => {
         definition: { ...definition, prompt: 'x'.repeat(48 * 1024) },
       });
       const fired = await automations.fire(fireParams());
-      expect(fired.run.run.execution).toBe('dispatch_started');
+      expect(fired.run!.run.execution).toBe('dispatch_started');
     });
   });
 
@@ -914,9 +934,9 @@ describe('hosted automation runs', () => {
       const fired = await automations.fire(fireParams());
       const runId = automationRunId(SCHEDULE_ID, SLOT_KEY);
       expect(fired.replayed).toBe(false);
-      expect(fired.run.automationRunId).toBe(runId);
-      expect(fired.run.run.state).toBe('running');
-      expect(fired.run.run.execution).toBe('dispatch_started');
+      expect(fired.run!.automationRunId).toBe(runId);
+      expect(fired.run!.run.state).toBe('running');
+      expect(fired.run!.run.execution).toBe('dispatch_started');
       expect(fired.inputId).toBe(automationInputId(runId));
       const events = authority.eventsInSequenceRange(
         before + 1,
@@ -941,7 +961,7 @@ describe('hosted automation runs', () => {
           ),
         ),
       );
-      expect(envelope.automationRunId).toBe(fired.run.automationRunId);
+      expect(envelope.automationRunId).toBe(fired.run!.automationRunId);
       expect(envelope.scheduleId).toBe(SCHEDULE_ID);
       expect(envelope.definitionRevision).toBe(1);
       expect(envelope.firedAt).toBe(fireParams().firedAt);
@@ -961,7 +981,7 @@ describe('hosted automation runs', () => {
         ...fireParams(1, 'manual:key-1'),
         trigger: 'manual',
       });
-      expect(manual.run.automationRunId).toBe(
+      expect(manual.run!.automationRunId).toBe(
         automationRunId(SCHEDULE_ID, 'manual:key-1'),
       );
       expect(automations.runs()).toHaveLength(2);
@@ -993,7 +1013,7 @@ describe('hosted automation runs', () => {
       const before = authority.committedSequence;
       const fired = await automations.fire(fireParams());
       expect(fired.replayed).toBe(true);
-      expect(fired.run.run.execution).toBe('dispatch_started');
+      expect(fired.run!.run.execution).toBe('dispatch_started');
       expect(
         authority
           .eventsInSequenceRange(before + 1, authority.committedSequence)
@@ -1087,7 +1107,7 @@ describe('hosted automation runs', () => {
       const failed = await automations.settleRunFailedUnknown(fired.inputId);
       expect(failed?.run.state).toBe('failed');
       expect(failed?.run.execution).toBe('outcome_unknown');
-      expect(failed?.automationRunId).toBe(fired.run.automationRunId);
+      expect(failed?.automationRunId).toBe(fired.run!.automationRunId);
       expect(
         authority
           .eventsInSequenceRange(before + 1, authority.committedSequence)
@@ -1105,7 +1125,7 @@ describe('hosted automation runs', () => {
       const next = await automations.fire(
         fireParams(1, 'schedule:2026-03-08T07:01:00Z'),
       );
-      expect(next.run.run.state).toBe('running');
+      expect(next.run!.run.state).toBe('running');
     });
   });
 
@@ -1135,8 +1155,8 @@ describe('hosted automation runs', () => {
       const before = authority.committedSequence;
       const ended = await automations.fire(fireParams());
       expect(ended.replayed).toBe(true);
-      expect(ended.run.run.state).toBe('cancelled');
-      expect(ended.run.run.execution).toBe('not_started_proven');
+      expect(ended.run!.run.state).toBe('cancelled');
+      expect(ended.run!.run.execution).toBe('not_started_proven');
       // One settle revision, no input, no wake: nothing of this
       // occurrence ever reached a turn.
       expect(
@@ -1249,5 +1269,639 @@ describe('hosted automation runs', () => {
         }),
       ).toBe(0);
     });
+  });
+});
+
+/** Hands each probe the next scripted result and records what it was asked. */
+function scriptedGate(results: HostedAutomationGateResult[]) {
+  const calls: HostedAutomationGateRequest[] = [];
+  const runner = async (request: HostedAutomationGateRequest) => {
+    calls.push(request);
+    const next = results.shift();
+    if (next === undefined) throw new Error('unscripted gate probe');
+    return next;
+  };
+  return { runner, calls };
+}
+
+const gated = { ...definition, gate: './probe.sh --gate' };
+
+describe('hosted automation gates', () => {
+  it('retains unknown release debt after the release-key cache overflows', async () => {
+    const harness = await createHarness();
+    let failing = true;
+    const releaseGate = vi.fn(async () => {});
+    const occurrences = Array.from(
+      { length: 1025 },
+      (_, index) =>
+        `schedule:${new Date(Date.UTC(2026, 2, 8 + index, 7))
+          .toISOString()
+          .replace('.000Z', 'Z')}`,
+    );
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        expect(automations.hasPendingGateReleases).toBe(false);
+        for (const occurrence of occurrences) {
+          await expect(
+            automations.fire(fireParams(1, occurrence)),
+          ).rejects.toThrow('unreleased Runtime');
+        }
+        failing = false;
+        for (const occurrence of occurrences.slice(1)) {
+          expect(
+            (await automations.fire(fireParams(1, occurrence))).gate,
+          ).toEqual({
+            outcome: 'quiet',
+            durationMs: 0,
+          });
+        }
+        expect(releaseGate).toHaveBeenCalledTimes(1024);
+        expect(automations.hasPendingGateReleases).toBe(true);
+      },
+      {
+        gate: async () => {
+          if (failing) throw new Error('unreleased Runtime');
+          return { kind: 'quiet', durationMs: 0 };
+        },
+        releaseGate,
+      },
+    );
+  });
+
+  it('withholds a quiet fire with no claim, input or wake', async () => {
+    const harness = await createHarness();
+    const gate = scriptedGate([{ kind: 'quiet', durationMs: 12 }]);
+    await withSession(
+      harness,
+      async (automations, authority) => {
+        const defined = await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        expect(defined.schedule.gate).toBe('./probe.sh --gate');
+        const before = authority.committedSequence;
+        const fired = await automations.fire(fireParams());
+        expect(fired).toEqual({
+          inputId: automationInputId(automationRunId(SCHEDULE_ID, SLOT_KEY)),
+          replayed: false,
+          gate: { outcome: 'quiet', durationMs: 12 },
+        });
+        expect(authority.committedSequence).toBe(before);
+        expect(automations.runs()).toHaveLength(0);
+        expect(gate.calls).toEqual([
+          expect.objectContaining({
+            automationRunId: automationRunId(SCHEDULE_ID, SLOT_KEY),
+            definitionRevision: 1,
+            gate: './probe.sh --gate',
+          }),
+        ]);
+      },
+      { gate: gate.runner },
+    );
+  });
+
+  it('releases the probe Session of the pinned revision when the fire ends without probing it again', async () => {
+    // An attempt that could not release its probe Session left that to the
+    // next attempt; a revision since, a retire or a deletion means no next
+    // attempt probes under that revision.
+    const harness = await createHarness();
+    const released: Array<[string, number]> = [];
+    const runId = automationRunId(SCHEDULE_ID, SLOT_KEY);
+    await withSession(
+      harness,
+      async (automations) => {
+        await expect(automations.fire(fireParams(4))).rejects.toThrow(
+          AutomationNotFoundError,
+        );
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: { gate: null },
+        });
+        await expect(automations.fire(fireParams(1))).rejects.toThrow(
+          AutomationRevisionStaleError,
+        );
+        await automations.retire(SCHEDULE_ID, nextOperationId());
+        await expect(automations.fire(fireParams(2))).rejects.toThrow(
+          AutomationRetiredError,
+        );
+        expect(released).toEqual([
+          [runId, 4],
+          [runId, 1],
+          [runId, 2],
+        ]);
+      },
+      {
+        releaseGate: async (id, revision) => {
+          released.push([id, revision]);
+        },
+      },
+    );
+  });
+
+  it('retries a fire whose stale revision’s probe Session this process owes, and only that one', async () => {
+    const harness = await createHarness();
+    let failing = true;
+    let hanging = false;
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        // The probe's attempt could not release its Session.
+        await expect(automations.fire(fireParams(1))).rejects.toThrow(
+          /was not released/,
+        );
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: { gate: null },
+        });
+        await expect(automations.fire(fireParams(1))).rejects.toThrow(
+          HostedAutomationGateHeld,
+        );
+        failing = false;
+        await expect(automations.fire(fireParams(1))).rejects.toThrow(
+          AutomationRevisionStaleError,
+        );
+        // Only then does the ungated revision claim, unprobed.
+        const fired = await automations.fire(fireParams(2));
+        expect(fired.run?.run.execution).toBe('dispatch_started');
+        // A stale fire that owes nothing does not wait on the Broker.
+        failing = true;
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: { prompt: 'Run the build again.' },
+        });
+        await expect(
+          automations.fire(fireParams(2, 'schedule:2026-03-09T07:00:00Z')),
+        ).rejects.toThrow(AutomationRevisionStaleError);
+        // Nor on one that hangs: the courtesy waits two seconds at most.
+        hanging = true;
+        const started = Date.now();
+        await expect(
+          automations.fire(fireParams(2, 'schedule:2026-03-10T07:00:00Z')),
+        ).rejects.toThrow(AutomationRevisionStaleError);
+        expect(Date.now() - started).toBeLessThan(4_000);
+      },
+      {
+        gate: async () => {
+          throw new Error(
+            "The gate's Runtime Session was not released, so the fire is retried to release it: Broker unavailable",
+          );
+        },
+        releaseGate: async () => {
+          if (hanging) return new Promise<void>(() => {});
+          if (failing) throw new Error('Broker unavailable');
+        },
+      },
+    );
+  });
+
+  it('releases what an earlier attempt owes before a later answer settles the fire', async () => {
+    // Attempt 1 may hold the probe's Session and fails; attempt 2 answers
+    // after a refusal that came before it acquired anything, so the runner
+    // released nothing. The answer would settle the occurrence and strand
+    // attempt 1's Session: the release comes first, and a failed one retries.
+    const harness = await createHarness();
+    const released: Array<[string, number]> = [];
+    let releaseFails = true;
+    let attempt = 0;
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        await expect(automations.fire(fireParams())).rejects.toThrow(
+          HostedAutomationGateHeld,
+        );
+        await expect(automations.fire(fireParams())).rejects.toThrow(
+          HostedAutomationGateHeld,
+        );
+        expect(released).toEqual([]);
+        releaseFails = false;
+        const fired = await automations.fire(fireParams());
+        expect(fired.gate).toEqual({ outcome: 'quiet', durationMs: 5 });
+        expect(released).toEqual([[automationRunId(SCHEDULE_ID, SLOT_KEY), 1]]);
+      },
+      {
+        gate: async () => {
+          attempt++;
+          if (attempt === 1) {
+            throw new HostedAutomationGateHeld(
+              "the occurrence's Runtime Session is held by another attempt",
+            );
+          }
+          return { kind: 'quiet', durationMs: 5 };
+        },
+        releaseGate: async (id, revision) => {
+          if (releaseFails) throw new Error('Broker unavailable');
+          released.push([id, revision]);
+        },
+      },
+    );
+  });
+
+  it('claims with the output, delivers it as data and replays without probing again', async () => {
+    const harness = await createHarness();
+    const gate = scriptedGate([
+      {
+        kind: 'output',
+        stdout: 'event: comment\n',
+        truncated: false,
+        durationMs: 40,
+      },
+    ]);
+    await withSession(
+      harness,
+      async (automations, authority) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        const fired = await automations.fire(fireParams());
+        expect(fired.gate).toEqual({ outcome: 'delivered', durationMs: 40 });
+        expect(fired.run!.gateOutputRef).not.toBeNull();
+        expect(fired.run!.run.execution).toBe('dispatch_started');
+        const events = authority.eventsInSequenceRange(
+          1,
+          authority.committedSequence,
+        );
+        const [pending] = pendingSessionInputs(events);
+        const envelope = decodeAutomationInputEnvelope(
+          await harness.store.read(
+            assertManagedSessionDurableRef(
+              pending!.contentRef,
+              'automation input contentRef',
+            ),
+          ),
+        );
+        expect(envelope.text).toContain('Run the build.\n\nGate output.');
+        expect(envelope.text).toContain('(`./probe.sh --gate`, exit 0, 0.0 s)');
+        expect(
+          envelope.text.endsWith(
+            '<gate-output>\nevent: comment\n</gate-output>',
+          ),
+        ).toBe(true);
+        // The same occurrence again is the committed run: no second probe.
+        const again = await automations.fire(fireParams());
+        expect(again.replayed).toBe(true);
+        expect(again.run).toEqual(fired.run);
+        expect(again.gate).toEqual({ outcome: 'delivered' });
+        expect(gate.calls).toHaveLength(1);
+      },
+      { gate: gate.runner },
+    );
+  });
+
+  it("completes a gated dispatch a crash left out from the claim's output", async () => {
+    const harness = await createHarness();
+    const gate = scriptedGate([]);
+    await withSession(
+      harness,
+      async (automations, authority) => {
+        const opened = await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        const gateOutputRef = await harness.store.publish(
+          AUTOMATION_RESOURCE_KINDS.gateOutput,
+          encodeAutomationGateOutput({
+            gate: './probe.sh --gate',
+            stdout: 'recorded before the crash\n',
+            truncated: false,
+            durationMs: 5,
+          }),
+        );
+        const claim = automationRunClaimBody({
+          schedule: opened.schedule,
+          occurrenceKey: SLOT_KEY,
+          gateOutputRef,
+        });
+        await authority.commitExtensionRecord(
+          {
+            operation: 'fireRun',
+            commandId: `${claim.automationRunId}:1`,
+            sessionKey,
+            contentDigest: 'd'.repeat(64),
+          },
+          { domain: 'automation_run', record: claim },
+          { class: 'trusted_entry' },
+        );
+        const fired = await automations.fire(fireParams());
+        expect(fired.replayed).toBe(true);
+        expect(fired.gate).toEqual({ outcome: 'delivered' });
+        expect(fired.run!.run.execution).toBe('dispatch_started');
+        const [pending] = pendingSessionInputs(
+          authority.eventsInSequenceRange(1, authority.committedSequence),
+        );
+        const envelope = decodeAutomationInputEnvelope(
+          await harness.store.read(
+            assertManagedSessionDurableRef(
+              pending!.contentRef,
+              'automation input contentRef',
+            ),
+          ),
+        );
+        expect(envelope.text).toContain('recorded before the crash');
+        expect(gate.calls).toHaveLength(0);
+      },
+      { gate: gate.runner },
+    );
+  });
+
+  it.each<[HostedAutomationGateResult, Record<string, unknown>]>([
+    [
+      {
+        kind: 'failed',
+        detail: 'exited with code 1',
+        stderr: 'boom',
+        durationMs: 7,
+      },
+      {
+        outcome: 'failed',
+        detail: 'exited with code 1; stderr: boom',
+        durationMs: 7,
+      },
+    ],
+    [
+      {
+        kind: 'failed',
+        detail: 'exited with code 1',
+        stderr: '',
+        durationMs: 7,
+      },
+      { outcome: 'failed', detail: 'exited with code 1', durationMs: 7 },
+    ],
+    [
+      { kind: 'blocked', reason: 'a permission rule denies it' },
+      { outcome: 'blocked', detail: 'a permission rule denies it' },
+    ],
+    [
+      { kind: 'unknown', reason: 'the Runtime did not settle' },
+      { outcome: 'unknown', detail: 'the Runtime did not settle' },
+    ],
+  ])('answers %o without a run', async (result, summary) => {
+    const harness = await createHarness();
+    const gate = scriptedGate([result]);
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        const fired = await automations.fire(fireParams());
+        expect(fired.run).toBeUndefined();
+        expect(fired.gate).toEqual(summary);
+        expect(automations.runs()).toHaveLength(0);
+      },
+      { gate: gate.runner },
+    );
+  });
+
+  it('publishes a printing gate’s output sanitized, so control bytes cannot push it past the resource limit', async () => {
+    // Each raw C0 control byte would escape to six bytes in the published
+    // JSON: 12 000 of them would outgrow the resource and drop the fire.
+    const harness = await createHarness();
+    const gate = scriptedGate([
+      {
+        kind: 'output',
+        stdout: `${'\u0001'.repeat(12_000)}event: comment\n`,
+        truncated: false,
+        durationMs: 3,
+      },
+    ]);
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        const fired = await automations.fire(fireParams());
+        expect(fired.run).toBeDefined();
+        expect(fired.gate).toMatchObject({ outcome: 'delivered' });
+        // Stored as the model sees it: no control byte left to escape.
+        const stored = decodeAutomationGateOutput(
+          await harness.store.read(fired.run!.gateOutputRef!),
+        );
+        expect(stored.stdout).toBe('event: comment');
+      },
+      { gate: gate.runner },
+    );
+  });
+
+  it('cuts the stored output back to the cap when sanitizing lengthens it', async () => {
+    // An escaped `<` gains three characters: 16 KiB of tags would outgrow
+    // the budget the definition was admitted under.
+    const harness = await createHarness();
+    const stdout = '<result>'.repeat((16 * 1024) / 8);
+    const gate = scriptedGate([
+      { kind: 'output', stdout, truncated: false, durationMs: 3 },
+    ]);
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        const fired = await automations.fire(fireParams());
+        const stored = decodeAutomationGateOutput(
+          await harness.store.read(fired.run!.gateOutputRef!),
+        );
+        expect(Buffer.byteLength(stored.stdout, 'utf8')).toBeLessThanOrEqual(
+          16 * 1024,
+        );
+        expect(stored.truncated).toBe(true);
+        expect(stored.stdout.startsWith('&lt;result>')).toBe(true);
+      },
+      { gate: gate.runner },
+    );
+  });
+
+  it('keeps the newest stderr of a failed gate, sanitized and within what the control plane stores', async () => {
+    // A failed gate runs no turn: the detail is the only place its reason
+    // reaches, so a long, colored stderr must not push that reason out.
+    const harness = await createHarness();
+    const stderr = [
+      ...Array.from({ length: 40 }, (_, i) => `noise ${i} ${'x'.repeat(60)}`),
+      '\u001b[31mauthentication expired\u001b[0m',
+    ].join('\n');
+    const gate = scriptedGate([
+      { kind: 'failed', detail: 'exited with code 1', stderr, durationMs: 7 },
+    ]);
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        const detail = (await automations.fire(fireParams())).gate?.detail;
+        expect(detail?.startsWith('exited with code 1; stderr: ')).toBe(true);
+        expect(detail?.endsWith('authentication expired')).toBe(true);
+        expect(detail).not.toContain('\u001b');
+        expect(detail).not.toContain('noise 0 ');
+        expect(detail!.length).toBeLessThanOrEqual(1024);
+      },
+      { gate: gate.runner },
+    );
+  });
+
+  it('blocks a gated fire when the Session has no runner, and never probes an ungated one', async () => {
+    const harness = await createHarness();
+    await withSession(harness, async (automations) => {
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
+        definition: gated,
+      });
+      const fired = await automations.fire(fireParams());
+      expect(fired.run).toBeUndefined();
+      expect(fired.gate).toMatchObject({ outcome: 'blocked' });
+    });
+    const gate = scriptedGate([]);
+    await withSession(
+      harness,
+      async (automations) => {
+        await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: { ...definition, gate: null },
+        });
+        const fired = await automations.fire(fireParams(2));
+        // An ungated run carries the key as null.
+        expect(fired.run!.gateOutputRef).toBeNull();
+        expect(fired.gate).toBeUndefined();
+        expect(gate.calls).toHaveLength(0);
+      },
+      { gate: gate.runner },
+    );
+  });
+
+  it('refuses and blocks a gate on a Session whose deployment configures Hooks', async () => {
+    // A probe does not run through the deployment's PreToolUse and
+    // PermissionRequest Hooks, so a gate there would run around them.
+    const harness = await createHarness();
+    const gate = scriptedGate([]);
+    await withSession(
+      harness,
+      async (automations) => {
+        await expect(
+          automations.define({
+            scheduleId: SCHEDULE_ID,
+            operationId: nextOperationId(),
+            definition: gated,
+          }),
+        ).rejects.toThrow(/pins a Hook catalog for this Session/);
+        expect(automations.schedules()).toHaveLength(0);
+      },
+      { gate: gate.runner, hooksConfigured: () => true },
+    );
+    // A definition committed before the Session had Hooks never probes.
+    await withSession(harness, async (automations) => {
+      await automations.define({
+        scheduleId: SCHEDULE_ID,
+        operationId: nextOperationId(),
+        definition: gated,
+      });
+    });
+    await withSession(
+      harness,
+      async (automations) => {
+        const fired = await automations.fire(fireParams());
+        expect(fired.run).toBeUndefined();
+        expect(fired.gate).toMatchObject({
+          outcome: 'blocked',
+          detail: expect.stringContaining('pins a Hook catalog'),
+        });
+        expect(gate.calls).toHaveLength(0);
+      },
+      { gate: gate.runner, hooksConfigured: () => true, create: false },
+    );
+  });
+
+  it('refuses a gate on a Session without Shell, keeps it across revisions and clears it with null', async () => {
+    const harness = await createHarness();
+    await withSession(
+      harness,
+      async (automations) => {
+        await expect(
+          automations.define({
+            scheduleId: SCHEDULE_ID,
+            operationId: nextOperationId(),
+            definition: gated,
+          }),
+        ).rejects.toBeInstanceOf(AutomationGateUnsupportedError);
+        expect(automations.schedules()).toHaveLength(0);
+      },
+      { shellAvailable: () => false },
+    );
+    await withSession(
+      harness,
+      async (automations) => {
+        const opened = await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: gated,
+        });
+        // A revision that names no gate keeps the committed one.
+        const revised = await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: { prompt: 'Run the build again.' },
+        });
+        expect(revised.schedule.gate).toBe('./probe.sh --gate');
+        expect(revised.schedule.definitionRevision).toBe(2);
+        expect(revised.schedule.definitionDigest).not.toBe(
+          opened.schedule.definitionDigest,
+        );
+        const cleared = await automations.define({
+          scheduleId: SCHEDULE_ID,
+          operationId: nextOperationId(),
+          definition: { gate: null },
+        });
+        expect(JSON.parse(JSON.stringify(cleared.schedule))).toHaveProperty(
+          'gate',
+          null,
+        );
+        expect(cleared.schedule.definitionRevision).toBe(3);
+        await expect(
+          automations.define({
+            scheduleId: SCHEDULE_ID,
+            operationId: nextOperationId(),
+            definition: { gate: 'sleep 5 &' },
+          }),
+        ).rejects.toThrow(/gate must not background/);
+      },
+      { shellAvailable: () => true },
+    );
   });
 });

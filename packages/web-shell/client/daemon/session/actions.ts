@@ -5,6 +5,7 @@
  */
 
 import type { Dispatch, SetStateAction } from 'react';
+import type { McpAppGeneratedUiInvalidation } from '../../mcpAppHostContext.js';
 import type {
   DaemonApprovalMode,
   DaemonClient,
@@ -283,6 +284,11 @@ export interface CreateDaemonSessionActionsArgs {
   setAttachSessionNonce: Dispatch<SetStateAction<number>>;
   setNewSessionNonce: Dispatch<SetStateAction<number>>;
   clearLiveJournalRepair?: () => void;
+  onGeneratedUiInvalidated?: (
+    owner: DaemonSessionClient,
+    reason: McpAppGeneratedUiInvalidation['reason'],
+    sessionId?: string,
+  ) => void;
   onPromptAdmitted?: (
     owner: DaemonSessionClient,
     admission: {
@@ -479,6 +485,7 @@ export function createDaemonSessionActions({
   setAttachSessionNonce,
   setNewSessionNonce,
   clearLiveJournalRepair = () => undefined,
+  onGeneratedUiInvalidated,
   onPromptAdmitted,
   onContinuationAdmitted,
   onPromptRemoved,
@@ -1285,7 +1292,7 @@ export function createDaemonSessionActions({
           shouldAppendOptimisticMessage &&
           displayedImages.length === 0 &&
           displayedFiles.length === 0;
-        let optimisticBlockId: string | undefined;
+        let optimisticBlockId: string | undefined = options?.bindBlockId;
         if (optimisticMessageAppended) {
           store.appendLocalUserMessage(
             text,
@@ -2519,6 +2526,7 @@ export function createDaemonSessionActions({
     async clearSession(options?: { dropSessionContext?: boolean }) {
       const session = sessionRef.current;
       manualSessionClearRef.current = true;
+      if (session) onGeneratedUiInvalidated?.(session, 'cleared');
       if (pendingPersistedReasoningAction) {
         await pendingPersistedReasoningAction.catch(() => undefined);
       }
@@ -2584,6 +2592,7 @@ export function createDaemonSessionActions({
           session.client.closeSession(sessionId),
           'Release session timed out',
         );
+        onGeneratedUiInvalidated?.(session, 'deleted', sessionId);
       } catch (error) {
         throw dispatchActionError(
           addNotice,
@@ -2857,10 +2866,12 @@ export function createDaemonSessionActions({
         'rewind_session',
       );
       try {
-        return await withActionTimeout(
+        const result = await withActionTimeout(
           session.rewind(promptId, opts),
           'Rewind session timed out',
         );
+        onGeneratedUiInvalidated?.(session, 'rewound');
+        return result;
       } catch (error) {
         if (opts?.silent) throw error;
         throw dispatchActionError(
@@ -2868,6 +2879,54 @@ export function createDaemonSessionActions({
           'Rewind session failed',
           error,
           'rewind_session',
+        );
+      }
+    },
+
+    async *btwSessionStream(
+      question: string,
+      opts?: { signal?: AbortSignal },
+    ): AsyncGenerator<{ type: 'answer' | 'done'; answer: string }> {
+      const session = requireSessionForAction(
+        addNotice,
+        sessionRef.current,
+        'Side question failed',
+        'btw_session',
+      );
+      let code: string | undefined;
+      try {
+        if (
+          getConnection().capabilities?.features?.includes(
+            'session_btw_stream',
+          ) !== true
+        ) {
+          const result = await withActionTimeout(
+            session.btw(question, opts),
+            'Side question timed out',
+          );
+          yield {
+            type: 'done',
+            answer: result.answer ?? '',
+          };
+          return;
+        }
+        for await (const event of session.btwStream(question, opts)) {
+          if (event.type === 'error') {
+            code = event.code;
+            throw new Error(event.message);
+          }
+          yield { type: event.type, answer: event.answer };
+          if (event.type === 'done') return;
+        }
+        throw new Error('Side question stream ended before completion');
+      } catch (error) {
+        if (opts?.signal?.aborted || isAbortError(error)) throw error;
+        throw dispatchActionError(
+          addNotice,
+          'Side question failed',
+          error,
+          'btw_session',
+          { code: code ?? getDaemonErrorCode(error) },
         );
       }
     },
@@ -3768,6 +3827,7 @@ function dispatchActionError(
   opts?: {
     dispatchedNoticeKeys?: Set<string>;
     noticeOnceKey?: string;
+    code?: string;
   },
 ): Error {
   if (isAbortError(error)) {
@@ -3787,7 +3847,7 @@ function dispatchActionError(
       operation,
       code: isAcpChildCapacityError(error)
         ? 'acp_child_capacity_exhausted'
-        : `daemon.${operation}.failed`,
+        : (opts?.code ?? `daemon.${operation}.failed`),
       message: `${action}: ${message}`,
       debugMessage: message,
       recoverable: true,

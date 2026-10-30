@@ -474,6 +474,22 @@ describe('FileReadCache', () => {
       expect(entry.lastReadCacheable).toBe(true);
     });
 
+    it('disarms unknown truncated reads without revoking rights', () => {
+      const stats = makeStats();
+      const otherStats = makeStats({ ino: 101 });
+      const entry = read('/x/foo.ts', stats);
+      const other = read('/x/other.ts', otherStats);
+      const generation = cache.getClearGeneration();
+      cache.markAllReadsEvictedFromHistory();
+      expect(fresh(stats)).toBe(entry);
+      expect(entry.readResidentInHistory).toBe(false);
+      expect(entry.lastReadAt).toBeDefined();
+      expect(entry.lastReadWasFull).toBe(true);
+      expect(entry.lastReadCacheable).toBe(true);
+      expect(other.readResidentInHistory).toBe(false);
+      expect(cache.getClearGeneration()).toBe(generation);
+    });
+
     it('returns false (caller must fall back to clear) when there is no entry for the stats', () => {
       // No entry, or stats resolved to a different inode than recorded
       // — the caller treats this like an unstattable path.

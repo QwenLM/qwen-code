@@ -15,6 +15,7 @@ import {
   readFileSync,
   rmSync,
   symlinkSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -38,9 +39,13 @@ const prSkill = readFileSync(
   'utf8',
 );
 const triageSkillDoc = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
+import { ATTRIBUTIONS, VERDICTS } from '../../scripts/verify-pr-check.mjs';
+
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 const hasGnuRealpath =
-  spawnSync('realpath', ['-m', '--', '/'], { stdio: 'ignore' }).status === 0;
+  spawnSync('realpath', ['-m', '--', '/'], {
+    stdio: 'ignore',
+  }).status === 0;
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -5200,6 +5205,115 @@ describe('qwen-triage verify hardening round 2', () => {
     }
   });
 
+  // The maintainer's publish round used to be a paragraph retyped every time
+  // ("English comment, collapsed Chinese, screenshots, my assets branch"), so
+  // the request and the report could drift apart. `--publish` has to resolve
+  // every one of those deliverables on its own, without weakening the repo
+  // rule it replaces.
+  it('resolves --publish to the whole local report deliverable', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain('`/verify-pr <n> --publish`');
+    expect(flat).toContain('`--publish` in the invocation is that request');
+    // A stable host is a coordinate, so it resolves once and needs no flag.
+    expect(flat).toContain(
+      'the repository is `--assets-repo`, else `$QWEN_VERIFY_ASSETS_REPO`, else the resolved `--repo`',
+    );
+    expect(flat).toContain(
+      'the branch is `--assets-branch`, else `$QWEN_VERIFY_ASSETS_BRANCH`, else `assets/pr<n>-validation`',
+    );
+    // settings.json fills the same variables, from operator scopes only.
+    expect(flat).toContain(
+      'fill those same variables at startup from operator scopes only',
+    );
+    // Posting is consent, not a coordinate: it stays per-invocation.
+    expect(flat).toContain('Only coordinates like these are defaultable');
+    expect(flat).toContain('posting stays a per-invocation request');
+    // The flag is not a shortcut around the metadata rule.
+    expect(flat).toContain('does not license an `origin` fallback');
+    // ...nor may the image host fall back to a contributor's fork.
+    expect(flat).toContain('Never fall back to `origin` for the host');
+    // Overwriting a published name leaves every older link on the old image.
+    expect(flat).toContain('A published filename is spent');
+    // A contents PUT cannot create the branch the first upload needs.
+    expect(flat).toContain('git/refs');
+    // ...and the sha to create it from is looked up in THAT repository.
+    expect(flat).toContain('.object.sha');
+    // The read-back must query the repository the blob was written to, not
+    // the PR's own repository, whose same path may not exist or may differ.
+    expect(flat).toContain('repos/<assets-repo>/contents/<path>?ref=');
+    // The deliverables are the skill's, not the maintainer's list.
+    expect(flat).toContain('do not ask the maintainer to restate them');
+  });
+
+  // Watch mode composes the shipped gate probe with cron_create. Each piece is
+  // pinned because dropping one turns the watch back into a polling task that
+  // spends a model turn per fire — the cost the design exists to avoid.
+  it('documents the watch mode on the shipped gate probe', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain('`--watch` installs a standing trigger');
+    // The gate runs the wrapper, not the bare probe: the probe also reports
+    // comments and failed checks, and every non-empty gate output wakes the
+    // model whether or not the head moved.
+    expect(flat).toContain('scripts/verify-pr-watch-gate.mjs');
+    expect(flat).toContain('resync');
+    // One cursor serves one consumer; installing over an existing autofix
+    // watch would starve this one of head moves and lose `stop`.
+    expect(flat).toContain('--check');
+    expect(flat).toContain('--claim');
+    expect(flat).toContain('--release');
+    expect(flat).toContain('one cursor serves one consumer');
+    expect(flat).toContain('head_moved_externally');
+    expect(flat).toContain('verify-pr-watch-');
+    expect(flat).toContain('cron_delete');
+    // A binary without the probe must stop the setup, not schedule a dead gate.
+    expect(flat).toContain('schedule nothing');
+  });
+
+  // A manual re-verification round that records its head only after it
+  // finishes leaves the shared dedup file on the previous head while it
+  // runs: the next watch fire reads that stale head and starts a second
+  // round for the same head (PR #15816 review, P2). The registration must
+  // precede the round, as the watch prompt's own write-before-start rule does.
+  it('registers a manual re-verification round before it starts', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    // The phrase is a documented trigger, and an ambiguous PR is asked about.
+    expect(flat).toContain('有更新了，重新验证');
+    expect(flat).toContain('ask when that is ambiguous');
+    // An unchanged head gets an answer, not a round.
+    expect(flat).toContain('the head has not moved since');
+    // The shared state is checked and registered before the round runs.
+    expect(flat).toContain(
+      'Register the round in the shared watch state before starting it',
+    );
+    expect(flat).toContain('write `H` as in-flight');
+    expect(flat).toContain(
+      'the same write-before-start rule the watch prompt follows',
+    );
+    expect(flat).toContain(
+      'record `H` as verified in the same file once the round completes',
+    );
+    // Registration is a step of its own ahead of the round, not an
+    // afterthought behind it.
+    expect(
+      flat.indexOf('Register the round in the shared watch state'),
+    ).toBeLessThan(flat.indexOf('Run the follow-up protocol above'));
+    // Publishing consent is not inherited from the phrase.
+    expect(flat).toContain('the phrase alone does not post a comment');
+  });
+
+  // The TUI renders `argument-hint` beside the command name; without the field
+  // `/verify-pr` looks like it takes no arguments, unlike `/review`.
+  it('declares an argument hint for the command prompt', () => {
+    const frontmatter = parse(/^---\n([\s\S]*?)\n---/.exec(verifySkill)[1]);
+
+    expect(frontmatter['argument-hint']).toBe(
+      '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]',
+    );
+  });
+
   // PR #7836's report said "Verdict: merge-ready — the 7 failures are all
   // expected A/B base-cell failures proving the tests are load-bearing"
   // while assertions.json said fail:7 — so the publisher's trust rule
@@ -5221,6 +5335,132 @@ describe('qwen-triage verify hardening round 2', () => {
     // And it must sit in Hard rules, not in narrative prose.
     expect(verifySkill.indexOf('Expected failures are passes')).toBeGreaterThan(
       verifySkill.indexOf('## Hard rules'),
+    );
+  });
+
+  // The rule above named two causes (PR, harness) and left the third unnamed.
+  // A round proved a repo test red on both arms, booked that red twice, and
+  // published `findings` while its own verdict line said neither reason was a
+  // PR defect. The A/A paragraph taught how to prove a red environmental and
+  // never how to count it, so the two halves have to name each other.
+  it('names the environment attribution and connects the A/A proof to the count', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    const rules = flat.slice(flat.indexOf('## Hard rules'));
+
+    expect(rules).toContain('failures: [{ id, attribution }]');
+    for (const attribution of ATTRIBUTIONS) {
+      expect(rules).toContain(`\`${attribution}\``);
+    }
+    expect(rules).toContain('Only `pr` can carry `findings` or `blocked`');
+    // The counting consequence lives with the A/A proof, not only in the rule.
+    const notCovered = flat.slice(
+      flat.indexOf('**Not covered** — every claim'),
+      flat.indexOf('**Methodology**'),
+    );
+    expect(notCovered).toContain(
+      'how you count it, not just how you describe it',
+    );
+    expect(notCovered).toContain('It never enters `fail`');
+    expect(notCovered).toContain('_Not covered_');
+  });
+
+  // Hand-run, the guard asks "is anything new?" — and a fetch that errored
+  // answers "no". 324 review comments became 0 and the comparison read clean.
+  it('makes the pre-publish guard fail closed and owns both halves', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain('scripts/verify-pr-guard.mjs');
+    expect(flat).toContain('the hand-run version fails open');
+    expect(flat).toContain('--compare --start');
+    expect(flat).toContain('a failed fetch as fatal and writes no snapshot');
+    expect(flat).toContain('shorter than the start snapshot');
+    expect(flat).toContain(
+      'A question you did not get answered is never a clean guard',
+    );
+    // A review has submitted_at and no updated_at, and neither an edit nor a
+    // dismissal moves it, so the stamp alone cannot answer "did anything
+    // change?". The boundary is stated too: reactions are not compared.
+    expect(flat).toContain('reviews carry `submitted_at`, not `updated_at`');
+    expect(flat).toContain(
+      'neither editing a review body nor dismissing the review moves it',
+    );
+    expect(flat).toContain("and each review's state, next to its stamp");
+    expect(flat).toContain('refuses a fetched item with no body');
+    expect(flat).toContain('or a review with no state');
+    expect(flat).toContain('reaction counts are deliberately not compared');
+  });
+
+  // "Every production commit was mutated on its own" shipped while two commits
+  // had no row. A coverage claim is a number over a set, so it is generated
+  // from the enumeration rather than asserted.
+  it('generates coverage claims from the enumeration', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain(
+      'A coverage claim is universally quantified, so generate it from the enumeration',
+    );
+    expect(flat).toContain('coverageClaim: "per-commit"');
+    expect(flat).toContain('productionCommits');
+    expect(flat).toContain('rows[].commit');
+    expect(flat).toContain('git log --no-merges base..head --not <target>');
+    // The claim is earned by the enumeration, not by having run mutations: a
+    // round with an uncovered commit reports per-guard and names the gap.
+    expect(flat).toContain('only when every enumerated commit has a row');
+    expect(flat).toContain('otherwise report the matrix per-guard');
+    const rules = flat.slice(flat.indexOf('## Hard rules'));
+    expect(rules).toContain('The same binds a **coverage claim**');
+  });
+
+  // Both obvious recipes are wrong in opposite directions. --no-merges keeps
+  // everything a merge brought in, so a branch that merged main counts main's
+  // work as its own; --first-parent throws away every second parent, so it also
+  // drops the PR's own feature-branch commits. Measured on a graph with one
+  // feature merge and one main merge: 5, 1, and 3 for the correct answer.
+  it('enumerates the commits the branch authored, and only those', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+
+    expect(flat).toContain(
+      'Both obvious recipes are wrong, in opposite directions',
+    );
+    expect(flat).toContain(
+      '`--no-merges` alone drops the merge commit but keeps',
+    );
+    expect(flat).toContain('also throws away the PR');
+    expect(flat).toContain('subtract the target with `--not`');
+    // --not returns nothing once the branch has landed, so the recipe carries
+    // the precondition it depends on rather than reading as unconditional.
+    expect(flat).toContain('Do this while the PR is open');
+    expect(flat).toContain('once the branch has landed in the target');
+    // Scoped to the coverage paragraph: neither recipe may be presented as the
+    // command to run, though another section could legitimately cite one.
+    const paragraph = flat.slice(
+      flat.indexOf('A coverage claim is universally quantified'),
+      flat.indexOf('Survivors of that matrix are not noise'),
+    );
+    expect(paragraph).not.toContain('git log --first-parent');
+    expect(paragraph).not.toContain(
+      'derive the set (`git log --no-merges base..head`)',
+    );
+  });
+
+  // A rule the artifact contract never asks for is a rule nothing produces:
+  // the checker reads mutations.json and failures[], so the contract that
+  // tells the round what to write has to name both.
+  it('asks the artifact contract for the files the new checks read', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    const start = flat.indexOf('## Artifact contract');
+    const contract = flat.slice(start, flat.indexOf('## ', start + 3));
+
+    expect(contract).toContain('`mutations.json`');
+    expect(contract).toContain('coverageClaim: "per-commit"');
+    expect(contract).toContain(
+      'git log --no-merges <previous>..<head> --not <target>',
+    );
+    expect(contract).toContain(
+      'one `{id, attribution}` entry per failed assertion',
+    );
+    expect(contract).toContain(
+      '`attribution` one of `pr`, `harness` or `environment`',
     );
   });
 
@@ -5247,6 +5487,24 @@ describe('qwen-triage verify hardening round 2', () => {
     const publishStep = step('Post verification report comment');
     expect(publishStep).toContain('.total == .pass + .fail');
     expect(publishStep).toContain('all(type == "number" and . >= 0');
+  });
+
+  // The local artifact checker mirrors this step instead of sharing code with
+  // it (design decision 3), so the mirror needs a pin. The numeric rule is
+  // already asserted on both sides; the verdict vocabulary was the axis with
+  // nothing holding the two implementations together, so a fifth word added to
+  // the publisher would leave the local path silently accepting four.
+  it('keeps the local checker aligned with the publisher verdicts', () => {
+    const publishStep = step('Post verification report comment');
+    const agentCase = publishStep
+      .slice(publishStep.indexOf('case "$AGENT_VERDICT"'))
+      .split('esac')[0];
+    const labels = new Set(
+      [...agentCase.matchAll(/^\s+([a-z][a-z-]*)\)/gm)].map(
+        (match) => match[1],
+      ),
+    );
+    expect(labels).toEqual(new Set(VERDICTS));
   });
 });
 
@@ -5818,6 +6076,157 @@ describe('qwen-triage verify publish fidelity', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // The report comment carries the same attribution /review posts: model,
+  // CLI version, and the content hash of the skill that ran. A half-known
+  // identity keeps the generic signature instead of posting a footer with
+  // a hole in it, and a weak notice reports the lane, not a round.
+  it('stamps the attribution footer only when all three values arrived', () => {
+    const dir = fixture();
+    try {
+      const attribution = {
+        VERIFY_MODEL: 'qwen3-max',
+        VERIFY_CLI_VERSION: '0.26.3',
+        VERIFY_SKILL_HASH: '0123456789ab',
+      };
+      const footer =
+        '_— qwen3-max via Qwen Code /verify-pr (v0.26.3; skill 0123456789ab)_';
+      const generic = '— _Qwen Code · sandboxed verification_';
+
+      const stamped = render(dir, { NAME: 'ft-on', ...attribution });
+      expect(stamped.trimEnd().endsWith(footer)).toBe(true);
+      expect(stamped).not.toContain(generic);
+
+      // No values at all, and each single hole: the generic signature stays.
+      const blank = {
+        VERIFY_MODEL: '',
+        VERIFY_CLI_VERSION: '',
+        VERIFY_SKILL_HASH: '',
+      };
+      const plain = render(dir, { NAME: 'ft-off', ...blank });
+      expect(plain.trimEnd().endsWith(generic)).toBe(true);
+      expect(plain).not.toContain('via Qwen Code /verify-pr');
+      for (const hole of Object.keys(attribution)) {
+        const partial = render(dir, {
+          NAME: `ft-${hole}`,
+          ...attribution,
+          [hole]: '',
+        });
+        expect(partial.trimEnd().endsWith(generic)).toBe(true);
+        expect(partial).not.toContain('via Qwen Code /verify-pr');
+      }
+
+      // Even with the values present, a weak notice keeps the generic
+      // signature: it reports the lane's outcome, not a verified round.
+      const weak = render(dir, {
+        NAME: 'ft-weak',
+        VERIFY_RESULT: 'cancelled',
+        ...attribution,
+      });
+      expect(weak.trimEnd().endsWith(generic)).toBe(true);
+      expect(weak).not.toContain('via Qwen Code /verify-pr');
+
+      // A downloaded artifact with no report.md is a weak notice too: the
+      // body says "No report.md was found", so it must not simultaneously
+      // carry a round attribution (review of 3108f8f24d, P3).
+      unlinkSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'report.md'),
+      );
+      const noReport = render(dir, { NAME: 'ft-noreport', ...attribution });
+      expect(noReport).toContain('No report.md was found');
+      expect(noReport.trimEnd().endsWith(generic)).toBe(true);
+      expect(noReport).not.toContain('via Qwen Code /verify-pr');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The three values are workflow-owned: the run step computes them from
+  // the lane's own model config, the runner's CLI and the re-pinned skill
+  // file — never from the agent-writable artifact tree, which PR code
+  // could plant. The hash is filter-proof for the same reason: prepare
+  // leaves .git node-owned.
+  it('threads workflow-owned attribution from the run step to the publisher', () => {
+    const run = stepIn('verify', 'Run verification agent');
+    expect(run).toContain(
+      'git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md',
+    );
+    expect(run).toContain('echo "cli_version=$CLI_VERSION"');
+    expect(run).toContain('echo "skill_hash=$SKILL_HASH"');
+    expect(run).toContain("tr -d '\\r\\n' | cut -c1-200");
+
+    // The ordering IS the security argument (review of 3108f8f24d, P2):
+    // the values must be collected after the base re-pin and BEFORE the
+    // agent starts. The workspace parent directory stays node-owned, so
+    // during the agent era PR code can replace the whole .qwen directory
+    // (mv + mkdir) without touching the root-owned files inside it; a
+    // post-agent hash could then name instructions the round never loaded.
+    // toContain is order-blind — these indices pin the property itself.
+    const repin = run.indexOf('chmod -R a-w,a+rX .qwen');
+    const cliCollect = run.indexOf('CLI_VERSION="$(timeout');
+    const hashCollect = run.indexOf('SKILL_HASH="$(timeout');
+    const agentStart = run.indexOf('--prompt "/verify-pr');
+    expect(repin).toBeGreaterThan(-1);
+    expect(cliCollect).toBeGreaterThan(repin);
+    expect(hashCollect).toBeGreaterThan(repin);
+    expect(agentStart).toBeGreaterThan(cliCollect);
+    expect(agentStart).toBeGreaterThan(hashCollect);
+    // Exactly one hash derivation, and the post-agent block only emits the
+    // saved value — it never re-derives one.
+    expect(run.split('git hash-object').length - 1).toBe(1);
+    expect(run.indexOf('echo "skill_hash=$SKILL_HASH"')).toBeGreaterThan(
+      agentStart,
+    );
+
+    const outputs =
+      job('verify').match(/\n {4}outputs:[\s\S]*?\n {4}steps:/)?.[0] ?? '';
+    expect(outputs).toContain("model: '${{ steps.run.outputs.model }}'");
+    expect(outputs).toContain(
+      "cli_version: '${{ steps.run.outputs.cli_version }}'",
+    );
+    expect(outputs).toContain(
+      "skill_hash: '${{ steps.run.outputs.skill_hash }}'",
+    );
+
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    expect(publish).toContain(
+      "VERIFY_MODEL: '${{ needs.verify.outputs.model }}'",
+    );
+    expect(publish).toContain(
+      "VERIFY_CLI_VERSION: '${{ needs.verify.outputs.cli_version }}'",
+    );
+    expect(publish).toContain(
+      "VERIFY_SKILL_HASH: '${{ needs.verify.outputs.skill_hash }}'",
+    );
+  });
+
+  // Two producers, one shape: the publisher's printf and the skill's local
+  // publish rule must carry the same footer template, or a wording edit to
+  // one leaves the two paths posting different attributions — the same
+  // skew /review's single-source footer module exists to prevent.
+  it('pins the same footer template in the skill and the publisher', () => {
+    const publish = stepIn(
+      'publish-verify',
+      'Post verification report comment',
+    );
+    expect(publish).toContain(
+      "printf '_— %s via Qwen Code /verify-pr (v%s; skill %s)_\\n'",
+    );
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain(
+      '_— <model> via Qwen Code /verify-pr (v<cli-version>; skill <skill-hash>)_',
+    );
+    expect(flat).toContain('$QWEN_CODE_MODEL_IDENTITY');
+    expect(flat).toContain(
+      'git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md',
+    );
+    // The report itself stays footer-free: both paths append at comment
+    // time, so a footer written into report.md would appear twice.
+    expect(flat).toContain('No attribution footer in it');
   });
 });
 
@@ -7468,18 +7877,28 @@ describe('qwen-triage verify Java toolchain', () => {
   function moduleCoordinates() {
     return [
       'packages/managed-agent-server/pom.xml',
+      ...readdirSync('packages/managed-agent-server', { withFileTypes: true })
+        .filter((entry) => entry.isDirectory())
+        .map((entry) =>
+          join('packages/managed-agent-server', entry.name, 'pom.xml'),
+        ),
       ...readdirSync('packages/sdk-java', { withFileTypes: true })
         .filter((entry) => entry.isDirectory())
         .map((entry) => join('packages/sdk-java', entry.name, 'pom.xml')),
     ]
       .filter((pom) => existsSync(pom))
       .map((pom) => {
-        const xml = readFileSync(pom, 'utf8').replace(
-          /<parent>[\s\S]*?<\/parent>/g,
-          '',
-        );
+        const source = readFileSync(pom, 'utf8');
+        const parent = source.match(/<parent>([\s\S]*?)<\/parent>/)?.[1] ?? '';
+        const xml = source.replace(/<parent>[\s\S]*?<\/parent>/g, '');
         return {
-          groupId: xml.match(/<groupId>([^<]+)<\/groupId>/)?.[1],
+          groupId:
+            xml
+              .split(
+                /<(?:dependencies|dependencyManagement|build|properties)>/,
+              )[0]
+              .match(/<groupId>([^<]+)<\/groupId>/)?.[1] ??
+            parent.match(/<groupId>([^<]+)<\/groupId>/)?.[1],
           artifactId: xml.match(/<artifactId>([^<]+)<\/artifactId>/)?.[1],
         };
       });

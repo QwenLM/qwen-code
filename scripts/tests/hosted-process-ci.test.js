@@ -145,6 +145,54 @@ const failoverArms = [
     ],
   ],
   [
+    'Run takeover load reply-loss E2E',
+    'test:e2e:managed-harness-restart-approval-load-reply-lost',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'load-reply-lost',
+    ],
+  ],
+  [
+    'Run committed terminal reply-loss E2E',
+    'test:e2e:managed-harness-restart-approval-terminal-reply-lost',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'terminal-reply-lost',
+    ],
+  ],
+  [
+    'Run missing terminal write E2E',
+    'test:e2e:managed-harness-restart-approval-terminal-write-failed',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'terminal-write-failed',
+    ],
+  ],
+  [
+    'Run refused cleanup release E2E',
+    'test:e2e:managed-harness-restart-approval-cleanup-failed',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'cleanup-failed',
+    ],
+  ],
+  [
     'Run Harness-restart continuation closeout E2E',
     'test:e2e:managed-harness-restart-continuation-closeout',
     ['--continuation-failover', '--harness-only', '--g3-verify continuation'],
@@ -227,10 +275,11 @@ describe('Hosted real-process gates', () => {
 
   it.each([
     {
-      name: 'test_macos',
+      name: 'test_macos_shards',
       step: 'Hosted portable process smoke',
       after: /Install dependencies/i,
-      condition: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}",
+      condition:
+        "${{ needs.classify_pr.outputs.skip_ci != 'true' && matrix.group == 'scripts' }}",
       run: `npm run ${focused} -- -t 'portable startup'`,
       minutes: 5,
     },
@@ -260,34 +309,31 @@ describe('Hosted real-process gates', () => {
     },
   );
 
-  it('gates the Windows Hosted suite on a successful install', () => {
-    const steps = ci.jobs.test_windows.steps;
-    // An unknown step id reads as '' and silently disables the condition
-    // above, so the suite would never run again.
-    expect(steps.find((step) => step.name === 'Install dependencies').id).toBe(
-      'install',
-    );
-  });
+  it.each(['test_windows', 'test_macos_shards'])(
+    'gates the %s suite on a successful install',
+    (name) => {
+      // An unknown step id reads as '' and silently disables the condition
+      // above, so the suite would never run again.
+      expect(
+        ci.jobs[name].steps.find((step) => step.name === 'Install dependencies')
+          .id,
+      ).toBe('install');
+    },
+  );
 
   it('keeps Hosted MySQL separate from the non-Hosted MySQL slice and fails on missing tests', () => {
     const job = java.jobs['hosted-harness-mysql'];
     expect(job.services.mysql.image).toBe('mysql:8.4.6');
     expect(job.services.mysql.ports).toEqual(['3306/tcp']);
     expect(job.if).toBe("${{ inputs.tier != 'fast' }}");
-    // The non-Hosted slice runs once per engine, so the Hosted lane stays the
-    // only place Hosted*IT executes while MariaDB keeps a real leg (#14971).
+    // Hosted*IT executes only in the separate Hosted lane.
     const nonHostedLane = java.jobs['mysql-integration'];
-    expect(nonHostedLane.strategy.matrix.include).toContainEqual(
-      expect.objectContaining({ image: 'mysql:8.4.6' }),
-    );
-    expect(nonHostedLane.strategy.matrix.include).toContainEqual(
-      expect.objectContaining({ image: 'mariadb:10.11.18' }),
-    );
+    expect(nonHostedLane.strategy).toBeUndefined();
     expect(
       nonHostedLane.steps.find(
         (step) => step.name === 'Start the database without native AIO',
       ).run,
-    ).toContain('"${DATABASE_IMAGE}" "${engine_args[@]}"');
+    ).toContain('mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin');
     // Keep daily coverage and run the same suite before Java publication.
     expect(Object.keys(java.on).sort()).toEqual([
       'schedule',
@@ -323,10 +369,9 @@ describe('Hosted real-process gates', () => {
     expect(job.steps[relay].shell).toBeUndefined();
     expect(job.steps[relay]['working-directory']).toBeUndefined();
     expect(relay).toBeLessThan(job.steps.indexOf(run));
-    const pom = read('packages/managed-agent-server/pom.xml').replace(
-      /<!--[\s\S]*?-->/g,
-      '',
-    );
+    const pom = read(
+      'packages/managed-agent-server/verification/pom.xml',
+    ).replace(/<!--[\s\S]*?-->/g, '');
     // The report check sees a test selection only when Maven passes it as a
     // user property. Set in the workflow (MAVEN_OPTS included) or in a POM,
     // it would narrow the run unrecorded.
@@ -360,7 +405,7 @@ describe('Hosted real-process gates', () => {
     expect(pom.match(/qwen\.hosted\.mysql\.isolation = true/g)).toHaveLength(1);
     expect(
       read(
-        'packages/managed-agent-server/src/test/resources/META-INF/services/org.junit.jupiter.api.extension.Extension',
+        'packages/managed-agent-server/verification/src/test/resources/META-INF/services/org.junit.jupiter.api.extension.Extension',
       ).trim(),
     ).toBe('com.alibaba.qwen.code.managedagent.HostedMySqlIsolationExtension');
     // The non-Hosted MySQL job must not narrow its selection either, or an IT outside
@@ -378,7 +423,7 @@ describe('Hosted real-process gates', () => {
     const profile = (id) =>
       pom.split(`<id>${id}</id>`)[1].split('</profile>')[0];
     const skipsUnits =
-      /<artifactId>maven-surefire-plugin<\/artifactId>\s*<configuration><skipTests>true<\/skipTests><\/configuration>/;
+      /<artifactId>maven-surefire-plugin<\/artifactId>\s*<configuration>\s*<skipTests>true<\/skipTests>\s*<\/configuration>/;
     for (const id of [
       'hosted-harness-mysql',
       'hosted-harness-gates',
@@ -414,7 +459,7 @@ describe('Hosted real-process gates', () => {
     expect(pom.match(/<qwen\.mysql\.forkNumber>/g)).toHaveLength(1);
     expect(
       read(
-        'packages/managed-agent-server/src/test/resources/META-INF/services/org.junit.platform.launcher.LauncherSessionListener',
+        'packages/managed-agent-server/verification/src/test/resources/META-INF/services/org.junit.platform.launcher.LauncherSessionListener',
       ).trim(),
     ).toBe('com.alibaba.qwen.code.managedagent.MySqlForkRoutingListener');
     expect(mysqlRun.run).not.toMatch(/-DforkCount\b/);
@@ -451,7 +496,7 @@ describe('Hosted real-process gates', () => {
     // test would move to non-Hosted MySQL, a renamed non-Hosted test to the Hosted job.
     const its = readdirSync(
       new URL(
-        '../../packages/managed-agent-server/src/test/java/',
+        '../../packages/managed-agent-server/verification/src/test/java/',
         import.meta.url,
       ),
       { recursive: true },
@@ -486,33 +531,33 @@ describe('Hosted real-process gates', () => {
     // module-relative directory precisely so an artifact can carry it; the
     // writer and the upload path must not drift.
     expect(upload.with.path).toContain(
-      'packages/managed-agent-server/target/fg7-cases/',
+      'packages/managed-agent-server/verification/target/fg7-cases/',
     );
     // FG8 follows the same precedent: its per-case evidence lives in
     // target/fg8-cases/.
     expect(upload.with.path).toContain(
-      'packages/managed-agent-server/target/fg8-cases/',
+      'packages/managed-agent-server/verification/target/fg8-cases/',
     );
     // FG9's session-relay fault gates keep theirs in target/fg9-cases/.
     expect(upload.with.path).toContain(
-      'packages/managed-agent-server/target/fg9-cases/',
+      'packages/managed-agent-server/verification/target/fg9-cases/',
     );
     // FG10 follows the same precedent: its per-case evidence lives in
     // target/fg10-cases/.
     expect(upload.with.path).toContain(
-      'packages/managed-agent-server/target/fg10-cases/',
+      'packages/managed-agent-server/verification/target/fg10-cases/',
     );
     // FG11a's automation lost-reply evidence lives in target/fg11-cases/.
     expect(upload.with.path).toContain(
-      'packages/managed-agent-server/target/fg11-cases/',
+      'packages/managed-agent-server/verification/target/fg11-cases/',
     );
     // FG12a's MCP reply-loss evidence lives in target/fg12-cases/.
     expect(upload.with.path).toContain(
-      'packages/managed-agent-server/target/fg12-cases/',
+      'packages/managed-agent-server/verification/target/fg12-cases/',
     );
     // FG13e's Hook stream-gap evidence lives in target/fg13-cases/.
     expect(upload.with.path).toContain(
-      'packages/managed-agent-server/target/fg13-cases/',
+      'packages/managed-agent-server/verification/target/fg13-cases/',
     );
     // The writer side of the same path: the Java literal must stay under
     // the directory the step uploads, or the artifact is silently empty.
@@ -580,11 +625,11 @@ describe('Hosted real-process gates', () => {
   });
 
   it.each([
-    // Step ceilings today (198 + 20 + 50 + 20): Verify, the Broker fault
+    // Step ceilings today (201 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 288, 301],
-    // Twenty failover arms at 10 each.
-    ['hosted-failover-e2e', 200, 215],
+    ['hosted-harness-mysql', 291, 304],
+    // Twenty-four failover arms at 10 each.
+    ['hosted-failover-e2e', 240, 255],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling) => {
@@ -727,7 +772,7 @@ describe('Hosted real-process gates', () => {
       // re-pointed -P flag must not leave the row reading the old profile.
       expect(run.run).toContain(`-P${profile}`);
       const forkSeconds = Number(
-        read('packages/managed-agent-server/pom.xml')
+        read('packages/managed-agent-server/verification/pom.xml')
           .split(`<id>${profile}</id>`)[1]
           .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
       );
@@ -834,15 +879,44 @@ describe('Hosted real-process gates', () => {
       // (2x its measured 6.5 s), moving the fork to 11236 and leaving the step at
       // 198 minutes; the FG12e Runtime connection replacement cell adds 28 s
       // (2x its measured 13.8 s), moving the fork to 11264 and leaving the step
-      // at 198 minutes):
+      // at 198 minutes). The pool fixture provisionally adds 180 s (its
+      // 120 s method ceiling plus 60 s for process/context cleanup), moving
+      // the fork to 11444 and the step to 201 minutes until CI measures it:
       // the relational check above tolerates
       // anything up to step*60, so the value is pinned literally here —
       // an unnoticed raise has no other red to land on.
       if (profile === 'hosted-harness-mysql') {
-        expect(forkSeconds).toBe(11264);
+        expect(forkSeconds).toBe(11444);
       }
     },
   );
+
+  it('runs the Broker fault gates even when the Hosted verify fails', () => {
+    const steps = java.jobs['hosted-harness-mysql'].steps;
+    const gates = steps.find(
+      (step) => step.name === 'Run Runtime Broker fault gates',
+    );
+    // Without a condition a red Hosted verify skipped them on 11 of the 14
+    // nights to 10-27, though they need neither its build nor MySQL.
+    expect(gates.if).toBe(
+      "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}",
+    );
+    expect(gates['continue-on-error']).toBeUndefined();
+    // An unknown step id reads as '' and would skip the gates on every run.
+    // The install step itself runs only after every setup step before it,
+    // the CLI bundle the gates spawn among them, succeeded.
+    const install = steps.find((step) => step.id === 'managed_dependencies');
+    expect(install, 'the managed_dependencies step').toBeDefined();
+    expect(install.name).toBe('Install Managed Agent dependencies');
+    expect(install.if).toBeUndefined();
+    expect(install.run).toContain('-f packages/sdk-java/qwencode/pom.xml');
+    const bundle = steps.findIndex(
+      (step) => step.name === 'Install, build and bundle CLI',
+    );
+    expect(bundle).toBeGreaterThan(-1);
+    expect(bundle).toBeLessThan(steps.indexOf(install));
+    expect(steps.indexOf(install)).toBeLessThan(steps.indexOf(gates));
+  });
 
   // The Hosted*IT classes share one failsafe fork, so a case stalled to its
   // @Timeout must still leave the fork its healthy runtime: on main the
@@ -935,26 +1009,28 @@ describe('Hosted real-process gates', () => {
   // measured 12.3s), so it becomes 10612s; the cancel-isolation cell adds 11s (2x its measured
   // 5.1s), so it becomes 10623s; the queue-one cell adds 13s (2x its measured
   // 6.5s), so it becomes 10636s; the FG12e Runtime connection replacement cell
-  // adds 28s (2x its measured 13.8s), so it becomes 10664s. The
+  // adds 28s (2x its measured 13.8s), so it becomes 10664s. The pool fixture
+  // provisionally reserves 180s (its 120s method ceiling plus 60s for
+  // process/context cleanup), so it becomes 10844s until CI measures it. The
   // largest
   // ceiling (600s) plus
   // that healthy sum still fits the fork. A larger ceiling lets failsafe
   // kill the fork mid-run, and the classes left unrun never report, failing
   // the gate undiagnosably (#13780).
-  const hostedForkHealthySeconds = 10664;
+  const hostedForkHealthySeconds = 10844;
   const hostedForkSeconds = () =>
     Number(
-      read('packages/managed-agent-server/pom.xml')
+      read('packages/managed-agent-server/verification/pom.xml')
         .split('<id>hosted-harness-mysql</id>')[1]
         .match(/<forkedProcessTimeoutInSeconds>(\d+)</)[1],
     );
   const hostedTestPath = (className) =>
-    'packages/managed-agent-server/src/test/java/' +
+    'packages/managed-agent-server/verification/src/test/java/' +
     `com/alibaba/qwen/code/managedagent/${className}.java`;
   // Every class the fork's **/Hosted*IT.java include picks up, in any
   // package.
   const hostedTestClasses = () => {
-    const root = 'packages/managed-agent-server/src/test/java/';
+    const root = 'packages/managed-agent-server/verification/src/test/java/';
     return readdirSync(new URL(`../../${root}`, import.meta.url), {
       recursive: true,
     })
@@ -1010,6 +1086,7 @@ describe('Hosted real-process gates', () => {
       'HostedEventStreamLivenessIT',
       'HostedExtensionsIT',
       'HostedHarnessMySqlIT',
+      'HostedHarnessPoolMySqlIT',
       'HostedHookCancelFaultGatesIT',
       'HostedHookFaultGatesIT',
       'HostedHookMessageDisplayReloadIT',

@@ -20,6 +20,34 @@ const standaloneFeatures = [
 
 const WORKSPACE_CWD = '/tmp/qwen-web-shell-e2e';
 
+test('hides the empty no-workspace group while keeping New session available @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: { features: standaloneFeatures },
+    standaloneSessions: [],
+  });
+  const daemon = await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+  await waitForRequest(
+    daemon,
+    (request) =>
+      request.method === 'GET' && request.path === '/standalone/sessions',
+  );
+
+  await expect(page.getByTestId('standalone-active-group')).toHaveCount(0);
+  await clickNewTask(page);
+  await expect(page.locator('[data-web-shell-composer-submit]')).toBeVisible();
+  await selectNoWorkspaceTarget(page);
+  await fillComposer(page, 'Start the first standalone conversation');
+  await page.locator('[data-web-shell-composer-submit]').click();
+  await waitForRequest(
+    daemon,
+    (request) =>
+      request.method === 'POST' && request.path === '/standalone/sessions',
+  );
+});
+
 /** Standalone creation calls, ignoring the Recents list reads. */
 function standaloneCreates(
   daemon: MockDaemonController,
@@ -130,7 +158,7 @@ test('the composer no-workspace target creates an exact standalone session @smok
   );
 });
 
-test('the sidebar New task keeps the primary workspace route on a capable daemon @smoke', async ({
+test('the sidebar New session keeps the primary workspace route on a capable daemon @smoke', async ({
   page,
 }, testInfo) => {
   const scenario = createWebShellDaemonScenario({
@@ -176,12 +204,10 @@ test('keeps workspace navigation reachable inside a standalone chat @smoke', asy
 
   // Row actions are hidden until the row is hovered.
   await workspaceRow.hover();
-  const newTaskButtons = sidebar.getByRole('button', {
-    name: 'New task',
-    exact: true,
-  });
-  await expect(newTaskButtons).toHaveCount(2);
-  await newTaskButtons.last().click();
+  await workspaceRow
+    .locator('..')
+    .getByRole('button', { name: 'New session', exact: true })
+    .click();
 
   await fillComposer(page, 'Back to the workspace');
   await page.locator('[data-web-shell-composer-submit]').click();
@@ -276,6 +302,159 @@ test('an uncertain standalone create stays recoverable and is never retried @smo
   expect(standaloneCreates(daemon)).toHaveLength(1);
 });
 
+test('no-workspace sessions remain visible beside collapsed Workspaces and persist independently @smoke', async ({
+  page,
+}, testInfo) => {
+  const sessionId = '33333333-3333-4333-8333-333333333333';
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: [...standaloneFeatures, 'workspace_qualified_rest_core'],
+    },
+    standaloneSessions: [
+      standaloneSummary(sessionId, 'Independent conversation'),
+    ],
+  });
+  await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+
+  const sidebar = page.getByRole('complementary');
+  const projects = sidebar
+    .getByRole('button', {
+      name: 'Workspaces',
+      exact: true,
+    })
+    .first();
+  await expect(sidebar.getByTestId('recent-sessions')).toBeVisible();
+  const group = sidebar.getByTestId('standalone-active-group');
+  const toggle = group.getByRole('button', {
+    name: 'No-workspace sessions',
+    exact: true,
+  });
+  const row = group.getByText('Independent conversation', { exact: true });
+  await expect(row).toBeVisible();
+  await projects.click();
+  await expect(projects).toHaveAttribute('aria-expanded', 'false');
+  await expect(group).toBeVisible();
+  await expect(row).toBeVisible();
+  await page.reload();
+  await expect(projects).toHaveAttribute('aria-expanded', 'false');
+  await expect(row).toBeVisible();
+
+  await toggle.click();
+  await page.reload();
+  await expect(projects).toHaveAttribute('aria-expanded', 'false');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await expect(row).toHaveCount(0);
+  await projects.click();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  await page.reload();
+  await expect(projects).toHaveAttribute('aria-expanded', 'true');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+
+  await sidebar
+    .getByRole('button', { name: 'Search sessions', exact: true })
+    .click();
+  await sidebar
+    .getByRole('textbox', { name: 'Search sessions', exact: true })
+    .fill('Independent');
+  await expect(row).toBeVisible();
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  expect(
+    await page.evaluate(() =>
+      window.localStorage.getItem(
+        'qwen.web-shell.sidebar.workspace-expanded:standalone:active',
+      ),
+    ),
+  ).toBe('false');
+  await row.click();
+  await expect(page).toHaveURL(
+    new URL(
+      `/session/${sessionId}?context=standalone`,
+      String(testInfo.project.use.baseURL),
+    ).href,
+  );
+});
+
+test('no-workspace category matches peer header geometry and expansion affordances @smoke', async ({
+  page,
+}, testInfo) => {
+  const scenario = createWebShellDaemonScenario({
+    capabilities: {
+      features: [
+        ...standaloneFeatures,
+        'workspace_qualified_rest_core',
+        'session_organization',
+      ],
+    },
+    standaloneSessions: [standaloneSummary('standalone-header', 'Standalone')],
+  });
+  scenario.sessions[0].isPinned = true;
+  await installScenario(page, scenario, testInfo);
+  await page.goto('/');
+
+  const sidebar = page.getByRole('complementary');
+  const names = ['Pinned', 'Workspaces', 'No-workspace sessions', 'Recent'];
+  const toggles = names.map((name) =>
+    sidebar.getByRole('button', { name, exact: true }).first(),
+  );
+  for (const toggle of toggles) {
+    await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+    await toggle.click();
+    await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+  }
+
+  const geometry = await Promise.all(
+    toggles.map((toggle) =>
+      toggle.evaluate((button) => {
+        const header = button.parentElement!;
+        const label = button.querySelector('span')!;
+        const style = getComputedStyle(button);
+        return {
+          height: header.getBoundingClientRect().height,
+          labelLeft: label.getBoundingClientRect().left,
+          labelTop:
+            label.getBoundingClientRect().top -
+            header.getBoundingClientRect().top,
+          color: style.color,
+          marginBottom: getComputedStyle(header.parentElement!).marginBottom,
+        };
+      }),
+    ),
+  );
+  for (const header of geometry) {
+    expect(header.height).toBe(32);
+    expect(header.labelLeft).toBe(geometry[1].labelLeft);
+    expect(header.labelTop).toBe(geometry[1].labelTop);
+    expect(header.color).toBe(geometry[1].color);
+  }
+  expect(geometry[2].marginBottom).toBe('0px');
+
+  const toggle = toggles[2];
+  const chevron = toggle.locator('svg');
+  await expect(chevron).toHaveCount(1);
+  await expect(chevron).toHaveAttribute('aria-hidden', 'true');
+  const labelBox = await toggle.locator('span').boundingBox();
+  const iconBox = await chevron.boundingBox();
+  expect(iconBox!.x).toBeGreaterThanOrEqual(labelBox!.x + labelBox!.width);
+  await page.mouse.move(1000, 700);
+  await expect(chevron).toHaveCSS('opacity', '0');
+  await toggle.hover();
+  await expect(chevron).toHaveCSS('opacity', '1');
+  await page.mouse.move(1000, 700);
+  await page.keyboard.press('Tab');
+  await toggle.focus();
+  await expect(chevron).toHaveCSS('opacity', '1');
+  const collapsedPath = await chevron.locator('path').getAttribute('d');
+  await page.keyboard.press('Enter');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  await expect(chevron.locator('path')).not.toHaveAttribute(
+    'd',
+    collapsedPath!,
+  );
+  await page.keyboard.press('Space');
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false');
+});
+
 test('standalone Recents keeps lifecycle actions on exact standalone routes @smoke', async ({
   page,
 }, testInfo) => {
@@ -330,12 +509,24 @@ test('standalone Recents keeps lifecycle actions on exact standalone routes @smo
   await expect(
     page.getByText('Renamed conversation', { exact: true }),
   ).toHaveCount(0);
-  await page.getByRole('button', { name: 'Archived', exact: true }).click();
+  await page.getByRole('button', { name: 'More', exact: true }).click();
+  await page.getByRole('button', { name: 'Settings', exact: true }).click();
+  await page
+    .getByRole('navigation', { name: 'Settings' })
+    .getByRole('button', { name: 'Archived conversations', exact: true })
+    .click();
   await expect(
     page.getByText('Renamed conversation', { exact: true }),
   ).toBeVisible();
 
   await openSessionAction(page, 'Renamed conversation', 'Restore');
+  await expect(
+    page.locator('[data-web-shell-archived-sessions]'),
+  ).not.toContainText('Renamed conversation');
+  await page
+    .getByRole('region', { name: 'Settings', exact: true })
+    .getByRole('button', { name: 'back', exact: true })
+    .click();
   await expect(
     page.getByText('Renamed conversation', { exact: true }),
   ).toBeVisible();
@@ -371,7 +562,7 @@ async function installScenario(
 
 async function clickNewTask(page: Page): Promise<void> {
   const newTask = page
-    .getByRole('button', { name: 'New task', exact: true })
+    .getByRole('button', { name: 'New session', exact: true })
     .first();
   await expect(newTask).toBeEnabled();
   await newTask.click();

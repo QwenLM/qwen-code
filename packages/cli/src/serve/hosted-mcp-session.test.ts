@@ -340,6 +340,63 @@ it('queries a lost configure reply by its original identity instead of reconnect
   });
 });
 
+it('keeps an unchanged independent MCP connection through package configuration changes', async () => {
+  await mcp.ensureReady();
+  const before = mcp.tools();
+  const configuration =
+    session.authority.extensionRecordsInDomain('mcp_configuration')[0]!;
+  const token = parseMcpConfiguration(configuration.record);
+  const requestCount = requests.length;
+  await mcp.drainForExtensionConfiguration([pin]);
+  await mcp.enableExtensionConfiguration([pin], randomUUID());
+  expect(requests).toHaveLength(requestCount);
+  expect(mcp.tools()).toEqual(before);
+  expect(
+    session.authority.extensionRecordsInDomain('mcp_configuration'),
+  ).toHaveLength(1);
+  expect(
+    parseMcpConfiguration(
+      session.authority.extensionRecord(
+        'mcp_configuration',
+        token.configurationId,
+      )!.record,
+    ),
+  ).toMatchObject({
+    configurationId: token.configurationId,
+    configRevision: token.configRevision,
+    connectionGeneration: token.connectionGeneration,
+    releaseState: 'active',
+  });
+});
+
+it('drains only the MCP server changed by an extension configuration', async () => {
+  const other = { ...pin, serverId: 'other' };
+  mcp = new HostedMcpSession(
+    { baseUrl: 'http://127.0.0.1:1', token: 'test' },
+    session,
+    [pin, other],
+  );
+  await mcp.ensureReady();
+  const preserved = session.authority
+    .extensionRecordsInDomain('mcp_configuration')
+    .map((entry) => parseMcpConfiguration(entry.record))
+    .find((entry) => entry.serverId === 'other')!;
+  const next = { ...pin, serverRevision: 2, definitionDigest: 'b'.repeat(64) };
+  await mcp.drainForExtensionConfiguration([next, other]);
+  await mcp.enableExtensionConfiguration([next, other], randomUUID());
+  expect(
+    requests
+      .filter((request) => request.kind === 'mcp-release')
+      .map((request) => ('serverId' in request ? request.serverId : undefined)),
+  ).toEqual(['demo']);
+  expect(
+    session.authority
+      .extensionRecordsInDomain('mcp_configuration')
+      .map((entry) => parseMcpConfiguration(entry.record))
+      .filter((entry) => entry.serverId === 'other'),
+  ).toEqual([preserved]);
+});
+
 async function interruptBeforeDispatch(operationId: string) {
   await mcp.ensureReady();
   const original = session.authority.commitExtensionRecord.bind(

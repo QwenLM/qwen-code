@@ -208,13 +208,24 @@ public final class SubmitHarnessTurn {
         }
 
         public Builder approvalSelection(String mode, long revision, boolean planMode) {
-            if (mode == null || !List.of("default", "auto-edit", "yolo").contains(mode)
-                    || revision < 0 || revision > 9_007_199_254_740_991L || planMode && revision == 0) {
+            return approvalSelection(mode, revision, planMode, null);
+        }
+
+        public Builder approvalSelection(String mode, long revision, boolean planMode, Map<String, ? extends List<String>> permissionRules) {
+            if (mode == null || !List.of("default", "auto", "auto-edit", "yolo").contains(mode)
+                    || revision < 0 || revision > 9_007_199_254_740_991L || (planMode || "auto".equals(mode)) && revision == 0) {
                 throw new IllegalArgumentException("Invalid Hosted approval selection");
             }
             Map<String, Object> fields = new LinkedHashMap<>(Map.of("mode", mode, "revision", revision));
             if (planMode) {
                 fields.put("planMode", true);
+            }
+            var rules = HostedPermissionRules.nonEmpty(HostedPermissionRules.copyOf(permissionRules));
+            if (rules != null) {
+                if (revision == 0) {
+                    throw new IllegalArgumentException("Permission rules require a selected approval revision");
+                }
+                fields.put("permissionRules", rules);
             }
             approvalSelection = Collections.unmodifiableMap(fields);
             return this;
