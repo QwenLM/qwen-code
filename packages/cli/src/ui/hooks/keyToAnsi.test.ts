@@ -39,16 +39,16 @@ describe('keyToAnsi', () => {
     expect(keyToAnsi(key({ name: 'home' }))).toBe('\x1b[H');
   });
 
-  it.each([
-    ['escape', '\x1b'],
-    ['tab', '\t'],
-    ['backspace', '\x7f'],
-    ['return', '\r'],
+  it.each<[string, string, string | null, string]>([
+    ['escape', '\x1b', '\x1b', '\x1b[27;5u'],
+    ['tab', '\t', '\t', '\x1b[27;5;9~'],
+    ['backspace', '\x7f', '\x7f', '\x1b[127;5u'],
+    ['return', '\r', null, '\x1b[27;5;13~'],
   ])(
     'pins the literal mapping for %s with and without Ctrl',
-    (name, expected) => {
+    (name, expected, ctrlExpected, sequence) => {
       expect(keyToAnsi(key({ name }))).toBe(expected);
-      expect(keyToAnsi(key({ name, ctrl: true }))).toBe(expected);
+      expect(keyToAnsi(key({ name, ctrl: true, sequence }))).toBe(ctrlExpected);
     },
   );
 
@@ -96,7 +96,6 @@ describe('keyToAnsi', () => {
       'escape',
       'tab',
       'backspace',
-      'return',
     ];
     for (const name of names) {
       expect(keyToAnsi(key({ name, ctrl: true }))).toBe(
