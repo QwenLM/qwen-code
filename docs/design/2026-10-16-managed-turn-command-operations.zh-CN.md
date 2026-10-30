@@ -2,9 +2,9 @@
 
 [English](2026-10-16-managed-turn-command-operations.md) | [简体中文](2026-10-16-managed-turn-command-operations.zh-CN.md)
 
-状态：已在本次改动中实现。Turn 的输入与取消成为持久命令 operation，种类为 `submit_input` 与 `cancel`，可经 operation 查询读取；契约 `1.58.0`，schema V8。#14318 先合入了契约 `1.52.0` 与 schema V7，#14358、#14412、#14413、#14405 与 #14414 先后合入了契约 `1.53.0` 至 `1.57.0`，本改动排在它们之后。准入响应暂不携带该 operation，那属于 D7-3。
+状态：已在本次改动中实现。Turn 的输入与取消成为持久命令 operation，种类为 `submit_input` 与 `cancel`，可经 operation 查询读取；契约 `1.58.0`，schema V8。#14318 先合入了契约 `1.52.0` 与 schema V7，#14358、#14412、#14413、#14405 与 #14414 先后合入了契约 `1.53.0` 至 `1.57.0`，本改动排在它们之后。准入响应仅在开启可选的 `java_durable` profile 后才携带该 operation、准入阶段与投递状态，该 profile 由 D7-3（#14470）提供。
 
-这是 [#14122](https://github.com/QwenLM/qwen-code/issues/14122)（[#12380](https://github.com/QwenLM/qwen-code/issues/12380) Stage D 的 D7 伞形 issue）的 **D7-1** 切片，由 [#14168](https://github.com/QwenLM/qwen-code/issues/14168) 跟踪。#12380 规定 Stage D 只有在具备持久命令投递与原命令对账时才能暴露 `java_durable`。本切片提供前一半。D7-2（[#14166](https://github.com/QwenLM/qwen-code/issues/14166)）提供对账，D7-3（[#14167](https://github.com/QwenLM/qwen-code/issues/14167)，可选 profile）须等两者都落地。
+这是 [#14122](https://github.com/QwenLM/qwen-code/issues/14122)（[#12380](https://github.com/QwenLM/qwen-code/issues/12380) Stage D 的 D7 伞形 issue）的 **D7-1** 切片，由 [#14168](https://github.com/QwenLM/qwen-code/issues/14168) 跟踪。#12380 规定 Stage D 只有在具备持久命令投递与原命令对账时才能暴露 `java_durable`。本切片提供前一半。D7-2（[#14166](https://github.com/QwenLM/qwen-code/issues/14166)）提供对账，D7-3（[#14167](https://github.com/QwenLM/qwen-code/issues/14167)，可选 profile）已在两者之后以 #14470 合入。
 
 ## 问题
 

@@ -65,8 +65,13 @@ change the boot-time epoch it uses. Parsing skips the complete parenthesized
 command name, which can contain spaces, parentheses and newlines. A read failure
 proves nothing. Linux absence distinguishes a missing stat file from other
 read errors; the latter cannot retire the journal or invalidate a cached worker.
-After matching the original start ticks, a `Z` or `X` task state means the worker
-has exited; it does not prove escaped writers stopped.
+After matching the original start ticks, a `Z`, `X` or `x` task state means the
+worker has exited; it does not prove escaped writers stopped. Startup adoption
+checks this absence evidence before accepting `ProcessHandle.isAlive()`, which
+can remain true for an unreaped Linux zombie. A registered worker that exits
+before ready publication is persisted as `RETIRED` and returns a terminal
+conflict promptly, without waiting for the 30-second ready timeout. The original
+handle and placement stay fenced; no replacement is launched.
 Deployment must preserve the Broker user and its procfs visibility. Ephemeral
 workers keep their original `Process` reaper-based lifetime checks.
 The non-Linux identity used by portable tests is not deployable.
@@ -124,6 +129,16 @@ Stage F, HTTP, Java SQL and CLI regression tests remain required, followed by
 build/typecheck and two clean full-diff audits. A simulated boot identity
 validates decisions only; actual Linux reboot acceptance belongs to W0e-3 and
 requires a dedicated host.
+
+For [#12956](https://github.com/QwenLM/qwen-code/issues/12956), cover startup
+adoption with a real unreaped Linux zombie and an unpublished ready record.
+Assert prompt non-retryable failure, the original registration's retirement,
+unchanged resource identity, no replacement worker and no writer-stop evidence.
+Default unit tests use fixed filesystem identity fixtures for successful
+discovery and missing-machine-ID rejection. Native Linux discovery also runs
+on hosts exposing all required identity sources; hosts without those sources
+skip only that native success check. Production startup still rejects missing
+or invalid identity, even when the portable unit suite can run on that host.
 
 ## Open validation
 

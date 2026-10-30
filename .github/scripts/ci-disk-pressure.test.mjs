@@ -240,6 +240,109 @@ describe('ci.yml disk-pressure evidence', () => {
     }
   });
 
+  it('reports swap and falls back to df -h in the failure dump', () => {
+    // The three sibling state-at-failure dumps grep SwapTotal|SwapFree and
+    // retry `df -h` when `df -hT` is unavailable; this one did neither, so a
+    // swap-exhausted death on the contended pool uploaded an artifact that
+    // could not show it, and a runner whose df has no -T (busybox, minimal
+    // images) uploaded no filesystem table at all. Execute the step body
+    // instead of pinning its text: the grep pattern is only worth anything if
+    // the fields actually reach the artifact. The stub rejects any option
+    // cluster carrying T — `df -hT` arrives as ONE argument, so matching on
+    // `-T` alone would let it through and fake the fallback. That arm must stay
+    // ahead of `-h`, and must mark its own output: otherwise "retried after
+    // -hT failed" and "never tried -hT" are indistinguishable.
+    //
+    // The three sibling dumps carry the same two fields and no equality pin
+    // reaches them ('Dump disk state on failure' is this lane's alone). Pin
+    // them textually like the sampler loop above — not executed, because
+    // test_windows greps /proc/meminfo, which Git Bash lacks.
+    for (const jobName of ['test', 'test_macos', 'test_windows']) {
+      const leg = ciJobs[jobName].steps.find(
+        (candidate) => candidate.name === 'Run tests and generate reports',
+      );
+      assert.ok(leg, `missing run-tests step in ${jobName}`);
+      assert.match(
+        leg.run,
+        /df -hT .* \|\| df -h /,
+        `${jobName} lost the df -h retry`,
+      );
+      assert.match(leg.run, /SwapTotal\|SwapFree/, `${jobName} lost swap`);
+    }
+
+    const root = mkdtempSync(join(tmpdir(), 'ci-disk-pressure-'));
+    const df = join(root, 'df');
+    writeFileSync(
+      df,
+      '#!/usr/bin/env bash\ncase "$*" in\n  *T*) echo STUB-DF-HT; exit 1 ;;\n  *-h*) echo STUB-DF-H ;;\nesac\n',
+    );
+    chmodSync(df, 0o755);
+
+    try {
+      const result = spawnSync(
+        'bash',
+        [
+          '-e',
+          '-o',
+          'pipefail',
+          '-c',
+          lintStep('Dump disk state on failure').run,
+        ],
+        {
+          encoding: 'utf8',
+          timeout: 30_000,
+          env: {
+            ...process.env,
+            PATH: `${root}:${process.env.PATH}`,
+            RUNNER_TEMP: root,
+          },
+        },
+      );
+
+      assert.equal(result.error, undefined);
+      assert.equal(
+        result.status,
+        0,
+        `signal: ${result.signal}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`,
+      );
+      const samples = readFileSync(
+        join(root, 'disk-pressure-samples.log'),
+        'utf8',
+      );
+      assert.match(
+        samples,
+        /^SwapTotal:/m,
+        `swap exhaustion is invisible in the artifact\nstdout: ${result.stdout}`,
+      );
+      assert.match(samples, /^SwapFree:/m);
+      // All four fields share the one edited grep line, so a pattern narrowed
+      // to swap alone must go red here. `MemAvailable` has to keep the exact
+      // spelling the sampler's `awk '/MemAvailable/'` uses, or the two stop
+      // being comparable.
+      assert.match(
+        samples,
+        /^MemTotal:/m,
+        `RAM total is invisible in the artifact\nstdout: ${result.stdout}`,
+      );
+      assert.match(samples, /^MemAvailable:/m, 'RAM available is invisible');
+      // -hT must be ATTEMPTED, not merely tolerated: a `df -h || true`
+      // collapse or a reorder still yields STUB-DF-H, silently losing the
+      // filesystem Type column.
+      assert.match(
+        samples,
+        /^STUB-DF-HT$/m,
+        `df -hT was never attempted first\nstdout: ${result.stdout}`,
+      );
+      assert.match(
+        samples,
+        /^STUB-DF-H$/m,
+        `df -hT failed and nothing retried with -h\nstdout: ${result.stdout}`,
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   it('keeps install failure status while writing the pre-install sample', () => {
     const root = mkdtempSync(join(tmpdir(), 'ci-disk-pressure-'));
     // The install step runs `corepack pnpm install`; stub corepack so the

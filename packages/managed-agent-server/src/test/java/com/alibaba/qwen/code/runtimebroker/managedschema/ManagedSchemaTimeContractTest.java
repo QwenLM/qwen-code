@@ -23,12 +23,11 @@ class ManagedSchemaTimeContractTest {
             "ma_session=gmt_create,gmt_modified,deleted_at,retired_at",
             "ma_turn=dispatch_lease_until,gmt_create,gmt_modified,completed_at,retry_after",
             "ma_session_head=writer_lease_until,gmt_create,gmt_modified,"
-                    + "activation_expires_at,claim_lease_until",
+                    + "activation_expires_at,claim_lease_until,wake_retry_at",
             "ma_session_journal_tx=gmt_create",
-            "ma_event_stream=snapshot_stale_since,gmt_modified",
+            "ma_event_stream=gmt_modified",
             "ma_public_event=gmt_create",
             "ma_message=gmt_create,gmt_modified",
-            "ma_snapshot=gmt_create,published_at,retain_until",
             "ma_session_record=gmt_create,started_at,settled_at",
             "ma_agent_definition=gmt_create",
             "ma_resource=gmt_create,last_verified_at,retention_until",
@@ -47,7 +46,7 @@ class ManagedSchemaTimeContractTest {
             "ma_channel_instance=gmt_create,gmt_modified",
             "ma_channel_binding=gmt_create",
             "ma_delivery=claimed_at,claim_until,available_at,gmt_create,gmt_modified",
-            "ma_schedule=armed_at,watermark_slot,lease_until,gmt_create,gmt_modified",
+            "ma_schedule=armed_at,watermark_slot,lease_until,gate_last_at,gmt_create,gmt_modified",
             "ma_schedule_occurrence=slot,next_retry_at,gmt_create,gmt_modified");
 
     @Test
@@ -57,7 +56,7 @@ class ManagedSchemaTimeContractTest {
     }
 
     @Test
-    void all77PersistedTimestampsDeclareUnsignedIntegerMilliseconds() {
+    void all75PersistedTimestampsDeclareUnsignedIntegerMilliseconds() {
         Map<String, String> declarations = declarations();
         List<Executable> checks = new ArrayList<>();
         int count = 0;
@@ -74,7 +73,7 @@ class ManagedSchemaTimeContractTest {
                 });
             }
         }
-        assertEquals(77, count);
+        assertEquals(75, count);
         assertAll(checks);
     }
 
@@ -98,8 +97,8 @@ class ManagedSchemaTimeContractTest {
             }
             try (var insert = connection.prepareStatement(
                     "INSERT INTO ma_session_head (tenant_key,harness_key,tenant_id,session_id,"
-                            + "harness_session_id,head_kind,gmt_create,gmt_modified,o3_backfill_pending)"
-                            + " VALUES ('tenant','harness',?,?,?,'HARNESS',?,?,FALSE)")) {
+                            + "harness_session_id,head_kind,gmt_create,gmt_modified)"
+                            + " VALUES ('tenant','harness',?,?,?,'HARNESS',?,?)")) {
                 insert.setBytes(1, ManagedSchemaKeys.identity("tenant"));
                 insert.setBytes(2, ManagedSchemaKeys.identity("harness"));
                 insert.setBytes(3, ManagedSchemaKeys.identity("harness"));

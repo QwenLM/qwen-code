@@ -153,6 +153,38 @@ export function registerWorkspaceQualifiedLifecycleRoutes(
   );
 
   app.post(
+    '/workspaces/:workspace/models/reload',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      const runtime = resolveWorkspaceRuntimeFromParam(
+        deps.workspaceRegistry,
+        req,
+        res,
+      );
+      if (!runtime || !requireTrustedWorkspaceRuntime(runtime, res)) return;
+      const clientId = parseAndValidateWorkspaceClientId(
+        req,
+        res,
+        runtime.bridge,
+      );
+      if (clientId === null) return;
+      const route = 'POST /workspaces/:workspace/models/reload';
+      try {
+        runtime.generationGuard?.assertOpen();
+        const ctx = createBuildWorkspaceCtx(runtime.workspaceCwd)(
+          route,
+          clientId,
+        );
+        const result = await runtime.workspaceService.reloadModelProviders(ctx);
+        runtime.generationGuard?.assertOpen();
+        res.status(200).json(result);
+      } catch (err) {
+        deps.sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  app.post(
     '/workspaces/:workspace/reload',
     deps.mutate({ strict: true }),
     async (req, res) => {

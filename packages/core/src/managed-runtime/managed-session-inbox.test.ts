@@ -25,6 +25,7 @@ import {
   type ManagedSessionUserMessageInput,
 } from './managed-session-inbox.js';
 import { MANAGED_SESSION_LIMITS } from './managed-session-records.js';
+import { MANAGED_JOURNAL_COMPACT_BYTES } from './managed-journal-snapshot.js';
 
 const limits = { maxPending: 10, maxPendingPerTenant: 5 };
 
@@ -216,6 +217,104 @@ describe('FileManagedSessionInbox', () => {
     await expect(
       inbox.admit(userMessage('x'.repeat(513), { payload: null }), limits),
     ).rejects.toThrow('messageId must be no larger than 512');
+  });
+
+  it('compacts repeated processing fences and restores only the current fence', async () => {
+    const inbox = await openInbox();
+    const input = userMessage('long-lived');
+    await inbox.admit(input, limits);
+    await inbox.markActivationReady(input);
+    for (let epoch = 1; epoch <= 1024; epoch++) {
+      await inbox.beginProcessing(
+        input,
+        activationFence(input.messageId, epoch),
+      );
+    }
+    const contents = await readFile(filePath, 'utf8');
+    const lines = contents.trimEnd().split('\n');
+    expect(JSON.parse(lines[0])).toMatchObject({
+      v: 2,
+      type: 'inbox.snapshot',
+    });
+    expect(Buffer.byteLength(contents)).toBeLessThan(
+      MANAGED_JOURNAL_COMPACT_BYTES + Buffer.byteLength(lines[0]) + 512,
+    );
+    const reopened = await openInbox();
+    expect(reopened.listAll()).toEqual(inbox.listAll());
+    await expect(
+      reopened.finish(
+        input,
+        activationFence(input.messageId, 1023),
+        'completed',
+      ),
+    ).rejects.toBeInstanceOf(ManagedSessionMessageStaleFenceError);
+    await reopened.finish(
+      input,
+      activationFence(input.messageId, 1024),
+      'completed',
+    );
+    expect((await openInbox()).get(input)?.state).toBe('finished');
+  }, 60_000);
+
+  it('preserves completed, cancelled, processing, and pending message replay across snapshots', async () => {
+    const inbox = await openInbox();
+    const finished = userMessage('finished');
+    const cancelled = userMessage('cancelled');
+    const processing = userMessage('processing');
+    const admitted = userMessage('admitted');
+    for (const input of [finished, cancelled, processing, admitted]) {
+      await inbox.admit(input, limits);
+    }
+    const finishedFence = activationFence(finished.messageId, 3);
+    await inbox.markActivationReady(finished);
+    await inbox.beginProcessing(finished, finishedFence);
+    await inbox.finish(finished, finishedFence, 'completed');
+    await inbox.requestCancel(cancelled);
+    const currentFence = activationFence(processing.messageId, 9);
+    await inbox.markActivationReady(processing);
+    await inbox.beginProcessing(processing, currentFence);
+    await inbox.requestCancel(processing);
+    await inbox.admit(
+      userMessage('padding', {
+        payload: { text: 'x'.repeat(MANAGED_JOURNAL_COMPACT_BYTES) },
+      }),
+      limits,
+    );
+    await inbox.markActivationReady(admitted);
+    const reopened = await openInbox();
+    expect(reopened.listAll()).toEqual(inbox.listAll());
+    expect(reopened.listPending()).toEqual(inbox.listPending());
+    await expect(reopened.admit(finished, limits)).resolves.toMatchObject({
+      created: false,
+      message: { state: 'finished', outcome: 'completed' },
+    });
+    await expect(
+      reopened.admit({ ...finished, payload: 'different' }, limits),
+    ).rejects.toBeInstanceOf(ManagedSessionMessageConflictError);
+    await expect(
+      reopened.finish(finished, finishedFence, 'completed'),
+    ).resolves.toEqual(inbox.get(finished));
+    await expect(reopened.requestCancel(cancelled)).resolves.toEqual(
+      inbox.get(cancelled),
+    );
+    await reopened.finish(processing, currentFence, 'cancelled');
+    expect((await openInbox()).get(processing)?.outcome).toBe('cancelled');
+  });
+
+  it('repairs only a torn post-snapshot tail before continuing admission', async () => {
+    const inbox = await openInbox();
+    const input = userMessage('large', {
+      payload: 'x'.repeat(MANAGED_JOURNAL_COMPACT_BYTES),
+    });
+    await inbox.admit(input, limits);
+    await inbox.markActivationReady(input);
+    const committed = await readFile(filePath, 'utf8');
+    expect(JSON.parse(committed.split('\n')[0])['type']).toBe('inbox.snapshot');
+    await appendFile(filePath, '{"v":1,"sequence":');
+    const reopened = await openInbox();
+    expect(await readFile(filePath, 'utf8')).toBe(committed);
+    await reopened.admit(userMessage('next'), limits);
+    expect((await openInbox()).listAll()).toEqual(reopened.listAll());
   });
 
   it('captures caller-owned payload and limits before entering the write queue', async () => {

@@ -35,6 +35,11 @@ import {
   formatContextFileDisplayPath,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
+import {
+  AUTO_MEMORY_SNAPSHOT_METADATA,
+  getAutoMemorySnapshot,
+  withoutAutoMemorySnapshots,
+} from '@qwen-code/qwen-code-core/memory/request-context.js';
 import { t } from '../../i18n/index.js';
 import * as path from 'node:path';
 import { getSanitizedExtensionDisplayName } from '../../utils/extension-mention.js';
@@ -400,9 +405,14 @@ export async function collectContextData(
   // `getStartupContextLength` and bill the whole prelude to `messages`.
   const history =
     activeChat?.getHistoryShallow?.() ?? activeChat?.getHistory?.() ?? [];
+  // Determine the boundary before filtering; catalog-only entries can disappear.
   const preludeLength = getStartupContextLength(history);
-  const prelude = measureStartupPrelude(history.slice(0, preludeLength));
-  const conversationHistory = history.slice(preludeLength);
+  const prelude = measureStartupPrelude(
+    withoutAutoMemorySnapshots(history.slice(0, preludeLength)),
+  );
+  const conversationHistory = withoutAutoMemorySnapshots(
+    history.slice(preludeLength),
+  );
   // Skill-listing reminders appended after the prelude are listing cost, not
   // conversation, and are billed with the startup listing under `skills`.
   const tailSkillListings = measureTailSkillListings(conversationHistory);
@@ -461,16 +471,27 @@ export async function collectContextData(
     config.getWorkingDir(),
     extensionContextFileOwners(config, config.getWorkingDir()),
   );
-  const autoMemoryPrompt = [
-    config.getAutoMemoryPrompt(),
-    config.getAutoMemoryContext?.() ?? '',
-  ]
-    .filter(Boolean)
-    .join('\n\n');
-  if (autoMemoryPrompt) {
+  const catalog = config.getAutoMemoryContext?.() ?? '';
+  // Older snapshots remain in the request too; suppression hides all of them.
+  const snapshots = catalog
+    ? history.flatMap((content) =>
+        (content.parts ?? []).filter(
+          (part) => part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true,
+        ),
+      )
+    : [];
+  const pendingSnapshot = getAutoMemorySnapshot(history, catalog);
+  if (pendingSnapshot) snapshots.push(pendingSnapshot);
+  const autoMemoryTokens =
+    estimateContextTextTokens(config.getAutoMemoryPrompt()) +
+    snapshots.reduce(
+      (sum, part) => sum + estimateContextTextTokens(part.text ?? ''),
+      0,
+    );
+  if (autoMemoryTokens > 0) {
     memoryFiles.push({
       path: t('auto memory'),
-      tokens: estimateContextTextTokens(autoMemoryPrompt),
+      tokens: autoMemoryTokens,
     });
   }
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);

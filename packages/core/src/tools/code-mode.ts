@@ -38,6 +38,8 @@ const DIRECT_ONLY_TOOLS = new Set<string>([
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
   ToolNames.CREATE_SUB_SESSION,
+  // Its confirmations are the user's consent to push and to run unattended.
+  ToolNames.AUTOFIX_PR,
   'speak_to_user',
   'wait_threads',
 ]);

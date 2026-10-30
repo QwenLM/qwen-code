@@ -23,6 +23,9 @@ if (-not $Archive -and $Tag -notmatch '^v[0-9A-Za-z.\-]+$') {
 
 $archiveName = "qwen-code-$Target-opentui-preview.zip"
 $work = $null
+$stage = $null
+$lock = $null
+$lockPath = $null
 
 try {
     if ($Archive) {
@@ -60,13 +63,73 @@ try {
     }
 
     New-Item -ItemType Directory -Force -Path $Dir | Out-Null
-    Remove-Item -Recurse -Force (Join-Path $Dir 'qwen-code') -ErrorAction SilentlyContinue
-    Expand-Archive -LiteralPath $archivePath -DestinationPath $Dir -Force
+    $Dir = [IO.Path]::GetFullPath($Dir)
+    $lockPath = Join-Path $Dir '.qwen-preview-install.lock'
+    $lock = [IO.File]::Open($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write, [IO.FileShare]::None)
+    $active = Join-Path $Dir 'qwen-code'
+    $current = Get-Item -LiteralPath $active -Force -ErrorAction SilentlyContinue
+    if ($current) {
+        if (-not $current.PSIsContainer -or ($current.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'Preview destination must be a regular directory.'
+        }
+    }
+    $stagePath = Join-Path $Dir ('.qwen-preview-stage-' + [IO.Path]::GetRandomFileName())
+    New-Item -ItemType Directory -Path $stagePath | Out-Null
+    $stage = $stagePath
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $zip = [IO.Compression.ZipFile]::OpenRead($archivePath)
+    try {
+        if ($zip.Entries.Count -eq 0) { throw 'Preview archive is empty.' }
+        foreach ($entry in $zip.Entries) {
+            $name = $entry.FullName.Replace('\', '/')
+            if ($name -notmatch '^qwen-code(?:/|$)' -or $name -match '(^|/)\.\.?(/|$)|[ .](?:/|$)|[\x00-\x1f]' -or $name.Contains(':')) {
+                throw "Unsafe preview archive path: $name"
+            }
+            $kind = ($entry.ExternalAttributes -shr 16) -band 0xF000
+            if (($kind -ne 0 -and $kind -ne 0x8000 -and $kind -ne 0x4000) -or ($entry.ExternalAttributes -band [IO.FileAttributes]::ReparsePoint)) {
+                throw "Preview archive contains a link or special entry: $name"
+            }
+        }
+    }
+    finally { $zip.Dispose() }
+    Expand-Archive -LiteralPath $archivePath -DestinationPath $stage -Force
+    $candidate = Join-Path $stage 'qwen-code'
+    foreach ($file in @('manifest.json', 'lib/package.json', 'lib/cli.js', 'lib/cli-entry.js', 'bin/qwen.cmd', 'bun/bun.exe', 'node/node.exe')) {
+        $item = Get-Item -LiteralPath (Join-Path $candidate $file) -Force
+        if ($item.PSIsContainer -or $item.Length -eq 0 -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw "Preview archive is missing regular file $file"
+        }
+    }
+    $previous = Join-Path $stage 'previous'
+    if (Test-Path -LiteralPath $active) { [IO.Directory]::Move($active, $previous) }
+    try { [IO.Directory]::Move($candidate, $active) }
+    catch {
+        if ((Test-Path -LiteralPath $previous) -and -not (Test-Path -LiteralPath $active)) {
+            [IO.Directory]::Move($previous, $active)
+        }
+        throw
+    }
+    if (Test-Path -LiteralPath $previous) { Remove-Item -LiteralPath $previous -Recurse -Force }
 
     Write-Host "installed: $(Join-Path $Dir 'qwen-code')"
     Write-Host "run: $(Join-Path $Dir 'qwen-code\bin\qwen.cmd')"
 }
 finally {
+    if ($stage) {
+        $previous = Join-Path $stage 'previous'
+        if ((Test-Path -LiteralPath $previous) -and -not (Test-Path -LiteralPath $active)) {
+            try { [IO.Directory]::Move($previous, $active) }
+            catch { Write-Warning "Could not restore previous preview: $_" }
+        }
+        if (Test-Path -LiteralPath $previous) {
+            Write-Warning "Previous preview preserved at $(Join-Path $stage 'previous')"
+        }
+        else { Remove-Item -LiteralPath $stage -Recurse -Force -ErrorAction SilentlyContinue }
+    }
+    if ($lock) {
+        $lock.Dispose()
+        Remove-Item -LiteralPath $lockPath -Force
+    }
     if ($work) {
         Remove-Item -Recurse -Force $work -ErrorAction SilentlyContinue
     }

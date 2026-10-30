@@ -328,10 +328,11 @@ it('records a durable Shell receipt when cancellation recovery settles a produce
   expect(f.cancelled()).toBe(true);
   expect(requests.filter((r) => r.endsWith(':cancel'))).toHaveLength(1);
   expect(requests.some((r) => /:start|:prepare/.test(r))).toBe(false);
-  const journal = await LocalJsonlManagedSessionJournalStore.read(
+  const journal = await LocalJsonlManagedSessionJournalStore.read({
     transcriptPath,
-    key,
-  );
+    runtimeBaseDir: root!,
+    sessionKey: key,
+  });
   const receipts = journal.events.filter(
     (event) =>
       event.kind === 'tool.receipt' &&
@@ -401,10 +402,11 @@ it.each([
         response: { executionStatus: 'cancelled' },
       },
     });
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      f.transcriptPath,
-      f.key,
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: f.transcriptPath,
+      runtimeBaseDir: root!,
+      sessionKey: f.key,
+    });
     expect(
       journal.events.filter((event) => event.kind === 'tool.receipt'),
     ).toHaveLength(0);
@@ -414,10 +416,11 @@ it.each([
     if (repeated.status === 'runnable') {
       expect(repeated.checkpoint.tools!.items[0].outcomeRef).toEqual(ref);
     }
-    const repeatedJournal = await LocalJsonlManagedSessionJournalStore.read(
-      f.transcriptPath,
-      f.key,
-    );
+    const repeatedJournal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: f.transcriptPath,
+      runtimeBaseDir: root!,
+      sessionKey: f.key,
+    });
     expect(
       repeatedJournal.events.filter((event) => event.kind === 'tool.receipt'),
     ).toHaveLength(0);
@@ -451,10 +454,11 @@ it.each([
         'in_progress',
       );
     }
-    const journal = await LocalJsonlManagedSessionJournalStore.read(
-      f.transcriptPath,
-      f.key,
-    );
+    const journal = await LocalJsonlManagedSessionJournalStore.read({
+      transcriptPath: f.transcriptPath,
+      runtimeBaseDir: root!,
+      sessionKey: f.key,
+    });
     expect(
       journal.events.filter((event) => event.kind === 'tool.receipt'),
     ).toHaveLength(0);

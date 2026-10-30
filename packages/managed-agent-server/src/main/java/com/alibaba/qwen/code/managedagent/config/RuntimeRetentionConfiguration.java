@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.config;
 
-import com.alibaba.qwen.code.managedagent.service.RuntimeRetentionJob;
-import com.alibaba.qwen.code.managedagent.store.ManagedRuntimeRetentionGuard;
+import com.alibaba.qwen.code.managedagent.persistence.ManagedRuntimeRetentionGuard;
+import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeRetentionJob;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeRetention;
 import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.boot.task.ThreadPoolTaskSchedulerBuilder;
 import org.springframework.context.annotation.Bean;
@@ -21,13 +22,13 @@ import javax.sql.DataSource;
 @ConditionalOnProperty(prefix = "qwen.managed-agent.runtime-broker",
         name = {"enabled", "retention.enabled"}, havingValue = "true")
 public class RuntimeRetentionConfiguration {
-    @Bean
+    @Bean(defaultCandidate = false)
     public ThreadPoolTaskScheduler runtimeRetentionScheduler(ThreadPoolTaskSchedulerBuilder builder) {
         return builder.poolSize(1).threadNamePrefix("runtime-retention-").build();
     }
 
     @Bean
-    public RuntimeRetentionJob runtimeRetentionJob(DataSource source,
+    public RuntimeRetentionJob runtimeRetentionJob(@Qualifier("managedAgentDataSource") DataSource source,
             RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, ManagedAgentProperties properties) {
         if (!(bindings instanceof JdbcRuntimeBindingRepository jdbcBindings)
