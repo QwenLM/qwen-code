@@ -146,8 +146,8 @@ public final class RocketMqEventClients {
             throw new IllegalStateException("the event-transport broker"
                     + " is reachable but could not write the probe message"
                     + " to topic " + topic + ": check the broker's disk"
-                    + " space and message store, not the topic's message"
-                    + " type", unavailable);
+                    + " space, message store and HA state, not the topic's"
+                    + " message type", unavailable);
         } catch (ClientException | RuntimeException failure) {
             throw new IllegalStateException("the event-transport topic "
                     + topic + " refused a LiteTopic message: create it as a"

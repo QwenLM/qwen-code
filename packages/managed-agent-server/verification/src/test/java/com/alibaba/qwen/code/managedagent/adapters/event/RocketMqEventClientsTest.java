@@ -1,6 +1,9 @@
 package com.alibaba.qwen.code.managedagent.adapters.event;
 
+import apache.rocketmq.v2.Code;
+import apache.rocketmq.v2.Status;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
+import org.apache.rocketmq.client.apis.ClientException;
 import org.apache.rocketmq.client.apis.ClientServiceProvider;
 import org.apache.rocketmq.client.apis.consumer.LitePushConsumer;
 import org.apache.rocketmq.client.apis.consumer.LitePushConsumerBuilder;
@@ -9,6 +12,9 @@ import org.apache.rocketmq.client.apis.producer.Producer;
 import org.apache.rocketmq.client.apis.producer.ProducerBuilder;
 import org.apache.rocketmq.client.java.exception.BadRequestException;
 import org.apache.rocketmq.client.java.exception.InternalErrorException;
+import org.apache.rocketmq.client.java.exception.StatusChecker;
+import org.apache.rocketmq.client.java.rpc.Context;
+import org.apache.rocketmq.client.java.rpc.RpcFuture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -110,5 +116,38 @@ public class RocketMqEventClientsTest {
                 failure.getMessage());
         assertEquals(BadRequestException.class, failure.getCause().getClass());
         verify(producer).close();
+    }
+
+    // The two branch tests above construct their exceptions, so they pin the
+    // probe's branch selection but not the client's code-to-type mapping the
+    // selection depends on. Drive the real StatusChecker so a client upgrade
+    // that remapped a type conflict onto InternalErrorException fails here,
+    // at unit speed, instead of only at the real-broker gate.
+    @Test
+    public void theClientKeepsTypeConflictsAndWriteRefusalsOnDistinctTypes() {
+        RpcFuture<?, ?> future = mock(RpcFuture.class);
+        Context context = mock(Context.class);
+        when(future.getContext()).thenReturn(context);
+        when(context.getRequestId()).thenReturn("probe-request");
+
+        assertEquals(BadRequestException.class, refusalType(40014, future));
+        assertEquals(BadRequestException.class, refusalType(40020, future));
+        assertEquals(InternalErrorException.class, refusalType(50000, future));
+        assertEquals(InternalErrorException.class, refusalType(50001, future));
+        assertEquals(InternalErrorException.class, refusalType(50002, future));
+    }
+
+    private static Class<?> refusalType(int code, RpcFuture<?, ?> future) {
+        Status status = Status.newBuilder()
+                .setCode(Code.forNumber(code))
+                .setMessage("probe")
+                .build();
+        try {
+            StatusChecker.check(status, future);
+        } catch (ClientException refusal) {
+            return refusal.getClass();
+        }
+        throw new AssertionError("response code " + code
+                + " did not refuse the probe message");
     }
 }
