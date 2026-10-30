@@ -109,7 +109,30 @@ export interface DaemonUiTextEvent extends DaemonUiEventBase {
   type: 'user.text.delta' | 'assistant.text.delta' | 'thought.text.delta';
   text: string;
   parentToolCallId?: string;
+  /**
+   * The agent associated with this frame. This normally names the producer;
+   * for an inter-agent message it names the recipient, matching OpenAI's
+   * `agent_message` semantics. The identity uses a path such as
+   * `/root/security`.
+   *
+   * Source: daemon stamps `_meta.agent` (see `SubAgentTracker` in the CLI).
+   */
+  agent?: DaemonAgentIdentity;
   meta?: DaemonTextDeltaMeta;
+}
+
+/**
+ * Path-style agent identity associated with one frame.
+ *
+ * `agentName` is derived from the spawning agent's path plus the subagent type.
+ * It is a readable role path, not a unique execution id: concurrent subagents
+ * of the same type share it, and renaming the agent definition changes it. Use
+ * `parentToolCallId` when a consumer must distinguish subagent executions.
+ */
+export interface DaemonAgentIdentity {
+  agentName: string;
+  depth: number;
+  kind: 'root' | 'subagent' | 'teammate';
 }
 
 export interface DaemonInputReference {
@@ -319,6 +342,11 @@ export interface DaemonUiToolUpdateEvent extends DaemonUiEventBase {
    * Source: daemon stamps `tool_call._meta.subagentType`.
    */
   subagentType?: string;
+  /**
+   * The agent that produced this tool call, when it was not the session's
+   * root agent. Same shape and source as `DaemonUiTextEvent.agent`.
+   */
+  agent?: DaemonAgentIdentity;
   details?: string;
   rawInput?: unknown;
   rawOutput?: unknown;
@@ -1104,6 +1132,12 @@ export interface DaemonTextTranscriptBlock extends DaemonTranscriptBlockBase {
   collapsed?: boolean;
   /** Used by the reducer for per-subAgent block routing; renderers may use it for nesting. */
   parentToolCallId?: string;
+  /**
+   * The agent associated with this block. This normally names the producer;
+   * for an inter-agent message it names the recipient. Lets a renderer name
+   * an agent by path without walking `parentToolCallId` chains.
+   */
+  agent?: DaemonAgentIdentity;
   /** Raw ACP update metadata used by renderers for display-only routing. */
   meta?: DaemonTextDeltaMeta;
   /**
@@ -1151,6 +1185,12 @@ export interface DaemonToolTranscriptBlock extends DaemonTranscriptBlockBase {
    * block came from a sub-agent delegation.
    */
   subagentType?: string;
+  /**
+   * The agent that produced this block, when it was not the session's root
+   * agent. Carried through from the event so renderers can attribute a block
+   * by path without walking `parentToolCallId` chains.
+   */
+  agent?: DaemonAgentIdentity;
   /**
    * `id` of the parent transcript block, populated by the reducer when
    * `parentToolCallId` matches a block already in state. Renderers can
