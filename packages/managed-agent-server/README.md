@@ -2,6 +2,8 @@
 
 The application lives in `packages/managed-agent-server`, alongside the Java SDK. It builds as one Maven reactor with six production modules and a verification module. The executable remains one Spring Boot service. Install the Java SDK before building the reactor; see [Runtime Broker internals](docs/runtime-broker.md).
 
+Every configuration property, with its environment variable and default, is listed in the [configuration reference](../../docs/users/managed-agent-configuration-reference.md). It is generated from this module's configuration metadata and the descriptions in `configuration-descriptions.json`; a new property needs a description there, and a settings class declared outside `ManagedAgentProperties` needs `@NestedConfigurationProperty` on its field, or the metadata leaves it out.
+
 Standalone Spring Boot control plane for the Qwen Code Hosted Harness. It has
 no DataWorks dependency. The default loopback listen address keeps the
 header-asserted tenant model: a trusted upstream sends `X-Qwen-Tenant-Id`
