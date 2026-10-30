@@ -352,6 +352,7 @@ export function getSlashCommandArgumentHint(
   text: string,
   commands: CommandInfo[],
   language: WebShellLanguage,
+  skillNames?: ReadonlySet<string>,
 ): string | null {
   const match = text.match(
     new RegExp(`^/${COMMAND_NAME_PATTERN}(?:\\s+(.*?))?\\s*$`),
@@ -363,7 +364,14 @@ export function getSlashCommandArgumentHint(
   if (!cmd) return null;
 
   const subcommandPath = match[2]?.trim();
-  if (cmd.source !== undefined && SKILL_BACKED_SOURCES.has(cmd.source)) {
+  // Session skill membership is authoritative: extension skills arrive with
+  // the shared 'plugin-command' label (and synthesized entries with no
+  // source at all), so only availableSkills tells them apart from ordinary
+  // plugin commands.
+  const isSkillBacked =
+    skillNames?.has(cmdName.toLowerCase()) === true ||
+    (cmd.source !== undefined && SKILL_BACKED_SOURCES.has(cmd.source));
+  if (isSkillBacked) {
     const hint = cmd.argumentHint?.trim();
     if (!hint) return null;
     return subcommandPath
@@ -419,9 +427,11 @@ type SkillHintToken =
   | { kind: 'flag'; text: string; flags: string[]; valueHint: string | null }
   | { kind: 'literal'; text: string; alternatives: string[] };
 
-// Live sessions keep the loader's source label ('skill-dir-command' for
-// project/user skills, 'bundled-skill' for bundled ones); only the
-// pre-session workspace bootstrap synthesizes 'skill'.
+// Source labels that are unambiguously skill-backed on their own. Live
+// sessions keep the loader's label ('skill-dir-command' for project/user
+// skills, 'bundled-skill' for bundled ones); only the pre-session workspace
+// bootstrap synthesizes 'skill'. Extension skills share 'plugin-command'
+// with ordinary plugin commands and are recognized via skillNames instead.
 const SKILL_BACKED_SOURCES = new Set([
   'skill',
   'skill-dir-command',

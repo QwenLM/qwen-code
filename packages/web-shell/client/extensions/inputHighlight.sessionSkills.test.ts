@@ -8,7 +8,9 @@ import { mapSupportedCommands } from '../daemon/session/mappers';
 import { inputHighlight } from './inputHighlight';
 
 // Mirrors the live /supported-commands metadata: project skills arrive as
-// 'skill-dir-command' and bundled skills as 'bundled-skill', while the
+// 'skill-dir-command', bundled skills as 'bundled-skill', and extension
+// skills as 'plugin-command' (a label they share with ordinary plugin
+// commands) while all of them are listed in availableSkills. The
 // availableSkills merge synthesizes raw._meta.source 'skill' without
 // replacing the top-level loader source.
 const SESSION_STATUS: DaemonSessionSupportedCommandsStatus = {
@@ -27,13 +29,30 @@ const SESSION_STATUS: DaemonSessionSupportedCommandsStatus = {
       input: { hint: '[pr-number] [--fix]' },
       _meta: { source: 'bundled-skill' },
     },
+    {
+      name: 'review-hint-fixture:hint-probe',
+      description: 'Extension skill',
+      input: { hint: '<id> [--watch]' },
+      _meta: { source: 'plugin-command' },
+    },
+    {
+      name: 'plugin-tool',
+      description: 'Ordinary plugin command, not a skill',
+      input: { hint: '<target>' },
+      _meta: { source: 'plugin-command' },
+    },
   ],
-  availableSkills: ['verify-pr', 'review'],
+  availableSkills: ['verify-pr', 'review', 'review-hint-fixture:hint-probe'],
 };
 
-function renderHint(doc: string, commands: CommandInfo[]): string | null {
+function renderHint(
+  doc: string,
+  commands: CommandInfo[],
+  skillNames: string[],
+): string | null {
   const parent = document.createElement('div');
   document.body.appendChild(parent);
+  const skills = skillNames.map((name) => ({ name, description: '' }));
   const view = new EditorView({
     state: EditorState.create({
       doc,
@@ -41,6 +60,7 @@ function renderHint(doc: string, commands: CommandInfo[]): string | null {
         inputHighlight(
           () => commands,
           () => 'en',
+          () => skills,
         ),
       ],
     }),
@@ -63,16 +83,32 @@ describe('inputHighlight with live-session skill commands', () => {
     expect(commands.find((c) => c.name === 'review')?.source).toBe(
       'bundled-skill',
     );
+    expect(
+      commands.find((c) => c.name === 'review-hint-fixture:hint-probe')?.source,
+    ).toBe('plugin-command');
   });
 
   it('renders progressive hints for project and bundled skills after session attach', () => {
-    const { commands } = mapSupportedCommands(SESSION_STATUS);
-    expect(renderHint('/verify-pr', commands)).toBe(
+    const { commands, skills } = mapSupportedCommands(SESSION_STATUS);
+    expect(renderHint('/verify-pr', commands, skills)).toBe(
       ' <pr-number> [--publish] [--watch]',
     );
-    expect(renderHint('/verify-pr 15871', commands)).toBe(
+    expect(renderHint('/verify-pr 15871', commands, skills)).toBe(
       ' [--publish] [--watch]',
     );
-    expect(renderHint('/review 15871', commands)).toBe(' [--fix]');
+    expect(renderHint('/review 15871', commands, skills)).toBe(' [--fix]');
+  });
+
+  it('renders progressive hints for extension skills via session skill membership', () => {
+    const { commands, skills } = mapSupportedCommands(SESSION_STATUS);
+    expect(
+      renderHint('/review-hint-fixture:hint-probe 42', commands, skills),
+    ).toBe(' [--watch]');
+  });
+
+  it('leaves ordinary plugin commands outside the skill hint path', () => {
+    const { commands, skills } = mapSupportedCommands(SESSION_STATUS);
+    expect(renderHint('/plugin-tool', commands, skills)).toBe(' <target>');
+    expect(renderHint('/plugin-tool 42', commands, skills)).toBeNull();
   });
 });

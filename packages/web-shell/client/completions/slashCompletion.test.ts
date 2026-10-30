@@ -150,6 +150,56 @@ describe('getSlashCommandArgumentHint progressive skill hints', () => {
     },
   );
 
+  it('recognizes extension skills by session membership, not by the shared plugin source', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'ext:probe',
+        description: 'Extension skill',
+        source: 'plugin-command',
+        argumentHint: '<id> [--watch]',
+      },
+      {
+        name: 'plugin-tool',
+        description: 'Ordinary plugin command',
+        source: 'plugin-command',
+        argumentHint: '<target>',
+      },
+    ];
+    const skillNames = new Set(['ext:probe']);
+    expect(
+      getSlashCommandArgumentHint('/ext:probe 42', commands, 'en', skillNames),
+    ).toBe('[--watch]');
+    expect(
+      getSlashCommandArgumentHint(
+        '/plugin-tool 42',
+        commands,
+        'en',
+        skillNames,
+      ),
+    ).toBeNull();
+    expect(
+      getSlashCommandArgumentHint('/plugin-tool', commands, 'en', skillNames),
+    ).toBe('<target>');
+  });
+
+  it('matches skill membership case-insensitively and covers source-less entries', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'Ext:Probe',
+        description: 'Synthesized skill entry without a top-level source',
+        argumentHint: '<id> [--watch]',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint(
+        '/Ext:Probe 42',
+        commands,
+        'en',
+        new Set(['ext:probe']),
+      ),
+    ).toBe('[--watch]');
+  });
+
   it('keeps the matching flag group visible while the flag is being typed', () => {
     expect(
       getSlashCommandArgumentHint('/verify-pr 15871 --pub', verifyPr, 'en'),
