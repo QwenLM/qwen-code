@@ -58,15 +58,16 @@ export function emailSettings(raw: Readonly<Record<string, unknown>>) {
   // because email's per-delivery durable claim only survives if every message
   // becomes its own turn — `collect` coalesces it into a later turn and
   // `inject` hands the text to a running one, so both release the claim as
-  // soon as the message is queued.
+  // soon as the message is queued. `null` is unset (the adapter falls back to
+  // followup), not an unsupported value.
   const dispatchMode = raw['dispatchMode'];
   if (
-    dispatchMode !== undefined &&
+    dispatchMode != null &&
     dispatchMode !== 'followup' &&
     dispatchMode !== 'steer'
   ) {
     throw new Error(
-      'Email does not support collect or inject dispatch mode; use followup or steer so each delivery retains its durable claim.',
+      `Email does not support dispatchMode "${String(dispatchMode)}"; use followup or steer so each delivery retains its durable claim.`,
     );
   }
   addressList(raw['allowedUsers'], 'allowedUsers');

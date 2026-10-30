@@ -62,6 +62,19 @@ describe('email configuration and bounds', () => {
       emailSettings({ ...settings, smtpPassword: '\r\nsecret' }),
     ).toThrow('Email smtpPassword must be a non-empty single-line string.');
   });
+  it('admits null as unset and names the refused dispatch mode', () => {
+    // An explicit null is unset: the channel falls back to followup, exactly
+    // as if the key had been omitted.
+    expect(emailSettings({ ...settings, dispatchMode: null })).toEqual(
+      emailSettings(settings),
+    );
+    // The refusal names the offending value instead of only the two it knows.
+    for (const dispatchMode of ['collect', 'inject', 'broadcast']) {
+      expect(() => emailSettings({ ...settings, dispatchMode })).toThrow(
+        `Email does not support dispatchMode "${dispatchMode}"`,
+      );
+    }
+  });
   it('bounds body text and removes conventional quote/signature blocks', () => {
     expect(boundedText('new\n\n> old', 200)).toBe('new');
     expect(boundedText('new\n-- \nsignature', 200)).toBe('new');
