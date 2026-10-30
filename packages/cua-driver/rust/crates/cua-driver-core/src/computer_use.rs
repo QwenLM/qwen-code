@@ -151,6 +151,7 @@ fn checked(result: ToolResult, mutating: bool) -> Result<ToolResult, ToolResult>
             | "snapshot_id_required"
     );
     let pre_dispatch = stale
+        || structured.is_some_and(|value| value["effect"] == "refused")
         || matches!(
             code,
             "no_focused_text_input" | "not_settable" | "foreground_unavailable" | "target_occluded"
@@ -1046,6 +1047,28 @@ mod tests {
         );
         let checked = checked(result, true).unwrap_err();
         assert_eq!(checked.structured_content.unwrap()["sent"], true);
+    }
+
+    #[test]
+    fn refused_keyboard_recovery_preserves_dispatch_evidence() {
+        for explicit_sent in [None, Some(false), Some(true)] {
+            let mut structured = json!({
+                "code": "same_pid_keyboard_ambiguity",
+                "effect": "refused",
+            });
+            if let Some(sent) = explicit_sent {
+                structured["sent"] = json!(sent);
+            }
+            let result = checked(
+                ToolResult::error("Sibling window keyboard target is ambiguous.")
+                    .with_structured(structured),
+                true,
+            )
+            .unwrap_err();
+            let public = result.structured_content.unwrap();
+            assert_eq!(public["code"], "same_pid_keyboard_ambiguity");
+            assert_eq!(public["sent"], explicit_sent.unwrap_or(false));
+        }
     }
 
     #[derive(Default)]
