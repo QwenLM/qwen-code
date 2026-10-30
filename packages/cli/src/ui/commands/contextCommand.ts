@@ -33,6 +33,9 @@ import {
   estimateContextTextTokens,
   resolveSlimmingConfig,
   formatContextFileDisplayPath,
+  getAllMemoryFilenames,
+  isSubpath,
+  Storage,
   type CompactionThresholds,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -102,6 +105,19 @@ function parseMemoryFiles(
   if (!memoryContent || memoryContent.trim().length === 0) return [];
 
   const results: ContextMemoryDetail[] = [];
+  // The context preview opens a row through the session workspace's file
+  // route or, for a global memory file, the memory route. Parent-directory
+  // and extension instruction files live outside both scopes, so they must
+  // stay non-interactive: only hand the client a path it can actually read.
+  const cwd = path.resolve(workingDir);
+  const globalDir = Storage.getGlobalQwenDir();
+  const memoryFilenames = new Set(getAllMemoryFilenames());
+  const openablePath = (absolutePath: string): string | undefined =>
+    isSubpath(cwd, absolutePath) ||
+    (path.dirname(absolutePath) === globalDir &&
+      memoryFilenames.has(path.basename(absolutePath)))
+      ? absolutePath
+      : undefined;
   // Use backreference (\1) to ensure start/end path markers match
   const regex =
     /--- Context from: (.+?) ---\n([\s\S]*?)--- End of Context from: \1 ---/g;
@@ -116,13 +132,14 @@ function parseMemoryFiles(
     // global memory files don't render as `../../..` chains.
     const absolutePath = path.resolve(workingDir, filePath);
     const owner = extensionOwners.get(absolutePath);
+    const openPath = openablePath(absolutePath);
     results.push({
       // An extension's file is named by its extension rather than by a path
       // under the install directory, which is what makes the row actionable:
       // the reader can disable or migrate that extension.
       path: owner ?? formatContextFileDisplayPath(absolutePath, workingDir),
       tokens: estimateContextTextTokens(content),
-      absolutePath,
+      ...(openPath !== undefined ? { absolutePath: openPath } : {}),
     });
   }
 

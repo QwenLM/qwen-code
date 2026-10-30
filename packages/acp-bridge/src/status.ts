@@ -717,8 +717,10 @@ export interface ServeContextMemoryDetail {
   path: string;
   tokens: number;
   /**
-   * Absolute on-disk path when the row maps to a real file; absent for
-   * synthetic aggregates. Absent from older servers.
+   * Absolute on-disk path when the row maps to a file the context preview
+   * can open: inside the session workspace, or a global memory file. Absent
+   * for synthetic aggregates and instruction files outside that readable
+   * scope (parent-directory or extension files). Absent from older servers.
    */
   absolutePath?: string;
 }

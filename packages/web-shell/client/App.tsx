@@ -63,7 +63,6 @@ import {
   useDaemonFollowupSuggestion,
   useSettings,
   useProviders,
-  useMemory,
   useSessionNotices,
   useDaemonSessionOwnerGuard,
   useStreamingState,
@@ -313,6 +312,7 @@ import {
   resolveArtifactWorkspaceOwner,
   useArtifactWorkspaceTarget,
 } from './components/artifacts/useArtifactWorkspaceTarget';
+import { readContextInstructionFile } from './components/artifacts/readContextInstructionFile';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -4272,7 +4272,6 @@ export function App({
     ) === true;
   const { notices, dismissNotice } = useSessionNotices();
   const workspaceActions = useWorkspaceActions();
-  const { readMemoryFile } = useMemory();
   const artifactWorkspaceTarget = useArtifactWorkspaceTarget(
     connection.workspaceCwd,
   );
@@ -8051,9 +8050,16 @@ export function App({
       if (!absolutePath) return;
       let content: string;
       try {
-        // Read through the memory route so global files outside the bound
-        // workspace open too; workspace files fall back to the file API.
-        ({ content } = await readMemoryFile(absolutePath));
+        const client = workspace.client;
+        if (!client) {
+          throw new Error('The workspace for this file is not available.');
+        }
+        content = await readContextInstructionFile(
+          client,
+          workspace.capabilities,
+          fileWorkspaceCwd,
+          absolutePath,
+        );
       } catch (err) {
         pushToast('error', err instanceof Error ? err.message : String(err));
         return;
@@ -8075,7 +8081,7 @@ export function App({
       setActiveArtifactPanelTabId(tab.id);
       setArtifactPanelOpen(true);
     },
-    [readMemoryFile, pushToast],
+    [workspace, pushToast],
   );
   const closeArtifactPanel = useCallback(() => {
     setArtifactPanelOpen(false);

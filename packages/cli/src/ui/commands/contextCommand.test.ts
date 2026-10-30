@@ -20,6 +20,7 @@ import {
   resolveInteractionMode,
   ToolNames,
   resolveSlimmingConfig,
+  Storage,
   wrapSystemReminder,
 } from '@qwen-code/qwen-code-core';
 import { AUTO_MEMORY_SNAPSHOT_METADATA } from '@qwen-code/qwen-code-core/memory/request-context.js';
@@ -151,6 +152,44 @@ describe('collectContextData (contextCommand)', () => {
     );
     expect(autoMemory).toBeDefined();
     expect(autoMemory?.absolutePath).toBeUndefined();
+  });
+
+  it('only exposes absolute paths the context preview can open', async () => {
+    // A session in a repository subdirectory inherits a parent instruction
+    // file, and an installed extension contributes its own context file.
+    // Neither is readable through the workspace file route or the memory
+    // route, so those rows must stay non-interactive (no absolutePath).
+    const workingDir = '/workspace/repo/sub';
+    const globalMemory = path.join(Storage.getGlobalQwenDir(), 'QWEN.md');
+    const workspaceFile = path.join(workingDir, 'AGENTS.md');
+    const parentFile = '/workspace/repo/AGENTS.md';
+    const extensionFile = '/opt/extensions/foo/AGENTS.md';
+    const marker = (absolute: string) => {
+      const relative = path.relative(workingDir, absolute);
+      return `--- Context from: ${relative} ---\nbody\n--- End of Context from: ${relative} ---`;
+    };
+    const config = {
+      ...makeMockConfig(200_000),
+      getWorkingDir: vi.fn().mockReturnValue(workingDir),
+      getUserMemory: vi
+        .fn()
+        .mockReturnValue(
+          [globalMemory, workspaceFile, parentFile, extensionFile]
+            .map(marker)
+            .join('\n\n'),
+        ),
+    } as unknown as Config;
+
+    const data = await collectContextData(config, true);
+    const rows = data.instructionFiles ?? [];
+    expect(rows).toHaveLength(4);
+    const openPaths = rows
+      .map((file) => file.absolutePath)
+      .filter((value): value is string => value !== undefined);
+    expect(new Set(openPaths)).toEqual(new Set([globalMemory, workspaceFile]));
+    expect(rows.filter((file) => file.absolutePath === undefined)).toHaveLength(
+      2,
+    );
   });
 
   it('queries getFunctionDeclarations with no args, matching the actual API request', async () => {
