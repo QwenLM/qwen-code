@@ -14,8 +14,6 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner;
-import com.alibaba.qwen.code.runtimebroker.provisioning.LocalProcessRuntimeProvisioner;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -427,7 +425,7 @@ public class WorkspaceExecutionStore
 
     public void claim(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
             RuntimeBindingRepository repository) {
-        if (!ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())) {
+        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
             claim(context, session);
             return;
         }
@@ -439,7 +437,7 @@ public class WorkspaceExecutionStore
 
     public boolean isHeld(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
             RuntimeBindingRepository repository) {
-        if (!ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())) {
+        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
             return isHeld(context, session);
         }
         return external(context, binding, repository, session.getSession().getScope(), false, (connection, owner, current) ->
@@ -448,7 +446,7 @@ public class WorkspaceExecutionStore
 
     public void assertHeld(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
             RuntimeBindingRepository repository) {
-        if (!ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())) {
+        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
             assertHeld(context, session);
             return;
         }
@@ -462,7 +460,7 @@ public class WorkspaceExecutionStore
 
     public void release(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
             RuntimeBindingRepository repository) {
-        if (!ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())) {
+        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
             release(context, session);
             return;
         }
@@ -789,7 +787,7 @@ public class WorkspaceExecutionStore
     }
 
     public boolean hasHolder(RuntimeBindingRecord saved) {
-        if (ExternalWorkspaceProvisioner.KIND.equals(saved.getRequest().getProvisionerKind())) {
+        if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(saved.getRequest().getProvisionerKind())) {
             WorkspaceStorageKindGuard.requireFreshTransaction();
             return transaction.execute(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<Boolean>) connection ->
                     JdbcExternalWorkspaceOwnership.hasHolder(connection,
@@ -801,7 +799,7 @@ public class WorkspaceExecutionStore
     }
 
     public boolean canStopExternalDrained(RuntimeBindingRecord saved, RuntimeBindingRepository repository) {
-        if (!ExternalWorkspaceProvisioner.isWorkspaceRequest(saved.getRequest())
+        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(saved.getRequest())
                 || saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST
                 || !saved.isDrainRequested()
                 || saved.getOperationOwner() == null) {
@@ -863,7 +861,7 @@ public class WorkspaceExecutionStore
     }
 
     public void releaseLost(RuntimeBindingRecord saved) {
-        if (ExternalWorkspaceProvisioner.KIND.equals(saved.getRequest().getProvisionerKind())) {
+        if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(saved.getRequest().getProvisionerKind())) {
             // LOST cannot bypass the persisted native receipt and DRAINING lifecycle gate.
             throw unavailable();
         }

@@ -57,7 +57,8 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 ignored -> CompletableFuture.failedFuture(WorkspaceExecutionStore.unavailable()));
     }
 
-    WorkspaceRuntimeTransport(HttpRuntimeTransport delegate, WorkspaceRuntimeResolver resolver,
+    WorkspaceRuntimeTransport(com.alibaba.qwen.code.runtimebroker.WorkspacePhysicalTransport delegate,
+            WorkspaceRuntimeResolver resolver,
             WorkspaceExecutionStore ownership, RuntimeBindingRepository bindings, RuntimeSessionRepository sessions,
             java.util.function.Function<RuntimeBindingRecord, CompletionStage<Void>> verifyExternalAcquisition) {
         this.verifyExternalAcquisition = java.util.Objects.requireNonNull(verifyExternalAcquisition);
@@ -109,7 +110,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     public CompletionStage<Map<String, Object>> extensionControl(RuntimeBindingRecord runtime,
             String harnessSessionId, Map<String, Object> operation) {
         RuntimeBindingRecord current = bindings.findById(runtime.getBindingId());
-        if (current != null && com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.KIND
+        if (current != null && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE
                 .equals(current.getRequest().getProvisionerKind())) {
             throw WorkspaceExecutionStore.unavailable();
         }
@@ -673,7 +674,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
     }
 
     private static boolean external(Context context) {
-        return com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.isWorkspaceRequest(context.runtime().getRequest());
+        return WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.runtime().getRequest());
     }
 
     private static void requireExternalFile(Context context, Map<String, Object> reference) {
@@ -690,7 +691,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
             throw new RuntimeBrokerException(501, "external_runtime_control_unsupported",
                     "External Workspace control is not qualified.", false);
         }
-        com.alibaba.qwen.code.runtimebroker.provisioning.ProviderRuntimeProtocol.control(
+        com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol.control(
                 operation, session.getHarnessSessionId(), session.getRuntimeSessionId());
         if ("prepare".equals(operation.get("action"))) {
             String prompt = (String) operation.get("promptId");
@@ -761,7 +762,7 @@ public final class WorkspaceRuntimeTransport implements RuntimeTransport {
                 || !sameLease(lease, runtime.getLease())) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
-        if (com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.isWorkspaceRequest(runtime.getRequest())) {
+        if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(runtime.getRequest())) {
             // Repository identity excludes transient lifecycle authority; preserve only the caller's
             // already matched scope so SQL can revalidate its live lifecycle claim.
             record = new RuntimeSessionRecord(session, record.getBindingId(), record.getRuntimeGeneration(),

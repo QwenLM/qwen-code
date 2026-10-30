@@ -151,8 +151,8 @@ public final class JdbcRuntimeBindingRepository
         }
         return JdbcRepositorySupport.transaction(dataSource, connection -> {
             lockPlacementDomain(connection, claim.getRequest().getScope().getTenantId());
-            boolean external = com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner
-                    .isWorkspaceRequest(claim.getRequest());
+            boolean external = com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                    .isExternalWorkspaceRequest(claim.getRequest());
             var externalOwner = external ? JdbcExternalWorkspaceOwnership.lockOwner(connection, claim) : null;
             if (external) {
                 JdbcExternalWorkspaceOwnership.savedContext(connection, claim, false);
@@ -994,7 +994,7 @@ public final class JdbcRuntimeBindingRepository
 
     public static void requireExternalHarnessAdmission(Connection connection, RuntimeProvisionRequest request,
             RuntimeScope scope, boolean cleanup) throws SQLException {
-        if (!com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.isWorkspaceRequest(request)
+        if (!WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
                 || !request.getScope().equals(scope)) {
             throw unverifiedWorkspaceHolder();
         }

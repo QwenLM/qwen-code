@@ -36,7 +36,6 @@ import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolHoldRow;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionCommandProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.ManagedExtensionProtocol;
@@ -500,7 +499,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                     }
                     return CompletableFuture.completedFuture(null);
                 }
-                if (ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())
+                if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
                         && (binding.getDrainReceipt() != null || !stoppedOnly)) {
                     return drainBinding(binding, null, authority);
                 }
@@ -729,7 +728,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     }
 
     private static boolean retryableExternalWorkspaceProvision(RuntimeProvisionRequest request, Throwable cause) {
-        if (!ExternalWorkspaceProvisioner.isWorkspaceRequest(request)) {
+        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)) {
             return false;
         }
         if (cause instanceof RuntimeBrokerException failure) {
@@ -821,13 +820,18 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     }
 
     private CompletionStage<Void> acknowledgeDrainedTools(RuntimeBindingRecord binding, String cursor) {
+        return acknowledgeDrainedTools(binding, cursor, null, null);
+    }
+
+    private CompletionStage<Void> acknowledgeDrainedTools(RuntimeBindingRecord binding, String cursor,
+            BindingRenewal renewal, RuntimeLifecycleAuthority authority) {
         if ((!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(binding.getRequest().getProvisionerKind())
-                && !ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest()))
+                && !com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest()))
                 || binding.getLease() == null) {
             return CompletableFuture.completedFuture(null);
         }
         if (binding.getLease() == null) {
-            return ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())
+            return com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
                     ? failed(conflict("workspace_close_identity_unverified", "Original worker lease is missing"))
                     : CompletableFuture.completedFuture(null);
         }
@@ -852,7 +856,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
 
     private CompletionStage<RuntimeDrainReceipt> stopAcknowledgedRuntime(RuntimeBindingRecord binding,
             BindingRenewal renewal, RuntimeLifecycleAuthority authority) {
-        if (!ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())) {
+        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
             return stopAcknowledgedRuntime(binding);
         }
         var current = drainClaimForIo(renewal, authority);
@@ -864,8 +868,8 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     }
 
     private CompletionStage<RuntimeDrainReceipt> stopAcknowledgedRuntime(RuntimeBindingRecord binding) {
-        if (ExternalWorkspaceProvisioner.KIND.equals(binding.getRequest().getProvisionerKind())
-                && (!ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest())
+        if (com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(binding.getRequest().getProvisionerKind())
+                && (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())
                         || executionRepository.hasActiveByBinding(binding.getBindingId(), binding.getGeneration()))) {
             return failed(conflict("workspace_close_identity_unverified", "External file drain is not verified"));
         }
@@ -897,7 +901,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     }
 
     private CompletionStage<Void> acknowledgePersistedTools(RuntimeBindingRecord binding, ToolExecutionRecord execution) {
-        boolean external = ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest());
+        boolean external = com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest());
         if (external && (!execution.isSettled() || execution.getResult() == null
                 || execution.getResult().containsKey("capture")
                 || !execution.getReference().keySet().equals(
@@ -1820,7 +1824,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                                     && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
-                        if (ExternalWorkspaceProvisioner.isWorkspaceRequest(context.binding().getRequest())
+                        if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                                 && (v3 || record.getReference().containsKey("runtimeProtocol")
                                         || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
                             executionRepository.settlePrepared(record, Map.of(
@@ -3800,7 +3804,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
             return failed(unavailable("runtime_binding_unavailable",
                     "Runtime binding is not available"));
         }
-        if (ExternalWorkspaceProvisioner.isWorkspaceRequest(request) && record.getResourceHandle() != null) {
+        if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(request) && record.getResourceHandle() != null) {
             return reconcileBinding(record);
         }
         CompletableFuture<BindingContext> created =
@@ -5012,7 +5016,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     private void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
             RuntimePublicationGrant grant) {
-        if (ExternalWorkspaceProvisioner.isWorkspaceRequest(context.binding().getRequest())
+        if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                 && (!"deferred".equals(prepared.getReference().get("dispatchMode"))
                         || prepared.getReference().containsKey("runtimeProtocol") || grant != null
                         || !prepared.isCancelRequested() && (payload == null
@@ -5139,7 +5143,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                     return null;
                 }).thenCompose(ignored -> {
                     if (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.SSH_PROCESS.equals(context.binding().getRequest().getProvisionerKind())
-                            && !ExternalWorkspaceProvisioner.isWorkspaceRequest(context.binding().getRequest())) {
+                            && !com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())) {
                         return CompletableFuture.completedFuture(null);
                     }
                     ToolExecutionRecord settled = executionRepository.findByExecutionCallId(executing.getExecutionCallId());
@@ -6325,8 +6329,8 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                 var expected = requireDrainClaim(authority != null);
                 if (receipt == null || !receipt.matches(expected)
                         || expected.getDrainReceipt() != null && !expected.getDrainReceipt().equals(receipt)
-                        || ExternalWorkspaceProvisioner.KIND.equals(expected.getRequest().getProvisionerKind())
-                                && (!ExternalWorkspaceProvisioner.isWorkspaceRequest(expected.getRequest())
+                        || com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE.equals(expected.getRequest().getProvisionerKind())
+                                && (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(expected.getRequest())
                                         || expected.getResourceHandle() == null || expected.getProvisionSeed() == null
                                         || expected.getLease() == null || !expected.getProvisionSeed().matches(expected.getLease())
                                         || !expected.getResourceHandle().equals(receipt.resourceHandle()))) {

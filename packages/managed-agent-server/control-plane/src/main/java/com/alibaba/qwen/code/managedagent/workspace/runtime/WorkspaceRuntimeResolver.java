@@ -23,7 +23,7 @@ public final class WorkspaceRuntimeResolver {
     private final AgentStateStore sessions;
     private final WorkspaceExecutionStore authority;
     private final SshWorkspaceService ssh;
-    private final com.alibaba.qwen.code.runtimebroker.provisioning.ExternalStorageRegistry externalRegistrations;
+    private final com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry externalRegistrations;
     private final com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog residents;
     private final Map<Storage, Mount> mounts = new LinkedHashMap<>();
     private final String boundSessionIsolationClass;
@@ -41,7 +41,7 @@ public final class WorkspaceRuntimeResolver {
 
     public WorkspaceRuntimeResolver(AgentStateStore sessions, WorkspaceExecutionStore authority,
             ManagedAgentSettings properties, SshWorkspaceService ssh,
-            com.alibaba.qwen.code.runtimebroker.provisioning.ExternalStorageRegistry externalRegistrations) {
+            com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry externalRegistrations) {
         this.ssh = ssh;
         this.externalRegistrations = externalRegistrations;
         this.managedExtensions = properties.getManagedExtensions();

@@ -125,7 +125,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     void configureRenameDelivery(ManagedAgentSettings properties, @Qualifier("managedAgentClock") Clock clock) {
         renameLeaseDuration = properties.getDispatch()::getLeaseDuration;
         renameClock = clock;
-        externalFilesConfiguration = com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner.KIND
+        externalFilesConfiguration = com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE
                 .equals(properties.getRuntimeBroker().getProvisioner());
     }
 
@@ -450,7 +450,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             return response(recorded.get());
         }
         if (externalFilesConfiguration && !workspaces.externalFilesAvailable()) {
-            throw new ManagedAgentException(HttpStatus.CONFLICT, "workspace_unavailable", "External Workspace creation is unavailable.");
+            throw new ManagedAgentException(409, "workspace_unavailable", "External Workspace creation is unavailable.");
         }
         if (modelId != null && (!"qwen-code".equals(agentId) || !harness.supportsModelSelection())) {
             throw new ManagedAgentException(409, "unsupported_feature",

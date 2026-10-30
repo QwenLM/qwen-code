@@ -125,8 +125,8 @@ public final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
 
     @Override
     public CompletionStage<com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
-        boolean external = com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner
-                .isWorkspaceRequest(binding.getRequest());
+        boolean external = com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                .isExternalWorkspaceRequest(binding.getRequest());
         if (external ? bindings == null || !executionStore.canStopExternalDrained(binding, bindings)
                 : binding.getRequest().isManagedContext() ? !executionStore.canStopDrained(binding)
                         : executionStore.hasHolder(binding)) {
