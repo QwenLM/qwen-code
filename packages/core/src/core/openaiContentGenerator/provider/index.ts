@@ -3,6 +3,7 @@ export { DashScopeOpenAICompatibleProvider } from './dashscope.js';
 export { DeepSeekOpenAICompatibleProvider } from './deepseek.js';
 export { ZaiOpenAICompatibleProvider } from './zai.js';
 export { MiniMaxOpenAICompatibleProvider } from './minimax.js';
+export { OllamaOpenAICompatibleProvider } from './ollama.js';
 export { MistralOpenAICompatibleProvider } from './mistral.js';
 export { CerebrasOpenAICompatibleProvider } from './cerebras.js';
 export { FireworksOpenAICompatibleProvider } from './fireworks.js';
