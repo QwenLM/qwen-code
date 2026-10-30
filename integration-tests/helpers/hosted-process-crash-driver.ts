@@ -50,10 +50,9 @@ const report = {
   promptSubmissions: 0,
   continuationsAfterFailure: 0,
   postFailureLoads: [] as boolean[],
-  // Which caller produced each entry above. The boolean records whether a
-  // load was cancellation-only; it does not say which of the connector's
-  // load paths sent it. #15898 shows the sequence changing shape between runs,
-  // so a failing entry has to name its own origin.
+  postFailureCancellationLoads: 0,
+  // Record non-resuming recovery modes separately from their wire origins.
+  // Both modes target the original prompt; cleanup alone cannot prove takeover.
   postFailureLoadOrigins: [] as string[],
   lateCancelReplays: 0,
   originalCancelBody: '',
@@ -163,8 +162,28 @@ const proxy = createServer(async (req, res) => {
         report.continuationsAfterFailure++;
       let postFailureLoadIndex: number | undefined;
       if (injected && target.pathname.endsWith('/load')) {
+        const cancellationOnly =
+          fields.cancellationTakeover === true &&
+          fields.passiveManagedRuntimeRecovery === true &&
+          typeof fields.cancellationPromptId === 'string' &&
+          fields.cancellationPromptId === report.promptId &&
+          fields.recoveryCleanupPromptId === undefined;
+        const cleanupOnly =
+          typeof fields.recoveryCleanupPromptId === 'string' &&
+          fields.recoveryCleanupPromptId === report.promptId &&
+          fields.cancellationTakeover !== true &&
+          fields.passiveManagedRuntimeRecovery !== true &&
+          fields.cancellationPromptId === undefined;
+        const nonDriving =
+          fields.driveRuntimeRecovery !== true &&
+          fields.mcpManagementOnly !== true &&
+          fields.lifecycleAuthority === undefined;
         postFailureLoadIndex = report.postFailureLoads.length;
-        report.postFailureLoads.push(fields.cancellationTakeover === true);
+        report.postFailureLoads.push(
+          nonDriving && (cancellationOnly || cleanupOnly),
+        );
+        if (nonDriving && cancellationOnly)
+          report.postFailureCancellationLoads++;
         report.postFailureLoadOrigins.push(
           [
             `takeover=${fields.cancellationTakeover === true}`,
@@ -172,7 +191,9 @@ const proxy = createServer(async (req, res) => {
             `drive=${fields.driveRuntimeRecovery === true}`,
             `mcpOnly=${fields.mcpManagementOnly === true}`,
             `promptId=${typeof fields.cancellationPromptId === 'string'}`,
+            `promptMatches=${fields.cancellationPromptId === report.promptId}`,
             `cleanup=${typeof fields.recoveryCleanupPromptId === 'string'}`,
+            `cleanupMatches=${fields.recoveryCleanupPromptId === report.promptId}`,
             `lifecycle=${fields.lifecycleAuthority !== undefined}`,
           ].join(' '),
         );
@@ -707,8 +728,12 @@ async function runRecoverySettlement() {
     `no post-failure loads were recorded at all: ${JSON.stringify(report.postFailureLoadOrigins)}`,
   );
   assert(
+    report.postFailureCancellationLoads > 0,
+    'replacement must use a targeted cancellation takeover load',
+  );
+  assert(
     report.postFailureLoads.every(Boolean),
-    `replacement must use cancellation-only loads: ${report.postFailureLoadOrigins.join(' | ')}`,
+    `replacement must use targeted cancellation or cleanup-only loads: ${report.postFailureLoadOrigins.join(' | ')}`,
   );
   await unlink(`${proof}.read-gate`);
   await waitUntil(async () => {
