@@ -1157,7 +1157,7 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             // adoption closing the captured client during that window
             // would strand this call on a dead instance instead of the
             // rebuilt one (the ordering doContinueManagedRuntime follows).
-            HarnessSessionRef ref = attachment(tenantId, sessionId, true);
+            HarnessSessionRef ref = automationAttachment(tenantId, sessionId);
             return client().runAutomationOperation(ref, body);
         } catch (HostedHarnessGenerationException error) {
             adoptGeneration(error);
@@ -1442,6 +1442,44 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
                 createOrLoad(tenantId, sessionId, true, true);
             }
             attachment = attachments.get(key);
+        }
+        return attachment;
+    }
+
+    /**
+     * An automation verb can be the first thing a Session ever does: a
+     * Session created with no input has no journal on the Harness to load,
+     * so resolve it the way that first Turn would — create when the store
+     * never bound a boot id, and re-take passively when the Harness
+     * already holds the Session. The create also binds the boot id at
+     * Session level, so the next cold verb loads instead of collecting
+     * the create's 409.
+     */
+    private HarnessSessionRef automationAttachment(String tenantId,
+            String sessionId) {
+        SessionRecord session = sessions.requireSession(tenantId, sessionId);
+        requireShellApproval(session);
+        AttachmentKey key = attachmentKey(tenantId, sessionId);
+        HarnessSessionRef attachment = attachments.get(key);
+        if (attachment == null || attachment.isRecoveryCleanupOnly()) {
+            boolean bound = session.harnessBootId() != null;
+            try {
+                createOrLoad(tenantId, sessionId, bound, false);
+            } catch (DaemonHttpException error) {
+                // The Harness already holds a Session this store never
+                // bound (a peer's create, or this one's lost answer):
+                // re-take it passively, the way the channel attachment
+                // does.
+                if (error.getStatusCode() != 409) {
+                    throw error;
+                }
+                createOrLoad(tenantId, sessionId, true, true);
+            }
+            attachment = attachments.get(key);
+            if (!bound && attachment != null) {
+                sessions.bindSessionHarness(tenantId, sessionId,
+                        attachment.getHarnessBootId());
+            }
         }
         return attachment;
     }

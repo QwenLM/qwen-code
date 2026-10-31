@@ -5838,6 +5838,21 @@ public class ManagedAgentStore implements AgentStateStore {
     }
 
     @Transactional
+    public void bindSessionHarness(String tenantId, String sessionId,
+            String harnessBootId) {
+        SessionRecord session = requireLegacySessionForUpdate(tenantId, sessionId);
+        if (harnessBootId.equals(session.harnessBootId())) {
+            return;
+        }
+        long now = clock.millis();
+        jdbc.update("UPDATE ma_session SET harness_boot_id ="
+                        + " COALESCE(harness_boot_id, ?),"
+                        + " gmt_modified = ?, version = version + 1 WHERE"
+                        + " tenant_id = ? AND session_id = ?",
+                harnessBootId, now, tenantId, sessionId);
+    }
+
+    @Transactional
     public boolean bindRecoveredHarness(String tenantId, String sessionId,
             String turnId, String owner, String expectedHarnessBootId,
             String harnessBootId) {

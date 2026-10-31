@@ -430,7 +430,11 @@ class SessionRowLockOrderTest {
                 // session row through the legacy-guarded helper or their
                 // own creation INSERT.
                 "insertCsiSessionCommand", "replayChildSessionCommand",
-                "requireCsiRequest");
+                "requireCsiRequest",
+                // The automation verbs' turn-free Session-level boot-id
+                // bind (#14548) locks the session row like bindHarness,
+                // with no turn row to touch.
+                "bindSessionHarness");
         // The comparison population is pinned as exactly as the locker set:
         // a locker that loses its turn-row access must shrink this set
         // loudly instead of silently dropping out of the ordering
@@ -445,7 +449,8 @@ class SessionRowLockOrderTest {
                         "beginSessionRename", "completeSessionRename",
                         "abandonSessionRename", "claimRename",
                         "settleParkedRename",
-                        "replayChildSessionCommand", "requireCsiRequest");
+                        "replayChildSessionCommand", "requireCsiRequest",
+                        "bindSessionHarness");
         // The turn-row population, pinned exactly like the locker set: a
         // member that reaches the turn row without taking the session lock
         // never enters `lockers`, so this assertion — not the violation

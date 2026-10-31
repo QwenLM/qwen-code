@@ -1723,7 +1723,7 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @Test
-    void anAutomationOperationCallsTheClientStandingAfterItsLoadRoundTrip() {
+    void anAutomationOperationCallsTheClientStandingAfterItsCreateRoundTrip() {
         HostedHarnessClient oldClient = mock(HostedHarnessClient.class);
         HostedHarnessCapabilities oldCapabilities =
                 mock(HostedHarnessCapabilities.class);
@@ -1746,10 +1746,10 @@ class QwenHostedHarnessConnectorTest {
         HostedHarnessClient replacement = mock(HostedHarnessClient.class);
         when(replacement.runAutomationOperation(any(), any())).thenReturn(Map.of(
                 "state", "settled", "replayed", true));
-        // The load round trip blocks long enough for another worker's
+        // The create round trip blocks long enough for another worker's
         // adoption to clear the client a receiver-first read had captured.
         final QwenHostedHarnessConnector[] box = new QwenHostedHarnessConnector[1];
-        when(oldClient.loadSession(any(LoadHarnessSession.class)))
+        when(oldClient.createSession(any(CreateHarnessSession.class)))
                 .thenAnswer(invocation -> {
                     ReflectionTestUtils.setField(box[0], "client", null);
                     return attached;
@@ -1775,7 +1775,7 @@ class QwenHostedHarnessConnectorTest {
                 "firedAt", 1L);
         assertThat(connector.runAutomationOperation("tenant-a", SESSION_ID, fire))
                 .containsEntry("state", "settled");
-        // The operation must land on the client standing after the load,
+        // The operation must land on the client standing after the create,
         // never on the instance an adoption closed inside the round trip.
         verify(replacement).runAutomationOperation(attached, fire);
         verify(oldClient, never()).runAutomationOperation(any(), any());
@@ -1828,6 +1828,102 @@ class QwenHostedHarnessConnectorTest {
                 loads.getValue(), "toJson"))
                 .containsEntry("driveRuntimeRecovery", true);
         verify(client).runAutomationOperation(any(), any());
+    }
+
+    // #14548: an automation verb can be the first thing a Session ever
+    // does. A Session created with no input has no journal on the Harness
+    // to load, so the verb must create the Session the way its first Turn
+    // would — never load it — and bind the boot id at Session level,
+    // which the Turn path's bindHarness cannot do without a Turn.
+    @Test
+    void anAutomationOperationOnANeverAttachedSessionCreatesItAndBindsItsBootId() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        when(client.createSession(any(CreateHarnessSession.class))).thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
+                null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "default",
+                "hosted-workspace-files/1");
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        when(client.runAutomationOperation(any(), any())).thenReturn(Map.of(
+                "state", "settled", "replayed", true));
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        Map<String, Object> fire = Map.of("operationId",
+                "66666666-6666-4666-8666-666666666666", "kind", "fire_run",
+                "scheduleId", "asch_0123456789abcdef0123456789abcdef",
+                "definitionRevision", 1L, "occurrenceKey",
+                "schedule:2026-06-01T10:00:00Z", "trigger", "scheduled",
+                "firedAt", 1L);
+        assertThat(connector.runAutomationOperation("tenant-a", SESSION_ID, fire))
+                .containsEntry("state", "settled");
+        verify(client).createSession(any(CreateHarnessSession.class));
+        verify(client, never()).loadSession(any());
+        verify(sessions).bindSessionHarness("tenant-a", SESSION_ID, BOOT_ID);
+        verify(client).runAutomationOperation(attached, fire);
+    }
+
+    // The never-attached create raced a peer that already created the
+    // Session, and the plain load the create's 409 falls back to answers
+    // hosted_session_already_attached: the verb re-takes the Session
+    // through the passive load and still binds the boot id (#14548).
+    @Test
+    void anAutomationOperationOnANeverAttachedSessionReTakesItPassivelyWhenTheHarnessHoldsIt() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        HarnessSessionRef attached = mock(HarnessSessionRef.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getBootId()).thenReturn(BOOT_ID);
+        DaemonHttpException conflict = mock(DaemonHttpException.class);
+        when(conflict.getStatusCode()).thenReturn(409);
+        when(client.createSession(any(CreateHarnessSession.class))).thenThrow(conflict);
+        DaemonHttpException alreadyAttached = mock(DaemonHttpException.class);
+        when(alreadyAttached.getStatusCode()).thenReturn(409);
+        when(client.loadSession(any(LoadHarnessSession.class)))
+                .thenThrow(alreadyAttached)
+                .thenReturn(attached);
+        when(attached.getHarnessBootId()).thenReturn(BOOT_ID);
+        when(attached.getApprovalMode()).thenReturn("default");
+        AgentStateStore sessions = mock(AgentStateStore.class);
+        SessionRecord session = new SessionRecord("tenant-a", SESSION_ID, "qwen-code", null,
+                null, "ACTIVE", null, null, 0, 0, 0, 1, 1, null, 1,
+                new ContextBinding("tenant-a", "selected-workspace", 1, "storage", "child",
+                        WorkspaceExecutionProfile.CONTEXT_CONFIG_REF, 1), "default",
+                "hosted-workspace-files/1");
+        when(sessions.requireSession("tenant-a", SESSION_ID)).thenReturn(session);
+        WorkspaceExecutionStore execution = mock(WorkspaceExecutionStore.class);
+        ManagedAgentProperties properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        ManagedActionStore actions = mock(ManagedActionStore.class);
+        when(actions.approvalMode("tenant-a", SESSION_ID)).thenReturn("default");
+        when(client.runAutomationOperation(any(), any())).thenReturn(Map.of(
+                "state", "settled", "replayed", true));
+        QwenHostedHarnessConnector connector = new QwenHostedHarnessConnector(properties, sessions, execution, actions);
+        ReflectionTestUtils.setField(connector, "client", client);
+        Map<String, Object> fire = Map.of("operationId",
+                "66666666-6666-4666-8666-666666666666", "kind", "fire_run",
+                "scheduleId", "asch_0123456789abcdef0123456789abcdef",
+                "definitionRevision", 1L, "occurrenceKey",
+                "schedule:2026-06-01T10:00:00Z", "trigger", "scheduled",
+                "firedAt", 1L);
+        assertThat(connector.runAutomationOperation("tenant-a", SESSION_ID, fire))
+                .containsEntry("state", "settled");
+        verify(client).createSession(any(CreateHarnessSession.class));
+        verify(client, times(2)).loadSession(any(LoadHarnessSession.class));
+        verify(sessions).bindSessionHarness("tenant-a", SESSION_ID, BOOT_ID);
+        verify(client).runAutomationOperation(attached, fire);
     }
 
     @ParameterizedTest
