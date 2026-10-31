@@ -1912,8 +1912,13 @@ daemon returns it as stored without separately resolving symlinks or
 canonicalizing it. Current daemons emit it for every skill, while clients must
 tolerate its absence from older v1 daemons. Skill bodies, hooks, `skillRoot`,
 and other skill configuration remain excluded. `errors` is omitted for every
-initialized catalog, including a partial one; `complete: false` marks a scan
-that could not cover every level or every readable entry.
+initialized catalog, including a partial one. A status carries `complete: false`
+when the catalog cannot prove a name absent or a spelling uniquely owned:
+enumeration skipped a level (safe or bare mode, or a level named in
+`skills.disabledLevels`), discovery could not read every Skill, an untrusted
+workspace's catalog omits Extension Skills, or the answer is a retained
+snapshot. An absent `complete` means the responding scan covered every level and
+every readable entry.
 
 For extension-owned skills, `extensionName` is the canonical manifest name and
 is safe to use as the owner identity. `extensionDisplayName` is an optional,
