@@ -75,6 +75,7 @@ import {
 import { evaluateMediaPolicyToolCall } from '@qwen-code/qwen-code-core/omni/policy/model-access.js';
 
 import { Buffer } from 'node:buffer';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomUUID } from 'node:crypto';
 import {
   getStartupContextLength,
@@ -2424,6 +2425,8 @@ const STANDALONE_PERMISSION_PERSISTENCE_POLICY: PermissionPersistencePolicy =
     allowUserPersistence: true,
   });
 
+const commandSnapshotBuildContext = new AsyncLocalStorage<boolean>();
+
 const STANDALONE_WORKTREE_ACTION_ERROR =
   'Standalone sessions cannot change or override their working directory.';
 
@@ -2713,6 +2716,9 @@ export class Session implements SessionContext {
   private activeGoalTurn: AcpGoalTurn | undefined;
   private goalHostUnbind?: () => void;
   private goalRuntimeUnsubscribe?: () => void;
+  private removeSkillChangeListener?: () => void;
+  private commandSnapshotInFlight?: Promise<unknown>;
+  private commandSnapshotPending = false;
   private lastGoalSnapshot?: GoalSnapshotV2;
   private lastGoalPublicationKey?: string;
   // Set only when runtime recovery selected a Goal that initial replay hid.
@@ -3010,6 +3016,12 @@ export class Session implements SessionContext {
     this.#registerBackgroundNotificationCallbacks();
     this.#registerSubSessionSpawner();
     this.#registerCurrentSessionScheduledTaskCreator();
+    this.removeSkillChangeListener = this.config
+      .getSkillManager()
+      ?.addChangeListener(() => {
+        if (this.disposed || commandSnapshotBuildContext.getStore()) return;
+        void this.sendAvailableCommandsUpdate();
+      });
     this.config
       .getWorkflowRunRegistry?.()
       .setApprovalRequestCallback((entry, approval, rawArgs, signal) =>
@@ -5190,6 +5202,9 @@ export class Session implements SessionContext {
     this.goalHostUnbind = undefined;
     this.goalRuntimeUnsubscribe?.();
     this.goalRuntimeUnsubscribe = undefined;
+    this.removeSkillChangeListener?.();
+    this.removeSkillChangeListener = undefined;
+    this.commandSnapshotPending = false;
     this.notificationAbortController?.abort();
     this.notificationAbortController = null;
     this.notificationProcessing = false;
@@ -14232,9 +14247,37 @@ export class Session implements SessionContext {
   }
 
   private async sendAvailableCommandsUpdateOrThrow(): Promise<void> {
-    if (this.#isAutomaticWorkHeld()) return;
+    // The latch covers only the snapshot build, not the client write, so the
+    // session never blocks its own next build on a pending write. A caller
+    // that arrives during the build shares its outcome (including a failure),
+    // and the change is republished once afterwards.
+    if (this.commandSnapshotInFlight) {
+      this.commandSnapshotPending = true;
+      await this.commandSnapshotInFlight;
+      return;
+    }
+    const build = (async () => {
+      if (this.#isAutomaticWorkHeld()) return undefined;
+      return commandSnapshotBuildContext.run(true, () =>
+        this.buildAvailableCommandsSnapshot(),
+      );
+    })();
+    this.commandSnapshotInFlight = build;
+    let snapshot: Awaited<typeof build>;
+    try {
+      snapshot = await build;
+    } finally {
+      this.commandSnapshotInFlight = undefined;
+      if (this.commandSnapshotPending) {
+        this.commandSnapshotPending = false;
+        if (!this.disposed && !this.closing) {
+          void this.sendAvailableCommandsUpdate();
+        }
+      }
+    }
+    if (!snapshot) return;
     const { availableCommands, availableSkills, availableSkillDetails } =
-      await this.buildAvailableCommandsSnapshot();
+      snapshot;
     this.config.refreshWorkflowMode?.();
     const update: SessionUpdate = {
       sessionUpdate: 'available_commands_update',
@@ -14248,6 +14291,7 @@ export class Session implements SessionContext {
           }
         : {}),
     };
+    if (this.disposed) return;
     await this.sendUpdate(update);
   }
 
