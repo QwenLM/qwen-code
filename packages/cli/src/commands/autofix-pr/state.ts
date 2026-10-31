@@ -112,6 +112,35 @@ export interface AutofixPrState {
   /** Set by a `cleanup` that kept the worktree: the watch is over, and the
    * helpers of its rounds refuse until a start (`prepare`) resumes it. */
   ended?: { at: string; reason: string };
+  /** Checks a round saw failing and has not seen pass since, written by
+   * `snapshot`: the budget of fix pushes per failing check (Section 10). */
+  failingChecks?: FailingCheck[];
+}
+
+export interface FailingCheck {
+  /** The check across its attempts: app, workflow, trigger and name. */
+  identity: string;
+  /** Its name, as the round reports it. */
+  check: string;
+  /** The head a round last saw it fail on. */
+  head: string;
+  /** Heads of this watch's own pushes it failed on again since a round
+   * first saw it fail. */
+  pushes: number;
+  /** The latest push of the watch the record counts from: only a push the
+   * watch made after this one spends another, so a return to an earlier
+   * push does not count twice. */
+  lastPush?: string;
+  /** Heads the count has no result for yet — still running, or not
+   * answered — oldest first, each with the record's `pushes` once that
+   * read counted: a pass found there later leaves only the pushes counted
+   * since. */
+  unanswered?: UnansweredHead[];
+}
+
+export interface UnansweredHead {
+  sha: string;
+  pushes: number;
 }
 
 export interface AutofixPrWatchOptions {
@@ -195,6 +224,40 @@ export function rerunFloors(state: {
 
 /** Pushes one watch may make before it stops (Section 10 of the design). */
 export const MAX_PUSHES = 10;
+
+/** Pushes of a watch a check may go on failing across before a round
+ * leaves it for a person instead of fixing it again (Section 10). */
+export const MAX_CHECK_FIX_PUSHES = 3;
+
+/** Checks `failingChecks` keeps, the most recently added last. */
+export const MAX_FAILING_CHECKS = 100;
+
+/**
+ * The state with `head` as the head the watch knows. A head the watch did
+ * not push is someone else's: it gives every check its fix pushes back,
+ * counted again from the watch's latest push (Section 10) — whether or not
+ * a round ever reads it, as one a fix merged in before pushing.
+ */
+export function withKnownHead(
+  state: AutofixPrState,
+  head: string,
+): AutofixPrState {
+  if (state.pushedShas.includes(head) || !state.failingChecks?.length) {
+    return { ...state, lastKnownHeadSha: head };
+  }
+  const lastPush = state.pushedShas.at(-1);
+  return {
+    ...state,
+    lastKnownHeadSha: head,
+    failingChecks: state.failingChecks.map((record) => ({
+      identity: record.identity,
+      check: record.check,
+      head: record.head,
+      pushes: 0,
+      ...(lastPush === undefined ? {} : { lastPush }),
+    })),
+  };
+}
 
 /** Key of one failed attempt of a check on a head, as the gate cursor keys it. */
 export function checkAttemptKey(
@@ -909,7 +972,42 @@ export function stateDefect(state: AutofixPrState): string | null {
   ) {
     return 'ended';
   }
+  if (
+    state.failingChecks !== undefined &&
+    !(
+      Array.isArray(state.failingChecks) &&
+      state.failingChecks.every(isFailingCheck)
+    )
+  ) {
+    return 'failingChecks';
+  }
   return null;
+}
+
+function isFailingCheck(value: unknown): value is FailingCheck {
+  const check = value as FailingCheck | null;
+  return (
+    typeof check === 'object' &&
+    check !== null &&
+    typeof check.identity === 'string' &&
+    typeof check.check === 'string' &&
+    typeof check.head === 'string' &&
+    Number.isInteger(check.pushes) &&
+    check.pushes >= 0 &&
+    SHA_RE.test(check.head) &&
+    (check.lastPush === undefined || SHA_RE.test(check.lastPush)) &&
+    (check.unanswered === undefined ||
+      (Array.isArray(check.unanswered) &&
+        check.unanswered.every(
+          (entry: UnansweredHead | null) =>
+            typeof entry === 'object' &&
+            entry !== null &&
+            typeof entry.sha === 'string' &&
+            SHA_RE.test(entry.sha) &&
+            Number.isInteger(entry.pushes) &&
+            entry.pushes >= 0,
+        )))
+  );
 }
 
 function isWatchOptions(value: unknown): value is AutofixPrWatchOptions {
@@ -973,7 +1071,8 @@ export function readState(statePath: string): AutofixPrState | null {
   }
   // The fields these hold, and nothing else: what reaches `status`, a
   // rebuilt state and the next write is what the helpers wrote.
-  const { watch, ended, needsHuman, reportedNeedsHuman } = parsed;
+  const { watch, ended, needsHuman, reportedNeedsHuman, failingChecks } =
+    parsed;
   return {
     ...parsed,
     ...(watch
@@ -1002,6 +1101,27 @@ export function readState(statePath: string): AutofixPrState | null {
             sha: reportedNeedsHuman.sha,
             texts: [...reportedNeedsHuman.texts],
           },
+        }
+      : {}),
+    ...(failingChecks
+      ? {
+          failingChecks: failingChecks.map(
+            ({ identity, check, head, pushes, lastPush, unanswered }) => ({
+              identity,
+              check,
+              head,
+              pushes,
+              ...(lastPush === undefined ? {} : { lastPush }),
+              ...(unanswered === undefined
+                ? {}
+                : {
+                    unanswered: unanswered.map(({ sha, pushes }) => ({
+                      sha,
+                      pushes,
+                    })),
+                  }),
+            }),
+          ),
         }
       : {}),
   };
