@@ -342,6 +342,8 @@ import {
   getConfiguredModelReasoning,
   getDefaultReasoningConfig,
   getGptReasoningOverrideState,
+  getModelConfiguration,
+  hasTieredManifestReasoning,
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
   parseReasoningSelection,
@@ -7142,7 +7144,7 @@ class QwenAgent implements Agent {
           ].map((sources) => [sources, sources?.['reasoning']] as const);
           try {
             if (modelReasoning && !modelReasoning.toggleOnly) {
-              clearReasoningRequestOverrides(generation);
+              clearReasoningRequestOverrides(generation, config);
             }
             applyReasoningSelection(config, selected, defaultReasoning);
             if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
@@ -9270,6 +9272,7 @@ class QwenAgent implements Agent {
           systemPrompt: 0,
           builtinTools: 0,
           mcpTools: 0,
+          instructionFiles: 0,
           memoryFiles: 0,
           skills: 0,
           messages: 0,
@@ -9278,6 +9281,7 @@ class QwenAgent implements Agent {
         },
         builtinTools: [] as Array<{ name: string; tokens: number }>,
         mcpTools: [] as Array<{ name: string; tokens: number }>,
+        instructionFiles: [] as Array<{ path: string; tokens: number }>,
         memoryFiles: [] as Array<{ path: string; tokens: number }>,
         skills: [] as Array<{
           name: string;
@@ -9293,6 +9297,7 @@ class QwenAgent implements Agent {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
+      workspaceRoot: this.sessionWorkspaceRoot(config),
       usage: {
         modelName: usage.modelName,
         totalTokens: usage.totalTokens,
@@ -9300,6 +9305,7 @@ class QwenAgent implements Agent {
         breakdown: usage.breakdown,
         builtinTools: usage.builtinTools,
         mcpTools: usage.mcpTools,
+        instructionFiles: usage.instructionFiles,
         memoryFiles: usage.memoryFiles,
         skills: usage.skills,
         isEstimated: usage.isEstimated,
@@ -16828,7 +16834,7 @@ class QwenAgent implements Agent {
       return;
     }
     if (generation && modelReasoning && !modelReasoning.toggleOnly) {
-      clearReasoningRequestOverrides(generation);
+      clearReasoningRequestOverrides(generation, config);
     }
     if (
       selection === REASONING_EFFORT_NONE ||
@@ -17669,7 +17675,8 @@ class QwenAgent implements Agent {
       activeRuntimeSnapshot ||
       (currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
         !modelReasoning?.profile &&
-        !deepSeekState) ||
+        !deepSeekState &&
+        !hasTieredManifestReasoning(reasoningModel)) ||
       !isReasoningSelectionSupported(
         reasoningModel,
         REASONING_EFFORT_DEFAULT,
@@ -17834,11 +17841,21 @@ class QwenAgent implements Agent {
         generation,
         resolveReasoningForModel(config, generation),
       );
-    return completeModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+    if (
+      completeModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
       !reasoning?.profile &&
       !deepSeekState
-      ? undefined
-      : reasoning;
+    ) {
+      // Keep an already-resolved declaration; the new tiered Qwen families
+      // fall back to their manifest only when nothing resolved, so routed
+      // selectors neither hide the controls nor replace a declaration.
+      if (reasoning) return reasoning;
+      const wireModel = getRequestModel(generation ?? {});
+      return hasTieredManifestReasoning(wireModel)
+        ? getModelConfiguration(wireModel)?.reasoning
+        : undefined;
+    }
+    return reasoning;
   }
 
   private buildSelectableModelOptions(config: Config) {

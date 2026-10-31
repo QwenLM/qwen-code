@@ -71,6 +71,7 @@ import {
   useWorkspace,
   useWorkspaceActions,
   useWorkspaceEventSignals,
+  type DaemonContextMemoryDetail,
   type DaemonSessionActions,
   type DaemonSessionNotice,
   type DaemonSessionOwnerSnapshot,
@@ -150,7 +151,10 @@ import { useModelRefresh } from './hooks/useModelRefresh';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
-import { isComposerTask } from './utils/composerTasks';
+import {
+  hasActiveBackgroundAgent,
+  isComposerTask,
+} from './utils/composerTasks';
 import {
   getTaskActivityKey,
   hasActiveTaskActivity,
@@ -186,6 +190,7 @@ import {
   ChatEditor,
   type ComposerToolbarAction,
 } from './components/ChatEditor';
+import { getWorkflowModeMessages } from './components/workflow-mode-messages';
 import {
   mapRestoredInputAnnotationsAfterTextChange,
   type ComposerSubmitCommit,
@@ -308,6 +313,10 @@ import {
   resolveArtifactWorkspaceOwner,
   useArtifactWorkspaceTarget,
 } from './components/artifacts/useArtifactWorkspaceTarget';
+import {
+  readContextInstructionFile,
+  type ContextInstructionFileContent,
+} from './components/artifacts/readContextInstructionFile';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -687,6 +696,7 @@ function getArtifactPanelTabStops(
 }
 const DEFAULT_COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'workflowMode',
   'contextUsage',
   'model',
   'widthMode',
@@ -3757,7 +3767,7 @@ export function App({
       if (
         target instanceof Element &&
         target.closest(
-          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
         )
       ) {
         return;
@@ -3791,7 +3801,7 @@ export function App({
       if (
         el instanceof Element &&
         el.closest(
-          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
         )
       ) {
         return;
@@ -8039,6 +8049,48 @@ export function App({
     },
     [],
   );
+  const openMemoryFilePreview = useCallback(
+    async (file: DaemonContextMemoryDetail, fileWorkspaceCwd: string) => {
+      const absolutePath = file.absolutePath;
+      if (!absolutePath) return;
+      let result: ContextInstructionFileContent;
+      try {
+        const client = workspace.client;
+        if (!client) {
+          throw new Error('The workspace for this file is not available.');
+        }
+        result = await readContextInstructionFile(
+          client,
+          workspace.capabilities,
+          fileWorkspaceCwd,
+          absolutePath,
+        );
+      } catch (err) {
+        pushToast('error', err instanceof Error ? err.message : String(err));
+        return;
+      }
+      if (result.truncated) {
+        pushToast('warning', t('contextUsage.previewTruncated'));
+      }
+      const tab: ArtifactPanelTab = {
+        id: `memory-file:${absolutePath}`,
+        kind: 'file',
+        title: file.path,
+        workspacePath: absolutePath,
+        previewContent: result.content,
+        previewOnly: true,
+        ...(fileWorkspaceCwd ? { workspaceCwd: fileWorkspaceCwd } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelOpen(true);
+    },
+    [workspace, pushToast, t],
+  );
   const closeArtifactPanel = useCallback(() => {
     setArtifactPanelOpen(false);
     // Reset fullscreen in the same commit: while it stays true the covered
@@ -8795,9 +8847,21 @@ export function App({
       return changed ? next : tabs;
     });
   }, [backgroundTasks, connection.sessionId]);
+  // Host-provided footers render their own task list from composer tasks
+  // plus background agents (foreground agents are transcript-only; terminal
+  // background agents keep reaching hosts, matching the design doc).
+  const footerHostTasks = useMemo(
+    () =>
+      sessionTasks.filter(
+        (task) =>
+          isComposerTask(task) ||
+          (task.kind === 'agent' && task.isBackgrounded === true),
+      ),
+    [sessionTasks],
+  );
   const footerTasks = useMemo(
-    () => (renderFooter ? backgroundTasks.map(mapToWebShellTaskInfo) : []),
-    [backgroundTasks, renderFooter],
+    () => (renderFooter ? footerHostTasks.map(mapToWebShellTaskInfo) : []),
+    [footerHostTasks, renderFooter],
   );
   const statusBarRef = useRef<StatusBarHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
@@ -20352,6 +20416,23 @@ export function App({
     ],
   );
 
+  const handleWorkflowModeChange = useCallback(
+    (requested: boolean) => {
+      if (sessionWriteBlockedRef.current || !connectionRef.current.sessionId) {
+        return;
+      }
+      const owner = sessionOwnerGuard.capture();
+      void sessionActions.setWorkflowMode(requested).catch((error: unknown) => {
+        if (owner.isCurrent())
+          reportError(
+            error,
+            getWorkflowModeMessages(selectedLanguage).updateFailed,
+          );
+      });
+    },
+    [reportError, sessionActions, sessionOwnerGuard, selectedLanguage],
+  );
+
   const handleReasoningEffort = useCallback(
     (value: ReasoningSelection) => {
       if (sessionWriteBlocked || !connectionRef.current.sessionId) {
@@ -21724,6 +21805,7 @@ export function App({
     onSelectTab: selectArtifactPanelTab,
     onCloseTab: closeArtifactPanelTab,
     onOpenFilePreview: openFilePreview,
+    onOpenMemoryFile: openMemoryFilePreview,
     onOpenFiles: filesAvailable ? openFilesPanel : undefined,
     onReferenceFile:
       workspaceContextActive && !dialogOpen && mainView === 'chat'
@@ -23933,6 +24015,11 @@ export function App({
                                     ? openCurrentContextUsagePanel
                                     : undefined
                                 }
+                                onOpenMemoryFile={
+                                  contextUsageAvailable
+                                    ? openMemoryFilePreview
+                                    : undefined
+                                }
                                 loadingTranscript={connection.loadingTranscript}
                                 catchingUp={connection.catchingUp}
                                 hasOlderHistory={transcriptHistory.hasMore}
@@ -24729,6 +24816,20 @@ export function App({
                           }
                           onSelectMode={handleSetMode}
                           onSelectModel={handleModelSelect}
+                          workflowMode={connection.workflowMode}
+                          workflowModeStatus={
+                            managedMode
+                              ? undefined
+                              : !connection.sessionId
+                                ? 'unbound'
+                                : sessionWriteBlocked ||
+                                    connection.catchingUp ||
+                                    connection.status !== 'connected'
+                                  ? 'syncing'
+                                  : (connection.workflowModeStatus ?? 'unknown')
+                          }
+                          workflowModePending={connection.workflowModePending}
+                          onWorkflowModeChange={handleWorkflowModeChange}
                           reasoning={displayedReasoning}
                           onSelectReasoningEffort={
                             hasAuthoritativeReasoningContext
@@ -24940,11 +25041,22 @@ export function App({
                           ref={statusBarRef}
                           onOpenTasks={() => openTasksPanel()}
                           onReturnToInput={handleReturnToEditor}
+                          // The pill filters composer tasks itself; it also
+                          // counts background agents, which the
+                          // pre-filtered list would have dropped. The full
+                          // snapshot reaches the pill only while a
+                          // background agent is still running in the
+                          // shipped entry, where the environment panel
+                          // replaces the footer task list; the empty chat
+                          // and headerless embeds keep the pre-filtered
+                          // composer tasks, so agents never reach them.
                           tasks={
                             isChatEmptyState ||
                             !environmentTasksReplacementEnabled
                               ? backgroundTasks
-                              : []
+                              : hasActiveBackgroundAgent(sessionTasks)
+                                ? sessionTasks
+                                : []
                           }
                           hideSettings={
                             hideSettings || !workspaceContextActive

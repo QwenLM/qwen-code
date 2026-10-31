@@ -2377,6 +2377,31 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
         });
       });
 
+      // The assertion above only proves the inner fetch was told to stop.
+      // The SDK resolves redirects outside it, against `requestInit`, so the
+      // transport has to carry the same answer or a same-origin 30x is
+      // replayed with the credential attached.
+      it('carries the Agent Plugin redirect refusal into the transport', async () => {
+        const plugin = await transportFor(
+          {
+            httpUrl: 'https://example.com/mcp',
+            headers: { 'X-Api-Key': 'synthetic' },
+            agentPluginV1: true,
+          },
+          'plugin-redirect',
+        );
+        const plain = await transportFor(
+          {
+            httpUrl: 'https://example.com/mcp',
+            headers: { 'X-Api-Key': 'synthetic' },
+          },
+          'plain-redirect',
+        );
+
+        expect(plugin._requestInit?.redirect).toBe('manual');
+        expect(plain._requestInit?.redirect).toBeUndefined();
+      });
+
       /**
        * Sends `init` (the optional GET/SSE probe by default) to /mcp through
        * the compatibility fetch over a stub answering `body` with `status`.
