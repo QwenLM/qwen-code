@@ -9,6 +9,8 @@ import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledFuture;
@@ -91,11 +93,15 @@ class ExecutionObservationCooldownTest {
             cooldown.stamp("exec-1", new ExecutionReconciliation(
                     record(ToolExecutionRecord.State.SETTLED, 1),
                     ExecutionReconciliation.Outcome.RESOLVED, "settled"));
-            assertThat(capturing.captured).isNotNull();
+            assertThat(capturing.tasks).hasSize(1);
+            // The eviction must be scheduled at the cooldown window itself,
+            // asserted against the moved constant rather than a restated 1000.
+            assertThat(capturing.delay).isEqualTo(ExecutionObservationCooldown.WINDOW.toMillis());
+            assertThat(capturing.unit).isEqualTo(TimeUnit.MILLISECONDS);
             // Advance the shared clock past the deadline, then run the
             // captured eviction task explicitly: no wall-clock race.
             clock.now = clock.now.plus(ExecutionObservationCooldown.WINDOW).plusMillis(50);
-            capturing.captured.run();
+            capturing.tasks.get(0).run();
             // Rewind inside the original window: a surviving entry would
             // answer again, so null proves the eviction removed the entry
             // rather than the read merely observing expiry.
@@ -118,9 +124,39 @@ class ExecutionObservationCooldownTest {
             // The scheduler fires against a clock that has not moved: the
             // eviction must consult the same clock as the reads and refuse
             // to drop an entry those reads still consider fresh.
-            capturing.captured.run();
+            capturing.tasks.get(0).run();
             assertThat(cooldown.cooled("exec-1", record(ToolExecutionRecord.State.UNKNOWN, 1)))
                     .isSameAs(settled);
+        } finally {
+            capturing.shutdownNow();
+        }
+    }
+
+    @Test
+    void aStaleEvictionDoesNotDeleteAFresherRestamp() {
+        CapturingScheduler capturing = new CapturingScheduler();
+        try {
+            ExecutionObservationCooldown cooldown = new ExecutionObservationCooldown(clock, capturing);
+            ExecutionReconciliation first = new ExecutionReconciliation(
+                    record(ToolExecutionRecord.State.SETTLED, 1),
+                    ExecutionReconciliation.Outcome.RESOLVED, "settled");
+            cooldown.stamp("exec-1", first);
+            // Re-stamp inside the first window: the second entry replaces the
+            // first and carries a later deadline.
+            clock.now = clock.now.plusMillis(900);
+            ExecutionReconciliation second = new ExecutionReconciliation(
+                    record(ToolExecutionRecord.State.SETTLED, 2),
+                    ExecutionReconciliation.Outcome.RESOLVED, "settled");
+            cooldown.stamp("exec-1", second);
+            assertThat(capturing.tasks).hasSize(2);
+            // Fire the FIRST eviction after its own deadline but before the
+            // second entry's: the value-equal remove must leave the fresher
+            // entry alone, or every observation in the restamped window's
+            // second half fans through to the worker (issue #13183).
+            clock.now = clock.now.plusMillis(150);
+            capturing.tasks.get(0).run();
+            assertThat(cooldown.cooled("exec-1", record(ToolExecutionRecord.State.UNKNOWN, 1)))
+                    .isSameAs(second);
         } finally {
             capturing.shutdownNow();
         }
@@ -137,9 +173,11 @@ class ExecutionObservationCooldownTest {
         assertThat(cooldown.cooled("exec-1", record(ToolExecutionRecord.State.UNKNOWN, 1))).isNull();
     }
 
-    /** Captures the cooldown's eviction task so tests run it deterministically. */
+    /** Captures the cooldown's eviction tasks so tests run them deterministically. */
     private static final class CapturingScheduler extends ScheduledThreadPoolExecutor {
-        private Runnable captured;
+        private final List<Runnable> tasks = new ArrayList<>();
+        private long delay;
+        private TimeUnit unit;
 
         private CapturingScheduler() {
             super(1);
@@ -147,7 +185,9 @@ class ExecutionObservationCooldownTest {
 
         @Override
         public ScheduledFuture<?> schedule(Runnable command, long delay, TimeUnit unit) {
-            captured = command;
+            tasks.add(command);
+            this.delay = delay;
+            this.unit = unit;
             return super.schedule(() -> { }, delay, unit);
         }
     }

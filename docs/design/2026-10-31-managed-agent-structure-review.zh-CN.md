@@ -60,16 +60,16 @@ Managed Agent 服务端从首篇设计（2026-09-19）起，约两个月内长�
 
 **D1. 上帝类。** 最大的生产类：
 
-| 类                                 | 模块           | 行数  | 备注                       |
-| ---------------------------------- | -------------- | ----- | -------------------------- |
-| `ManagedAgentStore`                | persistence    | 7,751 | 300+ 方法，7 个公开 setter |
-| `RuntimeBrokerService`             | runtime-broker | 6,417 | 230+ 方法；模块唯一的类    |
-| `ManagedSessionStore`              | persistence    | 3,931 |                            |
-| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                            |
-| `ToolPublicationDataStore`         | persistence    | 2,709 |                            |
-| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                            |
-| `ManagedAgentService`              | control-plane  | 2,120 |                            |
-| `HarnessCoordinator`               | control-plane  | 1,770 |                            |
+| 类                                 | 模块           | 行数  | 备注                                                   |
+| ---------------------------------- | -------------- | ----- | ------------------------------------------------------ |
+| `ManagedAgentStore`                | persistence    | 7,751 | 300+ 方法，7 个公开 setter                             |
+| `RuntimeBrokerService`             | runtime-broker | 6,417 | 230+ 方法；冷却已提取至 `ExecutionObservationCooldown` |
+| `ManagedSessionStore`              | persistence    | 3,931 |                                                        |
+| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                        |
+| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                        |
+| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                        |
+| `ManagedAgentService`              | control-plane  | 2,120 |                                                        |
+| `HarnessCoordinator`               | control-plane  | 1,770 |                                                        |
 
 `ManagedAgentStore` 混合了会话准入、turn、event、item/message 投影、worktree、
 MCP 管理、definition pin、skills 与 extension 投影。它的 7 个公开
@@ -202,7 +202,9 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
   契约。这是风险最低、可读性收益最高的拆分。observation 冷却是第一条
   提取的缝（2026-10-31，`ExecutionObservationCooldown`）：它只拥有自己
   触及的状态、无独立生命周期；恢复扫描、取消与 tool hold 作为独立切片
-  跟进。
+  跟进。带入下一切片的已知覆盖缺口：`lookupOnce` 中"先 stamp 后释放
+  在途槽位"的顺序没有测试钉住（base 上即存在的缺口）；待对账路径提取
+  为独立协作者、该顺序成为缝级契约而非私有 lambda 内部时序时再钉。
 - 之后对 `ManagedSessionStore` 与 `QwenHostedHarnessConnector` 做同样处理，
   各自独立成切片。
 
