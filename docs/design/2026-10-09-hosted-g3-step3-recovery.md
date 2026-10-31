@@ -510,7 +510,7 @@ Integration regressions proved that model request preparation failures preserve 
 
 The machine-readable reports, manifests and retained failed diagnostics are under `.qwen/investigations/g3-step3-implementation/`; the current consolidated report is `packaged-verification.md`. These five packaged gates do not prove the whole matrix above. Since [replaceable-Harness D11](2026-10-02-hosted-replaceable-harness.md#d11--residual-gates-step-3-in-ci-the-model-round-arm-and-q2s-binding-half), they are CI steps of the `hosted-failover-e2e` job, which runs apart from the Hosted MySQL verify (see D11), next to a model-round arm that packages the main observations of B1 for a no-tool Session and of B2, though not their attempt and stream identities, the live SSE view or the admission count.
 
-#14481's packaged gates add twelve fault arms to the same job. Seven landed with
+#14481's packaged gates add fourteen fault arms to the same job. Seven landed with
 the second step. Five layer one fault on the Allow path: three crash the
 replacement Harness after a
 durable A5 barrier — once the Allow decision is recorded (A5's decision row),
@@ -545,10 +545,26 @@ packaged too: a test-gated hook holds the replacement inside that window once
 its post-tool round has recorded Finished, the runner crashes it there, and the
 next generation must reissue the saved request deep-equal and project one
 terminal with the recovered answer rather than compensate an already-committed
-output. Malformed or foreign refs, snapshot overflow, mixed
-calls and rewritten inputs across a replacement (A3), Hook/MCP/child
+output. A crash in the mixed-sibling approval gap (A3's native half) is
+packaged as well: a two-call batch is approved one sibling at a time, a
+test-gated hook holds the replacement on the first approval it asks after the
+earlier sibling is decided, the runner crashes it there, and the next
+generation must re-hang the original pending Action with its original deadline,
+require that sibling's own Allow rather than inherit the earlier one, leave the
+decided sibling un-re-asked, and settle both calls once each in their original
+order ([A3 mixed-sibling approval](2026-10-31-hosted-a3-mixed-sibling-approval.md)).
+A crash after several earlier tool rounds (B3) is packaged too: a multi-round
+fixture runs two earlier tools, the replacement is crashed while a later post-tool
+request is held, and the next generation must resume the saved logical round and
+restore the turn cost snapshot and per-model token ledger rather than restart them,
+with each earlier execution occurring once and the later request reissued deep-equal
+([B3 round and cost budget](2026-10-31-hosted-b3-round-cost-budget.md)). "Cost budget"
+here is the TurnBudget snapshot plus the token ledger, not a cumulative spend gate.
+Malformed or foreign refs, snapshot overflow, the rewritten-input and
+Hook-no-rerun half of A3 (a commandStep follow-up, since a native continuation
+refuses Hook/MCP sessions), Hook/MCP/child
 uncertainty (A6), the attempt and stream identities plus the live SSE view
-(B2), the round and cost budgets (B3), and the mixed-version reader/bundle
+(B2), and the mixed-version reader/bundle
 closure (R2) stay focused or integration evidence. Full-owner restart, real-provider
 acceptance and a real mixed-version cluster remain separate. Q2's binding
 half has the D11 frozen control-plane arm for a woken former Spring's stale

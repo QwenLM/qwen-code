@@ -129,6 +129,12 @@ jobs:
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
       ubuntu_runner: '${{ steps.pick_runner.outputs.ubuntu_runner }}'
+      # Lint & Static's own routing: every pull request reaches the fleet,
+      # including untrusted forks (maintainer decision 2026-10-31 — the lane
+      # executes PR code on the shared pool and that risk is accepted). The
+      # association gate in ubuntu_runner still governs every other Linux
+      # lane; do not "simplify" the two outputs into one.
+      lint_runner: '${{ steps.pick_runner.outputs.lint_runner }}'
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     steps:
       - name: 'Detect release version-sync PR'
@@ -175,6 +181,12 @@ jobs:
       #
       # Keep push routing aligned with the classifier above so a hosted queue
       # does not delay the downstream ECS jobs.
+      #
+      # lint_runner is the one deliberate divergence: Lint & Static routes
+      # EVERY pull request to the fleet, untrusted forks included (maintainer
+      # decision 2026-10-31, risk accepted — see the classify_pr outputs
+      # comment). The kill-switch and LINUX_RUNNER_FLEET=hosted still force
+      # hosted, and non-PR events inherit ubuntu_runner unchanged.
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
@@ -193,6 +205,11 @@ jobs:
           case "${AUTHOR_ASSOCIATION}" in
             OWNER|MEMBER|COLLABORATOR) trusted_author=true ;;
           esac
+          # Resolve fleet labels once; both outputs assign from this.
+          fleet_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+          if [[ "${LINUX_RUNNER_FLEET}" == "arm64" ]]; then
+            fleet_runner='["self-hosted", "linux", "arm64"]'
+          fi
           # Dispatch input wins over the fleet variable; MAINTAINER_ECS_RUNNER_
           # DISABLED=true still hard-forces hosted runners everywhere.
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
@@ -207,14 +224,18 @@ jobs:
           elif [[ "${ECS_DISABLED}" == "true" || "${LINUX_RUNNER_FLEET}" == "hosted" ]]; then
             ubuntu_runner='["ubuntu-latest"]'
           elif [[ "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ]]; then
-            if [[ "${LINUX_RUNNER_FLEET}" == "arm64" ]]; then
-              ubuntu_runner='["self-hosted", "linux", "arm64"]'
-            else
-              ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
-            fi
+            ubuntu_runner="${fleet_runner}"
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
+          # Lint & Static routes every pull request to the fleet (maintainer
+          # decision 2026-10-31); non-PR events inherit ubuntu_runner unchanged.
+          lint_runner="${ubuntu_runner}"
+          if [[ "${EVENT_NAME}" == "pull_request" && "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" ]]; then
+            lint_runner="${fleet_runner}"
+          fi
+          echo "lint_runner=${lint_runner}" >> "${GITHUB_OUTPUT}"
+          echo "Selected lint runner: ${lint_runner}"
 
       # The product jobs later check out the PR head. Classify before that
       # from an explicit base-SHA checkout so no fork can replace the
@@ -630,7 +651,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       # The test step's side lane (.github/scripts/ci/run-unit-test-lanes.sh)
@@ -940,8 +961,14 @@ jobs:
     # same release-sync convention: stay running on skip_ci PRs so a required
     # context still reports, with the per-step guards making it a no-op pass.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
-    # Routed like test's, not a bare constant: this lane was beheaded twice
+    # Reads lint_runner, NOT ubuntu_runner: this lane routes every pull
+    # request to the fleet, untrusted forks included (maintainer decision
+    # 2026-10-31 — the lane executes PR code and the shared-pool risk is
+    # accepted). test and the integration lanes keep the association-gated
+    # ubuntu_runner. The kill-switch and hosted-fleet overrides still apply,
+    # inside pick_runner.
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'') }}'
+    # Pool-scoped like test's, not a bare constant: this lane was beheaded twice
     # running honestly on cold-cache hk3-pool runners — at 30 minutes flat
     # (install 892s vs the sibling Test job's 347s) and again at 45 (install
     # 940s, bundle closure 681s vs a warm 171s, every step 2–4x). The pool's
@@ -951,13 +978,30 @@ jobs:
     # Keyed on `self-hosted`, not on the x64 fleet's `ecs-qwen` label: the
     # ARM64 fleet renders ["self-hosted", "linux", "arm64"], so a
     # fleet-specific substring priced those reserved machines as hosted.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''90'' || ''45'') }}'
+    # Reads the same lint_runner as runs-on so the ceiling always prices the
+    # pool the job actually lands on.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''90'' || ''45'') }}'
     env:
       LINT_BASE_SHA: "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}"
     permissions:
       contents: 'read'
       pull-requests: 'read'
     steps:
+      # Untrusted fork code runs here; job env cannot read the runner context
+      # and RUNNER_TEMP survives across jobs, so publish a run-unique HOME via
+      # GITHUB_ENV. Rationale: docs/design/2026-10-31-lint-static-ecs-routing.md.
+      - name: 'Create isolated HOME'
+        run: |-
+          home="${RUNNER_TEMP}/qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf -- "$home"
+          mkdir -p "$home" "${RUNNER_TOOL_CACHE}/qwen-ci-cache"
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "$home" "$home" >> "${GITHUB_ENV}"
+          # Linter archives are SHA-256-verified on every cache hit, so sharing
+          # them is safe; corepack does NOT re-verify extracted entries on hit,
+          # so its home stays per-run (a shared one is a poisoning channel).
+          printf 'XDG_CACHE_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"
+          printf 'COREPACK_HOME=%s\n' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"
+
       # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
       # verify) may leave root-owned, read-only files anywhere in the workspace.
       # Restore ownership and write permission unconditionally so the checkout
@@ -1296,7 +1340,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Configure npm for rate limiting'
@@ -1472,10 +1516,30 @@ jobs:
       - name: 'Run .github/scripts helper tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
+          # Route os.tmpdir() off the host /tmp tmpfs: its inode quota is
+          # small and shared across the pool, and e2e-build.test.mjs creates
+          # thousands of chunk files there (#15965 ENOSPC with 202G free).
+          # Same routing as the unit lanes (#10035), private per-run dir
+          # included: RUNNER_TEMP is shared, and a cancelled battery never
+          # reaches its own after() cleanup, so the fixture tree would stick
+          # around in _work/_temp. A hard kill stays uncovered either way.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          HELPER_TMPDIR="$(mktemp -d "${TMPDIR}/helper-tests-XXXXXX" 2>/dev/null)" || HELPER_TMPDIR=""
+          if [ -n "$HELPER_TMPDIR" ]; then
+            TMPDIR="$HELPER_TMPDIR"
+            export TMPDIR
+            trap 'rm -rf "$HELPER_TMPDIR"' EXIT
+          fi
           node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} 2>&1 | tee "${RUNNER_TEMP}/helper-attempt1.log" || {
             node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} &&
               echo "::warning::helper tests failed once and the retry absorbed it; attempt-1 failures: $(grep -E '^not ok' "${RUNNER_TEMP}/helper-attempt1.log" | head -5 | paste -sd ';' -) — count this toward the #12772 helper-battery recurrence threshold"
           }
+
+      # Reclaim the run-unique HOME (constructed path, never $HOME) before the
+      # failure collector, which must stay last.
+      - name: 'Clean isolated HOME'
+        if: '${{ always() }}'
+        run: 'rm -rf -- "${RUNNER_TEMP}/qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
 
       # State-at-failure dump for the 19 substantive steps after install: the
       # install sampler is reaped by that step's `trap … EXIT`, so a death in
@@ -1534,13 +1598,16 @@ jobs:
         needs.classify_pr.outputs.skip_ci != 'true' &&
         (needs.classify_pr.outputs.ci_profile || 'full') == 'full'
       }}
-    # Run 40915920935 lost module requests to ERR_NETWORK_CHANGED on the
-    # shared ARM64 pool, before the app mounted. Use a fresh hosted runner
-    # to isolate this browser gate from other jobs' host network changes.
-    # Self-hosted steps below are dormant on this routing and retained for
-    # reversibility. Only the checkout-metadata and Node-preflight guards are
-    # pinned by tests; the font baseline guard is parked while this lane is hosted.
-    runs-on: 'ubuntu-latest'
+    # Keep the classifier's trust and hosted overrides, but use ARM64 for
+    # this lane independently of the ordinary Linux CI fleet. The history
+    # below is x64-specific, not a verdict on ARM64, but it is why this lane
+    # is fragile: #11250 moved it back to hosted after four pool attempts
+    # failed (run 34081409590). Three ran the smoke unpinned at 8 workers,
+    # half the host's 16 cores, against hosted's 2, and timed out broadly on
+    # visibility and clock waits. The fourth's transcript gate took 73 s
+    # against its 60 s budget while npm install alone took 28 min on that
+    # host. The smoke step pins the hosted worker count.
+    runs-on: '${{ contains(fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]''), ''self-hosted'') && fromJSON(''["self-hosted", "linux", "arm64"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Slow hosted mirrors kept downloading past 23 min; reserve time for
     # the 208 smoke tests and artifact cleanup after installation.
     timeout-minutes: 60
@@ -1694,7 +1761,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Configure npm for rate limiting'
@@ -2096,7 +2163,7 @@ jobs:
           # so create the directory through the Node the preflight verified.
           node -e "require('node:fs').mkdirSync(process.argv[1], { recursive: true })" "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Configure npm for rate limiting'
@@ -2210,7 +2277,8 @@ jobs:
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.
-    # Same self-hosted scoping as `lint_and_static`: hosted fallback routing
+    # Same self-hosted scoping as `test` (this lane keeps the association-gated
+    # ubuntu_runner, unlike lint_and_static): hosted fallback routing
     # keeps the pre-contention ceiling, and the ARM64 fleet — which carries
     # no `ecs-qwen` label — gets the contended-pool allowance it runs under.
     timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''60'' || ''30'') }}'
@@ -2372,7 +2440,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Disk floor gate (self-hosted)'
@@ -2599,7 +2667,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       # Same pre-install admission check as the test job (#10035): this job
