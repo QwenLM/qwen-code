@@ -138,6 +138,15 @@ describe('fix-start and fix-end', () => {
     rmSync(repo, { recursive: true, force: true });
   });
 
+  it('refuses an in-place watch: no background fix in the checkout', () => {
+    write({ inPlace: true, worktreePath: repo, branch: 'main' });
+    round();
+    expect(() => runFixStart({ pr: 7, attempt: ATTEMPT })).toThrow(
+      /in-place watch/,
+    );
+    expect(existsSync(paths.fixPath)).toBe(false);
+  });
+
   it('opens an attempt on the watch task and head, and claims it once', () => {
     const opened = runFixStart({ pr: 7, attempt: ATTEMPT });
     expect(opened).toMatchObject({
