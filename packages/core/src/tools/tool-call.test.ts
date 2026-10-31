@@ -163,6 +163,70 @@ describe('ToolCallTool', () => {
     ).not.toThrow();
   });
 
+  it.each([
+    {
+      reason: 'nested envelope',
+      envelope: {
+        arguments: {
+          name: 'deferred_target',
+          arguments: { prompt: 'private prompt' },
+        },
+      },
+      keys: '[arguments]',
+    },
+    {
+      reason: 'missing arguments',
+      envelope: { name: 'deferred_target' },
+      keys: '[name]',
+    },
+    {
+      reason: 'extra top-level field',
+      envelope: {
+        name: 'deferred_target',
+        arguments: { prompt: 'private prompt' },
+        prompt: 'private top-level value',
+      },
+      keys: '[name, arguments, prompt]',
+    },
+    {
+      reason: 'serialized nested envelope',
+      envelope: {
+        arguments:
+          '{"name":"deferred_target","arguments":{"prompt":"private prompt"}}',
+      },
+      keys: '[arguments]',
+    },
+  ])(
+    'attributes a $reason refusal to the tool_call envelope',
+    async ({ envelope, keys }) => {
+      const deferred = target('deferred_target');
+      const registry = makeRegistry([deferred], new Set([deferred.name]));
+
+      const result = await resolveDeferredToolCall(registry, envelope);
+
+      expect(result).toMatchObject(
+        refusal(ToolErrorType.INVALID_TOOL_PARAMS, 'tool_call'),
+      );
+      expect(result).not.toHaveProperty('tool');
+      expect(result).not.toHaveProperty('targetName');
+      if ('error' in result) {
+        expect(result.error.message).toContain(
+          DEFERRED_TOOL_CALL_REFUSAL_PREFIX,
+        );
+        expect(result.error.message).toContain('envelope');
+        expect(result.error.message).toContain('"name"');
+        expect(result.error.message).toContain('"arguments"');
+        expect(result.error.message).toContain('top-level fields');
+        expect(result.error.message).toContain(
+          `received top-level keys: ${keys}`,
+        );
+        expect(result.error.message).not.toContain('deferred_target');
+        expect(result.error.message).not.toContain('private prompt');
+        expect(result.error.message).not.toContain('private top-level value');
+      }
+    },
+  );
+
   it('refuses direct execution outside the scheduler', async () => {
     const result = await new ToolCallTool()
       .build({ name: 'deferred_tool', arguments: {} })
