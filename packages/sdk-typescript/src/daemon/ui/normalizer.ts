@@ -956,12 +956,19 @@ function normalizeSessionUpdate(
           return [];
         }
         if (part.kind === 'text') {
+          // A replayed peer notification arrives as a user chunk whose
+          // `_meta` carries the producing teammate's identity (hoisted by the
+          // replay machine); without extracting it here the block reducer
+          // never sees `block.agent`, and a reloaded session renders the
+          // notice unattributed.
+          const agent = extractAgentIdentity(update);
           return part.text
             ? [
                 {
                   ...base,
                   type: 'user.text.delta',
                   text: part.text,
+                  ...(agent ? { agent } : {}),
                   ...(meta ? { meta } : {}),
                 },
               ]
@@ -999,12 +1006,14 @@ function normalizeSessionUpdate(
         ];
       }
       const text = getTextContent(content);
+      const agent = extractAgentIdentity(update);
       return text
         ? [
             {
               ...base,
               type: 'user.text.delta',
               text,
+              ...(agent ? { agent } : {}),
               ...(meta ? { meta } : {}),
             },
           ]
@@ -1017,7 +1026,8 @@ function normalizeSessionUpdate(
       const meta = extractUpdateMeta(update);
       if (
         meta?.['source'] === 'background_task_completed' ||
-        meta?.['source'] === 'background_notification_turn_started'
+        meta?.['source'] === 'background_notification_turn_started' ||
+        meta?.['source'] === 'teammate_activity'
       ) {
         return [
           {
@@ -1026,9 +1036,13 @@ function normalizeSessionUpdate(
             source: meta['source'],
             text: text ?? '',
             data:
-              meta['source'] === 'background_task_completed'
-                ? meta['backgroundTask']
-                : meta['backgroundTurn'],
+              meta['source'] === 'background_notification_turn_started'
+                ? meta['backgroundTurn']
+                : meta['backgroundTask'],
+            ...(agent ? { agent } : {}),
+            ...(meta['source'] === 'teammate_activity'
+              ? { clearActiveText: false }
+              : {}),
           },
         ];
       }

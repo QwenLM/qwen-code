@@ -41,6 +41,10 @@ export enum TeamEventType {
    *  context for a CLI-level handler to resolve the approval
    *  through the session's own permission channel. */
   TEAMMATE_APPROVAL_REQUEST = 'teammate_approval_request',
+  /** A teammate made progress a UI can show without waking the leader: a
+   *  tool call started or settled. Observational only — hosts must not
+   *  build model turns off it. */
+  TEAMMATE_ACTIVITY = 'teammate_activity',
 }
 
 // ─── Event Payloads ─────────────────────────────────────────
@@ -73,6 +77,13 @@ export interface TeammateExitedEvent {
   name: string;
   status: AgentStatus;
   timestamp: number;
+  /**
+   * Set when this exit is part of a team teardown, where one `cleanup()`
+   * publishes an exit for every surviving teammate in a row. Consumers that
+   * turn an exit into a model turn must coalesce the burst; consumers that
+   * reconstruct membership still see one event per teammate.
+   */
+  teardown?: boolean;
 }
 
 export interface MessageSentEvent {
@@ -111,6 +122,20 @@ export interface TeammateApprovalRequestEvent {
   timestamp: number;
 }
 
+export interface TeammateActivityEvent {
+  agentId: string;
+  name: string;
+  /** Which tool the teammate invoked. */
+  toolName: string;
+  /** 'call' when the tool started, 'result' when it settled. */
+  phase: 'call' | 'result';
+  /** Success flag for `result` phases; undefined for `call`. */
+  success?: boolean;
+  /** Human-facing one-line description of the call. */
+  description: string;
+  timestamp: number;
+}
+
 // ─── Event Map ──────────────────────────────────────────────
 
 export interface TeamEventMap {
@@ -122,6 +147,7 @@ export interface TeamEventMap {
   [TeamEventType.TASK_AUTO_CLAIMED]: TaskAutoClaimedEvent;
   [TeamEventType.ALL_TEAMMATES_TERMINATED]: AllTeammatesTerminatedEvent;
   [TeamEventType.TEAMMATE_APPROVAL_REQUEST]: TeammateApprovalRequestEvent;
+  [TeamEventType.TEAMMATE_ACTIVITY]: TeammateActivityEvent;
 }
 
 // ─── Event Emitter ──────────────────────────────────────────

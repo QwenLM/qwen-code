@@ -487,16 +487,16 @@ export interface DaemonUiStatusEvent extends DaemonUiEventBase {
   text: string;
   source?: string;
   data?: unknown;
+  agent?: DaemonAgentIdentity;
   /**
    * Set only on normalizer-produced `debug` events. Absent on `status` events
    * and on debug events dispatched by clients themselves.
    */
   debugReason?: DaemonUiDebugReason;
   /**
-   * Client-dispatch opt-out: `false` inserts the status block without
-   * finalizing the active assistant/thought block, so read-only command
-   * output dispatched mid-turn does not split a streaming answer or orphan
-   * its usage frames. Daemon-emitted events leave this unset.
+   * `false` inserts the status block without finalizing the active
+   * assistant/thought block, so observational teammate activity and read-only
+   * command output do not split a streaming answer or orphan its usage frames.
    */
   clearActiveText?: boolean;
 }
@@ -1240,6 +1240,7 @@ export interface DaemonStatusTranscriptBlock extends DaemonTranscriptBlockBase {
   loop?: DaemonLoopStop;
   source?: string;
   data?: unknown;
+  agent?: DaemonAgentIdentity;
   /** Mirrors `DaemonUiStatusEvent.debugReason`; only set on `debug` blocks. */
   debugReason?: DaemonUiDebugReason;
 }

@@ -1,38 +1,66 @@
-# Agent Identity Projection (PR 13902 / #13785)
+# Agent Identity & Team Coordination Projection (PR 13902 / #13785)
 
 - [中文版](./2026-10-11-agent-team-identity-projection.zh-CN.md)
 
 ## Problem
 
-Subagent thought, message and tool frames lack a producer identity on the ACP/daemon wire. Persisted `task_execution` results retain `subagentName`, but replay does not restore it to transcript frames.
+A multi-agent session's output was unattributable on the ACP/daemon wire. Two distinct collaboration columns existed in the runtime with no identity dimension:
+
+1. **Subagent delegation** (parent spawns child): the runtime already projected thought/tool/message frames, but nothing named which agent produced them. After a reload the `task_execution` tool result carried `subagentName`, yet the transcript frames did not.
+2. **Agent Teams** (peer teammates): teammate reports and roster changes entered the leader's background notification queue as flat text. Persistence dropped the producer entirely, replay had no identity to restore, and the Web Shell rendered anonymous rows.
 
 ## Design
 
-Every projected frame can carry `_meta.agent`; the SDK preserves it as `block.agent`:
+### Single identity shape, two kinds
+
+Every projected frame can carry `_meta.agent` (SDK transcript block: `block.agent`):
 
 ```ts
 interface AgentIdentity {
-  agentName: string;
-  depth: number;
+  agentName: string; // path-style: /root, /root/security
+  depth: number; // 0 root, 1 direct child/teammate
   kind: 'root' | 'subagent' | 'teammate';
 }
 ```
 
-This shared shape reserves the teammate kind for the next change. This layer implements the subagent producer and its consumers only.
+The shape mirrors OpenAI's Responses multi-agent contract (per-item `agent: { agent_name }` with path names) under the repo's borrow-shape-not-spelling rule — camelCase field names, native `_meta` placement. `kind` distinguishes the two columns: subagent identity derives from the `task_execution` display (replay) or the live spawn (wire); teammate identity is minted at the enqueue site from the report sender or roster member.
 
-- Live tracking stamps thought, message, tool-call and update frames with the resolved runtime `start` name, preserving definition casing.
-- Replay rebuilds `/root/<type>` with depth 1 from validated `task_execution` display names. Blocked raw names and invalid path segments remain unattributed; admitted failed, cancelled and background results keep their identity.
-- The SDK carries identity through normalization and transcript reduction, including results that backfill an initially unattributed tool block. Live journal compaction accepts the agent stamp.
-- The Web Shell exposes the path on the subagent panel name's `title` tooltip.
+### Subagent column
 
-## Decisions and constraints
+- **Live**: the ACP session stamps `_meta.agent` on every subagent-projected frame (thought, message, tool call, tool call update), using the resolved definition name from the runtime's `start` event.
+- **Reload**: `transcript-replay.ts` rebuilds identity from the persisted `task_execution` display (`subagentName` → `/root/<type>`, `kind: 'subagent'`). Root-parented only — the persisted record carries no lineage beyond its type name.
 
-`agentName` is a readable role path, not a unique execution ID. Concurrent subagents of one type share it; consumers distinguish executions using `parentToolCallId`. Persisted results contain no lineage beyond the type name, so replay reconstructs only root-parented identities. Foreground nested-frame projection and persisted lineage remain separate work.
+### Teammate column
+
+- **Reports & roster changes** enqueue as `kind: 'peer'` background notifications with `agent` (producer) and `label` (sender name, rendered on the turn marker). Persistence keeps them inside `backgroundTask.agent`; replay hoists that to frame-level `_meta.agent`, so live and reloaded frames share one shape and the SDK reducer's `block.agent` path works identically.
+- **Deleting a team publishes an exit for every teammate still on the roster.** A teammate that never reported a terminal status has no `TEAMMATE_EXITED` of its own, and the teardown terminates it only after the event bridge is detached — so the deletion itself retires the remaining members as `cancelled` while listeners are still attached. A client that reconstructs membership from joins and exits therefore ends with an empty roster rather than a stale one.
+- **Activity & inter-agent messages** are a separate, display-only projection (new in this PR):
+  - The `TeamManager` event bridge already observed every teammate tool call/result — and discarded them as activity heartbeats. A new `TEAMMATE_ACTIVITY` event forwards `{name, toolName, phase, description, success}`.
+  - The team sink subscribes to `MESSAGE_SENT` (`{from, to, message}`) for messages addressed to teammates, using resolved roster names. Leader-directed reports use the mailbox projection only.
+  - The session publishes both as `agent_message_chunk` frames with `_meta.source = 'teammate_activity'`, **without entering the notification queue and without persistence**. Rationale: activity is observational — every queued peer item wakes the leader into an automatic turn (one model round per event), and 20+ tool events per teammate turn would drown the queue. The report a teammate eventually sends is what the transcript must keep; per-tool activity is ephemeral by the same logic the PR already applied to status/idle events.
+  - Direction follows OpenAI's `agent_message`: the frame's `agent` names the **recipient**, and the structured `backgroundTask.author` carries the sender (`/root`, depth 0, `kind: 'root'` for the leader). `toolName`/`phase`/`success` ride the same structured payload. The SDK projects activity as a status block that leaves leader text and token usage untouched.
+
+### Web Shell
+
+- Peer notices render as system bubbles with a `@name` chip derived from `block.agent` (teammate kind only).
+- `teammate_activity` frames classify as attributed notices rather than leader text; direction reads from the prose (`writer → researcher: …`), the recipient chip carries attribution, and the wire's `author` field serves programmatic consumers. (A `from @x` sender chip was tried and removed — it restated the prose.)
+
+## Decisions
+
+1. **`block.agent` is the single source of truth** for peer attribution — not text parsing, not a parallel `data.agent` key (an earlier local variant was dropped in favor of the remote prop design).
+2. **Activity never wakes the leader and never persists.** Both are deliberate: queue semantics make every peer item an automatic-turn trigger, and the transcript's job is durable reports, not per-tool noise.
+3. **Ephemerality is documented, not hidden** — reload keeps reports/roster rows attributed; activity rows vanish. The follow-up list records a persisted per-teammate summary as a candidate refinement.
+4. **Same-instance manager re-notification is a no-op** in the sink: `Config.setTeamManager` fires change callbacks even for the identical object, and re-registering the five listeners would double approvals and leak on detach (review finding, fixed with a regression test).
+
+Teammate approvals inherit the session's permission persistence policy: standalone sessions cannot offer project-wide persistence, and responses selecting an unoffered option are cancelled. Each request has its own UUID. Teammate permission requests carry private `_meta.permissionScope: 'session'`: neither the ACP session nor the bridge attributes them to a foreground or background leader turn. Ending that turn leaves them pending; session cancellation/teardown still cancels them. Switching or detaching the bound TeamManager also cancels its pending approvals immediately; a late host response cannot permit an old team tool. Each binding has a child-process-monotonic private `teammateBindingId`; `qwen/notify/session/teammate-binding-ended` retires its bridge/mediator requests and emits `permission_resolved`. A session-entry-scoped high-water mark rejects late requests from retired bindings without cancelling leader or newer-team approvals. Re-notifying the same manager preserves pending approvals. A single teammate leaving the team does not retire the binding, so its own exit is reported separately through the private `qwen/notify/session/teammate-exited`: the host retires that teammate's pending requests, which keeps the session from advertising an input-needed interaction nobody can answer while the rest of the team keeps running.
+
+## Known gaps (follow-ups, not this PR)
+
+- CJK teammate names collapse in `sanitizeName` (pre-existing main behavior): `研究员` sanitizes to empty and the model retries with ASCII. Identity projection itself handles non-ASCII paths fine (verified with pinyin names + Chinese message content).
+- Per-teammate persisted activity summary; teammate color usage; collapsed activity grouping (industry survey: Claude Code folds idle rows, LangGraph density slider, ChatGPT Active/Done panels — nobody streams flat tool rows into the main view).
+- Foreground nested-frame projection and persisted lineage remain separate work; this slice does not produce nested trees. Inbox consumption and transcript recording are not transactional, so crash-safe redelivery is not guaranteed.
 
 ## Acceptance
 
-Paired tests cover live canonical names, default identity, replay name/status boundaries, SDK normalization and backfill, journal compaction and the tooltip without a visible path chip. Tests, typechecks and builds must be rerun on this split commit; historical PR results do not validate this new candidate.
-
-## Following layers
-
-The next layer adds durable Team reports, roster notices and session-scoped approvals. A third layer adds display-only teammate activity and inter-agent message direction. Neither behavior is delivered by this layer.
+- Unit: cli Session (1215) / team-sink (11); web-shell adapter (233) + SystemMessage (71); sdk agent-identity (13); acp-bridge transcript-replay (153); core team (356).
+- E2E: `.qwen/e2e-tests/pr13902-teammate-activity-projection.md` — live daemon runs covering multi-teammate attribution, activity without leader wake, structured direction (recipient+author), Chinese content, reload attribution.

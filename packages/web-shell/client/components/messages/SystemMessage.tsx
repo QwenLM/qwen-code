@@ -45,6 +45,8 @@ interface SystemMessageProps {
   variant: 'info' | 'error' | 'warning';
   source?: string;
   data?: unknown;
+  /** Teammate (Agent Team peer) author, rendered as an `@name` chip. */
+  teammate?: { name: string };
   images?: Array<{ data: string; mimeType: string }>;
   files?: Array<{
     name: string;
@@ -161,6 +163,7 @@ export const SystemMessage = memo(function SystemMessage({
   variant,
   source,
   data,
+  teammate,
   images,
   files,
   onShowContextDetail,
@@ -223,6 +226,11 @@ export const SystemMessage = memo(function SystemMessage({
         >
           <MarkerIcon aria-hidden="true" />
         </span>
+        {teammate && (
+          <span className={styles.teammateChip} title={teammate.name}>
+            @{teammate.name}
+          </span>
+        )}
         <span className="shrink-0 text-muted-foreground">
           {t(
             turn?.kind === 'agent'
@@ -383,7 +391,8 @@ export const SystemMessage = memo(function SystemMessage({
   const isTaskNotification =
     variant === 'info' &&
     (source === 'background_notification' ||
-      source === 'background_task_completed');
+      source === 'background_task_completed' ||
+      source === 'teammate_activity');
   const notificationData =
     isTaskNotification && typeof data === 'object' && data !== null
       ? (data as Record<string, unknown>)
@@ -485,6 +494,11 @@ export const SystemMessage = memo(function SystemMessage({
         >
           <TaskNotificationIcon aria-hidden="true" />
         </span>
+        {teammate && (
+          <span className={styles.teammateChip} title={teammate.name}>
+            @{teammate.name}
+          </span>
+        )}
         <div
           className={`min-w-0 flex-1${taskI18nText ? ' truncate' : ''}`}
           title={taskI18nText}

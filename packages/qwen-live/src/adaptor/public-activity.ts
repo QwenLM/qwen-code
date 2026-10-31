@@ -19,7 +19,8 @@ export function publicActivity(
     if (
       meta?.['source'] === 'background_task_completed' ||
       meta?.['source'] === 'background_notification' ||
-      meta?.['source'] === 'background_notification_turn_started'
+      meta?.['source'] === 'background_notification_turn_started' ||
+      meta?.['source'] === 'teammate_activity'
     )
       return;
     const content = update['content'];

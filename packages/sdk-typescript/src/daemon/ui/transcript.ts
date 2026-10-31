@@ -499,6 +499,7 @@ function applyDaemonTranscriptEvent(
         appendUnrecognizedDiagnostic(next, event);
         break;
       }
+      if (coalesceTeammateActivity(next, event)) break;
       appendStatusBlock(next, event.type, event.text, event, {
         clearActiveText: event.clearActiveText,
       });
@@ -1734,6 +1735,65 @@ function appendUnrecognizedDiagnostic(
       : diagnostics;
 }
 
+/**
+ * An inter-teammate message or a failed tool result is a discrete event, not
+ * latest-state progress: two messages between the same pair carry different
+ * text, and a failure is an outcome rather than a phase, while these frames are
+ * never persisted, so merging either loses it for good. Ordinary tool frames
+ * stay coalesced, which is what protects the `maxBlocks` budget below.
+ */
+function isDiscreteTeammateFrame(data: unknown): boolean {
+  const status = (data as { status?: unknown } | undefined)?.status;
+  return status === 'message' || status === 'failed';
+}
+
+/**
+ * `teammate_activity` arrives once per teammate tool call *and* per tool
+ * result and is never persisted, so one block per event spends the `maxBlocks`
+ * budget on rows a reload will not contain and `trimTranscriptState` then
+ * evicts real conversation from the front.
+ */
+function coalesceTeammateActivity(
+  state: DaemonTranscriptState,
+  event: DaemonUiStatusEvent,
+): boolean {
+  if (event.type !== 'status' || event.source !== 'teammate_activity') {
+    return false;
+  }
+  const agentName = event.agent?.agentName;
+  if (!agentName) return false;
+  if (isDiscreteTeammateFrame(event.data)) return false;
+  for (let i = state.blocks.length - 1; i >= 0; i -= 1) {
+    const candidate = state.blocks[i]!;
+    // Stop at a segment boundary: a row above it keeps the text the reader saw
+    // there instead of being rewritten with content from the new segment.
+    if (candidate.kind === 'user') return false;
+    if (candidate.kind !== 'status') continue;
+    if (candidate.source === 'session_branched') return false;
+    if (
+      candidate.source !== 'teammate_activity' ||
+      candidate.agent?.agentName !== agentName ||
+      isDiscreteTeammateFrame(candidate.data)
+    ) {
+      continue;
+    }
+    const block = getWritableBlockById(state, candidate.id);
+    if (block?.kind !== 'status') return false;
+    const bytesBefore = estimateBlockBytes(block);
+    block.text = truncateText(state, block.id, undefined, event.text);
+    if (event.data !== undefined) block.data = event.data;
+    block.updatedAt = state.now;
+    state.retainedBytes += estimateBlockBytes(block) - bytesBefore;
+    // Origin envelope (`createdAt`, `eventId`, `serverTimestamp`) stays pinned
+    // to the first event: `buildEventOrderKeys` derives a second ordering from
+    // `eventId`, so refreshing it would make the two orderings disagree.
+    if (event.clearActiveText !== false) clearActiveText(state);
+    else state.activeUserBlockId = undefined;
+    return true;
+  }
+  return false;
+}
+
 function appendStatusBlock(
   state: DaemonTranscriptState,
   kind: 'status' | 'error' | 'debug',
@@ -1778,6 +1838,9 @@ function appendStatusBlock(
     ...((event?.type === 'status' || event?.type === 'debug') &&
     event.data !== undefined
       ? { data: event.data }
+      : {}),
+    ...((event?.type === 'status' || event?.type === 'debug') && event.agent
+      ? { agent: event.agent }
       : {}),
     ...((event?.type === 'status' || event?.type === 'debug') &&
     event.debugReason

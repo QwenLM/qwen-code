@@ -877,6 +877,252 @@ describe('status event while an assistant block is streaming', () => {
   });
 });
 
+describe('teammate_activity status events', () => {
+  const activity = (text: string, agentName?: string): DaemonUiEvent => ({
+    type: 'status',
+    source: 'teammate_activity',
+    text,
+    ...(agentName
+      ? { agent: { agentName, depth: 1, kind: 'teammate' as const } }
+      : {}),
+    clearActiveText: false,
+  });
+
+  it('keeps one row per teammate so activity cannot evict conversation', () => {
+    const events: DaemonUiEvent[] = [
+      { type: 'user.text.delta', text: 'question' },
+      { type: 'assistant.text.delta', text: 'answer' },
+      { type: 'assistant.done' },
+    ];
+    for (let i = 0; i < 40; i += 1) {
+      events.push(activity(`read_file #${i}`, `/root/qa-${i % 2}`));
+    }
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1, maxBlocks: 10 }),
+      events,
+      { now: 1, maxBlocks: 10 },
+    );
+
+    const rows = state.blocks.filter(
+      (block) =>
+        block.kind === 'status' && block.source === 'teammate_activity',
+    );
+    expect(rows).toHaveLength(2);
+    expect(rows.map((block) => ('text' in block ? block.text : ''))).toEqual([
+      'read_file #38',
+      'read_file #39',
+    ]);
+    // One block per event would spend the window on rows a reload never
+    // contains, and `trimTranscriptState` evicts from the front.
+    expect(state.blocks.map((block) => block.kind).slice(0, 2)).toEqual([
+      'user',
+      'assistant',
+    ]);
+  });
+
+  it('keeps message rows distinct from each other and from tool rows', () => {
+    // Keying the coalesce on `agent.agentName` alone let a message row and the
+    // recipient's tool row overwrite each other; these frames are never
+    // persisted, so the lost text is unrecoverable.
+    const frame = (text: string, status: string): DaemonUiEvent => ({
+      type: 'status',
+      source: 'teammate_activity',
+      text,
+      data: { status },
+      agent: { agentName: '/root/checker', depth: 1, kind: 'teammate' },
+      clearActiveText: false,
+    });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        frame('checker started read_file', 'call'),
+        frame('writer -> checker: review the auth module', 'message'),
+        frame('writer -> checker: check a different file', 'message'),
+        frame('checker finished read_file', 'result'),
+      ],
+      { now: 1 },
+    );
+
+    const rows = state.blocks.filter(
+      (block) =>
+        block.kind === 'status' && block.source === 'teammate_activity',
+    );
+    // The tool row stays latest-state coalesced; both messages keep their own.
+    expect(rows.map((block) => ('text' in block ? block.text : ''))).toEqual([
+      'checker finished read_file',
+      'writer -> checker: review the auth module',
+      'writer -> checker: check a different file',
+    ]);
+  });
+
+  it('keeps a failed tool row instead of letting the next call overwrite it', () => {
+    // A failure is an outcome, not a phase, and the system row renders it as
+    // one; the teammate's next call frame carries the same identity and these
+    // frames are never persisted, so merging it would lose the failure.
+    const frame = (text: string, status: string): DaemonUiEvent => ({
+      type: 'status',
+      source: 'teammate_activity',
+      text,
+      data: { status },
+      agent: { agentName: '/root/qa', depth: 1, kind: 'teammate' as const },
+      clearActiveText: false,
+    });
+
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        frame('qa failed read_file', 'failed'),
+        frame('qa started write_file', 'call'),
+      ],
+      { now: 1 },
+    );
+
+    const rows = state.blocks.filter(
+      (block) =>
+        block.kind === 'status' && block.source === 'teammate_activity',
+    );
+    expect(rows.map((block) => ('text' in block ? block.text : ''))).toEqual([
+      'qa failed read_file',
+      'qa started write_file',
+    ]);
+    expect(rows[0]).toMatchObject({ data: { status: 'failed' } });
+  });
+
+  it('keeps failed rows distinct from each other and from tool progress', () => {
+    const frame = (text: string, status: string): DaemonUiEvent => ({
+      ...activity(text, '/root/checker'),
+      data: { status },
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        frame('checker failed read_file', 'failed'),
+        frame('checker started write_file', 'call'),
+        frame('checker failed write_file', 'failed'),
+        frame('checker finished retry', 'result'),
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks).toMatchObject([
+      {
+        kind: 'status',
+        source: 'teammate_activity',
+        text: 'checker failed read_file',
+        data: { status: 'failed' },
+      },
+      {
+        kind: 'status',
+        source: 'teammate_activity',
+        text: 'checker finished retry',
+        data: { status: 'result' },
+      },
+      {
+        kind: 'status',
+        source: 'teammate_activity',
+        text: 'checker failed write_file',
+        data: { status: 'failed' },
+      },
+    ]);
+  });
+
+  it('appends a separate row when the activity carries no identity', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [activity('first'), activity('second')],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'status',
+      'status',
+    ]);
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual(['first', 'second']);
+  });
+
+  it('starts a new row after a turn boundary instead of rewriting the old one', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        activity('turn one work', '/root/qa'),
+        { type: 'user.text.delta', text: 'next question' },
+        activity('turn two work', '/root/qa'),
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'status',
+      'user',
+      'status',
+    ]);
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual(['turn one work', 'next question', 'turn two work']);
+  });
+
+  it('finalises the streaming block on a coalesced row that did not opt out', () => {
+    // Clients may dispatch these events themselves, so the reducer must key
+    // off the event rather than off whether a row already existed.
+    const plain = (text: string): DaemonUiEvent => ({
+      type: 'status',
+      source: 'teammate_activity',
+      text,
+      agent: { agentName: '/root/qa', depth: 1, kind: 'teammate' },
+    });
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        { type: 'assistant.text.delta', text: 'answering' },
+        plain('first'),
+        { type: 'assistant.text.delta', text: ' more' },
+        plain('second'),
+        { type: 'assistant.text.delta', text: ' tail' },
+      ],
+      { now: 1 },
+    );
+
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'assistant',
+      'status',
+      'assistant',
+      'assistant',
+    ]);
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual(['answering', 'second', ' more', ' tail']);
+  });
+
+  it('starts a new row after a branch marker instead of rewriting the old one', () => {
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState({ now: 1 }),
+      [
+        activity('before the branch', '/root/qa'),
+        {
+          type: 'session.branched',
+          sourceSessionId: 'session-a',
+          newSessionId: 'session-b',
+          displayName: 'retry',
+        },
+        activity('after the branch', '/root/qa'),
+      ],
+      { now: 1 },
+    );
+
+    expect(
+      state.blocks.map((block) => ('text' in block ? block.text : '')),
+    ).toEqual([
+      'before the branch',
+      'Branched conversation "retry". You are now in the branch.',
+      'after the branch',
+    ]);
+  });
+});
+
 describe('status event while a thought block is streaming', () => {
   it('keeps the thought block active when clearActiveText is false', () => {
     const state = reduceDaemonTranscriptEvents(

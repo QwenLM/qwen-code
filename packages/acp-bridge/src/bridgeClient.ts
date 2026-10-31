@@ -835,6 +835,14 @@ function takeUserMidTurnMessages(
   return taken;
 }
 
+/** A teammate approval awaiting a host answer, keyed by request id. */
+interface PendingTeammatePermission {
+  /** Child-process-monotonic epoch of the binding that issued the request. */
+  bindingId: number;
+  /** Teammate that asked, when the child identified one. */
+  teammateName?: string;
+}
+
 /**
  * Bridge `Client` implementation — the daemon's response surface for things
  * the agent asks the client (file reads/writes, permission prompts).
@@ -857,6 +865,26 @@ function takeUserMidTurnMessages(
  * sandbox-aware variant.
  */
 export class BridgeClient implements Client {
+  private readonly teammatePermissions = new WeakMap<
+    BridgeClientSessionEntry,
+    {
+      retiredThrough: number;
+      pending: Map<string, PendingTeammatePermission>;
+    }
+  >();
+
+  private teammatePermissionState(entry: BridgeClientSessionEntry) {
+    let state = this.teammatePermissions.get(entry);
+    if (!state) {
+      state = {
+        retiredThrough: 0,
+        pending: new Map<string, PendingTeammatePermission>(),
+      };
+      this.teammatePermissions.set(entry, state);
+    }
+    return state;
+  }
+
   constructor(
     /**
      * Look up the `SessionEntry` for an ACP call. Stage 1.5 multi-
@@ -883,7 +911,7 @@ export class BridgeClient implements Client {
      */
     private readonly mediator: Pick<
       PermissionMediator,
-      'request' | 'cancelForPrompt'
+      'request' | 'cancelForPrompt' | 'vote'
     >,
     /**
      * Bd1yh: wall-clock ms before `requestPermission` resolves as cancelled
@@ -1034,9 +1062,28 @@ export class BridgeClient implements Client {
       return { outcome: { outcome: 'cancelled' } };
     }
 
-    const explicitBackgroundTurn = parseBackgroundNotificationTurn(
-      params._meta?.['backgroundTurn'],
-    );
+    // Teammates outlive the leader turn that happens to be running.
+    const sessionOwned = params._meta?.['permissionScope'] === 'session';
+    const bindingId = params._meta?.['teammateBindingId'];
+    const requestingTeammate = params.toolCall?._meta?.['teammateName'];
+    const teammateName =
+      typeof requestingTeammate === 'string' && requestingTeammate.length > 0
+        ? requestingTeammate
+        : undefined;
+    const teammateState = this.teammatePermissionState(entry);
+    if (
+      bindingId !== undefined &&
+      (!sessionOwned ||
+        !this.ownsSession(params.sessionId) ||
+        typeof bindingId !== 'number' ||
+        !Number.isSafeInteger(bindingId) ||
+        bindingId <= teammateState.retiredThrough)
+    ) {
+      return { outcome: { outcome: 'cancelled' } };
+    }
+    const explicitBackgroundTurn = sessionOwned
+      ? undefined
+      : parseBackgroundNotificationTurn(params._meta?.['backgroundTurn']);
     if (
       explicitBackgroundTurn &&
       entry.backgroundTurn?.turnId !== explicitBackgroundTurn.turnId
@@ -1056,16 +1103,20 @@ export class BridgeClient implements Client {
     ) {
       return { outcome: { outcome: 'cancelled' } };
     }
-    const backgroundTurn = appClientId
-      ? undefined
-      : (explicitBackgroundTurn ??
-        (entry.promptActive ? undefined : entry.backgroundTurn));
-    const permissionPromptId = appClientId
-      ? undefined
-      : (backgroundTurn?.turnId ?? entry.activePromptId);
+    const backgroundTurn =
+      appClientId || sessionOwned
+        ? undefined
+        : (explicitBackgroundTurn ??
+          (entry.promptActive ? undefined : entry.backgroundTurn));
+    const permissionPromptId =
+      appClientId || sessionOwned
+        ? undefined
+        : (backgroundTurn?.turnId ?? entry.activePromptId);
     const permissionOriginator =
       appClientId ??
-      (backgroundTurn ? undefined : entry.activePromptOriginatorClientId);
+      (backgroundTurn || sessionOwned
+        ? undefined
+        : entry.activePromptOriginatorClientId);
     // Reserve model permission capacity within the existing session cap.
     if (
       appClientId &&
@@ -1150,6 +1201,12 @@ export class BridgeClient implements Client {
     }
     entry.pendingPermissionIds.add(requestId);
     if (interaction) entry.pendingInteractions.set(requestId, interaction);
+    if (typeof bindingId === 'number') {
+      teammateState.pending.set(requestId, {
+        bindingId,
+        ...(teammateName ? { teammateName } : {}),
+      });
+    }
     try {
       const record: PermissionRequestRecord = {
         requestId,
@@ -1159,12 +1216,28 @@ export class BridgeClient implements Client {
         allowedOptionIds,
         issuedAtMs: Date.now(),
       };
-      const resolution = await this.mediator.request(
+      const resolution = this.mediator.request(
         record,
         this.permissionTimeoutMs,
       );
-      return resolutionToAcpResponse(resolution);
+      // Publication can synchronously retire the binding before registration.
+      if (
+        typeof bindingId === 'number' &&
+        bindingId <= teammateState.retiredThrough &&
+        teammateState.pending.delete(requestId)
+      ) {
+        this.mediator.vote({
+          sessionId: entry.sessionId,
+          requestId,
+          optionId: CANCEL_VOTE_SENTINEL,
+          clientId: undefined,
+          receivedAtMs: Date.now(),
+          fromLoopback: true,
+        });
+      }
+      return resolutionToAcpResponse(await resolution);
     } finally {
+      teammateState.pending.delete(requestId);
       entry.pendingPermissionIds.delete(requestId);
       entry.pendingInteractions.delete(requestId);
     }
@@ -2857,6 +2930,74 @@ export class BridgeClient implements Client {
         });
       } catch {
         /* bus already closed */
+      }
+      return;
+    }
+    if (method === 'qwen/notify/session/teammate-binding-ended') {
+      const sessionId = params['sessionId'];
+      const bindingId = params['bindingId'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        typeof bindingId !== 'number' ||
+        !Number.isSafeInteger(bindingId) ||
+        bindingId <= 0
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      const state = this.teammatePermissionState(entry);
+      // The child assigns increasing epochs; a high-water mark fences late RPCs.
+      state.retiredThrough = Math.max(state.retiredThrough, bindingId);
+      for (const [requestId, pending] of state.pending) {
+        if (pending.bindingId > state.retiredThrough) continue;
+        state.pending.delete(requestId);
+        this.mediator.vote({
+          sessionId,
+          requestId,
+          optionId: CANCEL_VOTE_SENTINEL,
+          clientId: undefined,
+          receivedAtMs: Date.now(),
+          fromLoopback: true,
+        });
+      }
+      return;
+    }
+    if (method === 'qwen/notify/session/teammate-exited') {
+      const sessionId = params['sessionId'];
+      const teammateName = params['teammateName'];
+      if (
+        params['v'] !== 1 ||
+        typeof sessionId !== 'string' ||
+        sessionId.length === 0 ||
+        typeof teammateName !== 'string' ||
+        teammateName.length === 0
+      ) {
+        return;
+      }
+      const entry = this.resolveEntry(sessionId);
+      if (!entry || !this.ownsSession(sessionId)) return;
+      const state = this.teammatePermissionState(entry);
+      // A teammate that has left can no longer answer its own prompt, and the
+      // child-side abort that clears its await never crosses the wire. Retire
+      // its requests here so the session stops advertising an input-needed
+      // interaction nobody can answer — `pendingInteractions` is what the
+      // session summary and the transcript-serving mode read.
+      for (const [requestId, pending] of state.pending) {
+        if (pending.teammateName !== teammateName) continue;
+        state.pending.delete(requestId);
+        entry.pendingPermissionIds.delete(requestId);
+        entry.pendingInteractions.delete(requestId);
+        this.mediator.vote({
+          sessionId,
+          requestId,
+          optionId: CANCEL_VOTE_SENTINEL,
+          clientId: undefined,
+          receivedAtMs: Date.now(),
+          fromLoopback: true,
+        });
       }
       return;
     }

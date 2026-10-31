@@ -17,6 +17,8 @@ import {
   LoopReason,
 } from '@qwen-code/qwen-code-core/telemetry/types.js';
 import { createAgentHostToolInvocationGuard } from '@qwen-code/qwen-code-core/agents/workspace-agents/capability.js';
+import { LEADER_NAME } from '@qwen-code/qwen-code-core/agents/team/types.js';
+import { escapeXml } from '@qwen-code/qwen-code-core/utils/xml.js';
 import {
   INCOMPLETE_ARGS_EDIT_REJECTION,
   INCOMPLETE_ARGS_RETRY_LOOP_DIRECTIVE,
@@ -503,11 +505,13 @@ import {
 } from '../../utils/mcp-server-mention.js';
 
 // Import modular session components
-import type {
-  ApprovalModeValue,
-  CumulativeUsage,
-  SessionContext,
-  ToolCallStartParams,
+import {
+  ROOT_AGENT_IDENTITY,
+  type AgentIdentity,
+  type ApprovalModeValue,
+  type CumulativeUsage,
+  type SessionContext,
+  type ToolCallStartParams,
 } from './types.js';
 import { HistoryReplayer } from './history-replayer.js';
 import { projectAcpToolResultUpdate } from './acp-tool-result-text-projection.js';
@@ -531,6 +535,7 @@ import {
 } from './recovered-goal-update.js';
 import { SubAgentTracker } from './SubAgentTracker.js';
 import { runAcpToolBatch, type AcpToolBatchHost } from './acp-tool-batch.js';
+import { attachTeamSink } from './team-sink.js';
 import {
   buildPermissionRequestContent,
   interactionMetaFields,
@@ -559,6 +564,7 @@ import {
   type RepeatedToolFailureGuardDecision,
   type RepeatedToolFailureGuardState,
 } from './repeated-tool-failure-guard.js';
+import { defangPeerNotificationTags } from './peer-envelope.js';
 import {
   getToolExplorationKind,
   TOOL_EXPLORATION_REMINDER,
@@ -1998,17 +2004,61 @@ export interface BackgroundNotificationQueueItem {
   modelText: string;
   taskId: string;
   status: string;
-  kind: 'agent' | 'monitor' | 'shell' | 'workflow';
+  /**
+   * `peer` is a message from another agent session — today an Agent Team
+   * teammate's report to its leader. Core already models the kind end to end
+   * (`GROUP_ORDER.peer`, `droppedNoun` → "cross-session message", the
+   * `hasPeerLoss` accounting, and `background-turn-context`), and like `cron`
+   * it names no task the model could go and read, so a dropped one is a real
+   * loss rather than a pointer to a registry entry.
+   */
+  kind: 'agent' | 'monitor' | 'shell' | 'workflow' | 'peer';
   toolUseId?: string;
   todoWorkChainId?: string;
   label?: string;
-  /** Structured fields for i18n rendering on the frontend. */
+  /**
+   * Producer identity for `peer` items: the teammate whose report this is.
+   * Stamped onto the emitted frame's `_meta.agent` so a client attributes the
+   * message structurally instead of parsing the sender out of the text.
+   */
+  agent?: AgentIdentity;
+  /**
+   * Structured fields for i18n rendering on the frontend. `author` and the
+   * tool fields serve inter-agent frames: OpenAI's Responses multi-agent
+   * contract identifies an `agent_message`'s direction with `author` and
+   * `recipient` — this wire spells them camelCase under `AgentIdentity`'s
+   * borrow-shape-not-spelling rule.
+   */
   structured?: {
     description?: string;
     commandLabel?: string;
     eventCount?: number;
     droppedLines?: number;
+    author?: {
+      agentName: string;
+      depth: number;
+      kind: 'root' | 'teammate';
+    };
+    toolName?: string;
+    phase?: 'call' | 'result';
+    success?: boolean;
   };
+}
+
+/**
+ * Narrows a notification producer's identity to the kinds persistence keeps.
+ * The root agent never produces a background notification, but the queue's
+ * type is the broad `AgentIdentity`, and `NotificationRecordPayload`'s
+ * `backgroundTask.agent` accepts only the kinds that can be attributed.
+ */
+function persistedNotificationAgent(agent: AgentIdentity): {
+  agentName: string;
+  depth: number;
+  kind: 'teammate' | 'subagent';
+} {
+  return agent.kind === 'teammate'
+    ? { agentName: agent.agentName, depth: agent.depth, kind: 'teammate' }
+    : { agentName: agent.agentName, depth: agent.depth, kind: 'subagent' };
 }
 
 interface QueuedBackgroundNotification extends BackgroundNotificationQueueItem {
@@ -2737,6 +2787,17 @@ export class Session implements SessionContext {
   private unsubscribeWorkflowModeChange?: () => void;
   private workflowModeUpdateQueue: Promise<void> = Promise.resolve();
   private unsubscribeRequestLifecycle?: () => void;
+  /** Detaches the Agent Team leader sink installed by `#registerTeamSink`. */
+  private detachTeamSink?: () => void;
+  /** Session lifetime for an in-flight teammate approval request. */
+  private readonly teamSinkAbort = new AbortController();
+  /**
+   * Task ids are persisted in the transcript and correlated by clients, so a
+   * resumed Session must not re-mint ordinals that transcript already holds.
+   * The per-instance token keeps them collision-free across restarts.
+   */
+  private readonly teammateIdPrefix = randomUUID();
+  private teammateMessageSeq = 0;
   private requestLifecycleSessionId: string;
   private readonly requestLifecycleExecutions = new Set<string>();
   /** The exact status-change callback this Session installed, so dispose can
@@ -3008,6 +3069,7 @@ export class Session implements SessionContext {
 
     this.#bindGoalRuntime();
     this.#registerBackgroundNotificationCallbacks();
+    this.#registerTeamSink();
     this.#registerSubSessionSpawner();
     this.#registerCurrentSessionScheduledTaskCreator();
     this.config
@@ -4915,7 +4977,13 @@ export class Session implements SessionContext {
     }
     const notificationIds = new Set<string>();
     for (const item of this.notificationQueue) {
-      if (item.kind === 'agent' || item.kind === 'workflow') {
+      // `peer` names no registry entry the model could re-read, so an
+      // undrained teammate report held only here would be lost, not deferred.
+      if (
+        item.kind === 'agent' ||
+        item.kind === 'workflow' ||
+        item.kind === 'peer'
+      ) {
         notificationIds.add(item.taskId);
       }
     }
@@ -5154,6 +5222,55 @@ export class Session implements SessionContext {
     );
   }
 
+  /**
+   * Lands the model-visible copy of every queued teammate report that is not
+   * durable yet. A report is consumed from the on-disk mailbox (marked read)
+   * before it is durable anywhere else and `notificationQueue` is its only
+   * carrier, so this has to run while the recorder still accepts writes: on
+   * the stored-session close path `recorder.close()` precedes `dispose()`, and
+   * `appendRecord` is already a no-op by then.
+   */
+  #landUndrainedPeerNotifications(
+    items: readonly QueuedBackgroundNotification[] = this.notificationQueue,
+  ): void {
+    const recording = this.config.getChatRecordingService();
+    if (!recording) return;
+    for (const item of items) {
+      if (item.kind !== 'peer' || item.persisted) continue;
+      // Only cold copies get the task envelope: recovery trims these because
+      // the model was never asked anything. Warm copies keep their peer
+      // envelope so an unanswered delivered turn remains `interrupted_prompt`.
+      recording.recordNotification(
+        [
+          {
+            text: `<task-notification>\n${item.modelText}\n</task-notification>`,
+          },
+        ],
+        item.displayText,
+        {
+          taskId: item.taskId,
+          sourceTurnId: item.sourceTurnId,
+          status: item.status,
+          kind: item.kind,
+          ...(item.agent
+            ? { agent: persistedNotificationAgent(item.agent) }
+            : {}),
+          ...item.structured,
+        },
+      );
+      item.persisted = true;
+    }
+  }
+
+  /**
+   * Pre-close hook for {@link #landUndrainedPeerNotifications}. The
+   * stored-session close sequence calls this before the recorder is finalized,
+   * which is the last point where the write is both accepted and then flushed.
+   */
+  flushPendingPeerNotifications(): void {
+    this.#landUndrainedPeerNotifications();
+  }
+
   dispose(): void {
     this.disposed = true;
     this.closing = true;
@@ -5172,6 +5289,9 @@ export class Session implements SessionContext {
     this.unsubscribeApprovalModeChange = undefined;
     this.unsubscribeRequestLifecycle?.();
     this.unsubscribeRequestLifecycle = undefined;
+    this.detachTeamSink?.();
+    this.detachTeamSink = undefined;
+    this.teamSinkAbort.abort(SESSION_DISPOSE_ABORT_REASON);
     this.requestLifecycleExecutions.clear();
     this.pendingPrompt?.abort(SESSION_DISPOSE_ABORT_REASON);
     this.pendingPrompt = null;
@@ -5179,6 +5299,7 @@ export class Session implements SessionContext {
     this.resolveCloseGate = null;
     this.closeGateCompletion = null;
     this.hardSuspendTodoStopGuard();
+    this.#landUndrainedPeerNotifications();
     this.notificationQueue = [];
     this.droppedNotifications.clear();
     this.cronQueue = [];
@@ -12744,6 +12865,267 @@ export class Session implements SessionContext {
     );
   }
 
+  /**
+   * Agent Team: attach the leader sink so teammate reports reach the model and
+   * teammate tool approvals reach the client.
+   *
+   * Team tool registration is gated on `Config.isAgentTeamEnabled()`, which
+   * knows nothing about the host, so without this an ACP-hosted session
+   * advertises `team_create`, a model uses it, and the coordination never comes
+   * back: `TeamManager.pollLeaderInbox()` returns before consuming when no
+   * callback is attached, so the leader is never woken, and
+   * `TEAMMATE_APPROVAL_REQUEST` is emitted with no listener, so a blocked
+   * teammate is neither approved nor cancelled.
+   *
+   * Reports enter the background notification queue as `peer` items, which
+   * reuses the existing idle wake: ACP has no TUI-style idle hook, and
+   * `#enqueueBackgroundNotification` ends by draining. `peer` is deliberately
+   * not given task-registry semantics — like `cron`, it names no task the model
+   * could go and read, so core accounts a dropped one as a real loss.
+   */
+  #registerTeamSink(): void {
+    if (!this.config.isAgentTeamEnabled?.()) return;
+    this.detachTeamSink = attachTeamSink({
+      config: this.config,
+      sessionId: this.sessionId,
+      signal: this.teamSinkAbort.signal,
+      permissionPersistencePolicy: this.requiresManagedConversationBinding
+        ? STANDALONE_PERMISSION_PERSISTENCE_POLICY
+        : undefined,
+      injectLeaderMessage: (modelText, displayText, senders) =>
+        this.#enqueueTeammateMessage(modelText, displayText, senders),
+      reportRosterChange: (change) => this.#enqueueTeamRosterChange(change),
+      reportTeammateActivity: (activity) =>
+        this.#emitTeammateActivity(activity),
+      // Not `#requestPermissionQueued`: a teammate approval is session-scoped,
+      // so no leader turn ending bounds it — one ignored card left on the
+      // shared tail would wedge every later prompt, including the leader's own.
+      // Skipping the queue costs nothing here: `#withBackgroundPermission`
+      // early-returns on the `permissionScope: 'session'` these params carry.
+      requestPermission: (params, signal) =>
+        requestPermissionWithAbort(this.client, params, signal),
+      retireTeamBinding: (bindingId) =>
+        this.client.extNotification(
+          'qwen/notify/session/teammate-binding-ended',
+          {
+            v: 1,
+            sessionId: this.sessionId,
+            bindingId,
+          },
+        ),
+      retireTeammateApprovals: (teammateName) =>
+        this.client.extNotification('qwen/notify/session/teammate-exited', {
+          v: 1,
+          sessionId: this.sessionId,
+          teammateName,
+        }),
+    });
+  }
+
+  #enqueueTeammateMessage(
+    modelText: string,
+    displayText: string,
+    senders?: readonly string[],
+  ): void {
+    // Only `disposed` may drop a report. `TeamManager.pollLeaderInbox()`
+    // consumes the mailbox and marks it read *before* invoking this callback,
+    // so returning on `closing` would turn "retained, undelivered" into
+    // "consumed, lost" — the exact state `team-sink.ts`'s `injectLeaderMessage`
+    // contract forbids. Enqueueing is safe during a reversible close:
+    // `#drainNotificationQueue` has its own `closing` gate, and `beginClose`'s
+    // release drains the queue, so the report still reaches the leader.
+    if (this.disposed) return;
+    // A single-sender batch is attributable; a mixed batch is not, so it stays
+    // unattributed rather than naming one teammate for several reports.
+    const sender = senders?.length === 1 ? senders[0] : undefined;
+    this.#enqueueBackgroundNotification({
+      kind: 'peer',
+      // Unique per message: the public `enqueueBackgroundNotification` dedupes
+      // on `taskId`, and teammate reports must never collapse into one another.
+      taskId: `teammate-message-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
+      status: 'message',
+      modelText: `<peer-notification>\n${defangPeerNotificationTags(modelText)}\n</peer-notification>`,
+      displayText,
+      ...(sender
+        ? {
+            agent: {
+              agentName: `${ROOT_AGENT_IDENTITY.agentName}/${sender}`,
+              depth: 1,
+              kind: 'teammate' as const,
+            },
+            // The turn-start row renders `label ?? kind`, so a teammate
+            // report without a label reads as the generic "peer" after
+            // reload; the sender names it.
+            label: sender,
+          }
+        : {}),
+      continuesTodoStopGuardWorkChain: false,
+    });
+  }
+
+  /**
+   * Roster membership as wire-visible events, so a client reconstructs who is
+   * on the team from joins and exits without a roster route. Status changes
+   * and idle pulses are deliberately not projected: they fire on every
+   * transition and each would wake the leader into an automatic turn for noise.
+   */
+  #pendingTeardownExits: Array<{ name: string; status?: string }> = [];
+  #teardownFlushScheduled = false;
+
+  #flushTeardownRosterExits(): void {
+    this.#teardownFlushScheduled = false;
+    const exits = this.#pendingTeardownExits.splice(0);
+    if (exits.length === 0 || this.disposed) return;
+    const names = exits.map((exit) => exit.name);
+    const head =
+      names.length === 1
+        ? `Teammate ${names[0]}`
+        : `Teammates ${names.join(', ')}`;
+    const tail = `left the team (${exits[0]?.status ?? 'cancelled'})`;
+    this.#enqueueBackgroundNotification({
+      kind: 'peer',
+      taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
+      status: 'exited',
+      modelText: `<peer-notification>\n${escapeXml(`${head} ${tail}.`)}\n</peer-notification>`,
+      displayText: `teammate ${names.join(', ')} ${tail}`,
+      label: names.length === 1 ? names[0] : 'team',
+      continuesTodoStopGuardWorkChain: false,
+    });
+  }
+
+  #enqueueTeamRosterChange(change: {
+    type: 'joined' | 'exited';
+    name: string;
+    status?: string;
+    teardown?: boolean;
+  }): void {
+    // Same reasoning as `#enqueueTeammateMessage`: a reversible close must not
+    // swallow the notice, since the queue is drained when the gate releases.
+    if (this.disposed) return;
+    if (change.type === 'exited' && change.teardown) {
+      // One `cleanup()` publishes an exit per surviving teammate (up to ten),
+      // and every queued peer item drains as its own automatic leader turn.
+      // Collect the synchronous burst and enqueue a single item instead; the
+      // per-teammate events still reach the wire and the approval retirement.
+      this.#pendingTeardownExits.push({
+        name: change.name,
+        status: change.status,
+      });
+      if (!this.#teardownFlushScheduled) {
+        this.#teardownFlushScheduled = true;
+        queueMicrotask(() => this.#flushTeardownRosterExits());
+      }
+      return;
+    }
+    const joined = change.type === 'joined';
+    const tail = joined
+      ? 'joined the team'
+      : `left the team${change.status ? ` (${change.status})` : ''}`;
+    this.#enqueueBackgroundNotification({
+      kind: 'peer',
+      taskId: `teammate-roster-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
+      status: change.type,
+      modelText: `<peer-notification>\n${escapeXml(`Teammate ${change.name} ${tail}.`)}\n</peer-notification>`,
+      displayText: `teammate ${change.name} ${tail}`,
+      agent: {
+        agentName: `${ROOT_AGENT_IDENTITY.agentName}/${change.name}`,
+        depth: 1,
+        kind: 'teammate',
+      },
+      label: change.name,
+      continuesTodoStopGuardWorkChain: false,
+    });
+  }
+
+  /**
+   * Teammate progress and inter-teammate messages as display-only frames.
+   * Unlike roster changes and reports these never enter the notification
+   * queue — they carry nothing the leader must act on, and each would
+   * otherwise wake it into an automatic turn. Persistence is skipped for the
+   * same reason: the frames are ephemeral activity, while the report the
+   * teammate eventually sends is what the transcript must keep.
+   */
+  #emitTeammateActivity(activity: {
+    kind: 'tool' | 'message';
+    name: string;
+    toolName?: string;
+    phase?: 'call' | 'result';
+    success?: boolean;
+    description?: string;
+    from?: string;
+    to?: string;
+    message?: string;
+  }): void {
+    if (this.disposed || this.closing) return;
+    // The Web Shell system row switches `backgroundTask.status` on exactly
+    // `completed` / `failed` / `cancelled` and renders anything else with a
+    // neutral icon, so a failed tool result must not stay a raw phase string.
+    const toolFailed =
+      activity.phase === 'result' && activity.success === false;
+    const text =
+      activity.kind === 'tool'
+        ? `${activity.name} ${activity.phase === 'result' ? 'finished' : 'started'} ${activity.toolName ?? 'a tool'}${activity.description && (activity.phase === 'call' || toolFailed) ? `: ${activity.description}` : ''}`
+        : `${activity.from} → ${activity.to}: ${activity.message ?? ''}`;
+    // Inter-agent messages carry OpenAI's Responses multi-agent semantics —
+    // `agent_message` items identify direction with `author` and `recipient`,
+    // and the item's own `agent` names the recipient — spelled in this wire's
+    // camelCase, the same borrow-shape-not-spelling rule `AgentIdentity`
+    // documents.
+    const agentName = (name: string): string =>
+      name === LEADER_NAME
+        ? ROOT_AGENT_IDENTITY.agentName
+        : `${ROOT_AGENT_IDENTITY.agentName}/${name}`;
+    const recipient =
+      activity.kind === 'message' && activity.to ? activity.to : activity.name;
+    void this.#emitBackgroundNotificationDisplay(
+      {
+        displayText: text,
+        modelText: text,
+        taskId: `teammate-activity-${this.teammateIdPrefix}-${++this.teammateMessageSeq}`,
+        status:
+          activity.kind === 'tool'
+            ? toolFailed
+              ? 'failed'
+              : (activity.phase ?? 'call')
+            : 'message',
+        kind: 'peer',
+        agent: {
+          agentName: agentName(recipient),
+          depth: recipient === LEADER_NAME ? 0 : 1,
+          kind: recipient === LEADER_NAME ? 'root' : 'teammate',
+        },
+        structured: {
+          ...(activity.kind === 'message' &&
+          activity.from &&
+          activity.from !== 'unknown'
+            ? {
+                author: {
+                  agentName: agentName(activity.from),
+                  depth: activity.from === LEADER_NAME ? 0 : 1,
+                  kind:
+                    activity.from === LEADER_NAME
+                      ? ('root' as const)
+                      : ('teammate' as const),
+                },
+              }
+            : {}),
+          ...(activity.kind === 'tool'
+            ? {
+                toolName: activity.toolName,
+                phase: activity.phase,
+                ...(activity.success !== undefined
+                  ? { success: activity.success }
+                  : {}),
+              }
+            : {}),
+        },
+      },
+      'teammate_activity',
+    ).catch((error) => {
+      debugLogger.warn('Failed to publish teammate activity:', error);
+    });
+  }
+
   #registerBackgroundNotificationCallbacks(): void {
     const backgroundRegistry = this.config.getBackgroundTaskRegistry();
     // Single-slot setter, so remember exactly what we installed and only ever
@@ -12970,6 +13352,7 @@ export class Session implements SessionContext {
             ? `Notification queue overflow: dropping related task=${item.taskId} kind=${item.kind} because all queued items are related`
             : `Notification queue overflow: dropping unrelated task=${item.taskId} kind=${item.kind} while automatic work is deferred`,
         );
+        this.#landUndrainedPeerNotifications([item]);
         this.droppedNotifications.record(toAdmissibleNotification(item));
         return;
       }
@@ -12979,6 +13362,7 @@ export class Session implements SessionContext {
         `Notification queue overflow: evicting task=${evicted?.taskId ?? 'unknown'} kind=${evicted?.kind ?? 'unknown'}`,
       );
       if (evicted) {
+        this.#landUndrainedPeerNotifications([evicted]);
         this.droppedNotifications.record(toAdmissibleNotification(evicted));
       }
     }
@@ -12991,6 +13375,9 @@ export class Session implements SessionContext {
         status: item.status,
         kind: item.kind,
         toolUseId: item.toolUseId,
+        ...(item.agent
+          ? { agent: persistedNotificationAgent(item.agent) }
+          : {}),
         ...item.structured,
       },
     });
@@ -13343,6 +13730,9 @@ export class Session implements SessionContext {
             kind: item.kind,
             toolUseId: item.toolUseId,
             sourceTurnId: item.sourceTurnId,
+            ...(item.agent
+              ? { agent: persistedNotificationAgent(item.agent) }
+              : {}),
             ...item.structured,
           });
       }
@@ -13744,6 +14134,9 @@ export class Session implements SessionContext {
                 status: item.status,
                 kind: item.kind,
                 toolUseId: item.toolUseId,
+                ...(item.agent
+                  ? { agent: persistedNotificationAgent(item.agent) }
+                  : {}),
                 ...item.structured,
               },
             );
@@ -14051,6 +14444,7 @@ export class Session implements SessionContext {
       _meta: {
         source,
         qwenDiscreteMessage: true,
+        ...(item.agent ? { agent: item.agent } : {}),
         backgroundTask: {
           taskId: item.taskId,
           sourceTurnId: item.sourceTurnId,
@@ -14254,6 +14648,7 @@ export class Session implements SessionContext {
   #withBackgroundPermission(
     params: RequestPermissionRequest,
   ): RequestPermissionRequest {
+    if (params._meta?.['permissionScope'] === 'session') return params;
     const execution = backgroundTurnContext.getStore();
     return execution?.active && execution.sessionId === this.sessionId
       ? {
