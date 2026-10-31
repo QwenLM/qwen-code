@@ -843,6 +843,113 @@ async function hookApp(
   };
 }
 
+async function writeSettledToolHistory(
+  managed: ManagedSession,
+  promptId: string,
+  outcome: 'completed' | 'cancelled' | 'error',
+  stopReason: string,
+) {
+  const content = Buffer.from(
+    JSON.stringify([{ type: 'text', text: 'review X then fix findings' }]),
+  );
+  await managed.authority.submitInput(
+    {
+      operation: 'submitInput',
+      commandId: promptId,
+      sessionKey: {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      },
+      contentDigest: createHash('sha256').update(content).digest('hex'),
+    },
+    {
+      inputId: promptId,
+      turnId: promptId,
+      source: 'hosted-harness',
+      contentRef: await managed.resources.publish('managed-input', content),
+      admissionRef: await managed.resources.publish(
+        'managed-admission',
+        Buffer.from('{}'),
+      ),
+      deadline: null,
+      wakeReason: 'input',
+    },
+  );
+  await createManagedHarnessHandle(managed).ensureRunnable();
+  const messages: Array<Pick<ChatRecord, 'type' | 'message'>> = [
+    {
+      type: 'user',
+      message: {
+        role: 'user',
+        parts: [{ text: 'review X then fix findings' }],
+      },
+    },
+    {
+      type: 'assistant',
+      message: {
+        role: 'model',
+        parts: [
+          {
+            functionCall: {
+              id: `${promptId}:background-agent`,
+              name: 'agent',
+              args: {},
+            },
+          },
+        ],
+      },
+    },
+    {
+      type: 'tool_result',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: `${promptId}:background-agent`,
+              name: 'agent',
+              response: { output: 'Child agent started in the background' },
+            },
+          },
+        ],
+      },
+    },
+  ];
+  let parentUuid: string | null = null;
+  for (const message of messages) {
+    const uuid = randomUUID();
+    await managed.sink.write({
+      uuid,
+      parentUuid,
+      sessionId: SESSION_ID,
+      timestamp: new Date().toISOString(),
+      cwd: state.root,
+      version: 'hosted-harness/1',
+      daemonPromptId: promptId,
+      ...message,
+    } as ChatRecord);
+    parentUuid = uuid;
+  }
+  await managed.sink.write({
+    uuid: randomUUID(),
+    parentUuid,
+    sessionId: SESSION_ID,
+    timestamp: new Date().toISOString(),
+    type: 'system',
+    subtype: 'turn_result',
+    cwd: state.root,
+    version: 'hosted-harness/1',
+    daemonPromptId: promptId,
+    systemPayload: {
+      promptId,
+      state: outcome,
+      stopReason,
+      endedAt: Date.now(),
+    },
+  } as ChatRecord);
+}
+
 describe('attributeShellReceipts', () => {
   const input = (turnId: string, source = 'hosted-harness') =>
     ({
@@ -4318,6 +4425,87 @@ describe('Hosted Harness no-tool session', () => {
     vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
     return repair;
   }
+
+  it.each([
+    ['cancelled', 'harness_interruption', ['user', 'assistant', 'tool_result']],
+    ['cancelled', 'cancelled', []],
+    ['cancelled', 'deadline_exceeded', []],
+    ['error', 'error', []],
+  ] as const)(
+    'keeps settled tool history whole after %s/%s (#14256)',
+    async (outcome, stopReason, expectedTypes) => {
+      mockBrokerBroker();
+      const server = await app(true);
+      const created = await headers(supertest(server).post('/session'))
+        .send({
+          sessionId: SESSION_ID,
+          sessionScope: 'thread',
+          managedSessionStore: store(),
+          toolProfile: 'hosted-workspace-files/1',
+        })
+        .expect(200);
+      const managed = capturedWakeSession().managed;
+      const completedId = `${PROMPT_ID}:completed`;
+      await writeSettledToolHistory(
+        managed,
+        completedId,
+        'completed',
+        'end_turn',
+      );
+      await writeSettledToolHistory(managed, PROMPT_ID, outcome, stopReason);
+      const prompt = [{ type: 'text', text: 'please continue' }];
+      const nextPromptId = randomUUID();
+      await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+        .set('X-Qwen-Client-Id', created.body.clientId)
+        .send({
+          prompt,
+          promptId: nextPromptId,
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+        })
+        .expect(202);
+      await vi.waitFor(() => expect(state.model).toHaveBeenCalledOnce(), {
+        timeout: settleTimeoutMs(),
+      });
+      const input = state.model.mock.calls[0]![0] as unknown as {
+        history: ChatRecord[];
+      };
+      await vi.waitFor(
+        async () => {
+          const status = await headers(
+            supertest(server).get(`/session/${SESSION_ID}/status`),
+          ).set('X-Qwen-Client-Id', created.body.clientId);
+          expect(status.body.hasActivePrompt).toBe(false);
+        },
+        { timeout: settleTimeoutMs() },
+      );
+      expect(
+        input.history
+          .filter((entry) => entry.daemonPromptId === PROMPT_ID)
+          .map((entry) => entry.type),
+      ).toEqual(expectedTypes);
+      expect(
+        input.history
+          .filter(
+            (entry) => entry.daemonPromptId === completedId && entry.message,
+          )
+          .map((entry) => entry.type),
+      ).toEqual(['user', 'assistant', 'tool_result']);
+      expect(
+        (await managed.sink.project())
+          .filter((entry) => entry.daemonPromptId === PROMPT_ID)
+          .map((entry) => entry.type),
+      ).toEqual(['user', 'assistant', 'tool_result']);
+      expect(
+        managed.authority
+          .eventsInSequenceRange(1, managed.authority.committedSequence)
+          .find(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === PROMPT_ID,
+          )?.payload,
+      ).toMatchObject({ outcome, stopReason });
+    },
+  );
 
   it('keeps a turn that ended unanswered out of the next wake turn history', async () => {
     await prewriteAutomationSession();
@@ -8686,6 +8874,35 @@ describe('Hosted Harness no-tool session', () => {
     expect(await channels.planReply(turnId)).toBeUndefined();
     await scheduler.deps.recoverBlocked();
     expect(state.model).not.toHaveBeenCalled();
+    const prompt = [{ type: 'text', text: 'what happened to the deployment?' }];
+    await headers(supertest(server).post(`/session/${SESSION_ID}/prompt`))
+      .set('X-Qwen-Client-Id', clientId)
+      .send({
+        prompt,
+        promptId: randomUUID(),
+        payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+      })
+      .expect(202);
+    await vi.waitFor(() => expect(state.model).toHaveBeenCalledOnce(), {
+      timeout: settleTimeoutMs(),
+    });
+    const input = state.model.mock.calls[0]![0] as unknown as {
+      history: ChatRecord[];
+    };
+    expect(
+      input.history.find(
+        (entry) => entry.daemonPromptId === turnId && entry.type === 'user',
+      )?.message?.parts,
+    ).toEqual([{ text: 'write deploy.txt' }]);
+    await vi.waitFor(
+      async () => {
+        const status = await headers(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', clientId);
+        expect(status.body.hasActivePrompt).toBe(false);
+      },
+      { timeout: settleTimeoutMs() },
+    );
     await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
       'X-Qwen-Client-Id',
       clientId,
@@ -35438,6 +35655,14 @@ describe('Hosted Harness Runtime turn takeover', () => {
       toolProfile: FILE_PROFILE,
     });
     expect(created.status).toBe(200);
+    const managed = (wakeDeps.last as { session: { managed: ManagedSession } })
+      .session.managed;
+    for (const [id, outcome, reason] of [
+      ['prior-crash', 'cancelled', 'harness_interruption'],
+      ['prior-cancel', 'cancelled', 'cancelled'],
+      ['prior-complete', 'completed', 'end_turn'],
+    ] as const)
+      await writeSettledToolHistory(managed, id, outcome, reason);
     const CALL_A = {
       name: 'write_file',
       callId: 'call-a',
@@ -35558,7 +35783,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
     expect(continuedCall).toBeDefined();
     const input = continuedCall![0] as unknown as {
-      history: Array<{ type: string }>;
+      history: ChatRecord[];
       resumeFromToolResults: unknown[];
     };
     // Round one's tool result stays in history; only the parked round's
@@ -35567,6 +35792,15 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const historyResults = input.history.filter(
       (entry) => entry.type === 'tool_result',
     );
+    for (const id of ['prior-crash', 'prior-complete'])
+      expect(
+        input.history
+          .filter((entry) => entry.daemonPromptId === id && entry.message)
+          .map((entry) => entry.type),
+      ).toEqual(['user', 'assistant', 'tool_result']);
+    expect(
+      input.history.some((entry) => entry.daemonPromptId === 'prior-cancel'),
+    ).toBe(false);
     expect(JSON.stringify(historyResults)).toContain('call-a');
     expect(JSON.stringify(historyResults)).not.toContain('call-b');
     expect(JSON.stringify(input.resumeFromToolResults)).toContain('call-b');
@@ -37892,10 +38126,9 @@ describe('Hosted Harness Runtime turn takeover', () => {
   });
   // H4e-b1: a user Turn whose batch parks nothing (team calls only) dies
   // after a team call commits and before its tool_result lands. The
-  // cancellation takeover settles it; the committed call must be answered
-  // from its record, or core's orphan repair tells the next Turn's model to
-  // retry it and the retry opens a second task.
-  it('answers a committed team call of a cancelled user Turn from its record', async () => {
+  // cancellation takeover answers the committed call truthfully in audit
+  // history, while the next model request excludes the cancelled group.
+  it('preserves a cancelled team call in audit history without carrying it into the next Turn', async () => {
     domainEnablement.childRun = true;
     try {
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
@@ -37958,7 +38191,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
         await toolTurn!.execute(
           calls,
           calls.map((call) => ({
-            functionCall: { id: call.callId, name: call.name, args: call.args },
+            functionCall: {
+              id: call.callId,
+              name: call.name,
+              args: call.args,
+            },
           })),
           'test-model',
           signal,
@@ -37989,7 +38226,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         (await headers(supertest(server).delete(`/session/${SESSION_ID}`)))
           .status,
       ).toBe(204);
-      // The coordinator's cancellation takeover on a replacement Harness.
+      // The coordinator's explicit user-cancellation takeover.
       const replacement = await replacementApp();
       const loaded = await replacementHeaders(
         supertest(replacement).post(`/session/${SESSION_ID}/load`),
@@ -38000,7 +38237,7 @@ describe('Hosted Harness Runtime turn takeover', () => {
         cancellationTakeover: true,
       });
       expect(loaded.status).toBe(200);
-      let seen: ChatRecord[] = [];
+      let seen: ChatRecord[] | undefined;
       state.model.mockImplementationOnce(async (input) => {
         seen = [...((input as { history?: ChatRecord[] }).history ?? [])];
         return { text: 'ok', model: 'test-model' };
@@ -38016,10 +38253,28 @@ describe('Hosted Harness Runtime turn takeover', () => {
           payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(next)).digest('hex')}`,
         })
         .expect(202);
-      await vi.waitFor(() => expect(seen.length).toBeGreaterThan(0), {
+      await vi.waitFor(() => expect(seen).toBeDefined(), {
         timeout: settleTimeoutMs(),
       });
-      const answer = seen
+      const group = seen!.filter((entry) => entry.daemonPromptId === PROMPT_ID);
+      expect(group).toEqual([]);
+      const managed = (
+        wakeDeps.last as { session: { managed: ManagedSession } }
+      ).session.managed;
+      expect(
+        managed.authority
+          .eventsInSequenceRange(1, managed.authority.committedSequence)
+          .find(
+            (event) =>
+              event.kind === 'turn.settled' &&
+              event.payload['turnId'] === PROMPT_ID,
+          )?.payload,
+      ).toMatchObject({
+        outcome: 'cancelled',
+        stopReason: 'cancelled',
+      });
+      const audit = await managed.sink.project();
+      const answer = audit
         .filter(
           (record) =>
             record.daemonPromptId === PROMPT_ID &&
