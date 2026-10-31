@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
@@ -48,8 +49,14 @@ public final class WorkspaceRecoveryContract {
         var first = fixture.runtime("first");
         var transaction = new org.springframework.transaction.support.TransactionTemplate(
                 new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
-        var created = transaction.execute(status -> store.insertWorkspaceSessionCommand(fixture.tenant, "actor", "neighbor",
-                "sha256:" + "b".repeat(64), "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", ".")));
+        var created = transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(fixture.tenant)
+                .actorId("actor")
+                .idempotencyKey("neighbor")
+                .requestDigest("sha256:" + "b".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build()));
         var second = fixture.runtime("second", created.sessionId());
         var other = com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(jdbc, new org.springframework.jdbc.datasource.DataSourceTransactionManager(source)));
         var start = new java.util.concurrent.CyclicBarrier(2);
@@ -382,9 +389,14 @@ public final class WorkspaceRecoveryContract {
                     + " VALUES (?, 'workspace', ?, 'OPERATOR')", tenant, "actor".getBytes(StandardCharsets.UTF_8));
             var transaction = new org.springframework.transaction.support.TransactionTemplate(
                     new org.springframework.jdbc.datasource.DataSourceTransactionManager(source));
-            var created = transaction.execute(status -> store.insertWorkspaceSessionCommand(
-                    tenant, "actor", "create", "sha256:" + "a".repeat(64),
-                    "qwen-code", null, null, List.of(), null, new WorkspaceSelection("workspace", ".")));
+            var created = transaction.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor")
+                    .idempotencyKey("create")
+                    .requestDigest("sha256:" + "a".repeat(64))
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("workspace", "."))
+                    .build()));
             session = store.findSessionById(created.sessionId()).orElseThrow();
         }
 
