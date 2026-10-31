@@ -192,6 +192,26 @@ describe('memoryDiagnostics', () => {
     );
   });
 
+  it('writes heap snapshots under the global Qwen dir by default', () => {
+    const qwenHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-home-'));
+    vi.stubEnv('QWEN_HOME', qwenHome);
+    try {
+      const writtenPath = writeMemoryHeapSnapshot({
+        writeSnapshot: (filePath) => {
+          fs.writeFileSync(filePath, 'snapshot');
+          return filePath;
+        },
+      });
+
+      expect(path.dirname(writtenPath)).toBe(
+        path.join(qwenHome, 'memory-snapshots'),
+      );
+    } finally {
+      vi.unstubAllEnvs();
+      fs.rmSync(qwenHome, { recursive: true, force: true });
+    }
+  });
+
   it('refuses heap snapshots when estimated heap dump would leave little free disk', () => {
     const outputDir = path.join(
       os.tmpdir(),

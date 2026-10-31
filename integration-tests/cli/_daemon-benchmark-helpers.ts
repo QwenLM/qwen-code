@@ -19,8 +19,6 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import * as fs from 'node:fs';
-import * as os from 'node:os';
-import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { DaemonClient } from '@qwen-code/sdk';
 
@@ -234,14 +232,6 @@ export function measureProcessTreeRss(daemonPid: number): ProcessTreeRss {
 export async function measureCliStartupWithProfiler(opts?: {
   cwd?: string;
 }): Promise<StartupPhasesResult> {
-  const perfDir = path.join(os.homedir(), '.qwen', 'startup-perf');
-  const beforeFiles = new Set<string>();
-  try {
-    for (const f of fs.readdirSync(perfDir)) beforeFiles.add(f);
-  } catch {
-    /* dir might not exist yet */
-  }
-
   const result = await spawnCliWithTime(
     ['-p', 'x', '--output-format', 'text'],
     {
@@ -262,13 +252,15 @@ export async function measureCliStartupWithProfiler(opts?: {
     peakRssMB: result.peakRssMB,
   };
 
+  // The CLI picks the global dir after reading QWEN_HOME from the home .env,
+  // which this process never does, so use the path finalizeStartupProfile()
+  // reports instead of resolving the dir here.
+  const reportPath = /^Startup profile written to: (.+)$/m.exec(
+    result.stderr,
+  )?.[1];
   try {
-    const afterFiles = fs.readdirSync(perfDir);
-    const newFile = afterFiles.find((f) => !beforeFiles.has(f));
-    if (newFile) {
-      const report = JSON.parse(
-        fs.readFileSync(path.join(perfDir, newFile), 'utf-8'),
-      );
+    if (reportPath) {
+      const report = JSON.parse(fs.readFileSync(reportPath, 'utf-8'));
       const dp = report.derivedPhases ?? {};
       profileData.moduleLoadMs = report.processUptimeAtT0Ms ?? null;
       profileData.configInitMs = dp.config_initialize_dur ?? null;
@@ -278,7 +270,7 @@ export async function measureCliStartupWithProfiler(opts?: {
           ? Math.round((report.processUptimeAtT0Ms + report.totalMs) * 10) / 10
           : null;
       try {
-        fs.unlinkSync(path.join(perfDir, newFile));
+        fs.unlinkSync(reportPath);
       } catch {
         /* best-effort */
       }

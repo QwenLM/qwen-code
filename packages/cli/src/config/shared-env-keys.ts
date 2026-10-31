@@ -373,6 +373,21 @@ export function isPrivateProvenanceEnvKey(key: string): boolean {
   return PRIVATE_PROVENANCE_ENV_KEYS.has(key.toLowerCase());
 }
 
+// These decide where the global dir is. It is settled before .env files load
+// (QWEN_HOME from the home .env through HOME_ENV_BOOTSTRAP_KEYS), so no env
+// file at any scope may set them later: that would split global state across
+// two dirs.
+const GLOBAL_DIR_ENV_KEYS: ReadonlySet<string> = new Set([
+  'qwen_home',
+  'xdg_config_home',
+  'home',
+  'userprofile',
+]);
+
+export function isGlobalDirEnvKey(key: string): boolean {
+  return GLOBAL_DIR_ENV_KEYS.has(key.toLowerCase());
+}
+
 export const HOME_ENV_BOOTSTRAP_KEYS = [
   'QWEN_HOME',
   'QWEN_RUNTIME_DIR',
@@ -696,6 +711,33 @@ export function reportRejectedLoaderKeys(
     );
   }
   return rejectedKeys;
+}
+
+// A home .env could set these before they decided where the global dir is,
+// so say why one is now ignored instead of dropping it silently. A key the
+// environment already holds (QWEN_HOME from the home .env pre-read, say) was
+// not dropped.
+export function reportRejectedGlobalDirKeys(
+  source: string,
+  parsedEnv: Readonly<Record<string, string>>,
+): void {
+  const warnedKeys =
+    reportedLoaderKeyRejections.get(source) ?? new Set<string>();
+  const freshKeys = Object.keys(parsedEnv).filter(
+    (key) =>
+      isGlobalDirEnvKey(key) &&
+      parsedEnv[key] &&
+      !process.env[key] &&
+      !warnedKeys.has(key),
+  );
+  if (freshKeys.length === 0) return;
+  for (const key of freshKeys) warnedKeys.add(key);
+  reportedLoaderKeyRejections.set(source, warnedKeys);
+  writeStderrLineSafe(
+    `qwen: ${source} cannot set the env vars that locate the global ` +
+      `directory; ignored: ${freshKeys.join(', ')}. Export them in the ` +
+      'launch environment instead.',
+  );
 }
 
 /** Test-only: forget already-reported loader-key rejections. */

@@ -5,9 +5,10 @@
  */
 
 import { spawnSync } from 'node:child_process';
+import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 import {
   expandsAgainstHome,
@@ -15,6 +16,7 @@ import {
   getSystemDefaultsPath,
   getSystemSettingsPath,
   isFullyQualifiedPath,
+  markDefaultGlobalQwenDirLite,
   passedEnvironment,
   readEnvironmentVariable,
   spawnedEnvironmentView,
@@ -290,7 +292,97 @@ describe('settings locations in a given environment', () => {
     runOn('linux');
 
     expect(getGlobalQwenDirLite({ qwen_home: home })).toBe(
-      path.join(os.homedir(), '.qwen'),
+      getGlobalQwenDirLite({}),
     );
+  });
+
+  describe('the default on Linux', () => {
+    let userHome: string;
+
+    beforeEach(() => {
+      userHome = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-lite-home-'));
+      vi.stubEnv('HOME', userHome);
+      vi.stubEnv('USERPROFILE', userHome);
+      vi.stubEnv('QWEN_HOME', undefined);
+      vi.stubEnv('XDG_CONFIG_HOME', undefined);
+      runOn('linux');
+    });
+
+    afterEach(() => {
+      fs.rmSync(userHome, { recursive: true, force: true });
+    });
+
+    it('locates a new install and an existing ~/.qwen where core does', () => {
+      expect(getGlobalQwenDirLite()).toBe(
+        path.join(userHome, '.config', 'qwen'),
+      );
+      expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
+
+      fs.mkdirSync(path.join(userHome, '.qwen'));
+      expect(getGlobalQwenDirLite()).toBe(path.join(userHome, '.qwen'));
+      expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
+
+      const xdgDir = path.join(userHome, '.config', 'qwen');
+      fs.mkdirSync(xdgDir, { recursive: true });
+      expect(getGlobalQwenDirLite()).toBe(path.join(userHome, '.qwen'));
+      fs.writeFileSync(path.join(xdgDir, '.qwen-global-dir'), '');
+      expect(getGlobalQwenDirLite()).toBe(xdgDir);
+      expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
+    });
+
+    it('ignores a relative XDG_CONFIG_HOME, as core does', () => {
+      const xdgDir = path.join(userHome, '.config', 'qwen');
+      expect(getGlobalQwenDirLite({ XDG_CONFIG_HOME: 'relative-config' })).toBe(
+        xdgDir,
+      );
+      vi.stubEnv('XDG_CONFIG_HOME', 'relative-config');
+      expect(getGlobalQwenDirLite()).toBe(xdgDir);
+      expect(getGlobalQwenDirLite()).toBe(Storage.getGlobalQwenDir());
+    });
+
+    it('writes the marker core keeps a new install by', () => {
+      const xdgDir = path.join(userHome, '.config', 'qwen');
+      markDefaultGlobalQwenDirLite();
+      fs.mkdirSync(path.join(userHome, '.qwen'));
+
+      expect(Storage.getGlobalQwenDir()).toBe(xdgDir);
+      expect(getGlobalQwenDirLite()).toBe(xdgDir);
+    });
+
+    it.skipIf(process.platform === 'win32')(
+      'writes no marker while ~/.qwen is a symlink it cannot follow',
+      () => {
+        const volume = path.join(userHome, 'volume');
+        fs.symlinkSync(volume, path.join(userHome, '.qwen'));
+        markDefaultGlobalQwenDirLite();
+        fs.mkdirSync(volume);
+        expect(getGlobalQwenDirLite()).toBe(path.join(userHome, '.qwen'));
+      },
+    );
+
+    it('writes no marker under QWEN_HOME or when ~/.qwen is in use', () => {
+      const xdgDir = path.join(userHome, '.config', 'qwen');
+      vi.stubEnv('QWEN_HOME', xdgDir);
+      markDefaultGlobalQwenDirLite();
+      expect(fs.existsSync(xdgDir)).toBe(false);
+
+      vi.stubEnv('QWEN_HOME', undefined);
+      fs.mkdirSync(path.join(userHome, '.qwen'));
+      markDefaultGlobalQwenDirLite();
+      expect(fs.existsSync(xdgDir)).toBe(false);
+      expect(fs.readdirSync(path.join(userHome, '.qwen'))).toEqual([]);
+    });
+
+    it('reads XDG_CONFIG_HOME from the given environment', () => {
+      const configHome = path.join(userHome, 'xdg-config');
+      vi.stubEnv('XDG_CONFIG_HOME', path.join(userHome, 'ambient'));
+
+      expect(getGlobalQwenDirLite({ XDG_CONFIG_HOME: configHome })).toBe(
+        path.join(configHome, 'qwen'),
+      );
+      expect(getGlobalQwenDirLite({})).toBe(
+        path.join(userHome, '.config', 'qwen'),
+      );
+    });
   });
 });

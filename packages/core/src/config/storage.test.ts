@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { Storage } from './storage.js';
+import { InstallationManager } from './installationManager.js';
 import { FatalConfigError } from '../utils/errors.js';
 
 const mockRealpathSync = vi.hoisted(() => vi.fn());
@@ -94,9 +95,9 @@ const GLOBAL_CONFIG_PATHS = [
 ] as const;
 
 describe('Storage – getGlobalSettingsPath', () => {
-  it('returns path to ~/.qwen/settings.json', () => {
+  it('returns settings.json in the global Qwen dir', () => {
     expect(Storage.getGlobalSettingsPath()).toBe(
-      underHome('.qwen', 'settings.json'),
+      path.join(Storage.getGlobalQwenDir(), 'settings.json'),
     );
   });
 });
@@ -110,8 +111,10 @@ describe('Storage – additional helpers', () => {
     expect(storage.getWorkspaceSettingsPath()).toBe(expected);
   });
 
-  it('getUserCommandsDir returns ~/.qwen/commands', () => {
-    expect(Storage.getUserCommandsDir()).toBe(underHome('.qwen', 'commands'));
+  it('getUserCommandsDir returns commands in the global Qwen dir', () => {
+    expect(Storage.getUserCommandsDir()).toBe(
+      path.join(Storage.getGlobalQwenDir(), 'commands'),
+    );
   });
 
   it('getProjectCommandsDir returns project/.qwen/commands', () => {
@@ -119,8 +122,11 @@ describe('Storage – additional helpers', () => {
     expect(storage.getProjectCommandsDir()).toBe(expected);
   });
 
-  it('getMcpOAuthTokensPath returns ~/.qwen/mcp-oauth-tokens.json', () => {
-    const expected = underHome('.qwen', 'mcp-oauth-tokens.json');
+  it('getMcpOAuthTokensPath returns mcp-oauth-tokens.json in the global Qwen dir', () => {
+    const expected = path.join(
+      Storage.getGlobalQwenDir(),
+      'mcp-oauth-tokens.json',
+    );
     expect(Storage.getMcpOAuthTokensPath()).toBe(expected);
   });
 });
@@ -453,11 +459,6 @@ describe('Storage – QWEN_HOME env var', () => {
     restoreEnv('QWEN_HOME', originalEnv);
   });
 
-  it('defaults to ~/.qwen when QWEN_HOME is not set', () => {
-    delete process.env['QWEN_HOME'];
-    expect(Storage.getGlobalQwenDir()).toBe(underHome('.qwen'));
-  });
-
   it('uses QWEN_HOME when set to absolute path', () => {
     process.env['QWEN_HOME'] = configDir;
     expect(Storage.getGlobalQwenDir()).toBe(configDir);
@@ -515,6 +516,146 @@ describe('Storage – QWEN_HOME env var', () => {
     expect(Storage.getGlobalTempDir()).toBe(path.join(runtimeDir, 'tmp'));
     expect(Storage.getGlobalDebugDir()).toBe(path.join(runtimeDir, 'debug'));
     delete process.env['QWEN_RUNTIME_DIR'];
+  });
+});
+
+describe('Storage – default global dir (XDG Base Directory)', () => {
+  const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+  let home: string;
+  const legacyDir = () => path.join(home, '.qwen');
+  const xdgDir = () => path.join(home, '.config', 'qwen');
+  const create = (dir: string) => actualFs.mkdirSync(dir, { recursive: true });
+
+  beforeEach(() => {
+    home = actualFs.mkdtempSync(path.join(os.tmpdir(), 'qwen-xdg-home-'));
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
+    vi.stubEnv('QWEN_HOME', undefined);
+    vi.stubEnv('XDG_CONFIG_HOME', undefined);
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+  });
+
+  afterEach(() => {
+    Object.defineProperty(process, 'platform', platform);
+    vi.unstubAllEnvs();
+    actualFs.rmSync(home, { recursive: true, force: true });
+  });
+
+  it('uses ~/.config/qwen for a new install on Linux', () => {
+    expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+    for (const [method, file] of GLOBAL_CONFIG_PATHS) {
+      expect(Storage[method]()).toBe(path.join(xdgDir(), file));
+    }
+  });
+
+  it('keeps using an existing ~/.qwen on Linux', () => {
+    create(legacyDir());
+    expect(Storage.getGlobalQwenDir()).toBe(legacyDir());
+  });
+
+  it('keeps ~/.qwen next to an unrelated ~/.config/qwen', () => {
+    create(legacyDir());
+    create(xdgDir());
+    actualFs.writeFileSync(path.join(xdgDir(), 'settings.json'), '{}');
+    expect(Storage.getGlobalQwenDir()).toBe(legacyDir());
+  });
+
+  it('prefers the XDG directory next to ~/.qwen once it holds the marker', () => {
+    create(legacyDir());
+    create(xdgDir());
+    actualFs.writeFileSync(path.join(xdgDir(), '.qwen-global-dir'), '');
+    expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+  });
+
+  it('stays in the XDG directory when ~/.qwen is recreated after first run', () => {
+    expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+    Storage.markDefaultGlobalQwenDir();
+    create(legacyDir());
+    expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+  });
+
+  it.each(['installation_id', 'output-language.md'])(
+    'does not treat %s alone as the marker',
+    (file) => {
+      // Both can be written while QWEN_HOME points at the XDG directory.
+      create(legacyDir());
+      create(xdgDir());
+      actualFs.writeFileSync(path.join(xdgDir(), file), '');
+      expect(Storage.getGlobalQwenDir()).toBe(legacyDir());
+    },
+  );
+
+  it('does not mark the directory QWEN_HOME points at', () => {
+    create(legacyDir());
+    vi.stubEnv('QWEN_HOME', xdgDir());
+    new InstallationManager().getInstallationId();
+    Storage.markDefaultGlobalQwenDir();
+    vi.stubEnv('QWEN_HOME', undefined);
+    expect(Storage.getGlobalQwenDir()).toBe(legacyDir());
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'writes no marker while ~/.qwen is a symlink it cannot follow',
+    () => {
+      const volume = path.join(home, 'volume');
+      actualFs.symlinkSync(volume, legacyDir());
+      expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+      Storage.markDefaultGlobalQwenDir();
+      expect(actualFs.existsSync(path.join(xdgDir(), '.qwen-global-dir'))).toBe(
+        false,
+      );
+      create(volume);
+      expect(Storage.getGlobalQwenDir()).toBe(legacyDir());
+    },
+  );
+
+  it('writes no marker while ~/.qwen is in use', () => {
+    create(legacyDir());
+    Storage.markDefaultGlobalQwenDir();
+    expect(actualFs.existsSync(xdgDir())).toBe(false);
+    expect(actualFs.readdirSync(legacyDir())).toEqual([]);
+  });
+
+  it('uses an absolute XDG_CONFIG_HOME', () => {
+    const configHome = path.join(home, 'xdg-config');
+    vi.stubEnv('XDG_CONFIG_HOME', configHome);
+    expect(Storage.getGlobalQwenDir()).toBe(path.join(configHome, 'qwen'));
+  });
+
+  it('keeps a marked custom XDG_CONFIG_HOME next to ~/.qwen', () => {
+    const configHome = path.join(home, 'xdg-config');
+    vi.stubEnv('XDG_CONFIG_HOME', configHome);
+    Storage.markDefaultGlobalQwenDir();
+    expect(
+      actualFs.existsSync(path.join(configHome, 'qwen', '.qwen-global-dir')),
+    ).toBe(true);
+    create(legacyDir());
+    expect(Storage.getGlobalQwenDir()).toBe(path.join(configHome, 'qwen'));
+  });
+
+  it('names the XDG directory whether or not it is in use', () => {
+    create(legacyDir());
+    expect(Storage.getXdgGlobalQwenDir()).toBe(xdgDir());
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    expect(Storage.getXdgGlobalQwenDir()).toBeUndefined();
+  });
+
+  it('ignores a relative XDG_CONFIG_HOME, as the spec requires', () => {
+    vi.stubEnv('XDG_CONFIG_HOME', 'relative-config');
+    expect(Storage.getGlobalQwenDir()).toBe(xdgDir());
+  });
+
+  it('still lets QWEN_HOME override the default', () => {
+    create(xdgDir());
+    const qwenHome = path.join(home, 'custom-qwen');
+    vi.stubEnv('QWEN_HOME', qwenHome);
+    expect(Storage.getGlobalQwenDir()).toBe(qwenHome);
+  });
+
+  it.each(['darwin', 'win32'])('keeps ~/.qwen on %s', (value) => {
+    Object.defineProperty(process, 'platform', { value });
+    create(xdgDir());
+    expect(Storage.getGlobalQwenDir()).toBe(legacyDir());
   });
 });
 

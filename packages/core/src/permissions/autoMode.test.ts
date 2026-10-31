@@ -29,6 +29,7 @@ import {
 } from './autoMode.js';
 import { clearSessionCommits } from './destructive-commands.js';
 import { ApprovalMode } from '../config/config.js';
+import { Storage } from '../config/storage.js';
 import { ToolNames } from '../tools/tool-names.js';
 import type { Config } from '../config/config.js';
 import type { PermissionCheckContext } from './types.js';
@@ -274,6 +275,66 @@ describe('isAutoModeProtectedWritePath', () => {
         '/tmp/custom-qwen-home/.mcp.json',
       ]);
     });
+  });
+
+  it('expands a leading ~ in QWEN_HOME the way the global dir does', () => {
+    restoringQwenHome(() => {
+      process.env['QWEN_HOME'] = '~/custom-qwen';
+      const home = os.homedir();
+      expectProtected([
+        path.join(home, 'custom-qwen', 'settings.json'),
+        path.join(home, 'custom-qwen', 'hooks', 'pre-tool-use.json'),
+      ]);
+    });
+  });
+
+  it('matches self-modification surfaces in a default global dir outside .qwen', () => {
+    restoringQwenHome(() => {
+      delete process.env['QWEN_HOME'];
+      const globalDir = vi
+        .spyOn(Storage, 'getGlobalQwenDir')
+        .mockReturnValue('/home/user/.config/qwen');
+      try {
+        expectProtected([
+          '/home/user/.config/qwen/settings.json',
+          '/home/user/.config/qwen/hooks/pre-tool-use.json',
+          '/home/user/.config/qwen/skills/review/SKILL.md',
+          '/home/user/.config/qwen/.qwen-global-dir',
+        ]);
+        expectProtected(['/home/user/.config/qwen/tmp/notes.md'], false);
+      } finally {
+        globalDir.mockRestore();
+      }
+    });
+  });
+
+  it('keeps the XDG dir protected while ~/.qwen is the global dir', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    restoringQwenHome(() =>
+      inTmpDir('qwen-xdg-home-', (home) => {
+        delete process.env['QWEN_HOME'];
+        vi.stubEnv('HOME', home);
+        vi.stubEnv('USERPROFILE', home);
+        vi.stubEnv('XDG_CONFIG_HOME', undefined);
+        Object.defineProperty(process, 'platform', { value: 'linux' });
+        try {
+          const xdgDir = path.join(home, '.config', 'qwen');
+          expect(Storage.getGlobalQwenDir()).toBe(xdgDir);
+          // Planting the marker here would make the XDG dir win next start,
+          // and a ~/.qwen created mid-session must not unprotect it either.
+          fs.mkdirSync(path.join(home, '.qwen'));
+          expect(Storage.getGlobalQwenDir()).toBe(path.join(home, '.qwen'));
+          expectProtected([
+            path.join(xdgDir, 'settings.json'),
+            path.join(xdgDir, 'hooks', 'pre-tool-use.json'),
+            path.join(xdgDir, '.qwen-global-dir'),
+          ]);
+        } finally {
+          Object.defineProperty(process, 'platform', platform);
+          vi.unstubAllEnvs();
+        }
+      }),
+    );
   });
 
   it('matches real paths under a symlinked custom QWEN_HOME', () => {
@@ -614,6 +675,39 @@ describe('shouldForceAutoModeReviewForAllow', () => {
 
   it('returns true for ANSI-C quoted protected redirect targets', () => {
     expect(forcesReview("echo '{}' > $'.qwen/settings.json'")).toBe(true);
+  });
+
+  it('expands the home variables in redirects to the XDG global dir', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    restoringQwenHome(() =>
+      inTmpDir('qwen-xdg-redirect-', (home) => {
+        delete process.env['QWEN_HOME'];
+        vi.stubEnv('HOME', home);
+        vi.stubEnv('USERPROFILE', home);
+        vi.stubEnv('XDG_CONFIG_HOME', undefined);
+        Object.defineProperty(process, 'platform', { value: 'linux' });
+        try {
+          expect(Storage.getGlobalQwenDir()).toBe(
+            path.join(home, '.config', 'qwen'),
+          );
+          for (const command of [
+            'cat > $HOME/.config/qwen/settings.json',
+            'echo {} > "${HOME}/.config/qwen/hooks/pre-tool-use.json"',
+            'echo x > "$HOME"/.config/qwen/.qwen-global-dir',
+          ]) {
+            expect(forcesReview(command)).toBe(true);
+          }
+          vi.stubEnv('XDG_CONFIG_HOME', path.join(home, 'xdg'));
+          expect(
+            forcesReview('cat > $XDG_CONFIG_HOME/qwen/skills/x/SKILL.md'),
+          ).toBe(true);
+          expect(forcesReview('echo hi > $HOME/notes.txt')).toBe(false);
+        } finally {
+          Object.defineProperty(process, 'platform', platform);
+          vi.unstubAllEnvs();
+        }
+      }),
+    );
   });
 
   it('returns true for bidirectional redirects to protected paths', () => {

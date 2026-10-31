@@ -22,6 +22,7 @@ import path from 'node:path';
 import type { Content } from '@google/genai';
 import type { TrustedUserAnswerSnapshot } from './trusted-user-answers.js';
 import { ApprovalMode, type Config } from '../config/config.js';
+import { GLOBAL_DIR_MARKER, Storage } from '../config/storage.js';
 import {
   getAllMemoryFilenames,
   LOCAL_CONTEXT_FILENAME,
@@ -202,29 +203,37 @@ let qwenHomePrefixesCacheKey: string | undefined;
 let qwenHomePrefixesCache: string[] | undefined;
 
 function getNormalizedQwenHomePrefixes(): string[] {
-  const qwenHome = process.env['QWEN_HOME'];
-  if (!qwenHome) return [];
+  // The global dir can sit outside a `.qwen` directory (QWEN_HOME, or the XDG
+  // config directory on Linux), which the patterns above miss. The XDG dir is
+  // covered even while ~/.qwen wins, since a write there can make it win.
+  const qwenHomes = [Storage.getGlobalQwenDir()];
+  const xdgDir = Storage.getXdgGlobalQwenDir();
+  if (xdgDir) qwenHomes.push(xdgDir);
+  const cacheKey = qwenHomes.join('\n');
   if (
-    qwenHomePrefixesCacheKey === qwenHome &&
+    qwenHomePrefixesCacheKey === cacheKey &&
     qwenHomePrefixesCache !== undefined
   ) {
     return qwenHomePrefixesCache;
   }
 
-  const candidates = new Set<string>([path.resolve(qwenHome)]);
-  if (qwenHome.startsWith('/') || /^[A-Za-z]:[\\/]/.test(qwenHome)) {
-    candidates.add(qwenHome);
-  }
-  try {
-    candidates.add(fs.realpathSync.native(qwenHome));
-  } catch {
-    // QWEN_HOME may not exist yet; the configured path still matters.
+  const candidates = new Set<string>();
+  for (const qwenHome of qwenHomes) {
+    candidates.add(path.resolve(qwenHome));
+    if (qwenHome.startsWith('/') || /^[A-Za-z]:[\\/]/.test(qwenHome)) {
+      candidates.add(qwenHome);
+    }
+    try {
+      candidates.add(fs.realpathSync.native(qwenHome));
+    } catch {
+      // QWEN_HOME may not exist yet; the configured path still matters.
+    }
   }
 
   const prefixes = [...candidates].map((candidate) =>
     normalizePathForAutoModePattern(candidate).replace(/\/+$/, ''),
   );
-  qwenHomePrefixesCacheKey = qwenHome;
+  qwenHomePrefixesCacheKey = cacheKey;
   qwenHomePrefixesCache = prefixes;
   return prefixes;
 }
@@ -239,6 +248,7 @@ function matchesQwenHomeSurface(normalizedPath: string): boolean {
       /^settings(?:\.[^/]*)?\.json$/.test(relativePath) ||
       /^qwen\.local\.md$/.test(relativePath) ||
       /^\.mcp\.json$/.test(relativePath) ||
+      relativePath === GLOBAL_DIR_MARKER ||
       /^(rules|commands|agents|skills|hooks|fork-profiles)(?:\/|$)/.test(
         relativePath,
       )
@@ -356,12 +366,29 @@ function hasRawProtectedRedirect(command: string, cwd: string): boolean {
       i++;
     }
 
-    const target = stripRawRedirectTargetToken(token);
+    const target = expandGlobalDirEnvVar(stripRawRedirectTargetToken(token));
     if (!target || target.startsWith('&')) continue;
     const resolved = path.isAbsolute(target) ? target : path.join(cwd, target);
     if (isAutoModeProtectedWritePath(resolved)) return true;
   }
   return false;
+}
+
+const GLOBAL_DIR_ENV_VARS = new Set([
+  'HOME',
+  'USERPROFILE',
+  'XDG_CONFIG_HOME',
+  'QWEN_HOME',
+]);
+
+// The global dir's prefix match needs the real path: `> $HOME/.config/qwen/...`
+// has no `.qwen/` segment for the patterns above to catch.
+function expandGlobalDirEnvVar(target: string): string {
+  const match = /^\$(?:\{(\w+)\}|(\w+))["']?/.exec(target);
+  const name = match?.[1] ?? match?.[2];
+  const value =
+    name && GLOBAL_DIR_ENV_VARS.has(name) ? process.env[name] : undefined;
+  return value ? value + target.slice(match![0].length) : target;
 }
 
 function hasRawProtectedWriteCommand(command: string, cwd: string): boolean {

@@ -191,6 +191,9 @@ describe('IdeClient', () => {
     });
     vi.mocked(os.tmpdir).mockReturnValue('/tmp');
     vi.mocked(os.homedir).mockReturnValue('/home/test');
+    // On Linux the default global dir depends on which config directories
+    // exist, which the existsSync mock above answers for every path.
+    vi.stubEnv('QWEN_HOME', path.join('/home/test', '.qwen'));
     mockDebugLogger.debug.mockClear();
     mockDebugLogger.error.mockClear();
 

@@ -9878,6 +9878,78 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('falls back to the default global dir, XDG on Linux, for session runtime output and marks it', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-default-dir-')),
+    );
+    const home = path.join(tmpDir, 'home');
+    const workspaceDir = path.join(tmpDir, 'workspace');
+    fs.mkdirSync(home);
+    fs.mkdirSync(workspaceDir);
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('USERPROFILE', home);
+    vi.stubEnv('QWEN_HOME', undefined);
+    vi.stubEnv('QWEN_RUNTIME_DIR', undefined);
+    vi.stubEnv('XDG_CONFIG_HOME', undefined);
+    Object.defineProperty(process, 'platform', { value: 'linux' });
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as unknown as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    let primaryRuntime:
+      | import('./workspace-registry.js').WorkspaceRuntime
+      | undefined;
+    vi.spyOn(serverModule, 'createServeApp').mockImplementation(
+      (_opts, _getPort, deps) => {
+        primaryRuntime = deps?.workspaceRegistry?.primary;
+        return express();
+      },
+    );
+
+    let handle: Awaited<ReturnType<typeof runQwenServe>> | undefined;
+    try {
+      handle = await runQwenServe(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: workspaceDir,
+          maxSessions: 1,
+          serveWebShell: false,
+        },
+        {
+          bridge: makeRuntimeBridge(),
+          bootSettings: {},
+          daemonLogBaseDir: path.join(tmpDir, 'debug'),
+          resolveOnListen: true,
+        },
+      );
+      await handle.runtimeReady;
+      expect(primaryRuntime?.sessionRuntimeBaseDir).toBe(
+        path.join(home, '.config', 'qwen'),
+      );
+      expect(
+        fs.existsSync(path.join(home, '.config', 'qwen', '.qwen-global-dir')),
+      ).toBe(true);
+      // e.g. the Live discovery rendezvous, which still uses ~/.qwen.
+      fs.mkdirSync(path.join(home, '.qwen'));
+      expect(qwenCore.Storage.getGlobalQwenDir()).toBe(
+        path.join(home, '.config', 'qwen'),
+      );
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+      vi.unstubAllEnvs();
+      await handle?.close();
+    }
+  });
+
   it('rebuilds runtime env from the immutable daemon base after workspace reload', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-env-reload-')),

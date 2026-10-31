@@ -19,6 +19,7 @@ import {
   _resetCpuProfilerForTest,
   _setSessionFactoryForTest,
   clearCpuProfileRateLimit,
+  getCpuProfileOutputDir,
   isCpuProfileRecording,
   startCpuProfile,
   stopCpuProfile,
@@ -138,6 +139,26 @@ describe('cpuProfiler', () => {
   });
 
   describe('stopCpuProfile', () => {
+    it('writes under the global Qwen dir by default', async () => {
+      vi.stubEnv('QWEN_HOME', tmpDir);
+      try {
+        expect(getCpuProfileOutputDir()).toBe(
+          path.join(tmpDir, 'cpu-profiles'),
+        );
+        await startCpuProfile();
+        const result = await stopCpuProfile();
+
+        expect(result.ok).toBe(true);
+        if (result.ok) {
+          expect(path.dirname(result.filePath)).toBe(
+            path.join(tmpDir, 'cpu-profiles'),
+          );
+        }
+      } finally {
+        vi.unstubAllEnvs();
+      }
+    });
+
     it('stops and writes profile file', async () => {
       await startCpuProfile();
       const result = await stopCpuProfile({ outputDir: tmpDir });

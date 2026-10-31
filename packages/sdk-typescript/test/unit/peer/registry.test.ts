@@ -7,7 +7,8 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Storage } from '@qwen-code/qwen-code-core/storage';
 import {
   readLocalBootId,
   readPidNamespaceId,
@@ -23,6 +24,14 @@ import {
   writeOwnRecord,
 } from '../../../src/peer/registry.js';
 import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
+
+// This package's workers do not pass a stubbed HOME on to os.homedir(), so the
+// resolver tests below point it at a temporary home directly.
+const fakeHome = vi.hoisted(() => ({ dir: undefined as string | undefined }));
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, homedir: () => fakeHome.dir ?? actual.homedir() };
+});
 
 const isPosix = process.platform !== 'win32';
 const isLinux = process.platform === 'linux';
@@ -232,12 +241,73 @@ describe('resolveQwenHome', () => {
     else process.env['QWEN_HOME'] = saved;
   });
 
-  it('prefers an explicit home, then QWEN_HOME, then ~/.qwen', () => {
+  it('prefers an explicit home, then QWEN_HOME', () => {
     process.env['QWEN_HOME'] = '/from/env';
     expect(resolveQwenHome('/explicit')).toBe(path.resolve('/explicit'));
     expect(resolveQwenHome()).toBe(path.resolve('/from/env'));
-    delete process.env['QWEN_HOME'];
-    expect(resolveQwenHome()).toBe(path.join(os.homedir(), '.qwen'));
+  });
+
+  describe('without QWEN_HOME', () => {
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const savedXdg = process.env['XDG_CONFIG_HOME'];
+    let home: string;
+    const legacyDir = () => path.join(home, '.qwen');
+    const xdgDir = () => path.join(home, '.config', 'qwen');
+
+    beforeEach(() => {
+      home = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-sdk-home-'));
+      fakeHome.dir = home;
+      delete process.env['QWEN_HOME'];
+      delete process.env['XDG_CONFIG_HOME'];
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+    });
+
+    afterEach(() => {
+      Object.defineProperty(process, 'platform', platform);
+      fakeHome.dir = undefined;
+      if (savedXdg === undefined) delete process.env['XDG_CONFIG_HOME'];
+      else process.env['XDG_CONFIG_HOME'] = savedXdg;
+      fs.rmSync(home, { recursive: true, force: true });
+    });
+
+    it('uses ~/.config/qwen for a new install on Linux, like the CLI', () => {
+      expect(resolveQwenHome()).toBe(xdgDir());
+    });
+
+    it('keeps an existing ~/.qwen until the XDG directory holds the marker', () => {
+      fs.mkdirSync(legacyDir());
+      fs.mkdirSync(xdgDir(), { recursive: true });
+      expect(resolveQwenHome()).toBe(legacyDir());
+      fs.writeFileSync(path.join(xdgDir(), '.qwen-global-dir'), '');
+      expect(resolveQwenHome()).toBe(xdgDir());
+    });
+
+    it('uses an absolute XDG_CONFIG_HOME and ignores a relative one', () => {
+      process.env['XDG_CONFIG_HOME'] = path.join(home, 'xdg');
+      expect(resolveQwenHome()).toBe(path.join(home, 'xdg', 'qwen'));
+      process.env['XDG_CONFIG_HOME'] = 'relative-config';
+      expect(resolveQwenHome()).toBe(xdgDir());
+    });
+
+    it.each(['darwin', 'win32'])('keeps ~/.qwen on %s', (value) => {
+      Object.defineProperty(process, 'platform', { value });
+      expect(resolveQwenHome()).toBe(legacyDir());
+    });
+
+    // Peers only find each other when they resolve the directory the CLI
+    // uses, and the CLI resolves it through core.
+    it('resolves the same directory as core', () => {
+      const agrees = () =>
+        expect(resolveQwenHome()).toBe(Storage.getGlobalQwenDir());
+      agrees();
+      fs.mkdirSync(legacyDir());
+      agrees();
+      fs.mkdirSync(xdgDir(), { recursive: true });
+      fs.writeFileSync(path.join(xdgDir(), '.qwen-global-dir'), '');
+      agrees();
+      process.env['XDG_CONFIG_HOME'] = path.join(home, 'xdg');
+      agrees();
+    });
   });
 
   it('expands a leading ~ and resolves a relative path against the working directory', () => {

@@ -13,11 +13,13 @@ import { isWorkspaceTrusted } from './trustedFolders.js';
 import {
   DEFAULT_EXCLUDED_ENV_VARS,
   HOME_ENV_BOOTSTRAP_KEYS,
+  isGlobalDirEnvKey,
   isHardcodedProjectEnvExclusion,
   isLoaderEnvKey,
   isPrivateProvenanceEnvKey,
   PRIVATE_RELAUNCH_ENV_PROVENANCE,
   PROJECT_ENV_HARDCODED_EXCLUSIONS,
+  reportRejectedGlobalDirKeys,
   reportRejectedLoaderKeys,
   resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
@@ -179,10 +181,11 @@ let lastReloadSnapshotSeeded = false;
  * Returns the set of normalized .env file paths that count as user-level.
  *
  * User-level paths cover the home `.env` and the global Qwen config dir
- * `.env` (which respects `QWEN_HOME`). When `QWEN_HOME` redirects elsewhere,
- * the legacy `<homedir>/.qwen/.env` is also included so credentials users
- * left there continue to load (and the trust check in untrusted workspaces
- * still allows reading it).
+ * `.env` (which respects `QWEN_HOME`). The legacy `<homedir>/.qwen/.env` is
+ * always included, for compatibility: the docs pointed users at it for years,
+ * so credentials left there keep loading wherever the global dir is (and the
+ * trust check in untrusted workspaces still allows reading it). It is not
+ * the previous default dir's `.env`, and it cannot move the global dir.
  */
 function getUserLevelEnvPaths(): Set<string> {
   const homeDir = os.homedir();
@@ -215,14 +218,11 @@ export function preResolveHomeEnvOverrides(): void {
     return;
   }
 
-  // Storage.getGlobalQwenDir() shares the same homedir resolution as the
-  // rest of the storage layer; when QWEN_HOME is unset it equals
-  // `<homedir>/.qwen`, so path.dirname() recovers `<homedir>`.
   const initialQwenHome = process.env['QWEN_HOME'];
   const initialQwenDir = Storage.getGlobalQwenDir();
   const candidates: string[] = [path.join(initialQwenDir, '.env')];
   if (!initialQwenHome) {
-    candidates.push(path.join(path.dirname(initialQwenDir), '.env'));
+    candidates.push(path.join(os.homedir() || os.tmpdir(), '.env'));
   }
 
   for (const candidate of candidates) {
@@ -337,7 +337,7 @@ export function getHomeEnvFallbackVars(
   // because loadEnvironment() populates process.env independently — the two
   // scopes are intentionally different.
   if (!process.env['QWEN_HOME']) {
-    candidates.push(path.join(path.dirname(globalQwenDir), '.env'));
+    candidates.push(path.join(os.homedir() || os.tmpdir(), '.env'));
   }
 
   const result: Record<string, string> = {};
@@ -426,7 +426,7 @@ export function findEnvFiles(
   };
 
   // Home-dir candidates in priority order: globalQwenDir/.env, then legacy
-  // ~/.qwen/.env (only when QWEN_HOME redirects), then ~/.env.
+  // ~/.qwen/.env (when the global dir is elsewhere), then ~/.env.
   const pushCandidate = (filePath: string): boolean => {
     const normalized = path.normalize(filePath);
     if (
@@ -594,6 +594,7 @@ function canApplyParsedEnvKey(
   // hardcoded project tier they are rejected at every scope — a home `.env`
   // must not be able to forge sandbox or Conversations runtime state either.
   if (isPrivateProvenanceEnvKey(key)) return false;
+  if (isGlobalDirEnvKey(key)) return false;
   if (options.reload && isReloadExcludedKey(key)) return false;
   if (!envFile.isHomeScopedEnvFile && isHardcodedProjectEnvExclusion(key)) {
     return false;
@@ -706,6 +707,7 @@ export function buildRuntimeEnvironment(
       settings?.advanced?.excludedEnvVars || DEFAULT_EXCLUDED_ENV_VARS;
     for (const [key, value] of Object.entries(settings.env)) {
       if (isLoaderEnvKey(key)) continue;
+      if (isGlobalDirEnvKey(key)) continue;
       if (isReloadExcludedKey(key)) continue;
       if (isHardcodedProjectEnvExclusion(key)) continue;
       if (excludedVars.includes(key)) continue;
@@ -781,6 +783,12 @@ export function loadEnvironment(
       `.env file ${envFile.path}`,
       Object.keys(envFile.parsedEnv),
     );
+    if (envFile.isHomeScopedEnvFile) {
+      reportRejectedGlobalDirKeys(
+        `.env file ${envFile.path}`,
+        envFile.parsedEnv,
+      );
+    }
   }
 
   // Step 2: settings.env fallback (lowest priority, no-override).
@@ -789,6 +797,9 @@ export function loadEnvironment(
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
       if (isLoaderEnvKey(key)) {
+        continue;
+      }
+      if (isGlobalDirEnvKey(key)) {
         continue;
       }
       if (isReloadExcludedKey(key)) {
@@ -890,6 +901,7 @@ export function reloadEnvironment(
   if (settings.env) {
     for (const [key, value] of Object.entries(settings.env)) {
       if (isLoaderEnvKey(key)) continue;
+      if (isGlobalDirEnvKey(key)) continue;
       if (isReloadExcludedKey(key)) continue;
       if (isHardcodedProjectEnvExclusion(key)) continue;
       if (typeof value !== 'string') continue;

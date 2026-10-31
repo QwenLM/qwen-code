@@ -22,6 +22,20 @@ const IDE_DIR_NAME = 'ide';
 const PLANS_DIR_NAME = 'plans';
 const DEBUG_DIR_NAME = 'debug';
 const ARENA_DIR_NAME = 'arena';
+// Written into the XDG directory while it is the default global dir in use;
+// see getGlobalQwenDir() and markDefaultGlobalQwenDir().
+export const GLOBAL_DIR_MARKER = '.qwen-global-dir';
+
+function getXdgQwenDir(homeDir: string): string {
+  // XDG Base Directory spec: a relative XDG_CONFIG_HOME is invalid and ignored.
+  const xdgConfigHome = process.env['XDG_CONFIG_HOME'];
+  return path.join(
+    xdgConfigHome && path.isAbsolute(xdgConfigHome)
+      ? xdgConfigHome
+      : path.join(homeDir, '.config'),
+    'qwen',
+  );
+}
 
 // Win32 and darwin default volumes equate names differing only in case,
 // and realpath preserves the spelling it was given — so the same physical
@@ -199,7 +213,66 @@ export class Storage {
     if (!homeDir) {
       return path.join(os.tmpdir(), '.qwen');
     }
-    return path.join(homeDir, QWEN_DIR);
+    const legacyDir = path.join(homeDir, QWEN_DIR);
+    if (process.platform === 'win32' || process.platform === 'darwin') {
+      return legacyDir;
+    }
+    const xdgDir = getXdgQwenDir(homeDir);
+    // An existing ~/.qwen keeps working unless the XDG dir holds the marker
+    // Qwen Code writes there while using it as the default: then a ~/.qwen
+    // recreated later (e.g. by an older release) cannot pull the install back,
+    // while an unrelated ~/.config/qwen never takes over an existing ~/.qwen.
+    return !fs.existsSync(legacyDir) ||
+      fs.existsSync(path.join(xdgDir, GLOBAL_DIR_MARKER))
+      ? xdgDir
+      : legacyDir;
+  }
+
+  /**
+   * The XDG directory getGlobalQwenDir() picks between, whether or not it is
+   * the one in use. Undefined where the default is always ~/.qwen.
+   */
+  static getXdgGlobalQwenDir(): string | undefined {
+    const homeDir = os.homedir();
+    if (
+      !homeDir ||
+      process.platform === 'win32' ||
+      process.platform === 'darwin'
+    ) {
+      return undefined;
+    }
+    return getXdgQwenDir(homeDir);
+  }
+
+  /**
+   * Writes the marker getGlobalQwenDir() looks for when the XDG directory is
+   * the default global dir in use. Not under QWEN_HOME, so a redirected run
+   * never claims the directory it was pointed at.
+   */
+  static markDefaultGlobalQwenDir(): void {
+    const homeDir = os.homedir();
+    if (process.env['QWEN_HOME'] || !homeDir) {
+      return;
+    }
+    const dir = Storage.getGlobalQwenDir();
+    const marker = path.join(dir, GLOBAL_DIR_MARKER);
+    const legacyDir = path.join(homeDir, QWEN_DIR);
+    if (dir === legacyDir || fs.existsSync(marker)) {
+      return;
+    }
+    try {
+      // existsSync reports a ~/.qwen it cannot follow, such as a symlink into
+      // a volume that is not mounted yet, as missing. Marking the XDG dir now
+      // would keep that install out for good once its target is back.
+      if (fs.lstatSync(legacyDir, { throwIfNoEntry: false })) return;
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(
+        marker,
+        'Qwen Code keeps its global directory here even if ~/.qwen exists.\n',
+      );
+    } catch {
+      // Best effort: the next start tries again.
+    }
   }
 
   static getMcpOAuthTokensPath(): string {

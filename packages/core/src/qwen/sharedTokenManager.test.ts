@@ -215,6 +215,9 @@ describe('SharedTokenManager', () => {
 
     // Setup default mock implementations
     mockOs.homedir.mockReturnValue('/home/user');
+    // node:fs is mocked without existsSync, which the default global dir
+    // consults on Linux.
+    vi.stubEnv('QWEN_HOME', '/home/user/.qwen');
     mockPath.join.mockImplementation((...args) => args.join('/'));
     mockPath.dirname.mockImplementation((filePath) => {
       // Handle undefined/null input gracefully
@@ -234,6 +237,7 @@ describe('SharedTokenManager', () => {
   afterEach(() => {
     // Clean up listeners after each test
     tokenManager?.cleanup();
+    vi.unstubAllEnvs();
   });
 
   describe('Singleton Pattern', () => {

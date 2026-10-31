@@ -5,9 +5,9 @@
  */
 
 import * as fs from 'node:fs';
-import * as os from 'node:os';
 import * as path from 'node:path';
 import * as v8 from 'node:v8';
+import { Storage } from '@qwen-code/qwen-code-core/config/storage.js';
 
 export const HIGH_HEAP_PRESSURE_THRESHOLD = 0.85;
 
@@ -136,7 +136,7 @@ export interface CollectMemoryPressureSamplesOptions {
 }
 
 function defaultHeapSnapshotDir(): string {
-  return path.join(os.homedir(), '.qwen', 'memory-snapshots');
+  return path.join(Storage.getGlobalQwenDir(), 'memory-snapshots');
 }
 
 function formatSnapshotTimestamp(now: Date): string {
