@@ -175,10 +175,14 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
    `ManagedSessionStore`）、策略（`ManagedMcpManagementService`、
    `ManagedExtensionManagementService`）、事件投影
    （`MessageMaterializer`、`ReplayFloorAdvancer`、`ManagedToolResultStore`）、
-   Turn 执行（`SessionWorktreeService`）。其余消费方要么跨角色，要么把
+   Turn 执行（`SessionWorktreeService`）。其余消费方多数跨角色，或把
    store 透传给多角色依赖（证据 settle、Harness 与 broker 装配），继续
-   使用组合接口；更窄的注入会随 P1 沿同一条缝拆分实现而进一步扩散。
-   先接口隔离，后实现拆分（P1）。
+   使用组合接口。另有四个单角色消费方暂缓迁移、仍用组合接口，在此
+   记录供 P1 跟进：`ChildWorkspaceService`、`WorkspaceRuntimeResolver`、
+   `ManagedAutomationService`（查询）与 `TaskCancelCoordinator`（生命
+   周期）——它们的 `this(...)` 是本类构造委托而非透传，继承的
+   `AcceptanceEvidence.settle` 使用独立参数。更窄的注入会随 P1 沿同一
+   条缝拆分实现而进一步扩散。先接口隔离，后实现拆分（P1）。
 
 4. 在 `verification` 中按 `SurfaceRegistryGateTest` 的风格加 pin 测试：断言
    `AgentStateStore`（及其后继角色接口）中名为 `insertWorkspaceSessionCommand`

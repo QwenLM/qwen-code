@@ -198,12 +198,17 @@ cross-cutting "how the system works today" tour.
    `ManagedSessionStore`), policy (`ManagedMcpManagementService`,
    `ManagedExtensionManagementService`), event projection
    (`MessageMaterializer`, `ReplayFloorAdvancer`, `ManagedToolResultStore`),
-   and turn execution (`SessionWorktreeService`). The remaining consumers
-   either span roles or pass the store into multi-role dependencies
-   (evidence settlement, Harness and broker wiring) and keep the composite;
-   narrower injection spreads further as P1 splits the implementation along
-   the same seams. Interface segregation first, implementation split later
-   (P1).
+   and turn execution (`SessionWorktreeService`). Most of the remaining
+   consumers span roles or forward the store into multi-role dependencies
+   (evidence settlement, Harness and broker wiring) and keep the composite.
+   Four more are single-role but stay on the composite as deferred
+   migrations, recorded here for P1: `ChildWorkspaceService`,
+   `WorkspaceRuntimeResolver` and `ManagedAutomationService` (query), and
+   `TaskCancelCoordinator` (lifecycle) — their `this(...)` calls are
+   constructor delegation within the same class, not forwarding, and the
+   inherited `AcceptanceEvidence.settle` uses its own parameter. Narrower
+   injection spreads further as P1 splits the implementation along the same
+   seams. Interface segregation first, implementation split later (P1).
 
 4. Add a pin test in `verification`, in the style of `SurfaceRegistryGateTest`:
    assert that `AgentStateStore` (and its successor role interfaces) declare
