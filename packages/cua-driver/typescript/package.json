@@ -82,6 +82,7 @@
   "dependencies": {
     "@ubjs/core": "0.31.0-3",
     "tar": "7.5.22",
-    "@qwen-code/browser-use": "0.27.0"
+    "@qwen-code/browser-use": "0.27.0",
+    "undici": "^7.29.0"
   }
 }
