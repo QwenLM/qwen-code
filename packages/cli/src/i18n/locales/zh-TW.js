@@ -2024,6 +2024,8 @@ export default {
   'System prompt': '系統提示',
   'Built-in tools': '內置工具',
   'MCP tools': 'MCP tools',
+  'Instruction files': '指令檔案',
+  'Auto memory': '自動記憶',
   'Memory files': '記憶檔案',
   Skills: '技能',
   Messages: '消息',

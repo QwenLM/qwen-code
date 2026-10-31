@@ -22419,6 +22419,84 @@ exit 1
     rmSync(dir, { recursive: true, force: true });
   });
 
+  it('keeps the af-039 and af-050 budget prose in step with the job cap', () => {
+    // The sum check in 'bounds every long step…' proves the workflow bounds
+    // itself. It cannot see the two design-doc entries that RESTATE those
+    // bounds — af-039 in prose, af-050 in a hand-written budget table — and
+    // nothing else derives either number, so both kept describing a
+    // 300-minute job cap the workflow no longer has (plus a 20-minute repair
+    // row against a 70-minute step cap). Anchor each quoted figure to the
+    // workflow value it is derived from, so the pair cannot drift silently.
+    const addressJobBlock =
+      workflow.match(
+        /\n {2}review-address:\n[\s\S]*?(?=\n {2}\w[\w-]*:\n|$)/,
+      )?.[0] ?? '';
+    expect(addressJobBlock).toBeTruthy();
+    const jobCapMin = Number(
+      addressJobBlock.match(/\n {4}timeout-minutes: (\d+)/)?.[1],
+    );
+    expect(Number.isFinite(jobCapMin)).toBe(true);
+
+    // af-039 quotes the cap as runner-hours per slot and as a fleet total at
+    // the max-parallel fallback, derived the same way as 'bounds fleet-wide
+    // simultaneity below the per-scan target budget'.
+    const parallel = Number(
+      reviewAddressJob.match(/max-parallel:.*?\|\|\s*(\d+)/)?.[1],
+    );
+    expect(Number.isInteger(parallel)).toBe(true);
+    expect(designDoc).toContain(`${jobCapMin}-minute job cap`);
+    expect(designDoc).toContain(`${jobCapMin / 60} runner-hours per`);
+    expect(designDoc).toContain(
+      `(${(jobCapMin / 60) * parallel} across the fleet at ${parallel})`,
+    );
+    expect(designDoc).not.toContain('300-minute job cap');
+
+    // af-050's budget table: the Repair row is the derived step cap, and the
+    // worst-case line is that table's OWN sum quoted against the job cap.
+    // The table itemises setup and report, so its total is deliberately NOT
+    // the SETUP_AND_REPORT_MIN reserve the sum check adds to the four long
+    // steps — that reserve covers steps this table splits out instead.
+    const longSteps = addressJobBlock
+      .split(/\n {6}- name: /)
+      .slice(1)
+      .filter((b) =>
+        /node [^\n]*run-agent\.mjs|bash [^\n]*run-autofix-review-verification\.sh/.test(
+          b,
+        ),
+      );
+    expect(longSteps).toHaveLength(4);
+    const repairCapMin = stepCapsOf(
+      longSteps.find((b) => b.startsWith("'Repair deterministic rejection'")) ??
+        '',
+    ).unarmed;
+    expect(Number.isFinite(repairCapMin)).toBe(true);
+    // No trailing \n: this row carries a rationale parenthetical like its
+    // siblings. Still unique in the doc — 'Repair verification' is not
+    // followed by digits.
+    const repairRowMin = Number(designDoc.match(/\n {2}Repair +(\d+)/)?.[1]);
+    expect(Number.isFinite(repairRowMin)).toBe(true);
+    expect(repairRowMin).toBe(repairCapMin);
+
+    const setupRowMin = Number(designDoc.match(/\n {2}setup +(\d+)\n/)?.[1]);
+    const reportRowMin = Number(designDoc.match(/\n {2}report +(\d+)\n/)?.[1]);
+    expect(Number.isFinite(setupRowMin)).toBe(true);
+    expect(Number.isFinite(reportRowMin)).toBe(true);
+    const longStepSumMin = longSteps.reduce(
+      (a, b) => a + stepCapsOf(b).unarmed,
+      0,
+    );
+    const worstCase = designDoc.match(
+      /\n {2}worst case +(\d+) +=> job timeout (\d+)/,
+    );
+    expect(worstCase, 'af-050 worst-case line').toBeTruthy();
+    expect(Number(worstCase[1])).toBe(
+      setupRowMin + longStepSumMin + reportRowMin,
+    );
+    expect(Number(worstCase[2])).toBe(jobCapMin);
+    expect(Number(worstCase[1])).toBeLessThanOrEqual(jobCapMin);
+    expect(designDoc).not.toContain('=> job timeout 300');
+  });
+
   it('bounds every long step so the round fits under the job timeout', () => {
     // Every long step is bounded BELOW the job timeout so a runaway fails its
     // own STEP, leaving the always() report step time to run — a job-level

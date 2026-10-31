@@ -2228,6 +2228,8 @@ export default {
   'System prompt': '系统提示',
   'Built-in tools': '内置工具',
   'MCP tools': 'MCP tools',
+  'Instruction files': '指令文件',
+  'Auto memory': '自动记忆',
   'Memory files': '记忆文件',
   Skills: '技能',
   Messages: '消息',

@@ -1409,6 +1409,8 @@ export default {
   'System prompt': 'システムプロンプト',
   'Built-in tools': '組み込みツール',
   'MCP tools': 'MCP tools',
+  'Instruction files': '指示ファイル',
+  'Auto memory': '自動メモリ',
   'Memory files': 'メモリファイル',
   Skills: 'スキル',
   Messages: 'メッセージ',

@@ -2469,6 +2469,8 @@ export default {
   'System prompt': 'System prompt',
   'Built-in tools': 'Built-in tools',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Instruction files',
+  'Auto memory': 'Auto memory',
   'Memory files': 'Memory files',
   Skills: 'Skills',
   Messages: 'Messages',

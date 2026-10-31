@@ -1873,6 +1873,8 @@ export default {
   'System prompt': 'Prompt do sistema',
   'Built-in tools': 'Ferramentas integradas',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Arquivos de instruções',
+  'Auto memory': 'Memória automática',
   'Memory files': 'Arquivos de memória',
   Skills: 'Habilidades',
   Messages: 'Mensagens',
