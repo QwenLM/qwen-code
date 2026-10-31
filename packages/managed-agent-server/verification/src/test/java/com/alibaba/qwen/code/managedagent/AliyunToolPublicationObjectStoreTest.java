@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationStorageException;
+import com.aliyun.oss.ClientErrorCode;
 import com.aliyun.oss.ClientException;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSException;
@@ -22,6 +23,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -76,6 +78,31 @@ class AliyunToolPublicationObjectStoreTest {
         assertThatThrownBy(() -> store.open("key"))
                 .isInstanceOf(ToolPublicationStorageException.class).hasCause(failure);
         verify(client, times(4)).getObject("bucket", "key");
+    }
+
+    @Test
+    void aTimedOutOpenIsRetried() throws IOException {
+        // The configuration reference's read-timeout row promises this retry:
+        // an open that times out before the response is reissued, while a
+        // stall inside the returned body is not (aReturnedBodyIsNeverReplayed).
+        when(client.getObject("bucket", "key")).thenThrow(timeout(ClientErrorCode.SOCKET_TIMEOUT))
+                .thenReturn(object(new ByteArrayInputStream(new byte[] {1, 2, 3})));
+        try (var input = store.open("key")) {
+            assertThat(input.readAllBytes()).containsExactly(1, 2, 3);
+        }
+        verify(client, times(2)).getObject("bucket", "key");
+    }
+
+    @Test
+    void persistentTimeoutsStopAfterThreeRetries() {
+        for (String code : new String[] {ClientErrorCode.SOCKET_TIMEOUT, ClientErrorCode.CONNECTION_TIMEOUT}) {
+            clearInvocations(client);
+            var failure = timeout(code);
+            doThrow(failure).when(client).getObject("bucket", "key");
+            assertThatThrownBy(() -> store.open("key"))
+                    .isInstanceOf(ToolPublicationStorageException.class).hasCause(failure);
+            verify(client, times(4)).getObject("bucket", "key");
+        }
     }
 
     @Test
@@ -154,5 +181,11 @@ class AliyunToolPublicationObjectStoreTest {
 
     private static OSSException error(String code) {
         return new OSSException("fixture", code, "request", "host", "bucket", "key", "resource");
+    }
+
+    private static ClientException timeout(String code) {
+        // The one-argument constructor leaves the code null, which the store
+        // treats as unclassified and never retries.
+        return new ClientException("fixture", code, "request");
     }
 }
