@@ -227,6 +227,17 @@ async function run(fn: () => Promise<void>): Promise<void> {
 
 // A session's auto-collector holds a task lock for a few seconds at most;
 // waiting beats failing a command the user or agent just ran.
+function loadLocalBatchEnvironment(): void {
+  // Load env-file values for QWEN_BATCH_HOME without rewriting invalid
+  // workspace settings or blocking local task inspection and cleanup.
+  try {
+    loadSettings(process.cwd(), { preserveInvalidWorkspaceSettings: true });
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    writeStderrLine(`warning: Could not load batch settings: ${reason}`);
+  }
+}
+
 const LOCK_WAIT_MS = 15_000;
 
 /** Deps shared by the agent-prepared workflow subcommands. */
@@ -373,7 +384,7 @@ const cleanWorkflowCommand: CommandModule = {
   // Local only: no endpoint or credentials needed.
   handler: (argv) =>
     run(async () => {
-      loadSettings();
+      loadLocalBatchEnvironment();
       await cleanTask(
         {
           env: process.env,
@@ -430,7 +441,7 @@ export const listWorkflowCommand: CommandModule = {
       // too, so a reader that leaves (`batch list | head -1`) must not turn a
       // completed listing into a crash-class exit.
       ignoreBrokenPipe();
-      loadSettings();
+      loadLocalBatchEnvironment();
       await listTasks({
         env: process.env,
         out: writeStdoutLine,

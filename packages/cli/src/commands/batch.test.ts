@@ -320,6 +320,52 @@ describe('local batch command environment', () => {
   });
 
   it.each(['list', 'clean'] as const)(
+    '%s still uses its configured home if settings loading throws',
+    async (command) => {
+      const store = new BatchTaskStore(home);
+      const task = store.create(
+        {
+          version: 1,
+          name: 'configured',
+          kind: 'document-transform',
+          shared: { instructions: 'Translate' },
+          items: [{ id: 'a', source: 'a.md', target: 'b.md' }],
+        },
+        root,
+        'qwen-plus',
+      );
+      mockLoadSettings.mockImplementation(() => {
+        process.env['QWEN_BATCH_HOME'] = home;
+        throw new Error('unrelated invalid settings');
+      });
+
+      await yargs(
+        command === 'list' ? ['batch', 'list'] : ['batch', 'clean', task.id],
+      )
+        .command(batchCommand)
+        .exitProcess(false)
+        .fail(false)
+        .parseAsync();
+
+      expect(process.exitCode).toBeUndefined();
+      expect(mockLoadSettings).toHaveBeenCalledWith(process.cwd(), {
+        preserveInvalidWorkspaceSettings: true,
+      });
+      expect(mockWriteStderrLine).toHaveBeenCalledWith(
+        expect.stringContaining('unrelated invalid settings'),
+      );
+      if (command === 'list') {
+        expect(writeStdoutLine).toHaveBeenCalledWith(
+          expect.stringContaining(task.id),
+        );
+        expect(fs.existsSync(store.fileOf(task.id))).toBe(true);
+      } else {
+        expect(fs.existsSync(store.fileOf(task.id))).toBe(false);
+      }
+    },
+  );
+
+  it.each(['list', 'clean'] as const)(
     '%s uses the task home populated while loading settings',
     async (command) => {
       const store = new BatchTaskStore(home);
