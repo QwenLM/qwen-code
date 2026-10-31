@@ -632,19 +632,37 @@ describe('TUI product evidence', () => {
     expect(outputs.reason).toBe('Outside the TUI build/test closure');
   });
 
-  it('excludes every tree the pnpm workspace itself leaves out', async () => {
-    // Parse by value, not by literal spelling: a trailing comment or an
-    // `!integrations/...` negation is lint-legal and must still be reconciled.
-    const excluded = parse(readFileSync('pnpm-workspace.yaml', 'utf8'))
+  // Parse by value, not by literal spelling: a trailing comment or an
+  // `!integrations/...` negation is lint-legal and must still be reconciled.
+  const excludedTrees = (yamlText) =>
+    parse(yamlText)
       .packages.filter((entry) => entry.startsWith('!'))
       .map((entry) => entry.slice(1));
+
+  it('excludes every tree the pnpm workspace itself leaves out', async () => {
+    const excluded = excludedTrees(readFileSync('pnpm-workspace.yaml', 'utf8'));
     expect(excluded.length).toBeGreaterThan(0);
     for (const tree of excluded) {
       const { outputs } = await impact([
         { filename: `${tree}/placeholder.ts` },
       ]);
       expect(outputs.component, tree).toBe('false');
+      expect(outputs.reason, tree).toBe('Outside the TUI build/test closure');
     }
+  });
+
+  it('reconciles negations spelled with a trailing comment or another scope', () => {
+    expect(
+      excludedTrees(
+        [
+          'packages:',
+          "  - 'packages/*'",
+          "  - '!packages/desktop' # promoted to its own release later",
+          "  - '!integrations/generated-ui'",
+          '',
+        ].join('\n'),
+      ),
+    ).toEqual(['packages/desktop', 'integrations/generated-ui']);
   });
 
   it.each([
