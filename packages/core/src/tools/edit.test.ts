@@ -611,6 +611,20 @@ describe('EditTool', () => {
       );
     });
 
+    it('blocks a secret formed by the line-ending-preserving write result', async () => {
+      const githubPrefix = ['gh', 'p_', '\r'].join('');
+      const original = `old${'a'.repeat(36)}\r\nkeep`;
+      const file = writeTeamFile(original);
+
+      const result = await run(edit(file, 'old', githubPrefix));
+
+      expect(result.error?.type).toBe(ToolErrorType.INVALID_TOOL_PARAMS);
+      expect(JSON.stringify(result)).toMatch(
+        /shared with all repository collaborators/i,
+      );
+      expect(readText(file)).toBe(original);
+    });
+
     it('reports the pre-existing-secret message and leaves the file untouched', async () => {
       // Seed the on-disk file with a FULL detectable token so currentContent
       // itself trips the scanner — exercises the preExisting branch.
@@ -1027,6 +1041,47 @@ describe('EditTool', () => {
           CommitAttributionService.getInstance().getFileAttribution(filePath),
         ).toBeUndefined();
       });
+
+      it('records and displays the bytes written rather than the literal proposal', async () => {
+        // The bare CR at the end of new_string is dropped before the untouched
+        // mid-line tail, so the literal proposal differs from the written bytes.
+        // Attribution must describe the file on disk, and the diff must not
+        // count this normalization as a user modification.
+        const original = 'const a = 1;\r\nconst b = 2;\r\n';
+        seedFile(filePath, original);
+        const recordEdit = vi.spyOn(
+          CommitAttributionService.getInstance(),
+          'recordEdit',
+        );
+
+        const params = edit(filePath, 'const a', 'A\r');
+        const confirmation = await confirm(params);
+        const result = await run(params);
+
+        expect(result.error).toBeUndefined();
+        const written = readText(filePath);
+        expect(written).toBe('A = 1;\r\nconst b = 2;\r\n');
+        expect(recordEdit).toHaveBeenCalledTimes(1);
+        expect(recordEdit.mock.calls[0][2]).toBe(
+          written.replace(/\r\n/g, '\n'),
+        );
+        const preview = written.replace(/\r\n/g, '\n');
+        expect.soft(confirmation).toMatchObject({
+          newContent: preview,
+          fileDiff: expect.stringContaining('+A = 1;'),
+        });
+        const display = result.returnDisplay as FileDiff;
+        expect.soft(display.newContent).toBe(preview);
+        expect.soft(display.fileDiff).toContain('+A = 1;');
+        expect.soft(display.diffStat).toMatchObject({
+          user_added_lines: 0,
+          user_removed_lines: 0,
+          user_added_chars: 0,
+          user_removed_chars: 0,
+        });
+        expect.soft(result.llmContent).toContain('A = 1;');
+        expect.soft(result.llmContent).not.toContain('\r');
+      });
     });
 
     it('should create a new file if old_string is empty and file does not exist, and return created message', async () => {
@@ -1132,6 +1187,174 @@ describe('EditTool', () => {
       expect(display.fileDiff).toMatch(/\+new text\n\+new text\n\+new text/);
       expect(display.fileName).toBe(testFile);
       expect(display.diffStat).toStrictEqual(modelDiffStat(3, 3, 24, 24));
+    });
+
+    // Edit normalises CRLF to LF so matching and the confirmation diff
+    // are line-ending agnostic. It must not let that normalisation reach
+    // disk: a file that mixes endings keeps every line the edit did not
+    // touch byte-identical, otherwise a single stray CRLF rewrites the
+    // whole file and buries the real change in the user's git diff.
+    it('keeps untouched line endings when the file mixes CRLF and LF', async () => {
+      fs.writeFileSync(filePath, 'one\ntwo\nthree\r\nfour\n', 'utf8');
+      seedPriorRead(filePath);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'two',
+        new_string: 'TWO',
+      };
+
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(
+        'one\nTWO\nthree\r\nfour\n',
+      );
+    });
+
+    it('keeps the prior CRLF write behavior when inline modification replaces the whole file', async () => {
+      const original = 'a\r\nb\r\nc\n';
+      fs.writeFileSync(filePath, original, 'utf8');
+      seedPriorRead(filePath);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'b',
+        new_string: 'B',
+      };
+      const invocation = tool.build(params);
+      const signal = new AbortController().signal;
+      const confirmation = await invocation.getConfirmationDetails(signal);
+      if (confirmation.type !== 'edit') {
+        throw new Error(`Expected edit confirmation, got ${confirmation.type}`);
+      }
+
+      const updatedParams = tool
+        .getModifyContext(signal)
+        .createUpdatedParams(
+          confirmation.originalContent ?? '',
+          'a\nb\nc\nX\n',
+          params,
+        );
+      const result = await tool.build(updatedParams).execute(signal);
+
+      expect(result.llmContent).toMatch(/Showing lines/);
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('a\r\nb\r\nc\r\nX\r\n');
+    });
+
+    // The inserted text is the one thing the edit did ask for, so it
+    // takes the line ending of the text it replaced. Without that a
+    // uniform CRLF file would gain LF lines the caller never wrote.
+    it('gives an inserted line the line ending of the replaced text', async () => {
+      fs.writeFileSync(filePath, 'one\r\ntwo\r\nthree\r\n', 'utf8');
+      seedPriorRead(filePath);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: 'two',
+        new_string: 'TWO\nTWO_POINT_FIVE',
+      };
+
+      const invocation = tool.build(params);
+      await invocation.execute(new AbortController().signal);
+
+      expect(fs.readFileSync(filePath, 'utf8')).toBe(
+        'one\r\nTWO\r\nTWO_POINT_FIVE\r\nthree\r\n',
+      );
+    });
+
+    it('preserves a bare CR in a non-final new-string segment on disk', async () => {
+      seedFile(filePath, 'one\r\ntwo\r\nthree\r\n');
+      seedPriorRead(filePath);
+
+      const result = await run(edit(filePath, 'two', 'X\r\r\nY'));
+
+      expect(result.error).toBeUndefined();
+      expect(readText(filePath)).toBe('one\r\nX\r\r\nY\r\nthree\r\n');
+    });
+
+    it('preserves a bare CR at the start of a matched span', async () => {
+      const original = 'a\r\nb\rc\nd\n';
+      fs.writeFileSync(filePath, original, 'utf8');
+      seedPriorRead(filePath);
+      const params: EditToolParams = {
+        file_path: filePath,
+        old_string: '\rc',
+        new_string: '\rC\nD',
+      };
+
+      const result = await tool
+        .build(params)
+        .execute(new AbortController().signal);
+
+      expect(result.error).toBeUndefined();
+      expect(fs.readFileSync(filePath, 'utf8')).toBe('a\r\nb\rC\nD\nd\n');
+    });
+
+    // The no-change gate compares `currentContent` with `newContent`, and both
+    // of those are the LF-normalized view. The bytes that reach disk are
+    // `contentForWrite`, and a mixed-ending file can make the two disagree about
+    // whether anything changed: re-joining a span with the ending it already
+    // had reproduces the original bytes exactly. Reporting success there would
+    // bump mtime, take a history backup and record AI attribution for a file that
+    // did not change.
+    describe('an edit whose bytes are unchanged', () => {
+      it('reports no change instead of rewriting identical bytes', async () => {
+        // 'A\r\nB\r\n' is already CRLF throughout, so replacing 'A\nB' with
+        // 'A\r\nB' differs in the normalized view and is identical on disk.
+        const original = 'A\r\nB\r\n';
+        fs.writeFileSync(filePath, original, 'utf8');
+        seedPriorRead(filePath);
+        const writeSpy = vi.spyOn(fsService, 'writeTextFile');
+        const params: EditToolParams = {
+          file_path: filePath,
+          old_string: 'A\nB',
+          new_string: 'A\r\nB',
+        };
+
+        const result = await tool
+          .build(params)
+          .execute(new AbortController().signal);
+
+        expect(result.error?.type).toBe(ToolErrorType.EDIT_NO_CHANGE);
+        expect(writeSpy).not.toHaveBeenCalled();
+        expect(mockFileHistoryService.trackEdit).not.toHaveBeenCalled();
+        expect(fs.readFileSync(filePath, 'utf8')).toBe(original);
+      });
+
+      it('still applies a real byte change inside a mixed span', async () => {
+        // The guard on the guard: a real edit must not be rejected just because
+        // the span it touches is mixed. The splice re-joins this span with the
+        // CRLF that follows it, so the bytes on disk do change.
+        fs.writeFileSync(filePath, 'a\nb\r\nc\nd\r\n', 'utf8');
+        seedPriorRead(filePath);
+        const params: EditToolParams = {
+          file_path: filePath,
+          old_string: 'a\nb',
+          new_string: 'a\nB',
+        };
+
+        const result = await tool
+          .build(params)
+          .execute(new AbortController().signal);
+
+        expect(result.error).toBeUndefined();
+        expect(fs.readFileSync(filePath, 'utf8')).toBe('a\r\nB\r\nc\nd\r\n');
+      });
+
+      it('still applies a real byte change outside a mixed span', async () => {
+        fs.writeFileSync(filePath, 'one\ntwo\r\nthree\n', 'utf8');
+        seedPriorRead(filePath);
+        const params: EditToolParams = {
+          file_path: filePath,
+          old_string: 'two',
+          new_string: 'TWO',
+        };
+
+        const result = await tool
+          .build(params)
+          .execute(new AbortController().signal);
+
+        expect(result.error).toBeUndefined();
+        expect(fs.readFileSync(filePath, 'utf8')).toBe('one\nTWO\r\nthree\n');
+      });
     });
 
     it('should return error if trying to create a file that already exists (empty old_string)', async () => {
