@@ -390,10 +390,11 @@ cloned repository's settings file cannot choose where evidence is published.
 Upload blobs
 with `gh api -X PUT repos/.../contents/<path> --input -` carrying a
 JSON payload — `-f content="$(base64 …)"` blows past ARG_MAX around 100 KB.
-Keep the report.md contract in the comment body: verdict line first,
-collapsed `<details>` Chinese summary immediately after, images referenced
-by the same kebab-case names the files carry. End the comment with the
-attribution footer, the same shape `/review` posts:
+Keep the report.md contract in the comment body: verdict line first — a
+plain paragraph, never a `#` heading, which renders the whole verdict as
+one giant H1 — collapsed `<details>` Chinese summary immediately after,
+images referenced by the same kebab-case names the files carry. End the
+comment with the attribution footer, the same shape `/review` posts:
 
 ```text
 _— <model> via Qwen Code /verify-pr (v<cli-version>; skill <skill-hash>)_
@@ -407,10 +408,15 @@ the first 12 characters of
 hash of the instructions this round actually loaded, which needs no git
 history. When the model cannot be resolved, omit the footer rather than
 post an empty identity — and never claim the CI lane's `sandboxed
-verification` signature for a workstation round. The local path has no
-publisher enforcing the fail/mismatch rule, so run
-`node scripts/verify-pr-check.mjs <artifact dir>` and clear its errors before
-publishing, then state the verdict word from `verdict.txt` verbatim. A published
+verification` signature for a workstation round. Assemble the exact comment
+body — report content plus the resolved footer — into `comment.md` in the
+artifact directory and post that file: it is what the read-back below
+compares against, and it gives the checker a place to verify the footer
+actually landed. The local path has no publisher enforcing the fail/mismatch
+rule, so run `node scripts/verify-pr-check.mjs <artifact dir>` and clear its
+errors and its verdict-shape and footer warnings before publishing (a
+missing footer is legitimate only when the model could not be resolved),
+then state the verdict word from `verdict.txt` verbatim. A published
 filename is spent: raw.githubusercontent serves a URL from cache, so
 overwriting `02-matrix.png` leaves every earlier link showing the old image.
 Republish as `02-matrix-v2.png`, update the body and every comment that quotes
@@ -433,10 +439,12 @@ Measured example: while a round ran, a bot review with 4 Criticals landed
 against the previous head 20 minutes before the post. It was not read, the
 report went out as ready to merge, every blocking finding in it reproduced
 on the current head, and the comment had to be revised in place to "Not
-ready yet". After posting, read the body back and compare it with the
-local file byte for byte, and PATCH in place on any difference: GitHub
-rewrites the six-character escape text for NUL and SOH (a backslash, `u`,
-then `0000` or `0001`) into a caret form, inside code spans and fences too.
+ready yet". After posting, read the body back and compare it with
+`comment.md` byte for byte — not with `report.md`, which carries no footer
+and would differ on every clean post — and PATCH in place on any difference:
+GitHub rewrites the six-character escape text for NUL and SOH (a backslash,
+`u`, then `0000` or `0001`) into a caret form, inside code spans and fences
+too.
 
 **Run both halves of that guard through `scripts/verify-pr-guard.mjs`, because
 the hand-run version fails open.** `--pr <n> --repo <owner>/<repo> --snapshot
@@ -1518,6 +1526,11 @@ workflow globs). It must contain:
   it: both publish paths append the footer at comment time — the workflow
   from its own run metadata, a local round per the publish rule — so a
   footer written into the report would appear twice.
+- `comment.md` — local rounds only: the exact comment body as posted, the
+  report content plus the resolved attribution footer. The workflow
+  assembles its own body and appends its own footer, so it neither writes
+  nor needs this file; a local round posts it, and the checker verifies the
+  footer on it because `report.md` deliberately has none.
 - `verdict.txt` — exactly one word: `merge-ready` | `findings` | `blocked` |
   `inconclusive`. Anything else is discarded by the workflow.
 - `assertions.json` — `{"pass": <int>, "fail": <int>, "total": <int>}`,
@@ -1607,7 +1620,19 @@ either path.
 1. **Verdict line first**, with assertion totals and the verified head OID
    (`git rev-parse HEAD^2` in the lane — not the metadata snapshot's, which
    may have drifted; the `headRefOid` from `context.json` locally, which
-   prepare pinned to the clean tree the round verified).
+   prepare pinned to the clean tree the round verified). The verdict line is
+   a **plain paragraph, never a heading**: a `#` prefix makes GitHub render
+   the entire paragraph as one giant H1. A round title may lead the same
+   line as plain text, but the line must not start with `#`:
+
+   ```text
+   PR <n> round <r> verification — **Verdict: <word>** — <pass>/<total> scripted assertions passed, <fail> failed. Verified head: `<40-hex head OID>` …
+   ```
+
+   Measured example: three rounds of PR #15984 shipped the whole verdict
+   paragraph as one H1 because the title and the verdict shared a single
+   `#` line — the comment opened as a wall of giant bold text.
+
 2. **中文摘要** in a collapsed `<details>` block, **immediately after the
    verdict**: verdict, A/B 结论, findings, 未覆盖范围. Collapsed, so it costs a
    reader who does not want it exactly one line; placed here rather than at
