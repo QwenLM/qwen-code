@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary;
+import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -105,6 +106,47 @@ class HostedGateTestSupportTest {
         ReflectionTestUtils.setField(connector, "client", null);
         assertThat(ReflectionTestUtils.getField(connectorOwning(decorated), "client"))
                 .isNull();
+    }
+
+    // findField's type argument matches the declared type exactly, so a
+    // decorator that declares its delegate as a concrete connector is only
+    // walked past by a name-plus-assignability match. Without this the next
+    // such wrapper silently reintroduces #15972 on a green build.
+    @Test
+    void theWalkFollowsADelegateDeclaredAsAConcreteConnector() {
+        var connector = mock(QwenHostedHarnessConnector.class);
+        var attachments = new LinkedHashMap<Object, HarnessSessionRef>();
+        attachments.put("mine", ref("session-a"));
+        ReflectionTestUtils.setField(connector, "attachments", attachments);
+        var decorated = new ConcreteTypedBoundary(connector);
+
+        assertThat(connectorOwning(decorated)).isSameAs(connector);
+        assertThat(attachmentsOf(decorated)).isSameAs(attachments);
+    }
+
+    // A chain whose leaf owns neither field — the pooled connector is shaped
+    // like this — must stop at the leaf, so the caller still gets the error
+    // naming the missing field rather than a NullPointerException from
+    // dereferencing past the end.
+    @Test
+    void aChainThatOwnsNoMapStopsAndStillNamesTheMissingField() {
+        var leaf = new UnavailableHarnessConnector();
+        var decorated = new SdkHarnessBoundary(leaf);
+
+        assertThat(connectorOwning(decorated)).isSameAs(leaf);
+        assertThatThrownBy(() -> attachmentsOf(decorated))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("attachments");
+    }
+
+    // Declares its delegate as the concrete connector, not the interface.
+    private static final class ConcreteTypedBoundary
+            extends UnavailableHarnessConnector {
+        private final QwenHostedHarnessConnector delegate;
+
+        ConcreteTypedBoundary(QwenHostedHarnessConnector delegate) {
+            this.delegate = delegate;
+        }
     }
 
     // The boot retry's only consumer is the deep MySQL lane; pin its contract
