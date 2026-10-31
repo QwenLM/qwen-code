@@ -70,42 +70,42 @@
     "commands": [
       {
         "command": "qwen.diff.accept",
-        "title": "Qwen Code: Accept Current Diff",
+        "title": "%qwen.diff.accept.title%",
         "icon": "$(check)"
       },
       {
         "command": "qwen.diff.cancel",
-        "title": "Qwen Code: Close Diff Editor",
+        "title": "%qwen.diff.cancel.title%",
         "icon": "$(close)"
       },
       {
         "command": "qwen-code.runQwenCode",
-        "title": "Qwen Code: Run"
+        "title": "%qwen-code.runQwenCode.title%"
       },
       {
         "command": "qwen-code.showNotices",
-        "title": "Qwen Code: View Third-Party Notices"
+        "title": "%qwen-code.showNotices.title%"
       },
       {
         "command": "qwen-code.openChat",
-        "title": "Qwen Code: Open",
+        "title": "%qwen-code.openChat.title%",
         "icon": "./assets/icon.png"
       },
       {
         "command": "qwen-code.auth",
-        "title": "Qwen Code: Auth"
+        "title": "%qwen-code.auth.title%"
       },
       {
         "command": "qwen-code.focusChat",
-        "title": "Qwen Code: Focus Chat View"
+        "title": "%qwen-code.focusChat.title%"
       },
       {
         "command": "qwen-code.newConversation",
-        "title": "Qwen Code: New Conversation"
+        "title": "%qwen-code.newConversation.title%"
       },
       {
         "command": "qwen-code.showLogs",
-        "title": "Qwen Code: Show Logs"
+        "title": "%qwen-code.showLogs.title%"
       },
       {
         "command": "qwen-code.copyMessage",

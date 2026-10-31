@@ -16,6 +16,10 @@
 - **Conversation history**: Access to past conversations
 - **Multiple sessions**: Run multiple Qwen Code sessions simultaneously
 
+### Command language
+
+Command Palette titles and command labels in editor menus follow VS Code’s display language. English and Simplified Chinese are supported; other display languages use the English titles. This is independent of the CLI’s `general.language` setting.
+
 ### Requirements
 
 - VS Code 1.96.0 or higher
