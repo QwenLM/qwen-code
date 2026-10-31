@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
@@ -215,7 +216,7 @@ class OperationReconcilerTest {
             }
 
             @Override
-            public boolean settle(AgentStateStore ignored,
+            public boolean settle(SessionLifecycleStore ignored,
                     ParkedOperation parked, AcceptanceVerdict verdict,
                     long retryAt) {
                 settled.add(parked.operationId() + ":"
@@ -274,7 +275,7 @@ class OperationReconcilerTest {
             }
 
             @Override
-            public boolean settle(AgentStateStore ignored,
+            public boolean settle(SessionLifecycleStore ignored,
                     ParkedOperation parked, AcceptanceVerdict verdict,
                     long retryAt) {
                 settled.countDown();

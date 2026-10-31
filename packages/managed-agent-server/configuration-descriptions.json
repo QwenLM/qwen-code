@@ -1,0 +1,823 @@
+{
+  "groups": {
+    "qwen.managed-agent": {
+      "en": "Top-level settings of the Managed Agent server: the built-in agent revision, what stored AgentDefinitions may select, the Session model catalog, the trusted actor header and the service account, alongside the nested sections.",
+      "zh": "Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 AgentDefinition 可选择的范围、Session 模型目录、可信 actor 请求头和服务账号，以及各嵌套分组。"
+    },
+    "qwen.managed-agent.artifacts": {
+      "en": "Projection of Hosted Shell tool results into public tool results and downloadable stdout/stderr artifacts, and the limits on reading their content.",
+      "zh": "将 Hosted Shell 工具结果投影为公开工具结果和可下载的 stdout/stderr 制品，以及读取其内容时的各项限制。"
+    },
+    "qwen.managed-agent.auth": {
+      "en": "How the public API authenticates requests, open or HMAC-signed, and the startup guards that refuse unauthenticated or plaintext exposure beyond loopback.",
+      "zh": "公共 API 的请求认证方式（开放或 HMAC 签名），以及启动时拒绝在回环地址之外进行未认证或明文暴露的安全检查。"
+    },
+    "qwen.managed-agent.automation": {
+      "en": "The automation runtime: the scanner that fires scheduled automation definitions, its lease, its slot window and its concurrency.",
+      "zh": "自动化运行时：触发定时自动化定义的扫描器，及其租约、槽位窗口与并发设置。"
+    },
+    "qwen.managed-agent.channels": {
+      "en": "The trusted channel adapter surface on the internal listener and the lease on outbound delivery claims.",
+      "zh": "内部监听端口上的受信渠道适配器接口，以及出站投递认领的租约。"
+    },
+    "qwen.managed-agent.dispatch": {
+      "en": "Leases, retry backoff and retry budgets for the work the control plane hands to the Hosted Harness, such as Turns, Session lifecycle operations and Action responses.",
+      "zh": "控制面交给 Hosted Harness 执行的工作（如 Turn、Session 生命周期操作和 Action 应答）所用的租约、重试退避与重试预算。"
+    },
+    "qwen.managed-agent.event-transport": {
+      "en": "The optional RocketMQ LiteTopic event transport that publishes committed Session events across nodes and runs the wake and materialization consumers.",
+      "zh": "可选的 RocketMQ LiteTopic 事件传输：跨节点发布已提交的 Session 事件，并运行唤醒与物化消费者。"
+    },
+    "qwen.managed-agent.events": {
+      "en": "Session event streams (SSE), batching of Harness output into Session events, message materialization and the replay floor.",
+      "zh": "Session 事件流（SSE）、Harness 输出写入 Session 事件时的批处理、消息物化以及回放下限。"
+    },
+    "qwen.managed-agent.extensions": {
+      "en": "Publishing and managing Workspace extension packages, and which actors may do so.",
+      "zh": "Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操作。"
+    },
+    "qwen.managed-agent.harness": {
+      "en": "The connection to the Hosted Harness (`qwen serve --profile hosted-harness`) that runs Sessions: its address and shared credentials, call timeouts, the approval policy, and which Workspace tools Sessions are created with.",
+      "zh": "与运行 Session 的 Hosted Harness（`qwen serve --profile hosted-harness`）之间的连接：地址与共享凭据、调用超时、审批策略，以及 Session 创建时可获得哪些 Workspace 工具。"
+    },
+    "qwen.managed-agent.harness.pool": {
+      "en": "Placing Sessions on several Hosted Harness instances instead of the single `qwen.managed-agent.harness.base-url`, with static or Kubernetes discovery and mutual TLS to the members.",
+      "zh": "将 Session 分配到多个 Hosted Harness 实例上（而不是单一的 `qwen.managed-agent.harness.base-url`），支持静态或 Kubernetes 发现，并与成员之间使用双向 TLS。"
+    },
+    "qwen.managed-agent.internal-server": {
+      "en": "An optional separate listener for the internal routes (`/internal/**`), such as the Session Store the Harness calls, so they do not share the public listener.",
+      "zh": "可选的独立监听器，用于承载内部路由（`/internal/**`，例如 Harness 调用的 Session Store），使其不与公共监听器共用。"
+    },
+    "qwen.managed-agent.managed-extensions": {
+      "en": "Running the processes of selected extension packages inside Workspace Runtime workers under the managed extension execution profile.",
+      "zh": "在 Workspace Runtime worker 中按托管扩展执行配置运行所选扩展包的进程。"
+    },
+    "qwen.managed-agent.runtime-broker": {
+      "en": "The embedded Runtime Broker: its private HTTP listener for the Hosted Harness, the provisioner that places and recovers the Runtime workers that run Hosted tools, their Workspace mounts and isolation, and the keys that encrypt the Runtime credentials it persists.",
+      "zh": "内嵌 Runtime Broker：包括面向 Hosted Harness 的私有 HTTP 监听器、放置并恢复执行 Hosted 工具的 Runtime worker 的 provisioner、worker 的 Workspace 挂载与隔离方式，以及加密其持久化 Runtime 凭据的密钥。"
+    },
+    "qwen.managed-agent.runtime-broker.retention": {
+      "en": "Database cleanup of old terminal Runtime records (tool executions, Runtime Sessions and bindings), run in bounded batches on a dedicated scheduler.",
+      "zh": "在独立调度线程上按有限批次清理数据库中已终结的旧 Runtime 记录（工具执行、Runtime Session 和绑定）。"
+    },
+    "qwen.managed-agent.runtime-broker.ssh": {
+      "en": "SSH Runtime nodes: hosts the server reaches over SSH, on which users may register Workspaces whose Runtime workers then run there.",
+      "zh": "SSH Runtime 节点：服务端通过 SSH 访问的主机，用户可以在这些主机上登记 Workspace，其 Runtime worker 随后在该主机上运行。"
+    },
+    "qwen.managed-agent.session-store": {
+      "en": "The private Managed Session Store through which the Hosted Harness reads and writes Session journals on this server's internal routes, and the writer credentials and leases that guard it.",
+      "zh": "私有的 Managed Session Store：Hosted Harness 通过本服务的内部路由读写 Session 日志；以及保护它的写入凭据与写入租约。"
+    },
+    "qwen.managed-agent.tool-publication": {
+      "en": "Durable publication of Hosted Shell tool output to object storage: the storage target, capacity limits, operation and verification deadlines, and garbage collection.",
+      "zh": "将 Hosted Shell 工具输出持久发布到对象存储：存储位置、容量上限、操作与校验期限，以及垃圾回收。"
+    }
+  },
+  "properties": {
+    "qwen.managed-agent.agent-revision": {
+      "en": "The revision label of the built-in `qwen-code` agent, pinned on each Session that uses it; a request naming any other revision of `qwen-code` is refused. Must be 1 to 128 characters (startup refusal).",
+      "zh": "内置 `qwen-code` agent 的修订号标签，会固定在使用它的每个 Session 上；请求中指定 `qwen-code` 的其他修订号会被拒绝。长度必须为 1 到 128 个字符（否则启动时拒绝）。"
+    },
+    "qwen.managed-agent.artifacts.enabled": {
+      "en": "Whether tool results are projected into public tool results and artifacts, and whether the artifact read API is served. Reads answer not found unless `qwen.managed-agent.tool-publication.enabled` is also true, and they require an authenticated actor. Even while it is false, committed tool receipts are still recorded for projection, so turning it on later also projects the tool results recorded while it was off.",
+      "zh": "是否将工具结果投影为公开工具结果和制品，以及是否提供制品读取 API。除非同时开启 `qwen.managed-agent.tool-publication.enabled`，否则读取返回未找到；读取还要求已认证的 actor。即使为 false，已提交的工具回执仍会被记录下来等待投影，因此之后开启时，关闭期间记录的工具结果也会被投影。"
+    },
+    "qwen.managed-agent.artifacts.max-concurrent-reads": {
+      "en": "How many artifact content downloads this server process serves at once; a download beyond that gets HTTP 429 `artifact_read_limit` with `Retry-After: 1`. Must be at least 1 (startup refusal).",
+      "zh": "本服务进程可同时提供的制品内容下载数；超出的下载返回 HTTP 429 `artifact_read_limit` 并带 `Retry-After: 1`。至少为 `1`（否则启动时拒绝）。"
+    },
+    "qwen.managed-agent.artifacts.projection-interval": {
+      "en": "How often the tool-result projection pass runs; each pass projects up to 8 pending tool results into public tool results and artifacts. A plain number is milliseconds; a value with a unit such as `1s` is also accepted. The pass does nothing unless `qwen.managed-agent.artifacts.enabled` is true.",
+      "zh": "工具结果投影任务的运行间隔；每次最多将 8 个待处理的工具结果投影为公开工具结果和制品。纯数字按毫秒解析，也可使用带单位的值如 `1s`。`qwen.managed-agent.artifacts.enabled` 不为 true 时该任务不做任何事。",
+      "type": "duration"
+    },
+    "qwen.managed-agent.artifacts.publish-original": {
+      "en": "Whether projection publishes the sealed stdout and stderr streams of a tool result as downloadable artifacts, and whether an actor who can read the Session may download them. Requires `qwen.managed-agent.artifacts.enabled`.",
+      "zh": "投影时是否将工具结果中已封存的 stdout 和 stderr 流发布为可下载制品，以及可读取该 Session 的 actor 是否可以下载它们。需要开启 `qwen.managed-agent.artifacts.enabled`。"
+    },
+    "qwen.managed-agent.artifacts.publish-preview": {
+      "en": "Whether a projected tool result also carries a short text preview (at most the first 8 KiB of one stream, with ANSI and control characters removed) that every Session reader sees. Requires `qwen.managed-agent.artifacts.publish-original`.",
+      "zh": "投影后的工具结果是否附带一段简短文本预览（取自某个流开头最多 8 KiB，并去除 ANSI 与控制字符），所有 Session 读者均可见。需要开启 `qwen.managed-agent.artifacts.publish-original`。"
+    },
+    "qwen.managed-agent.artifacts.read-revalidation-interval": {
+      "en": "How often an in-flight artifact download re-checks the caller's access (Workspace grant, read policy, Session state); `PT0S` checks before every chunk. After a revocation, what is written before the next check still reaches the client: up to one window's worth of a streaming download, or a whole Range response of at most 1 MiB, which is written in one piece after its last check. Once a check denies, nothing more is written. A bare number is seconds.",
+      "zh": "进行中的制品下载重新检查调用方访问权限（Workspace 授权、读取策略、Session 状态）的间隔；`PT0S` 表示每个数据块前都检查。权限撤销后，下一次检查之前写出的内容仍会送达客户端：流式下载最多为一个窗口内写出的数据；Range 请求的响应（最多 1 MiB）在最后一次检查后一次性写出，会完整送达。某次检查拒绝后，不再写出任何内容。不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.artifacts.read-timeout": {
+      "en": "How long one artifact content download may take in total; the limit is checked between chunks: a download that exceeds it before its first chunk gets `503 artifact_unavailable`, and one already streaming is cut off mid-body. Whatever this value, the download also ends the same way when its stream from storage receives nothing for 50 seconds (the OSS client's default socket timeout, which no setting changes; a request to open the object that times out is first retried up to three times while this limit allows), or when the gap between two chunks lets its lease on the stored output lapse: the lease is renewed as chunks are read, so a gap of more than 90 seconds can end it and one of two minutes always does. Must be positive (startup refusal). A bare number is seconds.",
+      "zh": "单次制品内容下载允许的总时长；在数据块之间检查：首个数据块发出前超出则返回 `503 artifact_unavailable`，已在传输中的下载会被中途截断。无论此值多大，以下情况也会以同样方式结束下载：来自存储的数据流 50 秒内未收到任何数据（OSS 客户端的默认 socket 超时，没有设置可以修改；打开对象的请求超时时，会先在此限制允许的范围内最多重试三次）；或两个数据块之间的间隔长到让下载对已存储输出持有的读租约过期——租约随数据块读取而续期，间隔超过 90 秒就可能结束下载，满两分钟则一定结束。必须为正（否则启动时拒绝）。不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.auth.allow-insecure-bind": {
+      "en": "Whether to override the startup guards against unauthenticated or plaintext exposure: it lets `open` or `auto` mode serve a non-loopback `server.address`, the internal surface leave loopback without `qwen.managed-agent.session-store.binding-key`, and `qwen.managed-agent.harness.base-url` or `qwen.managed-agent.tool-publication.service-base-url` use plaintext `http` to a remote host. It does not lift the Harness pool TLS rule or the local directory import loopback rule. The preflight check warns while it is set.",
+      "zh": "是否绕过针对未认证或明文暴露的启动检查：允许 `open` 或 `auto` 模式在非回环 `server.address` 上提供服务、内部接口在未配置 `qwen.managed-agent.session-store.binding-key` 时离开回环地址，以及 `qwen.managed-agent.harness.base-url` 或 `qwen.managed-agent.tool-publication.service-base-url` 对远程主机使用明文 `http`。它不解除 Harness 池的 TLS 要求，也不解除本地目录导入的回环要求。设置后预检会给出警告。"
+    },
+    "qwen.managed-agent.auth.allowed-drift": {
+      "en": "How far the `X-Qwen-Signature-Timestamp` of a signed request may differ from the server clock, in either direction, before the request is rejected with `401`. Used only in `signed` mode and compared in whole seconds. Startup refuses less than `1s`. A number without a unit is read as milliseconds.",
+      "zh": "签名请求的 `X-Qwen-Signature-Timestamp` 与服务器时钟（任一方向）允许相差的最大时长，超出则以 `401` 拒绝请求。仅在 `signed` 模式下使用，按整秒比较。小于 `1s` 时启动时拒绝。不带单位的数字按毫秒解析。"
+    },
+    "qwen.managed-agent.auth.max-signed-body-bytes": {
+      "en": "The largest request body, in bytes, that `signed` mode buffers to verify its signature; a larger body is answered `413 payload_too_large`. Extension archive uploads have their own 100 MiB limit. Startup refuses a value below 1 in `signed` mode.",
+      "zh": "`signed` 模式为校验签名而缓冲的请求体最大字节数；更大的请求体返回 `413 payload_too_large`。扩展归档上传有单独的 100 MiB 上限。`signed` 模式下小于 1 时启动时拒绝。",
+      "default": "10485760"
+    },
+    "qwen.managed-agent.auth.mode": {
+      "en": "How public API requests are authenticated, case-insensitive: `open` trusts the tenant header (and the optional trusted actor header), `signed` requires an HMAC-SHA256 signature keyed by `qwen.managed-agent.auth.signing-key`, and `auto` acts as `open` on a loopback `server.address` (an unset address counts as non-loopback). Startup refuses `auto` or `open` on any other address unless `qwen.managed-agent.auth.allow-insecure-bind` is true, and refuses other values. The `managed-local` profile requires `signed`.",
+      "zh": "公共 API 请求的认证方式，不区分大小写：`open` 信任 tenant 请求头（以及可选的受信 actor 请求头）；`signed` 要求使用 `qwen.managed-agent.auth.signing-key` 计算的 HMAC-SHA256 签名；`auto` 在 `server.address` 为回环地址时等同 `open`（未设置地址视为非回环）。`auto` 或 `open` 用于其他地址时启动时拒绝，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true；其他取值同样启动时拒绝。`managed-local` profile 要求 `signed`。"
+    },
+    "qwen.managed-agent.auth.signing-key": {
+      "en": "The secret HMAC-SHA256 key with which `signed` clients sign each public request (`X-Qwen-Signature`). Read only in `signed` mode, where startup refuses a key shorter than 32 bytes (UTF-8), a key equal to `qwen.managed-agent.session-store.binding-key`, and any `qwen.managed-agent.trusted-actor-header`.",
+      "zh": "`signed` 模式下客户端为每个公共请求签名（`X-Qwen-Signature`）所用的机密 HMAC-SHA256 密钥。仅在 `signed` 模式下读取；此时密钥短于 32 字节（UTF-8）、与 `qwen.managed-agent.session-store.binding-key` 相同，或同时配置了 `qwen.managed-agent.trusted-actor-header`，均启动时拒绝。"
+    },
+    "qwen.managed-agent.automation.concurrency": {
+      "en": "How many unfinished runs one automation definition with overlap policy `allow` may hold at once; a further due slot is recorded `skipped` with reason `count_limit`. Startup refuses a value below 1 when `qwen.managed-agent.automation.enabled` is true.",
+      "zh": "重叠策略为 `allow` 的单个自动化定义可同时持有的未结束运行数；超出后，再到期的槽位记为 `skipped`，原因为 `count_limit`。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。"
+    },
+    "qwen.managed-agent.automation.enabled": {
+      "en": "Whether the automation scanner runs and the automation create, update, retire and run routes are admitted; while off, those routes answer `409 automation_unavailable` and the read routes still answer. Those routes also need `qwen.managed-agent.session-store.enabled`. When on, startup refuses non-positive automation counts and durations.",
+      "zh": "是否运行自动化扫描器，并受理自动化的创建、修改、退役与手动运行路由；关闭时这些路由返回 `409 automation_unavailable`，读取路由照常应答。这些路由还要求开启 `qwen.managed-agent.session-store.enabled`。开启后，自动化的计数或时长若不为正，启动时拒绝。"
+    },
+    "qwen.managed-agent.automation.late-tolerance": {
+      "en": "How late a due slot may be when the scanner sees it and still fire as scheduled. An older slot follows the definition's catch-up policy (`none`, `latest` or `bounded`) and is otherwise recorded missed. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
+      "zh": "扫描器发现到期槽位时，允许其迟到多久仍按计划触发。更迟的槽位按定义的补跑策略（`none`、`latest` 或 `bounded`）处理，未被补跑的记为错过。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
+    },
+    "qwen.managed-agent.automation.lease": {
+      "en": "How long a scanner tick or a manual run holds an automation definition's lease, counted from its claim; once it lapses another node may claim the definition, and from that claim on the earlier holder's writes to it are refused. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
+      "zh": "扫描轮次或手动运行持有自动化定义租约的时长，从认领时起算；租约过期后其他节点即可认领该定义，自该认领起，原持有者对它的写入都会被拒绝。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
+    },
+    "qwen.managed-agent.automation.lookback": {
+      "en": "How far back the scanner derives a definition's due slots; slots older than this, or older than the definition's arming, are neither fired nor recorded, which bounds every catch-up. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
+      "zh": "扫描器为定义推导到期槽位时最多回看的时长；早于该窗口（或早于定义启用时刻）的槽位既不触发也不记录，从而限定所有补跑的范围。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
+    },
+    "qwen.managed-agent.automation.max-slots-per-tick": {
+      "en": "How many due slots the scanner keeps per definition in one tick; when the lookback window holds more, the oldest are cut and a warning is logged. The limit does not shorten the scan itself: the scanner still checks every minute from where its previous tick for the definition stopped, up to the whole lookback window. Startup refuses a value below 1 when `qwen.managed-agent.automation.enabled` is true.",
+      "zh": "单个扫描轮次中每个定义最多保留的到期槽位数；回看窗口内超出时，最旧的槽位被截去并记录一条警告。该上限不会缩短扫描本身：扫描器仍会从该定义上一轮扫描停下的位置起逐分钟检查，最多覆盖整个回看窗口。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。"
+    },
+    "qwen.managed-agent.automation.scan-delay": {
+      "en": "How long the automation scanner waits between the end of one tick and the start of the next. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
+      "zh": "自动化扫描器从一轮扫描结束到下一轮开始之间等待的时长。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
+    },
+    "qwen.managed-agent.automation.scanner-threads": {
+      "en": "How many definition rows one scanner tick works in parallel; the tick waits for all of them before the next tick starts. Because a lease is not counted from the tick's start (see `qwen.managed-agent.automation.lease`), a long tick hands out no already-expired lease. Startup refuses a value below 1 when `qwen.managed-agent.automation.enabled` is true.",
+      "zh": "单个扫描轮次并行处理的定义行数；该轮会等待所有行处理完毕，下一轮才开始。由于租约不是从本轮开始时起算（见 `qwen.managed-agent.automation.lease`），扫描轮次再长也不会发放已经过期的租约。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。"
+    },
+    "qwen.managed-agent.channels.claim-lease": {
+      "en": "How long a channel adapter's claim on an outbound delivery stays valid without a receipt. Once it lapses, the reconcile pass records the delivery's outcome as unknown and never resends it automatically. A plain number is seconds.",
+      "zh": "渠道适配器对一条出站投递的认领在未收到回执时保持有效的时长。超时后，对账任务将该投递结果记为未知，且不会自动重发。不带单位的数字按秒计。"
+    },
+    "qwen.managed-agent.channels.enabled": {
+      "en": "Whether the trusted channel adapter routes under `/internal/managed-channels/` (register, disconnect, inbound events, delivery claims, receipts and resends) are served. They authenticate by the tenant header alone, so startup refuses it unless `qwen.managed-agent.internal-server.port` sets a separate internal listener.",
+      "zh": "是否提供 `/internal/managed-channels/` 下的受信渠道适配器路由（注册、断开、入站事件、投递认领、回执与重发）。这些路由仅凭租户请求头鉴权，因此未通过 `qwen.managed-agent.internal-server.port` 配置独立的内部监听端口时，启动时拒绝。"
+    },
+    "qwen.managed-agent.channels.scan-delay": {
+      "en": "How long the channel reconcile pass waits between runs; each run settles up to 50 outbound delivery claims older than `qwen.managed-agent.channels.claim-lease` as unknown. Accepts a duration such as `30s`; a plain number is milliseconds.",
+      "zh": "渠道对账任务两次运行之间的间隔；每次运行把认领时间超过 `qwen.managed-agent.channels.claim-lease` 的出站投递认领结算为未知，每次最多 50 条。接受 `30s` 这类时长；不带单位的数字按毫秒计。",
+      "type": "duration"
+    },
+    "qwen.managed-agent.child-relay.scan-delay": {
+      "en": "How long the child result relay waits between passes; each pass drives child agent and workflow runs whose creation or result delivery to the parent Session is unfinished. Does nothing unless `qwen.managed-agent.runtime-broker.enabled` is true. Accepts a duration such as `2s`; a plain number is milliseconds.",
+      "zh": "子结果中继两次运行之间的间隔；每次运行推进尚未完成创建或尚未将结果回传父 Session 的子 agent 与 workflow 运行。仅在 `qwen.managed-agent.runtime-broker.enabled` 为 true 时生效。接受 `2s` 这类时长；不带单位的数字按毫秒计。",
+      "type": "duration"
+    },
+    "qwen.managed-agent.child-workspace.scan-delay": {
+      "en": "How long the child Workspace pass waits between runs; each run resumes unfinished child Workspace Git steps (prepare, merge, apply, discard). Does nothing unless `qwen.managed-agent.runtime-broker.child-workspaces-enabled` is true. Accepts a duration such as `2s`; a plain number is milliseconds.",
+      "zh": "子 Workspace 任务两次运行之间的间隔；每次运行继续未完成的子 Workspace Git 步骤（准备、合并、应用、丢弃）。仅在 `qwen.managed-agent.runtime-broker.child-workspaces-enabled` 为 true 时生效。接受 `2s` 这类时长；不带单位的数字按毫秒计。",
+      "type": "duration"
+    },
+    "qwen.managed-agent.definition-models": {
+      "en": "The model IDs a stored AgentDefinition may name in `model.id`, as a comma-separated list; a Session whose definition names any other model is refused at admission. Each ID should match a model provider route configured in the Harness. Empty admits only definitions without a model.",
+      "zh": "存储的 AgentDefinition 可在 `model.id` 中指定的模型 ID，以逗号分隔；定义中指定其他模型的 Session 会在准入时被拒绝。每个 ID 应对应 Harness 中配置的一个模型提供方路由。为空时只接受未指定模型的定义。"
+    },
+    "qwen.managed-agent.definition-tool-profiles": {
+      "en": "The hosted tool profiles a stored AgentDefinition may select in `tools`, as a comma-separated list (such as `hosted-workspace-files/1`, `hosted-workspace-shell/1` or `hosted-workspace-mcp/1`); a Session whose definition selects another profile is refused at admission. `hosted-workspace-team-lead/1` and Shell profiles other than `hosted-workspace-shell/1` are always refused, as is a Shell profile whose approval mode is `yolo`. Preflight checks that the Harness supports each listed profile.",
+      "zh": "存储的 AgentDefinition 可在 `tools` 中选择的托管工具配置，以逗号分隔（如 `hosted-workspace-files/1`、`hosted-workspace-shell/1` 或 `hosted-workspace-mcp/1`）；定义选择其他配置的 Session 会在准入时被拒绝。`hosted-workspace-team-lead/1` 以及 `hosted-workspace-shell/1` 以外的 Shell 配置始终被拒绝，审批模式为 `yolo` 的 Shell 配置同样被拒绝。预检会确认 Harness 支持所列的每个配置。"
+    },
+    "qwen.managed-agent.dispatch.lease-duration": {
+      "en": "How long a node's lease on dispatched work (a Turn, Session lifecycle operation, Action response, task cancel, rename or context compression) lasts before another node may take it over; Turn, lifecycle operation, Action response and task cancel holders renew it while working, but a rename or context compression does not. Startup refuses a value below twice `qwen.managed-agent.dispatch.lease-renew-interval`. A plain number is seconds.",
+      "zh": "节点对已派发工作（Turn、Session 生命周期操作、Action 应答、任务取消、重命名或上下文压缩）所持租约的时长，过期后其他节点可接管；Turn、生命周期操作、Action 应答与任务取消的持有者在工作期间会续租，重命名与上下文压缩则不续租。小于 `qwen.managed-agent.dispatch.lease-renew-interval` 两倍的值启动时拒绝。不带单位的数字按秒计。"
+    },
+    "qwen.managed-agent.dispatch.lease-renew-interval": {
+      "en": "How often a node renews its lease on a Turn it is running; Action response delivery renews at this interval or a third of `qwen.managed-agent.dispatch.lease-duration`, whichever is shorter. Startup refuses a value under one millisecond or above half the lease duration. A plain number is seconds.",
+      "zh": "节点为正在运行的 Turn 续租的频率；Action 应答投递按该值与 `qwen.managed-agent.dispatch.lease-duration` 三分之一中的较小者续租。小于 1 毫秒或大于租约时长一半的值启动时拒绝。不带单位的数字按秒计。"
+    },
+    "qwen.managed-agent.dispatch.max-operation-retries": {
+      "en": "How many failed delivery attempts a Session lifecycle operation (such as close) or an Action response gets before it is recorded as failed; a close whose request already reached the Harness gets four times as many, and a close still waiting on a live journal writer, a Harness restart or the daemon is shown as blocked and keeps retrying instead. Startup refuses a negative value.",
+      "zh": "Session 生命周期操作（例如关闭）或 Action 应答在被记为失败前允许的失败投递次数；关闭请求已送达 Harness 的关闭操作可达四倍次数，仍在等待活跃日志写入者、Harness 重启或 daemon 的关闭操作则显示为受阻并继续重试。负值启动时拒绝。"
+    },
+    "qwen.managed-agent.dispatch.max-post-admission-retries": {
+      "en": "How many failed attempts a Turn gets after its submission to the Hosted Harness was attempted; past it the Turn fails, normally with `hosted_harness_unavailable_after_admission`, because it may already have run. Startup refuses a negative value or one below `qwen.managed-agent.dispatch.max-pre-admission-retries`.",
+      "zh": "Turn 已尝试提交给 Hosted Harness 之后允许的失败尝试次数；超出后 Turn 失败，通常错误码为 `hosted_harness_unavailable_after_admission`，因为它可能已经执行过。负值或小于 `qwen.managed-agent.dispatch.max-pre-admission-retries` 的值启动时拒绝。"
+    },
+    "qwen.managed-agent.dispatch.max-pre-admission-retries": {
+      "en": "How many failed attempts a Turn gets before its submission to the Hosted Harness is attempted; past it the Turn fails, normally with `hosted_harness_unavailable`. It also bounds how often a Turn is deferred while Workspace files are unavailable. Startup refuses a negative value or one above `qwen.managed-agent.dispatch.max-post-admission-retries`.",
+      "zh": "Turn 在尝试提交给 Hosted Harness 之前允许的失败尝试次数；超出后 Turn 失败，通常错误码为 `hosted_harness_unavailable`。Workspace 文件不可用时 Turn 被推迟的次数也受此限制。负值或大于 `qwen.managed-agent.dispatch.max-post-admission-retries` 的值启动时拒绝。"
+    },
+    "qwen.managed-agent.dispatch.retry-initial-delay": {
+      "en": "How long dispatch work waits before its first retry; each further retry doubles the wait up to `qwen.managed-agent.dispatch.retry-max-delay`. Used for Turns, Session lifecycle operations, Action responses, task cancels and renames. Startup refuses a zero or negative value. A plain number is seconds.",
+      "zh": "派发工作首次重试前等待的时长；之后每次重试等待时间翻倍，直至 `qwen.managed-agent.dispatch.retry-max-delay`。适用于 Turn、Session 生命周期操作、Action 应答、任务取消和重命名。零或负值启动时拒绝。不带单位的数字按秒计。"
+    },
+    "qwen.managed-agent.dispatch.retry-max-delay": {
+      "en": "How long dispatch work waits at most between retries; the doubling backoff that starts at `qwen.managed-agent.dispatch.retry-initial-delay` stops growing here. Startup refuses a value below the initial delay. A plain number is seconds.",
+      "zh": "派发工作两次重试之间最多等待的时长；从 `qwen.managed-agent.dispatch.retry-initial-delay` 开始翻倍的退避到此不再增长。小于初始延迟的值启动时拒绝。不带单位的数字按秒计。"
+    },
+    "qwen.managed-agent.dispatch.scan-delay": {
+      "en": "How long the dispatch recovery passes wait between runs. Each run re-drives due work: retryable or expired Turns, Session lifecycle operations, Action responses, task cancels, renames, context compressions, parked operations and owed Hosted cleanup. Accepts a duration such as `1s`; a plain number is milliseconds.",
+      "zh": "派发恢复任务两次运行之间的间隔。每次运行会重新推进到期的工作：可重试或租约过期的 Turn、Session 生命周期操作、Action 应答、任务取消、重命名、上下文压缩、挂起的操作以及待完成的 Hosted 清理。接受 `1s` 这类时长；不带单位的数字按毫秒计。",
+      "type": "duration"
+    },
+    "qwen.managed-agent.event-transport.capability-probe-group": {
+      "en": "The RocketMQ consumer group the startup LiteTopic capability probe subscribes in. Pre-create it as a LITE group bound to `qwen.managed-agent.event-transport.topic`; startup fails when the probe cannot subscribe.",
+      "zh": "启动时 LiteTopic 能力探测所使用的 RocketMQ 消费组。需预先创建为绑定到 `qwen.managed-agent.event-transport.topic` 的 LITE 组；探测无法订阅时启动失败。"
+    },
+    "qwen.managed-agent.event-transport.enabled": {
+      "en": "Whether committed Session journal records and public events are also published to a RocketMQ LiteTopic broker, whose consumers carry wakes and materialization notices between nodes. Needs RocketMQ 5.5.0 or later with `enableLmq` and a pre-created LITE topic and groups; startup fails when the broker cannot serve them. The private CSI lane refuses work while it is on.",
+      "zh": "是否将已提交的 Session 日志记录和公开事件同时发布到 RocketMQ LiteTopic broker，由其消费者在节点间传递唤醒与物化通知。需要 RocketMQ 5.5.0 及以上版本并开启 `enableLmq`，且须预先创建 LITE 主题和消费组；broker 无法提供时启动失败。开启期间私有 CSI 通道拒绝工作。"
+    },
+    "qwen.managed-agent.event-transport.endpoints": {
+      "en": "The RocketMQ proxy gRPC endpoint the event transport connects to, as `host:port` (for example `host:8081`). Required when `qwen.managed-agent.event-transport.enabled` is true; startup fails when the broker is unreachable or is not a gRPC (RocketMQ 5) proxy.",
+      "zh": "事件传输连接的 RocketMQ proxy gRPC 端点，格式为 `host:port`（例如 `host:8081`）。`qwen.managed-agent.event-transport.enabled` 为 true 时必填；broker 不可达或不是 gRPC（RocketMQ 5）proxy 时启动失败。"
+    },
+    "qwen.managed-agent.event-transport.owner-group": {
+      "en": "The RocketMQ consumer group, shared by every node, in which each node subscribes to the LiteTopics of the Sessions it holds, so a Session's notices reach its owner. Pre-create it as a LITE group bound to `qwen.managed-agent.event-transport.topic`.",
+      "zh": "所有节点共用的 RocketMQ 消费组；每个节点在其中订阅自己持有的 Session 的 LiteTopic，使 Session 的通知送达其所有者。需预先创建为绑定到 `qwen.managed-agent.event-transport.topic` 的 LITE 组。"
+    },
+    "qwen.managed-agent.event-transport.owner-reconcile-interval": {
+      "en": "How often a node re-aligns its owner-group subscriptions with the Sessions it holds, subscribing to newly held ones and dropping released ones. A plain number is seconds.",
+      "zh": "节点将其在 owner 消费组中的订阅与自己持有的 Session 对齐的频率：订阅新持有的 Session，退订已释放的 Session。不带单位的数字按秒计。"
+    },
+    "qwen.managed-agent.event-transport.topic": {
+      "en": "The parent RocketMQ topic under which each Session's LiteTopic and the wake bootstrap LiteTopic live. Required when `qwen.managed-agent.event-transport.enabled` is true. Pre-create it as a LITE topic (`message.type=LITE`); startup fails when it refuses a LiteTopic message.",
+      "zh": "父级 RocketMQ 主题，每个 Session 的 LiteTopic 与唤醒引导 LiteTopic 都位于其下。`qwen.managed-agent.event-transport.enabled` 为 true 时必填。需预先创建为 LITE 主题（`message.type=LITE`）；该主题拒收 LiteTopic 消息时启动失败。"
+    },
+    "qwen.managed-agent.event-transport.wake-bootstrap-group": {
+      "en": "The RocketMQ consumer group, shared by every node, that consumes `qwen.managed-agent.event-transport.wake-bootstrap-lite-topic`, one member at a time. Pre-create it as a LITE group bound to `qwen.managed-agent.event-transport.topic`; startup fails when it cannot subscribe.",
+      "zh": "所有节点共用的 RocketMQ 消费组，用于消费 `qwen.managed-agent.event-transport.wake-bootstrap-lite-topic`，同一时刻由一个成员接收。需预先创建为绑定到 `qwen.managed-agent.event-transport.topic` 的 LITE 组；无法订阅时启动失败。"
+    },
+    "qwen.managed-agent.event-transport.wake-bootstrap-lite-topic": {
+      "en": "The LiteTopic under `qwen.managed-agent.event-transport.topic` that every `wake.requested` envelope is also sent to, so any node can learn of a wake that no node owns yet. Choose a name that cannot equal a Session id (a UUID).",
+      "zh": "位于 `qwen.managed-agent.event-transport.topic` 之下的 LiteTopic，每个 `wake.requested` 信封都会同时发往这里，使任何节点都能得知尚无所有者的唤醒。名称不能与 Session id（UUID）相同。"
+    },
+    "qwen.managed-agent.events.batch-interval": {
+      "en": "How long streamed text output from the Hosted Harness is buffered before it is written to the Session's events as one batch; a batch is written sooner on reaching `qwen.managed-agent.events.batch-max-events` or `qwen.managed-agent.events.batch-max-bytes`. Startup refuses a zero or negative value. A plain number is milliseconds.",
+      "zh": "Hosted Harness 流式输出的文本在作为一个批次写入 Session 事件前缓冲的时长；批次达到 `qwen.managed-agent.events.batch-max-events` 或 `qwen.managed-agent.events.batch-max-bytes` 时会提前写入。零或负值启动时拒绝。不带单位的数字按毫秒计。"
+    },
+    "qwen.managed-agent.events.batch-max-bytes": {
+      "en": "How many bytes of streamed text output one event batch may collect before it is written early, estimated as each delta's UTF-8 text plus 128 bytes. Startup refuses a zero or negative value.",
+      "zh": "单个事件批次在提前写入前可累积的流式文本字节数，按每个增量的 UTF-8 文本长度加 128 字节估算。零或负值启动时拒绝。"
+    },
+    "qwen.managed-agent.events.batch-max-events": {
+      "en": "How many streamed text deltas one event batch may collect before it is written early; the queue between the Harness stream reader and the writer also holds twice this many, at least 128. Startup refuses a zero or negative value.",
+      "zh": "单个事件批次在提前写入前可累积的流式文本增量条数；读取 Harness 流的队列容量也取该值的两倍，最少 128。零或负值启动时拒绝。"
+    },
+    "qwen.managed-agent.events.heartbeat-interval": {
+      "en": "How often an idle Session event stream (SSE) sends a `keepalive` comment. A plain number is seconds.",
+      "zh": "空闲的 Session 事件流（SSE）发送 `keepalive` 注释的频率。不带单位的数字按秒计。"
+    },
+    "qwen.managed-agent.events.materialize-interval": {
+      "en": "How often the message materializer folds newly committed Session events into the message view that message and transcript queries read. A plain number is milliseconds.",
+      "zh": "消息物化任务将新提交的 Session 事件归并进消息视图（供消息与对话记录查询读取）的频率。不带单位的数字按毫秒计。"
+    },
+    "qwen.managed-agent.events.poll-interval": {
+      "en": "How long an open Session event stream waits for an in-process event notification before it re-reads the Session's events from the database, catching anything the notification missed. It also bounds how long an idle stream takes to notice a revoked read grant. A plain number is seconds.",
+      "zh": "打开的 Session 事件流等待进程内事件通知的最长时间，超时后从数据库重新读取该 Session 的事件，以补上通知遗漏的部分。它也决定空闲事件流最迟多久察觉读取授权已被撤销。不带单位的数字按秒计。"
+    },
+    "qwen.managed-agent.events.read-grant-recheck-interval": {
+      "en": "How often an open Session event stream re-verifies that its subscriber may still read the Session; `0s` checks before every event. A revoked grant stops delivery within this interval, and an idle stream closes within it plus `qwen.managed-agent.events.poll-interval`. A plain number is seconds.",
+      "zh": "打开的 Session 事件流重新校验订阅者是否仍有读取权限的频率；`0s` 表示每个事件前都校验。授权被撤销后，事件投递最迟在该间隔内停止，空闲流最迟在该间隔加 `qwen.managed-agent.events.poll-interval` 内关闭。不带单位的数字按秒计。"
+    },
+    "qwen.managed-agent.events.replay-floor-enabled": {
+      "en": "Whether a scheduled pass raises each Session's replay floor up to what its message view already covers, never past an unfinished Turn. Event cursors below the floor then get `409 cursor_expired`, or one `agent.session.resync_required` frame on a stream. No event is deleted either way. The pass runs every `qwen.managed-agent.events.replay-floor-interval`.",
+      "zh": "是否由定时任务把每个 Session 的回放下限提升到其消息视图已覆盖的位置，但不越过未结束的 Turn。低于下限的事件游标随后会收到 `409 cursor_expired`，事件流则收到一帧 `agent.session.resync_required`。无论开关与否都不会删除事件。该任务每隔 `qwen.managed-agent.events.replay-floor-interval` 运行一次。"
+    },
+    "qwen.managed-agent.events.replay-floor-interval": {
+      "en": "How long the replay-floor pass waits between runs; each run works through every eligible Session, and it does nothing unless `qwen.managed-agent.events.replay-floor-enabled` is true. Accepts a duration such as `60s`; a plain number is milliseconds.",
+      "zh": "回放下限任务两次运行之间的间隔；每次运行处理所有符合条件的 Session，且仅在 `qwen.managed-agent.events.replay-floor-enabled` 为 true 时生效。接受 `60s` 这类时长；不带单位的数字按毫秒计。",
+      "type": "duration"
+    },
+    "qwen.managed-agent.events.stream-timeout": {
+      "en": "How long one Session event stream (SSE) connection may stay open before the server ends it; the client must reconnect to keep receiving events. A plain number is seconds.",
+      "zh": "单个 Session 事件流（SSE）连接可保持打开的最长时间，到时服务端结束连接，客户端需重新连接才能继续接收事件。不带单位的数字按秒计。"
+    },
+    "qwen.managed-agent.extensions.allowed-actors": {
+      "en": "The actor IDs allowed to publish extension packages, save their settings, and select or apply them for Sessions, as a comma-separated list; `*` allows every actor. The actor also needs Workspace OPERATOR access. Empty allows nobody.",
+      "zh": "允许发布扩展包、保存其设置以及为 Session 选择或应用扩展包的 actor ID，以逗号分隔；`*` 表示允许所有 actor。该 actor 还需具备 Workspace OPERATOR 权限。为空时不允许任何人。"
+    },
+    "qwen.managed-agent.extensions.artifact-directory": {
+      "en": "The directory that stores published extension package archives, in one private (`0700`) subdirectory per tenant and Workspace. Empty disables extension management. A symbolic link at the root or at a subdirectory makes archives unavailable. Replicas must share this directory.",
+      "zh": "存放已发布扩展包归档的目录，每个租户与 Workspace 各占一个私有（`0700`）子目录。为空时禁用扩展管理。根目录或子目录为符号链接时归档不可用。多个副本必须共享该目录。"
+    },
+    "qwen.managed-agent.extensions.enabled": {
+      "en": "Whether extension packages can be published and managed for Workspaces through the public extensions API. Management also needs `qwen.managed-agent.extensions.artifact-directory`, an actor in `qwen.managed-agent.extensions.allowed-actors` and Workspace OPERATOR access. With `qwen.managed-agent.runtime-broker.enabled`, startup refuses `qwen.managed-agent.managed-extensions.enabled` without it; otherwise extension execution simply stays off.",
+      "zh": "是否允许通过公开扩展 API 为 Workspace 发布和管理扩展包。管理操作还需要设置 `qwen.managed-agent.extensions.artifact-directory`、actor 位于 `qwen.managed-agent.extensions.allowed-actors` 中，并具备 Workspace OPERATOR 权限。开启 `qwen.managed-agent.runtime-broker.enabled` 时，开启 `qwen.managed-agent.managed-extensions.enabled` 而未开启本项会在启动时拒绝；否则扩展执行只是保持关闭。"
+    },
+    "qwen.managed-agent.harness.approval-mode": {
+      "en": "The approval mode Hosted Sessions start with, case-insensitive: `yolo`, `default` or `auto-edit`, plus `plan` and `auto` while Workspace files are off. Unbound built-in Sessions follow the current value; Workspace-bound Sessions pin it at creation. While `qwen.managed-agent.harness.workspace-files-enabled` is true, startup refuses any mode but the first three, and with `qwen.managed-agent.harness.workspace-shell-enabled` it refuses `yolo` too. Any other value fails the Harness connector, at startup for a single Harness.",
+      "zh": "新建 Hosted Session 的初始审批模式，不区分大小写：`yolo`、`default` 或 `auto-edit`；Workspace 文件关闭时还可用 `plan` 与 `auto`。未绑定 Workspace 的内置 Session 始终使用当前值，绑定 Workspace 的 Session 在创建时固定该值。`qwen.managed-agent.harness.workspace-files-enabled` 为 true 时，前三者以外的取值启动时拒绝；`qwen.managed-agent.harness.workspace-shell-enabled` 为 true 时，`yolo` 也会启动时拒绝。其他取值会使 Harness 连接器创建失败，单个 Harness 时在启动时失败。"
+    },
+    "qwen.managed-agent.harness.approval-timeout": {
+      "en": "How long a tool permission request waits for an answer before it expires and the tool call is refused. It is sent to the Harness when a Session is created. Startup refuses values outside `1s` to `24h`; a number without a unit is read as seconds.",
+      "zh": "工具权限请求在过期、该工具调用被拒绝之前等待答复的时长。创建 Session 时发送给 Harness。取值不在 `1s` 到 `24h` 之间时启动时拒绝；不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.harness.base-url": {
+      "en": "The URL of the single Hosted Harness the control plane calls. Must be an absolute `http` or `https` URL without credentials, query or fragment while `qwen.managed-agent.harness.enabled` is true: a single Harness is refused at startup, and under `qwen.managed-agent.harness.pool.enabled` every pool member fails to join instead, so keep a valid value there even though the pool does not route by it. Startup refuses plaintext `http` to a non-loopback host unless `qwen.managed-agent.auth.allow-insecure-bind` is true. The `managed-local` profile requires a loopback `http` URL.",
+      "zh": "控制面调用的单个 Hosted Harness 的 URL。`qwen.managed-agent.harness.enabled` 为 true 时必须是不含凭据、查询串和片段的绝对 `http` 或 `https` URL：单个 Harness 时启动时拒绝；开启 `qwen.managed-agent.harness.pool.enabled` 时则改为所有池成员都无法加入，因此即使池不按它路由，也要保留有效值。指向非回环主机的明文 `http` 启动时拒绝，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true。`managed-local` profile 要求回环 `http` URL。"
+    },
+    "qwen.managed-agent.harness.capability-digest": {
+      "en": "The capability digest the Harness must advertise, written `sha256:` plus 64 lowercase hex characters and equal to the Harness's `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST`; a mismatch fails negotiation. Required while `qwen.managed-agent.harness.enabled` is true unless `qwen.managed-agent.harness.credentials-file` supplies it; setting both is refused at startup.",
+      "zh": "Harness 必须声明的能力摘要，格式为 `sha256:` 加 64 位小写十六进制字符，须与 Harness 的 `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST` 一致；不一致时协商失败。`qwen.managed-agent.harness.enabled` 为 true 时必填，除非由 `qwen.managed-agent.harness.credentials-file` 提供；两者同时设置时启动时拒绝。"
+    },
+    "qwen.managed-agent.harness.connect-timeout": {
+      "en": "How long the control plane waits to open a connection to a Hosted Harness, including Harness pool members. Must be positive; a number without a unit is read as seconds.",
+      "zh": "控制面与 Hosted Harness（包括 Harness 池成员）建立连接时的等待时长。必须为正值；不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.harness.credentials-file": {
+      "en": "Path to the Harness's own environment file, read instead of setting the shared credentials here: it must set `QWEN_SERVER_TOKEN` and `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST`, and may set `QWEN_MANAGED_RUNTIME_BROKER_URL` and `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` together. Read only while `qwen.managed-agent.harness.enabled` is true. Startup refuses it beside `qwen.managed-agent.harness.token` or `qwen.managed-agent.harness.capability-digest`, a file Broker token beside `qwen.managed-agent.runtime-broker.token`, an unreadable file, and any line systemd and a shell would read differently.",
+      "zh": "Harness 自身环境文件的路径，用于代替在此处直接配置共享凭据：文件必须设置 `QWEN_SERVER_TOKEN` 和 `QWEN_HOSTED_HARNESS_CAPABILITY_DIGEST`，可成对设置 `QWEN_MANAGED_RUNTIME_BROKER_URL` 与 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN`。仅在 `qwen.managed-agent.harness.enabled` 为 true 时读取。与 `qwen.managed-agent.harness.token` 或 `qwen.managed-agent.harness.capability-digest` 同时设置、文件中的 Broker token 与 `qwen.managed-agent.runtime-broker.token` 同时设置、文件不可读，或文件中有 systemd 与 shell 解读不一致的行时，均启动时拒绝。"
+    },
+    "qwen.managed-agent.harness.enabled": {
+      "en": "Whether the control plane runs Sessions on a Hosted Harness. When false, no Harness connector is created and Session execution fails as Harness disabled. When true, startup requires `qwen.managed-agent.session-store.enabled`, the Harness token and capability digest (directly or through `qwen.managed-agent.harness.credentials-file`), and for a single Harness a valid `qwen.managed-agent.harness.base-url`. The packaged configuration makes `qwen.managed-agent.session-store.enabled` follow it.",
+      "zh": "控制面是否在 Hosted Harness 上运行 Session。为 false 时不创建 Harness 连接器，Session 执行以 Harness 已禁用为由失败。为 true 时，启动要求 `qwen.managed-agent.session-store.enabled`、Harness token 与能力摘要（直接配置或通过 `qwen.managed-agent.harness.credentials-file`），单个 Harness 时还要求有效的 `qwen.managed-agent.harness.base-url`。打包配置让 `qwen.managed-agent.session-store.enabled` 跟随此项。"
+    },
+    "qwen.managed-agent.harness.heartbeat-interval": {
+      "en": "How often the control plane sends a keepalive heartbeat for each attached Harness Session. `0` turns scheduled heartbeats off; negative values are refused. A number without a unit is read as seconds.",
+      "zh": "控制面为每个已挂接的 Harness Session 发送保活心跳的间隔。`0` 关闭定时心跳，负值会被拒绝。不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.harness.load-timeout": {
+      "en": "How long a takeover load of a Harness Session may take, since it can settle parked Runtime executions; ordinary attach loads use `qwen.managed-agent.harness.request-timeout`. Must be positive while `qwen.managed-agent.harness.enabled` is true: a single Harness is refused at startup, and under `qwen.managed-agent.harness.pool.enabled` every pool member fails to join instead; a number without a unit is read as seconds.",
+      "zh": "Harness Session 接管加载允许的最长时长（接管加载可能需要了结挂起的 Runtime 执行）；普通挂接加载使用 `qwen.managed-agent.harness.request-timeout`。`qwen.managed-agent.harness.enabled` 为 true 时必须为正值：单个 Harness 时启动时拒绝；开启 `qwen.managed-agent.harness.pool.enabled` 时则改为所有池成员都无法加入；不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.harness.pool.discovery": {
+      "en": "How the Harness pool finds its members: `static` reads `qwen.managed-agent.harness.pool.instances`; `kubernetes` watches the EndpointSlices of the Service named by `qwen.managed-agent.harness.pool.namespace`, `qwen.managed-agent.harness.pool.service-name` and `qwen.managed-agent.harness.pool.service-uid`. Startup refuses any other value, `kubernetes` together with static instances, and `kubernetes` without the mTLS key and trust stores. Membership is refreshed every 5 seconds.",
+      "zh": "Harness 池发现成员的方式：`static` 读取 `qwen.managed-agent.harness.pool.instances`；`kubernetes` 监听由 `qwen.managed-agent.harness.pool.namespace`、`qwen.managed-agent.harness.pool.service-name` 与 `qwen.managed-agent.harness.pool.service-uid` 指定的 Service 的 EndpointSlice。其他取值、`kubernetes` 与静态实例同时配置，以及 `kubernetes` 未配置 mTLS 密钥库和信任库时，均启动时拒绝。成员列表每 5 秒刷新一次。"
+    },
+    "qwen.managed-agent.harness.pool.enabled": {
+      "en": "Whether Sessions are placed on a pool of Hosted Harness instances, each Session staying on its member, instead of the single `qwen.managed-agent.harness.base-url`. Read only while `qwen.managed-agent.harness.enabled` is true. Startup requires `qwen.managed-agent.session-store.enabled`, `qwen.managed-agent.session-store.binding-key`, the Harness token and a `sha256:` capability digest, and refuses `qwen.managed-agent.runtime-broker.provisioner=kubernetes-workspace`. Members must advertise `harness-pool-owner/1` and `harness-instance-lifecycle/1` with identical capabilities.",
+      "zh": "是否将 Session 分配到由多个 Hosted Harness 实例组成的池中（每个 Session 固定在其所在成员上），而不是调用单一的 `qwen.managed-agent.harness.base-url`。仅在 `qwen.managed-agent.harness.enabled` 为 true 时读取。启动要求 `qwen.managed-agent.session-store.enabled`、`qwen.managed-agent.session-store.binding-key`、Harness token 以及 `sha256:` 格式的能力摘要；`qwen.managed-agent.runtime-broker.provisioner=kubernetes-workspace` 时启动时拒绝。成员必须声明 `harness-pool-owner/1` 与 `harness-instance-lifecycle/1`，且各成员能力完全一致。"
+    },
+    "qwen.managed-agent.harness.pool.instances": {
+      "en": "The static pool members, used when `qwen.managed-agent.harness.pool.discovery` is `static`; set in a configuration file (YAML). Each entry has `instance-id` (1 to 128 letters, digits, `.`, `_`, `:` or `-`, unique, equal to the instance ID that Harness reports) and `base-url` (an `http` or `https` origin without path, credentials, query or fragment). Startup refuses an empty list, more than 256 entries, and a non-loopback member without `https` and the pool's mTLS stores.",
+      "zh": "静态池成员列表，在 `qwen.managed-agent.harness.pool.discovery` 为 `static` 时使用；需在配置文件（YAML）中设置。每项包含 `instance-id`（1 到 128 个字母、数字、`.`、`_`、`:` 或 `-`，不可重复，且须等于该 Harness 报告的实例 ID）和 `base-url`（不含路径、凭据、查询串和片段的 `http` 或 `https` 源地址）。列表为空、超过 256 项，或非回环成员未使用 `https` 和池的 mTLS 证书库时，均启动时拒绝。",
+      "default": ""
+    },
+    "qwen.managed-agent.harness.pool.key-store-file": {
+      "en": "Path to the PKCS12 key store with the client certificate and key the control plane presents to Harness pool members (mutual TLS). Must be set together with `qwen.managed-agent.harness.pool.trust-store-file`, or startup is refused. Required for `kubernetes` discovery and for any non-loopback member; with both stores empty, no client certificate is sent.",
+      "zh": "PKCS12 密钥库路径，包含控制面向 Harness 池成员出示的客户端证书和私钥（双向 TLS）。必须与 `qwen.managed-agent.harness.pool.trust-store-file` 同时设置，否则启动时拒绝。`kubernetes` 发现方式和任何非回环成员都需要它；两个证书库都为空时不发送客户端证书。"
+    },
+    "qwen.managed-agent.harness.pool.key-store-password-file": {
+      "en": "Path to a file holding the password of `qwen.managed-agent.harness.pool.key-store-file`, also used as the key password. The file holds a secret. At most 4096 bytes; trailing whitespace is removed; empty means an empty password. Startup refuses a file that cannot be read or is too large.",
+      "zh": "保存 `qwen.managed-agent.harness.pool.key-store-file` 密码的文件路径，该密码也用作私钥密码。文件内容属于机密。最多 4096 字节，末尾空白会被去除；为空表示空密码。文件不可读或过大时启动时拒绝。"
+    },
+    "qwen.managed-agent.harness.pool.kubernetes-api-url": {
+      "en": "The Kubernetes API server origin that `kubernetes` discovery reads the Harness Service and its EndpointSlices from. Must be an `https` origin without path, credentials, query or fragment, or startup is refused. Read only when `qwen.managed-agent.harness.pool.discovery` is `kubernetes`.",
+      "zh": "`kubernetes` 发现方式读取 Harness Service 及其 EndpointSlice 所用的 Kubernetes API server 源地址。必须是不含路径、凭据、查询串和片段的 `https` 源地址，否则启动时拒绝。仅在 `qwen.managed-agent.harness.pool.discovery` 为 `kubernetes` 时读取。"
+    },
+    "qwen.managed-agent.harness.pool.kubernetes-ca-file": {
+      "en": "Path to the X.509 CA certificates (PEM or DER) used to verify the Kubernetes API server for `kubernetes` discovery. Startup refuses a file that cannot be read or holds no certificate. Read only when `qwen.managed-agent.harness.pool.discovery` is `kubernetes`.",
+      "zh": "`kubernetes` 发现方式用于校验 Kubernetes API server 的 X.509 CA 证书文件路径（PEM 或 DER）。文件不可读或不含证书时启动时拒绝。仅在 `qwen.managed-agent.harness.pool.discovery` 为 `kubernetes` 时读取。"
+    },
+    "qwen.managed-agent.harness.pool.kubernetes-token-file": {
+      "en": "Path to the bearer token file that `kubernetes` discovery sends to the Kubernetes API, normally the Pod's service account token. The file holds a secret and is read again for every request; it must be one non-empty line of at most 64 KiB, otherwise discovery fails and the pool places no further Sessions until it recovers.",
+      "zh": "`kubernetes` 发现方式向 Kubernetes API 发送的 bearer token 文件路径，通常是 Pod 的 service account token。文件内容属于机密，每次请求都会重新读取；必须是不超过 64 KiB 的单行非空内容，否则发现失败，池在恢复前不再分配 Session。"
+    },
+    "qwen.managed-agent.harness.pool.namespace": {
+      "en": "The Kubernetes namespace of the Harness Service and its EndpointSlices for `kubernetes` discovery. Must be a DNS label (lowercase letters, digits and `-`, at most 63 characters); startup refuses anything else when `qwen.managed-agent.harness.pool.discovery` is `kubernetes`.",
+      "zh": "`kubernetes` 发现方式下 Harness Service 及其 EndpointSlice 所在的 Kubernetes 命名空间。必须是 DNS 标签（小写字母、数字和 `-`，最多 63 个字符）；`qwen.managed-agent.harness.pool.discovery` 为 `kubernetes` 时，其他取值启动时拒绝。"
+    },
+    "qwen.managed-agent.harness.pool.port-name": {
+      "en": "The name of the TCP port in the Harness EndpointSlices that serves the Harness; `kubernetes` discovery calls each Pod at `https://<pod IP>:<port>` and uses the Pod UID as its instance ID. Must be a DNS label (startup refusal otherwise); a slice that lacks the port or lists it twice makes discovery fail.",
+      "zh": "Harness EndpointSlice 中提供 Harness 服务的 TCP 端口名；`kubernetes` 发现方式通过 `https://<pod IP>:<port>` 访问每个 Pod，并以 Pod UID 作为实例 ID。必须是 DNS 标签，否则启动时拒绝；EndpointSlice 缺少该端口或重复列出该端口时发现失败。"
+    },
+    "qwen.managed-agent.harness.pool.service-name": {
+      "en": "The name of the Kubernetes Service whose EndpointSlices list the Harness Pods for `kubernetes` discovery. Must be a DNS label; startup refuses anything else when `qwen.managed-agent.harness.pool.discovery` is `kubernetes`.",
+      "zh": "`kubernetes` 发现方式所用 Kubernetes Service 的名称，其 EndpointSlice 列出 Harness Pod。必须是 DNS 标签；`qwen.managed-agent.harness.pool.discovery` 为 `kubernetes` 时，其他取值启动时拒绝。"
+    },
+    "qwen.managed-agent.harness.pool.service-uid": {
+      "en": "The `metadata.uid` of the Harness Service, which pins `kubernetes` discovery to that exact Service: a Service or EndpointSlice owner with another UID makes discovery fail and offers no members. Required, at most 256 characters, when `qwen.managed-agent.harness.pool.discovery` is `kubernetes`; startup refuses it empty.",
+      "zh": "Harness Service 的 `metadata.uid`，用于将 `kubernetes` 发现方式固定到这个确切的 Service：Service 或 EndpointSlice 属主的 UID 不同时发现失败，不提供任何成员。`qwen.managed-agent.harness.pool.discovery` 为 `kubernetes` 时必填，最多 256 个字符，为空时启动时拒绝。"
+    },
+    "qwen.managed-agent.harness.pool.trust-store-file": {
+      "en": "Path to the PKCS12 trust store with the CA certificates used to verify Harness pool members' server certificates. Must be set together with `qwen.managed-agent.harness.pool.key-store-file`, or startup is refused; that property says when the stores are required.",
+      "zh": "PKCS12 信任库路径，包含用于校验 Harness 池成员服务端证书的 CA 证书。必须与 `qwen.managed-agent.harness.pool.key-store-file` 同时设置，否则启动时拒绝；何时必须配置证书库见该属性。"
+    },
+    "qwen.managed-agent.harness.pool.trust-store-password-file": {
+      "en": "Path to a file holding the password of `qwen.managed-agent.harness.pool.trust-store-file`. The file holds a secret. At most 4096 bytes; trailing whitespace is removed; empty means an empty password. Startup refuses a file that cannot be read or is too large.",
+      "zh": "保存 `qwen.managed-agent.harness.pool.trust-store-file` 密码的文件路径。文件内容属于机密。最多 4096 字节，末尾空白会被去除；为空表示空密码。文件不可读或过大时启动时拒绝。"
+    },
+    "qwen.managed-agent.harness.request-timeout": {
+      "en": "How long a single ordinary call to the Hosted Harness may take, including attach loads that are not takeovers. Task cancellation attempts get at least four times this value, and never less than 5 minutes. Must be positive; a number without a unit is read as seconds.",
+      "zh": "对 Hosted Harness 的单次普通调用（包括非接管的挂接加载）允许的最长时长。任务取消尝试的时限至少为该值的四倍，且不少于 5 分钟。必须为正值；不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.harness.token": {
+      "en": "The bearer token the control plane sends to the Hosted Harness, equal to the Harness's `QWEN_SERVER_TOKEN`; a secret. Required while `qwen.managed-agent.harness.enabled` is true unless `qwen.managed-agent.harness.credentials-file` supplies it; setting both is refused at startup. The preflight check fails a value still starting with the template placeholder `replace-`.",
+      "zh": "控制面发送给 Hosted Harness 的 bearer token，须与 Harness 的 `QWEN_SERVER_TOKEN` 相同；属于机密。`qwen.managed-agent.harness.enabled` 为 true 时必填，除非由 `qwen.managed-agent.harness.credentials-file` 提供；两者同时设置时启动时拒绝。预检会对仍以模板占位符 `replace-` 开头的值报失败。"
+    },
+    "qwen.managed-agent.harness.turn-deadline": {
+      "en": "How long an admitted Turn may run before the Harness settles it as a deadline failure, so a stalled model stream cannot hold a Session forever. It is sent with each Turn. Values outside `1ms` to about 24.8 days are refused while `qwen.managed-agent.harness.enabled` is true: a single Harness is refused at startup, and under `qwen.managed-agent.harness.pool.enabled` every pool member fails to join instead; a number without a unit is read as seconds.",
+      "zh": "已受理的 Turn 在被 Harness 以超时失败结束之前允许运行的时长，避免停滞的模型流永久占用 Session。随每个 Turn 发送。`qwen.managed-agent.harness.enabled` 为 true 时，取值不在 `1ms` 到约 24.8 天之间会被拒绝：单个 Harness 时启动时拒绝；开启 `qwen.managed-agent.harness.pool.enabled` 时则改为所有池成员都无法加入；不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.harness.workspace-child-agents-enabled": {
+      "en": "Whether qualified Workspace Shell Sessions created while it is on may delegate work to public child agents: built-in `qwen-code` Sessions, and AgentDefinition Sessions too while managed extension execution is on. It takes effect only with `qwen.managed-agent.harness.workspace-shell-enabled`, `qwen.managed-agent.runtime-broker.durable-local-process`, `qwen.managed-agent.runtime-broker.provisioner=local-process`, `qwen.managed-agent.runtime-broker.bound-session-isolation-class=session` and a Harness that supports it; otherwise it stays off without an error. Setting it false stops further child launches.",
+      "zh": "是否允许在其开启期间创建的、符合条件的 Workspace Shell Session 将工作委派给公共子 agent：内置 `qwen-code` Session，以及开启托管扩展执行时的 AgentDefinition Session。仅在启用 `qwen.managed-agent.harness.workspace-shell-enabled` 与 `qwen.managed-agent.runtime-broker.durable-local-process`、`qwen.managed-agent.runtime-broker.provisioner=local-process`、`qwen.managed-agent.runtime-broker.bound-session-isolation-class=session` 且 Harness 支持时生效，否则不报错、保持关闭。设为 false 会停止后续的子 agent 启动。"
+    },
+    "qwen.managed-agent.harness.workspace-files-enabled": {
+      "en": "Whether Workspace-bound Sessions get the Hosted Workspace file tools (`hosted-workspace-files/1`) and the Workspace file routes, which otherwise answer `409 workspace_files_disabled`. Startup requires the Harness, the Session Store and `qwen.managed-agent.runtime-broker.enabled`; a `local-process` Broker with `session` isolation and Workspace mounts, a creation root, verified Workspace recovery or SSH nodes (or an exclusive resident CSI setup); and approval mode `yolo`, `default` or `auto-edit`. External Runtime provisioners refuse it.",
+      "zh": "绑定 Workspace 的 Session 是否获得 Hosted Workspace 文件工具（`hosted-workspace-files/1`）及 Workspace 文件路由（关闭时这些路由返回 `409 workspace_files_disabled`）。启动要求启用 Harness、Session Store 与 `qwen.managed-agent.runtime-broker.enabled`；Broker 须为 `local-process`、`session` 隔离，并具备 Workspace 挂载、创建根目录、已验证的 Workspace 恢复或 SSH 节点之一（或独占的常驻 CSI 配置）；审批模式须为 `yolo`、`default` 或 `auto-edit`。外部 Runtime provisioner 下启动时拒绝此项。"
+    },
+    "qwen.managed-agent.harness.workspace-shell-enabled": {
+      "en": "Whether built-in `qwen-code` Workspace Sessions are created with the `hosted-workspace-shell/1` profile: the file tools plus a foreground Shell. Startup requires `qwen.managed-agent.harness.workspace-files-enabled` and approval mode `default` or `auto-edit`, and refuses it with resident Workspaces or an external Runtime provisioner. Turning it off refuses fresh Turns on existing Shell Sessions with `409 workspace_unavailable`.",
+      "zh": "新建的内置 `qwen-code` Workspace Session 是否使用 `hosted-workspace-shell/1` profile：文件工具加前台 Shell。启动要求 `qwen.managed-agent.harness.workspace-files-enabled` 且审批模式为 `default` 或 `auto-edit`；与常驻 Workspace 或外部 Runtime provisioner 同时使用时启动时拒绝。关闭后，现有 Shell Session 的新 Turn 以 `409 workspace_unavailable` 被拒绝。"
+    },
+    "qwen.managed-agent.internal-server.address": {
+      "en": "The address the separate internal listener binds when `qwen.managed-agent.internal-server.port` is set; empty means `127.0.0.1`. Startup refuses an address that does not resolve, and a non-loopback address without `qwen.managed-agent.session-store.binding-key` unless `qwen.managed-agent.auth.allow-insecure-bind`. The listener is always plaintext, and the server warns when it leaves loopback. The `managed-local` profile requires a loopback address.",
+      "zh": "设置 `qwen.managed-agent.internal-server.port` 时，独立内部监听器绑定的地址；为空表示 `127.0.0.1`。无法解析的地址，以及未配置 `qwen.managed-agent.session-store.binding-key` 时的非回环地址（除非开启 `qwen.managed-agent.auth.allow-insecure-bind`），均启动时拒绝。该监听器始终为明文，离开回环地址时服务会发出警告。`managed-local` profile 要求回环地址。"
+    },
+    "qwen.managed-agent.internal-server.port": {
+      "en": "The port of a separate listener for the internal routes (`/internal/**`, including the Session Store); `0` or less serves them on the public listener. When set, each listener answers 404 for the other's routes. Startup refuses a port equal to `server.port`, and `qwen.managed-agent.channels.enabled` requires a port. The listener never inherits `server.ssl`.",
+      "zh": "内部路由（`/internal/**`，包括 Session Store）独立监听器的端口；`0` 或更小的值表示这些路由由公共监听器提供。设置后，两个监听器对彼此的路由都返回 404。与 `server.port` 相同时启动时拒绝；`qwen.managed-agent.channels.enabled` 需要设置此端口。该监听器不会继承 `server.ssl`。"
+    },
+    "qwen.managed-agent.managed-extensions.cache-directory": {
+      "en": "The absolute directory where Runtime workers cache the extension packages they run; keep it private and outside every Workspace. Required when `qwen.managed-agent.managed-extensions.enabled` is true: a relative or empty path is refused at startup when the Runtime Broker uses local-process or SSH workers.",
+      "zh": "Runtime worker 缓存其所运行扩展包的绝对目录，应保持私有并位于所有 Workspace 之外。`qwen.managed-agent.managed-extensions.enabled` 为 true 时必填：当 Runtime Broker 使用 local-process 或 SSH worker 时，相对路径或空值会在启动时被拒绝。"
+    },
+    "qwen.managed-agent.managed-extensions.cgroup-root": {
+      "en": "The absolute path of a writable, delegated cgroup v2 subtree under which Linux Runtime workers contain extension processes. Required for Linux workers when `qwen.managed-agent.managed-extensions.enabled` is true (a Runtime launch fails without it); must be empty in `developer-process-group` mode.",
+      "zh": "可写且已委派的 cgroup v2 子树的绝对路径，Linux Runtime worker 会把扩展进程限制在其下。`qwen.managed-agent.managed-extensions.enabled` 为 true 时 Linux worker 必须设置（缺失时 Runtime 启动失败）；`developer-process-group` 模式下必须为空。"
+    },
+    "qwen.managed-agent.managed-extensions.enabled": {
+      "en": "Whether Workspace Runtimes run with the managed extension execution profile, which lets selected extension packages run their processes (such as Hooks and MCP servers) in Runtime workers. Requires `qwen.managed-agent.extensions.enabled` (startup refusal) and `qwen.managed-agent.managed-extensions.cache-directory`, plus `qwen.managed-agent.managed-extensions.cgroup-root` on Linux.",
+      "zh": "Workspace Runtime 是否以托管扩展执行配置运行，使所选扩展包能在 Runtime worker 中运行其进程（如 Hook 和 MCP 服务器）。需要开启 `qwen.managed-agent.extensions.enabled`（否则启动时拒绝）并设置 `qwen.managed-agent.managed-extensions.cache-directory`，Linux 上还需设置 `qwen.managed-agent.managed-extensions.cgroup-root`。"
+    },
+    "qwen.managed-agent.managed-extensions.mode": {
+      "en": "The extension execution mode: `linux-cgroup` contains extension processes in a delegated cgroup v2 subtree, and `developer-process-group` is a weaker process-group mode for native macOS development. Linux workers always use `linux-cgroup`; a macOS worker is refused unless this is `developer-process-group`.",
+      "zh": "扩展执行模式：`linux-cgroup` 将扩展进程限制在已委派的 cgroup v2 子树中；`developer-process-group` 是面向原生 macOS 开发、隔离较弱的进程组模式。Linux worker 始终使用 `linux-cgroup`；macOS worker 只有在该值为 `developer-process-group` 时才被接受。"
+    },
+    "qwen.managed-agent.message-relay.scan-delay": {
+      "en": "How long the Session message relay waits between passes; each pass moves pending messages between Sessions (handover, receipt, acceptance) and settles those that cannot be delivered. Skipped on a node without an available Hosted Harness. Accepts a duration such as `2s`; a plain number is milliseconds.",
+      "zh": "Session 消息中继两次运行之间的间隔；每次运行推进 Session 之间待投递的消息（移交、回执、接受），并结算无法投递的消息。没有可用 Hosted Harness 的节点会跳过。接受 `2s` 这类时长；不带单位的数字按毫秒计。",
+      "type": "duration"
+    },
+    "qwen.managed-agent.model-catalog": {
+      "en": "The models offered for Sessions of the built-in `qwen-code` agent, selectable at Session creation and changeable later by a Workspace operator. A list of objects with `model-id` (a model ID configured in the Harness; required, unique, at most 512 bytes) and `label` (display name, defaults to `model-id`, at most 512 characters); an invalid or duplicate entry is refused at startup. Set it in a YAML configuration file; there is no environment variable. Selection also needs `qwen.managed-agent.harness.workspace-files-enabled` and Harness support.",
+      "zh": "为内置 `qwen-code` agent 的 Session 提供的可选模型，可在创建 Session 时选择，之后也可由 Workspace operator 更改。元素为对象列表，包含 `model-id`（Harness 中配置的模型 ID；必填、唯一、最多 512 字节）和 `label`（显示名称，默认等于 `model-id`，最多 512 个字符）；条目无效或重复时启动时拒绝。需在 YAML 配置文件中设置，没有对应的环境变量。模型选择还要求开启 `qwen.managed-agent.harness.workspace-files-enabled`，且 Harness 支持模型选择。",
+      "default": ""
+    },
+    "qwen.managed-agent.runtime-broker.allow-non-loopback": {
+      "en": "Whether the embedded Runtime Broker may bind a non-loopback address in `qwen.managed-agent.runtime-broker.host`, such as `0.0.0.0`; without it, startup refuses such an address. The listener serves one global bearer token over plaintext HTTP, with no per-tenant authorization, so enable it only behind a layer that terminates TLS and authorizes callers: restricting the network alone still sends the token in clear text, and whoever reads it can drive every execution the Broker admits. The `managed-local` profile refuses a non-loopback host regardless.",
+      "zh": "是否允许内嵌 Runtime Broker 绑定 `qwen.managed-agent.runtime-broker.host` 中的非回环地址（例如 `0.0.0.0`）；未开启时，此类地址启动时拒绝。该监听器通过明文 HTTP 使用同一个全局 bearer token，且没有按租户的鉴权，因此只应在终止 TLS 并对调用方鉴权的前置层之后开启：仅限制网络仍会以明文传输该 token，读到它的人可以操控 Broker 接纳的所有执行。`managed-local` profile 无论此项如何都拒绝非回环 host。"
+    },
+    "qwen.managed-agent.runtime-broker.bound-session-isolation-class": {
+      "en": "How Runtime workers are shared among Sessions bound to a mounted local Workspace: `session` gives each Session its own worker, `workspace` lets the Sessions of one Workspace share one. Startup refuses other values. `workspace` requires the `local-process` provisioner with `qwen.managed-agent.runtime-broker.durable-local-process` and cannot combine with `qwen.managed-agent.runtime-broker.child-workspaces-enabled`; Session worktrees and public child agents need `session`. SSH-bound Sessions always use `session`.",
+      "zh": "绑定到本地挂载 Workspace 的 Session 如何共享 Runtime worker：`session` 为每个 Session 单独启动 worker，`workspace` 让同一 Workspace 的 Session 共用一个 worker。其他取值启动时拒绝。`workspace` 要求使用 `local-process` provisioner 并开启 `qwen.managed-agent.runtime-broker.durable-local-process`，且不能与 `qwen.managed-agent.runtime-broker.child-workspaces-enabled` 同时使用；Session worktree 与公开子 agent 需要 `session`。SSH 绑定的 Session 始终使用 `session`。"
+    },
+    "qwen.managed-agent.runtime-broker.child-snapshots-enabled": {
+      "en": "Whether Hosted Sessions may also launch read-only snapshot child agents, which read a frozen, always-discarded copy of the parent's Workspace through a tool profile without writing tools. Requires `qwen.managed-agent.runtime-broker.child-workspaces-enabled`; startup refuses it alone, and also refuses it with an external provisioner.",
+      "zh": "是否允许 Hosted Session 额外启动只读的快照子 agent：子 agent 通过不含写入工具的工具 profile 读取父 Workspace 的冻结副本，该副本总会被丢弃。需要 `qwen.managed-agent.runtime-broker.child-workspaces-enabled`；单独开启时启动时拒绝，使用外部 provisioner 时也启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.child-workspace-git": {
+      "en": "The Git executable that child Workspace and Session worktree steps run; a bare name is looked up on the server's `PATH`. It must be Git 2.40 or later. With `qwen.managed-agent.runtime-broker.child-workspaces-enabled`, startup probes its version and refuses an older Git.",
+      "zh": "子 Workspace 与 Session worktree 步骤所调用的 Git 可执行文件；只写名称时在服务端的 `PATH` 中查找。须为 Git 2.40 及以上。开启 `qwen.managed-agent.runtime-broker.child-workspaces-enabled` 时，启动会探测其版本，更旧的 Git 启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.child-workspace-git-timeout": {
+      "en": "How long each Git command of a child Workspace or Session worktree step may run before it is killed. A suffix-less number binds as milliseconds, so write the unit. With `qwen.managed-agent.runtime-broker.child-workspaces-enabled`, startup refuses values outside 1s to 1h.",
+      "zh": "子 Workspace 或 Session worktree 步骤中每条 Git 命令最长可运行多久，超时即被终止。不带单位的数字按毫秒绑定，请写明单位。开启 `qwen.managed-agent.runtime-broker.child-workspaces-enabled` 时，超出 1s 到 1h 范围的值启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.child-workspaces-enabled": {
+      "en": "Whether Hosted Sessions may run child agents in isolated child Workspaces: Git worktrees inside the parent's storage, merged back or discarded after the child Session closes. Startup requires `qwen.managed-agent.runtime-broker.enabled`, the `local-process` provisioner, `session` in `qwen.managed-agent.runtime-broker.isolation-class`, `qwen.managed-agent.runtime-broker.durable-local-process`, `qwen.managed-agent.runtime-broker.workspace-mounts` or `qwen.managed-agent.runtime-broker.workspace-creation-root`, Git 2.40 or later, a UTF-8 locale and a non-Windows host, and refuses `workspace` in `qwen.managed-agent.runtime-broker.bound-session-isolation-class`.",
+      "zh": "是否允许 Hosted Session 在隔离的子 Workspace 中运行子 agent：子 Workspace 是父存储内的 Git worktree，子 Session 关闭后合并回父 Workspace 或丢弃。需要开启 `qwen.managed-agent.runtime-broker.enabled`、使用 `local-process` provisioner、`qwen.managed-agent.runtime-broker.isolation-class` 为 `session`、开启 `qwen.managed-agent.runtime-broker.durable-local-process`、配置 `qwen.managed-agent.runtime-broker.workspace-mounts` 或 `qwen.managed-agent.runtime-broker.workspace-creation-root`、Git 2.40 及以上、UTF-8 locale 且主机不是 Windows，否则启动时拒绝；`qwen.managed-agent.runtime-broker.bound-session-isolation-class` 为 `workspace` 时也启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.credential-key": {
+      "en": "The active Runtime credential key: a base64-encoded 32-byte AES-256-GCM key that encrypts the Runtime provision seeds, worker lease tokens and managed extension settings stored in the database. A secret. Required when `qwen.managed-agent.runtime-broker.enabled` is on; startup refuses an empty value, invalid base64 or a length other than 32 bytes. Generate one with `openssl rand -base64 32`.",
+      "zh": "当前生效的 Runtime 凭据密钥：经 base64 编码的 32 字节 AES-256-GCM 密钥，用于加密数据库中保存的 Runtime provision seed、worker 租约 token 和托管扩展设置。属于机密。开启 `qwen.managed-agent.runtime-broker.enabled` 时必填；空值、非法 base64 或长度不是 32 字节时启动时拒绝。可用 `openssl rand -base64 32` 生成。"
+    },
+    "qwen.managed-agent.runtime-broker.credential-key-id": {
+      "en": "The ID of the active Runtime credential key, stored beside every ciphertext it writes so that reads pick the matching key. Not a secret. Required when `qwen.managed-agent.runtime-broker.enabled` is on; startup refuses an empty value, one over 512 characters, or an ID also listed in `qwen.managed-agent.runtime-broker.previous-credential-keys`. Changing the ID and key is a rotation: keep the old pair in that map.",
+      "zh": "当前生效的 Runtime 凭据密钥的 ID，与它写入的每份密文一起保存，读取时据此选取对应密钥。不属于机密。开启 `qwen.managed-agent.runtime-broker.enabled` 时必填；空值、超过 512 个字符，或与 `qwen.managed-agent.runtime-broker.previous-credential-keys` 中某个 ID 相同时启动时拒绝。同时更换 ID 和密钥即为一次轮换：须把旧的 ID 与密钥保留在该映射中。"
+    },
+    "qwen.managed-agent.runtime-broker.durable-local-process": {
+      "en": "Whether the `local-process` provisioner registers every Runtime worker launch in `qwen.managed-agent.runtime-broker.state-directory` so that a restarted Broker adopts the same live worker; when off, workers stop with the Broker. Needs Linux, or macOS with `qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery` off, and a state directory outside every Workspace root; startup refuses otherwise. Trusted reboot recovery, child Workspaces, Workspace creation, local directory import and `workspace` bound-Session isolation require it.",
+      "zh": "`local-process` provisioner 是否把每次 Runtime worker 启动登记到 `qwen.managed-agent.runtime-broker.state-directory`，使重启后的 Broker 接管仍在运行的同一 worker；关闭时 worker 随 Broker 退出而停止。需要 Linux，或关闭 `qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery` 的 macOS，且状态目录须位于所有 Workspace 根目录之外，否则启动时拒绝。可信重启恢复、子 Workspace、Workspace 创建、本地目录导入以及 `workspace` 取值的绑定 Session 隔离都依赖此项。"
+    },
+    "qwen.managed-agent.runtime-broker.enabled": {
+      "en": "Whether the control plane runs the embedded Runtime Broker, which places the Runtime workers that execute Hosted tools and serves the Hosted Harness on `qwen.managed-agent.runtime-broker.host` and `qwen.managed-agent.runtime-broker.port`. When on, startup requires `qwen.managed-agent.runtime-broker.token`, `qwen.managed-agent.runtime-broker.credential-key-id`, `qwen.managed-agent.runtime-broker.credential-key`, `qwen.managed-agent.runtime-broker.workspace-cwd` and `qwen.managed-agent.harness.capability-digest`. Hosted Workspace files and child Workspaces require it.",
+      "zh": "控制面是否运行内嵌 Runtime Broker：它负责放置执行 Hosted 工具的 Runtime worker，并在 `qwen.managed-agent.runtime-broker.host` 与 `qwen.managed-agent.runtime-broker.port` 上为 Hosted Harness 提供服务。开启时，缺少 `qwen.managed-agent.runtime-broker.token`、`qwen.managed-agent.runtime-broker.credential-key-id`、`qwen.managed-agent.runtime-broker.credential-key`、`qwen.managed-agent.runtime-broker.workspace-cwd` 或 `qwen.managed-agent.harness.capability-digest` 时启动时拒绝。Hosted Workspace 文件与子 Workspace 都要求开启此项。"
+    },
+    "qwen.managed-agent.runtime-broker.environment": {
+      "en": "Extra environment variables for Runtime workers, as a map from variable name to value, set in a configuration file (YAML). No provisioner passes them on: startup refuses a non-empty map with the `local-process` provisioner, and the other provisioners ignore it.",
+      "zh": "为 Runtime worker 额外提供的环境变量，形式为变量名到取值的映射，在配置文件（YAML）中设置。没有任何 provisioner 会传递这些变量：使用 `local-process` provisioner 时非空映射启动时拒绝，其他 provisioner 忽略它。",
+      "default": ""
+    },
+    "qwen.managed-agent.runtime-broker.external-provider-id": {
+      "en": "The provider ID that the `external-scratch` and `external-workspace` provisioners record in every Runtime handle and digest into its identity. With either provisioner, startup refuses an empty value or one over 512 characters. Set it once before the first Session: changing it later invalidates every existing external binding.",
+      "zh": "`external-scratch` 与 `external-workspace` provisioner 写入每个 Runtime handle 并计入其身份摘要的 provider ID。使用这两种 provisioner 时，空值或超过 512 个字符的值启动时拒绝。请在第一个 Session 之前设定：之后再修改会使所有已有的外部 binding 失效。"
+    },
+    "qwen.managed-agent.runtime-broker.external-provider-token": {
+      "en": "The bearer token the Broker sends to the external Runtime provider's `provision` and `observe` routes. A secret. With an external provisioner, startup refuses a value that is not 16 to 4096 characters of letters, digits and `._~+/=-`, or that starts with `replace-`, the shipped template placeholder.",
+      "zh": "Broker 调用外部 Runtime provider 的 `provision` 与 `observe` 路由时发送的 bearer token。属于机密。使用外部 provisioner 时，若取值不是由字母、数字和 `._~+/=-` 组成的 16 到 4096 个字符，或以发行模板中的占位符前缀 `replace-` 开头，则启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.external-provider-url": {
+      "en": "The base URL of the operator-run external Runtime provider; the Broker POSTs to its `provision` and `observe` routes below this path and follows no redirects. Required with the `external-scratch` and `external-workspace` provisioners: startup refuses anything but an HTTP(S) URL with a host and no credentials, query or fragment. Use HTTPS outside a trusted network.",
+      "zh": "由运维方运行的外部 Runtime provider 的基础 URL；Broker 向该路径下的 `provision` 与 `observe` 路由发送 POST 请求，且不跟随重定向。使用 `external-scratch` 与 `external-workspace` provisioner 时必填：除带主机名且不含凭据、查询串或片段的 HTTP(S) URL 外，其他取值启动时拒绝。可信网络之外请使用 HTTPS。"
+    },
+    "qwen.managed-agent.runtime-broker.external-request-timeout": {
+      "en": "How long one HTTP call to the external Runtime provider may take before it fails; establishing the connection is separately bounded at 5 seconds. A suffix-less number binds as seconds. Read only with an external provisioner, where startup refuses a value under 1ms.",
+      "zh": "对外部 Runtime provider 的单次 HTTP 调用最长可用多久，超时即失败；建立连接另有固定的 5 秒上限。不带单位的数字按秒绑定。仅在使用外部 provisioner 时读取，此时小于 1ms 的值启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.external-startup-timeout": {
+      "en": "How long the Broker keeps polling the external provider's `observe` route after `provision` for the provisioned worker to report ready; when it lapses, the placement fails with the retryable `runtime_external_unavailable`. A suffix-less number binds as seconds. Read only with an external provisioner, where startup refuses a value under 1ms.",
+      "zh": "调用 `provision` 后，Broker 轮询外部 provider 的 `observe` 路由、等待所放置的 worker 就绪的最长时间；超时后本次放置以可重试的 `runtime_external_unavailable` 失败。不带单位的数字按秒绑定。仅在使用外部 provisioner 时读取，此时小于 1ms 的值启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.host": {
+      "en": "The address the embedded Runtime Broker's HTTP listener binds; the Hosted Harness reaches it through its own `QWEN_MANAGED_RUNTIME_BROKER_URL`. A non-loopback address, including `0.0.0.0`, requires `qwen.managed-agent.runtime-broker.allow-non-loopback`, and the `managed-local` profile refuses one regardless. Preflight compares the Broker URL in the Harness credentials file with this listener.",
+      "zh": "内嵌 Runtime Broker 的 HTTP 监听器绑定的地址；Hosted Harness 通过它自己的 `QWEN_MANAGED_RUNTIME_BROKER_URL` 访问该监听器。非回环地址（包括 `0.0.0.0`）需要开启 `qwen.managed-agent.runtime-broker.allow-non-loopback`，且 `managed-local` profile 无论如何都拒绝非回环地址。预检会将 Harness 凭据文件中的 Broker URL 与该监听器比对。"
+    },
+    "qwen.managed-agent.runtime-broker.isolation-class": {
+      "en": "How the Broker shares Runtime workers among Sessions with no Workspace binding: `session` gives each Hosted Session its own worker, `workspace` shares one across the configured Workspace. Startup refuses `workspace` with Hosted Workspace files on `local-process`, child Workspaces or an external provisioner, and refuses `session` with the `static` or `kubernetes-workspace` provisioner. Workspace-bound Sessions use `qwen.managed-agent.runtime-broker.bound-session-isolation-class` instead.",
+      "zh": "Broker 如何在未绑定 Workspace 的 Session 之间共享 Runtime worker：`session` 为每个 Hosted Session 单独启动 worker，`workspace` 让配置的整个 Workspace 共用一个 worker。在 `local-process` 上启用 Hosted Workspace 文件、启用子 Workspace 或使用外部 provisioner 时，`workspace` 启动时拒绝；使用 `static` 或 `kubernetes-workspace` provisioner 时，`session` 启动时拒绝。绑定 Workspace 的 Session 改用 `qwen.managed-agent.runtime-broker.bound-session-isolation-class`。"
+    },
+    "qwen.managed-agent.runtime-broker.local-directory-import-enabled": {
+      "en": "Whether WebShell may import an existing directory on this host as a Workspace, registering its parent as storage and granting the importing actor OWNER access. For a trusted single-user host: startup requires a loopback `server.address` with signed authentication or `qwen.managed-agent.trusted-actor-header`, plus `qwen.managed-agent.harness.workspace-files-enabled`, `qwen.managed-agent.runtime-broker.durable-local-process` and `qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled`.",
+      "zh": "是否允许 WebShell 将本机上已有的目录导入为 Workspace：导入时把其父目录登记为存储，并授予发起导入的 actor OWNER 权限。仅适用于可信的单用户主机：要求 `server.address` 为回环地址并使用 signed 认证或 `qwen.managed-agent.trusted-actor-header`，同时开启 `qwen.managed-agent.harness.workspace-files-enabled`、`qwen.managed-agent.runtime-broker.durable-local-process` 和 `qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled`，否则启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.node-executable": {
+      "en": "The path of the Node.js executable that runs the local Runtime worker (`qwen.managed-agent.runtime-broker.worker-entry`) and the helper processes for local Workspace file reads and uploads. Required with the `local-process` provisioner; startup refuses it empty. Preflight checks that it is executable.",
+      "zh": "Node.js 可执行文件的路径，用于运行本地 Runtime worker（`qwen.managed-agent.runtime-broker.worker-entry`）以及本地 Workspace 文件读取和上传的辅助进程。使用 `local-process` provisioner 时必填，留空时启动时拒绝。预检会检查它是否可执行。"
+    },
+    "qwen.managed-agent.runtime-broker.operator-recovery-enabled": {
+      "en": "Whether the offline operator-recovery command (`bin/qwen-managed-agent-operator-recovery`) may run its `inspect`, `prepare` and `complete` steps for a Hosted Shell capture that kept a Workspace lease. Set it for that maintenance process: the command refuses to run unless it is on with `qwen.managed-agent.runtime-broker.durable-local-process`, the `local-process` provisioner and `qwen.managed-agent.runtime-broker.state-directory`. The server refuses it at startup with an external provisioner.",
+      "zh": "是否允许离线的运维恢复命令（`bin/qwen-managed-agent-operator-recovery`）对仍占用 Workspace 租约的 Hosted Shell 捕获执行 `inspect`、`prepare` 与 `complete` 步骤。请在该维护进程中设置：除非此项开启，且同时开启 `qwen.managed-agent.runtime-broker.durable-local-process`、使用 `local-process` provisioner 并配置 `qwen.managed-agent.runtime-broker.state-directory`，否则该命令拒绝运行。使用外部 provisioner 时，服务端启动时拒绝此项。"
+    },
+    "qwen.managed-agent.runtime-broker.port": {
+      "en": "The TCP port of the embedded Runtime Broker's HTTP listener; the Hosted Harness's `QWEN_MANAGED_RUNTIME_BROKER_URL` must reach it, directly on a loopback address or through the TLS-terminating proxy in front of a non-loopback bind. Startup fails when the listener cannot bind it. Preflight checks that the port is free, or listening with `--online`, and compares it with the Broker URL in the Harness credentials file.",
+      "zh": "内嵌 Runtime Broker HTTP 监听器的 TCP 端口；Hosted Harness 的 `QWEN_MANAGED_RUNTIME_BROKER_URL` 必须能到达它：回环地址时直接指向它，非回环绑定时经由前置的 TLS 终止代理。监听器无法绑定该端口时启动失败。预检会检查端口是否空闲（使用 `--online` 时检查是否在监听），并与 Harness 凭据文件中的 Broker URL 比对。"
+    },
+    "qwen.managed-agent.runtime-broker.previous-credential-keys": {
+      "en": "Earlier Runtime credential keys kept after a rotation, as a map from key ID to base64-encoded 32-byte key, so rows encrypted under them stay readable; writes use only the active key. Secrets. Set it in a configuration file (YAML), each ID in brackets, such as `'[old-v1]': <key>`; environment variables cannot supply it. Startup refuses a key that is not 32 bytes or an ID equal to `qwen.managed-agent.runtime-broker.credential-key-id`.",
+      "zh": "密钥轮换后保留的旧 Runtime 凭据密钥，形式为 key ID 到 base64 编码 32 字节密钥的映射，使以旧密钥加密的行仍可读取，而写入始终只使用当前密钥。属于机密。须在配置文件（YAML）中设置，并用方括号包住每个 ID，例如 `'[old-v1]': <key>`；无法通过环境变量提供。密钥不是 32 字节，或 ID 与 `qwen.managed-agent.runtime-broker.credential-key-id` 相同时启动时拒绝。",
+      "default": ""
+    },
+    "qwen.managed-agent.runtime-broker.provisioner": {
+      "en": "Which provisioner places Runtime workers: `local-process` (Node.js workers on this host), `static` (one preconfigured worker at `qwen.managed-agent.runtime-broker.static-endpoint`), `external-scratch` or `external-workspace` (an operator-run HTTP provider at `qwen.managed-agent.runtime-broker.external-provider-url`), or `kubernetes-workspace` (resident Workspaces from `qwen.managed-agent.runtime-broker.resident-workspaces`). Startup refuses any other value, including `kubernetes`.",
+      "zh": "放置 Runtime worker 所用的 provisioner：`local-process`（本机上的 Node.js worker）、`static`（位于 `qwen.managed-agent.runtime-broker.static-endpoint` 的单个预配置 worker）、`external-scratch` 或 `external-workspace`（位于 `qwen.managed-agent.runtime-broker.external-provider-url` 的运维方 HTTP provider），或 `kubernetes-workspace`（来自 `qwen.managed-agent.runtime-broker.resident-workspaces` 的常驻 Workspace）。其他取值（包括 `kubernetes`）启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.resident-kubernetes-api-url": {
+      "en": "The HTTPS origin of the Kubernetes API server that the `kubernetes-workspace` provisioner calls for `qwen.managed-agent.runtime-broker.resident-workspaces`, together with `qwen.managed-agent.runtime-broker.resident-kubernetes-token-file` and `qwen.managed-agent.runtime-broker.resident-kubernetes-ca-file`. Startup refuses resident Workspaces without it, and refuses a URL that is not `https` or has a path, credentials, query or fragment. The resident-retirement maintenance command reads it too.",
+      "zh": "`kubernetes-workspace` provisioner 为 `qwen.managed-agent.runtime-broker.resident-workspaces` 调用的 Kubernetes API server 的 HTTPS origin，需与 `qwen.managed-agent.runtime-broker.resident-kubernetes-token-file`、`qwen.managed-agent.runtime-broker.resident-kubernetes-ca-file` 一起配置。配置了常驻 Workspace 却未设置此项，或 URL 不是 `https`、带有路径、凭据、查询串或片段时，启动时拒绝。常驻 Workspace 回收维护命令也会读取此项。"
+    },
+    "qwen.managed-agent.runtime-broker.resident-kubernetes-ca-file": {
+      "en": "Path to a PEM or DER file of X.509 CA certificates that the server trusts, instead of the JVM defaults, for TLS to the Kubernetes API named by `qwen.managed-agent.runtime-broker.resident-kubernetes-api-url`. Required when `qwen.managed-agent.runtime-broker.resident-workspaces` is set; an unreadable file or one without certificates fails startup. The `resident-retirement` admin command reads it too.",
+      "zh": "服务端连接 `qwen.managed-agent.runtime-broker.resident-kubernetes-api-url` 所指的 Kubernetes API 时用于校验 TLS 的 X.509 CA 证书文件路径（PEM 或 DER），只信任其中的证书，不使用 JVM 默认信任库。设置了 `qwen.managed-agent.runtime-broker.resident-workspaces` 时必填；文件不可读或不含证书时启动失败。管理命令 `resident-retirement` 也会读取它。"
+    },
+    "qwen.managed-agent.runtime-broker.resident-kubernetes-token-file": {
+      "en": "Path to a file holding the bearer token the server sends to the Kubernetes API to manage resident Workspace Pods. The file holds a secret; it is re-read on every request, so the token can be rotated in place, and it must contain at most 16 KiB of letters, digits and `._~-`. Required when `qwen.managed-agent.runtime-broker.resident-workspaces` is set; the `resident-retirement` admin command reads it too.",
+      "zh": "保存 Bearer 令牌的文件路径，服务端用该令牌调用 Kubernetes API 管理常驻 Workspace 的 Pod。文件内容是密钥；每次请求都会重新读取，因此可以原地轮换，内容最多 16 KiB，只能包含字母、数字和 `._~-`。设置了 `qwen.managed-agent.runtime-broker.resident-workspaces` 时必填；管理命令 `resident-retirement` 也会读取它。"
+    },
+    "qwen.managed-agent.runtime-broker.resident-workspaces": {
+      "en": "The Workspaces served by dedicated resident Kubernetes Pods on CSI storage, set in a configuration file (YAML) as a list. Each entry has `workspace-id`, `workspace-generation` (1 or more), `registration` (the registered CSI storage: `tenant-id`, `storage-id`, `cluster-domain`, `namespace`, `pvc-name`, `pvc-uid`, `pv-name`, `pv-uid`, `driver`, `volume-handle`, `backend-domain`, `disk-serial`, `mount-root`, `revision`), `protection` (`namespace-uid`, `policy-name`, `policy-uid`, `policy-generation`, `binding-name`, `binding-uid`, `binding-generation`), `image` (pinned as `name@sha256:<64 hex>`), `command` (1 to 32 arguments: the executable and CLI path) and `artifacts` (up to 48 ConfigMaps, each with `config-map-name`, `uid` and `sha256`). A non-empty list needs the `kubernetes-workspace` provisioner with its three `resident-kubernetes-*` settings, `workspace` isolation and Workspace files, and refuses Workspace mounts, SSH nodes, trusted reboot or verified Workspace recovery, child Workspaces and Workspace Shell. Each tenant Workspace and each volume may appear once, and each `registration` must match a registered CSI storage record.",
+      "zh": "由专属常驻 Kubernetes Pod 在 CSI 存储上服务的 Workspace 列表，在配置文件（YAML）中设置。每项包含 `workspace-id`、`workspace-generation`（不小于 1）、`registration`（已登记的 CSI 存储：`tenant-id`、`storage-id`、`cluster-domain`、`namespace`、`pvc-name`、`pvc-uid`、`pv-name`、`pv-uid`、`driver`、`volume-handle`、`backend-domain`、`disk-serial`、`mount-root`、`revision`）、`protection`（`namespace-uid`、`policy-name`、`policy-uid`、`policy-generation`、`binding-name`、`binding-uid`、`binding-generation`）、`image`（以 `name@sha256:<64 hex>` 固定摘要）、`command`（1 到 32 个参数，即可执行文件和 CLI 路径）以及 `artifacts`（最多 48 个 ConfigMap，每个含 `config-map-name`、`uid` 和 `sha256`）。列表非空时，需要 `kubernetes-workspace` provisioner 及其三项 `resident-kubernetes-*` 设置、`workspace` 隔离和 Workspace 文件，且不能同时配置 Workspace mount、SSH 节点、可信重启恢复或已验证 Workspace 恢复、子 Workspace 和 Workspace Shell，否则启动时拒绝。每个租户 Workspace 和每个卷只能出现一次，且每个 `registration` 必须与已登记的 CSI 存储记录一致。",
+      "default": ""
+    },
+    "qwen.managed-agent.runtime-broker.retention.batch-size": {
+      "en": "How many records one retention tick may handle: it caps the bindings scanned, the child records scanned and the total rows deleted per tick. Must be between 1 and 1000; checked at startup even while retention is off.",
+      "zh": "每轮保留期清理最多处理的记录数：同时限制每轮扫描的绑定数、扫描的子记录数和删除的总行数。取值须在 1 到 1000 之间；即使未启用清理也会在启动时校验，越界则启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.retention.enabled": {
+      "en": "Whether the server periodically deletes old terminal Runtime records (tool executions, Runtime Sessions and bindings) from the database, in bounded batches on its own scheduler. Takes effect only when `qwen.managed-agent.runtime-broker.enabled` is also true. It never stops workers or deletes Workspace files, and it keeps records that are still referenced, such as recovery records, Workspace holders and unsettled child lineage.",
+      "zh": "是否在独立调度线程上按有限批次，定期从数据库删除已终结的旧 Runtime 记录（工具执行、Runtime Session 和绑定）。仅当 `qwen.managed-agent.runtime-broker.enabled` 也为 true 时生效。它不会停止 worker，也不删除 Workspace 文件，并保留仍被引用的记录，例如恢复记录、Workspace 持有者和尚未结算的子 Session 谱系。"
+    },
+    "qwen.managed-agent.runtime-broker.retention.max-age": {
+      "en": "How long a terminal Runtime record must have been inactive before retention may delete it: a binding or Runtime Session is measured from its last activity, a tool execution from when it settled or was abandoned. A suffix-less number binds as days. Must be at least `1ms`; checked at startup even while retention is off.",
+      "zh": "已终结的 Runtime 记录至少要闲置多久才可被保留期清理删除：绑定和 Runtime Session 从最后活动时间算起，工具执行从结算或放弃的时间算起。不带单位的数字按天解析。至少为 `1ms`；即使未启用清理也会在启动时校验，不满足则启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.retention.scan-delay": {
+      "en": "How long the retention job waits after one tick finishes before it starts the next. A suffix-less number binds as milliseconds. Must be at least `1ms`; checked at startup even while retention is off.",
+      "zh": "保留期清理任务在一轮结束后、开始下一轮前的等待时间。不带单位的数字按毫秒解析。至少为 `1ms`；即使未启用清理也会在启动时校验，不满足则启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.session-create-warm": {
+      "en": "Whether creating a Workspace-bound Session without initial input starts its Runtime worker right away instead of at the first Turn. Requires `qwen.managed-agent.runtime-broker.bound-session-isolation-class` set to `workspace` and no `qwen.managed-agent.runtime-broker.ssh.nodes`; startup refuses it otherwise and with external provisioners. Has no effect while Workspace files are unavailable.",
+      "zh": "创建不带初始输入的 Workspace 绑定 Session 时，是否立即启动其 Runtime worker，而不是等到第一个 Turn。要求 `qwen.managed-agent.runtime-broker.bound-session-isolation-class` 为 `workspace` 且未配置 `qwen.managed-agent.runtime-broker.ssh.nodes`，否则启动时拒绝；使用外部 provisioner 时同样启动时拒绝。Workspace 文件不可用时不起作用。"
+    },
+    "qwen.managed-agent.runtime-broker.session-worktrees-enabled": {
+      "en": "Whether a Workspace Session may be created in its own Git worktree of the Workspace repository, checked out from an optional local base ref under `.qwen-managed-worktrees` on a new `worktree-managed-<id>` branch. Takes effect only with `qwen.managed-agent.runtime-broker.enabled`, `qwen.managed-agent.runtime-broker.durable-local-process`, the `local-process` provisioner and `qwen.managed-agent.runtime-broker.bound-session-isolation-class` set to `session`, on a non-Windows host whose JVM uses UTF-8 file names; otherwise worktree requests are refused with `worktree_unsupported`.",
+      "zh": "是否允许 Workspace Session 在 Workspace 仓库的独立 Git worktree 中创建：从可选的本地 base ref 检出到 `.qwen-managed-worktrees` 下，并新建 `worktree-managed-<id>` 分支。仅当启用 `qwen.managed-agent.runtime-broker.enabled` 和 `qwen.managed-agent.runtime-broker.durable-local-process`、使用 `local-process` provisioner、`qwen.managed-agent.runtime-broker.bound-session-isolation-class` 为 `session`，且主机不是 Windows、JVM 文件名编码为 UTF-8 时才生效；否则 worktree 请求以 `worktree_unsupported` 拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.ssh.enabled": {
+      "en": "Whether SSH Workspaces are offered: an actor listed in a node's `access` may browse that node's allowed roots and register a directory there as a Workspace; while off, those routes answer `404 ssh_runtime_disabled`. Startup refuses it without `qwen.managed-agent.harness.workspace-files-enabled` or without `qwen.managed-agent.runtime-broker.ssh.nodes`, with an external provisioner, and under the `managed-local` profile.",
+      "zh": "是否提供 SSH Workspace：节点 `access` 中列出的 actor 可以浏览该节点允许的根目录，并把其中的目录登记为 Workspace；关闭时这些路由返回 `404 ssh_runtime_disabled`。未开启 `qwen.managed-agent.harness.workspace-files-enabled` 或未配置 `qwen.managed-agent.runtime-broker.ssh.nodes`、使用外部 provisioner，或处于 `managed-local` profile 时，启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.ssh.nodes": {
+      "en": "The SSH Runtime nodes, set in a configuration file (YAML) as a list. Each entry has `node-id` and `display-name`, `ssh-host` (a host alias of the server account's SSH configuration), the absolute node paths `node-executable`, `qwen-entry` and `state-directory`, `allowed-roots` (at least one absolute directory Workspaces may be registered under), `publication-port` (the node's loopback port that tool publication is forwarded to over SSH), `qwen-version` (required; must equal the version the node reports) and `access` (the `tenant-id` and `actor-id` pairs that may use the node). Startup refuses an invalid entry. With nodes set, `qwen.managed-agent.tool-publication.service-base-url` must be an `http` URL.",
+      "zh": "SSH Runtime 节点，以列表形式写在配置文件（YAML）中。每一项包含 `node-id` 和 `display-name`；`ssh-host`（服务端账号 SSH 配置中的主机别名）；节点上的绝对路径 `node-executable`、`qwen-entry` 和 `state-directory`；`allowed-roots`（至少一个绝对目录，Workspace 只能登记在其下）；`publication-port`（节点上的 loopback 端口，工具发布通过 SSH 转发到这里）；`qwen-version`（必填，必须与节点报告的版本一致）；`access`（允许使用该节点的 `tenant-id` 与 `actor-id` 组合）。条目无效时启动时拒绝。配置了节点后，`qwen.managed-agent.tool-publication.service-base-url` 必须是 `http` URL。",
+      "default": ""
+    },
+    "qwen.managed-agent.runtime-broker.state-directory": {
+      "en": "The directory where the local-process Broker keeps worker registrations and recovery records; workers also run with it as their working directory. Required when `qwen.managed-agent.runtime-broker.provisioner` is `local-process`. With `qwen.managed-agent.runtime-broker.durable-local-process` it is created if missing, provided its parent exists, and must be owned by the server account with mode `0700`, have no symlinks in its path, and lie outside `qwen.managed-agent.runtime-broker.workspace-cwd`, `qwen.managed-agent.runtime-broker.workspace-creation-root` and every `qwen.managed-agent.runtime-broker.workspace-mounts` root; startup refuses otherwise. A relative path resolves against the server's working directory.",
+      "zh": "local-process Broker 存放 worker 登记和恢复记录的目录；worker 也以它作为工作目录。`qwen.managed-agent.runtime-broker.provisioner` 为 `local-process` 时必填。启用 `qwen.managed-agent.runtime-broker.durable-local-process` 时，目录不存在会自动创建（其父目录须已存在），且必须归服务账号所有、权限为 `0700`、路径中不含符号链接，并位于 `qwen.managed-agent.runtime-broker.workspace-cwd`、`qwen.managed-agent.runtime-broker.workspace-creation-root` 和每个 `qwen.managed-agent.runtime-broker.workspace-mounts` 根目录之外，否则启动时拒绝。相对路径按服务端的工作目录解析。"
+    },
+    "qwen.managed-agent.runtime-broker.static-endpoint": {
+      "en": "The HTTP(S) origin of the already-running Runtime worker that the `static` provisioner hands to every Session; an origin only, without path, credentials, query or fragment. Required, with `qwen.managed-agent.runtime-broker.static-token`, when `qwen.managed-agent.runtime-broker.provisioner` is `static`, which also requires `qwen.managed-agent.runtime-broker.isolation-class` set to `workspace` and `qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery` set to false.",
+      "zh": "`static` provisioner 交给每个 Session 的已在运行的 Runtime worker 的 HTTP(S) 源地址；只能是源（origin），不得包含路径、凭据、查询串或片段。`qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时，与 `qwen.managed-agent.runtime-broker.static-token` 一起必填；该模式还要求 `qwen.managed-agent.runtime-broker.isolation-class` 为 `workspace`、`qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery` 为 false。"
+    },
+    "qwen.managed-agent.runtime-broker.static-epoch": {
+      "en": "The lease epoch of the static Runtime worker; the Broker sends it with each request and the worker's attestation must report the same value. Startup refuses a negative value. Read only when `qwen.managed-agent.runtime-broker.provisioner` is `static`.",
+      "zh": "static Runtime worker 租约的 epoch；Broker 在每个请求中携带它，worker 的证明（attestation）必须回报相同的值。为负数时启动时拒绝。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。"
+    },
+    "qwen.managed-agent.runtime-broker.static-lease-id": {
+      "en": "The lease ID of the static Runtime worker; the Broker sends it with each request and the worker's attestation must report the same value. A non-empty string of at most 512 characters. Read only when `qwen.managed-agent.runtime-broker.provisioner` is `static`.",
+      "zh": "static Runtime worker 租约的 ID；Broker 在每个请求中携带它，worker 的证明（attestation）必须回报相同的值。须为非空字符串，最长 512 个字符。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。"
+    },
+    "qwen.managed-agent.runtime-broker.static-runtime-instance-id": {
+      "en": "The Runtime instance ID of the static Runtime worker's lease; the worker's attestation must report the same value. A non-empty string of at most 512 characters. Read only when `qwen.managed-agent.runtime-broker.provisioner` is `static`.",
+      "zh": "static Runtime worker 租约中的 Runtime 实例 ID；worker 的证明（attestation）必须回报相同的值。须为非空字符串，最长 512 个字符。仅当 `qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时读取。"
+    },
+    "qwen.managed-agent.runtime-broker.static-token": {
+      "en": "The bearer token the Broker presents to the static Runtime worker. A secret; saved bindings store it encrypted with the Runtime credential key (`qwen.managed-agent.runtime-broker.credential-key`). Required when `qwen.managed-agent.runtime-broker.provisioner` is `static`; at most 512 characters.",
+      "zh": "Broker 访问 static Runtime worker 时出示的 Bearer 令牌，属于密钥；已保存的绑定用 Runtime 凭据密钥（`qwen.managed-agent.runtime-broker.credential-key`）加密存储它。`qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时必填，最长 512 个字符。"
+    },
+    "qwen.managed-agent.runtime-broker.token": {
+      "en": "The bearer token the Hosted Harness presents to the embedded Runtime Broker's private listener; it also authorizes the loopback-only external storage registration endpoint. A secret. Required when `qwen.managed-agent.runtime-broker.enabled` is true; at most 512 characters. It can come from `qwen.managed-agent.harness.credentials-file` (`QWEN_MANAGED_RUNTIME_BROKER_TOKEN`) instead; setting it in both places is refused at startup.",
+      "zh": "Hosted Harness 访问内嵌 Runtime Broker 私有监听端口时出示的 Bearer 令牌；它也用于授权仅限回环地址的外部存储登记接口。属于密钥。`qwen.managed-agent.runtime-broker.enabled` 为 true 时必填，最长 512 个字符。也可以改由 `qwen.managed-agent.harness.credentials-file` 中的 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 提供；两处同时设置时启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.trusted-local-reboot-recovery": {
+      "en": "Whether, after a whole-host reboot on Linux, the Broker treats the changed kernel boot ID as proof that the original local workers stopped, and clears the holders of their saved Runtime bindings once every execution is terminal. It scans 8 saved bindings every 5 seconds and never starts a replacement worker or replays an execution. Requires `qwen.managed-agent.runtime-broker.durable-local-process` and the `local-process` provisioner; startup refuses it otherwise, on macOS and with resident Workspaces.",
+      "zh": "Linux 主机整机重启后，Broker 是否把内核 boot ID 的变化视为原本地 worker 已停止的证据，并在所有执行都已终结后清除这些已保存 Runtime 绑定的持有者。它每 5 秒扫描 8 个已保存的绑定，从不启动替代 worker，也不重放执行。要求 `qwen.managed-agent.runtime-broker.durable-local-process` 和 `local-process` provisioner；不满足条件、在 macOS 上或配置了常驻 Workspace 时启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.v3-result-window": {
+      "en": "How long the Runtime Broker keeps waiting for the worker's result of a dispatched Shell or Monitor execution that publishes its output (Tool v3, with `qwen.managed-agent.tool-publication.enabled`) before marking it `UNKNOWN`; a value shorter than the longest such call turns that call into `UNKNOWN`. Other tool executions do not use this window. A value above `30m` buys nothing on the shipped path: the Hosted Harness stops waiting for a Tool v3 execution after its own fixed 30 minutes. A suffix-less number binds as seconds. Startup refuses a value below `1s`.",
+      "zh": "Runtime Broker 等待 worker 返回已派发的、会发布输出的 Shell 或 Monitor 执行（Tool v3，开启 `qwen.managed-agent.tool-publication.enabled` 时使用）结果的最长时间，超时后把该执行标记为 `UNKNOWN`；若短于最长的此类调用，该调用会变成 `UNKNOWN`。其他工具执行不使用此窗口。大于 `30m` 在随发行版提供的执行路径上没有作用：Hosted Harness 自身等待 Tool v3 执行的期限固定为 30 分钟。不带单位的数字按秒解析。低于 `1s` 时启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled": {
+      "en": "Whether LOCAL Workspace execution is gated on a verified physical storage registration: before tools, file access or child Git run, the server checks that the Workspace root still matches its registered identity and marker, and otherwise refuses with `409 workspace_unavailable`. Required by `qwen.managed-agent.runtime-broker.workspace-creation-root` and `qwen.managed-agent.runtime-broker.local-directory-import-enabled`; without `qwen.managed-agent.runtime-broker.workspace-mounts` it also satisfies the Workspace source that `qwen.managed-agent.harness.workspace-files-enabled` needs. Startup refuses it with external provisioners and resident Workspaces.",
+      "zh": "LOCAL Workspace 的执行是否以已验证的物理存储登记为前提：在工具、文件访问或子 Git 操作运行前，服务端检查 Workspace 根目录是否仍与登记的身份和标记一致，否则以 `409 workspace_unavailable` 拒绝。`qwen.managed-agent.runtime-broker.workspace-creation-root` 和 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 都依赖它；未配置 `qwen.managed-agent.runtime-broker.workspace-mounts` 时，它也满足 `qwen.managed-agent.harness.workspace-files-enabled` 对 Workspace 来源的要求。与外部 provisioner 或常驻 Workspace 同时使用时启动时拒绝。"
+    },
+    "qwen.managed-agent.runtime-broker.worker-entry": {
+      "en": "Path to the built Qwen Code CLI bundle (for example `dist/cli.js`) that `qwen.managed-agent.runtime-broker.node-executable` runs with `managed-runtime-worker` to start local-process workers; LOCAL Workspace file-reference checks and uploads also run through it. Required when `qwen.managed-agent.runtime-broker.provisioner` is `local-process`; a relative path resolves against the server's working directory.",
+      "zh": "已构建的 Qwen Code CLI 包路径（例如 `dist/cli.js`），由 `qwen.managed-agent.runtime-broker.node-executable` 以 `managed-runtime-worker` 参数运行，以启动 local-process worker；LOCAL Workspace 的文件引用检查和上传也通过它执行。`qwen.managed-agent.runtime-broker.provisioner` 为 `local-process` 时必填；相对路径按服务端的工作目录解析。"
+    },
+    "qwen.managed-agent.runtime-broker.workspace-creation-root": {
+      "en": "An existing canonical directory the server account can write, under which it creates new empty Workspaces in per-tenant subdirectories when users start a Workspace from scratch; empty disables Workspace creation. It must not overlap any `qwen.managed-agent.runtime-broker.workspace-mounts` root, `qwen.managed-agent.runtime-broker.state-directory` or `qwen.managed-agent.runtime-broker.workspace-cwd`, and requires `qwen.managed-agent.harness.workspace-files-enabled`, `qwen.managed-agent.runtime-broker.durable-local-process` and `qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled`; startup refuses otherwise and with external provisioners. Any authenticated tenant actor can then allocate storage there and becomes its owner.",
+      "zh": "已存在、规范化且服务账号可写的目录，用户“从零开始”创建 Workspace 时，服务端在其下按租户分子目录新建空 Workspace；留空则禁用 Workspace 创建。它不得与任何 `qwen.managed-agent.runtime-broker.workspace-mounts` 根目录、`qwen.managed-agent.runtime-broker.state-directory` 或 `qwen.managed-agent.runtime-broker.workspace-cwd` 重叠，并要求启用 `qwen.managed-agent.harness.workspace-files-enabled`、`qwen.managed-agent.runtime-broker.durable-local-process` 和 `qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled`；不满足条件或使用外部 provisioner 时启动时拒绝。启用后，任何已认证的租户用户都可以在其中分配存储并成为所有者。"
+    },
+    "qwen.managed-agent.runtime-broker.workspace-cwd": {
+      "en": "The working directory of the Broker's default Workspace, used by Sessions that are not bound to a registered Workspace. Required when `qwen.managed-agent.runtime-broker.enabled` is true. With `local-process` it must exist and is resolved to its canonical path, from which the default workspace ID is derived (for the Session Store too, even while the Broker is disabled); `kubernetes-workspace` needs an absolute normalized path, and external provisioners an absolute normalized worker-side path other than `/`.",
+      "zh": "Broker 默认 Workspace 的工作目录，供未绑定已登记 Workspace 的 Session 使用。`qwen.managed-agent.runtime-broker.enabled` 为 true 时必填。使用 `local-process` 时目录必须存在，并被解析为规范路径，默认 workspace ID 由此派生（即使 Broker 未启用，Session Store 也会据此派生）；`kubernetes-workspace` 要求绝对且规范化的路径；外部 provisioner 要求 worker 侧的绝对规范化路径，且不能是 `/`。"
+    },
+    "qwen.managed-agent.runtime-broker.workspace-generation": {
+      "en": "The generation of the Broker's default Workspace, carried in the Runtime scope of Sessions that are not bound to a registered Workspace. A non-empty string of at most 512 characters; required when `qwen.managed-agent.runtime-broker.enabled` is true.",
+      "zh": "Broker 默认 Workspace 的代数（generation），写入未绑定已登记 Workspace 的 Session 的 Runtime 作用域。须为非空字符串，最长 512 个字符；`qwen.managed-agent.runtime-broker.enabled` 为 true 时必填。"
+    },
+    "qwen.managed-agent.runtime-broker.workspace-id": {
+      "en": "The ID of the Broker's default Workspace, which Sessions not bound to a registered Workspace share with the Session Store. With `local-process`, empty derives the first 16 hex characters of the SHA-256 of the canonical `qwen.managed-agent.runtime-broker.workspace-cwd`, and a set value must equal that hash; other provisioners require it. With the Hosted Harness and Session Store enabled, startup refuses a value that differs from `qwen.managed-agent.session-store.workspace-id`. Keep it unchanged once Sessions exist, since unbound Sessions resolve their Store scope from it.",
+      "zh": "Broker 默认 Workspace 的 ID，未绑定已登记 Workspace 的 Session 与 Session Store 共用它。使用 `local-process` 时，留空则取规范化后 `qwen.managed-agent.runtime-broker.workspace-cwd` 的 SHA-256 前 16 个十六进制字符，显式设置的值必须与之相同；其他 provisioner 必须显式设置。启用 Hosted Harness 和 Session Store 时，与 `qwen.managed-agent.session-store.workspace-id` 不一致则启动时拒绝。已有 Session 后不要修改，因为未绑定的 Session 依据它解析 Store 作用域。"
+    },
+    "qwen.managed-agent.runtime-broker.workspace-mounts": {
+      "en": "The administrator-mounted Workspace storage roots, set in a configuration file (YAML) as a list of entries with `tenant-id`, `storage-id` and `root`. Each `root` must be an existing canonical directory; roots must not overlap or alias each other, and each tenant and storage pair may appear once. Requires the `local-process` provisioner; startup refuses otherwise and with external provisioners or resident Workspaces. Every Broker sharing the database must use the same list.",
+      "zh": "管理员挂载的 Workspace 存储根目录，在配置文件（YAML）中以列表设置，每项包含 `tenant-id`、`storage-id` 和 `root`。每个 `root` 必须是已存在的规范化目录；各根目录不得重叠或互为别名，同一租户与存储的组合只能出现一次。要求 `local-process` provisioner；否则，或与外部 provisioner、常驻 Workspace 同时使用时，启动时拒绝。共享同一数据库的所有 Broker 必须使用相同的列表。",
+      "default": ""
+    },
+    "qwen.managed-agent.service-user": {
+      "en": "The operating-system account the server runs as. Only the preflight check reads it: it confirms the account exists and checks that the configuration and credentials files are readable by that account rather than by the account running preflight. Empty checks access as the account running preflight.",
+      "zh": "服务端运行所用的操作系统账号。仅预检会读取该值：确认账号存在，并按该账号（而非运行预检的账号）检查配置文件和凭据文件是否可读。为空时按运行预检的账号检查访问权限。"
+    },
+    "qwen.managed-agent.session-store.allow-insecure-http": {
+      "en": "Whether a plaintext `http` `qwen.managed-agent.session-store.base-url` on a non-loopback host is accepted. Without it startup refuses such a URL, which every Harness would reject; with it the flag is passed to the Harness in each Session's Store descriptor so its client accepts the URL.",
+      "zh": "是否接受指向非回环主机的明文 `http` `qwen.managed-agent.session-store.base-url`。未开启时此类 URL 启动时拒绝（所有 Harness 都会拒绝它）；开启后该标志会随每个 Session 的 Store 描述发送给 Harness，使其客户端接受该 URL。"
+    },
+    "qwen.managed-agent.session-store.base-url": {
+      "en": "The URL at which the Hosted Harness reaches this server's Session Store routes. Empty derives the loopback `http` URL of the serving listener (the internal one when `qwen.managed-agent.internal-server.port` is set) if it binds a blank, wildcard, `127.0.0.1` or `::1` address on a fixed port without TLS; otherwise set it. Startup refuses non-loopback plaintext `http` unless `qwen.managed-agent.session-store.allow-insecure-http`, and a loopback URL off the internal port. The `managed-local` profile requires a loopback `http` URL.",
+      "zh": "Hosted Harness 访问本服务 Session Store 路由所用的 URL。为空时，若提供这些路由的监听器（设置了 `qwen.managed-agent.internal-server.port` 时为内部监听器）在固定端口上绑定空、通配、`127.0.0.1` 或 `::1` 地址且未启用 TLS，则自动推导为其回环 `http` URL；否则必须显式设置。指向非回环主机的明文 `http`（除非开启 `qwen.managed-agent.session-store.allow-insecure-http`），以及未指向内部端口的回环 URL，均启动时拒绝。`managed-local` profile 要求回环 `http` URL。"
+    },
+    "qwen.managed-agent.session-store.binding-key": {
+      "en": "The secret HMAC key from which the control plane issues each Session's Store writer credential to the Harness; with it the Store rejects any other token, without it the Harness mints its own (first writer wins). At least 32 bytes. Required by the Harness pool, and before the internal surface leaves loopback unless `qwen.managed-agent.auth.allow-insecure-bind`; must differ from `qwen.managed-agent.auth.signing-key`.",
+      "zh": "机密 HMAC 密钥，控制面据此为每个 Session 向 Harness 签发 Store 写入凭据；配置后 Store 拒绝其他任何 token，未配置时由 Harness 自行生成（先写者获胜）。至少 32 字节。Harness 池需要它；内部接口离开回环地址前也需要它（除非开启 `qwen.managed-agent.auth.allow-insecure-bind`）；必须与 `qwen.managed-agent.auth.signing-key` 不同。"
+    },
+    "qwen.managed-agent.session-store.enabled": {
+      "en": "Whether this server serves the private Session Store routes under `/internal/managed-session-store/v1/` and gives Hosted Sessions a Store descriptor. Startup requires it while `qwen.managed-agent.harness.enabled` is true; Workspace files and the Harness pool need it too. It exposes the internal surface, so leaving loopback then needs `qwen.managed-agent.session-store.binding-key` unless `qwen.managed-agent.auth.allow-insecure-bind` is true. Unless set, the packaged configuration follows `qwen.managed-agent.harness.enabled`.",
+      "zh": "本服务是否提供 `/internal/managed-session-store/v1/` 下的私有 Session Store 路由，并为 Hosted Session 下发 Store 描述。`qwen.managed-agent.harness.enabled` 为 true 时必须开启，否则启动时拒绝；Workspace 文件功能和 Harness 池也依赖它。开启后会暴露内部接口，因此离开回环地址需要 `qwen.managed-agent.session-store.binding-key`，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true。未显式设置时，打包配置跟随 `qwen.managed-agent.harness.enabled`。"
+    },
+    "qwen.managed-agent.session-store.workspace-id": {
+      "en": "The workspace ID that scopes the Store for Sessions not bound to a Workspace; bound Sessions use their own Workspace ID. Empty takes `qwen.managed-agent.runtime-broker.workspace-id`, otherwise the ID a `local-process` Broker derives from `qwen.managed-agent.runtime-broker.workspace-cwd`. Startup refuses it empty while the Harness uses the Store, and different from a set Runtime Broker ID. Keep it unchanged on an existing deployment.",
+      "zh": "未绑定 Workspace 的 Session 在 Store 中使用的 workspace ID 作用域；绑定 Workspace 的 Session 使用其自身的 Workspace ID。为空时取 `qwen.managed-agent.runtime-broker.workspace-id`，否则取 `local-process` Broker 从 `qwen.managed-agent.runtime-broker.workspace-cwd` 推导出的 ID。Harness 使用 Store 时为空，或与已设置的 Runtime Broker ID 不同，均启动时拒绝。已有部署不要修改此值。"
+    },
+    "qwen.managed-agent.session-store.writer-lease-duration": {
+      "en": "How long a Harness's writer lease on a Session's Store journal lasts before it must be renewed; also how long Session close or delete admission keeps an already-live writer. Must be between `1s` and `300s`: a value outside fails each Session's Harness create or load rather than startup. A number without a unit is read as seconds.",
+      "zh": "Harness 对 Session 的 Store 日志持有的写入租约在必须续约之前的有效时长；也是受理 Session 关闭或删除时保留已有活跃写入者的时长。必须在 `1s` 到 `300s` 之间：超出范围不会在启动时报错，而是使每个 Session 的 Harness 创建或加载失败。不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.session-worktree.scan-delay": {
+      "en": "How long the Session worktree pass waits between runs; each run resumes pending per-Session Git worktree steps and fails the initial Turns of Sessions whose worktree could not be prepared. Accepts a duration such as `1s`; a plain number is milliseconds.",
+      "zh": "Session worktree 任务两次运行之间的间隔；每次运行继续未完成的单 Session Git worktree 步骤，并使 worktree 未能准备好的 Session 的初始 Turn 失败。接受 `1s` 这类时长；不带单位的数字按毫秒计。",
+      "type": "duration"
+    },
+    "qwen.managed-agent.tool-publication.active-captures": {
+      "en": "How many tool output captures one tenant may have open at the same time; a further reservation is refused until one finishes. Required when `qwen.managed-agent.tool-publication.enabled` is true; must be at least 1 (startup refusal).",
+      "zh": "单个租户可同时处于打开状态的工具输出捕获数量；达到上限后新的预留会被拒绝，直到有捕获结束。`qwen.managed-agent.tool-publication.enabled` 为 true 时必填，且至少为 `1`（否则启动时拒绝）。"
+    },
+    "qwen.managed-agent.tool-publication.async-verification-enabled": {
+      "en": "Whether clients may ask for asynchronous verification of publication operations with the `X-Qwen-Tool-Publication-Async: 1` header, receiving HTTP 202 and polling for the outcome; otherwise every operation verifies synchronously. Turning it off stops new asynchronous admissions while already accepted operations still drain.",
+      "zh": "是否允许客户端通过 `X-Qwen-Tool-Publication-Async: 1` 请求头为发布操作申请异步校验（先返回 HTTP 202，再轮询结果）；关闭时所有操作均同步校验。关闭后不再接纳新的异步操作，已接纳的操作仍会继续校验完毕。"
+    },
+    "qwen.managed-agent.tool-publication.claim-timeout": {
+      "en": "How long a server's claim on an in-progress publication operation lasts; the holder renews it every third of this period, and a retry can take the operation over only after the claim lapses. Required when tool publication is enabled; must be positive and shorter than `qwen.managed-agent.tool-publication.operation-timeout` (startup refusal). A bare number is seconds.",
+      "zh": "服务端对进行中的发布操作持有认领的时长；持有者每隔该时长的三分之一续期一次，认领失效后重试请求才能接管该操作。启用工具发布时必填，必须为正且短于 `qwen.managed-agent.tool-publication.operation-timeout`（否则启动时拒绝）。不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.tool-publication.deletion-grace": {
+      "en": "How long a retired Session's tool output and Session resources are kept before garbage collection may delete them. Only takes effect with `qwen.managed-agent.tool-publication.gc-enabled`; the periodic retention log sample also uses it. Must not be negative (startup refusal when tool publication is enabled). A bare number is seconds.",
+      "zh": "已退役 Session 的工具输出和 Session 资源在可被垃圾回收删除之前的保留时长。仅在开启 `qwen.managed-agent.tool-publication.gc-enabled` 时生效；周期性的保留情况日志采样也使用该值。不得为负（启用工具发布时，否则启动时拒绝）。不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.tool-publication.enabled": {
+      "en": "Whether the server accepts tool output publication: Hosted Shell executions stream their output through the internal `/internal/managed-tool-publications` API into object storage (Aliyun OSS unless a custom store bean is registered). Startup is refused unless this group's service URL, capacities and deadlines are set, plus the OSS endpoint, region and bucket. Off a loopback address it also requires `qwen.managed-agent.session-store.binding-key`, unless `qwen.managed-agent.auth.allow-insecure-bind` is true.",
+      "zh": "服务端是否接受工具输出发布：Hosted Shell 执行通过内部 `/internal/managed-tool-publications` API 将输出流式写入对象存储（未注册自定义存储 bean 时为阿里云 OSS）。必须同时设置本组的服务 URL、容量和期限，以及 OSS endpoint、region 和 bucket，否则启动时拒绝。内部接口不在回环地址上时还需要 `qwen.managed-agent.session-store.binding-key`，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true。"
+    },
+    "qwen.managed-agent.tool-publication.entry-concurrency": {
+      "en": "How many tool publication API requests this server process handles at once; a request beyond that gets HTTP 429 `managed_tool_publication_busy`. Required when tool publication is enabled; must be at least 1 (startup refusal).",
+      "zh": "本服务进程可同时处理的工具发布 API 请求数；超出的请求返回 HTTP 429 `managed_tool_publication_busy`。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。"
+    },
+    "qwen.managed-agent.tool-publication.execution-bytes": {
+      "en": "How many bytes of output one tool execution may capture; it is also sent to the Harness as the capture limit for Shell and team-lead executions. Required when tool publication is enabled; must be between 1 byte and 2 TiB (2^41 bytes). Startup is refused if verifying that much output would exceed `qwen.managed-agent.tool-publication.max-verification-timeout`.",
+      "zh": "单次工具执行最多可捕获的输出字节数；该值也会作为 Shell 与 team-lead 执行的捕获上限传给 Harness。启用工具发布时必填，取值范围为 1 字节到 2 TiB（2^41 字节）。若校验这么多输出所需的时间超过 `qwen.managed-agent.tool-publication.max-verification-timeout`，启动时拒绝。"
+    },
+    "qwen.managed-agent.tool-publication.gc-enabled": {
+      "en": "Whether the server garbage-collects retired tool output: capture objects in object storage and the stored resources of retired Sessions, once `qwen.managed-agent.tool-publication.deletion-grace` has passed. Only read when `qwen.managed-agent.tool-publication.enabled` is true.",
+      "zh": "服务端是否对已退役的工具输出做垃圾回收：在超过 `qwen.managed-agent.tool-publication.deletion-grace` 后，删除对象存储中的捕获对象以及已退役 Session 存储的资源。仅当 `qwen.managed-agent.tool-publication.enabled` 为 true 时读取。"
+    },
+    "qwen.managed-agent.tool-publication.max-verification-timeout": {
+      "en": "The longest deadline a publication verification may get. Must be positive and at most 25 minutes; startup is refused if `qwen.managed-agent.tool-publication.operation-timeout` plus the time to verify `qwen.managed-agent.tool-publication.execution-bytes` (and a fixed producer allowance) at `qwen.managed-agent.tool-publication.verification-bytes-per-second` exceeds it. Required when tool publication is enabled. A bare number is seconds.",
+      "zh": "发布校验可获得的最长期限。必须为正且不超过 25 分钟；若 `qwen.managed-agent.tool-publication.operation-timeout` 加上按 `qwen.managed-agent.tool-publication.verification-bytes-per-second` 校验 `qwen.managed-agent.tool-publication.execution-bytes`（外加固定的 producer 额度）所需的时间超过该值，启动时拒绝。启用工具发布时必填。不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.tool-publication.operation-timeout": {
+      "en": "How long a publication operation (upload, verification or finish) may run before its deadline; verifying stored content adds one second per `qwen.managed-agent.tool-publication.verification-bytes-per-second` bytes. Required when tool publication is enabled; must be positive and longer than `qwen.managed-agent.tool-publication.claim-timeout` (startup refusal). A bare number is seconds.",
+      "zh": "发布操作（上传、校验或完成）在到期前可运行的时长；校验已存储内容时，每 `qwen.managed-agent.tool-publication.verification-bytes-per-second` 字节额外增加一秒。启用工具发布时必填，必须为正且长于 `qwen.managed-agent.tool-publication.claim-timeout`（否则启动时拒绝）。不带单位的数字按秒解析。"
+    },
+    "qwen.managed-agent.tool-publication.oss-bucket": {
+      "en": "The Aliyun OSS bucket that stores tool output objects. Required when tool publication is enabled with the default OSS store (startup refusal); ignored when a custom `ToolPublicationObjectStore` bean is registered.",
+      "zh": "存放工具输出对象的阿里云 OSS bucket。启用工具发布且使用默认 OSS 存储时必填（否则启动时拒绝）；注册了自定义 `ToolPublicationObjectStore` bean 时忽略。"
+    },
+    "qwen.managed-agent.tool-publication.oss-endpoint": {
+      "en": "The Aliyun OSS endpoint for tool output objects. Must be `https://oss-<region>.aliyuncs.com` for `qwen.managed-agent.tool-publication.oss-region`, with no path, query or user info (startup refusal otherwise). OSS credentials are secrets read from the `OSS_ACCESS_KEY_ID` and `OSS_ACCESS_KEY_SECRET` environment variables (plus `OSS_SESSION_TOKEN` for a temporary token). Required with the default OSS store; ignored when a custom store bean is registered.",
+      "zh": "工具输出对象使用的阿里云 OSS endpoint。必须是与 `qwen.managed-agent.tool-publication.oss-region` 对应的 `https://oss-<region>.aliyuncs.com`，且不带路径、查询参数或用户信息（否则启动时拒绝）。OSS 凭据属于 secret，从 `OSS_ACCESS_KEY_ID` 和 `OSS_ACCESS_KEY_SECRET` 环境变量读取（临时凭据另加 `OSS_SESSION_TOKEN`）。使用默认 OSS 存储时必填；注册了自定义存储 bean 时忽略。"
+    },
+    "qwen.managed-agent.tool-publication.oss-region": {
+      "en": "The Aliyun OSS region (for example `cn-hangzhou`) used for V4 request signing; it must match the `qwen.managed-agent.tool-publication.oss-endpoint` host. Required with the default OSS store (startup refusal); ignored when a custom store bean is registered.",
+      "zh": "用于 V4 请求签名的阿里云 OSS region（例如 `cn-hangzhou`），必须与 `qwen.managed-agent.tool-publication.oss-endpoint` 的主机名一致。使用默认 OSS 存储时必填（否则启动时拒绝）；注册了自定义存储 bean 时忽略。"
+    },
+    "qwen.managed-agent.tool-publication.service-base-url": {
+      "en": "The base URL that Runtimes use to reach this server's tool publication API; they resolve `/internal/managed-tool-publications` against it. Must be an absolute `http` or `https` URL without path, query or fragment; plaintext `http` to a non-loopback host is refused unless `qwen.managed-agent.auth.allow-insecure-bind` is true. Required when tool publication is enabled. With SSH Runtime nodes configured it must be an `http` URL.",
+      "zh": "Runtime 访问本服务工具发布 API 所用的基础 URL，Runtime 会基于它解析 `/internal/managed-tool-publications`。必须是不带路径、查询参数或片段的绝对 `http` 或 `https` URL；指向非回环主机的明文 `http` 会在启动时被拒绝，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true。启用工具发布时必填。配置了 SSH Runtime 节点时必须为 `http` URL。"
+    },
+    "qwen.managed-agent.tool-publication.session-bytes": {
+      "en": "How many bytes of tool output one Session may hold reserved across its captures; each reservation counts its capture size plus a fixed overhead of 4784128 bytes. A reservation that would exceed it is refused. Required when tool publication is enabled; must be at least 1 (startup refusal).",
+      "zh": "单个 Session 所有捕获合计可预留的工具输出字节数；每次预留按其捕获大小加上固定的 `4784128` 字节开销计算。超出该值的预留会被拒绝。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。"
+    },
+    "qwen.managed-agent.tool-publication.tenant-bytes": {
+      "en": "How many bytes of tool output one tenant may hold reserved across all its Sessions' captures; each reservation counts its capture size plus a fixed overhead of 4784128 bytes. A reservation that would exceed it is refused. Required when tool publication is enabled; must be at least 1 (startup refusal).",
+      "zh": "单个租户在其所有 Session 的捕获中合计可预留的工具输出字节数；每次预留按其捕获大小加上固定的 `4784128` 字节开销计算。超出该值的预留会被拒绝。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。"
+    },
+    "qwen.managed-agent.tool-publication.verification-bytes-per-second": {
+      "en": "The verification throughput floor in bytes per second: a verification deadline is `qwen.managed-agent.tool-publication.operation-timeout` plus one second for each this many bytes being verified, and must stay within `qwen.managed-agent.tool-publication.max-verification-timeout`. Required when tool publication is enabled; must be at least 1 (startup refusal).",
+      "zh": "校验吞吐量下限（字节/秒）：校验期限为 `qwen.managed-agent.tool-publication.operation-timeout` 加上每校验这么多字节增加的一秒，且不得超过 `qwen.managed-agent.tool-publication.max-verification-timeout`。启用工具发布时必填，且至少为 `1`（否则启动时拒绝）。"
+    },
+    "qwen.managed-agent.tool-publication.verification-concurrency": {
+      "en": "How many background threads verify asynchronously admitted publication operations. The verifier keeps running when `qwen.managed-agent.tool-publication.async-verification-enabled` is turned off, so accepted operations drain. Must be at least 1 (startup refusal when tool publication is enabled).",
+      "zh": "对已异步接纳的发布操作进行校验的后台线程数。关闭 `qwen.managed-agent.tool-publication.async-verification-enabled` 后校验器仍会运行，以便处理完已接纳的操作。至少为 `1`（启用工具发布时，否则启动时拒绝）。"
+    },
+    "qwen.managed-agent.trusted-actor-header": {
+      "en": "The name of a request header (for example `X-Qwen-Actor-Id`) whose value is trusted as the caller's actor ID, together with `X-Qwen-Tenant-Id`, when no upstream principal is present. Used only in open authentication mode; combining it with signed mode is refused at startup. In open mode, `qwen.managed-agent.runtime-broker.local-directory-import-enabled` requires it. Never set it where untrusted clients can reach the server. Empty disables it.",
+      "zh": "一个请求头名称（例如 `X-Qwen-Actor-Id`），在没有上游认证主体时，其值连同 `X-Qwen-Tenant-Id` 一起被信任为调用方的 actor ID。仅在 open 认证模式下使用；与 signed 模式同时配置时启动时拒绝。open 模式下开启 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 时必须设置本项。切勿在不可信客户端能访问服务端的环境中设置。为空时禁用。"
+    },
+    "qwen.managed-agent.wake-recovery.scan-delay": {
+      "en": "How long the wake recovery scan waits between passes; each pass finds up to eight Sessions holding committed inputs that no writer owns and reattaches them so their wake runs. Runs only with `qwen.managed-agent.session-store.enabled` and an available Hosted Harness. Accepts a duration such as `2s`; a plain number is milliseconds.",
+      "zh": "唤醒恢复扫描两次运行之间的间隔；每次运行最多找出 8 个存有已提交输入但无写入者持有的 Session，并重新挂接以运行其唤醒。仅在开启 `qwen.managed-agent.session-store.enabled` 且 Hosted Harness 可用时运行。接受 `2s` 这类时长；不带单位的数字按毫秒计。",
+      "type": "duration"
+    },
+    "server.address": {
+      "en": "The address the public HTTP listener binds to. A non-loopback address needs `qwen.managed-agent.auth.mode=signed`; under `auto` or `open` mode startup refuses it unless `qwen.managed-agent.auth.allow-insecure-bind` is true. While the internal routes share this listener (no `qwen.managed-agent.internal-server.port`) and the Session Store or tool publication is on, a non-loopback address also needs `qwen.managed-agent.session-store.binding-key` unless `qwen.managed-agent.auth.allow-insecure-bind` is true. The `managed-local` profile refuses any non-loopback address.",
+      "zh": "公共 HTTP 监听器绑定的地址。非回环地址需要 `qwen.managed-agent.auth.mode=signed`；在 `auto` 或 `open` 模式下，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true，否则启动时拒绝。内部路由与该监听器共用（未设置 `qwen.managed-agent.internal-server.port`）且开启了 Session Store 或工具发布时，非回环地址还需要 `qwen.managed-agent.session-store.binding-key`，除非 `qwen.managed-agent.auth.allow-insecure-bind` 为 true。`managed-local` profile 下非回环地址一律启动时拒绝。",
+      "type": "string"
+    },
+    "server.port": {
+      "en": "The port of the public listener the API and `/actuator/health` are served on. Spring Boot reads it from `SERVER_PORT`.",
+      "zh": "公共监听端口，API 和 `/actuator/health` 都在该端口上提供。Spring Boot 从 `SERVER_PORT` 读取。",
+      "type": "integer",
+      "variable": "SERVER_PORT",
+      "default": "8080"
+    },
+    "spring.datasource.druid.max-active": {
+      "en": "How many connections the control plane's Druid database pool may hold at most. When all are busy, a request for a connection waits up to 30 seconds and then fails. Ignored under the `managed-local` profile, whose pool is fixed at 20.",
+      "zh": "控制面 Druid 数据库连接池最多可持有的连接数。连接全部占用时，获取连接的请求最多等待 30 秒，随后失败。`managed-local` profile 下不生效，其连接池固定为 20。",
+      "type": "integer"
+    },
+    "spring.datasource.password": {
+      "en": "The password of `spring.datasource.username`. A secret: keep it in a private environment file such as `server.env`, not on a command line.",
+      "zh": "`spring.datasource.username` 的密码。属于机密：应放在 `server.env` 这类私有环境文件中，不要写在命令行上。",
+      "type": "string"
+    },
+    "spring.datasource.url": {
+      "en": "The JDBC URL of the MySQL 8 database that holds the control plane's state; Flyway applies the schema migrations to it at startup. The `managed-local` profile replaces it with a private H2 file database and refuses any other URL.",
+      "zh": "存放控制面状态的 MySQL 8 数据库的 JDBC URL；启动时 Flyway 会对其执行 schema 迁移。`managed-local` profile 改用私有 H2 文件数据库，其他 URL 启动时拒绝。",
+      "type": "string"
+    },
+    "spring.datasource.username": {
+      "en": "The database user the control plane connects as. Besides rights on the control plane's database, it needs `SELECT` on `performance_schema.user_variables_by_thread`, which the preflight `--check` verifies.",
+      "zh": "控制面连接数据库所用的用户。除控制面数据库的权限外，还需要 `performance_schema.user_variables_by_thread` 的 `SELECT` 权限，预检 `--check` 会校验该权限。",
+      "type": "string"
+    }
+  }
+}
