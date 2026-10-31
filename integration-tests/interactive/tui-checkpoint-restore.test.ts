@@ -78,6 +78,11 @@ it(`H11a real model edit creates, hot-restores and cold-resumes its product chec
     old_string: 'H11A_ORIGINAL_BYTES',
     new_string: 'H11A_EDITED_BYTES',
   };
+  // Tool-call telemetry never carries raw arguments; the real edit args are
+  // asserted on the saved checkpoint and the PostToolUse hook input instead.
+  const redactedToolCallArgs = {
+    __redacted: 'tool arguments omitted from telemetry',
+  };
   const checkpointDir = new Storage(
     workspace,
     runtimeDir,
@@ -357,7 +362,7 @@ it(`H11a real model edit creates, hot-restores and cold-resumes its product chec
       initialEdits[0].toolCallResult?.callId,
     );
     expect(initialEditCalls[0].systemPayload?.uiEvent?.function_args).toEqual(
-      editArgs,
+      redactedToolCallArgs,
     );
     expect(initialEditCalls[0].systemPayload?.uiEvent?.execution_status).toBe(
       'success',
@@ -428,7 +433,7 @@ it(`H11a real model edit creates, hot-restores and cold-resumes its product chec
     );
     expect(replayEdits[0].systemPayload?.uiEvent?.success).toBe(true);
     expect(replayEdits[0].systemPayload?.uiEvent?.function_args).toEqual(
-      editArgs,
+      redactedToolCallArgs,
     );
     expect(typeof replayEdits[0].systemPayload?.uiEvent?.call_id).toBe(
       'string',
