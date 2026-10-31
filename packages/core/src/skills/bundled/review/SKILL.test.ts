@@ -101,6 +101,11 @@ describe('bundled review skill', () => {
     // refresh diff is a successful parse, not a fallback to the old hunks.
     expect(body).toContain("MERGE-BASE tree's `.github/actionlint.yaml`");
     expect(body).toContain('an EMPTY refresh diff');
+    // Round 4: the base config is applied with the worktree as the linter's
+    // cwd — path-scoped exceptions are inert in a session-cwd spawn.
+    expect(body).toContain(
+      "applied with the review worktree as the linter's cwd",
+    );
     // Revert guards: the abandon-and-restart wording is gone for good.
     expect(body).not.toContain(
       'Abandon this submission and start the review again',

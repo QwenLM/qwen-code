@@ -406,11 +406,15 @@ export type ToolRun =
  * `actionlintBaseConfig` is the merge-base `.github/actionlint.yaml` content
  * (actionlint only; undefined for the other tools and for a repo with no base
  * config) — the trusted compatibility knowledge the private config preserves.
+ * `worktreeRoot` is the review worktree the linter must run INSIDE: actionlint
+ * resolves the config's `paths:` entries against its cwd, so a session-cwd
+ * spawn leaves every path-scoped exception inert (PR #16001 review, round 4).
  */
 export type ToolRunner = (
   tool: LintTool,
   absPath: string,
   actionlintBaseConfig?: string,
+  worktreeRoot?: string,
 ) => ToolRun;
 
 /**
@@ -525,6 +529,7 @@ function runTool(
   tool: LintTool,
   absPath: string,
   actionlintBaseConfig?: string,
+  worktreeRoot?: string,
 ): ToolRun {
   // Isolation is `--config <private neutral file>`; if we could not create that file,
   // running hadolint would honour a PR-added (or planted) `.hadolint.yaml` in the cwd
@@ -550,12 +555,19 @@ function runTool(
     absPath,
     actionlintBaseConfig,
   );
+  // Run INSIDE the review worktree: actionlint matches the config's `paths:`
+  // entries against the linted file's path relative to its cwd, so a
+  // session-cwd spawn leaves every path-scoped base exception inert while the
+  // global keys still work — the exact split that hid this (PR #16001 review,
+  // round 4). PWD rides along because Go's os.Getwd trusts a matching PWD,
+  // which matters when the worktree path is symlinked (macOS temp dirs).
   const r = spawnSync(tool, argv, {
+    ...(worktreeRoot ? { cwd: worktreeRoot } : {}),
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
     timeout: timeoutMs,
     stdio: ['ignore', 'pipe', 'pipe'],
-    env,
+    env: worktreeRoot ? { ...env, PWD: worktreeRoot } : env,
   });
   const err = r.error as NodeJS.ErrnoException | undefined;
   if (err?.code === 'ENOENT') return { kind: 'missing' };
@@ -879,6 +891,7 @@ export function runScriptLint(
       tool,
       abs,
       tool === 'actionlint' ? resolveActionlintBaseConfig() : undefined,
+      wt,
     );
     if (res.kind === 'missing') {
       missing.add(tool);

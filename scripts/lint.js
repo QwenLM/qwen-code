@@ -17,6 +17,7 @@ import {
 } from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
 import { dirname, join, posix } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { getLintScope } from './lint-scope.js';
 
 const ACTIONLINT_VERSION = '1.7.12';
@@ -552,7 +553,18 @@ async function main() {
   if (args.length === 0) console.log('\nAll linting checks passed!');
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exitCode = 1;
-});
+// Run the CLI only when this file IS the entry point. The CI provisioning
+// steps import the installer helpers (`getLinters`, `getLinterTempDir`); an
+// unconditional main() made every such import execute a full lint pass
+// instead of installing anything, silently, under continue-on-error
+// (PR #16001 review, round 4). The argv[1] guard keeps `node -e` imports
+// (no argv[1]) inert too.
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

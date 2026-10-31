@@ -778,7 +778,7 @@ jobs:
         run: |-
           node --input-type=module -e '
             import { execSync } from "node:child_process";
-            import { appendFileSync, mkdirSync, rmSync } from "node:fs";
+            import { appendFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
             import { getLinters, getLinterTempDir } from "./scripts/lint.js";
             const tempDir = getLinterTempDir();
             rmSync(tempDir, { recursive: true, force: true });
@@ -786,8 +786,15 @@ jobs:
             const linters = getLinters();
             for (const name of ["actionlint", "shellcheck"]) {
               execSync(linters[name].installer, { stdio: "inherit" });
+              // Verify the install produced its binary BEFORE promoting the
+              // dir: a silent no-op install must fail this step visibly
+              // (continue-on-error tolerates it, the UI shows it), not
+              // degrade to skipped tests nobody notices (PR #16001 F2).
+              const bin = tempDir + "/" + name + "/" + name;
+              if (!existsSync(bin)) throw new Error(name + " installer produced no binary at " + bin);
               appendFileSync(process.env.GITHUB_PATH, tempDir + "/" + name + "\n");
             }
+            console.log("PROVISIONED actionlint + shellcheck into " + tempDir);
           '
 
       - name: 'Run tests and generate reports'

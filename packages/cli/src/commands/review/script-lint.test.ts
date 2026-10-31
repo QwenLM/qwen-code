@@ -336,9 +336,47 @@ describe('runScriptLint — the actionlint config trust boundary is the merge ba
     '      - run: echo hi',
     '',
   ].join('\n');
+  // The PATH-SCOPED exception shape (round 4, F1): a `paths:` ignore matches
+  // only when actionlint runs with the worktree as its cwd — a global key
+  // like the labels above passes even when every path-scoped entry is inert,
+  // which is exactly how the cwd bug hid behind the round-3 test.
+  const BASE_CONFIG_WITH_PATHS =
+    'paths:\n  .github/workflows/ci.yml:\n    ignore:\n' +
+    '      - \'unexpected key "queue" for "concurrency" section\'\n';
+  const QUEUE_WORKFLOW = [
+    'name: CI',
+    'on: push',
+    'concurrency:',
+    '  group: x',
+    '  queue: max',
+    'jobs:',
+    '  a:',
+    '    runs-on: ubuntu-latest',
+    '    steps:',
+    '      - run: echo hi',
+    '',
+  ].join('\n');
+  const QUEUE_ATTACK_WORKFLOW = [
+    'name: CI',
+    'on: push',
+    'concurrency:',
+    '  group: x',
+    '  queue: max',
+    'jobs:',
+    '  a:',
+    '    runs-on: ubuntu-latest',
+    '    env:',
+    '      X: ${{ runner.temp }}',
+    '    steps:',
+    '      - run: echo hi',
+    '',
+  ].join('\n');
 
   /** A two-commit repo: base declares the trusted config, head plants ignore-all. */
-  function twoCommitRepo(): { worktree: string; baseSha: string } {
+  function twoCommitRepo(
+    workflow: string = WORKFLOW,
+    baseConfig: string = BASE_CONFIG,
+  ): { worktree: string; baseSha: string } {
     const wt = tmpDir('script-lint-basecfg-');
     const git = (...args: string[]) =>
       execFileSync('git', ['-C', wt, ...args], { stdio: 'ignore' });
@@ -346,7 +384,7 @@ describe('runScriptLint — the actionlint config trust boundary is the merge ba
     git('config', 'user.email', 'test@example.com');
     git('config', 'user.name', 'test');
     mkdirSync(join(wt, '.github', 'workflows'), { recursive: true });
-    writeFileSync(join(wt, '.github', 'actionlint.yaml'), BASE_CONFIG);
+    writeFileSync(join(wt, '.github', 'actionlint.yaml'), baseConfig);
     writeFileSync(
       join(wt, '.github', 'workflows', 'ci.yml'),
       'name: CI\non: push\njobs: {}\n',
@@ -357,7 +395,7 @@ describe('runScriptLint — the actionlint config trust boundary is the merge ba
       encoding: 'utf8',
     }).trim();
     writeFileSync(join(wt, '.github', 'actionlint.yaml'), HEAD_CONFIG);
-    writeFileSync(join(wt, '.github', 'workflows', 'ci.yml'), WORKFLOW);
+    writeFileSync(join(wt, '.github', 'workflows', 'ci.yml'), workflow);
     git('add', '.');
     git('commit', '-qm', 'head');
     return { worktree: wt, baseSha };
@@ -433,6 +471,44 @@ describe('runScriptLint — the actionlint config trust boundary is the merge ba
       const kinds = r.checked[0].findings.map((f) => f.code);
       expect(kinds).toContain('expression');
       expect(kinds).not.toContain('runner-label');
+      expect(r.ok).toBe(false);
+    },
+  );
+
+  it.skipIf(!hasActionlint)(
+    'real binary: a PATH-SCOPED base exception applies (benign queue edit is clean)',
+    () => {
+      // F1's benign cell: the base config's `paths:` ignore for the queue
+      // schema lag must suppress the finding on a legitimate queue edit.
+      // actionlint resolves `paths:` against its cwd, so this passes only
+      // when the linter runs INSIDE the worktree — the round-3 labels-only
+      // fixture could not see the difference.
+      const { worktree, baseSha } = twoCommitRepo(
+        QUEUE_WORKFLOW,
+        BASE_CONFIG_WITH_PATHS,
+      );
+      const plan = planFor(worktree, { mergeBaseSha: baseSha });
+      const r = runScriptLint({ plan, worktree });
+      expect(r.errored).toEqual([]);
+      expect(r.checked[0].findings).toEqual([]);
+      expect(r.ok).toBe(true);
+    },
+  );
+
+  it.skipIf(!hasActionlint)(
+    'real binary: path-scoped exception + head ignore-all (attack keeps exactly the expression)',
+    () => {
+      // F1's attack cell: the queue schema-lag finding is suppressed by the
+      // BASE path-scoped exception, the unloadable expression is NOT
+      // suppressed by the HEAD ignore-all — exactly one finding survives.
+      const { worktree, baseSha } = twoCommitRepo(
+        QUEUE_ATTACK_WORKFLOW,
+        BASE_CONFIG_WITH_PATHS,
+      );
+      const plan = planFor(worktree, { mergeBaseSha: baseSha });
+      const r = runScriptLint({ plan, worktree });
+      expect(r.errored).toEqual([]);
+      expect(r.checked[0].findings.map((f) => f.code)).toEqual(['expression']);
       expect(r.ok).toBe(false);
     },
   );

@@ -21,8 +21,9 @@ import {
   rmSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, dirname } from 'node:path';
+import { join, dirname, resolve } from 'node:path';
 import { createHash } from 'node:crypto';
+import { spawnSync } from 'node:child_process';
 import {
   runScriptLint,
   buildToolInvocation,
@@ -31,12 +32,24 @@ import {
   type LintTool,
 } from './script-lint.js';
 
+// Spy on the real spawnSync (the default runner is injected away in these
+// tests, so the only spawn left is runScriptLint's own `git show` for the
+// merge-base config). The M15 regression needs to observe that a non-hex
+// merge base never reaches git AT ALL — git rejecting the malformed option
+// on its own is the same observable as the guard refusing it, which is
+// exactly how the guard's mutation survived (PR #16001 review, round 4).
+vi.mock('node:child_process', async (importOriginal) => {
+  const actual = (await importOriginal()) as Record<string, unknown>;
+  return { ...actual, spawnSync: vi.fn(actual['spawnSync'] as never) };
+});
+
 // A per-test temp dir, set up and torn down by hooks — NOT inline `fresh()`/`clean()`
 // calls. A failing `expect` throws before any inline cleanup would run and leaks the
 // dir; `afterEach` runs regardless, so the teardown is leak-proof.
 let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'script-lint-mock-'));
+  vi.mocked(spawnSync).mockClear();
 });
 afterEach(() => {
   rmSync(dir, { recursive: true, force: true });
@@ -123,11 +136,13 @@ describe('runScriptLint — tool JSON normalisation (injected runner)', () => {
       { hunks: [{ newStart: 8, newEnd: 8 }] },
     );
     const r = runScriptLint({ plan, worktree }, runner);
-    // No mergeBaseSha in this plan → no base config (undefined third arg).
+    // No mergeBaseSha in this plan → no base config (undefined third arg);
+    // the fourth arg is the worktree root the linter must run inside.
     expect(runner).toHaveBeenCalledWith(
       'actionlint',
       expect.any(String),
       undefined,
+      resolve(worktree),
     );
     expect(r.checked).toHaveLength(1);
     expect(r.checked[0].tool).toBe('actionlint');
@@ -567,6 +582,50 @@ describe('runScriptLint — the report is bound to the diff it ran against', () 
     expect(r.diffHash).toBeDefined();
     expect(r.checked[0].findings[0].inDiff).toBe(false);
     expect(r.ok).toBe(true);
+  });
+});
+
+describe('runScriptLint — the merge-base sha fence is observable (M15)', () => {
+  // The round-3 injection test asserted only that no config reached the
+  // runner — an observable git's own option rejection produces too, so
+  // deleting the hex guard survived the suite (mutation M15). These pin the
+  // fence DIRECTLY: a non-hex merge base must never spawn git at all, while
+  // a well-shaped (but nonexistent) one must — the guard, not git, is the
+  // thing under test.
+  function planWithBase(base: unknown): { plan: string; worktree: string } {
+    const { plan, worktree } = setup(
+      '.github/workflows/ci.yml',
+      'name: CI\non: push\njobs: {}\n',
+      { hunks: [{ newStart: 1, newEnd: 3 }] },
+    );
+    const planObj = JSON.parse(readFileSync(plan, 'utf8'));
+    planObj.mergeBaseSha = base;
+    writeFileSync(plan, JSON.stringify(planObj));
+    return { plan, worktree };
+  }
+  const okRunner: ToolRunner = () => ({ kind: 'ok', stdout: '[]' });
+  const gitCalls = () =>
+    vi.mocked(spawnSync).mock.calls.filter((c) => c[0] === 'git');
+
+  it('a non-hex merge base never reaches git', () => {
+    const { plan, worktree } = planWithBase('--output=/tmp/pwned');
+    runScriptLint({ plan, worktree }, okRunner);
+    expect(gitCalls()).toHaveLength(0);
+  });
+
+  it('a hex-shaped merge base DOES reach git (positive control)', () => {
+    // 40 hex chars, no such object in the fixture's non-repo dir: git runs
+    // and fails, the config degrades to {} — but the spawn happened, so a
+    // mutation that deletes the guard cannot hide behind git's rejection.
+    const { plan, worktree } = planWithBase('a'.repeat(40));
+    runScriptLint({ plan, worktree }, okRunner);
+    expect(gitCalls()).toHaveLength(1);
+    expect(gitCalls()[0][1]).toEqual([
+      '-C',
+      worktree,
+      'show',
+      `${'a'.repeat(40)}:.github/actionlint.yaml`,
+    ]);
   });
 });
 
