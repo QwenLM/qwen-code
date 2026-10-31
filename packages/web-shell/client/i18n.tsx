@@ -1366,6 +1366,8 @@ const EN: Messages = {
   'contextUsage.estimatedUntilProviderUsage':
     'Token usage is estimated until provider usage is received.',
   'contextUsage.free': 'Free',
+  'contextUsage.instructionFiles': 'Instruction files',
+  'contextUsage.autoMemory': 'Auto memory',
   'contextUsage.memoryFiles': 'Memory files',
   'contextUsage.messages': 'Messages',
   'contextUsage.startupContext': 'Startup context',
@@ -3622,6 +3624,8 @@ const EN: Messages = {
   'contextUsage.compressInterrupted':
     'Connection changed during compression. Refresh to check current usage.',
   'contextUsage.compressFailed': 'Compression failed. You can try again.',
+  'contextUsage.previewTruncated':
+    'This file is large; the preview shows only its beginning.',
   'contextUsage.compressRefreshFailed':
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
@@ -4295,6 +4299,7 @@ const EN: Messages = {
   'splitView.goToApproval': 'Go to it',
   'splitView.pendingCount': (v) => `${v?.count ?? 0} awaiting input`,
   'splitView.nextPending': 'Go to the next session awaiting input',
+  'splitView.noOtherSessions': 'No other sessions',
   'splitView.empty': 'No sessions in the split. Add one to get started.',
   'splitView.composerPlaceholder': 'Message this session…',
   'channels.title': 'Channels',
@@ -5923,6 +5928,8 @@ const ZH: Messages = {
   'contextUsage.estimatedUntilProviderUsage':
     'Token 使用量为估算值，直到收到服务商返回的使用量。',
   'contextUsage.free': '空闲',
+  'contextUsage.instructionFiles': '指令文件',
+  'contextUsage.autoMemory': '自动记忆',
   'contextUsage.memoryFiles': 'Memory 文件',
   'contextUsage.messages': '消息',
   'contextUsage.startupContext': '启动上下文',
@@ -8000,6 +8007,7 @@ const ZH: Messages = {
   'contextUsage.compressInterrupted':
     '压缩期间连接发生变化，请刷新查看当前使用量。',
   'contextUsage.compressFailed': '压缩失败，可以重试。',
+  'contextUsage.previewTruncated': '文件较大，预览仅显示开头部分。',
   'contextUsage.compressRefreshFailed':
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':
@@ -8620,6 +8628,7 @@ const ZH: Messages = {
   'splitView.goToApproval': '前往处理',
   'splitView.pendingCount': (v) => `${v?.count ?? 0} 个会话待处理`,
   'splitView.nextPending': '前往下一个待处理会话',
+  'splitView.noOtherSessions': '没有其他会话',
   'splitView.empty': '分屏中还没有会话，添加一个开始。',
   'splitView.composerPlaceholder': '给这个会话发消息…',
   'channels.title': '频道',

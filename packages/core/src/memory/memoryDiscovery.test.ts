@@ -1525,6 +1525,115 @@ describe('loadServerHierarchicalMemory', () => {
       expect(occurrences).toBe(1);
     });
   });
+
+  describe('imports of sibling top-level context files (#15679)', () => {
+    it.each(['tree', 'flat'] as const)(
+      'does not duplicate AGENTS.md imported by CLAUDE.md in %s format',
+      async (importFormat) => {
+        setMemoryFilename([AGENT_CONTEXT_FILENAME, 'CLAUDE.md']);
+        const agentsFile = await createTestFile(
+          path.join(cwd, AGENT_CONTEXT_FILENAME),
+          'sibling-agents-canary',
+        );
+        await createTestFile(path.join(cwd, 'CLAUDE.md'), '@AGENTS.md');
+        const onInstructionsLoaded = vi.fn();
+
+        const result = await loadServerHierarchicalMemory(
+          cwd,
+          [],
+          new FileDiscoveryService(projectRoot),
+          [],
+          DEFAULT_FOLDER_TRUST,
+          importFormat,
+          [],
+          { onInstructionsLoaded },
+        );
+
+        expect(result.fileCount).toBe(2);
+        expect(result.contextFilePaths).toContain(AGENT_CONTEXT_FILENAME);
+        expect(
+          result.memoryContent.match(/sibling-agents-canary/g) ?? [],
+        ).toHaveLength(1);
+        expect(onInstructionsLoaded).not.toHaveBeenCalledWith(
+          expect.objectContaining({
+            filePath: agentsFile,
+            loadReason: 'include',
+          }),
+        );
+        expect(onInstructionsLoaded).toHaveBeenCalledWith({
+          filePath: agentsFile,
+          memoryType: 'project',
+          loadReason: 'session_start',
+        });
+        if (importFormat === 'tree') {
+          expect(result.memoryContent).toContain(
+            '<!-- File already processed: AGENTS.md -->',
+          );
+        }
+      },
+    );
+
+    it.each(['tree', 'flat'] as const)(
+      'does not duplicate AGENTS.md imported via a symlink by CLAUDE.md in %s format',
+      async (importFormat) => {
+        setMemoryFilename([AGENT_CONTEXT_FILENAME, 'CLAUDE.md']);
+        await createTestFile(
+          path.join(cwd, AGENT_CONTEXT_FILENAME),
+          'symlink-agents-canary',
+        );
+        await createEmptyDir(path.join(cwd, 'docs'));
+        await fsPromises.symlink(
+          path.join('..', AGENT_CONTEXT_FILENAME),
+          path.join(cwd, 'docs', 'agents-link.md'),
+        );
+        await createTestFile(
+          path.join(cwd, 'CLAUDE.md'),
+          '@docs/agents-link.md',
+        );
+
+        const result = await loadServerHierarchicalMemory(
+          cwd,
+          [],
+          new FileDiscoveryService(projectRoot),
+          [],
+          DEFAULT_FOLDER_TRUST,
+          importFormat,
+        );
+
+        expect(result.fileCount).toBe(2);
+        expect(result.contextFilePaths).toContain(AGENT_CONTEXT_FILENAME);
+        expect(
+          result.memoryContent.match(/symlink-agents-canary/g) ?? [],
+        ).toHaveLength(1);
+      },
+    );
+
+    it('does not duplicate AGENTS.md imported by QWEN.md with default filenames', async () => {
+      setMemoryFilename([DEFAULT_CONTEXT_FILENAME, AGENT_CONTEXT_FILENAME]);
+      await createTestFile(
+        path.join(cwd, AGENT_CONTEXT_FILENAME),
+        'default-agents-canary',
+      );
+      await createTestFile(
+        path.join(cwd, DEFAULT_CONTEXT_FILENAME),
+        '@AGENTS.md',
+      );
+
+      const result = await loadServerHierarchicalMemory(
+        cwd,
+        [],
+        new FileDiscoveryService(projectRoot),
+        [],
+        DEFAULT_FOLDER_TRUST,
+      );
+
+      expect(result.fileCount).toBe(2);
+      expect(result.contextFilePaths).toContain(AGENT_CONTEXT_FILENAME);
+      expect(
+        result.memoryContent.match(/default-agents-canary/g) ?? [],
+      ).toHaveLength(1);
+    });
+  });
 });
 
 describe('formatContextFileDisplayPath', () => {
