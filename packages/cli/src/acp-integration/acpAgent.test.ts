@@ -1245,6 +1245,8 @@ import {
   uiTelemetryService,
   WorkflowCheckpointUnwritableError,
   WorkflowJournalUnavailableError,
+  getScopedEnvContents,
+  updateSetting,
   type Config,
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSources,
@@ -23092,6 +23094,134 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([
+    { scope: 'workspace', explicit: true },
+    { scope: 'workspace', explicit: false },
+    { scope: 'user', explicit: true },
+  ])(
+    'qwen/settings/setExtensionSetting targets $scope storage and readback (explicit cwd: $explicit)',
+    async ({ scope, explicit }) => {
+      const target = explicit ? '/selected-workspace' : '/bootstrap-workspace';
+      vi.mocked(mockConfig.getTargetDir).mockReturnValue(
+        '/bootstrap-workspace',
+      );
+      const definitions = [
+        {
+          name: 'Token',
+          envVar: 'TARGET_TOKEN',
+          description: 'Test',
+          sensitive: true,
+        },
+        { name: 'Label', envVar: 'TARGET_LABEL', description: 'Test' },
+      ];
+      const config = {
+        name: 'target-ext',
+        version: '1.0.0',
+        settings: definitions,
+      };
+      mockExtensionManagerState.extensions = [
+        {
+          id: 'target-ext-id',
+          name: config.name,
+          version: config.version,
+          isActive: true,
+          path: '/extensions/target-ext',
+          commands: [],
+          skills: [],
+          config,
+          settings: definitions,
+        },
+      ];
+      const values = new Map<string, Record<string, string>>();
+      vi.mocked(updateSetting).mockImplementation(
+        async (_config, _id, key, request, writtenScope, workspace) => {
+          const setting = definitions.find((item) => item.envVar === key)!;
+          const storageKey = `${workspace}:${writtenScope}`;
+          values.set(storageKey, {
+            ...values.get(storageKey),
+            [key]: await request(setting),
+          });
+        },
+      );
+      vi.mocked(getScopedEnvContents).mockImplementation(
+        async (_config, _id, readScope, workspace) =>
+          values.get(`${workspace}:${readScope}`) ?? {},
+      );
+      const { agent, agentPromise } =
+        await bootCoreSettingsAgent(makeCoreSettings());
+      try {
+        for (const [key, value] of [
+          ['TARGET_TOKEN', 'synthetic-target-secret'],
+          ['TARGET_LABEL', 'target-label'],
+        ]) {
+          const result = await agent.extMethod(
+            'qwen/settings/setExtensionSetting',
+            {
+              ...(explicit ? { cwd: target } : {}),
+              extensionId: 'target-ext-id',
+              settingKey: key,
+              value,
+              scope,
+            },
+          );
+          expect(updateSetting).toHaveBeenLastCalledWith(
+            config,
+            'target-ext-id',
+            key,
+            expect.any(Function),
+            scope,
+            target,
+          );
+          expect(getScopedEnvContents).toHaveBeenCalledWith(
+            config,
+            'target-ext-id',
+            'user',
+            target,
+          );
+          expect(getScopedEnvContents).toHaveBeenCalledWith(
+            config,
+            'target-ext-id',
+            'workspace',
+            target,
+          );
+          expect(ExtensionManager).toHaveBeenLastCalledWith(
+            expect.objectContaining({ workspaceDir: target }),
+          );
+          expect(result).toMatchObject({
+            extensions: [
+              {
+                settings: expect.arrayContaining([
+                  expect.objectContaining({
+                    envVar: key,
+                    effectiveScope: scope,
+                    hasUserValue: scope === 'user',
+                    hasWorkspaceValue: scope === 'workspace',
+                    ...(key === 'TARGET_LABEL'
+                      ? { effectiveValue: value }
+                      : {}),
+                  }),
+                ]),
+              },
+            ],
+          });
+          expect(JSON.stringify(result)).not.toContain(
+            'synthetic-target-secret',
+          );
+        }
+        expect(values.size).toBe(1);
+        expect(values.get(`${target}:${scope}`)).toEqual({
+          TARGET_TOKEN: 'synthetic-target-secret',
+          TARGET_LABEL: 'target-label',
+        });
+      } finally {
+        vi.mocked(updateSetting).mockReset().mockResolvedValue(undefined);
+        vi.mocked(getScopedEnvContents).mockReset().mockResolvedValue({});
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
 
   it('qwen/settings/setExtensionSetting validates required params before touching extensions', async () => {
     const settings = makeCoreSettings();

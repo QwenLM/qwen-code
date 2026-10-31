@@ -143,6 +143,7 @@ describe('settings set handler', () => {
       'API_KEY',
       mockPromptForSetting,
       'user',
+      process.cwd(),
     );
   });
 
@@ -165,6 +166,7 @@ describe('settings set handler', () => {
       'API_KEY',
       mockPromptForSetting,
       'workspace',
+      process.cwd(),
     );
   });
 });
@@ -251,6 +253,18 @@ describe('settings list handler', () => {
     const parser = yargs([]).command(settingsCommand);
     await parser.parseAsync('settings list my-extension');
 
+    expect(mockGetScopedEnvContents).toHaveBeenCalledWith(
+      mockExtension.config,
+      mockExtension.id,
+      'user',
+      process.cwd(),
+    );
+    expect(mockGetScopedEnvContents).toHaveBeenCalledWith(
+      mockExtension.config,
+      mockExtension.id,
+      'workspace',
+      process.cwd(),
+    );
     expect(mockWriteStdoutLine).toHaveBeenCalledWith(
       'Settings for "my-extension":',
     );

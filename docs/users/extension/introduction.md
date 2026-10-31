@@ -307,16 +307,22 @@ The `qwen-extension.json` file contains the configuration for the extension. The
 - `skills`: The directory containing custom skills (default: `skills`). Skills are discovered automatically and become available via the `/skills` command.
 - `agents`: The directory containing custom subagents (default: `agents`). Subagents are `.yaml` or `.md` files that define specialized AI assistants.
 - `workflows`: A directory, or a list of directories and `.js` files, containing workflow scripts (default: `workflows`). See [Custom workflows](#custom-workflows).
-- `settings`: An array of settings that the extension requires. When installing, users will be prompted to provide values for these settings. The values are stored securely and passed to MCP servers as environment variables.
+- `settings`: An array of settings that the extension requires. When installing, users will be prompted to provide values for these settings. Sensitive values use the selected secret backend. The saved-settings substitution map only reads dotenv variables declared by this extension's settings; unrelated project dotenv variables are excluded from that map. Saved values are substituted into `$VAR` or `${VAR}` references in that extension's MCP `headers` and explicit `env` entries, with trusted workspace settings taking precedence over user settings. Untrusted workspaces use user settings only. Existing workspace directory aliases share the physical directory identity for credential storage; older secrets under the supplied alias remain readable without migration. For Header/env references, the saved extension setting takes precedence over a same-named variable in the launching shell; shell values remain the fallback when no saved value exists. They are not exported to the global process environment or substituted into commands, arguments, URLs, or other manifest fields.
   - Each setting has the following properties:
     - `name`: Display name for the setting
     - `description`: A description of what this setting is used for
-    - `envVar`: The environment variable name that will be set
+    - `envVar`: The variable name to reference in MCP `headers` or `env`
     - `sensitive`: Boolean indicating if the value should be hidden (e.g., API keys, passwords)
 
 ### Managing Extension Settings
 
 Extensions can require configuration through settings (such as API keys or credentials). These settings can be managed using the `qwen extensions settings` CLI command:
+
+For example, a sensitive setting with `envVar: "API_TOKEN"` can be used as `"headers": {"Authorization": "Bearer $API_TOKEN"}` or `"env": {"API_TOKEN": "$API_TOKEN"}`. Do not put credentials in MCP command arguments or URLs, which can appear in diagnostics. Existing resolution from the process environment, including variables loaded by the CLI's normal environment loader, is unchanged.
+
+Workspace-scoped writes and readback use the selected target workspace, even when the daemon runs from another directory.
+
+If saved settings cannot be read, the extension remains visible for management but its MCP servers are disabled. The warning includes a safe diagnostic code (`selector-read`, `dotenv-read`, `credential-read`, `workspace-alias-read`, `bundle-missing`, or `bundle-parse`) identifying the failing stage without exposing stored values or raw backend errors. Check whether the selected credential store is available, then restart or reload the extension. Do not uninstall merely because the store is temporarily unavailable. If settings are confirmed missing or corrupt, back up recoverable settings before uninstalling and reinstalling; setting one value does not reconstruct a missing settings bundle.
 
 **Set a setting value:**
 
