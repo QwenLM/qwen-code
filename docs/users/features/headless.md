@@ -333,7 +333,17 @@ Qwen Code can abort an unattended run when it crosses one of the following thres
 | --------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `--max-wall-time`     | `model.maxWallTimeSeconds` | Wall-clock duration of the whole run. Flag accepts `90` (s), `30s`, `5m`, `1h`, `1.5h` (fractional units supported). Minimum 1s — sub-second values are rejected as typos. Settings is seconds.               |
 | `--max-tool-calls`    | `model.maxToolCalls`       | Cumulative top-level tool calls dispatched by the main run loop (counts successes _and_ failures — the model still consumes tokens on errors). See "Scope" below for subagent / structured-output exemptions. |
-| `--max-session-turns` | `model.maxSessionTurns`    | Number of user/model/tool turns; pre-existing. Exits with code 53 on overrun (distinct from budget exit 55).                                                                                                  |
+| `--max-session-turns` | `model.maxSessionTurns`    | Number of user/model/tool turns; pre-existing. A single-shot `-p` run exits with code 53 on overrun (distinct from budget exit 55). See "Turn-limit reporting" below for persistent sessions.                 |
+
+#### Turn-limit reporting
+
+A `--max-session-turns` overrun is reported in the terminal `result` envelope, not only in the exit code, because a persistent session cannot end per refused message:
+
+- **`--output-format stream-json` / `json`:** the terminal `result` has `is_error: true` and `subtype: "error_max_turns"`, and carries **no** `result` field — the previous turn's answer is not replayed. The `error.message` is the same text the exit path prints.
+- **`--output-format text`:** that message goes to **stderr** and stdout receives nothing for the refused turn.
+- **Exit status:** a single-shot `-p` run exits **53**, and so does the unified agent loop (`experimental.unifiedAgentLoop`). The legacy loop in a persistent `--input-format stream-json` session keeps its historical exit **0**, because one refused message must not terminate the session.
+
+Consumers must therefore branch on the `result` envelope (`is_error` / `subtype`) rather than on `$?`: a shell `qwen … && publish` wrapper or a `set -e` script that only checks the status treats a refused run as answered, and in text mode the answer it reads from stdout is empty. This applies to `json` and `text` as well, since all non-stream formats share the same result builder.
 
 #### Scope
 
@@ -448,7 +458,7 @@ export QWEN_CODE_UNATTENDED_RETRY=1
 ```yaml
 - name: Automated code review
   env:
-    QWEN_CODE_UNATTENDED_RETRY: '1'
+    QWEN_CODE_UNATTENDED_RETRY: "1"
   run: |
     qwen -p "Review all files in src/ for security issues" \
       --output-format json \

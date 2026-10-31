@@ -47,6 +47,7 @@ import type {
 import { functionResponsePartsToString } from '../nonInteractiveHelpers.js';
 import { projectHeadlessToolResultContent } from './headless-tool-result-text-projection.js';
 import { observeHeadlessToolResultProjection } from '../tool-result-boundary-diagnostics.js';
+import { formatMaxSessionTurnsMessage } from '../../utils/errors.js';
 
 /**
  * Internal state for managing a single message context (main agent or subagent).
@@ -161,6 +162,24 @@ export abstract class BaseJsonOutputAdapter {
 
   // Last assistant message for result generation
   protected lastAssistantMessage: CLIAssistantMessage | null = null;
+
+  /**
+   * Set when the client reports `LlmEventType.MaxSessionTurns`.
+   *
+   * `LlmClient` counts turns per session and never resets, while the headless
+   * counter in `nonInteractiveCli.ts` is local to one `runNonInteractive`
+   * call. A persistent session runs one call per user message, so the client
+   * crosses the limit first: it refuses the send and returns an empty `Turn`.
+   * The run loop then sees no tool calls and reports a successful `result`
+   * whose text is whatever the previous turn left in `lastAssistantMessage`.
+   * Latching the event here lets `buildResultMessage` turn that silent success
+   * into the same terminal error `-p` reports.
+   *
+   * Lives in the shared base because every JSON adapter emits that same
+   * replayed answer: `nonInteractiveCli.ts` routes `stream-json`, `json` and
+   * `text` through this class (`JsonOutputAdapter` for the last two).
+   */
+  protected sessionTurnLimitReached = false;
 
   // Track permission denials (execution denied tool calls)
   protected permissionDenials: CLIPermissionDenial[] = [];
@@ -607,6 +626,9 @@ export abstract class BaseJsonOutputAdapter {
    * This is a shared implementation used by both streaming and non-streaming adapters.
    */
   startAssistantMessage(): void {
+    // A new turn gets a fresh accounting: the latch describes the stream of
+    // the turn being started, not the adapter's lifetime.
+    this.sessionTurnLimitReached = false;
     this.startAssistantMessageInternal(this.mainAgentMessageState);
   }
 
@@ -719,6 +741,12 @@ export abstract class BaseJsonOutputAdapter {
           statusCode: event.statusCode,
           fallbackIndex: event.fallbackIndex,
         });
+        break;
+      case LlmEventType.MaxSessionTurns:
+        // No content follows for this turn — the client returned before
+        // sending. Remember it so the terminal `result` is an error instead
+        // of a success carrying the previous turn's answer.
+        this.sessionTurnLimitReached = true;
         break;
       default:
         break;
@@ -1257,9 +1285,31 @@ export abstract class BaseJsonOutputAdapter {
     options: ResultOptions,
     lastAssistantMessage: CLIAssistantMessage | null,
   ): CLIResultMessage {
-    const usage = options.usage ?? createExtendedUsage();
+    // A turn that never reached the wire has nothing of its own to report.
+    // Both callers pass `lastAssistantMessage`, which still holds the previous
+    // turn's message, so a plain success would replay the old answer under
+    // `is_error: false`. Report the limit instead, matching `-p`'s exit path.
+    //
+    // Only convert a result the caller reported as a success: an error the
+    // caller already classified keeps its own subtype and message, and the
+    // latch is consumed here because each `emitResult` builds exactly one
+    // result. Without either half, an adapter reused across messages would
+    // relabel a later monitor crash or abandoned continuation as the turn
+    // limit while its `error.message` says otherwise.
+    const resultOptions: ResultOptions =
+      this.sessionTurnLimitReached && !options.isError
+        ? {
+            ...options,
+            isError: true,
+            subtype: 'error_max_turns',
+            errorMessage:
+              options.errorMessage ?? formatMaxSessionTurnsMessage(this.config),
+          }
+        : options;
+    this.sessionTurnLimitReached = false;
+    const usage = resultOptions.usage ?? createExtendedUsage();
     const resultText =
-      options.summary ??
+      resultOptions.summary ??
       (lastAssistantMessage
         ? extractTextFromBlocks(lastAssistantMessage.message.content)
         : '');
@@ -1267,19 +1317,19 @@ export abstract class BaseJsonOutputAdapter {
     const baseUuid = randomUUID();
     const baseSessionId = this.getSessionId();
 
-    if (options.isError) {
-      const errorMessage = options.errorMessage ?? 'Unknown error';
+    if (resultOptions.isError) {
+      const errorMessage = resultOptions.errorMessage ?? 'Unknown error';
       return {
         type: 'result',
         subtype:
-          (options.subtype as CLIResultMessageError['subtype']) ??
+          (resultOptions.subtype as CLIResultMessageError['subtype']) ??
           'error_during_execution',
         uuid: baseUuid,
         session_id: baseSessionId,
         is_error: true,
-        duration_ms: options.durationMs,
-        duration_api_ms: options.apiDurationMs,
-        num_turns: options.numTurns,
+        duration_ms: resultOptions.durationMs,
+        duration_api_ms: resultOptions.apiDurationMs,
+        num_turns: resultOptions.numTurns,
         usage,
         permission_denials: [...this.permissionDenials],
         error: { message: errorMessage },
@@ -1296,9 +1346,9 @@ export abstract class BaseJsonOutputAdapter {
       // `JSON.stringify` (for `result`) and the top-level
       // `structured_result` field render as a JSON-safe `null` instead
       // of being silently omitted.
-      const hasStructured = 'structuredResult' in options;
+      const hasStructured = 'structuredResult' in resultOptions;
       const normalizedStructured = hasStructured
-        ? (options.structuredResult ?? null)
+        ? (resultOptions.structuredResult ?? null)
         : undefined;
       const finalResult = hasStructured
         ? JSON.stringify(normalizedStructured)
@@ -1309,20 +1359,21 @@ export abstract class BaseJsonOutputAdapter {
       } = {
         type: 'result',
         subtype:
-          (options.subtype as CLIResultMessageSuccess['subtype']) ?? 'success',
+          (resultOptions.subtype as CLIResultMessageSuccess['subtype']) ??
+          'success',
         uuid: baseUuid,
         session_id: baseSessionId,
         is_error: false,
-        duration_ms: options.durationMs,
-        duration_api_ms: options.apiDurationMs,
-        num_turns: options.numTurns,
+        duration_ms: resultOptions.durationMs,
+        duration_api_ms: resultOptions.apiDurationMs,
+        num_turns: resultOptions.numTurns,
         result: finalResult,
         usage,
         permission_denials: [...this.permissionDenials],
       };
 
-      if (options.stats) {
-        success.stats = options.stats;
+      if (resultOptions.stats) {
+        success.stats = resultOptions.stats;
       }
       if (hasStructured) {
         success.structured_result = normalizedStructured;

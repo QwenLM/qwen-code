@@ -515,6 +515,61 @@ describe('JsonOutputAdapter', () => {
       expect(resultMessage.error?.message).toBe('Test error');
     });
 
+    it('should report the session turn limit in JSON mode', () => {
+      adapter.startAssistantMessage();
+      adapter.processEvent({ type: LlmEventType.MaxSessionTurns });
+
+      adapter.emitResult({
+        isError: false,
+        durationMs: 20,
+        apiDurationMs: 20,
+        numTurns: 2,
+      });
+
+      const parsed = JSON.parse(stdoutWriteSpy.mock.calls[0][0] as string);
+      const resultMessage = parsed.find(
+        (msg: unknown) =>
+          typeof msg === 'object' &&
+          msg !== null &&
+          'type' in msg &&
+          msg.type === 'result',
+      );
+
+      expect(resultMessage.is_error).toBe(true);
+      expect(resultMessage.subtype).toBe('error_max_turns');
+      expect(resultMessage.error?.message).toContain(
+        'Reached max session turns',
+      );
+      expect(resultMessage).not.toHaveProperty('result');
+    });
+
+    it('should report the session turn limit on stderr in text mode', () => {
+      const stderrWriteSpy = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
+
+      adapter.startAssistantMessage();
+      adapter.processEvent({ type: LlmEventType.MaxSessionTurns });
+
+      adapter.emitResult({
+        isError: false,
+        durationMs: 20,
+        apiDurationMs: 20,
+        numTurns: 2,
+      });
+
+      // `-p` keeps its historical stdout/stderr split, so the JSON adapters
+      // must follow: `text` mode printed a plain answer to stdout, and the
+      // turn limit replaces that answer with the error on stderr.
+      expect(stdoutWriteSpy).not.toHaveBeenCalled();
+      expect(stderrWriteSpy.mock.calls[0][0] as string).toContain(
+        'Reached max session turns',
+      );
+
+      stderrWriteSpy.mockRestore();
+    });
+
     it('should use provided summary over extracted text', () => {
       adapter.emitResult({
         isError: false,

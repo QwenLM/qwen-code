@@ -8254,9 +8254,58 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('reports the client session turn limit in the JSON result on the legacy loop', async () => {
+    // Mirror of the shared-loop case above for the loop that stays on the
+    // legacy path: the client refuses the send before it reaches the wire, and
+    // the loop must name that limit in the result envelope instead of
+    // replaying the previous answer as a success. The exit code stays 0 here,
+    // as it always has — the pairing of that status with this envelope is the
+    // intent this case pins.
+    (mockConfig.getOutputFormat as Mock).mockReturnValue('stream-json');
+    (mockConfig.getIncludePartialMessages as Mock).mockReturnValue(false);
+    setupMetricsMock();
+    Object.assign(mockConfig, { isUnifiedAgentLoopEnabled: () => false });
+    mockLlmClient.sendMessageStream.mockReturnValueOnce(
+      createStreamFromEvents([{ type: LlmEventType.MaxSessionTurns }]),
+    );
+
+    const writes: string[] = [];
+    processStdoutSpy.mockImplementation((chunk: string | Uint8Array) => {
+      if (typeof chunk === 'string') {
+        writes.push(chunk);
+      } else {
+        writes.push(Buffer.from(chunk).toString('utf8'));
+      }
+      return true;
+    });
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Second question',
+      'prompt-client-turn-cap-legacy',
+    );
+
+    expect(exitCode).toBe(0);
+    const resultEnvelope = writes
+      .join('')
+      .split('\n')
+      .filter((line) => line.trim().length > 0)
+      .map((line) => JSON.parse(line))
+      .at(-1);
+    expect(resultEnvelope).toMatchObject({
+      type: 'result',
+      subtype: 'error_max_turns',
+      is_error: true,
+    });
+    // The error replaces a replayed answer rather than sitting next to one.
+    expect(resultEnvelope).not.toHaveProperty('result');
+  });
+
   // Intended difference: headless charges a drain item one turn, while the
-  // client counts each of its rounds, and only the shared loop honours the
-  // client's limit.
+  // client counts each of its rounds. Both loops now report the client's
+  // limit — the shared loop exits 53, and the legacy loop keeps its historical
+  // exit 0 while the result envelope carries `error_max_turns` (pinned above).
   it.each(bothLoops)(
     'handles the client session turn limit inside a drain item ($loop)',
     async ({ shared }) => {
