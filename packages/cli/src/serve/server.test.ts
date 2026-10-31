@@ -12457,6 +12457,7 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body).toEqual({ cleared: true, condition: 'ship it' });
       expect(bridge.clearSessionGoalCalls).toEqual(['s-1']);
+      expect(bridge.getSessionCatalogVersion().revision).toBe(1);
     });
 
     it('reads and controls the canonical session Goal', async () => {
@@ -12517,7 +12518,34 @@ describe('createServeApp', () => {
           context: { clientId: 'client-1' },
         },
       ]);
+      expect(bridge.getSessionCatalogVersion().revision).toBe(0);
     });
+
+    it.each(['create', 'replace', 'edit', 'clear'] as const)(
+      'advances the session catalog after a Goal %s changes its fallback label',
+      async (action) => {
+        const bridge = fakeBridge();
+        const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+        const app = createServeApp(
+          { ...tokenOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge },
+        );
+        const res = await request(app)
+          .post('/session/s-1/goal')
+          .set('Host', `127.0.0.1:${tokenOpts.port}`)
+          .set('Authorization', 'Bearer secret')
+          .send({
+            action,
+            ...(action !== 'create'
+              ? { expectedGoalId: 'goal-1', expectedRevision: 1 }
+              : {}),
+            ...(action !== 'clear' ? { objective: 'Current objective' } : {}),
+          });
+        expect(res.status).toBe(200);
+        expect(bridge.getSessionCatalogVersion().revision).toBe(1);
+      },
+    );
 
     it('rejects an invalid Goal control before bridge dispatch', async () => {
       const bridge = fakeBridge();

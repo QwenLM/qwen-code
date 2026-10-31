@@ -182,16 +182,8 @@ export interface SessionListItem {
   /**
    * Goal objective used when neither a title nor a prompt is available.
    *
-   * Deliberately scoped to the /resume picker for now. Session-label
-   * precedence (title > prompt > goal objective) is still resolved by each
-   * consumer, so the other label surfaces keep their degraded rendering of a
-   * Goal-only session: the ACP `ListSessions` title, the serve summaries'
-   * `displayName`, `@`-completion labels, and `qwen sessions list`. Unifying
-   * them means resolving the label once here — a computed `displayName` on
-   * this interface, or a shared `sessionDisplayName(item)` helper — and
-   * widening `serve/server/session-list.ts`'s `toSummary` parameter to carry
-   * the field. That is a separate change; until it lands, do not assume a
-   * consumer reads this.
+   * Display consumers use title > prompt > Goal objective precedence without
+   * treating the objective as a custom title or a transcript prompt.
    */
   goalObjective?: string;
   /**

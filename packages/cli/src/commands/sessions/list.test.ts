@@ -113,6 +113,62 @@ describe('sessions list command', () => {
     expect(dataLine).toContain('你好');
   });
 
+  it.each([
+    { prompt: '', customTitle: undefined, expected: 'Write release notes' },
+    {
+      prompt: 'First prompt',
+      customTitle: undefined,
+      expected: 'First prompt',
+    },
+    {
+      prompt: 'First prompt',
+      customTitle: 'Manual title',
+      expected: 'Manual title',
+    },
+    { prompt: '', customTitle: '', expected: '' },
+  ])(
+    'uses the Goal objective only as a fallback table title: $expected',
+    async ({ prompt, customTitle, expected }) => {
+      mockListSessions.mockResolvedValue({
+        items: [
+          {
+            ...sampleSession,
+            prompt,
+            customTitle,
+            goalObjective: 'Write release notes',
+          },
+        ],
+        hasMore: false,
+      });
+      await handleList({});
+      const dataLine = mockWriteStdoutLine.mock.calls[1][0] as string;
+      const titleStart = SESSION_COL + 1 + TIME_COL + 1;
+      expect(dataLine.slice(titleStart, titleStart + TITLE_COL).trim()).toBe(
+        expected,
+      );
+    },
+  );
+
+  it('sanitizes Goal objectives before displaying them in the table', async () => {
+    mockListSessions.mockResolvedValue({
+      items: [
+        {
+          ...sampleSession,
+          prompt: '',
+          customTitle: undefined,
+          goalObjective: 'Write\nrelease\t\x07notes',
+        },
+      ],
+      hasMore: false,
+    });
+    await handleList({});
+    const dataLine = mockWriteStdoutLine.mock.calls[1][0] as string;
+    expect(dataLine).toContain('Writereleasenotes');
+    expect(dataLine).not.toContain('\n');
+    expect(dataLine).not.toContain('\t');
+    expect(dataLine).not.toContain('\x07');
+  });
+
   it('should not fall back to prompt when customTitle is empty string', async () => {
     mockListSessions.mockResolvedValue({
       items: [

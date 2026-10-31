@@ -94,6 +94,29 @@ function makeApp(
 }
 
 describe('GET /goals', () => {
+  it.each([
+    { live: 'Live title', persisted: 'First prompt', expected: 'Live title' },
+    { live: undefined, persisted: 'First prompt', expected: 'First prompt' },
+    { live: undefined, persisted: undefined, expected: 'Current objective' },
+  ])(
+    'resolves session labels before using the current Goal objective: $expected',
+    async ({ live, persisted, expected }) => {
+      const getSessionDisplayName = vi.fn(async () => persisted);
+      const app = makeApp(
+        {
+          listWorkspaceSessions: () => [summary('s1', { displayName: live })],
+          getSessionGoal: async () => activeGoal('Current objective'),
+        },
+        { getSessionDisplayName },
+      );
+      const res = await request(app).get('/goals');
+      expect(res.status).toBe(200);
+      expect(res.body.goals[0].displayName).toBe(expected);
+      if (live) expect(getSessionDisplayName).not.toHaveBeenCalled();
+      else expect(getSessionDisplayName).toHaveBeenCalledWith('s1');
+    },
+  );
+
   it('returns an empty list when no session has a goal', async () => {
     const app = makeApp({
       listWorkspaceSessions: () => [summary('s1'), summary('s2')],
@@ -170,6 +193,36 @@ describe('GET /goals', () => {
     expect(res.body.code).toBe('workspace_runtime_unavailable');
   });
 
+  it('does not return a persisted label after the captured generation closes', async () => {
+    let releaseLabel!: (name: string) => void;
+    const pendingLabel = new Promise<string>((resolve) => {
+      releaseLabel = resolve;
+    });
+    const generationGuard = createWorkspaceGenerationGuard();
+    const getSessionDisplayName = vi.fn(() => pendingLabel);
+    const app = makeApp(
+      {
+        listWorkspaceSessions: () => [summary('s1')],
+        getSessionGoal: async () => activeGoal('Current objective'),
+      },
+      {
+        getSessionDisplayName,
+        captureGenerationAssertion: () => () => generationGuard.assertOpen(),
+      },
+    );
+    const response = request(app)
+      .get('/goals')
+      .then((result) => result);
+    await vi.waitFor(() =>
+      expect(getSessionDisplayName).toHaveBeenCalledOnce(),
+    );
+    generationGuard.close();
+    releaseLabel('Stale title');
+    const res = await response;
+    expect(res.status).toBe(503);
+    expect(res.body.code).toBe('workspace_runtime_unavailable');
+  });
+
   it('projects each active goal onto its session, newest first', async () => {
     const goals: Record<string, BridgeSessionGoal> = {
       s1: activeGoal('fix flaky tests', {
@@ -193,7 +246,7 @@ describe('GET /goals', () => {
     expect(res.body.goals).toEqual([
       {
         sessionId: 's2',
-        displayName: null,
+        displayName: 'raise coverage',
         condition: 'raise coverage',
         iterations: 0,
         setAt: 2000,
@@ -272,7 +325,7 @@ describe('GET /goals', () => {
     expect(res.body.goals).toEqual([
       {
         sessionId: 'alive',
-        displayName: null,
+        displayName: 'keep going',
         condition: 'keep going',
         iterations: 0,
         setAt: 1000,

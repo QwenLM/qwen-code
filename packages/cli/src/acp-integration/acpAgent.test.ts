@@ -30077,6 +30077,56 @@ describe('QwenAgent unstable_listSessions cursor parsing', () => {
     }
   });
 
+  it('uses the Goal objective as an ACP title fallback without changing previews', async () => {
+    const listSessions = vi.fn().mockResolvedValue({
+      items: [
+        {
+          sessionId: 'goal-only',
+          prompt: '',
+          goalObjective: 'Write release notes',
+        },
+        {
+          sessionId: 'prompt',
+          prompt: 'First prompt',
+          goalObjective: 'Write release notes',
+        },
+        {
+          sessionId: 'title',
+          customTitle: 'Manual title',
+          prompt: 'First prompt',
+          goalObjective: 'Write release notes',
+        },
+      ].map((item) => ({
+        ...item,
+        cwd: '/tmp/project',
+        startTime: '2026-08-24T00:00:00.000Z',
+        mtime: Date.parse('2026-08-24T01:00:00.000Z'),
+      })),
+    });
+    vi.mocked(SessionService).mockImplementation(
+      () => ({ listSessions }) as unknown as SessionService,
+    );
+    const { agent, agentPromise } = await bootAgent();
+    try {
+      await expect(
+        agent.unstable_listSessions({ cwd: '/tmp/project' }),
+      ).resolves.toMatchObject({
+        sessions: [
+          {
+            sessionId: 'goal-only',
+            title: 'Write release notes',
+            _meta: { preview: '' },
+          },
+          { sessionId: 'prompt', title: 'First prompt' },
+          { sessionId: 'title', title: 'Manual title' },
+        ],
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('treats absent cursor values as no cursor', async () => {
     const listSessions = vi.fn().mockResolvedValue({
       items: [],

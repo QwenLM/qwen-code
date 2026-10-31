@@ -3797,6 +3797,10 @@ export function createServeApp(
   registerGoalsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
+    getSessionDisplayName: (sessionId) =>
+      createWorkspaceRuntimeSessionService(
+        workspaceRegistry.primary,
+      ).getSessionDisplayName(sessionId),
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });

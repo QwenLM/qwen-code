@@ -16947,6 +16947,92 @@ describe('App session callbacks', () => {
     });
   });
 
+  it.each(['workspace', 'standalone'] as const)(
+    'refreshes the %s header when a Goal objective is edited or cleared',
+    async (kind) => {
+      mockConnection.displayName = undefined;
+      mockConnection.sessionContext = { kind };
+      mockConnection.goalState = activeGoalSnapshot('Original objective');
+      const summary = (displayName: string) => ({
+        sessionId: 'session-1',
+        workspaceCwd: '/tmp/project',
+        displayName,
+      });
+      const setSummary = (displayName: string) => {
+        mockWorkspace.client.listWorkspaceSessions.mockResolvedValue([
+          summary(displayName),
+        ]);
+        mockWorkspace.client.getStandaloneSession.mockResolvedValue(
+          summary(displayName),
+        );
+      };
+      setSummary('Original objective');
+      const { container, rerender } = renderApp();
+      const header = () =>
+        container.querySelector('[data-testid="chat-context-header"]')
+          ?.textContent;
+      await vi.waitFor(() => expect(header()).toContain('Original objective'));
+
+      setSummary('Edited objective');
+      mockConnection.goalState = activeGoalSnapshot('Edited objective');
+      rerender();
+      await vi.waitFor(() => expect(header()).toContain('Edited objective'));
+
+      setSummary('');
+      mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
+      rerender();
+      await vi.waitFor(() => {
+        expect(header()).not.toContain('Edited objective');
+        expect(header()).toContain('New session');
+      });
+    },
+  );
+
+  it('does not restore an old standalone Goal name when edit and clear reads settle out of order', async () => {
+    mockConnection.displayName = undefined;
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.goalState = activeGoalSnapshot('Original objective');
+    const summary = (displayName: string) => ({
+      sessionId: 'session-1',
+      workspaceCwd: '/tmp/project',
+      displayName,
+    });
+    mockWorkspace.client.getStandaloneSession.mockResolvedValue(
+      summary('Original objective'),
+    );
+    const { container, rerender } = renderApp();
+    const header = () =>
+      container.querySelector('[data-testid="chat-context-header"]')
+        ?.textContent;
+    await vi.waitFor(() => expect(header()).toContain('Original objective'));
+    const edit = deferred<ReturnType<typeof summary>>();
+    const clear = deferred<ReturnType<typeof summary>>();
+    mockWorkspace.client.getStandaloneSession.mockClear();
+    mockWorkspace.client.getStandaloneSession.mockReturnValueOnce(edit.promise);
+    mockConnection.goalState = activeGoalSnapshot('Edited objective');
+    rerender();
+    await vi.waitFor(() =>
+      expect(mockWorkspace.client.getStandaloneSession).toHaveBeenCalledTimes(
+        1,
+      ),
+    );
+    mockWorkspace.client.getStandaloneSession.mockReturnValueOnce(
+      clear.promise,
+    );
+    mockConnection.goalState = { v: 2, activity: 'idle', goal: null };
+    rerender();
+    await vi.waitFor(() =>
+      expect(mockWorkspace.client.getStandaloneSession).toHaveBeenCalledTimes(
+        2,
+      ),
+    );
+    await act(async () => clear.resolve(summary('')));
+    expect(header()).toContain('New session');
+    await act(async () => edit.resolve(summary('Edited objective')));
+    expect(header()).toContain('New session');
+    expect(header()).not.toContain('Edited objective');
+  });
+
   it('does not query a workspace catalog for a Live session title', async () => {
     mockConnection.sessionContext = { kind: 'live' };
     mockConnection.workspaceCwd = '';

@@ -6967,7 +6967,8 @@ class QwenAgent implements Agent {
       },
       cwd: item.cwd,
       sessionId: item.sessionId,
-      title: item.customTitle || item.prompt || '(session)',
+      title:
+        item.customTitle || item.prompt || item.goalObjective || '(session)',
       updatedAt: new Date(item.mtime).toISOString(),
     }));
 

@@ -8018,15 +8018,20 @@ export function registerSessionRoutes(
         }
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
-        res
-          .status(200)
-          .json(
-            await runtime.bridge.controlSessionGoal(
-              sessionId,
-              request,
-              clientId === undefined ? undefined : { clientId },
-            ),
-          );
+        const result = await runtime.bridge.controlSessionGoal(
+          sessionId,
+          request,
+          clientId === undefined ? undefined : { clientId },
+        );
+        if (
+          request.action === 'create' ||
+          request.action === 'replace' ||
+          request.action === 'edit' ||
+          request.action === 'clear'
+        ) {
+          invalidateSessionListsAndMarkCatalog(runtime, ['active']);
+        }
+        res.status(200).json(result);
       },
     ),
   );
@@ -8048,7 +8053,11 @@ export function registerSessionRoutes(
     withOwnerMutableSession(
       'POST /session/:id/goal/clear',
       async (_req, res, sessionId, runtime) => {
-        res.status(200).json(await runtime.bridge.clearSessionGoal(sessionId));
+        const result = await runtime.bridge.clearSessionGoal(sessionId);
+        if (result.cleared) {
+          invalidateSessionListsAndMarkCatalog(runtime, ['active']);
+        }
+        res.status(200).json(result);
       },
     ),
   );

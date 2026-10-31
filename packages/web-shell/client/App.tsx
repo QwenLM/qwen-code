@@ -11385,6 +11385,7 @@ export function App({
     () => isGoalGateBlockedFor(connectionRef.current),
     [],
   );
+  const activeSessionDisplayNameRequestRef = useRef(0);
   const refreshActiveSessionDisplayName = useCallback(async () => {
     const activeConnection = connectionRef.current;
     if (
@@ -11413,22 +11414,34 @@ export function App({
       !activeConnection.sessionId ||
       !activeConnection.workspaceCwd ||
       (activeConnection.sessionContext &&
-        activeConnection.sessionContext.kind !== 'workspace')
+        activeConnection.sessionContext.kind !== 'workspace' &&
+        activeConnection.sessionContext.kind !== 'standalone')
     ) {
       return;
     }
     const owner = sessionOwnerGuard.capture();
+    const requestId = ++activeSessionDisplayNameRequestRef.current;
     try {
-      const page = await loadSessionCatalogOnce(
-        workspace.client,
-        {
-          routeKind: 'legacy',
-          workspaceCwd: activeConnection.workspaceCwd,
-          options: { pageSize: 200 },
-        },
-        { fresh: true },
-      );
+      const summary =
+        activeConnection.sessionContext?.kind === 'standalone'
+          ? await workspace.client.getStandaloneSession(
+              activeConnection.sessionId,
+            )
+          : (
+              await loadSessionCatalogOnce(
+                workspace.client,
+                {
+                  routeKind: 'legacy',
+                  workspaceCwd: activeConnection.workspaceCwd,
+                  options: { pageSize: 200 },
+                },
+                { fresh: true },
+              )
+            ).sessions.find(
+              (session) => session.sessionId === activeConnection.sessionId,
+            );
       if (
+        requestId !== activeSessionDisplayNameRequestRef.current ||
         !owner.isCurrent() ||
         connectionRef.current.sessionId !== activeConnection.sessionId ||
         connectionRef.current.workspaceCwd !== activeConnection.workspaceCwd ||
@@ -11436,10 +11449,9 @@ export function App({
       ) {
         return;
       }
-      const displayName = page.sessions.find(
-        (session) => session.sessionId === activeConnection.sessionId,
-      )?.displayName;
-      if (displayName?.trim()) setSessionStatusDisplayName(displayName);
+      if (summary && !('state' in summary)) {
+        setSessionStatusDisplayName(summary.displayName || undefined);
+      }
     } catch {
       // The live session_metadata_updated event remains the primary path.
     }
@@ -15065,6 +15077,11 @@ export function App({
   useEffect(() => {
     setGoalSnapshot(connection.goalState ?? null);
   }, [connection.goalState, connection.sessionId, logicalSessionKey]);
+
+  useEffect(() => {
+    if (!goalSnapshotRef.current) return;
+    void refreshActiveSessionDisplayNameRef.current();
+  }, [goalSnapshot?.goal?.goalId, goalSnapshot?.goal?.objective]);
 
   const connectionGoalComplete =
     connection.goalState?.goal?.status === 'complete';
