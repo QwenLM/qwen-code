@@ -17,6 +17,10 @@ visual previews where possible:
 - inline and block LaTeX math
 - fenced code blocks with syntax highlighting
 
+Markdown tables use the delimiter row immediately after the header to set column
+alignment. Later pipe-delimited rows (`| ... |`) containing only hyphens and
+optional colons remain table data.
+
 Press `Alt/Option+M` to toggle the current session between modes. On macOS,
 the terminal must send Option as Meta for this shortcut; otherwise Option+M is
 treated as normal text input.
@@ -37,6 +41,23 @@ To start Qwen Code in raw mode by default, set `ui.renderMode`:
 
 Accepted values are `"render"` and `"raw"`. The shortcut only changes the
 current session view; it does not rewrite your settings file.
+
+While a confirmed table is streaming in raw mode, a header that wraps beyond
+the live preview's height limit shows its beginning within that limit. The
+complete table remains available when the response is committed.
+
+A completed display-math block can move into scrollback as a whole once its
+following blank line is complete. Ordinary code fences can commit at internal
+blank lines while preserving code highlighting and continuous line numbers.
+Long responses also avoid splitting a small display-math block when its
+preceding text can be committed first. Oversized blocks still use the existing
+message-size limit. When that limit divides a large math block, later code
+blocks retain their fences and continuous line numbers. After a small closed
+math block, available complete source lines are preserved at that limit.
+
+A short completed display-math block stays whole when literal fence syntax
+inside it precedes a tall ordinary code block. The code continues with its
+original language and line numbers.
 
 ## Assistant and Tool Images
 
