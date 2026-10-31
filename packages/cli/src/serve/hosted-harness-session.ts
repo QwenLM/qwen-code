@@ -1367,14 +1367,10 @@ function acceptedInputSequence(
 }
 
 /**
- * The prompts whose turns settled without an answer (`error` or
- * `cancelled`). Turn results are `turn.settled` journal events, not
- * projected messages, so they never reach any record-based exclusion in
- * the model runner: the history is filtered against the journal here —
- * what ended without an answer is over, and its instruction never merges
- * into a later turn the way a crashing text turn's naked user record
- * otherwise would (the no-toolProfile path's older design already did
- * this; tool-profile Sessions now follow it).
+ * Turns excluded from later model context as complete groups. A Harness
+ * interruption keeps its original instruction with the work it committed;
+ * other cancellations and errors do not carry their instructions forward.
+ * Settlement provenance lives in journal events, not projected messages.
  */
 function unansweredPrompts(session: HostedSession): Set<string> {
   const authority = session.managed.authority;
@@ -1386,7 +1382,8 @@ function unansweredPrompts(session: HostedSession): Set<string> {
     if (
       event.kind === 'turn.settled' &&
       (event.payload['outcome'] === 'error' ||
-        event.payload['outcome'] === 'cancelled')
+        (event.payload['outcome'] === 'cancelled' &&
+          event.payload['stopReason'] !== 'harness_interruption'))
     ) {
       const turnId = event.payload['turnId'];
       if (typeof turnId === 'string') prompts.add(turnId);
@@ -3736,7 +3733,6 @@ async function executeHostedTurn(
         ).filter(
           (entry) =>
             !(
-              entry.type === 'user' &&
               entry.daemonPromptId !== undefined &&
               unanswered.has(entry.daemonPromptId)
             ),
@@ -10851,7 +10847,6 @@ export function registerHostedHarnessSessionRoutes(
                 (entry.daemonPromptId === promptId &&
                   !parkedRound.has(entry.uuid))) &&
               !(
-                entry.type === 'user' &&
                 entry.daemonPromptId !== undefined &&
                 unanswered.has(entry.daemonPromptId)
               ),

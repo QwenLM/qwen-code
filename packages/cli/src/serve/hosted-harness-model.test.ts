@@ -1193,6 +1193,108 @@ describe('Hosted Harness model boundary', () => {
   });
 
   it.each([false, true])(
+    'excludes cancelled compressed tools and guidance through the next prompt (guidance marked=%s)',
+    async (marked) => {
+      const model = config([{ type: LlmEventType.Finished }]);
+      const hooks = hostedHooks();
+      const prefix: Content[] = [
+        { role: 'user', parts: [{ text: 'compressed summary' }] },
+        { role: 'model', parts: [{ text: 'Understood.' }] },
+      ];
+      const kept: Content[] = [
+        { role: 'user', parts: [{ text: 'next request' }] },
+        { role: 'model', parts: [{ text: 'next answer' }] },
+      ];
+      const history: ChatRecord[] = [
+        {
+          uuid: 'compression-with-cancelled-tools',
+          parentUuid: null,
+          sessionId: input.sessionId,
+          timestamp: '2026-10-30T00:00:00.000Z',
+          cwd: input.cwd,
+          version: 'test',
+          type: 'system',
+          subtype: 'chat_compression',
+          systemPayload: {
+            info: {
+              compressionStatus: CompressionStatus.COMPRESSED,
+              originalTokenCount: 100,
+              newTokenCount: 10,
+            },
+            compressedHistory: [
+              ...prefix,
+              { role: 'user', parts: [{ text: 'cancelled instruction' }] },
+              {
+                role: 'model',
+                parts: [
+                  { text: 'cancelled partial answer' },
+                  { functionCall: { id: 'cancelled-call', name: 'agent' } },
+                ],
+              },
+              {
+                role: 'user',
+                parts: [
+                  {
+                    functionResponse: {
+                      id: 'cancelled-call',
+                      name: 'agent',
+                      response: { output: 'cancelled result' },
+                    },
+                  },
+                ],
+              },
+              { role: 'user', parts: [{ text: 'cancelled queued guidance' }] },
+              {
+                role: 'model',
+                parts: [{ text: 'cancelled continued answer' }],
+              },
+              ...kept,
+            ],
+            promptIds: [
+              null,
+              null,
+              'cancelled-prompt',
+              null,
+              null,
+              marked ? 'cancelled-prompt' : null,
+              null,
+              'next-prompt',
+              null,
+            ],
+            summaryPrefixLength: prefix.length,
+          },
+        },
+      ];
+      const original = structuredClone(history);
+      await runHostedHarnessTextTurn({
+        ...input,
+        history,
+        excludedPromptIds: new Set(['cancelled-prompt']),
+        hooks: hooks.session,
+        toolTurn: {
+          declarations: async () => [],
+          execute: async () => [],
+          consumeResults: async () => undefined,
+          setPromptHookRunner: () => undefined,
+        },
+      });
+      expect(structuredClone(model.setHistory.mock.calls[0]![0])).toEqual([
+        ...prefix,
+        ...kept,
+      ]);
+      const start = hooks.fire.mock.calls.find(
+        ([event]) => event === HookEventName.SessionStart,
+      );
+      expect(start?.[2]['messages']).toEqual([
+        ...prefix,
+        ...kept,
+        { role: 'user', parts: [{ text: input.prompt }] },
+      ]);
+      expect(history).toEqual(original);
+    },
+  );
+
+  it.each([false, true])(
     'preserves compression around a recovered tool round without duplicating its pending response (current snapshot=%s)',
     async (currentSnapshot) => {
       const model = config([{ type: LlmEventType.Finished }]);

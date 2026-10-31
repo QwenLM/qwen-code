@@ -399,12 +399,17 @@ async function runPreparedHostedHarnessTextTurn(
   let pendingToolResults =
     input.resumeFromToolResults !== undefined ||
     (input.resumeModel?.pendingToolResults ?? false);
-  const excludeUnanswered = (history: Content[]) =>
-    history.filter(
-      (entry) =>
-        entry.role !== 'user' ||
-        !input.excludedPromptIds?.has(getApiHistoryPromptId(entry) ?? ''),
-    );
+  const excludeUnanswered = (history: Content[]) => {
+    let excluded = false;
+    return history.filter((entry) => {
+      const promptId = getApiHistoryPromptId(entry);
+      // Compression marks prompts alone. Tool rounds and unmarked queued
+      // guidance belong to that boundary until the next marked prompt.
+      if (promptId !== undefined)
+        excluded = input.excludedPromptIds?.has(promptId) ?? false;
+      return !excluded;
+    });
+  };
   const initialMessages: Content[] = excludeUnanswered(
     buildSessionHistoryFromConversation({
       messages: input.history,
@@ -865,9 +870,9 @@ async function runPreparedHostedHarnessTextTurn(
       client.setCompressionObserver(input.commitCompression, {
         restoreRecentFiles: false,
       });
-    // Failed and cancelled turns have no assistant record, and curated
-    // history drops an empty assistant record while keeping its prompt. Omit
-    // both kinds of unanswered prompt even when later completed turns follow.
+    // Text-only turns need a visible answer; curated history can drop an
+    // empty assistant record while keeping its prompt. Tool-profile turns
+    // can carry calls without text and use journal-based group exclusion.
     const answered = (entry: Content | undefined): boolean =>
       entry?.role === 'model' &&
       !!entry.parts?.some((part) => !part.thought && !!part.text);
