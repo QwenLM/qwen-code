@@ -1159,6 +1159,73 @@ test('rejects stale or ambiguous safety defaults', async (context) => {
   }
 });
 
+test('verifies archives in fresh directories on a reused runner', async () => {
+  const workflow = await readFile(
+    new URL(
+      '../../.github/workflows/release-managed-agent-reference.yml',
+      import.meta.url,
+    ),
+    'utf8',
+  );
+  const stepStart = workflow.indexOf(
+    "      - name: 'Verify and boot the exact archive'",
+  );
+  const runMarker = '        run: |-\n';
+  const runStart = workflow.indexOf(runMarker, stepStart);
+  const boundary = workflow.indexOf('          server_port=', runStart);
+  assert.ok(stepStart >= 0);
+  assert.ok(runStart > stepStart);
+  assert.ok(boundary > runStart);
+  const script = workflow
+    .slice(runStart + runMarker.length, boundary)
+    .replace(/^ {10}/gm, '');
+  const temporary = await mkdtemp(
+    path.join(os.tmpdir(), 'qwen-reference pool-'),
+  );
+  try {
+    const root = path.join(temporary, 'repo');
+    const output = path.join(temporary, 'managed-agent-reference');
+    const version = '0.1.0-alpha.1';
+    const name = `qwen-managed-agent-reference-${version}`;
+    await fixture(root);
+    await createReferenceDistribution({
+      repoRoot: root,
+      outputDirectory: output,
+      version,
+      sourceRevision: 'a'.repeat(40),
+    });
+    const legacy = path.join(output, 'extracted', name, 'stale.txt');
+    await mkdir(path.dirname(legacy), { recursive: true });
+    await writeFile(legacy, 'previous job');
+    const bundles = [];
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = execFileSync(
+        'bash',
+        ['-c', `${script}\nprintf '%s\\n' "$PWD"`],
+        {
+          env: {
+            ...process.env,
+            RUNNER_TEMP: temporary,
+            RELEASE_VERSION: version,
+          },
+          encoding: 'utf8',
+        },
+      );
+      const bundle = result.trim().split('\n').at(-1);
+      assert.equal(path.basename(bundle), name);
+      assert.ok(!bundles.includes(bundle));
+      await assert.rejects(readFile(path.join(bundle, 'stale.txt')), {
+        code: 'ENOENT',
+      });
+      await writeFile(path.join(bundle, 'stale.txt'), 'current job');
+      bundles.push(bundle);
+    }
+    assert.equal(await readFile(legacy, 'utf8'), 'previous job');
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});
+
 test('publishes verified draft assets behind an exact tag', async () => {
   const workflow = await readFile(
     new URL(

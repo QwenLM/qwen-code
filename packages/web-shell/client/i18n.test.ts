@@ -17,7 +17,53 @@ const FOLLOWUP_SETTING_KEYS = [
   'settings.description.ui.enableFollowupSuggestions',
 ] as const;
 
+const BROWSER_NOTIFICATION_KEYS = [
+  'label',
+  'description',
+  'prompt',
+  'reply',
+  'completed',
+  'failed',
+  'ended',
+  'approval',
+  'question',
+  'allow',
+  'enable',
+  'helpEnabled',
+  'helpWaiting',
+  'helpWhen',
+  'helpSystem',
+  'helpMac',
+  'helpWindows',
+  'enabled',
+  'disabled',
+  'waiting',
+  'denied',
+  'unavailable',
+  'requesting',
+  'error',
+  'temporary',
+].map((suffix) => `browserNotifications.${suffix}`);
+
 describe('web-shell i18n catalog', () => {
+  it('keeps every browser notification translation in both locales', () => {
+    const en = getTranslator('en');
+    const zh = getTranslator('zh-CN');
+    for (const key of BROWSER_NOTIFICATION_KEYS) {
+      const english = en(key, { text: 'Task' });
+      const chinese = zh(key, { text: 'Task' });
+      expect(english).not.toBe(key);
+      expect(chinese).not.toBe(key);
+      expect(chinese).not.toBe(english);
+    }
+    expect(en('browserNotifications.prompt', { text: 'Task' })).toBe(
+      'Prompt: Task',
+    );
+    expect(zh('browserNotifications.reply', { text: 'Task' })).toBe(
+      '回复：Task',
+    );
+  });
+
   it('explains missing rewind identities in both locales', () => {
     expect(getTranslator('en')('rewind.identityUnavailable')).toContain(
       'no prompt identity',
@@ -49,6 +95,7 @@ describe('web-shell i18n catalog', () => {
       '已选 2 组',
     );
   });
+
   it('keeps task cancellation and elapsed-time copy available in both locales', () => {
     const en = getTranslator('en');
     const zh = getTranslator('zh-CN');

@@ -57,6 +57,8 @@ import type {
   InstructionLoadReason,
   BackgroundTaskInfo,
   CronJobInfo,
+  FileChangedInput,
+  FileChangeEvent,
 } from './types.js';
 import {
   createHookOutput,
@@ -216,6 +218,24 @@ export class HookEventHandler {
   private readonly sessionHooksManager: SessionHooksManager;
   /** Optional provider for conversation history */
   private messagesProvider?: MessagesProvider;
+
+  async fireFileChangedEvent(
+    filePath: string,
+    event: FileChangeEvent,
+    signal?: AbortSignal,
+  ): Promise<AggregatedHookResult> {
+    const input: FileChangedInput = {
+      ...this.createBaseInput(HookEventName.FileChanged),
+      file_path: filePath,
+      event,
+    };
+    return this.executeHooks(
+      HookEventName.FileChanged,
+      input,
+      { filePath },
+      signal,
+    );
+  }
 
   constructor(
     config: Config,

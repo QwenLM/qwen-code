@@ -1732,6 +1732,26 @@ jobs:
             echo 'font baseline check: skipped (script not present in this checkout)'
             exit 0
           fi
+          # A recoverable setup gap should not emit a failure annotation.
+          if GITHUB_ACTIONS='' bash .github/scripts/ecs-runner/check-font-baseline.sh; then
+            exit 0
+          fi
+          # Keep PR-supplied code at the runner's existing privilege level.
+          font_stage="$(mktemp -d "${RUNNER_TEMP:-/tmp}/qwen-fonts.XXXXXX")"
+          trap 'rm -rf -- "${font_stage}"' EXIT
+          mkdir -p "${font_stage}/lists/partial" "${font_stage}/packages"
+          apt-get -o "Dir::State::lists=${font_stage}/lists" update -qq
+          (
+            cd "${font_stage}/packages"
+            apt-get -o "Dir::State::lists=${font_stage}/lists" download fonts-dejavu-core fonts-dejavu-mono
+          )
+          for archive in "${font_stage}"/packages/*.deb; do
+            dpkg-deb --extract "${archive}" "${font_stage}/extracted"
+          done
+          font_dir="${XDG_DATA_HOME:-${HOME}/.local/share}/fonts/qwen-ci"
+          mkdir -p "${font_dir}"
+          cp -R "${font_stage}/extracted/usr/share/fonts/." "${font_dir}/"
+          fc-cache -f "${font_dir}"
           bash .github/scripts/ecs-runner/check-font-baseline.sh
 
       - name: 'Install dependencies'

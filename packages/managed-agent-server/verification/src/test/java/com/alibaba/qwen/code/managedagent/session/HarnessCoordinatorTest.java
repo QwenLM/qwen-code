@@ -3661,6 +3661,7 @@ class HarnessCoordinatorTest {
         HarnessCoordinator coordinator = new HarnessCoordinator(store, harness,
                 new HarnessEventProjector(), mock(RuntimeWarmer.class), executor,
                 Clock.systemUTC(), new ManagedAgentProperties());
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(20);
         try {
             coordinator.dispatch("tenant", "session", "turn");
             if (terminalAtProbe) {
@@ -3673,6 +3674,8 @@ class HarnessCoordinatorTest {
                 verify(store, timeout(20_000)).markTurnRecoveryBlocked(eq("tenant"), eq("session"),
                         eq("turn"), anyString(), eq(AgentStateStore.HARNESS_RECOVERY_BLOCKED), anyString());
             }
+            assertThat(closed.await(Math.max(0, deadline - System.nanoTime()),
+                    TimeUnit.NANOSECONDS)).isTrue();
         } finally {
             coordinator.close();
             executor.shutdownNow();

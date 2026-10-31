@@ -129,7 +129,11 @@ async function createMinimalConfig(): Promise<Config> {
   // pass `initialize()` would otherwise start. Skipping it removes the race
   // where that background pass re-arms health-check timers after
   // `config.shutdown()` and leaves the process hanging (issue #9944).
-  await config.initialize({ skipMcpDiscovery: true });
+  await config.initialize({
+    skipMcpDiscovery: true,
+    skipFileWatching: true,
+    skipLlmInitialization: true,
+  });
 
   return config;
 }

@@ -519,8 +519,8 @@ it(`H02b typed file survives mutation and cold resume (${runtime}+${renderer})`,
     writeFileSync(file, changed);
     expect(readFileSync(file, 'utf8')).toBe(changed);
     await api.start(original.sessionId);
-    await api.visible('RECOVERY_file_0_DONE', 'cold-assistant-ready');
-    const cold = await api.visible(submitted, 'cold-typed-form');
+    const cold = await api.visible('RECOVERY_file_0_DONE', 'cold-typed-form');
+    expect(cold).toContain(submitted);
     expect(cold).toContain('RECOVERY_file_0_DONE');
     expect(cold).not.toContain(changed.trim());
     expect(api.server.requests).toHaveLength(1);

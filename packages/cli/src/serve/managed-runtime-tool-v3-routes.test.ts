@@ -13,7 +13,8 @@ import * as path from 'node:path';
 import type { AddressInfo } from 'node:net';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { resetManagedRuntimeDispatchGatesForTest } from '@qwen-code/qwen-code-core/managed-runtime/managed-runtime-dispatch-gate.js';
 import { LocalManagedSessionResourceStore } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-resources.js';
 import { LocalToolResultSegmentStore } from '@qwen-code/qwen-code-core/managed-runtime/local-managed-tool-result-store.js';
 import { LocalShellResultSession } from '@qwen-code/qwen-code-core/managed-runtime/local-shell-result-session.js';
@@ -79,6 +80,7 @@ let lease: SessionWriterLease | undefined;
 let session: ManagedSession | undefined;
 let executor: ManagedToolExecutor | undefined;
 let root: string | undefined;
+beforeEach(resetManagedRuntimeDispatchGatesForTest);
 afterEach(async () => {
   await executor?.close();
   if (server)
@@ -103,6 +105,7 @@ afterEach(async () => {
 describe('Tool v3 local worker routes', () => {
   it('executes one Shell and binds status and ACK to the original receipt', async () => {
     root = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-tool-v3-'));
+    const executionCallId = path.basename(root);
     const runtimeBaseDir = path.join(root, 'runtime');
     const transcriptPath = path.join(
       runtimeBaseDir,
@@ -223,7 +226,7 @@ describe('Tool v3 local worker routes', () => {
           epoch: session!.activation.epoch,
         },
         payload: {
-          executionCallId: identity.executionCallId,
+          executionCallId,
           batchId: 'batch-a',
           ordinal: 0,
           toolDefinitionRef: definitionRef,
@@ -236,7 +239,7 @@ describe('Tool v3 local worker routes', () => {
     await harness.commitAwaitRuntime({
       functionCallId: identity.callId,
       toolName: 'run_shell_command',
-      executionCallId: identity.executionCallId,
+      executionCallId,
       invocationBindingId: 'binding-a',
       capabilityVersion: 'cap-a',
       policyVersion: 'policy-a',
@@ -330,7 +333,7 @@ describe('Tool v3 local worker routes', () => {
             tenantId: sessionKey.tenantId,
             sessionId: sessionKey.sessionId,
             turnId: 'turn-a',
-            executionCallId: identity.executionCallId,
+            executionCallId,
             bindingGeneration: '1',
             capturePolicy: 'complete_required',
           },
@@ -345,7 +348,7 @@ describe('Tool v3 local worker routes', () => {
         tenantId: sessionKey.tenantId,
         sessionId: sessionKey.sessionId,
         turnId: 'turn-a',
-        executionCallId: identity.executionCallId,
+        executionCallId,
         bindingGeneration: '1',
         capturePolicy: 'complete_required',
       },
@@ -392,7 +395,7 @@ describe('Tool v3 local worker routes', () => {
       });
     }
     const receipt = {
-      executionCallId: identity.executionCallId,
+      executionCallId,
       manifest: settled.result.capture.manifest,
       deliveryStatus: 'committed',
       historyRevision: receiptEvent!.sequence,
@@ -421,7 +424,7 @@ describe('Tool v3 local worker routes', () => {
             tenantId: sessionKey.tenantId,
             sessionId: sessionKey.sessionId,
             turnId: 'turn-a',
-            executionCallId: identity.executionCallId,
+            executionCallId,
             bindingGeneration: '1',
             capturePolicy: 'complete_required',
           },

@@ -630,6 +630,19 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js.includes('managed.tasks.')).toBe(false);
   });
 
+  it('keeps browser notification strings and lookups in the interactive entry only', () => {
+    const js = readTranscriptBundle().replace(
+      /^const __qwenWebShellCss=[^\n]*\n/,
+      '',
+    );
+    expect(js).not.toContain('browserNotifications.');
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('browserNotifications.helpMac');
+    expect(interactive).toContain('browserNotifications.approval');
+    expect(interactive).toContain('Open System Settings → Notifications.');
+    expect(interactive).toContain('浏览器（Chrome');
+  });
+
   it('keeps remote Workspace registration copy in the interactive entry', () => {
     expect(readPackageJavascript()).toContain('managed.remoteWorkspaceAdd');
     expect(readTranscriptBundle()).not.toContain('managed.remoteWorkspace');

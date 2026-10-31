@@ -356,6 +356,13 @@ jobs:
           if [[ "${RUN_ATTEMPT}" == '1' ]]; then
             total=0
             infra=0
+            # The gate workflow's reporter job is always() and fails with
+            # only the tier-result error, which carries no infrastructure
+            # signature; excluding it by its failing step keeps a lane's
+            # infra death classifiable. Filtering the step rather than the
+            # job keeps the legitimate rerun: when the reporter's own
+            # runner dies no step has failed, so the job still counts and
+            # its GitHub-generated annotation still matches.
             while IFS=$'\t' read -r job_id check_run_id; do
               total=$((total + 1))
               annotations=''

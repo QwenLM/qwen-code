@@ -563,7 +563,12 @@ for (const key of spec.required ?? []) {
 
 const prompt = promptFor(options, spec);
 if (options.printPrompt) {
-  process.stdout.write(prompt);
+  await new Promise((resolve, reject) => {
+    process.stdout.write(prompt, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
   process.exit(0);
 }
 

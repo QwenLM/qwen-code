@@ -2406,6 +2406,46 @@ describe('setup-java Maven cache stays on hosted runners', () => {
   });
 });
 
+describe('SDK Java runner-local tool-cache repair', () => {
+  it('repairs only default local caches without gating Java installation', () => {
+    for (const [name, job] of Object.entries(parse(workflow).jobs)) {
+      const steps = job.steps ?? [];
+      const java = steps.findIndex((s) =>
+        String(s.uses ?? '').startsWith('actions/setup-java'),
+      );
+      const helper = '.github/scripts/restore-java-tool-cache.sh';
+      const repair = steps.findIndex((s) =>
+        String(s.run ?? '').includes(helper),
+      );
+      if (java < 0 || !String(job['runs-on']).includes('self-hosted')) {
+        expect(repair, name).toBe(-1);
+        continue;
+      }
+      // A resumed release checks out an older tag that predates this helper,
+      // so the step must probe for it before invoking bash.
+      expect(steps[repair].run, name).toContain(`[ -f ${helper} ]`);
+      const checkout = steps.findIndex((s) =>
+        String(s.uses ?? '').startsWith('actions/checkout'),
+      );
+      expect(repair, name).toBeGreaterThan(checkout);
+      if (name === 'daemon-e2e') {
+        expect(repair, name).toBe(java - 2);
+        expect(steps[repair + 1].name, name).toBe(
+          'Use pre-installed Node.js (self-hosted)',
+        );
+      } else {
+        expect(repair, name).toBe(java - 1);
+      }
+      expect(steps[repair].if, name).toBe(
+        "${{ runner.environment == 'self-hosted' && endsWith(runner.tool_cache, '/_tool') }}",
+      );
+      expect(steps[repair]['continue-on-error'], name).toBeUndefined();
+      expect(steps[java].if, name).toBeUndefined();
+      expect(steps[java].env?.RUNNER_TOOL_CACHE, name).toBeUndefined();
+    }
+  });
+});
+
 // A bare `corepack pnpm install` has no retry. Run 39348512071's daemon E2E
 // lane died in that step before any test ran, inside the workspace build the
 // install's `prepare` re-enters: packages/cli's `tsc --build` exhausted V8's

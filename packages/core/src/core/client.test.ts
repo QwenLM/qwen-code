@@ -1659,6 +1659,20 @@ describe('Gemini Client (client.ts)', () => {
       expect(hookSystem.fireSessionStartEvent).not.toHaveBeenCalled();
     });
 
+    it('runs session-start lifecycle for FileChanged without a SessionStart hook', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+      };
+      stubHookSystem(hookSystem);
+      vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+        (event) => event === 'FileChanged',
+      );
+      await expect(
+        fireHook(SessionStartSource.Resume),
+      ).resolves.toBeUndefined();
+      expectSessionStart(hookSystem, SessionStartSource.Resume);
+    });
+
     it('logs and returns undefined when the SessionStart hook throws', async () => {
       const debugLogger = stubDebugLogger();
       stubHookSystem({

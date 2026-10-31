@@ -72,6 +72,8 @@ class HostedAutomationFaultGatesIT {
     private static final String DIGEST = "sha256:" + "a".repeat(64);
     // A public task event cursor: base64url of its scope key and sequence.
     private static final Pattern TASK_CURSOR = Pattern.compile("tev2:[^:]+:([0-9]+)");
+    private static final Pattern HARNESS_LISTENING = Pattern.compile(
+            "qwen serve listening on http://127\\.0\\.0\\.1:(\\d+)");
     private static final String OPERATIONS = "/automations/operations";
     // The Harness store client's bounded retry of one commit (http-managed-session-store.ts).
     private static final int STORE_ATTEMPTS = 3;
@@ -621,9 +623,13 @@ class HostedAutomationFaultGatesIT {
                 + "' AND NEW.definition_revision <> OLD.definition_revision", "NEW.definition_revision");
         Map<String, Object> update = Map.of("prompt", "FG11B_PROJECTION_TWO reply with FG11_DONE.");
         String path = "/v1/agent-automations/" + id;
+        long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60);
         assertUnknown(send("POST", path, update, "projection-update"));
-        assertThat(refusedDetails("projection")).as("the store client's bounded retry")
-                .hasSizeGreaterThanOrEqualTo(STORE_ATTEMPTS).containsOnly("2");
+        long remaining = deadline - System.nanoTime();
+        assertThat(remaining).as("the original request window remains").isPositive();
+        waiting().pollDelay(Duration.ZERO).atMost(Duration.ofNanos(remaining)).untilAsserted(() ->
+                assertThat(refusedDetails("projection")).as("the store client's bounded retry")
+                        .hasSizeGreaterThanOrEqualTo(STORE_ATTEMPTS).containsOnly("2"));
         assertThat(commands(session, "defineSchedule")).as("the rolled-back revision").hasSize(1);
         assertThat(recordRevision(session, "schedule", id)).isEqualTo(1);
         assertThat(mirrorRevision(id)).isEqualTo(1);
@@ -2500,7 +2506,7 @@ class HostedAutomationFaultGatesIT {
         return filter;
     }
 
-    // A cold Harness: a fresh HOME and QWEN_HOME each start, on the same port.
+    // A cold Harness: fresh HOME and QWEN_HOME; the relay follows its bound port.
     private void startHarness() throws Exception {
         Path cli = harnessCli;
         Path home = Files.createDirectory(temporary.resolve("home-" + UUID.randomUUID()));
@@ -2511,9 +2517,10 @@ class HostedAutomationFaultGatesIT {
                 "telemetry", Map.of("enabled", false), "modelProviders", Map.of("openai", List.of(Map.of(
                         "id", "fg11-fixture", "envKey", "OPENAI_API_KEY", "baseUrl", modelUrl))))));
         Path log = temporary.resolve("harness.log");
+        int logOffset = Files.exists(log) ? Files.readString(log).length() : 0;
         ProcessBuilder builder = new ProcessBuilder(node, cli.toString(),
                 "serve", "--profile", "hosted-harness", "--http-bridge", "--hostname", "127.0.0.1", "--port",
-                Integer.toString(harnessPort), "--require-auth", "--no-web", "--workspace", decoy.toString(),
+                harness == null ? "0" : Integer.toString(harnessPort), "--require-auth", "--no-web", "--workspace", decoy.toString(),
                 "--managed-runtime-broker-url", "http://127.0.0.1:" + brokerPort,
                 "--managed-runtime-broker-token", TOKEN)
                 .directory(decoy.toFile()).redirectErrorStream(true)
@@ -2538,6 +2545,10 @@ class HostedAutomationFaultGatesIT {
             if (!harness.isAlive()) {
                 throw new AssertionError("Hosted Harness exited: " + Files.readString(log));
             }
+            var listening = HARNESS_LISTENING.matcher(Files.readString(log).substring(logOffset));
+            assertThat(listening.find()).as("Hosted Harness reported its bound port").isTrue();
+            harnessPort = Integer.parseInt(listening.group(1));
+            harnessRelay.backend(URI.create("http://127.0.0.1:" + harnessPort));
             assertThat(http.send(HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + harnessPort
                     + "/capabilities")).timeout(Duration.ofSeconds(2)).header("Authorization", "Bearer " + TOKEN)
                     .build(), HttpResponse.BodyHandlers.discarding()).statusCode()).isEqualTo(200);

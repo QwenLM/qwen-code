@@ -3155,6 +3155,7 @@ export async function runAcpAgent(
   try {
     await config.initialize({
       skipLlmInitialization: true,
+      skipFileWatching: true,
       // Bootstrap skips MCP discovery — each session runs its own
       // pool-routed discovery, so bootstrap-level spawns would be
       // redundant subprocess leaks (W119).

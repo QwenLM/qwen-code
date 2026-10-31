@@ -362,9 +362,9 @@ jobs:
           release="${RUNNER_TEMP}/managed-agent-reference"
           cd "${release}"
           sha256sum --check SHA256SUMS.txt
-          mkdir extracted
-          tar -xzf "qwen-managed-agent-reference-${RELEASE_VERSION}.tar.gz" -C extracted
-          bundle="${release}/extracted/qwen-managed-agent-reference-${RELEASE_VERSION}"
+          extracted="$(mktemp -d "${release}/extracted.XXXXXX")"
+          tar -xzf "qwen-managed-agent-reference-${RELEASE_VERSION}.tar.gz" -C "${extracted}"
+          bundle="${extracted}/qwen-managed-agent-reference-${RELEASE_VERSION}"
           cd "${bundle}"
           sha256sum --check SHA256SUMS
           server_port="$(node -e "const s=require('net').createServer().listen(0,'127.0.0.1',()=>{console.log(s.address().port);s.close()})")"

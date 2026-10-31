@@ -2289,6 +2289,8 @@ export interface ConfigInitializeOptions {
    * need config services (hooks, tools, MCP) before a real session exists.
    */
   skipLlmInitialization?: boolean;
+  /** Load hooks without starting a filesystem subscription for bootstrap configs. */
+  skipFileWatching?: boolean;
   /** @deprecated Use `skipLlmInitialization`; retained until a future major release. */
   skipGeminiInitialization?: boolean;
   /**
@@ -4300,7 +4302,9 @@ export class Config {
         (!options?.skipHooks && !this.getDisableAllHooks()))
     ) {
       this.hookSystem = new HookSystem(this, options?.managedHookDispatcher);
-      await this.hookSystem.initialize();
+      await this.hookSystem.initialize({
+        skipFileWatching: options?.skipFileWatching,
+      });
       this.debugLogger.debug('Hook system initialized');
 
       // Initialize MessageBus for hook execution
@@ -4363,6 +4367,28 @@ export class Config {
                     signal,
                   );
                   break;
+                case 'FileChanged': {
+                  const filePath = input['file_path'];
+                  const event = input['event'];
+                  if (
+                    typeof filePath !== 'string' ||
+                    !path.isAbsolute(filePath) ||
+                    (event !== 'add' &&
+                      event !== 'change' &&
+                      event !== 'unlink')
+                  ) {
+                    throw new Error('Invalid FileChanged hook input');
+                  }
+                  const changed = await hookSystem.fireFileChangedEvent(
+                    filePath,
+                    event,
+                    signal,
+                  );
+                  result = changed.finalOutput
+                    ? createHookOutput('FileChanged', changed.finalOutput)
+                    : undefined;
+                  break;
+                }
                 case 'Stop': {
                   // Extract context usage data from input with runtime validation
                   const contextUsageData = buildContextUsage(
@@ -8037,6 +8063,7 @@ export class Config {
     this.backgroundTaskRegistry.disposeResidentAgents();
     this.targetDir = expected;
     this.cwd = expected;
+    await this.hookSystem?.refreshFileWatchingForWorkingDirectory();
     resetPreloadedContentGenerator(this.contentGenerator);
     await this.refreshCurrentRuntimeStatus(expected);
     this.workspaceContext.applyRootDirectories(workspaceDirectories);
@@ -8256,6 +8283,9 @@ export class Config {
   private async shutdownResourcesOnce(): Promise<void> {
     let resourceError: unknown;
     try {
+      if (Object.hasOwn(this, 'hookSystem')) {
+        await this.hookSystem?.close();
+      }
       this.memoryManager.cancelMigrations();
       this.clearSessionRestoreProjection();
       // Drop this session's project-dir registry entry. It is registered during

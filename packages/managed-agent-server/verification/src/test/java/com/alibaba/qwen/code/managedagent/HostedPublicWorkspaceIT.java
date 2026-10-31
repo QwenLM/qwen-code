@@ -4,6 +4,7 @@ import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.config.runtime.EmbeddedRuntimeBroker;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
+import com.alibaba.qwen.code.managedagent.persistence.WorkspaceTestStorage;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -1469,7 +1470,7 @@ class HostedPublicWorkspaceIT {
         assertThat(modelRequests).hasSize(approvals ? 16 : 30);
     }
 
-    private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) {
+    private void startSpring(Path cli, List<Path> roots, int harnessPort, int brokerPort) throws IOException {
         boolean mysql = System.getProperty("mysql.url") != null;
         List<String> arguments = new ArrayList<>(List.of("--server.address=127.0.0.1", "--server.port=" + port,
                 "--spring.datasource.url=" + System.getProperty("mysql.url",
@@ -1546,6 +1547,7 @@ class HostedPublicWorkspaceIT {
         if (!publicChildRestarted && (definitionApproval || "Linux".equals(System.getProperty("os.name")))) {
             var guard = spring.getBean(com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageGuard.class);
             for (int index = 0; index < roots.size(); index++) {
+                WorkspaceTestStorage.prepareNativeRoot(roots.get(index));
                 guard.register(tenant, "storage-" + index, UUID.randomUUID().toString());
             }
         }

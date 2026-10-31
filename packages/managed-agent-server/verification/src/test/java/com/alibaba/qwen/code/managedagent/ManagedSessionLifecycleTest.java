@@ -993,13 +993,17 @@ class ManagedSessionLifecycleTest {
         logged.start();
         logger.addAppender(logged);
         try {
-            assertThatThrownBy(() -> subject.renameSession(tenant, null,
-                    "key", sessionId, "renamed"))
-                    .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
-                        assertThat(error.getCode())
-                                .isEqualTo("hosted_harness_unavailable");
-                        assertThat(error.getCause()).isSameAs(failure);
-                    });
+            // Keep recovery from claiming the row before the inline attempt
+            // reaches the injected store failure.
+            new TransactionTemplate(transactionManager).executeWithoutResult(ignored -> {
+                assertThatThrownBy(() -> subject.renameSession(tenant, null,
+                        "key", sessionId, "renamed"))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                            assertThat(error.getCode())
+                                    .isEqualTo("hosted_harness_unavailable");
+                            assertThat(error.getCause()).isSameAs(failure);
+                        });
+            });
         } finally {
             logger.detachAppender(logged);
         }

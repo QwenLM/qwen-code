@@ -945,6 +945,21 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       String(s.uses || '').startsWith('actions/setup-node'),
     );
     assert.equal(setupNode.if, "${{ runner.environment == 'github-hosted' }}");
+    const setupJava = build.steps.find((s) =>
+      String(s.uses || '').startsWith('actions/setup-java'),
+    );
+    const cache = setupJava.with.cache;
+    for (const [environment, expected] of [
+      ['github-hosted', 'maven'],
+      ['self-hosted', ''],
+    ]) {
+      const actual = cache.startsWith('${{')
+        ? new Function('runner', `return (${cache.slice(3, -2)});`)({
+            environment,
+          })
+        : cache;
+      assert.equal(actual, expected, environment);
+    }
   });
 
   it('tui-parity keeps setup-node and the pnpm cache off the pool', () => {

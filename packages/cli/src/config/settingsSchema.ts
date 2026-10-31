@@ -4369,6 +4369,18 @@ const SETTINGS_SCHEMA = {
         mergeStrategy: MergeStrategy.CONCAT,
         items: HOOK_DEFINITION_ITEMS,
       },
+      FileChanged: {
+        type: 'array',
+        label: 'File Changed Hooks',
+        category: 'Advanced',
+        requiresRestart: false,
+        default: [],
+        description:
+          'Hooks that execute when a watched file is added, changed, or deleted in a local session.',
+        showInDialog: false,
+        mergeStrategy: MergeStrategy.CONCAT,
+        items: HOOK_DEFINITION_ITEMS,
+      },
     },
   },
 
