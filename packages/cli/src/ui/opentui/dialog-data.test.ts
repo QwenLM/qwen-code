@@ -1101,6 +1101,11 @@ describe('permissions data and mutations', () => {
           type: 'deny',
           scope: 'session',
         },
+        {
+          rule: { raw: 'Bash(docker *', toolName: 'Bash', invalid: true },
+          type: 'deny',
+          scope: 'user',
+        },
       ],
       addPersistentRule,
       removePersistentRule,
@@ -1121,6 +1126,13 @@ describe('permissions data and mutations', () => {
     expect(data.rules).toEqual([
       { raw: 'Bash(git *)', toolName: 'Bash', type: 'allow', scope: 'user' },
       { raw: 'Write', toolName: 'Write', type: 'deny', scope: 'session' },
+      {
+        raw: 'Bash(docker *',
+        toolName: 'Bash',
+        type: 'deny',
+        scope: 'user',
+        invalid: true,
+      },
     ]);
     expect(data.directories).toEqual(['/workspace/a']);
     expect(data.initialDirectories).toEqual(['/workspace/a']);

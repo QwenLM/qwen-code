@@ -2741,14 +2741,14 @@ describe('PermissionManager', () => {
       expect(sessionAllowRules(pm)).toHaveLength(1);
     });
 
-    it('malformed session allow rule is silently ignored', async () => {
+    it('malformed session allow rule does not match', async () => {
       pm.addSessionAllowRule('Bash(git commit');
       // 'git commit' is not readonly, so default is 'ask'.
       // The malformed rule must not act as catch-all allow.
       expect(await pm.evaluate(sh('git commit'))).toBe('ask');
     });
 
-    it('malformed session deny rule is silently ignored', async () => {
+    it('malformed session deny rule does not match', async () => {
       pm.addSessionDenyRule('Bash(rm -rf /)*');
       // Should NOT deny — the malformed rule must not act as catch-all
       expect(await pm.evaluate(sh('git status'))).not.toBe('deny');
@@ -2804,15 +2804,83 @@ describe('PermissionManager', () => {
       expect(sessionAllow?.rule.toolName).toBe('run_shell_command');
     });
 
-    it('excludes malformed rules from listing', async () => {
+    it('includes malformed rules in listing as not applied', async () => {
       pm = makePm({
         permissionsAllow: ['ReadFileTool'],
         permissionsDeny: ['Bash(rm -rf /)*'],
       });
 
       const rules = pm.listRules();
-      expect(rules.length).toBe(1);
-      expect(rules[0]!.rule.toolName).toBe('read_file');
+      expect(rules.length).toBe(2);
+      expect(rules[0]!.rule.toolName).toBe('run_shell_command');
+      expect(rules[0]!.rule.invalid).toBe(true);
+      expect(rules[1]!.rule.toolName).toBe('read_file');
+    });
+  });
+
+  describe('malformed rule warnings', () => {
+    // Owns its own manager: these must run standalone as well as in order,
+    // so nothing here may lean on a fixture a neighbouring test left behind.
+    it('warns on every malformed rule ingestion path', () => {
+      const manager = makePm();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        parseRules(['Bash(git *']);
+        manager.addSessionAllowRule('Bash(git *');
+        manager.addSessionDenyRule('Bash(git *');
+        manager.addSessionAskRule('Bash(git *');
+        manager.addPersistentRule('Bash(git *', 'deny');
+
+        expect(warn).toHaveBeenCalledTimes(5);
+        expect(warn.mock.calls.map(([message]) => message)).toEqual([
+          expect.stringContaining(
+            'malformed rule (unbalanced parentheses): Bash(git *',
+          ),
+          expect.stringContaining(
+            'malformed allow rule (unbalanced parentheses): Bash(git *',
+          ),
+          expect.stringContaining(
+            'malformed deny rule (unbalanced parentheses): Bash(git *',
+          ),
+          expect.stringContaining(
+            'malformed ask rule (unbalanced parentheses): Bash(git *',
+          ),
+          expect.stringContaining(
+            'malformed deny rule (unbalanced parentheses): Bash(git *',
+          ),
+        ]);
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
+    // The raw rule reaches the operator's terminal through this warning, and
+    // it arrives from settings files and from tool calls, so escapes in it
+    // must not survive into the message.
+    it('strips terminal escapes before printing', () => {
+      // A raw rule the way a hostile settings file would carry it: unbalanced,
+      // with a screen-clear and a BEL riding along.
+      const esc = String.fromCharCode(27);
+      const bel = String.fromCharCode(7);
+      const rawWithEscapes = `Bash(git *${esc}[2J${bel}`;
+      const manager = makePm();
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        // Both ingestion routes on purpose: the parser and the manager have to
+        // share one escaping printer rather than each rolling its own.
+        parseRules([rawWithEscapes]);
+        manager.addSessionDenyRule(rawWithEscapes);
+        expect(warn).toHaveBeenCalledTimes(2);
+        for (const [message] of warn.mock.calls) {
+          expect(String(message)).toContain('Bash(git *');
+          expect(String(message)).not.toContain(esc);
+          expect(String(message)).not.toContain(bel);
+          // eslint-disable-next-line no-control-regex
+          expect(String(message)).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+        }
+      } finally {
+        warn.mockRestore();
+      }
     });
   });
 

@@ -11,6 +11,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as nodePath from 'node:path';
 import { theme } from '../semantic-colors.js';
+import { stripUnsafeCharacters } from '../utils/textUtils.js';
 import { useKeypress } from '../hooks/useKeypress.js';
 import { RadioButtonSelect } from './shared/RadioButtonSelect.js';
 import { useConfig } from '../contexts/ConfigContext.js';
@@ -429,7 +430,13 @@ export function PermissionsDialog({
     ];
     for (const r of filteredRules) {
       items.push({
-        label: `${r.rule.raw}`,
+        // The badge leads the row: both renderers clip the label from the
+        // tail, so a trailing badge disappears on a long rule and the row
+        // then reads as a rule in force, which is what the badge is here to
+        // prevent.
+        label: r.rule.invalid
+          ? `${t('(invalid: not applied)')} ${r.rule.raw}`
+          : r.rule.raw,
         value: r.rule.raw,
         key: `${r.type}-${r.scope}-${r.rule.raw}`,
       });
@@ -897,9 +904,9 @@ export function PermissionsDialog({
           </Text>
           <Box height={1} />
           <Box marginLeft={2} flexDirection="column">
-            <Text bold>{deleteTarget.rule.raw}</Text>
+            <Text bold>{stripUnsafeCharacters(deleteTarget.rule.raw)}</Text>
             <Text color={theme.text.secondary}>
-              {describeRule(deleteTarget.rule.raw)}
+              {describeRule(stripUnsafeCharacters(deleteTarget.rule.raw))}
             </Text>
             <Text color={theme.text.secondary}>
               {scopeLabel(deleteTarget.scope)}

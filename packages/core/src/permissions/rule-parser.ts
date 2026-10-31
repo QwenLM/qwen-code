@@ -15,6 +15,7 @@ import {
   normalizeMcpToolName,
 } from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
+import { stripAnsiAndControl } from '../utils/textUtils.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -576,14 +577,20 @@ export function parseRule(raw: string): PermissionRule {
  * rule merely fails closed. `debugLogger.warn` reaches a file that is off in
  * default runs, so the same reason `tools.eager` reports its unusable entries
  * applies here.
+ *
+ * The raw rule is printed through `stripAnsiAndControl`: it arrives from
+ * settings files and from tool calls, so it is untrusted text headed for the
+ * operator's terminal.
  */
 export function warnDroppedPermissionRule(raw: string, kind?: string): void {
-  // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where a dropped rule would otherwise be invisible
-  console.warn(
+  const printable = stripAnsiAndControl(raw);
+  const message =
     `[permissions] ignoring malformed ${kind ? `${kind} ` : ''}rule ` +
-      `(unbalanced parentheses): ${raw} — it matches nothing, so it ` +
-      `protects nothing. Balance the parentheses to make it take effect.`,
-  );
+    `(unbalanced parentheses): ${printable} — it matches nothing, so it ` +
+    `protects nothing. Balance the parentheses to make it take effect.`;
+  debugLogger.warn(message);
+  // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where a dropped rule would otherwise be invisible
+  console.warn(message);
 }
 
 /**

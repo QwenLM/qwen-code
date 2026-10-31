@@ -1623,8 +1623,8 @@ export class PermissionManager {
   // ---------------------------------------------------------------------------
 
   /**
-   * Return all active rules with their types and scopes, suitable for
-   * display in the /permissions dialog.
+   * Return all parsed rules with their types and scopes, including invalid
+   * entries that must be marked as not applied in the /permissions dialog.
    */
   listRules(): RuleWithSource[] {
     const result: RuleWithSource[] = [];
@@ -1635,9 +1635,7 @@ export class PermissionManager {
       scope: RuleScope,
     ) => {
       for (const rule of rules) {
-        if (!rule.invalid) {
-          result.push({ rule, type, scope });
-        }
+        result.push({ rule, type, scope });
       }
     };
 
