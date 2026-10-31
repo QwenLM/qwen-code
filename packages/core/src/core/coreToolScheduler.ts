@@ -75,6 +75,7 @@ import type { PostToolBatchToolCall } from '../hooks/types.js';
 import type { MessageBus } from '../confirmation-bus/message-bus.js';
 import {
   COMBINED_PASS_TOLERANCE_FACTOR,
+  contextAwareTruncateThreshold,
   truncateLlmContent,
   truncateToolOutput,
   TOOL_OUTPUT_TRUNCATED_PREFIX,
@@ -6944,13 +6945,25 @@ export class CoreToolScheduler {
         const perToolLines =
           perToolMax !== undefined ? Number.POSITIVE_INFINITY : undefined;
         const promptIdForTruncation = scheduledCall.request.prompt_id;
+        // Tighten the global char budget to the space actually left in the
+        // context window, so a near-full conversation cannot leave the model
+        // too little room to answer and surface a hard stream error. Per-tool
+        // budgets are left exactly as the tool declared them.
+        const contextAwareBase = contextAwareTruncateThreshold(
+          this.config,
+          this.config.getTruncateToolOutputThreshold(),
+        );
         try {
           const contentBeforeTruncation = content;
           const truncated = await truncateLlmContent(
             this.config,
             toolName,
             content,
-            { threshold: perToolMax, lines: perToolLines, keep: perToolKeep },
+            {
+              threshold: perToolMax ?? contextAwareBase,
+              lines: perToolLines,
+              keep: perToolKeep,
+            },
             promptIdForTruncation,
             scheduledCall.request.callId,
           );
@@ -7000,8 +7013,7 @@ export class CoreToolScheduler {
           typeof content === 'string' &&
           !content.startsWith(TOOL_OUTPUT_TRUNCATED_PREFIX)
         ) {
-          const baseThreshold =
-            perToolMax ?? this.config.getTruncateToolOutputThreshold();
+          const baseThreshold = perToolMax ?? contextAwareBase;
           // Match the first pass's char-only semantics for per-tool budgets;
           // only the global path keeps a (doubled) line cap.
           const combinedLines =
