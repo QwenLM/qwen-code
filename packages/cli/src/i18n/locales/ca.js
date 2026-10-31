@@ -1918,6 +1918,8 @@ export default {
   'System prompt': 'Missatge del sistema',
   'Built-in tools': 'Eines integrades',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Fitxers d’instruccions',
+  'Auto memory': 'Memòria automàtica',
   'Memory files': 'Fitxers de memòria',
   Skills: 'Habilitats',
   Messages: 'Missatges',

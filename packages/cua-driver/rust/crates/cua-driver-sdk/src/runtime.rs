@@ -25,6 +25,33 @@ use std::sync::{
 
 const RECORDING_IDLE_TTL_SECS_DEFAULT: u64 = 300;
 const SESSION_IDLE_TTL_SECS_DEFAULT: u64 = 300;
+thread_local! {
+    static NATIVE_UI_HOST_AVAILABLE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+pub(crate) fn set_native_ui_host_available(available: bool) -> bool {
+    NATIVE_UI_HOST_AVAILABLE.with(|host| host.replace(available))
+}
+
+fn native_ui_host_available() -> bool {
+    !cfg!(target_os = "macos") || NATIVE_UI_HOST_AVAILABLE.with(std::cell::Cell::get)
+}
+#[cfg(target_os = "macos")]
+static ACTIVE_UI_RUNTIMES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+pub(crate) fn native_ui_needs_pump() -> bool {
+    #[cfg(target_os = "macos")]
+    return ACTIVE_UI_RUNTIMES.load(Ordering::Acquire) != 0;
+    #[cfg(not(target_os = "macos"))]
+    false
+}
+
+#[cfg(target_os = "macos")]
+async fn finish_ui_lease() -> Result<(), String> {
+    platform_macos::cursor::overlay::flush_on_main_thread().await?;
+    ACTIVE_UI_RUNTIMES.fetch_sub(1, Ordering::AcqRel);
+    Ok(())
+}
 #[cfg(test)]
 pub(crate) static TEST_RUNTIME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
@@ -63,15 +90,14 @@ pub(crate) struct RuntimeOptions {
 
 impl RuntimeOptions {
     pub(crate) fn embedded(compatibility_mode: bool) -> Self {
+        let mut cursor = CursorConfig::from_args();
+        cursor.enabled &= native_ui_host_available();
         Self {
-            cursor: CursorConfig {
-                enabled: false,
-                ..CursorConfig::default()
-            },
+            cursor,
             host_owns_permission_ux: true,
             host_bundle_id: None,
             compatibility_mode,
-            prepare_desktop_environment: true,
+            prepare_desktop_environment: native_ui_host_available(),
             register_host_tools: None,
             authorization_ceiling: None,
             compatibility_authorization: None,
@@ -157,11 +183,13 @@ pub(crate) struct DriverRuntime {
     authorization_registry: Arc<SessionAuthorizationRegistry>,
     compatibility_context: Arc<EffectiveAuthorizationContext>,
     shutdown: AtomicBool,
+    #[cfg(target_os = "macos")]
+    ui_active: AtomicBool,
     last_activity: AtomicU64,
     /// Calls hold a read guard; shutdown takes the write guard after closing
     /// admission. Therefore shutdown is idempotent and does not return while a
     /// previously admitted operation is still executing.
-    lifecycle: tokio::sync::RwLock<()>,
+    lifecycle: Arc<tokio::sync::RwLock<()>>,
     activity_observer: Option<Arc<dyn DriverActivityObserver>>,
 }
 
@@ -191,13 +219,22 @@ impl DriverRuntime {
             || build_registry(&options),
         ));
         registry.init_self_weak();
+        #[cfg(target_os = "macos")]
+        let ui_active = registry.preview_enabled()
+            || (options.cursor.enabled && platform_macos::cursor::overlay::is_started());
+        #[cfg(target_os = "macos")]
+        if ui_active {
+            ACTIVE_UI_RUNTIMES.fetch_add(1, Ordering::AcqRel);
+        }
         let runtime = Arc::new(Self {
             registry,
             authorization_registry,
             compatibility_context,
             shutdown: AtomicBool::new(false),
+            #[cfg(target_os = "macos")]
+            ui_active: AtomicBool::new(ui_active),
             last_activity: AtomicU64::new(now_unix_secs()),
-            lifecycle: tokio::sync::RwLock::new(()),
+            lifecycle: Arc::new(tokio::sync::RwLock::new(())),
             activity_observer: options.activity_observer.clone(),
         });
         spawn_lifecycle_maintenance(&runtime);
@@ -212,7 +249,7 @@ impl DriverRuntime {
         self.compatibility_context.runtime_scope_key()
     }
 
-    pub(crate) async fn shutdown(&self) {
+    pub(crate) async fn shutdown(&self) -> Result<(), String> {
         self.shutdown.store(true, Ordering::Release);
         let _drained = self.lifecycle.write().await;
         self.authorization_registry.revoke_all();
@@ -229,19 +266,34 @@ impl DriverRuntime {
             .clear_runtime_scope(&self.compatibility_context.runtime_scope_key());
         let recording = self.registry.recording.clone();
         let _ = tokio::task::spawn_blocking(move || recording.stop_owner(None)).await;
+        cua_driver_core::pip_hook::remove_runtime(&runtime_prefix);
+        #[cfg(target_os = "macos")]
+        platform_macos::pip::flush_runtime(&runtime_prefix)
+            .await
+            .map_err(|error| error.to_string())?;
+        #[cfg(target_os = "macos")]
+        if self.ui_active.load(Ordering::Acquire) {
+            finish_ui_lease().await?;
+            self.ui_active.store(false, Ordering::Release);
+        }
+        Ok(())
     }
 
     pub(crate) fn tools_list(&self) -> Option<Value> {
         self.is_running().then(|| self.registry.tools_list())
     }
 
-    pub(crate) async fn invoke(&self, name: &str, args: Value) -> Option<CoreToolResult> {
+    pub(crate) async fn invoke(
+        self: &Arc<Self>,
+        name: &str,
+        args: Value,
+    ) -> Option<CoreToolResult> {
         self.invoke_with_context(name, args, self.compatibility_context.clone())
             .await
     }
 
     pub(crate) async fn invoke_from_trusted_adapter(
-        &self,
+        self: &Arc<Self>,
         name: &str,
         mut args: Value,
     ) -> Option<CoreToolResult> {
@@ -257,7 +309,7 @@ impl DriverRuntime {
     }
 
     async fn invoke_with_context(
-        &self,
+        self: &Arc<Self>,
         name: &str,
         args: Value,
         context: Arc<EffectiveAuthorizationContext>,
@@ -272,7 +324,7 @@ impl DriverRuntime {
     }
 
     async fn invoke_with_context_and_evidence(
-        &self,
+        self: &Arc<Self>,
         name: &str,
         args: Value,
         context: Arc<EffectiveAuthorizationContext>,
@@ -282,7 +334,7 @@ impl DriverRuntime {
             return None;
         }
         self.last_activity.store(now_unix_secs(), Ordering::Relaxed);
-        let _operation = self.lifecycle.read().await;
+        let operation = self.lifecycle.clone().read_owned().await;
         if !self.is_running() {
             return None;
         }
@@ -303,9 +355,10 @@ impl DriverRuntime {
             .into_iter()
             .map(|adapter| adapter.id.to_owned())
             .collect::<Vec<_>>();
+        let evidence = evidence.with_runtime_operation((self.clone(), operation));
         let result = self
             .registry
-            .invoke_with_context_and_evidence(name, args, context, evidence)
+            .invoke_with_context_and_evidence(name, args, context, evidence.clone())
             .await;
         if let Some(observer) = self.activity_observer.as_ref() {
             let refusal_code = result
@@ -430,6 +483,30 @@ impl Drop for DriverRuntime {
         let runtime_scope = self.compatibility_context.runtime_scope_key();
         let runtime_prefix = format!("__cua_runtime_{runtime_scope}:");
         cua_driver_core::session::revoke_sessions_with_prefix(&runtime_prefix);
+        cua_driver_core::pip_hook::remove_runtime(&runtime_prefix);
+        #[cfg(target_os = "macos")]
+        if self.ui_active.swap(false, Ordering::AcqRel) {
+            let ui_prefix = runtime_prefix.clone();
+            std::thread::spawn(move || {
+                match tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build()
+                {
+                    Ok(executor) => executor.block_on(async {
+                        if let Err(error) = platform_macos::pip::flush_runtime(&ui_prefix).await {
+                            tracing::warn!("window preview did not finish cleanup: {error}");
+                            return;
+                        }
+                        if let Err(error) = finish_ui_lease().await {
+                            tracing::warn!("native UI cleanup did not complete: {error}");
+                        }
+                    }),
+                    Err(error) => {
+                        tracing::warn!("native UI cleanup executor unavailable: {error}");
+                    }
+                }
+            });
+        }
         cua_driver_core::session::forget_ended_sessions_with_prefix(&runtime_prefix);
         cua_driver_core::session::forget_suspended_runtime_scope(&runtime_scope);
         cua_driver_core::element_token::global().clear_runtime_scope(&runtime_scope);
@@ -521,13 +598,25 @@ fn build_registry(options: &RuntimeOptions) -> ToolRegistry {
     #[cfg(target_os = "macos")]
     let mut registry = {
         configure_macos_runtime();
-        platform_macos::register_tools_with_cursor_and_provider(
+        let mut registry = platform_macos::register_tools_with_cursor_and_provider(
             options.authorization_host.clone(),
             options.cursor.clone(),
             options.compatibility_mode,
             options.host_owns_permission_ux,
             options.host_bundle_id.clone(),
-        )
+        );
+        if options.prepare_desktop_environment && platform_macos::session::has_graphic_access() {
+            let config = pip_preview::default_config_path()
+                .map(|path| pip_preview::PipConfig::from_args_and_file(&path))
+                .unwrap_or_else(pip_preview::PipConfig::from_args);
+            if config.enabled {
+                match platform_macos::pip::initialize(&config) {
+                    Ok(()) => registry.set_preview_enabled(true),
+                    Err(error) => tracing::debug!("window preview unavailable: {error}"),
+                }
+            }
+        }
+        registry
     };
 
     #[cfg(target_os = "windows")]
@@ -662,6 +751,22 @@ mod tests {
     };
     use std::time::Duration;
 
+    #[test]
+    fn embedded_ui_requires_a_thread_local_host_on_macos() {
+        let previous = set_native_ui_host_available(false);
+        assert_eq!(
+            RuntimeOptions::embedded(false).cursor.enabled,
+            !cfg!(target_os = "macos")
+        );
+        assert!(!set_native_ui_host_available(true));
+        assert!(RuntimeOptions::embedded(false).cursor.enabled);
+        assert!(RuntimeOptions::embedded(false).prepare_desktop_environment);
+        assert!(set_native_ui_host_available(false));
+        let other_thread = std::thread::spawn(|| RuntimeOptions::embedded(false).cursor.enabled);
+        assert_eq!(other_thread.join().unwrap(), !cfg!(target_os = "macos"));
+        set_native_ui_host_available(previous);
+    }
+
     struct TestProtectedHost;
 
     #[async_trait]
@@ -737,7 +842,7 @@ mod tests {
             "continuous authorized traffic must refresh the private idle clock"
         );
 
-        runtime.shutdown().await;
+        runtime.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -785,7 +890,7 @@ mod tests {
             "session-end hook must finalize recording after idle eviction"
         );
 
-        runtime.shutdown().await;
+        runtime.shutdown().await.unwrap();
     }
 
     #[tokio::test]
@@ -863,6 +968,106 @@ mod tests {
             Some("authorization_revoked")
         );
 
-        runtime.shutdown().await;
+        runtime.shutdown().await.unwrap();
+    }
+
+    struct PendingNativeTool {
+        release: std::sync::Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        finished: std::sync::mpsc::Sender<()>,
+    }
+
+    static PENDING_NATIVE_TOOL: std::sync::Mutex<Option<PendingNativeTool>> =
+        std::sync::Mutex::new(None);
+
+    #[async_trait]
+    impl cua_driver_core::tool::Tool for PendingNativeTool {
+        fn def(&self) -> &cua_driver_core::tool::ToolDef {
+            static DEF: std::sync::OnceLock<cua_driver_core::tool::ToolDef> =
+                std::sync::OnceLock::new();
+            DEF.get_or_init(|| cua_driver_core::tool::ToolDef {
+                name: "get_screen_size".into(),
+                description: "test-only native operation with an early ACK".into(),
+                input_schema: serde_json::json!({"type": "object"}),
+                read_only: true,
+                destructive: false,
+                idempotent: true,
+                open_world: false,
+            })
+        }
+
+        async fn invoke(&self, _args: Value) -> CoreToolResult {
+            let lifetime = cua_driver_core::tool::retain_dispatch_lifetime();
+            let release = self.release.lock().unwrap().take().unwrap();
+            let finished = self.finished.clone();
+            tokio::task::spawn_blocking(move || {
+                let _lifetime = lifetime;
+                release.recv().unwrap();
+                drop(_lifetime);
+                finished.send(()).unwrap();
+            });
+            CoreToolResult::text("pending native call; observe before retrying")
+        }
+    }
+
+    #[tokio::test]
+    async fn early_ack_retains_native_session_cleanup_and_runtime_drain() {
+        let _runtime_test = TEST_RUNTIME_LOCK.lock().unwrap();
+        let (release, receiver) = std::sync::mpsc::channel();
+        let (finished, completed) = std::sync::mpsc::channel();
+        *PENDING_NATIVE_TOOL.lock().unwrap() = Some(PendingNativeTool {
+            release: std::sync::Mutex::new(Some(receiver)),
+            finished,
+        });
+        let mut options = standard_options();
+        options.register_host_tools = Some(|registry| {
+            registry.register(Box::new(
+                PENDING_NATIVE_TOOL.lock().unwrap().take().unwrap(),
+            ));
+        });
+        let runtime = DriverRuntime::create(options).unwrap();
+        let public = "early-native-ack";
+        let internal = runtime.compatibility_context.runtime_session_key(public);
+        let cleanup_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let cleanup_count_for_hook = cleanup_count.clone();
+        let _hook = cua_driver_core::session::register_scoped_session_end_hook(move |id| {
+            if id == internal {
+                cleanup_count_for_hook.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let result = runtime
+            .invoke("get_screen_size", serde_json::json!({"session": public}))
+            .await
+            .unwrap();
+        assert_ne!(result.is_error, Some(true), "{result:?}");
+        runtime
+            .invoke("end_session", serde_json::json!({"session": public}))
+            .await
+            .unwrap();
+        let cleanup_before_native_return = cleanup_count.load(Ordering::SeqCst);
+        let mut shutdown = Box::pin(runtime.shutdown());
+        let shutdown_returned_early =
+            tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+                .await
+                .is_ok();
+        release.send(()).unwrap();
+        tokio::task::spawn_blocking(move || {
+            completed.recv_timeout(Duration::from_secs(2)).unwrap()
+        })
+        .await
+        .unwrap();
+        if !shutdown_returned_early {
+            tokio::time::timeout(Duration::from_secs(2), shutdown)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            cleanup_before_native_return, 0,
+            "ACK must not finalize an in-flight native session"
+        );
+        assert!(
+            !shutdown_returned_early,
+            "shutdown must drain a native call that outlived its ACK"
+        );
+        assert_eq!(cleanup_count.load(Ordering::SeqCst), 1);
     }
 }

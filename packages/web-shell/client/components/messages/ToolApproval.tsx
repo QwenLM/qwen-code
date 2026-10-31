@@ -725,7 +725,10 @@ export function ToolApproval({
           {diffs.map((block, index) => (
             <div key={index}>
               <div>{block.path}</div>
-              <DiffView diff={block.diff} />
+              <DiffView
+                diff={block.diff}
+                fillScrollRegion={variant === 'floating'}
+              />
             </div>
           ))}
         </div>

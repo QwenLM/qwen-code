@@ -12,6 +12,7 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import type { DaemonContextMemoryDetail } from '@qwen-code/web-shell/daemon-react-sdk';
 import { CompactModeContext } from '../WebShellContexts';
 import type {
   WebShellAssistantFeedbackRating,
@@ -53,6 +54,11 @@ interface MessageItemProps {
   pendingApproval?: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Open a context instruction file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   onLocateBackgroundSource?: (messageId: string, callId?: string) => boolean;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
@@ -105,6 +111,7 @@ export const MessageItem = memo(function MessageItem({
   message,
   pendingApproval,
   onShowContextDetail,
+  onOpenMemoryFile,
   onLocateBackgroundSource,
   onImagePreview,
   onAttachmentPreview,
@@ -305,6 +312,7 @@ export const MessageItem = memo(function MessageItem({
             images={message.images}
             files={message.files}
             onShowContextDetail={onShowContextDetail}
+            onOpenMemoryFile={onOpenMemoryFile}
             onLocateBackgroundSource={onLocateBackgroundSource}
             onImagePreview={onImagePreview}
             onAttachmentPreview={onAttachmentPreview}
@@ -483,6 +491,7 @@ function areMessageItemPropsEqual(
 ): boolean {
   if (prev.pendingApproval?.id !== next.pendingApproval?.id) return false;
   if (prev.onShowContextDetail !== next.onShowContextDetail) return false;
+  if (prev.onOpenMemoryFile !== next.onOpenMemoryFile) return false;
   if (prev.onLocateBackgroundSource !== next.onLocateBackgroundSource)
     return false;
   if (prev.onImagePreview !== next.onImagePreview) return false;
