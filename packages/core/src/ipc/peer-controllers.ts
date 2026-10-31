@@ -110,11 +110,18 @@ const MAX_REGISTRY_BYTES = 64 * 1024;
 const REGISTRY_FILE_MODE = 0o600;
 const REGISTRY_DIRECTORY_MODE = 0o700;
 
+// A writer waits about 8 s for another process's lock, so it outlasts a
+// lock left by a crashed holder and takes it over instead of failing
+// (#15991). The holder refreshes the lock's mtime every `stale / 2`, but
+// proper-lockfile stamps a process's first lock up to 1 s in the future
+// while it probes mtime precision, so a dead holder's lock can take
+// `stale` + 1 s to go stale. The back-off reaches `maxTimeout` after five
+// retries; 84 retries sleep 8.05–8.15 s in total.
 const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,
   stale: 5000,
   retries: {
-    retries: 10,
+    retries: 84,
     minTimeout: 5,
     maxTimeout: 100,
     factor: 2,

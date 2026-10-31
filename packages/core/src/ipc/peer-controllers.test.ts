@@ -208,6 +208,38 @@ describe('addPeerController', () => {
     }
   });
 
+  it('waits out a lock that a crashed process left behind', async () => {
+    // #15991: the wait used to end after about 0.7 s, long before a dead
+    // holder's lock goes stale (5 s), so the next writer failed. This lock
+    // was last refreshed 3 s ago and goes stale in about 2 s.
+    const lockDir = `${registryPath}.lock`;
+    await fs.mkdir(lockDir);
+    const lastRefresh = new Date(Date.now() - 3000);
+    await fs.utimes(lockDir, lastRefresh, lastRefresh);
+    const lockSpy = vi.spyOn(lockfile, 'lock');
+    try {
+      const added = await add('voice');
+      expect((await readRaw()).controllers).toEqual([added.record]);
+
+      // A lock stamped just before the crash can take `stale` plus 1 s to
+      // go stale: proper-lockfile stamps a process's first lock up to 1 s
+      // ahead. Even the shortest back-off (no jitter) must outlast that.
+      const { stale, retries } = lockSpy.mock.calls[0][1]!;
+      const backoff = retries as Record<
+        'retries' | 'minTimeout' | 'maxTimeout' | 'factor',
+        number
+      >;
+      let shortestWait = 0;
+      for (let attempt = 0; attempt < backoff.retries; attempt++) {
+        const delay = backoff.minTimeout * backoff.factor ** attempt;
+        shortestWait += Math.min(delay, backoff.maxTimeout);
+      }
+      expect(shortestWait).toBeGreaterThan(stale! + 1000);
+    } finally {
+      lockSpy.mockRestore();
+    }
+  });
+
   it('completes a write after a stale-lock takeover', async () => {
     const { lockSpy, getOnCompromised } = mockCompromisedLock();
     try {
