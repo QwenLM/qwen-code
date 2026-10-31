@@ -1303,10 +1303,32 @@ describe('glued redirect operators (#12280 R8-5)', () => {
   });
 
   it('splits a glued redirect after a read operand', () => {
-    expectSorted('cat /etc/shadow>/tmp/x', [read('/etc/shadow'), write('/tmp/x')]);
+    expectSorted('cat /etc/shadow>/tmp/x', [
+      read('/etc/shadow'),
+      write('/tmp/x'),
+    ]);
   });
 
   it('still treats a bare fd prefix as an fd, not an operand', () => {
     expectSorted('cat foo 2>&1', [read('/home/user/project/foo')]);
   });
+});
+
+describe('R9 review round: continuation and substitution word boundaries', () => {
+  it('does not turn a trailing continuation backslash into a cd operand', () => {
+    const command = ['cd .qwen \\', '&& echo {} > settings.json'].join('\n');
+    expect(across(command)).toEqual([write(REPO_SETTINGS)]);
+  });
+
+  it.each(['$(echo a)', '$((1 + 1))', '<(printf x)', '>(cat)'])(
+    'keeps a comment marker glued to a substitution in the same word: %s',
+    (substitution) => {
+      const command = [`echo ${substitution}#x\\`, 'cd .. ; echo hi > f'].join(
+        '\n',
+      );
+      expect(extractShellOperationsAcrossCommand(command, '/repo/sub')).toEqual(
+        [write('/repo/sub/f')],
+      );
+    },
+  );
 });

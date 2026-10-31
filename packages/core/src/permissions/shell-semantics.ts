@@ -120,6 +120,7 @@ function tokenizeDetailed(command: string): ShellToken[] {
   let bare = true;
   let bareChars: boolean[] = [];
   let trailingSyntax = false;
+  let sawQuotedContent = false;
   let inSingle = false;
   let inDouble = false;
   let escaped = false;
@@ -141,6 +142,7 @@ function tokenizeDetailed(command: string): ShellToken[] {
     if (escaped) {
       current += ch;
       bareChars.push(false);
+      sawQuotedContent = true;
       trailingSyntax = false;
       escaped = false;
       continue;
@@ -154,25 +156,36 @@ function tokenizeDetailed(command: string): ShellToken[] {
     if (ch === "'" && !inDouble) {
       inSingle = !inSingle;
       bare = false;
+      sawQuotedContent = true;
       trailingSyntax = true;
       continue;
     }
     if (ch === '"' && !inSingle) {
       inDouble = !inDouble;
       bare = false;
+      sawQuotedContent = true;
       trailingSyntax = true;
       continue;
     }
     if (!inSingle && !inDouble && (ch === ' ' || ch === '\t')) {
-      pushToken(tokens, current, bare, bareChars, trailingSyntax, {
-        unquotedGlob,
-        quotedTilde,
-        unquotedSyntax,
-      });
+      pushToken(
+        tokens,
+        current,
+        bare,
+        bareChars,
+        trailingSyntax,
+        sawQuotedContent,
+        {
+          unquotedGlob,
+          quotedTilde,
+          unquotedSyntax,
+        },
+      );
       current = '';
       bare = true;
       bareChars = [];
       trailingSyntax = false;
+      sawQuotedContent = false;
       unquotedGlob = false;
       quotedTilde = false;
       unquotedSyntax = false;
@@ -182,11 +195,19 @@ function tokenizeDetailed(command: string): ShellToken[] {
     bareChars.push(!inSingle && !inDouble);
     trailingSyntax = false;
   }
-  pushToken(tokens, current, bare, bareChars, trailingSyntax, {
-    unquotedGlob,
-    quotedTilde,
-    unquotedSyntax,
-  });
+  pushToken(
+    tokens,
+    current,
+    bare,
+    bareChars,
+    trailingSyntax,
+    sawQuotedContent,
+    {
+      unquotedGlob,
+      quotedTilde,
+      unquotedSyntax,
+    },
+  );
   return tokens;
 }
 
@@ -196,6 +217,7 @@ function pushToken(
   bare: boolean,
   bareChars: boolean[],
   trailingSyntax: boolean,
+  sawQuotedContent: boolean,
   provenance: TokenProvenance,
 ): void {
   const normalized = trimShellSyntax(token, bareChars);
@@ -211,10 +233,10 @@ function pushToken(
     leadTrim,
     leadTrim + normalized.length,
   );
-  // A word that quotes away to nothing (`''`) is still a word: bash counts it
-  // as an operand and `cd ''` errors without moving the cwd, so erasing it
-  // would under-count the operands (#12280 R3-2).
-  if (normalized || !bare) {
+  // Empty quotes still form an operand (`cd ''` fails without moving), but a
+  // trailing backslash that consumed no character does not. Tracking actual
+  // quoted/escaped word syntax separately from `bare` keeps those states apart.
+  if (normalized || sawQuotedContent) {
     tokens.push({
       text: normalized,
       bare,
@@ -257,6 +279,42 @@ function tokenize(command: string): string[] {
   return tokenizeDetailed(command)
     .filter((token) => token.text !== '' && !isBareBrace(token))
     .map((token) => token.text);
+}
+
+/** Return the closing parenthesis of a shell substitution, or input length. */
+function findShellSubstitutionEnd(command: string, start: number): number {
+  let depth = 0;
+  let inSingle = false;
+  let inDouble = false;
+  let escaped = false;
+
+  for (let i = start + 1; i < command.length; i++) {
+    const ch = command[i]!;
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\' && !inSingle) {
+      escaped = true;
+      continue;
+    }
+    if (ch === "'" && !inDouble) {
+      inSingle = !inSingle;
+      continue;
+    }
+    if (ch === '"' && !inSingle) {
+      inDouble = !inDouble;
+      continue;
+    }
+    if (inSingle || inDouble) continue;
+    if (ch === '(') {
+      depth++;
+    } else if (ch === ')') {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return command.length;
 }
 
 /**
@@ -340,44 +398,18 @@ function cutShellCommentsAndProcessSubstitutions(command: string): string {
       wordStart = true;
       continue;
     }
-    if ((ch === '>' || ch === '<') && command[i + 1] === '(') {
-      let depth = 0;
-      let psSingle = false;
-      let psDouble = false;
-      let psEscaped = false;
-      let j = i + 1;
-      for (; j < command.length; j++) {
-        const c = command[j]!;
-        if (psEscaped) {
-          psEscaped = false;
-          continue;
-        }
-        if (c === '\\' && !psSingle) {
-          psEscaped = true;
-          continue;
-        }
-        if (c === "'" && !psDouble) {
-          psSingle = !psSingle;
-          continue;
-        }
-        if (c === '"' && !psSingle) {
-          psDouble = !psDouble;
-          continue;
-        }
-        if (psSingle || psDouble) continue;
-        if (c === '(') {
-          depth++;
-        } else if (c === ')') {
-          depth--;
-          if (depth === 0) break;
-        }
+    if ((ch === '$' || ch === '>' || ch === '<') && command[i + 1] === '(') {
+      const end = findShellSubstitutionEnd(command, i);
+      if (ch === '$') {
+        out += command.slice(i, end + 1);
+      } else {
+        // bash expands a process substitution to exactly one real word (an fd
+        // path), so erasing it under-counts the `cd` operands: `cd backup
+        // >(tee log)` fails with too many arguments and never moves the cwd
+        // (#12280 R2-1).
+        out += ' /dev/fd/63';
       }
-      // bash expands a process substitution to exactly one real word (an fd
-      // path), so erasing it under-counts the `cd` operands: `cd backup
-      // >(tee log)` fails with too many arguments and never moves the cwd
-      // (#12280 R2-1).
-      out += ' /dev/fd/63';
-      i = j;
+      i = end;
       wordStart = false;
       continue;
     }
@@ -440,6 +472,14 @@ function dropCommentContinuationBackslashes(command: string): string {
     }
     if (inSingle || inDouble) {
       out += ch;
+      continue;
+    }
+
+    if ((ch === '$' || ch === '>' || ch === '<') && command[i + 1] === '(') {
+      const end = findShellSubstitutionEnd(command, i);
+      out += command.slice(i, end + 1);
+      i = end;
+      wordStart = false;
       continue;
     }
 
