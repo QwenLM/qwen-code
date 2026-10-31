@@ -5,6 +5,7 @@ const baseURL =
   process.env['PLAYWRIGHT_BASE_URL'] ?? `http://127.0.0.1:${port}`;
 
 export default defineConfig({
+  tsconfig: './tsconfig.json',
   testDir: './client/e2e',
   // The visuals suite (screenshot/video capture) runs under its own
   // playwright.visuals.config.ts; keep it out of the smoke/e2e runs.
