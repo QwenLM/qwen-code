@@ -197,6 +197,173 @@ describe('sedEditParser', () => {
     expect(applySed("sed -i 's/a$-/X/g' file.txt", 'a$- a')).toBe('X a');
   });
 
+  // GNU sed anchors ^ right after \( or \|, and $ right before \) or \|
+  // (escaped or raw). Measured against GNU sed 4.9: s/\(^foo\)/Z/ on
+  // "xxfoo\nfoo\n" writes "xxfoo\nZ\n", and s/\(foo$\)/Z/ writes
+  // "xxZ\nZ\nfoobar\n". A live anchor that shares an alternation is declined
+  // below: JavaScript's leftmost-first choice is not POSIX leftmost-longest.
+  it('anchors BRE ^ and $ at group boundaries', () => {
+    expect(applySed("sed -i 's/\\(^foo\\)/Z/' f.txt", 'xxfoo\nfoo\n')).toBe(
+      'xxfoo\nZ\n',
+    );
+    expect(
+      applySed("sed -i 's/\\(foo$\\)/Z/' f.txt", 'xxfoo\nfoo\nfoobar\n'),
+    ).toBe('xxZ\nZ\nfoobar\n');
+    expect(
+      applySed("sed -i 's/\\(^foo$\\)/Z/' f.txt", 'foo\nfoobar\nxfoo\n'),
+    ).toBe('Z\nfoobar\nxfoo\n');
+    // ^ that is not the first character of the group stays a literal.
+    expect(applySed("sed -i 's/\\(a^b\\)/X/' f.txt", 'a^b\n')).toBe('X\n');
+    // An even run of backslashes is a literal \, so "(^" is not a group.
+    expect(applySed("sed -i 's/\\\\(^/X/' f.txt", 'a\\(^b\n(^b\n')).toBe(
+      'aXb\n(^b\n',
+    );
+    // The same even run before | keeps "^" literal (pattern a\\|^b).
+    expect(applySed("sed -i 's/a\\\\|^b/X/' f.txt", 'a\\|^b\n')).toBe('X\n');
+    // Same-length branches still agree with sed when ^ sits outside them.
+    expect(
+      applySed("sed -i 's/^foo\\(a\\|b\\)/Z/' f.txt", 'fooa\nfoob\nxfooa\n'),
+    ).toBe('Z\nZ\nxfooa\n');
+  });
+
+  it('declines a live anchor inside an alternation', () => {
+    expect(
+      parseSedEditCommand("sed -i 's/\\(foo$\\|^bar\\)/Z/' f.txt"),
+    ).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/foo\\|^bar/Z/' f.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/foo$\\|bar/Z/' f.txt")).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^\\|TODO\\)/DONE/g' f.txt"),
+    ).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/\\(^a\\|ab\\)/X/' f.txt")).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^ab\\|abc\\)/X/' f.txt"),
+    ).toBeNull();
+    // The anchor sits in a nested group that is itself a branch.
+    expect(
+      parseSedEditCommand("sed -i 's/\\(\\(^a\\)\\|ab\\)/X/' f.txt"),
+    ).toBeNull();
+    // ERE: ^a matches one character and ab matches two, so "ab" diverges.
+    expect(parseSedEditCommand("sed -E -i 's/^a|ab/X/' f.txt")).toBeNull();
+  });
+
+  // Prefix-overlapping branches disagree even when the anchor is outside
+  // the group, and even with no anchor at all. Equal-length branches do not.
+  it('declines overlapping alternation branches', () => {
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\(b\\|bc\\)\\)/X/' f.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^foo\\(b\\|bar\\)\\)/X/' f.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/^foo\\(a\\|ab\\)/Z/' f.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/foo\\(a\\|ab\\)/Z/' f.txt"),
+    ).toBeNull();
+    expect(parseSedEditCommand("sed -E -i 's/(^a(b|bc))/X/' f.txt")).toBeNull();
+  });
+
+  it('simulates equal-length alternation branches', () => {
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\(b\\|c\\)\\)/X/' f.txt"),
+    ).not.toBeNull();
+    expect(applySed("sed -i 's/\\(^a\\(b\\|c\\)\\)/X/' f.txt", 'abc\n')).toBe(
+      'Xc\n',
+    );
+    expect(
+      parseSedEditCommand("sed -E -i 's/^foo(a|b)/Z/' f.txt"),
+    ).not.toBeNull();
+    expect(
+      applySed("sed -E -i 's/^foo(a|b)/Z/' f.txt", 'fooa\nfoob\nxfooa\n'),
+    ).toBe('Z\nZ\nxfooa\n');
+  });
+
+  // GNU sed 4.9 leaves "aa" unchanged for \{1,2\}, \{1,\}, \{0,2\}, and \+,
+  // and rewrites both * and \{0,\} as Xa on "aa" (XaX with /g). A nested
+  // group keeps the anchor: \(\(^a\)\)\{1,2\} stays "aa", while * rewrites Xa.
+  it('declines an anchored group closed by an unsafe quantifier', () => {
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^#\\)\\{1,2\\} */# /' a.ts"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)\\{1,2\\}/X/' a.ts"),
+    ).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/\\(^a\\)\\+/X/' a.ts")).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/\\(^a\\)*/X/' a.ts")).not.toBeNull();
+    expect(applySed("sed -i 's/\\(^a\\)*/X/' a.ts", 'aa\n')).toBe('Xa\n');
+    expect(applySed("sed -i 's/\\(^a\\)*/X/' a.ts", '\n')).toBe('X\n');
+    expect(applySed("sed -i 's/\\(^a\\)*/X/' a.ts", 'ba\n')).toBe('Xba\n');
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)\\{0,\\}/X/' a.ts"),
+    ).not.toBeNull();
+    expect(applySed("sed -i 's/\\(^a\\)\\{0,\\}/X/' a.ts", 'aa\n')).toBe(
+      'Xa\n',
+    );
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)\\{1,\\}/X/' a.ts"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)\\{0,2\\}/X/' a.ts"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(\\(^a\\)\\)\\{1,2\\}/X/' a.ts"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(\\(^a\\)\\)*/X/' a.ts"),
+    ).not.toBeNull();
+    expect(applySed("sed -i 's/\\(\\(^a\\)\\)*/X/' a.ts", 'aa\n')).toBe('Xa\n');
+    // No quantifier after the group: GNU sed 4.9 rewrites "ab" to "X".
+    expect(applySed("sed -i 's/\\(^a\\)*b/X/' a.ts", 'ab\n')).toBe('X\n');
+  });
+
+  // A zero-capable quantifier on an anchored group, followed by another
+  // quantifier, is leftmost-longest in GNU sed 4.9. JavaScript keeps a
+  // shorter match, so these are handed to real sed.
+  it('declines an anchored group with a zero quantifier before later quantified text', () => {
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)*\\(ab\\)*/X/' f.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)*\\(ab\\)\\?/X/' f.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)\\{0,1\\}\\(ab\\)*/X/' f.txt"),
+    ).toBeNull();
+    expect(
+      parseSedEditCommand("sed -i 's/\\(^a\\)\\{0,\\}\\(ab\\)*/X/' f.txt"),
+    ).toBeNull();
+  });
+
+  // GNU sed 4.9 anchors $ before a raw ) or | only when that marker is not
+  // the last character of the pattern. A final ) or | leaves $ literal.
+  it('anchors $ before a raw ) or |', () => {
+    expect(applySed("sed -i 's/\\(^foo$|bar\\)/Z/' f.txt", 'foo$|bar\n')).toBe(
+      'foo$|bar\n',
+    );
+    expect(applySed("sed -i 's/x$)y/Z/' f.txt", 'x$)y\n')).toBe('x$)y\n');
+    expect(applySed("sed -i 's/x$|y/Z/' f.txt", 'x$|y\n')).toBe('x$|y\n');
+    expect(applySed("sed -i 's/x$))/Z/' f.txt", 'x$))\n')).toBe('x$))\n');
+    expect(applySed("sed -i 's/x$)/Z/' f.txt", 'ax$)b\n')).toBe('aZb\n');
+    expect(applySed("sed -i 's/x$|/Z/' f.txt", 'ax$|b\n')).toBe('aZb\n');
+    expect(applySed("sed -i 's/x$)/Z/g' f.txt", 'ax$)b\n')).toBe('aZb\n');
+    expect(applySed("sed -i 's/x$|/Z/g' f.txt", 'ax$|b\n')).toBe('aZb\n');
+    expect(applySed("sed -i 's/(x$)/Z/g' f.txt", 'a(x$)b\n')).toBe('aZb\n');
+    expect(applySed("sed -i 's/x$)/Z/g' f.txt", 'x$)\nx$)\n')).toBe('Z\nZ\n');
+  });
+
+  // $ followed by \ and a char other than ) or | stays literal. GNU sed 4.9
+  // writes X for s/a$\\b/X/ on the bytes a, $, \, b. A helper that treats
+  // every $ before \ as an anchor leaves the line unchanged.
+  it('keeps $ literal before a backslash that does not escape ) or |', () => {
+    expect(applySed("sed -i 's/a$\\\\b/X/' f.txt", 'a$\\b\n')).toBe('X\n');
+    // `$` before `\\)` or `\\|` is literal: the byte after `\` is `\`, not
+    // `)` or `|`. The `|` here is a literal pipe, not an alternation.
+    expect(applySed("sed -i 's/x$\\\\)y/Z/' f.txt", 'x$\\)y\n')).toBe('Z\n');
+    expect(applySed("sed -i 's/x$\\\\|y/Z/' f.txt", 'x$\\|y\n')).toBe('Z\n');
+  });
+
   it('applies non-global substitutions once per line', () => {
     expect(applySed("sed -i 's/foo/bar/' file.txt", 'foo foo\nfoo foo')).toBe(
       'bar foo\nbar foo',
