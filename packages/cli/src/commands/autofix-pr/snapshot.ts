@@ -49,7 +49,7 @@ import {
   NO_FOLLOW,
   readGateCursor,
   readState,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   rerunFloors,
   sameRepository,
@@ -382,6 +382,9 @@ export interface Snapshot {
   /** Prepared mode: the API has not caught up with the branch yet, so this
    * snapshot carries no checks or conflict; a later one will. */
   lagging?: true;
+  /** Prepared mode: a check fails while the branch is behind its base, so
+   * the failure may be the base's fault; the brief merges the base first. */
+  baseBehind?: true;
 }
 
 const TRUSTED_ASSOCIATIONS: Record<string, Trust> = {
@@ -1056,6 +1059,26 @@ export function buildSnapshot(
     truncated,
     ...(lagging ? { lagging: true as const } : {}),
   };
+}
+
+/**
+ * The base has commits the head does not, as GitHub's compare reports it.
+ * Asked only by a round whose snapshot already holds a failed check, so
+ * the gate stays free of the extra read. Any error answers false: a hint
+ * is never worth failing a round over.
+ */
+export function baseIsBehind(state: AutofixPrState, headSha: string): boolean {
+  try {
+    const status = gh(
+      'api',
+      `repos/${state.owner}/${state.repo}/compare/${state.baseRefName}...${headSha}`,
+      '--jq',
+      '.status',
+    ).trim();
+    return status === 'behind' || status === 'diverged';
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1827,7 +1850,7 @@ function runGate(args: SnapshotArgs): void {
   // A blank --host is refused here: resolved, it would be '', recorded as
   // the cursor's host, and later fires would ask whatever host `gh` defaults to.
   setGhHost(args.host);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
   const existing = readGateCursor(paths.gatePath);
   const state = readState(paths.statePath);
   let target: { host: string; owner: string; repo: string };
@@ -2041,12 +2064,9 @@ export function runSnapshot(args: SnapshotArgs): void {
     runGate(args);
     return;
   }
-  const state = requireState(
-    autofixPrPaths(repoRoot(), args.pr).statePath,
-    args.pr,
-  );
+  const paths = autofixPrPaths(resolveWatchRoot(args.pr), args.pr);
+  const state = requireState(paths.statePath, args.pr);
   assertWatching(state, args.task);
-  const paths = autofixPrPaths(repoRoot(), args.pr);
   // The snapshot file is the one the agent working now reads.
   assertNoFixInFlight(paths, args.pr);
   setGhHost(state.host);
@@ -2064,7 +2084,18 @@ export function runSnapshot(args: SnapshotArgs): void {
   // The comments' bodies run past what a line of tool output shows on a PR
   // with any history: the snapshot goes to a file the round reads, and the
   // line says what to do and where it is.
-  const snapshot = buildSnapshot(pr, state, branchHead);
+  const built = buildSnapshot(pr, state, branchHead);
+  // A failed check on a branch behind its base may be the base's fault:
+  // one lazy compare tells the brief to merge the base first. A workflow
+  // that never started has no log to blame on the base, and a lagging
+  // snapshot carries no checks at all.
+  const staleBase =
+    built.action === 'fix' &&
+    built.events.some(
+      (event) => event.type === 'ci_failed' && !event.startupFailure,
+    ) &&
+    baseIsBehind(state, pr.headRefOid);
+  const snapshot: Snapshot = staleBase ? { ...built, baseBehind: true } : built;
   // A body is written as its lines, and a long line folded: `read_file`
   // pages a file by lines and cuts what one read returns at 25,000
   // characters, and GitHub takes bodies of 65,536.
@@ -2124,7 +2155,8 @@ export function roundReplyCheck(
   return {
     known: (id) => seen.has(id),
     strict,
-    cachePath: autofixPrPaths(repoRoot(), state.prNumber).repliesPath,
+    cachePath: autofixPrPaths(resolveWatchRoot(state.prNumber), state.prNumber)
+      .repliesPath,
   };
 }
 

@@ -35,8 +35,8 @@ const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
 /**
  * Legacy input ladder for routes without an explicit reasoning capability.
- * DashScope accepts high/max as xhigh aliases; configured presets expose only
- * native low/medium/xhigh choices. Keep this fallback's clamp and warning for
+ * Configured presets declare the tiers the model accepts (qwen3.8 goes up to
+ * max) and bypass this ladder. Keep this fallback's clamp and warning for
  * existing unconfigured routes.
  */
 const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [

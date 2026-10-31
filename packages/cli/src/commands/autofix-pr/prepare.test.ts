@@ -41,6 +41,9 @@ const mocks = vi.hoisted(() => ({
     'origin',
   ]),
   stdout: vi.fn((_line: string) => {}),
+  // Runs right after a real networkGit call: a concurrent fetch in the
+  // user's checkout, for the FETCH_HEAD race.
+  afterFetch: null as (() => void) | null,
 }));
 
 vi.mock('../review/lib/gh.js', async (importOriginal) => ({
@@ -72,19 +75,38 @@ vi.mock('../../utils/stdioHelpers.js', () => ({
   writeStderrLineSafe: () => {},
 }));
 
+vi.mock('./worktree.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./worktree.js')>();
+  return {
+    ...actual,
+    networkGit: (args: string[]) => {
+      const out = actual.networkGit(args);
+      mocks.afterFetch?.();
+      return out;
+    },
+  };
+});
+
 import {
   eligibilityError,
   pushUrl,
   runPrepare,
   type PrView,
 } from './prepare.js';
+import { runCleanup } from './cleanup.js';
 import {
+  anchorPath,
   autofixPrPaths,
   historyPath,
+  readAnchor,
   readState,
+  repoRoot,
+  trustAnchor,
   withWatchLock,
+  writeAnchor,
   writeState,
 } from './state.js';
+import { requireWorktree } from './worktree.js';
 
 function prView(overrides: Partial<PrView> = {}): PrView {
   return {
@@ -208,6 +230,7 @@ describe('runPrepare (real git)', () => {
   let savedCwd: string;
   let savedSession: string | undefined;
   let savedHost: string | undefined;
+  let savedServe: string | undefined;
 
   // The runner may have no git identity of its own: a commit the test
   // makes in a repository it configures none for (a submodule's checkout)
@@ -263,15 +286,23 @@ describe('runPrepare (real git)', () => {
     // `runPrepare` without a host falls back to an exported GH_HOST.
     savedHost = process.env['GH_HOST'];
     delete process.env['GH_HOST'];
+    // `watchRoot` roots a daemon session's watch at its own worktree, so a
+    // runner that itself runs under `qwen serve` must not leak that into the
+    // non-daemon tests: each daemon test sets it explicitly.
+    savedServe = process.env['QWEN_CODE_SERVE'];
+    delete process.env['QWEN_CODE_SERVE'];
     process.chdir(clone);
   });
 
   afterEach(() => {
+    mocks.afterFetch = null;
     process.chdir(savedCwd);
     if (savedSession === undefined) delete process.env['QWEN_CODE_SESSION_ID'];
     else process.env['QWEN_CODE_SESSION_ID'] = savedSession;
     if (savedHost === undefined) delete process.env['GH_HOST'];
     else process.env['GH_HOST'] = savedHost;
+    if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
+    else process.env['QWEN_CODE_SERVE'] = savedServe;
     rmSync(dir, { recursive: true, force: true });
   });
 
@@ -284,10 +315,11 @@ describe('runPrepare (real git)', () => {
     expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(false);
   });
 
-  it('refuses in a daemon session a clone outside the session working directory', () => {
-    // The watch belongs to the clone's main worktree, so a session opened in
-    // a sibling checkout prepares it outside its own directory — where the
-    // daemon refuses every command the fix agent would run.
+  it('prepares in a daemon session opened in a linked worktree, rooting under it', () => {
+    // A linked worktree of the same clone is a session working directory of
+    // its own: the watch roots there, inside it, where the daemon runs the
+    // fix agent's commands — not under the clone's main worktree, outside it,
+    // where every command would be refused (the b1887512 dead end).
     const elsewhere = join(dir, 'elsewhere');
     run(
       clone,
@@ -299,18 +331,19 @@ describe('runPrepare (real git)', () => {
       elsewhere,
       'origin/main',
     );
-    const savedServe = process.env['QWEN_CODE_SERVE'];
     process.env['QWEN_CODE_SERVE'] = '1';
     process.chdir(elsewhere);
     try {
-      expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
-        /outside this session's working directory/,
-      );
+      runPrepare({ pr: 7, repo: 'o/r' });
+      const paths = autofixPrPaths(elsewhere, 7);
+      expect(existsSync(paths.worktreePath)).toBe(true);
+      expect(run(paths.worktreePath, 'rev-parse', 'HEAD')).toBe(headSha);
+      expect(lastReport()).toMatchObject({ worktreePath: paths.worktreePath });
+      // Nothing was rooted under the main worktree, outside this session.
       expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(false);
     } finally {
       process.chdir(clone);
-      if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
-      else process.env['QWEN_CODE_SERVE'] = savedServe;
+      delete process.env['QWEN_CODE_SERVE'];
     }
   });
 
@@ -326,26 +359,18 @@ describe('runPrepare (real git)', () => {
     expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(true);
   });
 
-  it('refuses a resume in a daemon session that cannot run the worktree', () => {
+  it('refuses a daemon session whose working directory is below the watch root', () => {
+    // The watch roots at the worktree toplevel; a session opened in a
+    // subdirectory of it cannot run a worktree rooted above its own directory.
     // A resume reports the worktree already there, so the refusal has to come
     // before the state is read: otherwise this session is handed a watch whose
     // every command the daemon will refuse.
     runPrepare({ pr: 7, repo: 'o/r' });
     const paths = autofixPrPaths(clone, 7);
-    const elsewhere = join(dir, 'elsewhere');
-    run(
-      clone,
-      'worktree',
-      'add',
-      '-q',
-      '-b',
-      'other',
-      elsewhere,
-      'origin/main',
-    );
-    const savedServe = process.env['QWEN_CODE_SERVE'];
+    const sub = join(clone, 'src', 'deep');
+    mkdirSync(sub, { recursive: true });
     process.env['QWEN_CODE_SERVE'] = '1';
-    process.chdir(elsewhere);
+    process.chdir(sub);
     try {
       expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
         /outside this session's working directory/,
@@ -356,8 +381,301 @@ describe('runPrepare (real git)', () => {
       });
     } finally {
       process.chdir(clone);
-      if (savedServe === undefined) delete process.env['QWEN_CODE_SERVE'];
-      else process.env['QWEN_CODE_SERVE'] = savedServe;
+      delete process.env['QWEN_CODE_SERVE'];
+    }
+  });
+
+  it('imports the PR history when a watch moves to another worktree', () => {
+    // The supported migration: cleanup in the old owning worktree keeps the
+    // history beside the old state, then a daemon session prepares in a linked
+    // worktree. The fresh watch must not forget the comments it already handled.
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const mainPaths = autofixPrPaths(clone, 7);
+    writeState(mainPaths.statePath, {
+      ...readState(mainPaths.statePath)!,
+      handledCommentIds: ['IC_already_handled'],
+      postedCommentIds: ['IC_posted'],
+    });
+    runCleanup(7, false);
+    expect(existsSync(mainPaths.worktreePath)).toBe(false);
+    expect(
+      existsSync(
+        historyPath(mainPaths, { host: 'github.com', owner: 'o', repo: 'r' }),
+      ),
+    ).toBe(true);
+    const linked = join(dir, 'linked');
+    run(clone, 'worktree', 'add', '-q', '-b', 'other', linked, 'origin/main');
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linked);
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+      const moved = readState(autofixPrPaths(linked, 7).statePath)!;
+      expect(moved.handledCommentIds).toEqual(['IC_already_handled']);
+      expect(moved.postedCommentIds).toEqual(['IC_posted']);
+    } finally {
+      process.chdir(clone);
+      delete process.env['QWEN_CODE_SERVE'];
+    }
+  });
+
+  it('merges PR history across two relocation hops', () => {
+    // main handles X; linked A imports X, handles Y; linked B must union both
+    // histories ([X, Y]), not import the stale main copy ([X]) first-match.
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const mainPaths = autofixPrPaths(clone, 7);
+    writeState(mainPaths.statePath, {
+      ...readState(mainPaths.statePath)!,
+      handledCommentIds: ['X'],
+    });
+    runCleanup(7, false);
+    const linkedA = join(dir, 'linkedA');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherA', linkedA, 'origin/main');
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linkedA);
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const aPaths = autofixPrPaths(linkedA, 7);
+    expect(readState(aPaths.statePath)!.handledCommentIds).toEqual(['X']);
+    writeState(aPaths.statePath, {
+      ...readState(aPaths.statePath)!,
+      handledCommentIds: ['X', 'Y'],
+    });
+    runCleanup(7, false);
+    const linkedB = join(dir, 'linkedB');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherB', linkedB, 'origin/main');
+    process.chdir(linkedB);
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+      expect(
+        readState(autofixPrPaths(linkedB, 7).statePath)!.handledCommentIds,
+      ).toEqual(['X', 'Y']);
+    } finally {
+      process.chdir(clone);
+      delete process.env['QWEN_CODE_SERVE'];
+    }
+  });
+
+  it('keys the trust anchor by the clone and reads it from the external store', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const state = readState(autofixPrPaths(clone, 7).statePath)!;
+    const genuine = realpathSync(clone);
+    const repository = { host: 'github.com', owner: 'o', repo: 'r' };
+    // prepare confirmed the anchor in the external store, keyed by this clone.
+    expect(readAnchor(repository, 7)?.trustRoot).toBe(genuine);
+    expect(trustAnchor(state)).toBe(genuine);
+    // The anchor is clone-specific: a different main worktree resolves to a
+    // different, unconfirmed key and fails closed rather than borrowing this
+    // clone's confirmation (defense-in-depth against a repointed cwd).
+    const other = join(dir, 'other-clone');
+    run(dir, 'init', '-q', '-b', 'main', other);
+    process.chdir(other);
+    try {
+      expect(realpathSync(repoRoot())).not.toBe(genuine);
+      expect(() => trustAnchor(state)).toThrow(/no confirmed trust anchor/);
+    } finally {
+      process.chdir(clone);
+    }
+    // Tampering the state's repository redirects to another unconfirmed key,
+    // which fails closed; it cannot borrow the genuine clone's anchor.
+    expect(() => trustAnchor({ ...state, repo: 'other' })).toThrow(
+      /no confirmed trust anchor/,
+    );
+  });
+
+  it('fails closed for a watch with no confirmed anchor', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const state = readState(autofixPrPaths(clone, 7).statePath)!;
+    rmSync(
+      anchorPath({ host: 'github.com', owner: 'o', repo: 'r' }, 7, clone),
+      {
+        force: true,
+      },
+    );
+    expect(() => trustAnchor(state)).toThrow(/no confirmed trust anchor/);
+  });
+
+  it('rejects a compromised watch through the production trustAnchor path', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    const state = readState(paths.statePath)!;
+    // A round builds a replacement repo and repoints the watch worktree's
+    // gitfile at a self-consistent entry of it, and tampers the state anchor.
+    const repl = join(dir, 'repl');
+    run(dir, 'init', '-q', '-b', 'main', repl);
+    run(
+      repl,
+      '-c',
+      'user.email=a@b',
+      '-c',
+      'user.name=a',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'r',
+    );
+    const entry = join(repl, '.git', 'worktrees', 'autofix-pr-7');
+    mkdirSync(entry, { recursive: true });
+    writeFileSync(join(entry, 'gitdir'), `${paths.worktreePath}/.git\n`);
+    writeFileSync(join(entry, 'commondir'), '../../\n');
+    writeFileSync(join(paths.worktreePath, '.git'), `gitdir: ${entry}\n`);
+    // The production write path validates against trustAnchor(state), which
+    // reads the external store (the genuine clone), so the compromised watch is
+    // rejected even though the watch gitfile names the replacement.
+    expect(() =>
+      requireWorktree(paths, 7, clone, false, trustAnchor(state)),
+    ).toThrow(/not to this clone's own entry/);
+  });
+
+  it('re-confirms the anchor on resume after the clone root changed', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const repository = { host: 'github.com', owner: 'o', repo: 'r' };
+    const genuine = realpathSync(clone);
+    const state = readState(autofixPrPaths(clone, 7).statePath)!;
+    expect(readAnchor(repository, 7)?.trustRoot).toBe(genuine);
+    // A clone move orphans the anchor keyed by the old root: the current root
+    // has none, so the watch fails closed until a resume re-confirms it.
+    rmSync(anchorPath(repository, 7, clone), { force: true });
+    expect(readAnchor(repository, 7)).toBeNull();
+    expect(() => trustAnchor(state)).toThrow(/no confirmed trust anchor/);
+    // Resume re-confirms from the current cwd, re-establishing the anchor.
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(readAnchor(repository, 7)?.trustRoot).toBe(genuine);
+  });
+
+  it('keeps two independent clones watching one PR on distinct anchors', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const repository = { host: 'github.com', owner: 'o', repo: 'r' };
+    const genuineA = realpathSync(clone);
+    expect(readAnchor(repository, 7)?.trustRoot).toBe(genuineA);
+    // A second, independent clone confirms its own anchor for the same PR.
+    const cloneB = join(dir, 'clone-b');
+    run(dir, 'init', '-q', '-b', 'main', cloneB);
+    const genuineB = realpathSync(cloneB);
+    writeAnchor(repository, 7, genuineB);
+    // Distinct keys: confirming B neither revokes nor overwrites A's anchor
+    // (the repo+PR-only key let the second prepare revoke the first).
+    expect(anchorPath(repository, 7, genuineA)).not.toBe(
+      anchorPath(repository, 7, genuineB),
+    );
+    expect(readAnchor(repository, 7)?.trustRoot).toBe(genuineA);
+    // B reads its own confirmation from its own cwd.
+    process.chdir(cloneB);
+    try {
+      expect(readAnchor(repository, 7)?.trustRoot).toBe(genuineB);
+    } finally {
+      process.chdir(clone);
+    }
+  });
+
+  it('keeps the latest handled conflict marker across a two-hop migration', () => {
+    const repository = { host: 'github.com', owner: 'o', repo: 'r' };
+    const headA = 'a'.repeat(40);
+    const headB = 'b'.repeat(40);
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const mainPaths = autofixPrPaths(clone, 7);
+    writeState(mainPaths.statePath, {
+      ...readState(mainPaths.statePath)!,
+      handledConflictSha: headA,
+    });
+    runCleanup(7, false);
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(historyPath(mainPaths, repository), old, old);
+    const linkedL = join(dir, 'linkedL');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherL', linkedL, 'origin/main');
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linkedL);
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const lPaths = autofixPrPaths(linkedL, 7);
+    writeState(lPaths.statePath, {
+      ...readState(lPaths.statePath)!,
+      handledConflictSha: headB,
+    });
+    runCleanup(7, false);
+    const linkedN = join(dir, 'linkedN');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherN', linkedN, 'origin/main');
+    process.chdir(linkedN);
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+      // The newer linked settlement (B) wins over the stale main marker (A).
+      expect(
+        readState(autofixPrPaths(linkedN, 7).statePath)!.handledConflictSha,
+      ).toBe(headB);
+    } finally {
+      process.chdir(clone);
+      delete process.env['QWEN_CODE_SERVE'];
+    }
+  });
+
+  it('keeps settled history on a return hop to a former root', () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const mainPaths = autofixPrPaths(clone, 7);
+    writeState(mainPaths.statePath, {
+      ...readState(mainPaths.statePath)!,
+      handledCommentIds: ['X'],
+    });
+    runCleanup(7, false);
+    const linkedA = join(dir, 'linkedA');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherA', linkedA, 'origin/main');
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linkedA);
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const aPaths = autofixPrPaths(linkedA, 7);
+    writeState(aPaths.statePath, {
+      ...readState(aPaths.statePath)!,
+      handledCommentIds: ['X', 'Y'],
+    });
+    runCleanup(7, false);
+    // Return to main, which still holds its old [X] history: reconciliation
+    // must union A's [X,Y], not skip because main has a local history.
+    process.chdir(clone);
+    delete process.env['QWEN_CODE_SERVE'];
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(readState(mainPaths.statePath)!.handledCommentIds).toEqual([
+      'X',
+      'Y',
+    ]);
+  });
+
+  it('does not resurrect a spent rerun hold when reconciling histories', () => {
+    const repository = { host: 'github.com', owner: 'o', repo: 'r' };
+    const floor = `check@${'a'.repeat(40)}@123`;
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const mainPaths = autofixPrPaths(clone, 7);
+    writeState(mainPaths.statePath, {
+      ...readState(mainPaths.statePath)!,
+      heldChecks: [`123:${floor}`],
+      deferredRuns: [123],
+    });
+    runCleanup(7, false);
+    // Age main's history so the linked copy is unambiguously the newest.
+    const old = new Date(Date.now() - 60_000);
+    utimesSync(historyPath(mainPaths, repository), old, old);
+    const linkedA = join(dir, 'linkedA');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherA', linkedA, 'origin/main');
+    process.env['QWEN_CODE_SERVE'] = '1';
+    process.chdir(linkedA);
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const aPaths = autofixPrPaths(linkedA, 7);
+    // A spends the hold: the floor settles into rerunChecks, the hold clears.
+    writeState(aPaths.statePath, {
+      ...readState(aPaths.statePath)!,
+      rerunChecks: [floor],
+      heldChecks: [],
+      deferredRuns: [],
+    });
+    runCleanup(7, false);
+    const linkedB = join(dir, 'linkedB');
+    run(clone, 'worktree', 'add', '-q', '-b', 'otherB', linkedB, 'origin/main');
+    process.chdir(linkedB);
+    try {
+      runPrepare({ pr: 7, repo: 'o/r' });
+      const st = readState(autofixPrPaths(linkedB, 7).statePath)!;
+      expect(st.rerunChecks).toContain(floor);
+      expect(st.heldChecks ?? []).toEqual([]);
+      expect(st.deferredRuns ?? []).toEqual([]);
+    } finally {
+      process.chdir(clone);
+      delete process.env['QWEN_CODE_SERVE'];
     }
   });
 
@@ -1315,5 +1633,224 @@ describe('runPrepare (real git)', () => {
     });
     expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(/is merged/);
     expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(false);
+  });
+
+  describe('--in-place', () => {
+    // The bare's HEAD is feat (src was on it when the bare was cloned), so
+    // the clone already sits on feat, tracking origin/feat, at the PR head.
+    const statePath = () => autofixPrPaths(clone, 7).statePath;
+
+    it("prepares the user's checkout: no worktree, no branch of its own", () => {
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      const state = readState(statePath())!;
+      expect(state).toMatchObject({
+        inPlace: true,
+        worktreePath: clone,
+        branch: 'feat',
+        lastKnownHeadSha: headSha,
+      });
+      expect(lastReport()).toMatchObject({
+        inPlace: true,
+        resumed: false,
+        worktreePath: clone,
+      });
+      expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(false);
+      expect(run(clone, 'branch', '--list', 'qwen-autofix/pr-7')).toBe('');
+      // The checkout did not move.
+      expect(run(clone, 'rev-parse', 'HEAD')).toBe(headSha);
+    });
+
+    it('refuses another branch, leaving nothing written', () => {
+      run(clone, 'checkout', '-q', 'main');
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /needs the PR's head branch feat/,
+      );
+      expect(existsSync(statePath())).toBe(false);
+    });
+
+    it('refuses a detached HEAD', () => {
+      run(clone, 'checkout', '-q', '--detach');
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /detached HEAD/,
+      );
+      expect(existsSync(statePath())).toBe(false);
+    });
+
+    it('refuses uncommitted changes and keeps them', () => {
+      writeFileSync(join(clone, 'dirty.txt'), 'mine');
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /uncommitted changes/,
+      );
+      expect(existsSync(join(clone, 'dirty.txt'))).toBe(true);
+      expect(existsSync(statePath())).toBe(false);
+    });
+
+    it('refuses unpushed local commits and keeps them', () => {
+      run(clone, 'commit', '-q', '--allow-empty', '-m', 'mine');
+      const mine = run(clone, 'rev-parse', 'HEAD');
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /commits the PR does not have/,
+      );
+      expect(run(clone, 'rev-parse', 'HEAD')).toBe(mine);
+      expect(existsSync(statePath())).toBe(false);
+    });
+
+    it('prepares a behind branch without moving it', () => {
+      run(clone, 'reset', '-q', '--hard', 'HEAD~1');
+      const behind = run(clone, 'rev-parse', 'HEAD');
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      // The first round's sync fast-forwards; prepare itself moves nothing.
+      expect(run(clone, 'rev-parse', 'HEAD')).toBe(behind);
+      expect(readState(statePath())!.lastKnownHeadSha).toBe(headSha);
+    });
+
+    it('refuses a branch that tracks nothing', () => {
+      run(clone, 'branch', '--unset-upstream', 'feat');
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /must track origin\/feat/,
+      );
+      expect(existsSync(statePath())).toBe(false);
+    });
+
+    it('refuses a daemon session in a subdirectory, naming the checkout root', () => {
+      const sub = join(clone, 'sub');
+      mkdirSync(sub);
+      process.env['QWEN_CODE_SERVE'] = '1';
+      process.chdir(sub);
+      try {
+        expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+          /checkout root/,
+        );
+        expect(existsSync(statePath())).toBe(false);
+      } finally {
+        process.chdir(clone);
+        delete process.env['QWEN_CODE_SERVE'];
+      }
+    });
+
+    it('refuses when a worktree watch of the PR exists already', () => {
+      runPrepare({ pr: 7, repo: 'o/r' });
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /already has a watch/,
+      );
+      expect(readState(statePath())!.inPlace).toBeUndefined();
+    });
+
+    it('classic prepare refuses an in-place state', () => {
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      let message = '';
+      try {
+        runPrepare({ pr: 7, repo: 'o/r' });
+      } catch (err) {
+        message = (err as Error).message;
+      }
+      expect(message).toMatch(/in-place watch/);
+      // Cleanup is the only way forward; a bare --in-place retry is not.
+      expect(message).toMatch(/cleanup 7/);
+      expect(message).toMatch(/then prepare again/);
+      expect(readState(statePath())!.inPlace).toBe(true);
+    });
+
+    it('reads the PR head from a private ref, not the shared FETCH_HEAD', () => {
+      // A concurrent fetch in the user's checkout (an IDE's autofetch)
+      // overwrites FETCH_HEAD between prepare's fetch and its read.
+      mocks.afterFetch = () => {
+        run(clone, 'fetch', '-q', 'origin', 'main');
+      };
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      expect(readState(statePath())!.lastKnownHeadSha).toBe(headSha);
+      expect(run(clone, 'rev-parse', 'refs/qwen-autofix/pr-7/head')).toBe(
+        headSha,
+      );
+    });
+
+    it('refuses a URL push target with an actionable named-remote message', () => {
+      mocks.gh.mockImplementation((...args: string[]) => {
+        if (args[0] === 'pr')
+          return JSON.stringify(
+            prView({
+              headRefOid: headSha,
+              isCrossRepository: true,
+              maintainerCanModify: true,
+              headRepositoryOwner: { login: 'contributor' },
+            }),
+          );
+        if (args[0] === 'repo') return JSON.stringify(writable);
+        if (args[0] === 'config') return 'https';
+        throw new Error(`unexpected gh ${args.join(' ')}`);
+      });
+      // No remote of this clone serves the contributor's fork: pushTarget
+      // falls back to a URL, which git can never track as an upstream.
+      mocks.matched.mockImplementation((owner) =>
+        owner === 'contributor' ? [] : ['origin'],
+      );
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /named git remote/,
+      );
+      expect(existsSync(statePath())).toBe(false);
+    });
+
+    it('refuses under the lock when an in-place start lands during the gh calls', () => {
+      const answer = mocks.gh.getMockImplementation()!;
+      let injected = false;
+      mocks.gh.mockImplementation((...args: string[]) => {
+        if (args[0] === 'pr' && !injected) {
+          injected = true;
+          // A full in-place start completes while the classic call is
+          // between its first state read and its lock.
+          runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+        }
+        return answer(...args);
+      });
+      expect(() => runPrepare({ pr: 7, repo: 'o/r' })).toThrow(
+        /in-place watch/,
+      );
+      expect(readState(statePath())!.inPlace).toBe(true);
+      expect(run(clone, 'branch', '--list', 'qwen-autofix/pr-7')).toBe('');
+      expect(existsSync(autofixPrPaths(clone, 7).worktreePath)).toBe(false);
+    });
+
+    it('refuses a checkout of another repository, leaving nothing written', () => {
+      mocks.matched.mockImplementation(() => []);
+      expect(() => runPrepare({ pr: 7, repo: 'o/r', inPlace: true })).toThrow(
+        /no single git remote/,
+      );
+      expect(existsSync(statePath())).toBe(false);
+    });
+
+    it('inherits the settled history of an earlier watch', () => {
+      const paths = autofixPrPaths(clone, 7);
+      mkdirSync(dirname(paths.statePath), { recursive: true });
+      writeFileSync(
+        historyPath(paths, { host: 'github.com', owner: 'o', repo: 'r' }),
+        JSON.stringify({
+          version: 1,
+          host: 'github.com',
+          owner: 'o',
+          repo: 'r',
+          prNumber: 7,
+          handledCommentIds: ['IC_1'],
+          postedCommentIds: ['IC_2'],
+          handledChecks: ['c@h@a'],
+          rerunChecks: [],
+        }),
+      );
+      runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+      expect(readState(statePath())!).toMatchObject({
+        handledCommentIds: ['IC_1'],
+        postedCommentIds: ['IC_2'],
+        handledChecks: ['c@h@a'],
+      });
+    });
+
+    it('prepares in a daemon session opened at the checkout root', () => {
+      process.env['QWEN_CODE_SERVE'] = '1';
+      try {
+        runPrepare({ pr: 7, repo: 'o/r', inPlace: true });
+        expect(readState(statePath())!.inPlace).toBe(true);
+      } finally {
+        delete process.env['QWEN_CODE_SERVE'];
+      }
+    });
   });
 });

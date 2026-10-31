@@ -12,7 +12,7 @@ import { fileURLToPath } from 'node:url';
 import openapiTS, { astToString } from 'openapi-typescript';
 
 const SPEC = new URL(
-  '../../managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json',
+  '../../managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json',
   import.meta.url,
 );
 export const OUTPUT = new URL(
