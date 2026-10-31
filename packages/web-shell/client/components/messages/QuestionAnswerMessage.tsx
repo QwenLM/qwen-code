@@ -29,30 +29,26 @@ export function QuestionAnswerMessage({
       data-transcript-tool-call-id={tool.callId}
     >
       <div className={messageStyles.chatMessageColumn}>
-        <div
+        <SelectionCopyMenu
           className={`${messageStyles.chatBubble} ${styles.bubble} ${
             isLocateFlashing ? flashStyles.flash : ''
           }`}
+          content={content}
+          enabled={interactive}
         >
-          <SelectionCopyMenu
-            className=""
-            content={content}
-            enabled={interactive}
-          >
-            {answers.length > 0 ? (
-              <dl className={styles.answers}>
-                {answers.map(({ question, answer }, index) => (
-                  <div key={index}>
-                    <dt className={styles.question}>{question}</dt>
-                    <dd className={styles.answer}>{answer}</dd>
-                  </div>
-                ))}
-              </dl>
-            ) : (
-              text
-            )}
-          </SelectionCopyMenu>
-        </div>
+          {answers.length > 0 ? (
+            <dl className={styles.answers}>
+              {answers.map(({ question, answer }, index) => (
+                <div key={index}>
+                  <dt className={styles.question}>{question}</dt>
+                  <dd className={styles.answer}>{answer}</dd>
+                </div>
+              ))}
+            </dl>
+          ) : (
+            text
+          )}
+        </SelectionCopyMenu>
       </div>
     </div>
   );
