@@ -17,6 +17,7 @@ import {
 import { Storage } from '../config/storage.js';
 import { isManagedSessionTranscriptSync } from '../utils/sessionStorageUtils.js';
 import {
+  LITE_READ_BUF_SIZE,
   readManagedSessionTitleInfoSync,
   readManagedSessionSourceSync,
   readSessionTitleInfoFromFileSync,
@@ -139,6 +140,448 @@ function renameCommand(commandId: string) {
 }
 
 describe('managed session metadata', () => {
+  type TranscriptRecord = {
+    subtype?: string;
+    managedSession?: {
+      kind?: string;
+      sequence?: number;
+      eventCount?: number;
+      firstSequence?: number;
+      lastSequence?: number;
+    };
+  };
+
+  async function readTranscriptLines(filePath: string) {
+    const lines = (await fs.readFile(filePath, 'utf8')).split('\n');
+    const records = lines.map((line) =>
+      line.length === 0 ? undefined : (JSON.parse(line) as TranscriptRecord),
+    );
+    return { lines, records };
+  }
+
+  async function glueRecords(
+    filePath: string,
+    probe: (record: TranscriptRecord) => boolean,
+    count: 2 | 3,
+  ): Promise<TranscriptRecord[]> {
+    const { lines, records } = await readTranscriptLines(filePath);
+    const index = records.findIndex(
+      (record) => record !== undefined && probe(record),
+    );
+    expect(index, 'no record matched the probe').toBeGreaterThanOrEqual(0);
+    const following = records.slice(index + 1, index + count);
+    expect(following).toHaveLength(count - 1);
+    for (const record of following) expect(record).toBeDefined();
+    lines.splice(index, count, lines.slice(index, index + count).join(''));
+    await fs.writeFile(filePath, lines.join('\n'), 'utf8');
+    return following.map((record) => record!);
+  }
+
+  async function removeTranscriptRecords(
+    filePath: string,
+    predicate: (record: TranscriptRecord) => boolean,
+  ): Promise<void> {
+    const { lines, records } = await readTranscriptLines(filePath);
+    const kept = lines.filter((_, index) => {
+      const record = records[index];
+      return record === undefined || !predicate(record);
+    });
+    await fs.writeFile(filePath, kept.join('\n'), 'utf8');
+  }
+
+  async function moveRecordAfter(
+    filePath: string,
+    movingProbe: (record: TranscriptRecord) => boolean,
+    afterProbe: (record: TranscriptRecord) => boolean,
+  ): Promise<void> {
+    const { lines, records } = await readTranscriptLines(filePath);
+    const movingIndex = records.findIndex(
+      (record) => record !== undefined && movingProbe(record),
+    );
+    expect(
+      movingIndex,
+      'no record matched the move probe',
+    ).toBeGreaterThanOrEqual(0);
+    const [movingLine] = lines.splice(movingIndex, 1);
+    records.splice(movingIndex, 1);
+    const afterIndex = records.findIndex(
+      (record) => record !== undefined && afterProbe(record),
+    );
+    expect(
+      afterIndex,
+      'no record matched the destination probe',
+    ).toBeGreaterThanOrEqual(0);
+    lines.splice(afterIndex + 1, 0, movingLine);
+    await fs.writeFile(filePath, lines.join('\n'), 'utf8');
+  }
+
+  const domainEvent = (sequence: number) => (record: TranscriptRecord) =>
+    record.subtype === 'managed_session_event_v1' &&
+    record.managedSession?.kind === 'domain.committed' &&
+    record.managedSession?.sequence === sequence;
+
+  it('still reads a renamed title after a line in the transcript is torn', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-torn'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'Design review notes', titleSource: 'manual' },
+        },
+        { class: 'trusted_entry' },
+      );
+    });
+
+    // Damage can leave two records on one line, where a bare JSON.parse throws
+    // and the committed title is lost with them. Glue the header to the event
+    // that follows it.
+    const [next] = await glueRecords(
+      harness.transcriptPath,
+      (record) => record.subtype === 'managed_session_header_v1',
+      2,
+    );
+    expect(next.subtype).toBe('managed_session_event_v1');
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({ title: 'Design review notes', source: 'manual' });
+  });
+
+  // An interrupted append can leave a fragment that recovers nothing at all,
+  // and the writer resumes after it with whole records. A reader that treats
+  // such a line as "the transcript is broken, stop looking" throws away a title
+  // committed further up the same window, so the scan has to move on to the
+  // previous line instead. The fragment must not be left as the file's
+  // unterminated tail: the scan drops whatever follows the last newline and
+  // would never reach it, which makes the witness vacuous.
+  it('keeps scanning earlier lines when one yields no record at all', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-unrecoverable'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'Design review notes', titleSource: 'manual' },
+        },
+        { class: 'trusted_entry' },
+      );
+    });
+
+    const text = await fs.readFile(harness.transcriptPath, 'utf8');
+    const lines = text.trimEnd().split('\n');
+    // The committed transaction ends the transcript, so the tear goes after it.
+    expect(lines[lines.length - 1]).toContain(
+      '"subtype":"managed_session_commit_v1"',
+    );
+    lines.push(
+      '{"subtype":"managed_session_ev',
+      JSON.stringify({
+        uuid: 'rec-user-after-tear',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-09-01T10:00:00.000Z',
+        type: 'user',
+        cwd: '/workspace',
+        version: 'test',
+        message: { role: 'user', parts: [{ text: 'continue after the tear' }] },
+      }),
+    );
+    await fs.writeFile(harness.transcriptPath, `${lines.join('\n')}\n`, 'utf8');
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({ title: 'Design review notes', source: 'manual' });
+  });
+
+  // A transaction is laid out events first and marker last, so the record
+  // after a committed event is the marker that authorises it. Reading a line
+  // holding that pair in file order reaches the event before the marker and
+  // drops a rename that did commit.
+  it('still reads a renamed title when the event is glued to its own commit marker', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-glued-marker'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'Design review notes', titleSource: 'manual' },
+        },
+        { class: 'trusted_entry' },
+      );
+    });
+
+    const [marker] = await glueRecords(
+      harness.transcriptPath,
+      domainEvent(1),
+      2,
+    );
+    expect(marker.subtype).toBe('managed_session_commit_v1');
+    expect(marker.managedSession).toMatchObject({
+      firstSequence: 1,
+      lastSequence: 1,
+    });
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({ title: 'Design review notes', source: 'manual' });
+  });
+
+  it('reads the latest title when the newest event is glued to its own commit marker', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'First title', titleSource: 'auto' },
+        },
+        { class: 'trusted_entry' },
+      );
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-2'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'Second title', titleSource: 'manual' },
+        },
+        { class: 'trusted_entry' },
+      );
+    });
+
+    // The newest event shares a line with its own marker. Returning the first
+    // title here would show the session list a name the user already replaced.
+    const [marker] = await glueRecords(
+      harness.transcriptPath,
+      domainEvent(2),
+      2,
+    );
+    expect(marker.subtype).toBe('managed_session_commit_v1');
+    expect(marker.managedSession).toMatchObject({
+      firstSequence: 2,
+      lastSequence: 2,
+    });
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({ title: 'Second title', source: 'manual' });
+  });
+
+  // Gluing across a transaction boundary puts one line's records in the order
+  // the writer never emits: an older commit marker ahead of the newer event that
+  // opens the next transaction. A reader that applied a line's last record
+  // first and then walked that line forwards would let marker1 authorise a
+  // window of {1,1}, reject event2 for falling outside it, and report the title
+  // the user already replaced. Only the writer's own order, walked backwards,
+  // reaches event2 while marker2 still authorises it.
+  it('reads the latest title when an older commit marker is glued onto the next event', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-1'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'First title', titleSource: 'auto' },
+        },
+        { class: 'trusted_entry' },
+      );
+      await authority.commitDomainRecord(
+        renameCommand('cmd-rename-2'),
+        {
+          domain: 'session_metadata',
+          content: { title: 'Second title', titleSource: 'manual' },
+        },
+        { class: 'trusted_entry' },
+      );
+    });
+
+    // A commit marker carries no `domain` field, so the transaction it closes is
+    // identified by the sequence window it authorises: firstSequence 1 is the
+    // marker of the first rename, and the record after it is the second rename's
+    // event.
+    const [event] = await glueRecords(
+      harness.transcriptPath,
+      (record) =>
+        record.subtype === 'managed_session_commit_v1' &&
+        record.managedSession?.firstSequence === 1,
+      2,
+    );
+    expect(event.subtype).toBe('managed_session_event_v1');
+    expect(event.managedSession).toMatchObject({
+      kind: 'domain.committed',
+      sequence: 2,
+    });
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({ title: 'Second title', source: 'manual' });
+  });
+
+  it.each([
+    ['session_metadata', 'session_source'],
+    ['session_source', 'session_metadata'],
+  ] as const)(
+    'keeps domain reads scoped to records in a three-record %s/%s glue',
+    async (firstDomain, secondDomain) => {
+      const harness = await createHarness();
+      const metadata = {
+        domain: 'session_metadata' as const,
+        content: { title: 'Design review notes', titleSource: 'manual' },
+      };
+      const source = {
+        domain: 'session_source' as const,
+        content: {
+          record: {
+            uuid: 'rec-source-managed',
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-09-01T10:00:00.000Z',
+            type: 'system',
+            subtype: 'session_source',
+            cwd: '/workspace',
+            version: 'test',
+            systemPayload: { sourceType: 'agent', sourceId: 'managed' },
+          },
+        },
+      };
+      const contentFor = (domain: 'session_metadata' | 'session_source') =>
+        domain === 'session_metadata' ? metadata : source;
+
+      await withAuthority(harness, async (authority) => {
+        await authority.commitDomainRecord(
+          renameCommand(`cmd-${firstDomain}`),
+          contentFor(firstDomain),
+          { class: 'trusted_entry' },
+        );
+        await authority.commitDomainRecord(
+          renameCommand(`cmd-${secondDomain}`),
+          contentFor(secondDomain),
+          { class: 'trusted_entry' },
+        );
+      });
+
+      const [marker, nextEvent] = await glueRecords(
+        harness.transcriptPath,
+        domainEvent(1),
+        3,
+      );
+      expect(marker).toMatchObject({
+        subtype: 'managed_session_commit_v1',
+        managedSession: { firstSequence: 1, lastSequence: 1, eventCount: 1 },
+      });
+      expect(nextEvent).toMatchObject({
+        subtype: 'managed_session_event_v1',
+        managedSession: { kind: 'domain.committed', sequence: 2 },
+      });
+
+      expect(
+        readManagedSessionTitleInfoSync(
+          harness.transcriptPath,
+          harness.runtimeBaseDir,
+        ),
+      ).toEqual({ title: 'Design review notes', source: 'manual' });
+      expect(
+        readManagedSessionSourceSync(
+          harness.transcriptPath,
+          harness.runtimeBaseDir,
+        ),
+      ).toEqual({ sourceType: 'agent', sourceId: 'managed' });
+    },
+  );
+
+  it('rejects a title outside the lower bound of the latest commit window', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      for (const [sequence, title] of [
+        [1, 'First title'],
+        [2, 'Second title'],
+      ] as const) {
+        await authority.commitDomainRecord(
+          renameCommand(`cmd-window-${sequence}`),
+          {
+            domain: 'session_metadata',
+            content: { title, titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        );
+      }
+    });
+
+    // Keep a real {2,2} marker while removing its event and the older {1,1}
+    // marker. The remaining event is outside the only committed window.
+    await removeTranscriptRecords(
+      harness.transcriptPath,
+      (record) =>
+        (record.subtype === 'managed_session_event_v1' &&
+          record.managedSession?.sequence === 2) ||
+        (record.subtype === 'managed_session_commit_v1' &&
+          record.managedSession?.firstSequence === 1),
+    );
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({});
+  });
+
+  it('rejects a newer title beyond the upper bound of the latest commit window', async () => {
+    const harness = await createHarness();
+    await withAuthority(harness, async (authority) => {
+      for (const [sequence, title] of [
+        [1, 'First title'],
+        [2, 'Second title'],
+      ] as const) {
+        await authority.commitDomainRecord(
+          renameCommand(`cmd-window-${sequence}`),
+          {
+            domain: 'session_metadata',
+            content: { title, titleSource: 'manual' },
+          },
+          { class: 'trusted_entry' },
+        );
+      }
+    });
+
+    // Keep the real {1,1} marker and both events, but omit the newer marker.
+    // The second title is therefore newer than any committed window.
+    await removeTranscriptRecords(
+      harness.transcriptPath,
+      (record) =>
+        record.subtype === 'managed_session_commit_v1' &&
+        record.managedSession?.firstSequence === 2,
+    );
+    await moveRecordAfter(
+      harness.transcriptPath,
+      (record) =>
+        record.subtype === 'managed_session_commit_v1' &&
+        record.managedSession?.firstSequence === 1,
+      domainEvent(2),
+    );
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({ title: 'First title', source: 'manual' });
+  });
+
   it('fences delayed hosted titles across cold reopen and recorder renames', async () => {
     const harness = await createHarness();
     const write = (
@@ -184,6 +627,7 @@ describe('managed session metadata', () => {
       )?.title,
     ).toBe('A');
   });
+
   it('projects a renamed title into the synchronous directory read', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
@@ -628,25 +1072,80 @@ describe('managed session metadata', () => {
     },
   );
 
+  async function writeLongTitleTranscript(
+    authority: LocalManagedSessionAuthority,
+  ): Promise<number> {
+    await authority.commitDomainRecord(
+      renameCommand('cmd-title-old'),
+      {
+        domain: 'session_metadata',
+        content: { title: 'Title old', titleSource: 'manual' },
+      },
+      { class: 'trusted_entry' },
+    );
+    const activation = await authority.installActivation({
+      activationId: 'activation-tail-padding',
+      workerId: 'worker-tail-padding',
+      leaseDurationMs: 60_000,
+    });
+    const firstPaddingSequence = authority.committedSequence + 1;
+    await authority.appendExecution(
+      {
+        operation: 'appendMessageDeltaBatch',
+        commandId: 'cmd-tail-padding-batch',
+        sessionKey,
+        contentDigest: 'd'.repeat(64),
+      },
+      Array.from({ length: 16 }, (_, index) => ({
+        v: 1,
+        sequence: firstPaddingSequence + index,
+        eventId: `message-delta-tail-padding-${index}`,
+        sessionKey,
+        kind: 'message.delta',
+        occurredAt: Date.now(),
+        subject: {
+          type: 'activation' as const,
+          scopeId: activation.activationId,
+          ...activation,
+        },
+        payload: {
+          messageId: 'tail-padding-message',
+          turnId: 'tail-padding-turn',
+          role: 'assistant',
+          text: 'x'.repeat(4096),
+        },
+      })),
+      { class: 'harness', activation },
+    );
+    await authority.commitDomainRecord(
+      renameCommand('cmd-title-previous'),
+      {
+        domain: 'session_metadata',
+        content: { title: 'Title previous', titleSource: 'manual' },
+      },
+      { class: 'trusted_entry' },
+    );
+    await authority.commitDomainRecord(
+      renameCommand('cmd-title-new'),
+      {
+        domain: 'session_metadata',
+        content: { title: 'Title new', titleSource: 'manual' },
+      },
+      { class: 'trusted_entry' },
+    );
+    return authority.committedSequence;
+  }
+
   it('finds the committed title in the bounded tail window of a long log', async () => {
     const harness = await createHarness();
-    await withAuthority(harness, async (authority) => {
-      for (let index = 0; index < 64; index++) {
-        await authority.commitDomainRecord(
-          renameCommand(`cmd-${index}`),
-          {
-            domain: 'session_metadata',
-            content: { title: `Title ${index}`, titleSource: 'manual' },
-          },
-          { class: 'trusted_entry' },
-        );
-      }
-    });
+    await withAuthority(harness, writeLongTitleTranscript);
     const text = await fs.readFile(harness.transcriptPath, 'utf8');
-    expect(Buffer.byteLength(text)).toBeGreaterThan(64 * 1024);
     const lines = text.trimEnd().split('\n');
     lines.pop();
     await fs.writeFile(harness.transcriptPath, `${lines.join('\n')}\n`);
+    expect((await fs.stat(harness.transcriptPath)).size).toBeGreaterThan(
+      LITE_READ_BUF_SIZE,
+    );
 
     expect(
       readManagedSessionTitleInfoSync(
@@ -654,7 +1153,48 @@ describe('managed session metadata', () => {
         harness.runtimeBaseDir,
       ),
     ).toEqual({
-      title: 'Title 62',
+      title: 'Title previous',
+      source: 'manual',
+    });
+  });
+
+  // The tail window is the only call site of the tolerant reader that a long log
+  // reaches: below the read-window size the offset is zero and the branch never
+  // runs, so the short glue witnesses above leave it untested. And the title it has to find
+  // lives in the tail, so the head fallback cannot answer for it — a tail that
+  // gives up returns an older title, not this one.
+  it('still reads the committed title from the tail window when a glued line sits inside it', async () => {
+    const harness = await createHarness();
+    const newestSequence = await withAuthority(
+      harness,
+      writeLongTitleTranscript,
+    );
+    const [marker] = await glueRecords(
+      harness.transcriptPath,
+      domainEvent(newestSequence),
+      2,
+    );
+    expect(marker.subtype).toBe('managed_session_commit_v1');
+    expect(marker.managedSession).toMatchObject({
+      firstSequence: newestSequence,
+      lastSequence: newestSequence,
+    });
+
+    // Glue costs the file one newline; assert the size after it,
+    // because `tailOffset > 0` — and with it the whole tail
+    // branch — holds exactly when the file is longer than the window. Without
+    // this the fixture could drift under the limit and the case would quietly
+    // stop covering anything.
+    const fileSize = (await fs.stat(harness.transcriptPath)).size;
+    expect(fileSize).toBeGreaterThan(LITE_READ_BUF_SIZE);
+
+    expect(
+      readManagedSessionTitleInfoSync(
+        harness.transcriptPath,
+        harness.runtimeBaseDir,
+      ),
+    ).toEqual({
+      title: 'Title new',
       source: 'manual',
     });
   });
