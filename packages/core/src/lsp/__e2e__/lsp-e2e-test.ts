@@ -398,7 +398,12 @@ async function testLanguage(cfg: LanguageTestConfig): Promise<void> {
       const diagUri = pathToFileURL(positions.diagnosticsFile).toString();
       const diags = await service.diagnostics(diagUri);
       // 0 diagnostics is fine for clean code
-      record('diagnostics', langName, true, `${diags.length} diagnostic(s)`);
+      record(
+        'diagnostics',
+        langName,
+        true,
+        `${diags.items.length} diagnostic(s)`,
+      );
     } catch (e: any) {
       record('diagnostics', langName, false, `Error: ${e.message}`);
     }
@@ -424,7 +429,7 @@ async function testLanguage(cfg: LanguageTestConfig): Promise<void> {
         'workspaceDiagnostics',
         langName,
         true,
-        `${wsDiags.length} file(s) with diagnostics`,
+        `${wsDiags.items.length} file(s) with diagnostics`,
       );
     } catch (e: any) {
       record('workspaceDiagnostics', langName, false, `Error: ${e.message}`);

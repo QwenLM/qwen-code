@@ -21,6 +21,7 @@ import type {
   LspCodeActionContext,
   LspDefinition,
   LspDiagnostic,
+  LspDiagnosticsReport,
   LspFileDiagnostics,
   LspHoverResult,
   LspLocation,
@@ -242,9 +243,12 @@ export class NativeLspClient implements LspClient {
    *
    * @param uri - The document URI to get diagnostics for
    * @param serverName - Optional specific LSP server to query
-   * @returns Promise resolving to array of diagnostics
+   * @returns Promise resolving to the diagnostics and any servers whose pull failed
    */
-  diagnostics(uri: string, serverName?: string): Promise<LspDiagnostic[]> {
+  diagnostics(
+    uri: string,
+    serverName?: string,
+  ): Promise<LspDiagnosticsReport<LspDiagnostic>> {
     return this.service.diagnostics(uri, serverName);
   }
 
@@ -253,12 +257,12 @@ export class NativeLspClient implements LspClient {
    *
    * @param serverName - Optional specific LSP server to query
    * @param limit - Maximum number of file diagnostics to return
-   * @returns Promise resolving to array of file diagnostics
+   * @returns Promise resolving to the file diagnostics and any servers whose pull failed
    */
   workspaceDiagnostics(
     serverName?: string,
     limit?: number,
-  ): Promise<LspFileDiagnostics[]> {
+  ): Promise<LspDiagnosticsReport<LspFileDiagnostics>> {
     return this.service.workspaceDiagnostics(serverName, limit);
   }
 

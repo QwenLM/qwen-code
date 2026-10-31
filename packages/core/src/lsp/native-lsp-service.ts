@@ -17,6 +17,7 @@ import type {
   LspCodeActionContext,
   LspDefinition,
   LspDiagnostic,
+  LspDiagnosticsReport,
   LspFileDiagnostics,
   LspHoverResult,
   LspLocation,
@@ -2232,7 +2233,7 @@ export class NativeLspService {
   async diagnostics(
     uri: string,
     serverName?: string,
-  ): Promise<LspDiagnostic[]> {
+  ): Promise<LspDiagnosticsReport<LspDiagnostic>> {
     const handles = this.requireReadyHandles('diagnostics', serverName, uri);
     const extension = this.diagnosticFileExtension(uri);
     // Ownership is only decidable for an extension the tables can place. For
@@ -2377,15 +2378,15 @@ export class NativeLspService {
       );
     }
 
+    // A server the queried file provably excludes cannot veto the answer or
+    // make it partial — its failure says nothing about this file — and neither
+    // can a server that answered `-32601`, which never implemented the pull in
+    // the first place (and so is already out of `failures`). A failure or
+    // unusable answer from a server that could own the file must still veto.
+    const relevantFailures = failures.filter(
+      ({ handle }) => !this.serverDeclaredIrrelevant(handle, extension),
+    );
     if (allDiagnostics.length === 0) {
-      // A server the queried file provably excludes cannot veto the answer —
-      // its failure says nothing about this file — and neither can a server
-      // that answered `-32601`, which never implemented the pull in the first
-      // place (and so is already out of `failures`). A failure or unusable
-      // answer from a server that could own the file must still veto.
-      const relevantFailures = failures.filter(
-        ({ handle }) => !this.serverDeclaredIrrelevant(handle, extension),
-      );
       const unreachable = this.unreachableDiagnosticServers(
         queried,
         serverName,
@@ -2425,7 +2426,13 @@ export class NativeLspService {
             );
       }
     }
-    return allDiagnostics;
+    return {
+      items: allDiagnostics,
+      failedServers: relevantFailures.map(({ name, error }) => ({
+        serverName: name,
+        reason: getErrorMessage(error),
+      })),
+    };
   }
 
   /**
@@ -2438,7 +2445,7 @@ export class NativeLspService {
   async workspaceDiagnostics(
     serverName?: string,
     limit = 100,
-  ): Promise<LspFileDiagnostics[]> {
+  ): Promise<LspDiagnosticsReport<LspFileDiagnostics>> {
     const handles = this.requireReadyHandles('diagnostics', serverName);
     const results: LspFileDiagnostics[] = [];
     const failures: Array<{ name: string; error: unknown }> = [];
@@ -2626,7 +2633,13 @@ export class NativeLspService {
         );
       }
     }
-    return results.slice(0, limit);
+    return {
+      items: results.slice(0, limit),
+      failedServers: failures.map(({ name, error }) => ({
+        serverName: name,
+        reason: getErrorMessage(error),
+      })),
+    };
   }
 
   /**
