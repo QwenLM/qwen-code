@@ -1697,8 +1697,10 @@ defect.
   the verdict cannot be `merge-ready` — and the publisher enforces exactly
   that. When the unexpected failure is in the harness itself (a flaky probe,
   a broken A/B control cell) rather than in the PR's code, the verdict is
-  `inconclusive`, not `findings` — `findings` stamps ❌ on the PR for a
-  problem it did not cause.
+  `inconclusive`, not `findings` — the failure is not the PR's, and CI
+  refuses a `findings` round whose failures name no `pr` cause: it publishes
+  the round as inconclusive under an untrusted-verdict note (see the
+  attribution rule below).
   **Attribute every failure to a cause, and name the host as its own.**
   `assertions.json` carries `failures: [{ id, attribution }]`, one
   entry per failed assertion, with `attribution` one of `pr`, `harness` or

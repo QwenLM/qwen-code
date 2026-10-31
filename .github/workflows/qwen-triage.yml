@@ -2263,7 +2263,6 @@ jobs:
       # empty -> the job broke before deciding (publish reports infra).
       verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
       failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
-      agent_verdict: '${{ steps.run.outputs.agent_verdict }}'
       # Report-footer attribution: the configured model, the runner's CLI
       # version, and the content hash of the base-pinned skill that ran.
       # Empty when the run step never reached its output writes; the
@@ -4695,23 +4694,9 @@ jobs:
             echo "::error::Failed to write the agent output stream (tee exit ${TEE_STATUS}); reporting an infrastructure failure rather than a pass."
           fi
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
-
-          # The skill writes its verdict as one word in verdict.txt. It is
-          # output of a run that executed untrusted PR code, so allowlist it
-          # instead of echoing it into workflow outputs.
-          AGENT_VERDICT=''
-          VERDICT_FILE="$(find tmp -maxdepth 2 -type f -path '*-verify-*/verdict.txt' 2>/dev/null | sort | head -1 || true)"
-          if [ -n "$VERDICT_FILE" ]; then
-            # Bound the read before the pipeline: with `head` closing early on
-            # an oversized file, the producer takes SIGPIPE and `pipefail`
-            # would abort the step instead of ignoring an unusable verdict.
-            CANDIDATE="$(head -c 4096 "$VERDICT_FILE" | tr -d '[:space:]' | cut -c1-32)"
-            case "$CANDIDATE" in
-              merge-ready|findings|blocked|inconclusive) AGENT_VERDICT="$CANDIDATE" ;;
-              *) echo "::warning::Unrecognized agent verdict in ${VERDICT_FILE}; ignoring." ;;
-            esac
-          fi
-          echo "agent_verdict=$AGENT_VERDICT" >> "$GITHUB_OUTPUT"
+          # verdict.txt is read only by the publisher, from the uploaded
+          # report's own directory: a second reader here picked its own
+          # round directory and could name a different word.
 
           # Emit the attribution collected before the agent started (see the
           # re-pin above) — the saved values, never re-derived here: the
@@ -4722,7 +4707,7 @@ jobs:
             echo "cli_version=$CLI_VERSION"
             echo "skill_hash=$SKILL_HASH"
           } >> "$GITHUB_OUTPUT"
-          echo "verify verdict: $VERDICT agent: ${AGENT_VERDICT:-none} (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
+          echo "verify verdict: $VERDICT (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
 
       # The gate log's authoritative copy lives root-owned inside the 0700
       # root-only home (/flake-gate/log), which no PR-controlled
@@ -5311,7 +5296,6 @@ jobs:
           # cancellations. Verified by executing this step with both values.
           PR_NUMBER: '${{ needs.verify.outputs.pr_number || github.event.issue.number }}'
           VERDICT: '${{ needs.verify.outputs.verdict }}'
-          AGENT_VERDICT: '${{ needs.verify.outputs.agent_verdict }}'
           VERIFY_MODEL: '${{ needs.verify.outputs.model }}'
           VERIFY_CLI_VERSION: '${{ needs.verify.outputs.cli_version }}'
           VERIFY_SKILL_HASH: '${{ needs.verify.outputs.skill_hash }}'
@@ -5349,6 +5333,8 @@ jobs:
             exit 0
           fi
           BODY_FILE="${RUNNER_TEMP:-/tmp}/verify-comment.md"
+          # Set only from the published report's own verdict.txt below.
+          AGENT_VERDICT=''
 
           # Same embedding discipline as publish-tmux: the report is untrusted
           # PR-run output, so it goes inside <details><pre><code> with &, <, >
@@ -5937,19 +5923,23 @@ jobs:
           else
             collect_and_host_evidence
             # Pin the artifact-dir shape and sort: a bare -name search takes
-            # whatever directory find visits first, which is unordered.
-            REPORT="$(find verify-results -mindepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
-            # The counts and the verdict must come from the report's own
-            # directory: the verify job picked AGENT_VERDICT by its own
-            # search, and another round directory's zero or word would
-            # headline this report. Same allowlist as that job.
+            # whatever directory find visits first, which is unordered. Depth
+            # 2 exactly: a report.md nested in a round (evidence/) sorts
+            # ahead of the round's own and would stand in for it.
+            REPORT="$(find verify-results -mindepth 2 -maxdepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
+            # The report's own directory is the round: its counts and its
+            # verdict word headline it, never another directory's. This is
+            # the only reader of verdict.txt, which untrusted PR code wrote.
             if [ -n "$REPORT" ]; then
               ASSERTIONS_FILE="$(dirname "$REPORT")/assertions.json"
               [ -f "$ASSERTIONS_FILE" ] || ASSERTIONS_FILE=''
               AGENT_VERDICT="$(head -c 4096 "$(dirname "$REPORT")/verdict.txt" 2>/dev/null | tr -d '[:space:]' | cut -c1-32 || true)"
               case "$AGENT_VERDICT" in
                 merge-ready|findings|blocked|inconclusive) ;;
-                *) AGENT_VERDICT='' ;;
+                *)
+                  echo "::warning::No usable verdict.txt beside the published report.md; the round has no agent verdict."
+                  AGENT_VERDICT=''
+                  ;;
               esac
             else
               ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
@@ -6060,9 +6050,9 @@ jobs:
               esac
               if [ -n "${AGENT_VERDICT:-}" ]; then
                 if [ "${VERDICT:-}" = 'pass' ]; then
-                  if [ -z "$REPORT" ]; then
-                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (report.md missing); reporting the process outcome instead."
-                  elif [ -z "$ASSERT_LINE" ]; then
+                  # A word is only ever read beside a report, so the report
+                  # is present here.
+                  if [ -z "$ASSERT_LINE" ]; then
                     echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions.json missing or inconsistent); reporting the process outcome instead."
                   elif [ "$AGENT_VERDICT" = 'merge-ready' ] && [ "${A_FAIL:-0}" != '0' ]; then
                     echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions recorded ${A_FAIL:-?} failures); reporting the process outcome instead."

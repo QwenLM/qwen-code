@@ -5534,9 +5534,9 @@ describe('qwen-triage verify publish fidelity', () => {
 
   // Render the publisher for a given outcome with a stubbed gh and the real
   // artifact checker, and return the comment body it would post plus the
-  // step log. The verify job reads AGENT_VERDICT from the artifact's
-  // verdict.txt, so the fixture carries the same word unless VERDICT_TXT
-  // says otherwise.
+  // step log. The publisher reads the agent's word only from verdict.txt
+  // beside the report, so AGENT_VERDICT names what the fixture writes there
+  // unless VERDICT_TXT says otherwise.
   const publish = (dir, env) => {
     const out = join(dir, `body-${env.NAME}.md`);
     const work = join(dir, 'work');
@@ -5812,11 +5812,13 @@ describe('qwen-triage verify publish fidelity', () => {
           '\u274c \u4e0d\u901a\u8fc7 \u00b7 \u62a5\u544a\u4e86\u53d1\u73b0\uff08agent \u5224\u5b9a\uff09',
           PR_RED,
         ],
+        // Unlike findings, blocked stays not-passed over an all-green
+        // ledger on purpose: the measured blocked-at-zero round (SKILL.md)
+        // was a real regression counted as a pass.
         [
           { VERDICT: 'pass', AGENT_VERDICT: 'blocked' },
           '\u274c not passed \u2014 blocked (agent verdict)',
           '\u274c \u4e0d\u901a\u8fc7 \u00b7 \u963b\u585e\uff08agent \u5224\u5b9a\uff09',
-          PR_RED,
         ],
         [
           { VERDICT: 'pass', AGENT_VERDICT: 'inconclusive' },
@@ -5964,20 +5966,27 @@ describe('qwen-triage verify publish fidelity', () => {
     }
   });
 
-  // REPORT, the counts and the verdict were picked by independent searches,
-  // so a run that left an earlier round directory behind could headline the
-  // later report with that directory's zero or verdict word.
+  // REPORT, the counts and the verdict were picked by independent searches
+  // (the verdict in another job), so a run that left an earlier round
+  // directory behind could headline the later report with that directory's
+  // zero or verdict word.
   it("binds the headline to the report's own directory", () => {
     const dir = fixture();
     const results = join(dir, 'work', 'verify-results');
+    const round = join(results, 'prA-verify-1');
     try {
+      // The leftover sorts first and holds a complete green round's files.
       mkdirSync(join(results, 'prA-verify-0'));
       writeFileSync(
         join(results, 'prA-verify-0', 'assertions.json'),
         '{"pass":10,"fail":0,"total":10}',
       );
       writeFileSync(
-        join(results, 'prA-verify-1', 'assertions.json'),
+        join(results, 'prA-verify-0', 'verdict.txt'),
+        'merge-ready\n',
+      );
+      writeFileSync(
+        join(round, 'assertions.json'),
         '{"pass":9,"fail":1,"total":10,"failures":[{"id":"x","attribution":"pr"}]}',
       );
       const mixed = render(dir, { NAME: 'mix', AGENT_VERDICT: 'findings' });
@@ -5987,27 +5996,61 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(mixed).toContain(
         'Scripted assertions: 9 passed · 1 failed · 10 total',
       );
+      expect(mixed).not.toContain('merge-ready (agent verdict)');
+      expect(mixed).not.toContain('verify-pr-check.mjs');
 
-      // The verify job picks AGENT_VERDICT by its own search, which lands on
-      // a leftover round directory holding only verdict.txt. The headline
-      // must still be the completed round's own verdict.
+      // A round holding only its report has no counts and no word, and the
+      // leftover must lend it neither.
+      rmSync(join(round, 'assertions.json'));
+      const bare = publish(dir, { NAME: 'bare', AGENT_VERDICT: '' });
+      expect(bare.body).toContain(
+        '⚠️ inconclusive — completed without a usable structured verdict',
+      );
+      expect(bare.body).not.toContain('Scripted assertions:');
+      expect(bare.log).toContain(
+        '::warning::No usable verdict.txt beside the published report.md',
+      );
+
+      // A report.md nested inside the round sorts ahead of the round's own.
       writeFileSync(
-        join(results, 'prA-verify-0', 'verdict.txt'),
-        'merge-ready\n',
+        join(round, 'assertions.json'),
+        '{"pass":10,"fail":0,"total":10}',
       );
-      const leftover = render(dir, {
-        NAME: 'leftover',
+      mkdirSync(join(round, 'evidence'));
+      writeFileSync(join(round, 'evidence', 'report.md'), '## nested\n');
+      const nested = render(dir, {
+        NAME: 'nested',
         AGENT_VERDICT: 'merge-ready',
-        VERDICT_TXT: 'findings',
       });
-      expect(leftover).toContain(
-        '❌ not passed — findings reported (agent verdict)',
-      );
-      expect(leftover).not.toContain('merge-ready (agent verdict)');
-      expect(leftover).not.toContain('verify-pr-check.mjs');
+      expect(nested).toContain('✅ passed — merge-ready (agent verdict)');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  // verdict.txt has one reader. The verify job used to read its own copy
+  // from whichever round directory its search found first and hand the
+  // publisher that word.
+  it('reads verdict.txt only beside the published report', () => {
+    const doc = parse(workflow);
+    const code = (s) =>
+      (s.run ?? '')
+        .split('\n')
+        .filter((line) => !/^\s*#/.test(line))
+        .join('\n');
+    const readers = Object.entries(doc.jobs).flatMap(([name, job]) =>
+      (job.steps ?? [])
+        .filter((s) => code(s).includes('verdict.txt'))
+        .map((s) => `${name}/${s.name}`),
+    );
+    expect(readers).toEqual([
+      'publish-verify/Post verification report comment',
+    ]);
+    expect(doc.jobs.verify.outputs).not.toHaveProperty('agent_verdict');
+    const post = doc.jobs['publish-verify'].steps.find(
+      (s) => s.name === 'Post verification report comment',
+    );
+    expect(post.env).not.toHaveProperty('AGENT_VERDICT');
   });
 
   // Every other case injects an absolute checker path. The production value

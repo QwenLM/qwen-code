@@ -170,8 +170,10 @@ A published verification comment ends with the same attribution shape
    here only, so the lane published shapes every local round refuses. The
    publish job now runs this script from its trusted checkout (the
    default-branch commit, never PR code) and trusts an agent verdict only when
-   the script passes on the report's own directory, with the verdict read from
-   that same directory. Tightening a rule here therefore tightens CI too.
+   the script passes on the report's own directory. That directory is also
+   the only place the lane reads `verdict.txt`: the verify job used to read
+   its own copy from whichever round directory its search found first.
+   Tightening a rule here therefore tightens CI too.
    Loosening one does not always loosen it: the publish step still validates
    the count triple itself (the checker runs only on a valid one) and still
    refuses `merge-ready` over failures on its own, so those two need the
