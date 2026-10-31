@@ -43,6 +43,7 @@ import {
   watchRoot,
   requireState,
   sameRepository,
+  withKnownHead,
   withWatchLock,
   writeAnchor,
   writeState,
@@ -988,9 +989,11 @@ export function runPrepare(args: PrepareArgs): void {
             handledConflictSha: existing.handledConflictSha,
             pushCount: existing.pushCount,
             summarizedSha: existing.summarizedSha,
+            reportedNeedsHuman: existing.reportedNeedsHuman,
             pendingPosts: existing.pendingPosts,
             deferredRuns: existing.deferredRuns,
             heldChecks: existing.heldChecks,
+            failingChecks: existing.failingChecks,
             // The task `resume` starts again, and what is left for a person.
             watch: existing.watch,
             needsHuman: existing.needsHuman,
@@ -1000,8 +1003,11 @@ export function runPrepare(args: PrepareArgs): void {
     // Record the clone this watch is confirmed against, in the anchor store
     // outside the workspace (defense-in-depth; see `anchorStoreRoot`).
     writeAnchor({ host, owner, repo: repoName }, args.pr, repoRoot());
-    writeState(paths.statePath, state);
-    return state;
+    // A head someone else pushed gives every check its fix pushes back, as
+    // `sync` adopting it does.
+    const known = withKnownHead(state, headSha);
+    writeState(paths.statePath, known);
+    return known;
   });
 
   // Work in the user's own copy of the head branch: the worktree starts from

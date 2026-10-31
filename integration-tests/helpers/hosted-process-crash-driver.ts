@@ -688,7 +688,12 @@ async function runExistingCase() {
 }
 
 async function runRecoverySettlement() {
-  async function api(route: string, body?: object, expected = 200) {
+  async function api(
+    route: string,
+    body?: object,
+    expected = 200,
+    allowProjectionPending = false,
+  ) {
     if (proxyFailure) throw proxyFailure;
     const response = await fetch(config.storeUrl + route, {
       method: body ? 'POST' : 'GET',
@@ -702,6 +707,13 @@ async function runRecoverySettlement() {
       signal: AbortSignal.timeout(10_000),
     });
     const text = await response.text();
+    if (
+      allowProjectionPending &&
+      response.status === 503 &&
+      JSON.parse(text)?.error?.code === 'message_projection_pending'
+    ) {
+      return null;
+    }
     assert.equal(response.status, expected, `${route}: ${text}`);
     return text ? JSON.parse(text) : {};
   }
@@ -796,9 +808,9 @@ async function runRecoverySettlement() {
     report.promptId,
   );
   await waitUntil(async () =>
-    JSON.stringify(await api(`${route}/items?limit=100`)).includes(
-      'FOLLOW_UP_OK',
-    ),
+    JSON.stringify(
+      await api(`${route}/items?limit=100`, undefined, 200, true),
+    ).includes('FOLLOW_UP_OK'),
   );
   assert.equal(
     report.operations.filter((operation) => operation === 'start').length,
