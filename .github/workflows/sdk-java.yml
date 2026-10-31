@@ -1300,8 +1300,9 @@ jobs:
           npx vitest run cli/hosted-latency-baseline.test.ts
       - name: 'Run Runtime Broker fault gates'
         # The gates need only the CLI bundle and the installed SDK, so a red
-        # Hosted verify above must not skip them: without this it did on 11
-        # of the 14 nights to 10-27. A failed setup step still does.
+        # Hosted verify above must not skip them: without this it did on 10
+        # of the 14 nights to 10-27. The run cancelled on an 11th night still
+        # skips them through !cancelled(), and so does a failed setup step.
         if: "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}"
         # Outlive the 600 s surefire fork plus compilation and report teardown.
         timeout-minutes: 20
@@ -1387,9 +1388,9 @@ jobs:
     # that a failing integration test there no longer skips them: they need
     # only the bundled CLI, the server jar and a runner-private mysqld, not
     # its MySQL service or cgroup root. Each arm also runs when an earlier
-    # one failed. Ceilings: 25 arms × 10 = 250 plus ~13 minutes for the
-    # uncapped setup steps (Checkout.. Install MySQL binaries): 263 + 2.
-    timeout-minutes: 265
+    # one failed. Ceilings: 27 arms × 10 = 270 plus ~13 minutes for the
+    # uncapped setup steps (Checkout.. Install MySQL binaries): 283 + 2.
+    timeout-minutes: 285
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     steps:
@@ -1533,6 +1534,16 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-finished-before-commit
+      - name: 'Run sibling-approval crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-sibling-approval
+      - name: 'Run after-earlier-tools crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-after-earlier-tools
       - name: 'Run approval decision reply-loss E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
