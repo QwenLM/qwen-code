@@ -13350,14 +13350,16 @@ export function App({
         target.closest('[data-web-shell-context-popover]')
       )
         return;
-      // Exempt controls the user is deliberately activating (editable fields
-      // like the inline rename input, and the pane title's keyboard-activation
-      // path) so the dismisser can't swallow their Enter/Space or preempt the
-      // title's own handler.
+      // Exempt the inline rename's own controls (the pane title's
+      // keyboard-activation path and its input) so the dismisser can't
+      // swallow their Enter/Space or preempt the title's handler; any other
+      // editable target (e.g. the composer) must keep being able to dismiss
+      // or cancel the panel from the keyboard.
       if (
-        isEditableTarget(target) ||
-        (target instanceof Element &&
-          target.closest('[data-web-shell-pane-title], [role="button"]'))
+        target instanceof Element &&
+        target.closest(
+          '[data-web-shell-pane-title], [data-web-shell-pane-title-input]',
+        )
       )
         return;
       const message = btwMessage;

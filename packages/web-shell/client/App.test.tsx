@@ -32723,6 +32723,67 @@ describe('App session callbacks', () => {
     expect(btw()).not.toBeNull();
   });
 
+  it('dismisses a settled btw answer with Escape from another editable target', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/btw keep this answer';
+    await clickSubmit(container);
+    await flush();
+    testState.prompt = '';
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    const btw = () => container.querySelector('[class*="btwPanel"]');
+    expect(btw()).not.toBeNull();
+
+    const field = document.createElement('input');
+    container.append(field);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => field.dispatchEvent(event));
+    expect(event.defaultPrevented).toBe(true);
+    expect(btw()).toBeNull();
+  });
+
+  it('cancels a pending btw with Ctrl+C from another editable target', async () => {
+    const hold = deferred<void>();
+    let signal: AbortSignal | undefined;
+    mockSessionActions.btwSessionStream.mockImplementationOnce(
+      async function* (_question?: unknown, opts?: { signal?: AbortSignal }) {
+        signal = opts?.signal;
+        yield {
+          v: 1,
+          type: 'answer',
+          requestId: 'btw-request',
+          answer: 'Working on it',
+        } as const;
+        await hold.promise;
+      },
+    );
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/btw slow answer';
+    await clickSubmit(container);
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+    const btw = () => container.querySelector('[class*="btwPanel"]');
+    expect(btw()).not.toBeNull();
+
+    const field = document.createElement('input');
+    container.append(field);
+    const event = new KeyboardEvent('keydown', {
+      key: 'c',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => field.dispatchEvent(event));
+    expect(event.defaultPrevented).toBe(true);
+    expect(btw()).toBeNull();
+    expect(signal?.aborted).toBe(true);
+  });
+
   it('settles visible recap after a same-id attachment replacement', async () => {
     const recap = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
