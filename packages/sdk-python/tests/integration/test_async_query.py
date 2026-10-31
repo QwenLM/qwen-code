@@ -262,6 +262,38 @@ async def test_non_zero_process_exit_is_propagated(fake_qwen_path: str) -> None:
 
 
 @pytest.mark.asyncio
+async def test_slow_consumer_drains_messages_before_process_exit_error(
+    fake_qwen_path: str,
+) -> None:
+    result = query(
+        "please exit nonzero",
+        {"path_to_qwen_executable": fake_qwen_path},
+    )
+
+    try:
+        while True:
+            first = await asyncio.wait_for(anext(result), timeout=2)
+            if is_sdk_assistant_message(first):
+                break
+        assert first["message"]["content"][0]["text"] == "first"
+
+        await _wait_for(result.is_closed)
+        second = await asyncio.wait_for(anext(result), timeout=2)
+        assert is_sdk_assistant_message(second)
+        assert second["message"]["content"][0]["text"] == "buffered second"
+
+        with pytest.raises(ProcessExitError, match="code 9") as error:
+            await asyncio.wait_for(anext(result), timeout=2)
+        assert error.value.exit_code == 9
+
+        for _ in range(2):
+            with pytest.raises(StopAsyncIteration):
+                await asyncio.wait_for(anext(result), timeout=2)
+    finally:
+        await result.close()
+
+
+@pytest.mark.asyncio
 async def test_async_context_manager(fake_qwen_path: str) -> None:
     async with query(
         "hello context",
