@@ -113,20 +113,34 @@ describe('complete macOS test groups', () => {
 const ECS_RUNNER = '["self-hosted", "linux", "x64", "ecs-qwen"]';
 const ARM_RUNNER = '["self-hosted", "linux", "arm64"]';
 const HOSTED_RUNNER = '["ubuntu-latest"]';
+// The classifier output a job's runs-on actually reads. Deriving it (instead
+// of accepting either name) keeps the throw below reachable: a ceiling that
+// names a DIFFERENT output than its runs-on leaves `needs.` in the expression
+// and fails loud, which is the desync this guard exists to catch.
+const outputOf = (job) =>
+  /outputs\.((?:ubuntu|lint)_runner)/.exec(
+    String(ci.jobs[job]['runs-on']),
+  )?.[1];
 const timeoutMinutesOn = (job, ubuntuRunner) => {
   // The same `|| '["ubuntu-latest"]'` default the runs-on expression carries:
   // a missing output (classify_pr skipped) is the hosted routing. The caller
   // passes the value of the output the job itself reads — ubuntu_runner for
   // the association-gated lanes, lint_runner for lint_and_static.
   const effective = ubuntuRunner || HOSTED_RUNNER;
+  const name = outputOf(job);
   let expr = String(ci.jobs[job]['timeout-minutes'])
     .replace(/^\$\{\{\s*/, '')
-    .replace(/\s*\}\}$/, '')
-    .replace(
-      /contains\(needs\.classify_pr\.outputs\.(?:ubuntu|lint)_runner \|\| '\["ubuntu-latest"\]', 'self-hosted'\)/g,
+    .replace(/\s*\}\}$/, '');
+  if (name) {
+    expr = expr.replace(
+      new RegExp(
+        `contains\\(needs\\.classify_pr\\.outputs\\.${name} \\|\\| '\\["ubuntu-latest"\\]', 'self-hosted'\\)`,
+        'g',
+      ),
       String(effective.includes('self-hosted')),
-    )
-    .replace(/fromJSON\(/g, '(');
+    );
+  }
+  expr = expr.replace(/fromJSON\(/g, '(');
   if (/needs\.|contains\(|fromJSON\(/.test(expr)) {
     throw new Error(
       `${job} timeout carries a term this guard does not model: ${expr}`,
@@ -255,7 +269,11 @@ const runnerOn = (job, ubuntuRunner) => {
     'contains',
     `return (${expression});`,
   )(
-    { classify_pr: { outputs: { ubuntu_runner: ubuntuRunner } } },
+    {
+      classify_pr: {
+        outputs: { [outputOf(job) ?? 'ubuntu_runner']: ubuntuRunner },
+      },
+    },
     JSON.parse,
     (labels, label) => labels.includes(label),
   );
@@ -298,6 +316,46 @@ it('gives the ARM64 fleet the same contended-pool ceilings as the x64 pool', () 
   // at 30, which reads as an ARM compatibility failure.
   expect(timeoutMinutesOn('lint_and_static', ARM_RUNNER)).toBe(90);
   expect(timeoutMinutesOn('integration_no_ak', ARM_RUNNER)).toBe(60);
+});
+
+it('isolates HOME in every lane that admits untrusted authors', () => {
+  // A job routed by lint_runner executes fork-authored code on the shared
+  // persistent pool. Without a per-job HOME it can plant ~/.gitconfig
+  // (core.hooksPath / fsmonitor) or ~/.npmrc state that the next trusted job
+  // on the same runner registration inherits — exposure beyond the fork's
+  // own run, which the accepted risk does not cover. The sibling lanes pin
+  // the same runner.temp HOME pattern on their PR-code steps.
+  for (const [id, job] of Object.entries(ci.jobs)) {
+    if (!String(job['runs-on'] ?? '').includes('lint_runner')) continue;
+    const homes = [
+      job.env?.HOME,
+      ...(job.steps ?? []).map((s) => s.env?.HOME),
+    ].filter(Boolean);
+    expect(
+      homes.some((h) => String(h).includes('runner.temp')),
+      `${id} admits untrusted authors without a per-job HOME`,
+    ).toBe(true);
+  }
+  expect(ci.jobs.lint_and_static.env.HOME).toBe(
+    '${{ runner.temp }}/qwen-lint-home',
+  );
+  // The shared-cache derivation must not ride the per-job HOME back to a
+  // cold cache: it reads the runner account's real home from passwd and
+  // re-points npm, pnpm (XDG) and corepack explicitly.
+  const cache = ci.jobs.lint_and_static.steps.find(
+    (s) => s.name === 'Configure persistent npm cache (self-hosted)',
+  );
+  expect(cache.run).toContain('getent passwd');
+  expect(cache.run).not.toContain('cache_dir="${HOME}');
+  expect(cache.run).toContain('XDG_DATA_HOME=');
+  expect(cache.run).toContain('COREPACK_HOME=');
+  // The fresh HOME must exist before the hygiene steps write their global
+  // git config into it.
+  const names = ci.jobs.lint_and_static.steps.map((s) => s.name);
+  expect(names).toContain('Create per-job HOME');
+  expect(names.indexOf('Create per-job HOME')).toBeLessThan(
+    names.indexOf('Restore workspace ownership'),
+  );
 });
 
 it('routes the browser smoke to ARM64 independently of the shared Linux test lane', () => {
@@ -576,6 +634,15 @@ describe('post-merge push lane', () => {
     expect(String(ci.jobs.lint_and_static['runs-on'])).toBe(
       '${{ fromJSON(needs.classify_pr.outputs.lint_runner || \'["ubuntu-latest"]\') }}',
     );
+    // The deleted lint==test equality used to pin `test` to ubuntu_runner
+    // transitively; keep that promise enforceable with an explicit literal.
+    // Without it, a one-token edit moving `test` onto lint_runner — the
+    // "simplify the two outputs into one" move the ci.yml comments warn
+    // against — would put every untrusted fork's full unit-test lane on the
+    // shared pool with nothing going red.
+    expect(String(ci.jobs.test['runs-on'])).toBe(
+      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+    );
     // The needs edge is what makes every needs.classify_pr.outputs.* this
     // describe relies on non-empty at runtime. Drop it and the lane silently
     // decouples from the classifier: runs-on falls through the `|| '…'` to
@@ -644,6 +711,25 @@ describe('post-merge push lane', () => {
             return [
               s.name,
               JSON.stringify(canon({ ...install, with: restWith })),
+            ];
+          }
+          if (s.name === 'Configure persistent npm cache (self-hosted)') {
+            // The two copies must differ: lint derives the shared caches
+            // from the runner account's real home (its job HOME is per-job
+            // for untrusted fork code); test rides the real HOME. Pin each
+            // derivation here and exempt the FIELD that must differ from
+            // the equality loop — the HOME-isolation guard adds the rest.
+            if (job === 'lint_and_static') {
+              expect(s.run).toContain('getent passwd');
+            } else {
+              expect(s.run).toContain(
+                'cache_dir="${HOME}/.cache/qwen-code/npm"',
+              );
+            }
+            const { run: _cacheRun, ...cacheStep } = s;
+            return [
+              s.name,
+              JSON.stringify(canon({ ...cacheStep, with: restWith })),
             ];
           }
           return [s.name, JSON.stringify(canon({ ...s, with: restWith }))];
