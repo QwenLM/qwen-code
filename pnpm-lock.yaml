@@ -1610,14 +1610,14 @@ importers:
         specifier: ^6.35.0
         version: 6.43.1
       '@datafe-open/markdown-chart':
-        specifier: ^0.1.12
-        version: 0.1.12
+        specifier: ^0.4.1
+        version: 0.4.1
       '@datafe-open/markdown-chart-echarts':
-        specifier: ^0.1.12
-        version: 0.1.12(echarts@6.1.0)
+        specifier: ^0.4.1
+        version: 0.4.1(echarts@6.1.0)
       '@datafe-open/markdown-chart-react':
-        specifier: ^0.1.12
-        version: 0.1.12(@types/react@19.2.10)(echarts@6.1.0)(react@19.2.4)(supports-color@7.2.0)
+        specifier: ^0.4.1
+        version: 0.4.1(@types/react@19.2.10)(echarts@6.1.0)(react@19.2.4)(supports-color@7.2.0)
       '@modelcontextprotocol/ext-apps':
         specifier: ^1.7.5
         version: 1.7.5(@modelcontextprotocol/sdk@1.30.0(supports-color@7.2.0)(zod@3.25.76))(react-dom@19.2.4(react@19.2.4))(react@19.2.4)(zod@3.25.76)
@@ -2130,19 +2130,25 @@ packages:
     resolution: {integrity: sha512-Vd/9EVDiu6PPJt9yAh6roZP6El1xHrdvIVGjyBsHR0RYwNHgL7FJPyIIW4fANJNG6FtyZfvlRPpFI4ZM/lubvw==}
     engines: {node: '>=18'}
 
-  '@datafe-open/markdown-chart-echarts@0.1.12':
-    resolution: {integrity: sha512-/GzbYGC5ZYU0myaPlT+PLR2QLttf4W9CZ1oNmQJVGS0GNOqS2WTZeMBCvVkVqtXnT7e1We3RiG5MQsY4FhFTyA==}
+  '@datafe-open/markdown-chart-echarts@0.4.1':
+    resolution: {integrity: sha512-FCtbjzIcTHoqj/KJ/ihp3slC0X/qvMfZk0JZlaSrIg6Fldbkpk22wDO+H3ycDe5GSyoZw3+wHZbIJCCfw6lz9g==}
     peerDependencies:
       echarts: '>=5.5 <7'
 
-  '@datafe-open/markdown-chart-react@0.1.12':
-    resolution: {integrity: sha512-JOAnOYgGBS6wVVUc5+DaV0TMiJUMms3YcOVTI2A1NIy80hPJyeWElFGTVML1L8nktU1Q1XQtsbxekSMuweJ7EA==}
+  '@datafe-open/markdown-chart-kpi@0.4.1':
+    resolution: {integrity: sha512-H5gsq8QkNaaGaQvjZF/A22S9cTzVlXKL1M/1l9WyhNoQXV7orZbVpFV8+mRBaCw2YLeU27uX5AzdRTCpE04Evg==}
+
+  '@datafe-open/markdown-chart-react@0.4.1':
+    resolution: {integrity: sha512-xvI0qpHDK+zUMdNFbyaao6DEPPFo0LEsarjFleTMzsWkqOvC2s/vIQQbjF4e0dFFFHcTELT1P9V8oR4vI/h5Mg==}
     peerDependencies:
       echarts: '>=5.5 <7'
       react: ^19.2.4
 
-  '@datafe-open/markdown-chart@0.1.12':
-    resolution: {integrity: sha512-q/eS0se1h8jXoSPrGdKYiKxbGiG13mFoQYdA8RC41bFRQCJHCrQNk2UEhXWG0JJFabTopmMKMENUsDVWp0+Rvw==}
+  '@datafe-open/markdown-chart-table@0.4.1':
+    resolution: {integrity: sha512-k1srdpqIUWCw2rmcWNnVICd6/e4u6cXjC+Yo5x1IoxpixmY1QutRuj0nxP2fxW1XktFAfm9rUuGNEbxcoXni2w==}
+
+  '@datafe-open/markdown-chart@0.4.1':
+    resolution: {integrity: sha512-NW/p6LkOWPZSIPXHZiApqsehwCCOacSkXh7CEZzTGTgobgFayqysJWn/YKBQiIlFCBhc5xin04/zJFm9F6zLjQ==}
 
   '@dotenvx/dotenvx@1.75.1':
     resolution: {integrity: sha512-/BITOC9dmS/edY2zQwZNicQ059O6RKabtQfyEafV0nGtfYRNHYy1DIPiYVcov40+tob9hfmBnbR963dS+EQ1DQ==}
@@ -5576,6 +5582,15 @@ packages:
     resolution: {integrity: sha512-lGq+9yr1/GuAWaVYIHRjvvySG5/4VfKIvC8EWxStPdcDh/Ka7FG3twP6v4d5BkravUilhIAsG4Qj83t02LWUPQ==}
     engines: {node: '>=0.4.0'}
     hasBin: true
+
+  ag-charts-types@14.2.0:
+    resolution: {integrity: sha512-4pDV6/4zbzPN7t607Gr1o6DO9RhmPafQGr+hIpTJBaerbaMoC+WOO3v/wkxFbvCNrHKOexEKSfNTH7PaAR4UzA==}
+
+  ag-grid-community@36.2.0:
+    resolution: {integrity: sha512-tK0Toj7t0fV/OMLPnDc0xlYKAqDbnCT3iJodYSn2TJ541caU8jPdYwWhMdW+AP2+pUNwFiJVgc04eJNfvBPsWw==}
+
+  ag-stack@36.2.0:
+    resolution: {integrity: sha512-f3XT2htFs9dUPcHni2z9ak69QNta5ODEpooHuuNvbjN98JkokpEqRQ9YLQHQJFdCcgi9Ybs/j3zkkvmNRamIPg==}
 
   agent-base@6.0.2:
     resolution: {integrity: sha512-RZNwNclF7+MS/8bDg70amg32dyeZGZxiDuQmZxKLAlQjr3jGyLx+4Kkk58UO7D2QdgFIQCovuSuZESne6RG6XQ==}
@@ -11516,16 +11531,22 @@ snapshots:
 
   '@csstools/css-tokenizer@3.0.4': {}
 
-  '@datafe-open/markdown-chart-echarts@0.1.12(echarts@6.1.0)':
+  '@datafe-open/markdown-chart-echarts@0.4.1(echarts@6.1.0)':
     dependencies:
-      '@datafe-open/markdown-chart': 0.1.12
+      '@datafe-open/markdown-chart': 0.4.1
       echarts: 6.1.0
       papaparse: 5.5.4
 
-  '@datafe-open/markdown-chart-react@0.1.12(@types/react@19.2.10)(echarts@6.1.0)(react@19.2.4)(supports-color@7.2.0)':
+  '@datafe-open/markdown-chart-kpi@0.4.1':
     dependencies:
-      '@datafe-open/markdown-chart': 0.1.12
-      '@datafe-open/markdown-chart-echarts': 0.1.12(echarts@6.1.0)
+      '@datafe-open/markdown-chart': 0.4.1
+
+  '@datafe-open/markdown-chart-react@0.4.1(@types/react@19.2.10)(echarts@6.1.0)(react@19.2.4)(supports-color@7.2.0)':
+    dependencies:
+      '@datafe-open/markdown-chart': 0.4.1
+      '@datafe-open/markdown-chart-echarts': 0.4.1(echarts@6.1.0)
+      '@datafe-open/markdown-chart-kpi': 0.4.1
+      '@datafe-open/markdown-chart-table': 0.4.1
       echarts: 6.1.0
       react: 19.2.4
       react-markdown: 9.1.0(@types/react@19.2.10)(react@19.2.4)(supports-color@7.2.0)
@@ -11533,7 +11554,12 @@ snapshots:
       - '@types/react'
       - supports-color
 
-  '@datafe-open/markdown-chart@0.1.12': {}
+  '@datafe-open/markdown-chart-table@0.4.1':
+    dependencies:
+      '@datafe-open/markdown-chart': 0.4.1
+      ag-grid-community: 36.2.0
+
+  '@datafe-open/markdown-chart@0.4.1': {}
 
   '@dotenvx/dotenvx@1.75.1':
     dependencies:
@@ -12412,11 +12438,11 @@ snapshots:
       cors: 2.8.5
       cross-spawn: 7.0.6
       eventsource: 3.0.7
-      eventsource-parser: 3.0.3
+      eventsource-parser: 3.1.1
       express: 5.2.1(supports-color@7.2.0)
       express-rate-limit: 8.5.2(express@5.2.1(supports-color@7.2.0))
       hono: 4.13.3
-      jose: 6.1.3
+      jose: 6.2.12
       json-schema-typed: 8.0.2
       pkce-challenge: 5.0.0
       raw-body: 3.0.2
@@ -14969,14 +14995,14 @@ snapshots:
       msw: 2.10.4(@types/node@20.19.1)(typescript@5.8.3)
       vite: 7.3.6(@types/node@20.19.1)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.20.3)(yaml@2.9.0)
 
-  '@vitest/mocker@3.2.7(msw@2.10.4(@types/node@22.20.1)(typescript@5.8.3))(vite@7.3.6(@types/node@20.19.1)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.20.3)(yaml@2.9.0))':
+  '@vitest/mocker@3.2.7(msw@2.10.4(@types/node@22.20.1)(typescript@5.8.3))(vite@7.3.6(@types/node@22.20.1)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.20.3)(yaml@2.9.0))':
     dependencies:
       '@vitest/spy': 3.2.7
       estree-walker: 3.0.3
       magic-string: 0.30.21
     optionalDependencies:
       msw: 2.10.4(@types/node@22.20.1)(typescript@5.8.3)
-      vite: 7.3.6(@types/node@20.19.1)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.20.3)(yaml@2.9.0)
+      vite: 7.3.6(@types/node@22.20.1)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.20.3)(yaml@2.9.0)
 
   '@vitest/pretty-format@3.2.7':
     dependencies:
@@ -15161,6 +15187,15 @@ snapshots:
   acorn@8.15.0: {}
 
   acorn@8.18.0: {}
+
+  ag-charts-types@14.2.0: {}
+
+  ag-grid-community@36.2.0:
+    dependencies:
+      ag-charts-types: 14.2.0
+      ag-stack: 36.2.0
+
+  ag-stack@36.2.0: {}
 
   agent-base@6.0.2(supports-color@7.2.0):
     dependencies:
@@ -16872,7 +16907,7 @@ snapshots:
 
   eventsource@3.0.7:
     dependencies:
-      eventsource-parser: 3.0.3
+      eventsource-parser: 3.1.1
 
   exceljs@4.4.0:
     dependencies:
@@ -19874,7 +19909,7 @@ snapshots:
     dependencies:
       bytes: 3.1.2
       http-errors: 2.0.1
-      iconv-lite: 0.7.2
+      iconv-lite: 0.7.3
       unpipe: 1.0.0
 
   rc-config-loader@4.1.4(supports-color@7.2.0):
@@ -21608,7 +21643,7 @@ snapshots:
     dependencies:
       '@types/chai': 5.2.2
       '@vitest/expect': 3.2.7
-      '@vitest/mocker': 3.2.7(msw@2.10.4(@types/node@22.20.1)(typescript@5.8.3))(vite@7.3.6(@types/node@20.19.1)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.20.3)(yaml@2.9.0))
+      '@vitest/mocker': 3.2.7(msw@2.10.4(@types/node@22.20.1)(typescript@5.8.3))(vite@7.3.6(@types/node@22.20.1)(jiti@2.7.0)(lightningcss@1.32.0)(tsx@4.20.3)(yaml@2.9.0))
       '@vitest/pretty-format': 3.2.7
       '@vitest/runner': 3.2.7
       '@vitest/snapshot': 3.2.7
