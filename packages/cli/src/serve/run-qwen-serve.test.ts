@@ -2865,6 +2865,25 @@ describe('workspace skill settings persistence', () => {
     ).rejects.toMatchObject({ name: 'SkillCatalogUnavailableError' });
   });
 
+  it('does not resolve a bare authored name from a partial catalog', async () => {
+    writeSkillSettings([], []);
+    const { persistUserSkillActivation } = await captureSkillPersistence(
+      [skillStatus('rust:pdf', 'extension', 'rust')],
+      { complete: false },
+    );
+
+    await expect(
+      persistUserSkillActivation!(workspace, ['pdf'], false, 'default'),
+    ).resolves.toEqual({
+      outcomes: [{ skillName: 'pdf', changed: true }],
+      settingsChanges: [{ key: 'skills.defaultDisabled', value: ['pdf'] }],
+    });
+    expect(
+      JSON.parse(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'))
+        .skills,
+    ).toMatchObject({ defaultDisabled: ['pdf'] });
+  });
+
   it.each(['pdf', 'rust:pdf'] as const)(
     'preserves recovery boundaries for a retained %s user restriction',
     async (entry) => {
@@ -3095,16 +3114,31 @@ describe('workspace skill settings persistence', () => {
   it('preserves a bare restriction when disabling an unresolved qualified name', async () => {
     writeSkillSettings([], ['pdf']);
     const { persistUserSkillActivation } = await captureSkillPersistence([]);
+    const before = fs.readFileSync(
+      path.join(qwenHome, 'settings.json'),
+      'utf8',
+    );
 
     await expect(
       persistUserSkillActivation!(workspace, ['rust:pdf'], false, 'default'),
-    ).resolves.toMatchObject({
-      outcomes: [{ skillName: 'rust:pdf', changed: true }],
+    ).resolves.toEqual({
+      outcomes: [
+        {
+          skillName: 'rust:pdf',
+          changed: false,
+          block: {
+            reason: 'hard',
+            list: 'disabled',
+            entry: 'pdf',
+            scope: 'User',
+          },
+        },
+      ],
+      settingsChanges: [],
     });
-    expect(
-      JSON.parse(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'))
-        .skills,
-    ).toEqual({ disabled: ['pdf'], defaultDisabled: ['rust:pdf'] });
+    expect(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8')).toBe(
+      before,
+    );
   });
 
   it('converts a unique authored user hard restriction to default mode', async () => {
@@ -3122,6 +3156,39 @@ describe('workspace skill settings persistence', () => {
       JSON.parse(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8'))
         .skills,
     ).toEqual({ defaultDisabled: ['rust:pdf'] });
+  });
+
+  it('refuses a default-mode disable when a hard entry survives under the authored spelling', async () => {
+    writeSkillSettings([], ['pdf']);
+    const { persistUserSkillActivation } = await captureSkillPersistence([
+      skillStatus('pdf', 'project'),
+      skillStatus('rust:pdf', 'extension', 'rust'),
+    ]);
+    const before = fs.readFileSync(
+      path.join(qwenHome, 'settings.json'),
+      'utf8',
+    );
+
+    await expect(
+      persistUserSkillActivation!(workspace, ['rust:pdf'], false, 'default'),
+    ).resolves.toEqual({
+      outcomes: [
+        {
+          skillName: 'rust:pdf',
+          changed: false,
+          block: {
+            reason: 'hard',
+            list: 'disabled',
+            entry: 'pdf',
+            scope: 'User',
+          },
+        },
+      ],
+      settingsChanges: [],
+    });
+    expect(fs.readFileSync(path.join(qwenHome, 'settings.json'), 'utf8')).toBe(
+      before,
+    );
   });
 
   it('enables a skill whose user entry uses the authored spelling', async () => {

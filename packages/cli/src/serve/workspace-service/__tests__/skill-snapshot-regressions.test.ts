@@ -202,6 +202,7 @@ describe('Skill snapshot correctness regressions', () => {
       'retained-review',
     ]);
     expect(result.errors).toBeUndefined();
+    expect(result.complete).toBe(false);
     expect(result.snapshot).toEqual({
       observedAt: initial.snapshot!.observedAt,
       ageMs: 1_500,

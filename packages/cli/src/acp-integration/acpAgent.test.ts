@@ -11579,7 +11579,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
   });
 
   it.each([false, true])(
-    'preserves known skills and reports partial discovery in live ACP status (errors: %s)',
+    'preserves known skills and marks partial discovery in live ACP status (discoveryErrors: %s)',
     async (hasDiscoveryErrors) => {
       mockConfig = {
         ...mockConfig,
@@ -11632,14 +11632,10 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           initialized: true,
           skills: [{ name: 'rust:pdf', extensionName: 'rust' }],
         });
+        expect(status).not.toHaveProperty('errors');
         if (hasDiscoveryErrors) {
-          expect(status).toMatchObject({
-            errors: [
-              { kind: 'skills', status: 'error', error: expect.any(String) },
-            ],
-          });
+          expect(status).toMatchObject({ complete: false });
         } else {
-          expect(status).not.toHaveProperty('errors');
           expect(status).not.toHaveProperty('complete');
         }
       } finally {

@@ -1911,8 +1911,9 @@ means the skill remains manually available but is hidden from model invocation.
 daemon returns it as stored without separately resolving symlinks or
 canonicalizing it. Current daemons emit it for every skill, while clients must
 tolerate its absence from older v1 daemons. Skill bodies, hooks, `skillRoot`,
-and other skill configuration remain excluded. `errors` is omitted when
-discovery succeeds.
+and other skill configuration remain excluded. `errors` is omitted for every
+initialized catalog, including a partial one; `complete: false` marks a scan
+that could not cover every level or every readable entry.
 
 For extension-owned skills, `extensionName` is the canonical manifest name and
 is safe to use as the owner identity. `extensionDisplayName` is an optional,
@@ -4236,7 +4237,7 @@ SSE event (workspace-scoped): `tool_toggled` with `{toolName, enabled, originato
 
 Capability tag: `workspace_skills_config_runtime`.
 
-`GET /workspace/config/skills` reads the daemon-local global configuration owner. `GET /workspaces/:workspace/config/skills` reads the exact registered workspace configuration and does not require a live or trusted runtime. Both return the normal Skills status shape without a required `runtimeEpoch`. A status carries `complete: false` when enumeration skipped a level — safe or bare mode, or a level named in `skills.disabledLevels` — because such a catalog cannot prove a name absent or a spelling uniquely owned; an absent `complete` means the scan covered every level:
+`GET /workspace/config/skills` reads the daemon-local global configuration owner. `GET /workspaces/:workspace/config/skills` reads the exact registered workspace configuration and does not require a live or trusted runtime. Both return the normal Skills status shape without a required `runtimeEpoch`. A status carries `complete: false` when the catalog cannot prove a name absent or a spelling uniquely owned — enumeration skipped a level (safe or bare mode, or a level named in `skills.disabledLevels`), discovery could not read every Skill, an untrusted workspace's catalog omits Extension Skills, or the answer is a retained snapshot; an absent `complete` means the responding scan covered every level and every readable entry:
 
 ```json
 {
@@ -4390,7 +4391,7 @@ A `hard` disable cannot be lifted by any other scope, so workspace toggles for t
 
 An enable is refused, without writing, when a standing entry would keep the Skill disabled. System and SystemDefaults `skills.disabled` entries refuse under either spelling. A User entry in the resolved spelling, or an authored alias, does not refuse the enable only when complete fresh managed catalogs prove that spelling belongs to one registry identity; other User hard restrictions remain blocking. For example, with `rust:pdf` and `go:pdf` in the managed catalogs, enabling only `rust:pdf` preserves a User `disabled: ["pdf"]` entry and returns its User block. A `defaultDisabled` entry that survives the write also blocks unless an identically spelled grant cancels it. The grant written by this request cancels a default restriction in the resolved spelling, including at System or SystemDefaults scope, only when ownership is proven unique; it does not cancel another spelling. A new grant is refused (`changed: false`, `reason: "ambiguous_skill_name"`) unless fresh complete managed catalogs prove the written spelling belongs to exactly one registry identity: an identically spelled `defaultDisabled` entry is cancelled at load time in every scope and workspace, so a shared grant can lift a restriction the request never named. A grant already present is not refused. Batch enables recheck restrictions removed or cancelled by earlier items before reporting a block. Workspace entries never refuse a user write; they keep gating only their own workspace. The route does not require the primary workspace to be trusted, but an enable that cannot resolve against an untrusted workspace's extension-filtered catalog answers `503 skill_catalog_unavailable` instead of `unresolved_skill_name`.
 
-Retained catalog snapshots can resolve identities but cannot establish that any spelling is safe to relax. For example, with project `pdf` and extension `rust:pdf`, enabling exact `pdf` preserves a global `pdf` restriction and returns its existing block. Converting a shared or unverified exact hard restriction to default mode is likewise refused. Ordinary exact recovery remains available when fresh complete catalogs prove unique ownership. Shared names require settings intervention: a new shared grant is refused as above rather than silently cancelling another identity's Workspace default restriction. These routes do not provide per-identity exceptions to a shared restriction, and catalog checks cover managed workspaces only.
+Retained catalog snapshots can resolve exact registry names but cannot resolve a bare authored spelling or establish that any spelling is safe to relax. For example, with project `pdf` and extension `rust:pdf`, enabling exact `pdf` preserves a global `pdf` restriction and returns its existing block. Converting a shared or unverified exact hard restriction to default mode is likewise refused. Ordinary exact recovery remains available when fresh complete catalogs prove unique ownership. Shared names require settings intervention: a new shared grant is refused as above rather than silently cancelling another identity's Workspace default restriction. These routes do not provide per-identity exceptions to a shared restriction, and catalog checks cover managed workspaces only.
 
 Request:
 

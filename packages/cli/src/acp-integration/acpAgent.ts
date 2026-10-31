@@ -8623,20 +8623,9 @@ class QwenAgent implements Agent {
         skills: Array.from(skillsByKey.values()).sort((a, b) =>
           a.name.localeCompare(b.name),
         ),
-        ...(skillManager.getOmittedSkillLevels().length > 0
+        ...(skillManager.getOmittedSkillLevels().length > 0 ||
+        skillManager.hasDiscoveryErrors()
           ? { complete: false }
-          : {}),
-        ...(skillManager.hasDiscoveryErrors()
-          ? {
-              errors: [
-                this.errorCell(
-                  'skills',
-                  new Error(
-                    'The enabled Skills could not be completely discovered.',
-                  ),
-                ),
-              ],
-            }
           : {}),
       };
     } catch (error) {

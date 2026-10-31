@@ -361,25 +361,19 @@ async function buildWorkspaceSkillsStatus(
         );
       }
     }
-    const errors: ServeWorkspaceSkillsStatus['errors'] =
-      skillManager.hasDiscoveryErrors()
-        ? [
-            {
-              kind: 'skills',
-              status: 'error',
-              error: 'The enabled Skills could not be completely discovered.',
-            },
-          ]
-        : undefined;
+    // A partial observation still serves the readable skills: `complete`
+    // carries the incompleteness, while `errors` is reserved for a catalog
+    // that could not be built at all, which the catch path below reports.
+    const incomplete =
+      !workspaceTrusted ||
+      skillManager.getOmittedSkillLevels().length > 0 ||
+      skillManager.hasDiscoveryErrors();
     return {
       v: STATUS_SCHEMA_VERSION,
       workspaceCwd,
       initialized: true,
       skills: statuses.sort((a, b) => a.name.localeCompare(b.name)),
-      ...(skillManager.getOmittedSkillLevels().length > 0
-        ? { complete: false }
-        : {}),
-      ...(errors ? { errors } : {}),
+      ...(incomplete ? { complete: false } : {}),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

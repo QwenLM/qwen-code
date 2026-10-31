@@ -6021,7 +6021,11 @@ async function runQwenServeImpl(
             resolved: true,
           };
         }
-        const authoredMatch = skillsByAuthoredName.get(normalized);
+        // An incomplete observation cannot prove which Extension owns a
+        // bare authored name: another claimant may be the one it missed.
+        const authoredMatch = catalogEnumerated
+          ? skillsByAuthoredName.get(normalized)
+          : undefined;
         if (authoredMatch?.extensionName) {
           return {
             name: skillName,
@@ -6452,16 +6456,6 @@ async function runQwenServeImpl(
                 };
                 continue;
               }
-              // Default mode also removes a hard entry. Refuse that
-              // relaxation unless the exact spelling is proven unshared.
-              const relaxesSharedHardEntry =
-                mode === 'default' &&
-                !isProvenUniqueSpelling(skillName) &&
-                next.disabled.some(
-                  (name) =>
-                    name.trim().toLowerCase() ===
-                    skillName.trim().toLowerCase(),
-                );
               // An existing grant may already cancel this default. Preserve
               // its shared fallback instead of deleting it in a no-op enable.
               const preservesDefault =
@@ -6472,8 +6466,12 @@ async function runQwenServeImpl(
                     name.trim().toLowerCase() ===
                     skillName.trim().toLowerCase(),
                 );
+              // A default-mode disable must not report a relaxation a
+              // surviving hard entry still forbids. The blocking spelling can
+              // be the authored alias, so consult the block check for every
+              // disable rather than only when the written spelling carries it.
               const block =
-                enabled || relaxesSharedHardEntry
+                enabled || mode === 'default'
                   ? stillBlocked(index, !preservesDefault)
                   : null;
               if (block) {

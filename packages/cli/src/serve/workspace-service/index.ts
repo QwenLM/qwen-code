@@ -353,6 +353,9 @@ export function createDaemonWorkspaceService(
     const ageMs = Math.max(0, Date.now() - lastWorkspaceSkillsStatusAt);
     return {
       ...lastWorkspaceSkillsStatus,
+      // The refresh that would prove this answer current failed, so the
+      // retained catalog cannot prove a name absent or a spelling unowned.
+      complete: false,
       snapshot: {
         observedAt: lastWorkspaceSkillsStatusAt,
         ageMs,

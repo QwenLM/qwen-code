@@ -423,6 +423,8 @@ describe('createWorkspaceSkillsStatusProvider', () => {
         expect.objectContaining({ name: 'local-skill', level: 'project' }),
       ]),
     );
+    // The Extension level is never inventoried for an untrusted workspace.
+    expect(status.complete).toBe(false);
     await fsp.rm(workspace, { recursive: true, force: true });
   });
 
@@ -597,9 +599,10 @@ describe('createWorkspaceSkillsStatusProvider', () => {
         await expect(provider.snapshot(workspace)).rejects.toThrow(
           'completely discovered',
         );
-        expect(status.errors).toEqual([
-          expect.objectContaining({ kind: 'skills', status: 'error' }),
-        ]);
+        // A partial observation is still a successful status: `complete`
+        // marks it, so consumers keep serving the readable skills.
+        expect(status.complete).toBe(false);
+        expect(status.errors).toBeUndefined();
       } finally {
         await fsp.rm(workspace, { recursive: true, force: true });
       }
