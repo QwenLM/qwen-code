@@ -85,7 +85,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `lookback` | `QWEN_MANAGED_AGENT_AUTOMATION_LOOKBACK` | 时长 | `24h` | 扫描器为定义推导到期槽位时最多回看的时长；早于该窗口（或早于定义启用时刻）的槽位既不触发也不记录，从而限定所有补跑的范围。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
 | `max-slots-per-tick` | — | 整数 | `1000` | 单个扫描轮次中每个定义最多保留的到期槽位数；回看窗口内超出时，最旧的槽位被截去并记录一条警告。该上限不会缩短扫描本身：扫描器仍会从该定义上一轮扫描停下的位置起逐分钟检查，最多覆盖整个回看窗口。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
 | `scan-delay` | `QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY` | 时长 | `10s` | 自动化扫描器从一轮扫描结束到下一轮开始之间等待的时长。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
-| `scanner-threads` | — | 整数 | `4` | 单个扫描轮次并行处理的定义行数；该轮会等待所有行处理完毕，下一轮才开始。每一行的租约都从该行自己的认领时刻起算，而不是从本轮开始时起算，因此扫描轮次再长也不会发放已经过期的租约。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
+| `scanner-threads` | — | 整数 | `4` | 单个扫描轮次并行处理的定义行数；该轮会等待所有行处理完毕，下一轮才开始。由于租约不是从本轮开始时起算（见 `qwen.managed-agent.automation.lease`），扫描轮次再长也不会发放已经过期的租约。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
 
 ## `qwen.managed-agent.channels`
 
