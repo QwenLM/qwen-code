@@ -192,6 +192,7 @@ describe('TUI product evidence', () => {
     ['packages/sdk-java/client/pom.xml', []],
     ['packages/sdk-python/pyproject.toml', []],
     ['packages/zed-extension/extension.toml', []],
+    ['packages/cua-driver/typescript/src/native-assets.ts', []],
     ['scripts/unrelated-maintenance.js', ['component']],
   ])(
     'selects mechanisms rather than blanket full acceptance for %s',
@@ -623,6 +624,29 @@ describe('TUI product evidence', () => {
     ).toBe(true);
   });
 
+  it('reports a policy exclusion instead of the no-impact default', async () => {
+    const { outputs } = await impact([
+      { filename: 'packages/cua-driver/typescript/src/native-assets.ts' },
+    ]);
+    expect(outputs.component).toBe('false');
+    expect(outputs.reason).toBe('Outside the TUI build/test closure');
+  });
+
+  it('excludes every tree the pnpm workspace itself leaves out', async () => {
+    const excluded = [
+      ...readFileSync('pnpm-workspace.yaml', 'utf8').matchAll(
+        /^\s*- '!packages\/([^']+)'$/gm,
+      ),
+    ].map(([, name]) => name);
+    expect(excluded.length).toBeGreaterThan(0);
+    for (const name of excluded) {
+      const { outputs } = await impact([
+        { filename: `packages/${name}/placeholder.ts` },
+      ]);
+      expect(outputs.component, name).toBe('false');
+    }
+  });
+
   it.each([
     'packages/cli/src/ui/App.tsx',
     'packages/vscode-ide-companion/package.json',
@@ -737,6 +761,11 @@ describe('TUI product evidence', () => {
       'both ends in the workspace-excluded mobile-shell tree',
       'packages/mobile-shell/build.gradle.kts',
       'packages/mobile-shell/old-build.gradle.kts',
+    ],
+    [
+      'both ends in the CUA driver tree',
+      'packages/cua-driver/typescript/src/native-assets.ts',
+      'packages/cua-driver/typescript/src/old-native-assets.ts',
     ],
   ])(
     'still skips a rename with %s',
