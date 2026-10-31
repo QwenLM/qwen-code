@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.persistence.FaultingExtensionRecordStore;
@@ -907,10 +908,14 @@ class HostedMcpStoreFaultGatesIT {
 
     private SessionRef createSession() throws Exception {
         String key = uuid();
-        String session = store.insertWorkspaceSessionCommand(tenant, "actor",
-                "create-" + key, "sha256:" + "a".repeat(64), "qwen-code",
-                null, null, List.of(), null,
-                new WorkspaceSelection("workspace", "child")).sessionId();
+        String session = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId(tenant)
+                .actorId("actor")
+                .idempotencyKey("create-" + key)
+                .requestDigest("sha256:" + "a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "child"))
+                .build()).sessionId();
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("sessionId", session);
         body.put("sessionScope", "thread");
