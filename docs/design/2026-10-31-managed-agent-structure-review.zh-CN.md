@@ -160,9 +160,15 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
    硬切，不留 deprecated 桥：release 尚未发生，模块门禁使每个调用方都可
    枚举，留桥只会让重载链继续活着。同一改动内更新全部调用方。
 
-3. 把 `AgentStateStore` 拆成角色接口（例如 `SessionAdmissionStore`、
-   `SessionQueryStore`、`EventProjectionStore`）。这一步实现可以仍是一个类；
-   消费方只注入自己用到的角色。先接口隔离，后实现拆分（P1）。
+3. 把 `AgentStateStore` 拆成角色接口。已落地（2026-10-31）为六个角色——
+   `SessionAdmissionStore`、`SessionLifecycleStore`、`SessionQueryStore`、
+   `SessionPolicyStore`、`EventProjectionStore`、`TurnExecutionStore`——
+   `AgentStateStore` 保留为继承它们的组合接口，实现与测试继续使用完整
+   表面，嵌套 record/常量经继承解析（嵌套类型的 import 必须写拥有它的
+   角色）。角色组合 pin 保证组合接口自身为空、不拥有任何表面。消费方
+   审计：今天的服务都是跨角色编排者，因此继续使用组合接口；
+   `RenameEvidence` 收窄为 `SessionLifecycleStore`。更窄的注入会随 P1
+   沿同一条缝拆分实现而扩散。先接口隔离，后实现拆分（P1）。
 
 4. 在 `verification` 中按 `SurfaceRegistryGateTest` 的风格加 pin 测试：断言
    `AgentStateStore`（及其后继角色接口）中名为 `insertWorkspaceSessionCommand`

@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract;
@@ -19,9 +20,9 @@ import java.util.Optional;
  */
 @Component
 public class RenameEvidence implements AcceptanceEvidence {
-    private final AgentStateStore store;
+    private final SessionLifecycleStore store;
 
-    public RenameEvidence(AgentStateStore store) {
+    public RenameEvidence(SessionLifecycleStore store) {
         this.store = store;
     }
 
