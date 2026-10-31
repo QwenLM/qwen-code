@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { buildManagedAutoMemoryIndex } from './indexer.js';
 import {
   INDEX_TRUNCATION_NOTICE,
+  INDEX_TRUNCATION_NOTICE_START,
   INDEX_TRUNCATION_WARNING,
   MAX_INDEX_CHARS,
   MAX_INDEX_LINE_CHARS,
@@ -193,8 +194,11 @@ describe('managed auto-memory prompt helpers', () => {
       expect(result).not.toContain('- [Oversized](');
       expect(result).toContain(retainedEntry);
       expect(result).toContain('Only part of it was loaded.');
-      expect(result).toContain(
+      expect(result).not.toContain(
         `one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units`,
+      );
+      expect(result).toContain(
+        'Prune or merge entries to fit the character budget.',
       );
     },
   );
@@ -258,6 +262,7 @@ describe('managed auto-memory prompt helpers', () => {
         .split('\n')
         .filter((line) => line.startsWith('- ['));
       expect(entries).toHaveLength(14);
+      expect(entries.join('\n').length).toBeLessThanOrEqual(MAX_INDEX_CHARS);
       expect(generated.length).toBeGreaterThan(25_000);
       expect(generated).toContain('only part of it was written.');
       const index = generated.replaceAll('\n', newline);
@@ -277,6 +282,7 @@ describe('managed auto-memory prompt helpers', () => {
       }
       expect(result).toContain('only part of it was written.');
       expect(result).not.toContain('Only part of it was loaded.');
+      expect(result).not.toContain('too many index entries');
     },
   );
 
@@ -416,37 +422,154 @@ describe('managed auto-memory prompt helpers', () => {
     },
   );
 
-  // Issue #14834: a store can blow the character budget while every entry stays
-  // within the per-line limit, because MAX_INDEX_LINES * MAX_INDEX_LINE_CHARS
-  // exceeds MAX_INDEX_CHARS. The old message blamed entry length in that state,
-  // which named a lever that cannot move the number.
-  const uniformOverBudgetIndex = () => {
+  // Issue #14834: ordinary entries can exceed the total character budget.
+  // Issue #15277: shortening descriptions can still recover those entries.
+  const uniformOverBudgetIndex = (
+    count = 170,
+    lineChars = MAX_INDEX_LINE_CHARS,
+  ) => {
     const entry = (i: number) => {
       const prefix = `- [Topic ${i}](project/topic-${i}.md) — `;
-      return `${prefix}${'h'.repeat(MAX_INDEX_LINE_CHARS - prefix.length)}`;
+      return `${prefix}${'h'.repeat(lineChars - prefix.length)}`;
     };
-    return Array.from({ length: 170 }, (_, i) => entry(i));
+    return Array.from({ length: count }, (_, i) => entry(i));
   };
 
-  it('blames the entry count, not entry length, when every entry is legal', () => {
-    const lines = uniformOverBudgetIndex();
-    for (const line of lines) expect(line).toHaveLength(MAX_INDEX_LINE_CHARS);
-    const index = lines.join('\n');
-    expect(index.length).toBeGreaterThan(MAX_INDEX_CHARS);
-    expect(lines.length).toBeLessThan(MAX_MANAGED_AUTO_MEMORY_INDEX_LINES);
+  it.each(['project', 'user'])(
+    'directs %s character-budget edits to durable topic frontmatter',
+    (scope) => {
+      const index = uniformOverBudgetIndex().join('\n');
+      const result =
+        scope === 'project'
+          ? buildManagedAutoMemoryPrompt('/tmp/memory', index)
+          : buildManagedAutoMemoryPrompt('/tmp/memory', null, {
+              memoryDir: '/tmp/user',
+              indexContent: index,
+            });
+      expect(result).toContain('Only part of it was loaded.');
+      expect(result).toContain('`description` frontmatter in the topic files');
+      expect(result).not.toContain('shorten index descriptions');
+    },
+  );
 
-    const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+  it.each([160, 1])(
+    'does not prescribe cutting links when %i link-dominated entries overflow',
+    (count) => {
+      const lineChars = count === 1 ? MAX_INDEX_CHARS + 1 : 200;
+      const lines = Array.from({ length: count }, (_, i) => {
+        const start = `- [Long ${i}](reference/`;
+        const end = '.md)';
+        return `${start}${'x'.repeat(lineChars - start.length - end.length)}${end}`;
+      });
+      const index = lines.join('\n');
+      expect(index.length).toBeGreaterThan(MAX_INDEX_CHARS);
+      const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+      expect(result).not.toContain('Keep index entries to one line at most');
+      expect(result).toContain(
+        'Prune or merge entries to fit the character budget.',
+      );
+    },
+  );
 
-    expect(result).toContain(
-      `${index.length} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — too many index entries (170)`,
+  it('does not apply the per-line limit to a protected link among removable descriptions', () => {
+    const link = `- [Long](reference/${'x'.repeat(200)}.md)`;
+    const lines = [link, ...uniformOverBudgetIndex(159, 200)];
+    expect(lines.join('\n').length).toBeGreaterThan(MAX_INDEX_CHARS);
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
     );
-    expect(result).not.toContain('index entries are too long');
     expect(result).not.toContain('Keep index entries to one line at most');
-    expect(result).toContain('shortening entries cannot help');
+    expect(result).toContain('`description` frontmatter in the topic files');
+    expect(result).toContain(link);
+  });
+
+  it.each([
+    [170, MAX_INDEX_LINE_CHARS],
+    [200, 200],
+  ])(
+    'offers effective character-budget advice for %i entries of %i units',
+    (count, lineChars) => {
+      const lines = uniformOverBudgetIndex(count, lineChars);
+      for (const line of lines) expect(line).toHaveLength(lineChars);
+      const index = lines.join('\n');
+      expect(index.length).toBeGreaterThan(MAX_INDEX_CHARS);
+      expect(lines.length).toBeLessThanOrEqual(
+        MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
+      );
+      expect(
+        lines.map((line) => line.slice(0, MAX_INDEX_LINE_CHARS)).join('\n')
+          .length,
+      ).toBeGreaterThan(MAX_INDEX_CHARS);
+
+      const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+
+      expect(result).toContain(
+        `${index.length} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — too many index entries (${count})`,
+      );
+      expect(result).not.toContain('index entries are too long');
+      expect(result).not.toContain('Keep index entries to one line at most');
+      expect(result).toMatch(/shortening nonempty `description` frontmatter/i);
+      expect(result).toContain('check the regenerated index');
+      expect(result).toMatch(/prune or merge memory files/i);
+      // The budget is a hardcoded constant with no settings surface, so the
+      // advice must not send the reader after a lever they cannot pull.
+      expect(result).not.toContain('raise the budget');
+
+      const shortened = lines.map((line) => line.slice(0, 100));
+      const recovered = buildManagedAutoMemoryPrompt(
+        '/tmp/memory',
+        shortened.join('\n'),
+      );
+      expect(recovered).not.toContain('Only part of it was loaded.');
+      expect(recovered.match(/^- \[Topic \d+\]/gm)).toHaveLength(count);
+    },
+  );
+
+  it('limits the cannot-shorten advice to a line-count overflow', () => {
+    const lines = uniformOverBudgetIndex(201, 100);
+    expect(lines.join('\n').length).toBeLessThan(MAX_INDEX_CHARS);
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
+    );
+    expect(result).toContain('201 lines (limit: 200)');
+    expect(result).toContain('Shortening entries cannot reduce the line count');
     expect(result).toContain('prune or merge entries');
-    // The budget is a hardcoded constant with no settings surface, so the
-    // advice must not send the reader after a lever they cannot pull.
-    expect(result).not.toContain('raise the budget');
+    expect(result).not.toContain('also exceed the character budget');
+    expect(result).not.toMatch(
+      /shortening nonempty `description` frontmatter/i,
+    );
+
+    const shortened = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.map((line) => line.slice(0, 50)).join('\n'),
+    );
+    expect(shortened).toContain('Dropped 1 of 201 entries');
+    const pruned = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.slice(0, 200).join('\n'),
+    );
+    expect(pruned).not.toContain('Only part of it was loaded.');
+  });
+
+  it('does not take length advice from an entry beyond the line cap', () => {
+    const lines = [
+      ...uniformOverBudgetIndex(200, 100),
+      `- [Outside](notes/${'x'.repeat(MAX_INDEX_CHARS)}.md)`,
+    ];
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
+    );
+    expect(result).toContain('Dropped 1 of 201 entries: "Outside".');
+    expect(result).toContain('Shortening entries cannot reduce the line count');
+    expect(result).not.toContain('Keep index entries to one line at most');
+    expect(result).not.toContain('also exceed the character budget');
+    expect(result).not.toMatch(
+      /shortening nonempty `description` frontmatter/i,
+    );
+    expect(result.match(/^- \[Topic \d+\]/gm)).toHaveLength(200);
   });
 
   it('names what the budget evicted instead of only saying part was loaded', () => {
@@ -462,16 +585,66 @@ describe('managed auto-memory prompt helpers', () => {
     expect(result).not.toContain('- [Topic 165](');
   });
 
-  it('keeps blaming entry length when an entry really does exceed the line limit', () => {
-    const index = `- [Oversized](reference/${'%28'.repeat(9_000)}.md)\n- [Kept](reference/kept.md)`;
+  it('keeps length advice when a removable description causes the overflow', () => {
+    const index = `- [Oversized](reference/long.md) — ${'h'.repeat(27_000)}\n- [Kept](reference/kept.md)`;
     const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
 
     expect(result).toContain('index entries are too long');
     expect(result).toContain(
       `Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units`,
     );
-    expect(result).not.toContain('shortening entries cannot help');
     expect(result).toContain('Dropped 1 of 2 entries: "Oversized".');
+  });
+
+  it('omits description advice when link prefixes alone exceed the character budget', () => {
+    const prefixes = Array.from({ length: 200 }, (_, i) => {
+      const start = `- [Topic ${i}](reference/`;
+      const end = '.md) — ';
+      return `${start}${'x'.repeat(140 - start.length - end.length)}${end}`;
+    });
+    expect(prefixes.join('\n').length).toBeGreaterThan(MAX_INDEX_CHARS);
+    const lines = prefixes.map((prefix) => `${prefix}${'h'.repeat(10)}`);
+    for (const index of [
+      lines.join('\n'),
+      prefixes.join('\n'),
+      prefixes.map((prefix) => prefix.slice(0, -3)).join('\n'),
+    ]) {
+      const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+      expect(result).toContain(
+        'Prune or merge entries to fit the character budget.',
+      );
+      expect(result).not.toMatch(
+        /shortening nonempty `description` frontmatter/i,
+      );
+    }
+    const pruned = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.slice(0, 165).join('\n'),
+    );
+    expect(pruned).not.toContain('Only part of it was loaded.');
+    expect(pruned.match(/^- \[Topic \d+\]/gm)).toHaveLength(165);
+  });
+
+  it('keeps length advice ahead of line-count advice when both budgets overflow', () => {
+    const lines = [
+      ...uniformOverBudgetIndex(150, 100),
+      ...Array.from({ length: 50 }, (_, i) => {
+        const prefix = `- [Big ${i}](project/big-${i}.md) — `;
+        return `${prefix}${'h'.repeat(300 - prefix.length)}`;
+      }),
+      ...uniformOverBudgetIndex(1, 100),
+    ];
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
+    );
+    expect(result).toContain('201 lines and 30300 UTF-16 code units');
+    expect(result).toContain(
+      `Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units`,
+    );
+    expect(result).not.toContain(
+      'Shortening entries cannot reduce the line count',
+    );
   });
 
   it('counts line-cap removals in the drop note when both budgets overflow', () => {
@@ -488,6 +661,397 @@ describe('managed auto-memory prompt helpers', () => {
 
     // 35 evicted by the character budget + 50 by the 200-line cap.
     expect(result).toContain('Dropped 85 of 250 entries');
+    expect(result).toContain('Shortening entries cannot reduce the line count');
+    expect(result).toContain(
+      'The first 200 entries also exceed the character budget',
+    );
+    expect(result).toContain(
+      'try shortening nonempty `description` frontmatter in the topic files',
+    );
+
+    const capped = lines.slice(0, 200);
+    const countOnly = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      capped.join('\n'),
+    );
+    expect(countOnly).toContain('Dropped 35 of 200 entries');
+    const shortened = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      capped.map((line) => line.slice(0, 124)).join('\n'),
+    );
+    expect(shortened).not.toContain('Only part of it was loaded.');
+    expect(shortened.match(/^- \[Note \d+\]/gm)).toHaveLength(200);
+  });
+
+  it('does not count the writer notice as entries or against shortening feasibility', () => {
+    const lines = uniformOverBudgetIndex(199);
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n') + INDEX_TRUNCATION_NOTICE,
+    );
+    expect(result).toContain('Dropped 34 of 199 entries');
+    expect(result).toContain('too many index entries (199)');
+    expect(result).toMatch(/shortening nonempty `description` frontmatter/i);
+    expect(result).not.toContain(
+      'Shortening entries cannot reduce the line count',
+    );
+    expect(result).not.toContain('The first');
+  });
+
+  it.each(['', '  '])(
+    'preserves grouped links with trailing whitespace %j when measuring description-free entries',
+    (trailingWhitespace) => {
+      const lines = Array.from({ length: 200 }, (_, i) => {
+        const link = `- [Topic ${i}](notes/${i}.md)`;
+        const suffix = ` (also: ${'x'.repeat(122 - link.length - 10)}.md)`;
+        return `${link} — hook${suffix}${trailingWhitespace}`;
+      });
+      expect(lines.join('\n').length).toBeGreaterThan(MAX_INDEX_CHARS);
+      const result = buildManagedAutoMemoryPrompt(
+        '/tmp/memory',
+        lines.join('\n'),
+      );
+      expect(result).toMatch(/shortening nonempty `description` frontmatter/i);
+      expect(result).toContain('check the regenerated index');
+      expect(lines.every((line) => line.length <= MAX_INDEX_LINE_CHARS)).toBe(
+        true,
+      );
+    },
+  );
+
+  it('does not treat a separator in a title as the description boundary', () => {
+    const lines = Array.from({ length: 200 }, (_, i) => {
+      const title = 'Topic — title';
+      const prefix = `- [${title}](notes/${'x'.repeat(105)}-${i}.md)`;
+      return `${prefix} — hook — detail`;
+    });
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
+    );
+    expect(result).not.toMatch(
+      /shortening nonempty `description` frontmatter/i,
+    );
+    expect(result).toContain(
+      'Prune or merge entries to fit the character budget.',
+    );
+  });
+
+  it.each([' - ', ' – ', ': ', 'raw target', 'bold link'])(
+    'does not certify an unrecognized hand-edited entry shape: %s',
+    (shape) => {
+      const lines = Array.from({ length: 200 }, (_, i) => {
+        const link = `- [Topic ${i}](notes/${i}${shape === 'raw target' ? '(draft)' : ''}.md)`;
+        const prefix =
+          shape === 'bold link'
+            ? `- **${link.slice(2)}** — `
+            : `${link}${shape === 'raw target' ? ' — ' : shape}`;
+        return `${prefix}${'h'.repeat(150 - prefix.length)}`;
+      });
+      const result = buildManagedAutoMemoryPrompt(
+        '/tmp/memory',
+        lines.join('\n'),
+      );
+      expect(result).toMatch(/shortening nonempty `description` frontmatter/i);
+      expect(result).not.toContain(
+        'Prune or merge entries to fit the character budget.',
+      );
+      expect(result).not.toContain('bring the total within');
+    },
+  );
+
+  it('does not mistake an also phrase inside a description for grouped links', () => {
+    const lines = Array.from({ length: 200 }, (_, i) => {
+      const prefix = `- [Topic ${i}](notes/${i}.md) — hook (also: `;
+      return `${prefix}${'h'.repeat(149 - prefix.length)})`;
+    });
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
+    );
+    expect(result).toMatch(/shortening nonempty `description` frontmatter/i);
+    expect(result).toContain(
+      'Try shortening nonempty `description` frontmatter in the topic files',
+    );
+    expect(result).not.toContain('bring the total within');
+  });
+
+  it('keeps a non-anchored grouped suffix followed by text conditional', () => {
+    const links = Array.from({ length: 200 }, (_, i) => {
+      const start = `- [Topic ${i}](notes/`;
+      const end = `-${i}.md)`;
+      return `${start}${'x'.repeat(124 - start.length - end.length)}${end}`;
+    });
+    const lines = links.map((link) => `${link} — h (also: x.md) note`);
+    expect(lines.every((line) => line.length === 146)).toBe(true);
+    expect(lines.join('\n')).toHaveLength(29_399);
+    const groupsWithoutHooks = links.map((link) => `${link} (also: x.md) note`);
+    expect(groupsWithoutHooks.join('\n')).toHaveLength(28_599);
+    for (const index of [lines.join('\n'), groupsWithoutHooks.join('\n')]) {
+      const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+      expect(result).toContain(
+        'Try shortening nonempty `description` frontmatter in the topic files',
+      );
+      expect(result).not.toContain('bring the total within');
+      expect(result).not.toContain(
+        'Prune or merge entries to fit the character budget.',
+      );
+    }
+  });
+
+  it.each(['', '.'])(
+    'does not promise shortening for hook-less grouped links ending in %j',
+    (punctuation) => {
+      const lines = Array.from({ length: 200 }, (_, i) => {
+        const link = `- [Topic ${i}](notes/${'x'.repeat(90)}-${i}.md)`;
+        return `${link} (also: notes/${'y'.repeat(12)}-${i}.md)${punctuation}`;
+      });
+      expect(lines.join('\n').length).toBeGreaterThan(MAX_INDEX_CHARS);
+      const result = buildManagedAutoMemoryPrompt(
+        '/tmp/memory',
+        lines.join('\n'),
+      );
+      expect(result).toContain(
+        'Prune or merge entries to fit the character budget.',
+      );
+      expect(result).not.toMatch(
+        /shortening nonempty `description` frontmatter/i,
+      );
+    },
+  );
+
+  it('keeps advice conditional for an ambiguous punctuated grouped suffix', () => {
+    const lines = Array.from({ length: 200 }, (_, i) => {
+      const link = `- [Topic ${i}](notes/${i}.md)`;
+      const suffix = ` (also: ${'x'.repeat(138 - link.length - 10)}.md).`;
+      return `${link} — hook${suffix}`;
+    });
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
+    );
+    expect(result).toContain(
+      'Try shortening nonempty `description` frontmatter in the topic files',
+    );
+    expect(result).not.toContain('bring the total within');
+  });
+
+  it('does not certify a file-looking suffix inside a real writer description', () => {
+    const links: string[] = [];
+    const lines = Array.from({ length: 200 }, (_, i) => {
+      const title = `Topic ${i}`;
+      const start = `- [${title}](notes/`;
+      const end = `-${i}.md)`;
+      const relativePath = `notes/${'x'.repeat(124 - start.length - end.length)}-${i}.md`;
+      links.push(`- [${title}](${relativePath})`);
+      return buildManagedAutoMemoryIndex([
+        {
+          scope: 'project',
+          type: 'reference',
+          relativePath,
+          filePath: `/tmp/memory/${relativePath}`,
+          filename: relativePath.slice(6),
+          title,
+          description: 'h (also: x.md)',
+          category: 'uncategorized',
+          keywords: [],
+          usageScenarios: [],
+          body: '',
+          mtimeMs: 0,
+        },
+      ]);
+    });
+    expect(links.join('\n')).toHaveLength(24_999);
+    expect(lines.every((line) => line.length <= MAX_INDEX_LINE_CHARS)).toBe(
+      true,
+    );
+    expect(lines.join('\n').length).toBeGreaterThan(MAX_INDEX_CHARS);
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
+    );
+    expect(result).toContain(
+      'Try shortening nonempty `description` frontmatter in the topic files',
+    );
+    expect(result).not.toContain('bring the total within');
+    expect(result).not.toContain(
+      'Prune or merge entries to fit the character budget.',
+    );
+    expect(
+      buildManagedAutoMemoryPrompt('/tmp/memory', links.join('\n')),
+    ).not.toContain('Only part of it was loaded.');
+  });
+
+  it('keeps prune-only advice when both budgets overflow and links alone cannot fit', () => {
+    const lines = Array.from({ length: 250 }, (_, i) => {
+      const link = `- [Topic ${i}](notes/${'x'.repeat(110)}-${i}.md)`;
+      return `${link} — hook`;
+    });
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n'),
+    );
+    expect(result).toContain(
+      'The first 200 entries also exceed the character budget',
+    );
+    expect(result).toContain('prune or merge more entries.');
+    expect(result).not.toMatch(
+      /shortening nonempty `description` frontmatter/i,
+    );
+  });
+
+  it('does not certify a description-free floor that writer fallback cannot reach', () => {
+    const docs = Array.from({ length: 200 }, (_, i) => {
+      const title = `Topic ${i}`;
+      const start = `- [${title}](notes/`;
+      const end = `-${i}.md)`;
+      const relativePath = `notes/${'x'.repeat(124 - start.length - end.length)}-${i}.md`;
+      expect(`- [${title}](${relativePath})`).toHaveLength(124);
+      return {
+        scope: 'project' as const,
+        type: 'reference' as const,
+        relativePath,
+        filePath: `/tmp/memory/${relativePath}`,
+        filename: `${i}.md`,
+        title,
+        description: 'h'.repeat(20),
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      };
+    });
+    const index = docs
+      .map((doc) => buildManagedAutoMemoryIndex([doc]))
+      .join('\n');
+    expect(index.length).toBeGreaterThan(MAX_INDEX_CHARS);
+    for (let length = 0; length <= 20; length++) {
+      const regenerated = buildManagedAutoMemoryIndex(
+        docs.map((doc) => ({ ...doc, description: 'h'.repeat(length) })),
+      );
+      expect(regenerated.match(/^- \[Topic \d+\]/gm)!.length).toBeLessThan(200);
+    }
+    const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+    expect(result).not.toContain('bring the total within');
+    expect(result).not.toContain('enough to fit');
+    expect(result).toContain(
+      'Try shortening nonempty `description` frontmatter',
+    );
+    expect(result).toContain('check the regenerated index');
+  });
+
+  it('does not let a writer notice withhold a feasible shortening lever', () => {
+    const lines = Array.from({ length: 201 }, (_, i) => {
+      const start = `- [Topic ${i}](notes/`;
+      const end = `-${i}.md)`;
+      const link = `${start}${'x'.repeat(124 - start.length - end.length)}${end}`;
+      expect(link).toHaveLength(124);
+      return `${link} — ${'h'.repeat(20)}`;
+    });
+    const floor = lines
+      .slice(0, 200)
+      .map((line) => line.slice(0, 124))
+      .join('\n');
+    expect(floor).toHaveLength(24_999);
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/memory',
+      lines.join('\n') + INDEX_TRUNCATION_NOTICE,
+    );
+    expect(result).toContain(
+      'try shortening nonempty `description` frontmatter in the topic files',
+    );
+  });
+
+  it('keeps a stale writer notice without claiming 199 loaded entries were truncated', () => {
+    const index =
+      uniformOverBudgetIndex(199, 100).join('\n') + INDEX_TRUNCATION_NOTICE;
+    const result = buildManagedAutoMemoryPrompt('/tmp/memory', index);
+    expect(result).toContain(INDEX_TRUNCATION_WARNING);
+    expect(result).not.toContain('Only part of it was loaded.');
+    expect(result).not.toContain('prune or merge entries');
+  });
+
+  it('preserves the real writer notice without promising to reduce its saved total', () => {
+    const docs = Array.from({ length: 200 }, (_, i) => ({
+      scope: 'project' as const,
+      type: 'reference' as const,
+      relativePath: `notes/${i}.md`,
+      filePath: `/tmp/memory/notes/${i}.md`,
+      filename: `${i}.md`,
+      title: `Topic ${i}`,
+      description: 'h'.repeat(130),
+      category: 'uncategorized' as const,
+      keywords: [],
+      usageScenarios: [],
+      body: '',
+      mtimeMs: 0,
+    }));
+    for (const description of ['h'.repeat(130), 'h'.repeat(87), '']) {
+      const generated = buildManagedAutoMemoryIndex(
+        docs.map((doc) => ({ ...doc, description })),
+      );
+      const result = buildManagedAutoMemoryPrompt('/tmp/memory', generated);
+      expect(result).not.toContain('Only part of it was loaded.');
+      expect(result).not.toContain('bring the total within');
+      const noticeStart = generated.indexOf(INDEX_TRUNCATION_NOTICE_START);
+      if (description.length === 130) {
+        expect(noticeStart).toBeGreaterThanOrEqual(0);
+        expect(result).toContain(generated.slice(noticeStart));
+      } else {
+        expect(noticeStart).toBe(-1);
+      }
+    }
+  });
+
+  it('directs team description changes to topic-file frontmatter', () => {
+    const result = buildManagedAutoMemoryPrompt(
+      '/tmp/project',
+      null,
+      undefined,
+      {
+        memoryDir: '/tmp/team',
+        indexContent: uniformOverBudgetIndex().join('\n'),
+      },
+    );
+    expect(result).toContain('`description` frontmatter in the topic files');
+    expect(result).toContain('check the regenerated index');
+    expect(result).not.toContain('shorten index descriptions');
+  });
+
+  it('does not offer shortening when the real writer already used its type fallback', () => {
+    const docs = Array.from({ length: 200 }, (_, i) => {
+      const title = `Topic ${i}`;
+      const start = `- [${title}](notes/`;
+      const end = `-${i}.md)`;
+      const relativePath = `notes/${'x'.repeat(124 - start.length - end.length)}-${i}.md`;
+      expect(`- [${title}](${relativePath})`).toHaveLength(124);
+      return {
+        scope: 'project' as const,
+        type: 'reference' as const,
+        relativePath,
+        filePath: `/tmp/memory/${relativePath}`,
+        filename: relativePath.slice(6),
+        title,
+        description: '',
+        category: 'uncategorized' as const,
+        keywords: [],
+        usageScenarios: [],
+        body: '',
+        mtimeMs: 0,
+      };
+    });
+    const generated = buildManagedAutoMemoryIndex(docs);
+    expect(generated.length).toBeGreaterThan(MAX_INDEX_CHARS);
+    expect(generated).toContain(' — reference');
+    const noticeStart = generated.indexOf(INDEX_TRUNCATION_NOTICE_START);
+    expect(noticeStart).toBeGreaterThanOrEqual(0);
+    const result = buildManagedAutoMemoryPrompt('/tmp/memory', generated);
+    expect(result).toContain(generated.slice(noticeStart));
+    expect(result).not.toMatch(
+      /shortening nonempty `description` frontmatter/i,
+    );
+    expect(result).not.toContain('Only part of it was loaded.');
   });
 
   it('does not cut a surrogate pair when naming a dropped entry', () => {

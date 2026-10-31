@@ -9,11 +9,13 @@ import { normalizeContent } from '../utils/textUtils.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
 import {
   describeDroppedIndexEntries,
+  formatIndexEntry,
   INDEX_SCAN_CAP_NOTICE_START,
   INDEX_TRUNCATION_NOTICE_START,
   MAX_INDEX_LINES as MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
   MAX_INDEX_CHARS,
   MAX_INDEX_LINE_CHARS,
+  parseIndexEntry,
   trimIndexToBudgetDetailed,
 } from './index-budget.js';
 
@@ -163,6 +165,20 @@ export const TRUSTING_RECALL_SECTION: readonly string[] = [
   'A memory that summarizes repo state (activity logs, architecture snapshots) is frozen in time. If the user asks about *recent* or *current* state, prefer `git log` or reading the code over recalling the snapshot.',
 ];
 
+function descriptionFreeIndexEntry(
+  line: string,
+): { min: number; max: number } | undefined {
+  const entry = parseIndexEntry(line);
+  if (!entry) {
+    return undefined;
+  }
+  const max = formatIndexEntry({ ...entry, description: undefined }).length;
+  // A hook can itself end in text identical to a grouped-link suffix.
+  const min =
+    entry.description !== undefined && entry.suffix ? entry.link.length : max;
+  return { min, max };
+}
+
 function truncateManagedAutoMemoryIndex(indexContent: string): string {
   const trimmed = normalizeContent(indexContent).trim();
   const noticeStart = Math.max(
@@ -178,8 +194,8 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
   const entryContent = (
     hasWriterNotice ? trimmed.slice(0, noticeStart) : trimmed
   ).trimEnd();
-  const lines = entryContent.split('\n');
-  const lineCount = lines.length;
+  const entries = entryContent.split('\n');
+  const lineCount = entries.length;
   const charCount = entryContent.length;
   const wasLineTruncated = lineCount > MAX_MANAGED_AUTO_MEMORY_INDEX_LINES;
   const wasCharTruncated = charCount > MAX_INDEX_CHARS;
@@ -188,17 +204,54 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
     return trimmed;
   }
 
-  const entries = lines;
   const { content, dropped } = trimIndexToBudgetDetailed(entries);
   const candidates = entries.slice(0, MAX_MANAGED_AUTO_MEMORY_INDEX_LINES);
-  const hasOverlongEntry = candidates.some(
-    (line) => line.length > MAX_INDEX_LINE_CHARS,
-  );
+  const candidateCharCount = candidates.join('\n').length;
+  let allOverlongEntriesShortenable = true;
+  const ordinaryCharCount = candidates
+    .map((line) => {
+      const entry = parseIndexEntry(line);
+      if (
+        !entry ||
+        entry.link.length + entry.suffix.length > MAX_INDEX_LINE_CHARS
+      ) {
+        if (line.length > MAX_INDEX_LINE_CHARS) {
+          allOverlongEntriesShortenable = false;
+        }
+        return line;
+      }
+      return line.slice(0, MAX_INDEX_LINE_CHARS);
+    })
+    .join('\n').length;
+  let minimumCharCount = candidates.length - 1;
+  let maximumCharCount = minimumCharCount;
+  let allRecognized = true;
+  for (const line of candidates) {
+    const floor = descriptionFreeIndexEntry(line);
+    if (!floor) {
+      allRecognized = false;
+      break;
+    }
+    minimumCharCount += floor.min;
+    maximumCharCount += floor.max;
+  }
+  const canFitWithoutDescriptions = !allRecognized
+    ? undefined
+    : maximumCharCount <= MAX_INDEX_CHARS
+      ? true
+      : minimumCharCount > MAX_INDEX_CHARS
+        ? false
+        : undefined;
+  // Blame long candidates only when the ordinary-entry bound clears overflow.
+  const overlongEntriesCauseOverflow =
+    allOverlongEntriesShortenable &&
+    candidateCharCount > MAX_INDEX_CHARS &&
+    ordinaryCharCount <= MAX_INDEX_CHARS;
 
   const reason =
     wasCharTruncated && !wasLineTruncated
       ? `${charCount} UTF-16 code units (limit: ${MAX_INDEX_CHARS}) — ${
-          hasOverlongEntry
+          overlongEntriesCauseOverflow
             ? 'index entries are too long'
             : `too many index entries (${entries.length})`
         }`
@@ -206,18 +259,27 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
         ? `${lineCount} lines (limit: ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES})`
         : `${lineCount} lines and ${charCount} UTF-16 code units`;
 
-  // Shortening a candidate cannot reduce the line count or an excluded tail.
-  const lever =
-    candidates.join('\n').length > MAX_INDEX_CHARS && hasOverlongEntry
-      ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units; move detail into topic files. Prune or merge entries if the count is still over budget.`
-      : hasOverlongEntry
+  const shorteningAdvice =
+    'Try shortening nonempty `description` frontmatter in the topic files; check the regenerated index, and prune or merge memory files if it still exceeds the character budget.';
+  const combinedCharacterAdvice =
+    canFitWithoutDescriptions === false
+      ? 'prune or merge more entries.'
+      : 'try shortening nonempty `description` frontmatter in the topic files; check the regenerated index, and prune or merge more memory files if necessary.';
+
+  const lever = overlongEntriesCauseOverflow
+    ? ` Keep index entries to one line at most ${MAX_INDEX_LINE_CHARS} UTF-16 code units by shortening topic-file frontmatter; never cut link targets. Prune or merge memory files if the count is still over budget.`
+    : wasLineTruncated && candidateCharCount > MAX_INDEX_CHARS
+      ? ` Shortening entries cannot reduce the line count — prune or merge entries. The first ${candidates.length} entries also exceed the character budget; ${combinedCharacterAdvice}`
+      : wasLineTruncated
         ? ' Shortening entries cannot reduce the line count — prune or merge entries.'
-        : ` No candidate entry exceeds the ${MAX_INDEX_LINE_CHARS}-unit line limit, so shortening entries cannot help — prune or merge entries.`;
+        : canFitWithoutDescriptions !== false
+          ? ` ${shorteningAdvice}`
+          : ' Prune or merge entries to fit the character budget.';
 
   return `${content}${writerNotice}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${describeDroppedIndexEntries(
     dropped,
     entries.length,
-  )}${lever}`;
+  )}${lever} Make edits in the topic files; changes to regenerated index lines do not persist.`;
 }
 
 /**

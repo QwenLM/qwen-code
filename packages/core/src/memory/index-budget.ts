@@ -56,6 +56,49 @@ export function describeDroppedIndexEntries(
   }.`;
 }
 
+export const INDEX_HOOK_SEPARATOR = ' — ';
+export const INDEX_ALSO_OPEN = ' (also: ';
+
+interface IndexEntry {
+  link: string;
+  description: string | undefined;
+  suffix: string;
+}
+
+export function formatIndexEntry({
+  link,
+  description,
+  suffix,
+}: IndexEntry): string {
+  return `${link}${description === undefined ? '' : `${INDEX_HOOK_SEPARATOR}${description}`}${suffix}`;
+}
+
+export function parseIndexEntry(line: string): IndexEntry | undefined {
+  const trimmed = line.trimEnd();
+  const link = /^-\s+\[(?:(?!\]\().)+\]\([^()\s]+\)/.exec(trimmed)?.[0];
+  if (!link) {
+    return undefined;
+  }
+  const rest = trimmed.slice(link.length);
+  const suffix =
+    / \(also: [^()\s,]+\.md(?:, [^()\s,]+\.md)*\)[.!?]*$/i.exec(rest)?.[0] ??
+    '';
+  const hook = rest.slice(0, rest.length - suffix.length);
+  if (hook.includes(INDEX_ALSO_OPEN)) {
+    return undefined;
+  }
+  if (hook === '') {
+    return { link, description: undefined, suffix };
+  }
+  if (hook === INDEX_HOOK_SEPARATOR.trimEnd()) {
+    return { link, description: '', suffix };
+  }
+  if (!hook.startsWith(INDEX_HOOK_SEPARATOR)) {
+    return undefined;
+  }
+  return { link, description: hook.slice(INDEX_HOOK_SEPARATOR.length), suffix };
+}
+
 export interface IndexTrimResult {
   /** Surviving entries, in index order. */
   content: string;
