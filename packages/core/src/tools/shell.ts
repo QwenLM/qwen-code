@@ -786,11 +786,13 @@ function gitCommitContext(
       // `git commit` into a different repo. A cd AFTER the commit
       // doesn't matter for the commit we already saw.
       //
-      // A heuristic relaxation: relative cd targets that don't escape
-      // upward (no `..`, no absolute path, no env-var/$home expansion)
-      // almost always stay within the same repo. The very common
-      // `cd subdir && git commit -m "..."` flow is the motivating case
-      // — same repo, same toplevel, attribution is still safe. Only
+      // A heuristic relaxation: cd targets that keep us inside this
+      // repository — a relative path without upward escape, or an
+      // absolute path under the shell's cwd — almost always stay in the
+      // same repo. The very common `cd subdir && git commit -m "..."`
+      // and `cd /abs/repo && git commit -m "..."` flows are the
+      // motivating cases — same repo, same toplevel, attribution is
+      // still safe. Only
       // mark as shifted when the target *could* land us in a different
       // repo. We can't be 100% certain without running `git rev-parse
       // --show-toplevel` after the cd, which would require a synchronous
@@ -879,9 +881,10 @@ function parseGhInvocation(tokens: string[]): string[] {
  * `cd /abs/path/to/this/repo && git commit -m "..."` spelling keeps
  * attribution. Anything else absolute — a sibling, an unrelated tree —
  * still shifts. Resolution is static (`path.resolve`) on purpose: the
- * walk must not spawn `git rev-parse` (see `gitCommitContext`), and a
- * symlinked spelling that resolves elsewhere is still caught by the
- * equality/prefix test because both sides go through the same `cwd`.
+ * walk must not spawn `git rev-parse` (see `gitCommitContext`). Because
+ * it never touches the filesystem, a symlink or a nested repo inside
+ * `cwd` is a known residue of this heuristic, and containment is
+ * measured against `cwd`, not the repository root.
  */
 function cdTargetMayChangeRepo(tokens: string[], cwd: string): boolean {
   // tokens[0] is 'cd'. The next non-flag token is the target.
@@ -890,6 +893,12 @@ function cdTargetMayChangeRepo(tokens: string[], cwd: string): boolean {
   const target = tokens[i];
   // `cd` with no argument goes to $HOME.
   if (target === undefined) return true;
+  // An env-var (`$PKG`, `${PKG}`) or a backtick substitution expands at
+  // runtime, so the literal text looking contained proves nothing: with
+  // `PKG=../other-repo`, `cd /repo/$PKG` resolves lexically to a path
+  // under `cwd` while bash lands elsewhere. Checked before the absolute
+  // branch so `/repo/$PKG` cannot be certified.
+  if (target.includes('$') || target.includes('`')) return true;
   if (target.startsWith('/')) {
     // Same directory, or a subdirectory of it: still this repo. The
     // `path.sep` in the prefix test is load-bearing — `<repo>-sibling`
@@ -899,8 +908,6 @@ function cdTargetMayChangeRepo(tokens: string[], cwd: string): boolean {
     return !(resolved === root || resolved.startsWith(root + path.sep));
   }
   if (target.startsWith('~')) return true;
-  // Env-var reference (e.g. `$HOME`, `$REPO`) — can't resolve here.
-  if (target.includes('$')) return true;
   // `..`, `../..`, `..\\foo` etc. could escape the repo root.
   if (target === '..') return true;
   if (target.startsWith('../') || target.startsWith('..\\')) return true;
@@ -1031,9 +1038,10 @@ function findAttributableCommitSegment(
     if (!looseTokens) continue;
     const program = programBasename(looseTokens[0]!);
     if (program === 'cd' || program === 'pushd') {
-      // Mirror gitCommitContext's cd/pushd heuristic: relative paths
-      // that don't escape upward are treated as in-repo, so
-      // `cd subdir && git commit ...` still finds the segment.
+      // Mirror gitCommitContext's cd/pushd heuristic: targets that keep
+      // us inside this repository are treated as in-repo, so
+      // `cd subdir && git commit ...` and `cd /abs/repo && git commit ...`
+      // still find the segment.
       if (!cwdShifted && cdTargetMayChangeRepo(looseTokens, cwd)) {
         cwdShifted = true;
       }
