@@ -7,6 +7,10 @@
 // Japanese translations for Qwen Code CLI
 
 export default {
+  'Generated UI': 'Generated UI（生成 UI）',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    '対応するローカルセッションで内蔵 Generated UI を有効にします。変更を適用するには対象のセッションを再起動してください。',
+
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -1403,6 +1407,8 @@ export default {
   'System prompt': 'システムプロンプト',
   'Built-in tools': '組み込みツール',
   'MCP tools': 'MCP tools',
+  'Instruction files': '指示ファイル',
+  'Auto memory': '自動メモリ',
   'Memory files': 'メモリファイル',
   Skills: 'スキル',
   Messages: 'メッセージ',

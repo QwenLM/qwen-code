@@ -28,6 +28,24 @@ describe('TestRig', () => {
       process.env['KEEP_OUTPUT'] = originalKeepOutput;
     }
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
+  });
+
+  it('pins getDefaultTimeout to the CI-first environment table', () => {
+    const rig = new TestRig();
+
+    vi.stubEnv('CI', 'true');
+    vi.stubEnv('QWEN_SANDBOX', 'docker');
+    expect(rig.getDefaultTimeout()).toBe(60_000);
+
+    // The documented scripts export QWEN_SANDBOX=false, which the helper's
+    // truthiness check still treats as a container.
+    vi.stubEnv('CI', '');
+    vi.stubEnv('QWEN_SANDBOX', 'false');
+    expect(rig.getDefaultTimeout()).toBe(30_000);
+
+    vi.stubEnv('QWEN_SANDBOX', '');
+    expect(rig.getDefaultTimeout()).toBe(15_000);
   });
 
   it('resets a reused test directory during setup', async () => {
@@ -113,6 +131,36 @@ describe('TestRig', () => {
         timeout: 10_000,
       })
       .toBe(false);
+  });
+
+  it('re-arms a reused rig after cleanup', async () => {
+    const rig = new TestRig();
+    await rig.setup('reused after cleanup');
+
+    await rig.cleanup();
+    await rig.setup('reused after cleanup');
+
+    await expect(rig.poll(() => true, 1_000, 10)).resolves.toBe(true);
+  });
+
+  it('stops a pending readiness poll when the rig is cleaned up', async () => {
+    const rig = new TestRig();
+    await rig.setup('cleanup stops readiness poll');
+
+    const settled = rig.waitForText('never-rendered', 60_000);
+    await rig.cleanup();
+
+    // Without the stop flag the abandoned poll keeps scanning until its 60s
+    // budget expires; the race bounds the failure so a regression reddens
+    // this case instead of stalling the lane.
+    await expect(
+      Promise.race([
+        settled,
+        new Promise<'still polling'>((resolve) =>
+          setTimeout(() => resolve('still polling'), 5_000).unref(),
+        ),
+      ]),
+    ).resolves.toBe(false);
   });
 
   it.each([

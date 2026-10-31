@@ -98,6 +98,7 @@ export const clearCommand: SlashCommand = {
         }
       }
 
+      getInteractiveModSession(config)?.invalidateTools();
       const newSessionId = config.startNewSession();
       await getInteractiveModSession(config)?.syncSession('clear');
 

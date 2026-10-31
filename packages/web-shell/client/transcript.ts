@@ -17,8 +17,8 @@
  * renders `McpStatusMessage`, `TasksStatusMessage` and the artifact turn
  * outputs, and those call the strict `useDaemonActions` / `useDaemonWorkspace`
  * hooks, so their provider guards are in `dist/transcript.js`. Decoupling them
- * is #11100. `client/build-artifact.test.ts` therefore bounds this entry's size
- * rather than asserting a symbol is absent.
+ * is #11100. Artifact tests enforce specific package boundaries rather than
+ * asserting that the daemon runtime is absent.
  *
  * Do not rely on importing the package root or incidental tree shaking to
  * keep this payload small; see

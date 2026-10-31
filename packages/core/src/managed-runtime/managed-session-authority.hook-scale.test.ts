@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { readFileSync } from 'node:fs';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -128,7 +129,10 @@ async function history() {
     });
     try {
       return await LocalManagedSessionAuthority.open({
-        lease,
+        journal: LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKey,
+        ),
         sessionKey,
         cwd: '/workspace',
         version: 'test',

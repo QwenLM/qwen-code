@@ -26,6 +26,8 @@ import { pendingSessionInputs } from './hosted-wake-intake.js';
 export interface HostedMonitorWakeTurn {
   readonly turnId: string;
   readonly text: string;
+  /** Original notification consumed by a successful crash continuation. */
+  readonly notificationTurnId?: string;
   /**
    * The committed input's source (`monitor`, H6's `automation`, H5's
    * `channel`, or H4b's `child_agent`): an automation run settles from

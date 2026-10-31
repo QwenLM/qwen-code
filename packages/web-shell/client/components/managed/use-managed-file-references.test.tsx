@@ -104,6 +104,72 @@ describe('Managed file reference snapshots', () => {
     expect(current.error).toBeUndefined();
   });
 
+  it('treats an unsupported file-access capability as absent actions, not an error', async () => {
+    vi.mocked(provider.workspaceFiles!.query).mockRejectedValueOnce(
+      Object.assign(
+        new Error('Workspace file access requires an updated CLI.'),
+        { status: 409, code: 'workspace_files_unsupported' },
+      ),
+    );
+    await render();
+    // The composer simply has no file actions; the refusal must not become a
+    // standing alert above the editor.
+    expect(current.actions).toBeUndefined();
+    expect(current.error).toBeUndefined();
+  });
+
+  it('still reports a Workspace probe failure that is not a capability refusal', async () => {
+    vi.mocked(provider.workspaceFiles!.query).mockRejectedValueOnce(
+      Object.assign(new Error('Workspace storage is unavailable.'), {
+        status: 503,
+        code: 'workspace_files_busy',
+      }),
+    );
+    await render();
+    expect(current.actions).toBeUndefined();
+    expect(current.error).toBe('Workspace storage is unavailable.');
+  });
+
+  it('still reports a 409 probe failure whose code is not the capability refusal', async () => {
+    vi.mocked(provider.workspaceFiles!.query).mockRejectedValueOnce(
+      Object.assign(new Error('Workspace file is unavailable.'), {
+        status: 409,
+        code: 'workspace_file_unavailable',
+      }),
+    );
+    await render();
+    // The suppression keys on the code, not the status: a fenced or draining
+    // Workspace answers this same probe with 409 too, and must still surface.
+    expect(current.actions).toBeUndefined();
+    expect(current.error).toBe('Workspace file is unavailable.');
+  });
+
+  it('still surfaces an unsupported refusal after the mount probe succeeded', async () => {
+    await render();
+    vi.mocked(provider.workspaceFiles!.read).mockRejectedValueOnce(
+      Object.assign(
+        new Error('Workspace file access requires an updated CLI.'),
+        { status: 409, code: 'workspace_files_unsupported' },
+      ),
+    );
+    await act(async () => {
+      await expect(
+        current.actions!.prepareFileReference!({
+          id: 'file:src/a.ts',
+          kind: 'file',
+          value: 'src/a.ts',
+          serialized: '@src/a.ts',
+          metadata: { fileKind: 'file', filePath: 'src/a.ts' },
+        }),
+      ).rejects.toThrow('Workspace file access requires an updated CLI.');
+    });
+    // The same code can mean the broker failed mid-request, so only the mount
+    // probe may treat it as an absent capability.
+    expect(current.error).toBe(
+      'Workspace file access requires an updated CLI.',
+    );
+  });
+
   it('stores exact contents in the chip, survives JSON draft persistence and submits without rereading', async () => {
     await render();
     const saved = JSON.parse(
@@ -170,7 +236,7 @@ describe('Managed file reference snapshots', () => {
     expect(prepared.text).toContain('"src/a.ts" → "reference-1-a.ts"');
   });
 
-  it('preserves the existing total encoded input bound', async () => {
+  it('applies the 8 MiB encoded input bound to referenced files', async () => {
     await render();
     const prepared = await current.prepareInput(
       'prompt '.repeat(8000) + '@src/a.ts',
@@ -183,7 +249,21 @@ describe('Managed file reference snapshots', () => {
     );
     await expect(
       encodeManagedInput(prepared.text, [], prepared.files),
-    ).rejects.toThrow('48 KiB');
+    ).resolves.toHaveLength(2);
+    await expect(
+      encodeManagedInput(
+        prepared.text,
+        [],
+        [
+          ...prepared.files,
+          {
+            name: 'large.txt',
+            media_type: 'text/plain',
+            text: 'x'.repeat(8 * 1024 * 1024),
+          },
+        ],
+      ),
+    ).rejects.toThrow('8 MiB');
   });
 
   it('rejects a snapshot from another Session even with an identical Workspace context', async () => {
@@ -193,6 +273,49 @@ describe('Managed file reference snapshots', () => {
     await expect(
       current.prepareInput('@src/a.ts explain', [], selected),
     ).rejects.toThrow('select the file again');
+  });
+
+  it('resolves an existing Session from its ID for query, read and upload', async () => {
+    const api = enableUploads();
+    await render('.qwen-managed-worktrees/owned/src', 'session-a');
+    expect(api.query).toHaveBeenLastCalledWith(
+      { sessionId: 'session-a', directory: '.', query: '' },
+      { clientId: 'client', signal: expect.any(AbortSignal) },
+    );
+    await select();
+    expect(api.read).toHaveBeenLastCalledWith(
+      {
+        sessionId: 'session-a',
+        path: 'src/a.ts',
+        expectedScopeRevision: revision,
+      },
+      { clientId: 'client' },
+    );
+    const data = new Blob(['session upload']);
+    await current.uploadTarget!.client.uploadWorkspaceFile({
+      path: 'file.txt',
+      data,
+    });
+    expect(api.upload).toHaveBeenLastCalledWith(
+      {
+        sessionId: 'session-a',
+        path: 'file.txt',
+        expectedScopeRevision: revision,
+        uploadId: expect.any(String),
+      },
+      data,
+      { clientId: 'client', signal: undefined },
+    );
+    const prepared = await current.prepareInput(
+      '@src/a.ts explain',
+      [],
+      await metadata(),
+    );
+    expect(prepared.files[0]?.text).toBe(text);
+    expect(api.query).toHaveBeenLastCalledWith(
+      { sessionId: 'session-a', directory: '.', query: '' },
+      { clientId: 'client' },
+    );
   });
 
   it('blocks submission until every selected file has finished loading', async () => {
@@ -310,5 +433,145 @@ describe('Managed file reference snapshots', () => {
     await expect(
       encodeManagedInput(prepared.text, [], prepared.files),
     ).resolves.toHaveLength(3);
+  });
+
+  function enableUploads() {
+    const api = provider.workspaceFiles!;
+    const original = vi.mocked(api.query).getMockImplementation()!;
+    vi.mocked(api.query).mockImplementation(async (request, options) => ({
+      ...(await original(request, options)),
+      maxUploadBytes: 8 * 1024 * 1024,
+    }));
+    api.upload = vi.fn(async (request, data) => ({
+      scopeRevision: revision,
+      uploadId: request.uploadId,
+      path: request.path,
+      sizeBytes: data.size,
+      sha256: 'a'.repeat(64),
+    }));
+    api.queryUpload = vi.fn();
+    return api;
+  }
+
+  it('keeps upload disabled on a read-only CLI even when the provider has an upload method', async () => {
+    const api = provider.workspaceFiles!;
+    api.upload = vi.fn();
+    await render();
+    expect(current.actions).toBeDefined();
+    expect(current.uploadTarget).toBeUndefined();
+    expect(api.upload).not.toHaveBeenCalled();
+  });
+
+  it('uploads binary bytes and sends a scoped path without reading a text snapshot', async () => {
+    const api = enableUploads();
+    await render();
+    const target = current.uploadTarget!;
+    const data = new Blob([new Uint8Array([0, 255, 128, 1])]);
+    const result = await target.client.uploadWorkspaceFile({
+      path: '报告.pdf',
+      data,
+    });
+    expect(api.upload).toHaveBeenCalledWith(
+      {
+        workspaceId: 'workspace',
+        cwdRelative: '.',
+        path: '报告.pdf',
+        expectedScopeRevision: revision,
+        uploadId: expect.any(String),
+      },
+      data,
+      { clientId: 'client', signal: undefined },
+    );
+    const tag = target.createReference(result.path);
+    const prompt = `${tag.serialized} inspect`;
+    const prepared = await current.prepareInput(prompt, [], {
+      inputAnnotations: createInputAnnotationsFromComposerTags(prompt, [tag]),
+    });
+    expect(prepared.text).toContain('paths relative to the working directory');
+    expect(prepared.text).toContain('"报告.pdf"');
+    expect(prepared.files).toEqual([]);
+    expect(api.read).not.toHaveBeenCalled();
+  });
+
+  it('does not admit an upload completion or restored reference into a different Session', async () => {
+    const api = enableUploads();
+    await render();
+    const target = current.uploadTarget!;
+    const result = await target.client.uploadWorkspaceFile({
+      path: 'binary.pdf',
+      data: new Blob(['pdf']),
+    });
+    const tag = target.createReference(result.path);
+    const original = vi.mocked(api.upload!).getMockImplementation()!;
+    let finish!: () => void;
+    vi.mocked(api.upload!).mockImplementationOnce(
+      (request, data, options) =>
+        new Promise((resolve) => {
+          finish = () => void original(request, data, options).then(resolve);
+        }),
+    );
+    const pending = target.client
+      .uploadWorkspaceFile({
+        path: 'pending.pdf',
+        data: new Blob(['pdf']),
+      })
+      .catch((error: unknown) => error);
+    await render('.', 'different-session');
+    finish();
+    expect(await pending).toBeInstanceOf(Error);
+    expect(((await pending) as Error).message).toContain('Workspace changed');
+    await expect(
+      current.prepareInput('@binary.pdf', [], {
+        inputAnnotations: createInputAnnotationsFromComposerTags(
+          '@binary.pdf',
+          [tag],
+        ),
+      }),
+    ).rejects.toThrow('Workspace changed');
+  });
+
+  it('reconciles a lost upload response by its original ID without sending the mutation again', async () => {
+    const api = enableUploads();
+    await render();
+    vi.mocked(api.upload!).mockRejectedValueOnce(
+      new TypeError('Connection lost'),
+    );
+    vi.mocked(api.queryUpload!).mockImplementation(async (uploadId) => ({
+      scopeRevision: revision,
+      uploadId,
+      state: 'completed',
+      path: 'a.bin',
+      sizeBytes: 1,
+      sha256: 'a'.repeat(64),
+    }));
+    await expect(
+      current.uploadTarget!.client.uploadWorkspaceFile({
+        path: 'a.bin',
+        data: new Blob(['a']),
+      }),
+    ).resolves.toMatchObject({ path: 'a.bin' });
+    expect(api.upload).toHaveBeenCalledTimes(1);
+    expect(api.queryUpload).toHaveBeenCalledWith(
+      vi.mocked(api.upload!).mock.calls[0][0].uploadId,
+      { clientId: 'client', signal: undefined },
+    );
+  });
+
+  it('never treats an occupied destination as an uploaded reference', async () => {
+    const api = enableUploads();
+    await render();
+    vi.mocked(api.upload!).mockRejectedValueOnce(
+      Object.assign(new Error('The file already exists.'), { status: 409 }),
+    );
+    await expect(
+      current.uploadTarget!.client.uploadWorkspaceFile({
+        path: 'a.bin',
+        data: new Blob(['a']),
+      }),
+    ).rejects.toThrow('already exists');
+    expect(api.queryUpload).not.toHaveBeenCalled();
+    expect(() => current.uploadTarget!.createReference('a.bin')).toThrow(
+      'has not completed',
+    );
   });
 });

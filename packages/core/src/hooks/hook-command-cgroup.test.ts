@@ -4,7 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawnSync } from 'node:child_process';
+import * as runtimeInfo from '../utils/runtime-info.js';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   mkdir,
   mkdtemp,
@@ -21,14 +22,50 @@ import {
   HookCommandIsolationUnavailableError,
 } from './hook-command-cgroup.js';
 
+// A real cgroup directory accepts rmdir while its virtual files stay; a
+// regular directory with a `cgroup.events` file cannot model that, so the
+// removal decision is observed on the call instead.
+const rmdirSync = vi.hoisted(() => vi.fn());
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs')>();
+  rmdirSync.mockImplementation(actual.rmdirSync);
+  return { ...actual, rmdirSync };
+});
+
+let root: string;
 let directory: string;
 beforeEach(async () => {
-  directory = await mkdtemp(join(tmpdir(), 'hook-launcher-'));
+  const actualFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  rmdirSync.mockImplementation(actualFs.rmdirSync);
+  root = await mkdtemp(join(tmpdir(), 'hook-launcher-'));
+  directory = join(root, 'unit');
+  await mkdir(directory);
 });
 afterEach(async () => {
   vi.restoreAllMocks();
-  await rm(directory, { recursive: true, force: true });
+  await rm(root, { recursive: true, force: true });
 });
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitFor(
+  assertion: () => boolean | Promise<boolean>,
+): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    if (await assertion()) return;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('condition did not settle');
+}
 
 describe('unit creation and attachment', () => {
   it('refuses to create or attach without a delegated Linux root', () => {
@@ -104,9 +141,62 @@ describe('unit creation and attachment', () => {
     ).toThrow(HookCommandIsolationUnavailableError);
     expect(await readdir(directory)).toEqual(['qwen-bg-owner']);
   });
+
+  it('covers a launcher that moved into its reaper sibling unit', async () => {
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    await writeFile(join(directory, 'cgroup.procs'), '1\n');
+    const sibling = `${directory}-reaper-4321`;
+    await mkdir(sibling);
+    await writeFile(join(sibling, 'cgroup.procs'), '4321\n');
+
+    expect(unit.covers(1)).toBe(true);
+    expect(unit.covers(4321)).toBe(true);
+    expect(unit.covers(9999)).toBe(false);
+  });
+
+  it('removes an empty reaper sibling and keeps a populated one', async () => {
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const emptySibling = `${directory}-reaper-4321`;
+    await mkdir(emptySibling);
+    await writeFile(join(emptySibling, 'cgroup.events'), 'populated 0\n');
+    rmdirSync.mockClear();
+    unit.removeReaper(4321);
+    expect(rmdirSync).toHaveBeenCalledWith(emptySibling);
+
+    const busySibling = `${directory}-reaper-5678`;
+    await mkdir(busySibling);
+    await writeFile(join(busySibling, 'cgroup.events'), 'populated 1\n');
+    rmdirSync.mockClear();
+    unit.removeReaper(5678);
+    expect(rmdirSync).not.toHaveBeenCalled();
+  });
 });
 
 describe('managed command launcher environment', () => {
+  it('launches through the private interpreter while preserving the payload executable', () => {
+    const interpreter = join(directory, 'bun', 'bin', 'bun');
+    vi.spyOn(runtimeInfo, 'getJsInterpreterCommand').mockReturnValue({
+      command: interpreter,
+      runtime: 'bun',
+    });
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const launch = unit.launch('/payload/bin/tool', ['literal argument'], {
+      PATH: '/payload/bin',
+    });
+    expect(launch.executable).toBe(interpreter);
+    expect(launch.args.slice(-3)).toEqual([
+      directory,
+      '/payload/bin/tool',
+      '["literal argument"]',
+    ]);
+  });
+
   it('keeps environment values out of argv and applies them only after membership', async () => {
     const preload = join(directory, 'preload.cjs');
     const marker = join(directory, 'preloaded');
@@ -196,14 +286,38 @@ fs.appendFileSync(${JSON.stringify(marker)}, fs.readFileSync(${JSON.stringify(jo
     expect(result.status).toBe(0);
     expect(result.output[3]).toBe('joined\n');
   });
-});
 
-describe('exit evidence', () => {
-  const run = (script: string) => {
+  it('enables parent-death reaping only when the caller opts in', () => {
     const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
       directory,
     ]);
-    const launch = unit.launch(process.execPath, ['--eval', script], {});
+    const plain = unit.launch(process.execPath, ['--eval', ''], {});
+    expect(plain.env).not.toHaveProperty(
+      'QWEN_HOOK_COMMAND_REAP_ON_PARENT_EXIT',
+    );
+    const supervised = unit.launch(
+      process.execPath,
+      ['--eval', ''],
+      {},
+      {
+        reapOnParentExit: true,
+      },
+    );
+    expect(supervised.env.QWEN_HOOK_COMMAND_REAP_ON_PARENT_EXIT).toBe('1');
+  });
+});
+
+describe('exit evidence', () => {
+  const run = (script: string, options?: { reapOnParentExit?: boolean }) => {
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const launch = unit.launch(
+      process.execPath,
+      ['--eval', script],
+      {},
+      options,
+    );
     return spawnSync(launch.executable, launch.args, {
       env: launch.env,
       stdio: ['ignore', 'pipe', 'pipe', 'pipe'],
@@ -232,4 +346,338 @@ describe('exit evidence', () => {
       expect(result.signal).toBe(signal);
     },
   );
+
+  // The opted-in launcher handles SIGTERM to survive the cancellation sweep.
+  // That handler must not swallow the SIGTERM that ended the command itself.
+  it.skipIf(process.platform === 'win32')(
+    'ends by the SIGTERM that ended its command while opted into reaping',
+    () => {
+      const result = run(`process.kill(process.pid, 'SIGTERM')`, {
+        reapOnParentExit: true,
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.status).toBeNull();
+      expect(result.signal).toBe('SIGTERM');
+    },
+  );
+});
+
+describe.skipIf(process.platform === 'win32')('parent death', () => {
+  it('reaps the unit when the launcher parent dies', async () => {
+    const launcherPidFile = join(directory, 'launcher.pid');
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const launch = unit.launch(
+      process.execPath,
+      ['--eval', 'setTimeout(() => process.exit(0), 1000)'],
+      {},
+      { reapOnParentExit: true },
+    );
+    const worker = spawn(
+      process.execPath,
+      [
+        '--eval',
+        `const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const spec = JSON.parse(process.env.SPEC);
+const child = spawn(spec.executable, spec.args, {
+  env: spec.env,
+  stdio: ['ignore', 'ignore', 'ignore'],
+});
+writeFileSync(process.env.LAUNCHER_PID, String(child.pid));
+setInterval(() => {}, 1000);`,
+      ],
+      {
+        env: {
+          PATH: process.env['PATH'] ?? '',
+          SPEC: JSON.stringify(launch),
+          LAUNCHER_PID: launcherPidFile,
+        },
+        stdio: ['ignore', 'ignore', 'ignore'],
+      },
+    );
+    try {
+      await waitFor(async () => {
+        try {
+          return (await readFile(launcherPidFile, 'utf8')).length > 0;
+        } catch {
+          return false;
+        }
+      });
+      const launcherPid = Number(await readFile(launcherPidFile, 'utf8'));
+
+      // The launcher captures its parent after it joins the unit. Wait for
+      // that membership write before killing the worker, or the launcher
+      // starts with ppid 1 and has no change to observe.
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(join(directory, 'cgroup.procs'), 'utf8')) ===
+            String(launcherPid)
+          );
+        } catch {
+          return false;
+        }
+      });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // The worker dies without running any handler; the launcher is
+      // reparented and must reap its own unit.
+      worker.kill('SIGKILL');
+
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(join(directory, 'cgroup.kill'), 'utf8')) === '1'
+          );
+        } catch {
+          return false;
+        }
+      });
+      await waitFor(() => !alive(launcherPid));
+    } finally {
+      worker.kill('SIGKILL');
+    }
+  });
+
+  it('reaps when it starts already reparented to PID 1', async () => {
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const launch = unit.launch(
+      process.execPath,
+      ['--eval', 'setTimeout(() => process.exit(0), 1000)'],
+      {},
+      { reapOnParentExit: true },
+    );
+    const worker = spawn(
+      process.execPath,
+      [
+        '--eval',
+        `const { spawn } = require('node:child_process');
+const spec = JSON.parse(process.env.SPEC);
+spawn(spec.executable, spec.args, {
+  env: spec.env,
+  stdio: ['ignore', 'ignore', 'ignore'],
+});
+process.exit(0);`,
+      ],
+      {
+        env: { PATH: process.env['PATH'] ?? '', SPEC: JSON.stringify(launch) },
+        stdio: ['ignore', 'ignore', 'ignore'],
+      },
+    );
+    try {
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(join(directory, 'cgroup.kill'), 'utf8')) === '1'
+          );
+        } catch {
+          return false;
+        }
+      });
+    } finally {
+      worker.kill('SIGKILL');
+    }
+  });
+
+  it('keeps the reaper for a foreground that exits before its descendants', async () => {
+    await writeFile(join(directory, 'cgroup.events'), 'populated 1\n');
+    const descendantPidFile = join(directory, 'descendant.pid');
+    const launcherPidFile = join(directory, 'launcher.pid');
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const launch = unit.launch(
+      process.execPath,
+      [
+        '--eval',
+        `const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const descendant = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 1000)'], {
+  stdio: ['ignore', 'ignore', 'ignore'],
+  detached: true,
+});
+descendant.unref();
+writeFileSync(process.env.DESCENDANT_PID, String(descendant.pid));
+process.exit(0);`,
+      ],
+      { DESCENDANT_PID: descendantPidFile },
+      { reapOnParentExit: true },
+    );
+    const worker = spawn(
+      process.execPath,
+      [
+        '--eval',
+        `const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const spec = JSON.parse(process.env.SPEC);
+const child = spawn(spec.executable, spec.args, {
+  env: spec.env,
+  stdio: ['ignore', 'ignore', 'ignore'],
+});
+writeFileSync(process.env.LAUNCHER_PID, String(child.pid));
+setInterval(() => {}, 1000);`,
+      ],
+      {
+        env: {
+          PATH: process.env['PATH'] ?? '',
+          SPEC: JSON.stringify(launch),
+          LAUNCHER_PID: launcherPidFile,
+        },
+        stdio: ['ignore', 'ignore', 'ignore'],
+      },
+    );
+    try {
+      await waitFor(async () => {
+        try {
+          return (await readFile(launcherPidFile, 'utf8')).length > 0;
+        } catch {
+          return false;
+        }
+      });
+      const launcherPid = Number(await readFile(launcherPidFile, 'utf8'));
+
+      // The foreground exits immediately; the launcher moves itself to a
+      // temporary sibling reaper unit and stays for the remaining members.
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(
+              join(root, `unit-reaper-${launcherPid}`, 'cgroup.procs'),
+              'utf8',
+            )) === String(launcherPid)
+          );
+        } catch {
+          return false;
+        }
+      });
+      worker.kill('SIGKILL');
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(join(directory, 'cgroup.kill'), 'utf8')) === '1'
+          );
+        } catch {
+          return false;
+        }
+      });
+    } finally {
+      worker.kill('SIGKILL');
+    }
+    try {
+      const descendantPid = Number(await readFile(descendantPidFile, 'utf8'));
+      process.kill(descendantPid, 'SIGKILL');
+    } catch {
+      // The descendant already exited.
+    }
+  });
+
+  it('survives the cancellation SIGTERM sweep until the worker dies', async () => {
+    const launcherPidFile = join(directory, 'launcher.pid');
+    const foregroundPidFile = join(directory, 'foreground.pid');
+    const unit: HookCommandCgroup = Reflect.construct(HookCommandCgroup, [
+      directory,
+    ]);
+    const launch = unit.launch(
+      process.execPath,
+      [
+        '--eval',
+        `const { writeFileSync } = require('node:fs');
+process.on('SIGTERM', () => {});
+writeFileSync(process.env.FOREGROUND_PID, String(process.pid));
+setInterval(() => {}, 1000);`,
+      ],
+      { FOREGROUND_PID: foregroundPidFile },
+      { reapOnParentExit: true },
+    );
+    const worker = spawn(
+      process.execPath,
+      [
+        '--eval',
+        `const { spawn } = require('node:child_process');
+const { writeFileSync } = require('node:fs');
+const spec = JSON.parse(process.env.SPEC);
+const child = spawn(spec.executable, spec.args, {
+  env: spec.env,
+  stdio: ['ignore', 'ignore', 'ignore'],
+});
+writeFileSync(process.env.LAUNCHER_PID, String(child.pid));
+setInterval(() => {}, 1000);`,
+      ],
+      {
+        env: {
+          PATH: process.env['PATH'] ?? '',
+          SPEC: JSON.stringify(launch),
+          LAUNCHER_PID: launcherPidFile,
+        },
+        stdio: ['ignore', 'ignore', 'ignore'],
+      },
+    );
+    let foregroundPid: number | undefined;
+    try {
+      await waitFor(async () => {
+        try {
+          return (await readFile(launcherPidFile, 'utf8')).length > 0;
+        } catch {
+          return false;
+        }
+      });
+      const launcherPid = Number(await readFile(launcherPidFile, 'utf8'));
+
+      // Cancellation SIGTERMs every unit member before escalating.
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(join(directory, 'cgroup.procs'), 'utf8')) ===
+            String(launcherPid)
+          );
+        } catch {
+          return false;
+        }
+      });
+      foregroundPid = Number(
+        await waitFor(async () => {
+          try {
+            return (await readFile(foregroundPidFile, 'utf8')).length > 0;
+          } catch {
+            return false;
+          }
+        }).then(() => readFile(foregroundPidFile, 'utf8')),
+      );
+      process.kill(launcherPid, 'SIGTERM');
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      // The launcher is the reaper: the SIGTERM must not end it, and the
+      // kill escalation still belongs to the worker.
+      expect(alive(launcherPid)).toBe(true);
+      await expect(
+        readFile(join(directory, 'cgroup.kill'), 'utf8'),
+      ).rejects.toThrow();
+
+      // The worker dies inside the grace period; the launcher must escalate.
+      worker.kill('SIGKILL');
+      await waitFor(async () => {
+        try {
+          return (
+            (await readFile(join(directory, 'cgroup.kill'), 'utf8')) === '1'
+          );
+        } catch {
+          return false;
+        }
+      });
+      await waitFor(() => !alive(launcherPid));
+    } finally {
+      worker.kill('SIGKILL');
+      if (foregroundPid) {
+        try {
+          process.kill(foregroundPid, 'SIGKILL');
+        } catch {
+          // The foreground already exited.
+        }
+      }
+    }
+  });
 });
