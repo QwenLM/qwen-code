@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunToolPublicationObjectStore;
 import com.alibaba.qwen.code.managedagent.contracts.artifact.ToolPublicationStorageException;
+import com.aliyun.oss.ClientErrorCode;
 import com.aliyun.oss.ClientException;
 import com.aliyun.oss.OSS;
 import com.aliyun.oss.OSSException;
@@ -12,6 +13,7 @@ import com.aliyun.oss.model.OSSObject;
 import com.aliyun.oss.model.PutObjectRequest;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -22,6 +24,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.clearInvocations;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
@@ -70,6 +73,7 @@ class AliyunToolPublicationObjectStoreTest {
     }
 
     @Test
+    @Timeout(10)
     void persistentTransientFailureStopsAfterThreeRetries() {
         var failure = error("InternalError");
         when(client.getObject("bucket", "key")).thenThrow(failure);
@@ -79,14 +83,63 @@ class AliyunToolPublicationObjectStoreTest {
     }
 
     @Test
-    void permanentOrUnclassifiedErrorsAreNotRetried() {
+    void aTimedOutOpenIsRetried() throws IOException {
+        // The configuration reference's read-timeout row promises this retry:
+        // an open that times out before the response is reissued, while a
+        // stall inside the returned body is not (aReturnedBodyIsNeverReplayed).
+        when(client.getObject("bucket", "key")).thenThrow(clientError(ClientErrorCode.SOCKET_TIMEOUT))
+                .thenReturn(object(new ByteArrayInputStream(new byte[] {1, 2, 3})));
+        try (var input = store.open("key")) {
+            assertThat(input.readAllBytes()).containsExactly(1, 2, 3);
+        }
+        verify(client, times(2)).getObject("bucket", "key");
+    }
+
+    @Test
+    @Timeout(10)
+    void persistentTimeoutsStopAfterThreeRetries() {
+        for (String code : new String[] {ClientErrorCode.SOCKET_TIMEOUT, ClientErrorCode.CONNECTION_TIMEOUT}) {
+            clearInvocations(client);
+            var failure = clientError(code);
+            doThrow(failure).when(client).getObject("bucket", "key");
+            assertThatThrownBy(() -> store.open("key"))
+                    .isInstanceOf(ToolPublicationStorageException.class).hasCause(failure);
+            verify(client, times(4)).getObject("bucket", "key");
+        }
+    }
+
+    @Test
+    void everyTransientCodeIsRetried() throws IOException {
+        // One case per member of the store's two transient sets, so dropping
+        // any code from either set fails here.
         for (RuntimeException failure : new RuntimeException[] {
-                error("AccessDenied"), error("NoSuchKey"), new ClientException("unknown")}) {
+                error("InternalError"), error("ServiceUnavailable"),
+                clientError(ClientErrorCode.CONNECTION_TIMEOUT), clientError(ClientErrorCode.SOCKET_TIMEOUT),
+                clientError(ClientErrorCode.CONNECTION_REFUSED), clientError(ClientErrorCode.UNKNOWN_HOST),
+                clientError(ClientErrorCode.SOCKET_EXCEPTION), clientError(ClientErrorCode.SSL_EXCEPTION)}) {
+            clearInvocations(client);
+            doThrow(failure).doReturn(object(new ByteArrayInputStream(new byte[] {1})))
+                    .when(client).getObject("bucket", "key");
+            try (var input = store.open("key")) {
+                assertThat(input.readAllBytes()).as("after %s", failure.getMessage()).containsExactly(1);
+            }
+            verify(client, times(2)).getObject("bucket", "key");
+        }
+    }
+
+    @Test
+    void permanentOrUnclassifiedErrorsAreNotRetried() {
+        // ClientException("unknown") carries the code "Unknown". The
+        // no-argument ClientException and OSSException(String) leave the code
+        // null and reach the null-code guards of the two catch arms.
+        for (RuntimeException failure : new RuntimeException[] {
+                error("AccessDenied"), error("NoSuchKey"), new ClientException("unknown"),
+                new ClientException(), new OSSException("fixture")}) {
             doThrow(failure).when(client).getObject("bucket", "key");
             assertThatThrownBy(() -> store.open("key"))
                     .isInstanceOf(ToolPublicationStorageException.class).hasCause(failure);
         }
-        verify(client, times(3)).getObject("bucket", "key");
+        verify(client, times(5)).getObject("bucket", "key");
     }
 
     @Test
@@ -154,5 +207,11 @@ class AliyunToolPublicationObjectStoreTest {
 
     private static OSSException error(String code) {
         return new OSSException("fixture", code, "request", "host", "bucket", "key", "resource");
+    }
+
+    private static ClientException clientError(String code) {
+        // The one-argument constructor sets the code to "Unknown", which is
+        // not in the store's transient set; pass the code explicitly.
+        return new ClientException("fixture", code, "request");
     }
 }
