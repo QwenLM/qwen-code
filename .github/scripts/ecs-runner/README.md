@@ -146,13 +146,11 @@ bash .github/scripts/ecs-runner/check-font-baseline.sh
 bash .github/scripts/ecs-runner/check-font-baseline.sh --with-metrics
 ```
 
-The web-shell smoke lane is pinned to `ubuntu-latest` to isolate its browsers
-from shared-host network changes (run 40915920935 failed before app startup
-with `ERR_NETWORK_CHANGED` on ARM64). Its retained `Check host font baseline
-(self-hosted)` step is skipped on that routing. Before moving browser jobs
-back to a shared host, provide network isolation as well as this font baseline;
-matching fonts alone does not prevent interrupted module loads. L1 remains a
-manual/host-provisioning check requiring an installed Chromium.
+The web-shell smoke lane runs the L0 half as `Check host font baseline
+(self-hosted)` before installing dependencies, so a drifted host fails in
+seconds with an actionable message instead of failing two layout assertions
+26 minutes into the suite. L1 stays a manual/host-provisioning check because
+it needs a Chromium that the lane has not installed yet at that point.
 
 ## Regression check
 

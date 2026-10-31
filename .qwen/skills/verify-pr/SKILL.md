@@ -1591,6 +1591,17 @@ reviewer's attention; `blocked` = the central claim failed its A/B or a
 regression reproduced; `inconclusive` = budget or environment prevented the
 central claim from being tested — say why.
 
+For `findings`, the published headline follows the counts, not the word
+alone: `findings` with `fail: 0` is published as passed with findings
+(`blocked` is published as not passed at any count). A defect you reproduced
+at head is therefore a failed assertion attributed to `pr`, never an
+expected-red pass — that rule covers control cells, which exist to fail, not
+head behaviour the PR got wrong. Measured example: a round reproduced a
+regression, asserted that the head showed it, and published `blocked` over
+4382 passes and 0 failures. The CI publisher runs `verify-pr-check.mjs` before
+it trusts any verdict, so run it on the artifact dir before you finish, in
+either path.
+
 ### report.md structure
 
 1. **Verdict line first**, with assertion totals and the verified head OID
@@ -1687,8 +1698,11 @@ defect.
   the verdict cannot be `merge-ready` — and the publisher enforces exactly
   that. When the unexpected failure is in the harness itself (a flaky probe,
   a broken A/B control cell) rather than in the PR's code, the verdict is
-  `inconclusive`, not `findings` — `findings` stamps ❌ on the PR for a
-  problem it did not cause.
+  `inconclusive`, not `findings` — the failure is not the PR's. CI refuses
+  `findings` only when the failures ledger below names no `pr` cause, and
+  publishes the round as inconclusive under an untrusted-verdict note.
+  Without a ledger it cannot tell, and stamps ❌ on the PR for a problem it
+  did not cause.
   **Attribute every failure to a cause, and name the host as its own.**
   `assertions.json` carries `failures: [{ id, attribution }]`, one
   entry per failed assertion, with `attribution` one of `pr`, `harness` or

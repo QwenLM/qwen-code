@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.CwdChangeOutcome;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -1156,11 +1157,15 @@ class ManagedCwdChangeOperationTest {
                                 + " workspace_id", tenant, workspaceId,
                                 STORAGE, workspaceId);
                         grant(tenant, workspaceId, ACTOR, "OPERATOR");
-                        return store.insertWorkspaceSessionCommand(tenant,
-                                ACTOR, "create-" + UUID.randomUUID(),
-                                "create-digest", "qwen-code", null, null,
-                                List.of(), null, new WorkspaceSelection(
+                        return store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                                .tenantId(tenant)
+                                .actorId(ACTOR)
+                                .idempotencyKey("create-" + UUID.randomUUID())
+                                .requestDigest("create-digest")
+                                .agentId("qwen-code")
+                                .selection(new WorkspaceSelection(
                                         workspaceId, "services/api"))
+                                .build())
                                 .sessionId();
                     });
         }
