@@ -181,6 +181,7 @@ import {
   LOAD_REPLAY_MODE_META_KEY,
   LOAD_REPLAY_PAGE_SIZE_META_KEY,
   LOAD_REPLAY_VERSION,
+  MAX_SUBMITTED_PROMPT_CHARS,
   MID_TURN_SEND_NOW_METHOD,
   MID_TURN_RECONCILIATION_RING_SIZE,
   PROMPT_CANCEL_METHOD,
@@ -387,10 +388,50 @@ function standaloneWorkingDirectoryMissingError(): RequestError {
 }
 
 /**
- * Only the daemon's authenticated channel-worker path can populate the
- * user-facing display projection. Every other source echoes its prompt content
- * verbatim. Single source of truth for the echo, pending-entry text, and child
- * metadata so their `''`/undefined semantics cannot drift apart.
+ * Controls neutralized in a submission declaration before it may become the
+ * Channel display projection: C0/DEL except TAB/LF (raw whitespace a
+ * declaration keeps), the C1 block, Unicode line/paragraph separators, every
+ * format character (bidi overrides, zero-widths), the Default_Ignorable set
+ * (Hangul fillers, variation selectors, and friends), lone surrogates, and
+ * U+2800 (BRAILLE PATTERN BLANK is invisible but not Default_Ignorable).
+ * Applied BEFORE the blankness test so an invisible-only declaration reads
+ * as blank and keeps content-derived display. The class mirrors
+ * `PROMPT_UNSAFE_INVISIBLES` / `sanitizeDisplayText`
+ * (packages/channels/base/src/sanitize.ts) and must stay in sync with it.
+ * It is repeated here because acp-bridge declares no channel-base
+ * dependency. Deliberate deltas: TAB is preserved here and neutralized
+ * there, and the display projection keeps the grapheme-rendering characters
+ * that `sanitizeDisplayText` neutralizes (DECLARATION_KEPT_GRAPHEME_CHAR
+ * below).
+ */
+const DECLARATION_UNSAFE_DISPLAY_CHARS =
+  // eslint-disable-next-line no-control-regex
+  /[\u0000-\u0008\u000b-\u001f\u007f\u0080-\u009f\p{Cf}\p{Default_Ignorable_Code_Point}\u2800\u2028\u2029]|[\ud800-\udfff]/gu;
+
+/**
+ * Grapheme-rendering characters the declaration's display projection keeps:
+ * ZWNJ/ZWJ, the variation selectors, and CGJ carry no glyph of their own —
+ * they join or select a neighbor's rendering — so neutralizing them to
+ * spaces would split joined scripts and emoji sequences on the live display
+ * while the model still receives the intact text. The blankness gate
+ * re-neutralizes them, so a declaration of nothing but these characters
+ * still reads as blank.
+ */
+const DECLARATION_KEPT_GRAPHEME_CHAR =
+  // eslint-disable-next-line no-misleading-character-class
+  /^[\u034f\u200c\u200d\ufe00-\ufe0f\u{e0100}-\u{e01ef}]$/u;
+
+/**
+ * Channel display text comes from the authenticated worker or an explicit
+ * submission declaration on a worker-attested channel session. It never
+ * grants channel-turn classification. Every other source echoes its prompt
+ * content verbatim. Single source of truth for the echo and pending-entry
+ * text so their `''`/undefined semantics cannot drift apart. The durable
+ * record is stamped separately from the worker value alone
+ * (`recordedDisplayText` in `sendPrompt`): a caller declaration is
+ * display-only and must never reach the recorded display text, which
+ * downstream consumers read as model input (auto-title generation,
+ * cross-session `@session` references).
  */
 function getChannelPromptDisplayText(
   entry: Pick<SessionEntry, 'sourceType'>,
@@ -730,6 +771,18 @@ interface SessionEntry {
   /** Immutable creator attribution, persisted in the transcript when present. */
   sourceType?: string;
   sourceId?: string;
+  /**
+   * Daemon-verified channel origin. Set when a worker-classified turn is
+   * admitted on this session: the bridge strips a caller-forged
+   * classification key from request metadata and re-arms it only from the
+   * trusted context flag, which the daemon prompt route sets only after
+   * verifying the channel-worker token — so the latch cannot be
+   * self-assigned. Caller declarations (`submittedPrompt`) project display
+   * text only on attested channel sessions; a self-labeled `channel`
+   * session keeps content-derived display. Live-only: a restored session is
+   * re-attested by the worker's next relay turn.
+   */
+  channelWorkerAttested?: boolean;
   managedConversationBinding?: {
     expectation: BridgeConversationDirectoryExpectation;
     released: boolean;
@@ -2246,9 +2299,11 @@ function enrichTerminalTurnStatus(
 ): BridgeTurnStatus {
   return {
     ...terminal,
-    // The bridge's display projection is trusted; the child-recorded text
-    // only backfills when the terminal has none, so hidden channel context
-    // the child derived from raw blocks never replaces it.
+    // The bridge's display projection is trusted as display; the
+    // child-recorded text only backfills when the terminal has none, so
+    // hidden channel context the child derived from raw blocks never
+    // replaces it. The projection may carry a caller submission declaration
+    // (display-only, never read back as model input).
     ...(terminal.promptText === undefined && persisted.promptText !== undefined
       ? { promptText: persisted.promptText }
       : {}),
@@ -11445,7 +11500,64 @@ export function createSessionControlPlane(
           );
         }
       }
+      const submittedPrompt = context?.submittedPrompt;
+      // A worker-classified turn attests the session's channel origin: the
+      // classification key is stripped from caller metadata and re-armed
+      // only from the trusted context flag, which the daemon prompt route
+      // sets only after verifying the channel-worker token. Self-labeled
+      // `channel` sessions never receive one, so their declarations keep
+      // content-derived display.
+      if (context?.channelPrompt === true) {
+        entry.channelWorkerAttested = true;
+      }
+      // Cheap eligibility discards run before the caller-controlled
+      // neutralization scan, so a non-channel session or an ineligible
+      // request never pays for it on this synchronous admission path. The
+      // length cap is one of them: an over-cap declaration is treated as
+      // absent, so the scan stays bounded by MAX_SUBMITTED_PROMPT_CHARS
+      // rather than the transport body limit. The raw-blank term is only a
+      // pre-gate: the projecting blankness test below still runs after
+      // neutralization, so an invisible-only declaration reads as blank and
+      // keeps content-derived display.
+      const declarationEligible =
+        entry.sourceType === 'channel' &&
+        entry.channelWorkerAttested === true &&
+        context?.channelPrompt !== true &&
+        req.prompt.some((block) => isRecord(block) && block['type'] === 'text');
+      const rawDeclaration =
+        declarationEligible &&
+        typeof submittedPrompt === 'string' &&
+        submittedPrompt.length <= MAX_SUBMITTED_PROMPT_CHARS &&
+        submittedPrompt.trim().length > 0
+          ? submittedPrompt
+          : undefined;
+      // The blankness gate runs on the FULLY neutralized form: the display
+      // projection keeps the grapheme-rendering characters
+      // (DECLARATION_KEPT_GRAPHEME_CHAR), and a declaration of nothing but
+      // those, zero-widths, or fillers is still invisible and must keep
+      // content-derived display.
+      const declarationBlank =
+        rawDeclaration === undefined ||
+        rawDeclaration.replace(DECLARATION_UNSAFE_DISPLAY_CHARS, ' ').trim()
+          .length === 0;
+      const declaredChannelDisplayText =
+        rawDeclaration !== undefined && !declarationBlank
+          ? rawDeclaration.replace(DECLARATION_UNSAFE_DISPLAY_CHARS, (char) =>
+              DECLARATION_KEPT_GRAPHEME_CHAR.test(char) ? char : ' ',
+            )
+          : undefined;
       const channelDisplayText = getChannelPromptDisplayText(
+        entry,
+        context?.promptDisplayText ?? declaredChannelDisplayText,
+      );
+      // The durable record stamps only the authenticated worker value. A
+      // caller declaration projects the pending entry, the live echo, and
+      // the warm turn-status promptText derived from the pending entry —
+      // all display-only — but must never reach the recorded display text:
+      // downstream consumers read it as model input (auto-title generation,
+      // cross-session `@session` references, the turn-result record's
+      // promptText and its OTel input-message attribute).
+      const recordedDisplayText = getChannelPromptDisplayText(
         entry,
         context?.promptDisplayText,
       );
@@ -11732,7 +11844,7 @@ export function createSessionControlPlane(
                     copy._meta && typeof copy._meta === 'object'
                       ? { ...copy._meta }
                       : {};
-                  const promptDisplayText = channelDisplayText;
+                  const promptDisplayText = recordedDisplayText;
                   const channelOutputMode = meta[CHANNEL_OUTPUT_MODE_META_KEY];
                   delete meta[DAEMON_RETRY_META_KEY];
                   delete meta[INVOCATION_CONTEXT_META_KEY];

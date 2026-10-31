@@ -1402,7 +1402,20 @@ export interface BridgeClientRequestContext {
    * unchanged. HTTP routes never populate this from request input.
    */
   modelPrompt?: string;
-  /** Original text explicitly declared by a supported submission producer. */
+  /**
+   * Original text explicitly declared by a supported submission producer.
+   * Caller-controlled: transport routes forward it from request `_meta`. On a
+   * worker-attested `sourceType: 'channel'` session — one that has admitted
+   * a worker-classified turn — a nonblank, control-neutralized
+   * declaration becomes the turn's live display projection (pending entry,
+   * user echo, and the warm turn-status prompt text derived from the pending
+   * entry) when no worker projection is supplied; it never reaches the
+   * recorded display text and confers no worker authority. Declarations
+   * longer than `MAX_SUBMITTED_PROMPT_CHARS` do not project display text;
+   * the provenance key `qwen.daemon.submittedPrompt` still carries the
+   * declaration verbatim, bounded only by the transport body limit.
+   * `promptDisplayText` still wins when both are present.
+   */
   submittedPrompt?: string;
   /** User-facing projection supplied by an authenticated channel worker. */
   promptDisplayText?: string;
@@ -1500,6 +1513,11 @@ export function isValidTrustedModelPrompt(value: unknown): value is string {
     value.length <= MAX_TRUSTED_MODEL_PROMPT_CHARS
   );
 }
+
+/** Bound on a caller declaration; an over-cap declaration is treated as
+ * absent so the synchronous admission-time neutralization scan stays bounded
+ * by this rather than the transport body limit. */
+export const MAX_SUBMITTED_PROMPT_CHARS = 64 * 1024;
 
 export const DAEMON_CHANNEL_DELIVERY_META_KEY = 'qwen.daemon.channelDelivery';
 export const SUBMITTED_PROMPT_META_KEY = 'qwen.submittedPrompt';
