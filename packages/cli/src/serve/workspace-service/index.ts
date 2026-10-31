@@ -348,14 +348,17 @@ export function createDaemonWorkspaceService(
     ],
   });
 
-  const skillsSnapshot = (): ServeWorkspaceSkillsStatus | undefined => {
+  const skillsSnapshot = (
+    retained: boolean,
+  ): ServeWorkspaceSkillsStatus | undefined => {
     if (!lastWorkspaceSkillsStatus) return undefined;
     const ageMs = Math.max(0, Date.now() - lastWorkspaceSkillsStatusAt);
     return {
       ...lastWorkspaceSkillsStatus,
-      // The refresh that would prove this answer current failed, so the
-      // retained catalog cannot prove a name absent or a spelling unowned.
-      complete: false,
+      // A retained answer was not observed for this request, so it cannot
+      // prove a name absent or a spelling unowned. A fresh answer already
+      // carries the producer's completeness.
+      ...(retained ? { complete: false } : {}),
       snapshot: {
         observedAt: lastWorkspaceSkillsStatusAt,
         ageMs,
@@ -432,7 +435,7 @@ export function createDaemonWorkspaceService(
       // ordinary read, but a mutation must decide from an enumerated catalog.
       return requireEnumerated
         ? unavailable
-        : (skillsSnapshot() ?? unavailable);
+        : (skillsSnapshot(true) ?? unavailable);
     }
     return status;
   };
@@ -507,7 +510,7 @@ export function createDaemonWorkspaceService(
         return Promise.resolve(unavailableWorkspaceSkillsStatus());
       }
       return revalidateWorkspaceSkillsStatus().then(
-        (status) => skillsSnapshot() ?? status,
+        (status) => skillsSnapshot(false) ?? status,
       );
     }
     if (!inFlightWorkspaceSkillsStatus && canStart) {
@@ -517,7 +520,7 @@ export function createDaemonWorkspaceService(
         );
       });
     }
-    return Promise.resolve(skillsSnapshot()!);
+    return Promise.resolve(skillsSnapshot(true)!);
   };
 
   const refreshWorkspaceSkillsAfterMutation = async (): Promise<void> => {
