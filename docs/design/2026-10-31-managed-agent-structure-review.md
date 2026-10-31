@@ -69,16 +69,16 @@ exclusion; zero `TODO`/`FIXME` markers in production code.
 
 **D1. God classes.** The largest production classes:
 
-| Class                              | Module         | Lines | Notes                                 |
-| ---------------------------------- | -------------- | ----- | ------------------------------------- |
-| `ManagedAgentStore`                | persistence    | 7,751 | 300+ methods, 7 public setters        |
-| `RuntimeBrokerService`             | runtime-broker | 6,417 | 230+ methods; the module's only class |
-| `ManagedSessionStore`              | persistence    | 3,931 |                                       |
-| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                       |
-| `ToolPublicationDataStore`         | persistence    | 2,709 |                                       |
-| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                       |
-| `ManagedAgentService`              | control-plane  | 2,120 |                                       |
-| `HarnessCoordinator`               | control-plane  | 1,770 |                                       |
+| Class                              | Module         | Lines | Notes                                                              |
+| ---------------------------------- | -------------- | ----- | ------------------------------------------------------------------ |
+| `ManagedAgentStore`                | persistence    | 7,751 | 300+ methods, 7 public setters                                     |
+| `RuntimeBrokerService`             | runtime-broker | 6,417 | 230+ methods; cooldown extracted to `ExecutionObservationCooldown` |
+| `ManagedSessionStore`              | persistence    | 3,931 |                                                                    |
+| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                    |
+| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                                    |
+| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                                    |
+| `ManagedAgentService`              | control-plane  | 2,120 |                                                                    |
+| `HarnessCoordinator`               | control-plane  | 1,770 |                                                                    |
 
 `ManagedAgentStore` mixes session admission, turns, events, item/message
 projection, worktrees, MCP management, definition pins, skills, and extension
@@ -229,7 +229,15 @@ cross-cutting "how the system works today" tour.
 - `RuntimeBrokerService`: extract module-internal collaborators for recovery
   scanning, cancellation, tool holds, and observation cooldown; the service
   becomes a facade. The module already exists, so no cross-module contract
-  moves. This is the lowest-risk, highest-readability split.
+  moves. This is the lowest-risk, highest-readability split. The observation
+  cooldown is the first seam extracted (2026-10-31,
+  `ExecutionObservationCooldown`): it owns the only state it touches and has
+  no lifecycle of its own; recovery scanning, cancellation and tool holds
+  follow as separate slices. Known coverage gap carried into the next slice:
+  the stamp-before-in-flight-slot-drop ordering in `lookupOnce` has no test
+  pinning it (a pre-existing gap, identical at the base); pin it when the
+  reconciliation path becomes its own collaborator and the ordering is a
+  seam-level contract rather than a private lambda's internal sequence.
 - Apply the same treatment to `ManagedSessionStore` and
   `QwenHostedHarnessConnector` afterwards, each as its own slice.
 
