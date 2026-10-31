@@ -1943,7 +1943,10 @@ function ManagedSessionsContent({
             // 有会话/消息时保持铺满。注意 inline style 优先级高于样式表，不能写死。
             <div
               className={shellStyles.content}
-              style={{ flex: !sessionId && messages.length === 0 ? '0 0 auto' : '1 1 auto' }}
+              style={{
+                flex:
+                  !sessionId && messages.length === 0 ? '0 0 auto' : '1 1 auto',
+              }}
             >
               <ToolDetailsContext.Provider value={loadToolDetails}>
                 <MessageList
@@ -1965,7 +1968,9 @@ function ManagedSessionsContent({
                   // 空转录仍显示欢迎头；但当会话已有失败态（如服务端已删除）时，
                   // 由 failure 横幅说明状态，不再叠欢迎文案。
                   welcomeHeader={
-                    messages.length === 0 && !detail.loading && !summary?.failure ? (
+                    messages.length === 0 &&
+                    !detail.loading &&
+                    !summary?.failure ? (
                       <WelcomeHeader
                         version=""
                         cwd=""
@@ -1985,12 +1990,17 @@ function ManagedSessionsContent({
               role="alert"
               className="mx-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] items-start gap-2 rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-[10px] text-xs leading-relaxed text-destructive"
             >
-              <span aria-hidden="true" className="mt-0.5 shrink-0">⚠</span>
+              <span aria-hidden="true" className="mt-0.5 shrink-0">
+                ⚠
+              </span>
               <p className="min-w-0 flex-1">{failureMessage}</p>
             </div>
           )}
           {pendingElsewhere && !busy && (
-            <div role="status" className="mb-2 flex items-center gap-3 text-sm text-muted-foreground">
+            <div
+              role="status"
+              className="mb-2 flex items-center gap-3 text-sm text-muted-foreground"
+            >
               <p>{t('managed.pendingElsewhere')}</p>
               <Button
                 variant="outline"
@@ -2006,9 +2016,7 @@ function ManagedSessionsContent({
               role="status"
               className="mx-auto mb-2 flex w-full max-w-[var(--chat-shell-width)] items-start justify-between gap-3 rounded-lg border bg-muted/40 px-3 py-[10px] text-xs leading-relaxed text-muted-foreground"
             >
-              <p className="min-w-0 flex-1">
-                {t('managed.uncertain')}
-              </p>
+              <p className="min-w-0 flex-1">{t('managed.uncertain')}</p>
               <Button
                 size="sm"
                 disabled={busy || compression.blocked}

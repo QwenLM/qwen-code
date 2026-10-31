@@ -4060,7 +4060,9 @@ describe('ManagedSessionsPage', () => {
   });
 
   it('keeps an uncertain create with its original page when viewing another session', async () => {
-    mocks.client.createSession.mockRejectedValueOnce(new TypeError('Network failed'));
+    mocks.client.createSession.mockRejectedValueOnce(
+      new TypeError('Network failed'),
+    );
     await render();
     await input('CHECK_CREATE');
     await click('Send');
@@ -4069,7 +4071,9 @@ describe('ManagedSessionsPage', () => {
     await render('s1');
     expect(container.textContent).not.toContain('not confirmed as submitted');
     expect(container.textContent).not.toContain('Retry the same request');
-    expect(container.textContent).toContain('Another conversation has an unconfirmed request');
+    expect(container.textContent).toContain(
+      'Another conversation has an unconfirmed request',
+    );
     expect(container.querySelector('textarea')?.disabled).toBe(true);
     expect(mocks.client.createSession).toHaveBeenCalledTimes(1);
     expect(mocks.client.submitPrompt).not.toHaveBeenCalled();
@@ -4104,9 +4108,7 @@ describe('ManagedSessionsPage', () => {
       discard!.click();
       await flush();
     });
-    expect(container.textContent).not.toContain(
-      'not confirmed as submitted',
-    );
+    expect(container.textContent).not.toContain('not confirmed as submitted');
     expect(textarea()?.disabled).toBe(false);
     expect(textarea()?.value).toBe('Do the work');
     expect(mocks.client.createSession).toHaveBeenCalledTimes(1);
@@ -4123,9 +4125,7 @@ describe('ManagedSessionsPage', () => {
     await act(async () => root.unmount());
     root = createRoot(container);
     await render();
-    expect(container.textContent).not.toContain(
-      'not confirmed as submitted',
-    );
+    expect(container.textContent).not.toContain('not confirmed as submitted');
   });
 
   it('sends the edited draft under a fresh idempotency key after a discard', async () => {
@@ -4187,9 +4187,7 @@ describe('ManagedSessionsPage', () => {
     await click('Task s1Completed');
     await render('s1');
     await click('Discard this request');
-    expect(container.textContent).not.toContain(
-      'not confirmed as submitted',
-    );
+    expect(container.textContent).not.toContain('not confirmed as submitted');
     expect(container.querySelector('textarea')?.value).toBe(
       'For session A only',
     );
@@ -4366,9 +4364,7 @@ describe('ManagedSessionsPage', () => {
     // The restore is the only way the draft survives the discard now.
     expect(container.querySelector('textarea')?.value).toBe('Keep this prompt');
     expect(container.querySelector('textarea')?.disabled).toBe(false);
-    expect(container.textContent).not.toContain(
-      'not confirmed as submitted',
-    );
+    expect(container.textContent).not.toContain('not confirmed as submitted');
   });
 
   it('moves focus to the session list when a discard has no composer to focus', async () => {
@@ -4389,9 +4385,7 @@ describe('ManagedSessionsPage', () => {
 
     await focusAndClickDiscard();
 
-    expect(container.textContent).not.toContain(
-      'not confirmed as submitted',
-    );
+    expect(container.textContent).not.toContain('not confirmed as submitted');
     expect(document.activeElement).not.toBe(document.body);
     expect(document.activeElement).toBe(container.querySelector('nav'));
   });
@@ -4561,9 +4555,7 @@ describe('ManagedSessionsPage', () => {
 
     // The unconfirmed row unmounted with the click; the persistent visually
     // hidden status region still announces the outcome.
-    expect(container.textContent).not.toContain(
-      'not confirmed as submitted',
-    );
+    expect(container.textContent).not.toContain('not confirmed as submitted');
     expect(
       Array.from(
         container.querySelectorAll('[role="status"], [aria-live]'),

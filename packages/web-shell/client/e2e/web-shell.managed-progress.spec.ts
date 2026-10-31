@@ -664,13 +664,17 @@ test('a permanently failing pending create exposes a discard path @smoke', async
     .click();
 
   await expect(
-    page.getByText('The request outcome is unconfirmed', { exact: false }),
+    page.getByText('The previous message was not confirmed as submitted', {
+      exact: false,
+    }),
   ).toBeVisible();
   await expect(composer).toHaveAttribute('contenteditable', 'false');
 
   await page.getByRole('button', { name: 'Discard this request' }).click();
   await expect(
-    page.getByText('The request outcome is unconfirmed', { exact: false }),
+    page.getByText('The previous message was not confirmed as submitted', {
+      exact: false,
+    }),
   ).toBeHidden();
   await expect(composer).toHaveAttribute('contenteditable', 'true');
   await expect(composer).toHaveText('Fragile draft');

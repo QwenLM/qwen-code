@@ -136,11 +136,11 @@ function injectCssModules(mode: string): Plugin {
           ? 'managed-host'
           : item.facadeModuleId?.endsWith('/client/app-host.tsx')
             ? 'app-host'
-          : item.facadeModuleId?.endsWith('/client/transcript.ts')
-            ? 'transcript'
-            : item.facadeModuleId?.endsWith('/client/index.tsx')
-              ? 'index'
-              : undefined;
+            : item.facadeModuleId?.endsWith('/client/transcript.ts')
+              ? 'transcript'
+              : item.facadeModuleId?.endsWith('/client/index.tsx')
+                ? 'index'
+                : undefined;
         if (!entry) {
           continue;
         }
@@ -306,12 +306,12 @@ export default defineConfig(({ mode }) => ({
           : mode === 'app-host'
             ? { index: 'client/app-host.tsx' }
             : mode === 'transcript'
-            ? { transcript: 'client/transcript.ts' }
-            : {
-                index: 'client/index.tsx',
-                'daemon-react-sdk': 'client/daemon-react-sdk.ts',
-                'code-highlighter': 'client/code-highlighter.ts',
-              },
+              ? { transcript: 'client/transcript.ts' }
+              : {
+                  index: 'client/index.tsx',
+                  'daemon-react-sdk': 'client/daemon-react-sdk.ts',
+                  'code-highlighter': 'client/code-highlighter.ts',
+                },
       formats: ['es'],
       fileName: (_format, entryName) => `${entryName}.js`,
     },
@@ -366,7 +366,9 @@ export default defineConfig(({ mode }) => ({
       ? {
           'process.env.NODE_ENV': JSON.stringify('production'),
           ...(mode === 'app-host' ? { 'process.env': '{}' } : {}),
-          ...(mode === 'app-host' ? { 'process': JSON.stringify({ env: {} }) } : {}),
+          ...(mode === 'app-host'
+            ? { process: JSON.stringify({ env: {} }) }
+            : {}),
         }
       : {}),
     __WEB_SHELL_VERSION__: JSON.stringify(pkg.version),

@@ -41,7 +41,9 @@ export function renderWebShellApp(
   const root = createRoot(container);
   const rootNode = container.getRootNode();
   const removeStyles =
-    rootNode instanceof ShadowRoot ? installWebShellShadowStyles(rootNode) : undefined;
+    rootNode instanceof ShadowRoot
+      ? installWebShellShadowStyles(rootNode)
+      : undefined;
   const render = (next: WebShellAppHostProps) =>
     root.render(
       <WebShellWithProviders

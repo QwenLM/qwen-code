@@ -226,7 +226,8 @@ const EN: Messages = {
   'managed.cancel': 'Cancel turn',
   'managed.uncertain':
     'The previous message was not confirmed as submitted. Retrying reuses the same request and will not run twice.',
-  'managed.pendingElsewhere': 'Another conversation has an unconfirmed request. Return to it before sending a new message.',
+  'managed.pendingElsewhere':
+    'Another conversation has an unconfirmed request. Return to it before sending a new message.',
   'managed.openPendingOwner': 'Open the original conversation',
   'managed.discard': 'Discard this request',
   'managed.pendingRestoreFailed':
@@ -4791,8 +4792,10 @@ const ZH: Messages = {
   'managed.runningHint': '本轮执行中，暂时不能发送新消息。',
   'managed.retry': '重试同一请求',
   'managed.cancel': '取消本轮',
-  'managed.uncertain': '上一条消息未确认是否提交成功。重试使用同一请求标识，不会重复执行。',
-  'managed.pendingElsewhere': '另一个对话有未确认请求，请返回原对话处理后再发送新消息。',
+  'managed.uncertain':
+    '上一条消息未确认是否提交成功。重试使用同一请求标识，不会重复执行。',
+  'managed.pendingElsewhere':
+    '另一个对话有未确认请求，请返回原对话处理后再发送新消息。',
   'managed.openPendingOwner': '返回原对话',
   'managed.discard': '丢弃本次请求',
   'managed.pendingRestoreFailed':

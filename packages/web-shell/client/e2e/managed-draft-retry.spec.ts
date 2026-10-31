@@ -105,7 +105,9 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     await editor.fill('  Accepted A input  ');
     await editor.press('Enter');
     await expect(
-      page.getByText('The request outcome is unconfirmed', { exact: false }),
+      page.getByText('The previous message was not confirmed as submitted', {
+        exact: false,
+      }),
     ).toBeVisible();
     await choose('B');
     await expect(editor).toContainText('Unrelated B draft');
