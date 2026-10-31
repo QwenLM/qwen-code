@@ -755,6 +755,10 @@ export default {
   // ============================================================================
   // Settings Labels
   // ============================================================================
+  'Tool Mode (Experimental)': '工具模式（实验性）',
+  Default: '默认',
+  'Code Mode': '代码模式',
+  'Code Mode Only': '仅代码模式',
   'Code Mode Only (Experimental)': '仅代码模式（实验性）',
   'Mods (Experimental)': 'Mods（实验性）',
   'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':

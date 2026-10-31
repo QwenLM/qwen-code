@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { runWithCodeModeAllowedNames } from '../../utils/code-mode-allowed-names.js';
 import { convertToFunctionResponse } from '../../core/coreToolScheduler.js';
 import {
   enforceFunctionResponseBudget,
@@ -26,6 +27,12 @@ import type {
   ResidentBackgroundAgent,
 } from '../../agents/background-tasks.js';
 import { ToolNames } from '../tool-names.js';
+import { ToolMode } from '../code-mode.js';
+import { ToolRegistry } from '../tool-registry.js';
+import { ExecTool } from '../exec.js';
+import { AgentCore } from '../../agents/runtime/agent-core.js';
+import { MockTool } from '../../test-utils/mock-tool.js';
+import { makeFakeConfig } from '../../test-utils/config.js';
 import {
   backgroundFixAt,
   canonicalWorktreePath,
@@ -666,9 +673,9 @@ describe('AgentTool', () => {
     it('rejects code mode before starting a container, including when validation is bypassed', async () => {
       config.getCodeModeOnly = () => true;
       expect(agentTool.validateToolParams(params)).toContain(
-        'tools.codeModeOnly',
+        'tools.mode = "code_mode_only"',
       );
-      await expectRefused('tools.codeModeOnly', true);
+      await expectRefused('tools.mode = "code_mode_only"', true);
     });
 
     it('rejects nested launch rather than defaulting to host tools', async () => {
@@ -1323,7 +1330,10 @@ describe('AgentTool', () => {
       expect(forkTools.minItems).toBeUndefined();
       expectText(forkTools.description, [
         'Only valid with subagent_type "fork"',
-        'tool declarations remain unchanged',
+        '`direct` mode keeps declarations unchanged',
+        'hybrid `code_mode` narrows them to the list',
+        'Code modes admit `exec` ahead of a non-empty list',
+        'an empty array rejects every tool call',
       ]);
     });
 
@@ -4056,6 +4066,205 @@ describe('AgentTool', () => {
       );
     });
 
+    describe('inherited execution policy persistence', () => {
+      function preparePolicyRuntime(mode: 'code_mode' | 'code_mode_only') {
+        config.getToolMode = vi.fn().mockReturnValue(mode);
+        config.getToolRegistry().getTool = vi.fn();
+        const emitter = new AgentEventEmitter();
+        mockAgent.getCore().getEventEmitter = () => emitter;
+        mockAgent.setExternalMessageProvider = vi.fn();
+        mockAgent.setExternalMessageWaiter = vi.fn();
+        mockAgent.setExternalMessageWaitPredicate = vi.fn();
+        vi.spyOn(transcript, 'attachJsonlTranscriptWriter').mockReturnValue({
+          cleanup: vi.fn(),
+        });
+      }
+      afterEach(() => vi.restoreAllMocks());
+      it.each(['code_mode', 'code_mode_only'] as const)(
+        'bounds and persists an explicit exec fork in %s',
+        async (mode) => {
+          preparePolicyRuntime(mode);
+          const names = [
+            'exec',
+            'read_file',
+            'mcp__github__read_file',
+            'mcp__payments__charge',
+          ];
+          vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue(
+            names,
+          );
+          vi.mocked(config.getLlmClient).mockReturnValue({
+            getHistory: vi.fn().mockReturnValue([]),
+            getChat: vi.fn().mockReturnValue({
+              getGenerationConfig: vi.fn().mockReturnValue({
+                systemInstruction: 'parent system',
+                tools: [{ functionDeclarations: [{ name: 'exec' }] }],
+              }),
+            }),
+          } as unknown as ReturnType<Config['getLlmClient']>);
+          const writeMetaSpy = vi
+            .spyOn(transcript, 'writeAgentMeta')
+            .mockImplementation(() => {});
+          const invocation = (
+            agentTool as AgentToolWithProtectedMethods
+          ).createInvocation({
+            description: 'inherit bounded exec',
+            prompt: 'read the implementation',
+            subagent_type: 'fork',
+            fork_tools: ['exec'],
+            run_in_background: true,
+          });
+          const result = await runWithAgentConfiguredToolAllowlist(
+            [
+              'exec',
+              'read_file',
+              'mcp__github__read_*',
+              'mcp__github__read_file',
+            ],
+            () => invocation.execute(),
+          );
+          expect(result.error).toBeUndefined();
+          const tools = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+          expect(tools?.executionAllowedTools).toEqual([]);
+          expect(tools?.nestedExecutionAllowedTools).toEqual([
+            'read_file',
+            'mcp__github__read_file',
+          ]);
+          expect(writeMetaSpy.mock.calls[0]?.[1]).toMatchObject({
+            executionAllowedTools: [],
+            nestedExecutionAllowedTools: [
+              'read_file',
+              'mcp__github__read_file',
+            ],
+          });
+          writeMetaSpy.mockRestore();
+        },
+      );
+
+      it.each([false, true])(
+        'bounds a default fork and persists its background sidecar (background=%s)',
+        async (background) => {
+          preparePolicyRuntime('code_mode');
+          vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+            'exec',
+            'read_file',
+            'write_file',
+          ]);
+          vi.mocked(config.getLlmClient).mockReturnValue({
+            getHistory: vi.fn().mockReturnValue([]),
+            getChat: vi.fn().mockReturnValue({
+              getGenerationConfig: vi.fn().mockReturnValue({
+                systemInstruction: 'parent system',
+                tools: [{ functionDeclarations: [{ name: 'exec' }] }],
+              }),
+            }),
+          } as unknown as ReturnType<Config['getLlmClient']>);
+          const writeMetaSpy = vi
+            .spyOn(transcript, 'writeAgentMeta')
+            .mockImplementation(() => {});
+          const invocation = (
+            agentTool as AgentToolWithProtectedMethods
+          ).createInvocation({
+            description: 'inherit bounded default',
+            prompt: 'read the implementation',
+            subagent_type: 'fork',
+            run_in_background: background,
+          });
+          const result = await runWithAgentConfiguredToolAllowlist(
+            ['read_file'],
+            () =>
+              runWithCodeModeAllowedNames(['read_file', 'write_file'], () =>
+                invocation.execute(),
+              ),
+          );
+          expect(result.error).toBeUndefined();
+          expect(
+            vi.mocked(AgentHeadless.create).mock.calls[0]?.[5]
+              ?.executionAllowedTools,
+          ).toEqual(['read_file']);
+          expect(
+            vi.mocked(AgentHeadless.create).mock.calls[0]?.[5]
+              ?.nestedExecutionAllowedTools,
+          ).toEqual(['read_file', 'write_file']);
+          if (background) {
+            expect(writeMetaSpy.mock.calls[0]?.[1]).toMatchObject({
+              executionAllowedTools: ['read_file'],
+              nestedExecutionAllowedTools: ['read_file', 'write_file'],
+            });
+          } else {
+            // Interactive forks return a placeholder and have no sidecar.
+            expect(writeMetaSpy).not.toHaveBeenCalled();
+          }
+          writeMetaSpy.mockRestore();
+        },
+      );
+
+      it.each([
+        {
+          forkTools: [ToolNames.READ_FILE],
+          direct: [ToolNames.READ_FILE],
+          nested: [ToolNames.READ_FILE],
+        },
+        {
+          forkTools: [ToolNames.EXEC],
+          direct: [ToolNames.EXEC],
+          nested: [ToolNames.READ_FILE, ToolNames.WRITE_FILE],
+        },
+      ])(
+        'derives the nested exec bound for a top-level hybrid fork (%j)',
+        async ({ forkTools, direct, nested }) => {
+          // Forks launch only from the top-level session, where no
+          // runWithAgentConfiguredToolAllowlist frame exists. The nested bound
+          // must still be concrete, or exec bypasses fork_tools.
+          preparePolicyRuntime('code_mode');
+          vi.mocked(config.getToolRegistry().getAllToolNames).mockReturnValue([
+            ToolNames.EXEC,
+            ToolNames.READ_FILE,
+            ToolNames.WRITE_FILE,
+          ]);
+          vi.mocked(config.getLlmClient).mockReturnValue({
+            getHistory: vi.fn().mockReturnValue([]),
+            getChat: vi.fn().mockReturnValue({
+              getGenerationConfig: vi.fn().mockReturnValue({
+                systemInstruction: 'parent system',
+                tools: [
+                  {
+                    functionDeclarations: [
+                      { name: ToolNames.EXEC },
+                      { name: ToolNames.READ_FILE },
+                      { name: ToolNames.WRITE_FILE },
+                    ],
+                  },
+                ],
+              }),
+            }),
+          } as unknown as ReturnType<Config['getLlmClient']>);
+          const writeMetaSpy = vi
+            .spyOn(transcript, 'writeAgentMeta')
+            .mockImplementation(() => {});
+          const invocation = (
+            agentTool as AgentToolWithProtectedMethods
+          ).createInvocation({
+            description: 'bound a top-level fork',
+            prompt: 'read the implementation',
+            subagent_type: 'fork',
+            fork_tools: forkTools,
+            run_in_background: true,
+          });
+          const result = await invocation.execute();
+          expect(result.error).toBeUndefined();
+          const tools = vi.mocked(AgentHeadless.create).mock.calls[0]?.[5];
+          expect(tools?.executionAllowedTools).toEqual(direct);
+          expect(tools?.nestedExecutionAllowedTools).toEqual(nested);
+          expect(writeMetaSpy.mock.calls[0]?.[1]).toMatchObject({
+            executionAllowedTools: direct,
+            nestedExecutionAllowedTools: nested,
+          });
+          writeMetaSpy.mockRestore();
+        },
+      );
+    });
+
     it('preserves fork_tools deny-all inside a configured parent allowlist', async () => {
       parentTools(readSearchCall, [...bridged()]);
       await runFork(
@@ -4071,6 +4280,46 @@ describe('AgentTool', () => {
       );
       expect(allowed()).toEqual([]);
     });
+
+    it.each([ToolMode.CodeMode, ToolMode.CodeModeOnly])(
+      'deny-all fork_tools closes the exec route in %s',
+      async (mode) => {
+        config.getToolMode = vi.fn().mockReturnValue(mode);
+        parentTools(readSearchCall, [...bridged()]);
+        await runFork(
+          forkParams('deny all tools', {
+            prompt: 'reason without tools',
+            fork_tools: [],
+          }),
+        );
+        expect(allowed()).toEqual([]);
+        // Drive the captured child toolConfig through a real AgentCore: the
+        // empty execution allowlist must close the exec route in both code
+        // modes, at the declaration surface and at the admission gate.
+        const childConfig = makeFakeConfig({ toolMode: mode });
+        const registry = new ToolRegistry(childConfig);
+        vi.spyOn(childConfig, 'getToolRegistry').mockReturnValue(registry);
+        registry.registerTool(new ExecTool(childConfig));
+        registry.registerTool(new MockTool({ name: ToolNames.READ_FILE }));
+        const core = new AgentCore(
+          'deny-all-fork',
+          childConfig,
+          { systemPrompt: '' },
+          { model: 'test-model' },
+          { max_turns: 1 },
+          toolConfig(),
+        );
+        const declarations = await core.prepareTools();
+        expect(declarations.map((d) => d.name)).not.toContain(ToolNames.EXEC);
+        expect(
+          (
+            core as unknown as {
+              isToolExecutionAllowed: (t: string) => boolean;
+            }
+          ).isToolExecutionAllowed.call(core, ToolNames.EXEC),
+        ).toBe(false);
+      },
+    );
 
     it('preserves display_image in the fork declarations but denies its execution', async () => {
       parentTools([

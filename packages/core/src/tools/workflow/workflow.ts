@@ -1564,12 +1564,11 @@ const WORKFLOW_TOOL_RUNTIME_NAME_ONLY = withReplacements(
 const WORKFLOW_AUTHORING_TOOL_SEARCH_NOTE = ` ${toolSearchBridgeSentence(ToolDisplayNames.SKILL)}`;
 
 /**
- * Leads the inlined reference. The reference is written for sessions that can
- * load skills, so it names another one (`workflow-creator`); say up front that
- * such pointers do not apply here.
+ * The reference names another skill (`workflow-creator`), but a shared registry
+ * does not prove that the current agent can load it.
  */
 const WORKFLOW_AUTHORING_INLINE_NOTE =
-  'Skills cannot be loaded in this session, even one named in a skill listing, so the authoring reference follows in full. Where it points at another skill, that skill is not available here either.';
+  'The authoring reference follows in full. Use this inline guidance directly; references to other skills do not establish that those skills are available.';
 
 /**
  * The tool description for a given shape.
@@ -1577,8 +1576,8 @@ const WORKFLOW_AUTHORING_INLINE_NOTE =
  * - `pointer` / `pointer-via-tool-search`: decision + runtime + a line naming
  *   the skill. This is the point of moving the reference out: roughly four
  *   times this text, needed only on the turn that writes a script.
- * - `inline`: decision + the reference in full. No route to any skill, so a
- *   pointer would leave the model writing scripts against nothing.
+ * - `inline`: decision + the reference in full. A skill-loading route cannot
+ *   be established for every consumer, so avoid relying on a pointer.
  * - `withheld`: decision + runtime. The user turned the reference off; putting
  *   it back into every request would raise exactly the cost they removed.
  *

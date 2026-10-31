@@ -597,7 +597,7 @@ describe('UpdateGoalTool', () => {
       [new UpdateGoalTool(makeConfig({}))],
       () => true,
     );
-    const declaration = buildExecDescription(plan, true);
+    const declaration = buildExecDescription(plan, { searchAvailable: true });
     expect(declaration).toContain(
       'Deferred tool signatures and descriptions are omitted below',
     );
@@ -1145,7 +1145,7 @@ describe('ProposeGoalTool', () => {
     );
     // A default code-mode session has the bridge, so the signature moves out
     // of the exec declaration and the discovery path is announced instead.
-    const bridged = buildExecDescription(plan, true);
+    const bridged = buildExecDescription(plan, { searchAvailable: true });
     expect(bridged).toContain(
       'Deferred tool signatures and descriptions are omitted below',
     );

@@ -79,8 +79,9 @@ values.
 
 The policy composes with `isolation: "worktree"` and `working_dir`. It does not
 extend the model-visible isolation enum or change `isolation: "remote"`.
-Combining it with `tools.codeModeOnly` is rejected before container startup;
-the first container registry supports direct tool calls only.
+Combining it with `tools.mode: "code_mode_only"` is rejected before container startup;
+`tools.mode: "code_mode"` warns and continues with direct tools only, registering
+no `exec`. The first container registry supports direct tool calls only.
 
 ## Backend policy and definition boundaries
 

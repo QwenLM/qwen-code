@@ -1241,6 +1241,55 @@ describe('SettingsDialog', () => {
       unmount();
     });
 
+    it.each(['\u0003', '\u000c'])(
+      'persists resetting legacy Tool Mode with %j and requests restart',
+      async (key) => {
+        const settings = createMockSettings({ tools: { codeModeOnly: true } });
+        const setValue = vi
+          .spyOn(settings, 'setValue')
+          .mockImplementation(() => {});
+        const actual = await vi.importActual<
+          typeof import('../../config/settingsUtils.js')
+        >('../../config/settingsUtils.js');
+        vi.mocked(saveModifiedSettings).mockImplementation(
+          actual.saveModifiedSettings,
+        );
+        const onRestartRequest = vi.fn();
+        const { stdin, lastFrame, unmount } = render(
+          <KeypressProvider kittyProtocolEnabled={false}>
+            <SettingsDialog
+              settings={settings}
+              onSelect={vi.fn()}
+              onRestartRequest={onRestartRequest}
+              availableTerminalHeight={40}
+            />
+          </KeypressProvider>,
+        );
+        try {
+          await waitFor(() => expect(lastFrame()).toContain('Code Mode Only'));
+          stdin.write(TerminalKeys.DOWN_ARROW);
+          await wait(30);
+          stdin.write(key);
+          await waitFor(() =>
+            expect(lastFrame()).toContain(
+              'Press r to exit and apply changes now',
+            ),
+          );
+          stdin.write('r');
+          await waitFor(() =>
+            expect(setValue).toHaveBeenCalledWith(
+              SettingScope.User,
+              'tools.mode',
+              'direct',
+            ),
+          );
+          expect(onRestartRequest).toHaveBeenCalledOnce();
+        } finally {
+          unmount();
+        }
+      },
+    );
+
     it('should handle Ctrl+C to reset current setting to default', async () => {
       const settings = createMockSettings({ vimMode: true }); // Start with vimMode enabled
       const onSelect = vi.fn();

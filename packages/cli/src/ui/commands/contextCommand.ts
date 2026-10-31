@@ -457,6 +457,11 @@ export async function collectContextData(
   const toolDeclarations = toolRegistry
     ? toolRegistry.getFunctionDeclarations()
     : [];
+  const toolDeclarationsByName = new Map(
+    toolDeclarations
+      .filter((declaration) => declaration.name)
+      .map((declaration) => [declaration.name!, declaration] as const),
+  );
   const toolsJsonStr = JSON.stringify(toolDeclarations);
   const allToolsTokens = estimateContextTextTokens(toolsJsonStr);
 
@@ -473,7 +478,9 @@ export async function collectContextData(
     if (isMediaPolicyToolHiddenFromModel(config, tool)) {
       continue;
     }
-    const toolJsonStr = JSON.stringify(tool.schema);
+    const declaration = toolDeclarationsByName.get(tool.name);
+    if (!declaration) continue;
+    const toolJsonStr = JSON.stringify(declaration);
     const tokens = estimateContextTextTokens(toolJsonStr);
     if (tool instanceof DiscoveredMCPTool) {
       mcpTools.push({
@@ -526,8 +533,9 @@ export async function collectContextData(
   const memoryFilesTokens = memoryFiles.reduce((sum, f) => sum + f.tokens, 0);
 
   const skillTool = allTools.find((tool) => tool.name === ToolNames.SKILL);
-  const skillToolDefinitionTokens = skillTool
-    ? estimateContextTextTokens(JSON.stringify(skillTool.schema))
+  const skillDeclaration = toolDeclarationsByName.get(ToolNames.SKILL);
+  const skillToolDefinitionTokens = skillDeclaration
+    ? estimateContextTextTokens(JSON.stringify(skillDeclaration))
     : 0;
 
   const loadedContentNames: ReadonlyMap<string, string> =

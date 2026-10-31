@@ -19,6 +19,7 @@ import { MockTool } from '../test-utils/mock-tool.js';
 import { ExecTool } from '../tools/exec.js';
 import { ToolSearchTool } from '../tools/tool-search.js';
 import { getToolCallRuntime } from './tool-call-runtime.js';
+import { getCurrentCodeModeAllowedNames } from '../utils/code-mode-allowed-names.js';
 import {
   Kind,
   ToolConfirmationOutcome,
@@ -49,7 +50,7 @@ function setup(
   } = {},
 ) {
   const config = makeFakeConfig({
-    codeModeOnly: true,
+    toolMode: 'code_mode_only',
     approvalMode: ApprovalMode.DEFAULT,
     chatRecording: false,
     targetDir: '/tmp',
@@ -106,7 +107,7 @@ const findUpdate = (updates: ToolCall[][], name: string, status?: string) =>
 describe('CodeModeOnly scheduler dispatch', () => {
   it('searches a scoped deferred tool, executes it, and still validates arguments', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       targetDir: '/tmp',
       cwd: '/tmp',
     });
@@ -470,7 +471,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('runs Code Mode Bash calls in one Promise.allSettled batch', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -599,6 +600,70 @@ describe('CodeModeOnly scheduler dispatch', () => {
     expect(call().status).toBe('success');
   }, 40_000);
 
+  it('re-establishes the parent allowlist for a nested call resumed after approval', async () => {
+    // The approval resume path runs outside the parent exec's async frame, so
+    // the nested tool can only observe the allowlist when the scheduler
+    // re-establishes it from the request — which requires dispatchCodeModeTool
+    // to copy codeModeAllowedToolNames onto the nested request.
+    let observed: readonly string[] | undefined | 'unset' = 'unset';
+    const execute = vi.fn(async () => {
+      observed = getCurrentCodeModeAllowedNames();
+      return {
+        llmContent: 'approved',
+        returnDisplay: 'approved',
+      };
+    });
+    const updates: ToolCall[][] = [];
+    const { scheduler, run, completed, call } = setup(
+      [
+        new MockTool({
+          name: 'approval_probe',
+          kind: Kind.Other,
+          params: { type: 'object' },
+          getDefaultPermission: async () => 'ask',
+          getConfirmationDetails: async () => ({
+            type: 'info',
+            title: 'Approve nested tool',
+            prompt: 'Continue?',
+            onConfirm: vi.fn().mockResolvedValue(undefined),
+          }),
+          execute,
+        }),
+      ],
+      {
+        params: { interactive: true },
+        onToolCallsUpdate: (calls) => updates.push(calls),
+      },
+    );
+
+    const controller = new AbortController();
+    const scheduled = run(
+      'exec-approval-allowlist',
+      'prompt-approval-allowlist',
+      'await tools.approval_probe({})',
+      { codeModeAllowedToolNames: ['approval_probe'] },
+      controller.signal,
+    );
+    const waiting = () =>
+      findUpdate(updates, 'approval_probe', 'awaiting_approval');
+    await vi.waitFor(() => expect(waiting() !== undefined).toBe(true), {
+      timeout: 30_000,
+    });
+    const { request, confirmationDetails } = waiting() as WaitingToolCall;
+    await scheduler.handleConfirmationResponse(
+      request.callId,
+      confirmationDetails.onConfirm,
+      ToolConfirmationOutcome.ProceedOnce,
+      controller.signal,
+    );
+
+    await scheduled;
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+    expect(execute).toHaveBeenCalledOnce();
+    expect(call().status).toBe('success');
+    expect(observed).toEqual(['approval_probe']);
+  }, 40_000);
+
   it('runs nested hooks with the real tool name', async () => {
     const messageBus = {
       request: vi
@@ -640,7 +705,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('delivers nested PreToolUse context with the exec result, not the script value', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -722,7 +787,7 @@ describe('CodeModeOnly scheduler dispatch', () => {
 
   it('delivers nested PostToolUseFailure context with the exec result, not the script error', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: 'code_mode_only',
       approvalMode: ApprovalMode.DEFAULT,
       targetDir: '/tmp',
       cwd: '/tmp',
@@ -887,6 +952,47 @@ describe('CodeModeOnly scheduler dispatch', () => {
     expect(JSON.stringify(call()?.response.responseParts)).toContain(
       'unavailable on this CodeModeOnly call surface',
     );
+  });
+
+  it('allows an ordinary direct call on the hybrid CodeMode surface', async () => {
+    const config = makeFakeConfig({
+      toolMode: 'code_mode',
+      approvalMode: ApprovalMode.DEFAULT,
+      targetDir: '/tmp',
+      cwd: '/tmp',
+    });
+    const registry = new ToolRegistry(config);
+    vi.spyOn(config, 'getToolRegistry').mockReturnValue(registry);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'read ok',
+      returnDisplay: 'read ok',
+    });
+    registry.registerTool(
+      new MockTool({ name: 'read_probe', kind: Kind.Read, execute }),
+    );
+    const completed = vi.fn();
+    const scheduler = new CoreToolScheduler({
+      config,
+      onAllToolCallsComplete: async (calls) => completed(calls),
+      onToolCallsUpdate: vi.fn(),
+      getPreferredEditor: () => undefined,
+      onEditorClose: vi.fn(),
+    });
+
+    await scheduler.schedule(
+      {
+        callId: 'hybrid-direct-read',
+        name: 'read_probe',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: 'prompt-hybrid-direct-read',
+      },
+      new AbortController().signal,
+    );
+
+    expect(execute).toHaveBeenCalledOnce();
+    await vi.waitFor(() => expect(completed).toHaveBeenCalledOnce());
+    expect(completed.mock.calls[0]?.[0][0].status).toBe('success');
   });
 
   it('enforces a restricted agent allowlist inside exec', async () => {

@@ -35,6 +35,13 @@ const FORK_COMMAND_REQUIRED_KEYS = [
   'Forked into a background agent. It inherits this conversation and runs without blocking — track it in the background tasks panel; it reports back when done.',
 ] as const;
 
+const TOOL_MODE_TRANSLATION_KEYS = [
+  'Tool Mode (Experimental)',
+  'Default',
+  'Code Mode',
+  'Code Mode Only',
+] as const;
+
 const NON_ENGLISH_LANGUAGES = SUPPORTED_LANGUAGES.filter(
   (language) => language.code !== 'en',
 );
@@ -117,6 +124,17 @@ describe('must-translate locale coverage', () => {
       expect(untranslated).toEqual([]);
     },
     SLOW_LOCALE_TEST_TIMEOUT_MS,
+  );
+
+  it.each(['zh', 'zh-TW'] as const)(
+    'translates tool mode settings in %s',
+    async (language) => {
+      await setLanguageAsync(language);
+
+      expect(
+        TOOL_MODE_TRANSLATION_KEYS.filter((key) => t(key) === key),
+      ).toEqual([]);
+    },
   );
 
   it.each(NON_ENGLISH_LANGUAGES)(

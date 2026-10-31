@@ -13,6 +13,7 @@ import { MockTool } from '../test-utils/mock-tool.js';
 import { ExecTool } from '../tools/exec.js';
 import { ToolRegistry } from '../tools/tool-registry.js';
 import { Kind } from '../tools/tools.js';
+import { ToolMode } from '../tools/code-mode.js';
 import {
   createSchedulerExecutor,
   runAgentLoop,
@@ -815,7 +816,7 @@ describe('runToolBatch', () => {
 describe('createSchedulerExecutor', () => {
   it('runs the calls an exec script makes, with their output on the exec call', async () => {
     const config = makeFakeConfig({
-      codeModeOnly: true,
+      toolMode: ToolMode.CodeModeOnly,
       approvalMode: ApprovalMode.YOLO,
       chatRecording: false,
       targetDir: '/tmp',

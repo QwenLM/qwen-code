@@ -193,7 +193,9 @@ describe('AgentCore.runInAgentFrames', () => {
     const runConfig: RunConfig = { max_turns: 1 };
     return new AgentCore(
       name,
-      {} as unknown as Config,
+      {
+        getToolRegistry: () => ({ getAllToolNames: () => [] }),
+      } as unknown as Config,
       promptConfig,
       modelConfig,
       runConfig,

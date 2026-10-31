@@ -752,6 +752,27 @@ function mergeSettings(
   } else if (merged.tools && typeof merged.tools === 'object') {
     delete merged.tools.executionSandbox;
   }
+  // `tools.mode` and the legacy `tools.codeModeOnly` name one setting but
+  // merge as independent keys, so an operator's enforced legacy value would
+  // otherwise sit beside a lower-scope `mode` that every key-first reader
+  // prefers. Keep the highest-precedence scope's choice.
+  const toolModeChoice = [systemDefaults, user, safeWorkspace, system].reduce<
+    'mode' | 'legacy' | undefined
+  >((choice, scope) => {
+    const tools = scope.tools as
+      | { mode?: unknown; codeModeOnly?: unknown }
+      | undefined;
+    if (tools?.mode !== undefined) return 'mode';
+    if (tools?.codeModeOnly === true) return 'legacy';
+    return choice;
+  }, undefined);
+  if (
+    toolModeChoice === 'legacy' &&
+    merged.tools &&
+    typeof merged.tools === 'object'
+  ) {
+    delete merged.tools.mode;
+  }
   return merged;
 }
 

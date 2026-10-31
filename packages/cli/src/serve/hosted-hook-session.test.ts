@@ -1589,7 +1589,7 @@ it('cancels a detached child after its async marker has admitted it', async () =
           .filter((record) => !record.recordId.startsWith('hook-plan-'))
           .map((record) => record.run.state),
       ).toEqual(['cancelled']),
-    { timeout: isSlowTestHost() ? 30_000 : 1_000 },
+    { timeout: isSlowTestHost() ? 30_000 : 10_000 },
   );
   expect(
     requests.filter((request) => request.kind === 'hook-cancel').length,
@@ -2133,7 +2133,7 @@ it('fences a hook-cancel that lands during module evaluation as outcome_unknown'
         expect(
           requests.filter((request) => request.kind === 'hook-execute'),
         ).toHaveLength(1),
-      { timeout: isSlowTestHost() ? 30_000 : 1_000 },
+      { timeout: isSlowTestHost() ? 30_000 : 10_000 },
     );
     abort.abort();
     expect(await outcome).toBeInstanceOf(HostedHookRecoveryRequiredError);

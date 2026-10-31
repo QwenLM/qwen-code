@@ -21,6 +21,7 @@ import {
   Storage,
   SessionIdCaseConflictError,
   FatalConfigError,
+  ToolMode,
 } from '@qwen-code/qwen-code-core';
 import { normalizeModelProposedGoals } from './config.js';
 import {
@@ -32,7 +33,7 @@ import {
   type CliArgs,
   resetOutputStyleWarningsForTesting,
 } from './config.js';
-import type { Settings } from './settings.js';
+import { LoadedSettings, type Settings } from './settings.js';
 import * as ServerConfig from '@qwen-code/qwen-code-core';
 import { isWorkspaceTrusted } from './trustedFolders.js';
 import { resetMcpApprovalsForTesting } from './mcpApprovals.js';
@@ -1782,7 +1783,7 @@ describe('loadCliConfig', () => {
     );
     expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
       expect.objectContaining({
-        codeModeOnly: false,
+        toolMode: ToolMode.Direct,
         disableAllHooks: true,
         mcpServers: {},
         overrideExtensions: [],
@@ -4620,22 +4621,126 @@ describe('mergeExcludeTools', () => {
     expect(config.getToolSearchThreshold()).toBe(0);
   });
 
-  it('should enable CodeModeOnly only when explicitly configured', async () => {
+  it('should resolve the tool mode enum', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
 
     const direct = await loadCliConfig({}, argv, undefined, []);
     const codeMode = await loadCliConfig(
-      { tools: { codeModeOnly: true } },
+      { tools: { mode: ToolMode.CodeMode } },
+      argv,
+      undefined,
+      [],
+    );
+    const codeModeOnly = await loadCliConfig(
+      { tools: { mode: ToolMode.CodeModeOnly } },
       argv,
       undefined,
       [],
     );
 
     expect(direct.getCodeModeOnly()).toBe(false);
-    expect(codeMode.getCodeModeOnly()).toBe(true);
+    expect(codeMode.getCodeModeOnly()).toBe(false);
+    expect(codeModeOnly.getCodeModeOnly()).toBe(true);
     expect(direct.getToolMode()).toBe('direct');
-    expect(codeMode.getToolMode()).toBe('code_mode_only');
+    expect(codeMode.getToolMode()).toBe('code_mode');
+    expect(codeModeOnly.getToolMode()).toBe('code_mode_only');
+  });
+
+  it.each([ToolMode.CodeMode, ToolMode.CodeModeOnly])(
+    'warns when SSH downgrades %s to direct',
+    async (mode) => {
+      sshWorkspaceProbe.mockReturnValueOnce({
+        host: 'host',
+        directory: '/srv/project',
+      });
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({ tools: { mode } }, argv, undefined, []);
+      expect(mockConfigConstructorParams).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          toolMode: ToolMode.Direct,
+          warnings: expect.arrayContaining([
+            `SSH workspaces do not support tools.mode = "${mode}"; using direct tools for this session.`,
+          ]),
+        }),
+      );
+    },
+  );
+
+  it('should fail closed for an invalid tool mode', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { mode: 'code-mode' } } as unknown as Settings,
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(config.getToolMode()).toBe(ToolMode.Direct);
+    expect(config.getWarnings()).toContain(
+      'Unrecognized tools.mode "code-mode"; falling back to direct.',
+    );
+  });
+
+  it('should honor the legacy tools.codeModeOnly setting', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { codeModeOnly: true } } as unknown as Settings,
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(config.getToolMode()).toBe(ToolMode.CodeModeOnly);
+    expect(config.getWarnings()).toContain(
+      'tools.codeModeOnly is deprecated; use tools.mode = "code_mode_only".',
+    );
+  });
+
+  it('should keep an operator legacy mode over a lower-scope tools.mode', async () => {
+    const file = (settings: Settings) => ({
+      settings,
+      originalSettings: settings,
+      path: 'fixture',
+    });
+    const loaded = new LoadedSettings(
+      file({ tools: { codeModeOnly: true } } as unknown as Settings),
+      file({}),
+      file({ tools: { mode: ToolMode.Direct } }),
+      file({}),
+      true,
+      new Set(),
+    );
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(loaded.merged, argv, undefined, []);
+
+    expect(config.getToolMode()).toBe(ToolMode.CodeModeOnly);
+    expect(config.getWarnings()).toContain(
+      'tools.codeModeOnly is deprecated; use tools.mode = "code_mode_only".',
+    );
+  });
+
+  it.each([
+    ['--safe-mode', ToolMode.CodeMode],
+    ['--safe-mode', ToolMode.CodeModeOnly],
+    ['--bare', ToolMode.CodeMode],
+    ['--bare', ToolMode.CodeModeOnly],
+  ] as const)('should force direct mode for %s with %s', async (flag, mode) => {
+    process.argv = ['node', 'script.js', flag];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { tools: { mode } },
+      argv,
+      undefined,
+      [],
+    );
+
+    expect(config.getCodeModeOnly()).toBe(false);
+    expect(config.getToolMode()).toBe('direct');
   });
 
   it('should only enable tools.freeform inside CodeModeOnly', async () => {
@@ -4649,11 +4754,19 @@ describe('mergeExcludeTools', () => {
       [],
     );
     const codeMode = await loadCliConfig(
-      { tools: { codeModeOnly: true, freeform: true } },
+      { tools: { mode: ToolMode.CodeModeOnly, freeform: true } },
       argv,
       undefined,
       [],
     );
+
+    const hybrid = await loadCliConfig(
+      { tools: { mode: ToolMode.CodeMode, freeform: true } },
+      argv,
+      undefined,
+      [],
+    );
+    expect(hybrid.getFreeform()).toBe(false);
 
     expect(direct.getCodeModeOnly()).toBe(false);
     expect(direct.getFreeform()).toBe(false);
@@ -4661,18 +4774,21 @@ describe('mergeExcludeTools', () => {
   });
 
   it.each(['--safe-mode', '--bare'])(
-    'should disable CodeModeOnly and Freeform in %s mode',
+    'should force direct mode for the legacy setting and disable Freeform with %s',
     async (flag) => {
       process.argv = ['node', 'script.js', flag];
       const argv = await parseArguments();
       const config = await loadCliConfig(
-        { tools: { codeModeOnly: true, freeform: true } },
+        {
+          tools: { codeModeOnly: true, freeform: true },
+        } as unknown as Settings,
         argv,
         undefined,
         [],
       );
 
       expect(config.getCodeModeOnly()).toBe(false);
+      expect(config.getToolMode()).toBe(ToolMode.Direct);
       expect(config.getFreeform()).toBe(false);
     },
   );

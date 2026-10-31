@@ -718,6 +718,10 @@ export default {
   Settings: '設置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     '要查看更改，必須重啟 Qwen Code。按 r 退出並立即應用更改。',
+  'Tool Mode (Experimental)': '工具模式（實驗性）',
+  Default: '預設',
+  'Code Mode': '程式碼模式',
+  'Code Mode Only': '僅程式碼模式',
   'Code Mode Only (Experimental)': '僅程式碼模式（實驗性）',
   'Mods (Experimental)': 'Mods（實驗性）',
   'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':

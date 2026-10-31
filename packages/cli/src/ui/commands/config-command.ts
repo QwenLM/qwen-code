@@ -15,6 +15,7 @@ import type { SettingDefinition } from '../../config/settingsSchema.js';
 import { t } from '../../i18n/index.js';
 import {
   getAllSettingKeys,
+  getEffectiveValue,
   getFlattenedSchema,
   getDefaultValue,
   getNestedProperty,
@@ -220,7 +221,10 @@ function listAllSettings(context: CommandContext): MessageActionReturn {
     const def = flattened[key]!;
     if (!SETTABLE_TYPES.has(def.type)) continue;
 
-    const current = getNestedProperty(merged as Record<string, unknown>, key);
+    const current =
+      key === 'tools.mode'
+        ? getEffectiveValue(key, {}, merged)
+        : getNestedProperty(merged as Record<string, unknown>, key);
     let displayCurrent: string;
     if (isSensitiveKey(key)) {
       displayCurrent = maskValue(current ?? def.default);
@@ -283,10 +287,13 @@ export const configCommand: SlashCommand = {
       };
     }
 
-    const currentValue = getNestedProperty(
-      context.services.settings.merged as Record<string, unknown>,
-      key,
-    );
+    const currentValue =
+      key === 'tools.mode'
+        ? getEffectiveValue(key, {}, context.services.settings.merged)
+        : getNestedProperty(
+            context.services.settings.merged as Record<string, unknown>,
+            key,
+          );
 
     if (isToggle && def.type !== 'boolean') {
       const display = isSensitiveKey(key)
