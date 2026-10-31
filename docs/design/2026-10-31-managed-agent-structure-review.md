@@ -69,24 +69,26 @@ exclusion; zero `TODO`/`FIXME` markers in production code.
 
 **D1. God classes.** The largest production classes:
 
-| Class                              | Module         | Lines | Notes                                 |
-| ---------------------------------- | -------------- | ----- | ------------------------------------- |
-| `ManagedAgentStore`                | persistence    | 7,751 | 300+ methods, 7 public setters        |
-| `RuntimeBrokerService`             | runtime-broker | 6,417 | 230+ methods; the module's only class |
-| `ManagedSessionStore`              | persistence    | 3,931 |                                       |
-| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                       |
-| `ToolPublicationDataStore`         | persistence    | 2,709 |                                       |
-| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                       |
-| `ManagedAgentService`              | control-plane  | 2,120 |                                       |
-| `HarnessCoordinator`               | control-plane  | 1,770 |                                       |
+| Class                              | Module         | Lines | Notes                                                                                                        |
+| ---------------------------------- | -------------- | ----- | ------------------------------------------------------------------------------------------------------------ |
+| `ManagedAgentStore`                | persistence    | 7,751 | 300+ methods, 7 public setters                                                                               |
+| `RuntimeBrokerService`             | runtime-broker | 6,329 | 230+ methods; cooldown and hold inventory extracted (`ExecutionObservationCooldown`, `RuntimeHoldInventory`) |
+| `ManagedSessionStore`              | persistence    | 3,931 |                                                                                                              |
+| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                                                              |
+| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                                                                              |
+| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                                                                              |
+| `ManagedAgentService`              | control-plane  | 2,120 |                                                                                                              |
+| `HarnessCoordinator`               | control-plane  | 1,770 |                                                                                                              |
 
 `ManagedAgentStore` mixes session admission, turns, events, item/message
 projection, worktrees, MCP management, definition pins, skills, and extension
 projection. Its 7 public `set*`/`configure*` methods are mutable post-
 construction wiring: the bean can be observed before it is fully assembled.
 `RuntimeBrokerService` mixes provisioning, binding CAS, leases, cancellation,
-recovery scans, tool holds, extension commands, and observation cooldowns in a
-single class. Tests mirror the shape: `RuntimeBrokerServiceTest` is 8,002
+recovery scans, and extension commands in a single class; the observation
+cooldown and the tool-hold inventory are the first concerns delegated to
+extracted collaborators (see the P1 extraction slices below). Tests mirror
+the shape: `RuntimeBrokerServiceTest` is 8,002
 lines and `HarnessCoordinatorTest` is 4,910 lines.
 
 **D2. Telescoping session-creation API.** `insertWorkspaceSessionCommand` has
@@ -181,11 +183,36 @@ cross-cutting "how the system works today" tour.
    gate makes every caller enumerable, and a bridge would keep the chain alive.
    Update all callers in the same change.
 
-3. Split `AgentStateStore` into role interfaces (for example
-   `SessionAdmissionStore`, `SessionQueryStore`, `EventProjectionStore`).
-   The implementation may remain one class in this step; consumers inject
-   only the role they use. Interface segregation first, implementation split
-   later (P1).
+3. Split `AgentStateStore` into role interfaces. Landed (2026-10-31) as six
+   roles — `SessionAdmissionStore`, `SessionLifecycleStore`,
+   `SessionQueryStore`, `SessionPolicyStore`, `EventProjectionStore`,
+   `TurnExecutionStore` — with `AgentStateStore` kept as a composite that
+   extends them, so implementations and tests keep the whole surface and
+   nested records/constants resolve through inheritance (imports of nested
+   types must name the owning role). A role-composition pin keeps the
+   composite empty and owns no surface of its own. Consumer audit
+   (call-level, corrected after review): 18 single-role consumers inject
+   their role directly — lifecycle (`RenameEvidence`, `TurnInputEvidence`,
+   `ChildLifecycleAdmissions`, `ActionResponseCoordinator`,
+   `ContextCompressionCoordinator`, `ContextCompressionService`,
+   `ManagedTaskCancelService`, `OperationReconciler`), query
+   (`ManagedRuntimeCoordinator`,
+   `SessionRecoveryService`, `ManagedExtensionCommandVerifier`,
+   `ManagedSessionStore`), policy (`ManagedMcpManagementService`,
+   `ManagedExtensionManagementService`), event projection
+   (`MessageMaterializer`, `ReplayFloorAdvancer`, `ManagedToolResultStore`),
+   and turn execution (`SessionWorktreeService`). Most of the remaining
+   consumers span roles or forward the store into multi-role dependencies
+   (Harness and broker wiring) and keep the composite.
+   Four more are single-role but stay on the composite as deferred
+   migrations, recorded here for P1: `ChildWorkspaceService`,
+   `WorkspaceRuntimeResolver` and `ManagedAutomationService` (query), and
+   `TaskCancelCoordinator` (lifecycle) — their `this(...)` calls are
+   constructor delegation within the same class, not forwarding.
+   `AcceptanceEvidence.settle` now takes `SessionLifecycleStore` directly,
+   which also let `OperationReconciler` narrow. Narrower
+   injection spreads further as P1 splits the implementation along the same
+   seams. Interface segregation first, implementation split later (P1).
 
 4. Add a pin test in `verification`, in the style of `SurfaceRegistryGateTest`:
    assert that `AgentStateStore` (and its successor role interfaces) declare
@@ -204,7 +231,42 @@ cross-cutting "how the system works today" tour.
 - `RuntimeBrokerService`: extract module-internal collaborators for recovery
   scanning, cancellation, tool holds, and observation cooldown; the service
   becomes a facade. The module already exists, so no cross-module contract
-  moves. This is the lowest-risk, highest-readability split.
+  moves. This is the lowest-risk, highest-readability split. The observation
+  cooldown is the first seam extracted (2026-10-31,
+  `ExecutionObservationCooldown`): it owns the only state it touches and has
+  no lifecycle of its own. The tool-hold inventory followed the same day
+  (`RuntimeHoldInventory`): the durable pagination and RELEASED filter move
+  verbatim, while the service keeps the admission, tenant resolution and
+  error-mapping boundary. Recovery scanning was investigated next and proved
+  entangled — `scanExecutions` drives `reconcileInContext`, and the
+  background-process settle family owns the `SessionContext` in-memory index
+  and the CAS settle loop — so extracting it now would create a collaborator
+  with a dozen injected callbacks rather than a clean seam; it waits for the
+  reconciliation path to become its own collaborator. Cancellation follows
+  the same rule: extract only where the seam is clean. Known coverage gap
+  carried into the reconciliation slice:
+  the stamp-before-in-flight-slot-drop ordering in `lookupOnce` has no test
+  pinning it (a pre-existing gap, identical at the base); pin it when the
+  reconciliation path becomes its own collaborator and the ordering is a
+  seam-level contract rather than a private lambda's internal sequence.
+- Reconciliation, recovery scanning and cancellation are **not** clean
+  standalone seams (investigated 2026-10-31). Unlike the cooldown and the
+  hold inventory — which own their state — these paths share the service's
+  core mutable state and lifecycle machinery: the `sessions`, `liveBindings`
+  and `reconciliations` concurrent maps, the binding-lifecycle helpers
+  (`requireAnswerableBinding`, `requireLiveBinding`, `invalidateBinding`,
+  `provisioner.isUsable`), and the CAS execution settle
+  (`absorbRuntimeStatus` → `settleUnstartedBackgroundSiblings`). Extracting
+  any of them now would inject a dozen maps/helpers/callbacks into a
+  "collaborator" that is the god class under another name. The prerequisite
+  is a **shared-state registry** slice: move the three maps and the
+  binding-lifecycle helpers behind a `RuntimeBindingRegistry` (or similar)
+  that owns them, leaving the service to delegate. Once that registry
+  exists, reconciliation/recovery/cancellation depend on a narrow owner
+  instead of the service's internals and become extractable, and the M6
+  ordering becomes a seam-level contract a test can pin. This registry
+  slice is larger and riskier than the two clean seams and should be
+  designed and reviewed on its own before implementation.
 - Apply the same treatment to `ManagedSessionStore` and
   `QwenHostedHarnessConnector` afterwards, each as its own slice.
 

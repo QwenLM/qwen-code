@@ -1,9 +1,12 @@
 package com.alibaba.qwen.code.managedagent.harness;
 
 import com.alibaba.qwen.code.daemon.HostedHarnessClient;
+import com.alibaba.qwen.code.managedagent.HostedGateTestSupport;
 import com.alibaba.qwen.code.managedagent.ManagedAgentServerApplication;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.security.WriterCredentialPolicy;
+import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.persistence.HarnessPlacementStore;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.fasterxml.jackson.databind.JsonNode;
@@ -85,7 +88,10 @@ class HostedHarnessPoolMySqlIT {
         var settings = spring.getBean(ManagedAgentProperties.class);
         settings.getSessionStore().setBaseUrl("http://127.0.0.1:" + spring.getWebServer().getPort());
         var placements = spring.getBean(HarnessPlacementStore.class);
-        pool = spring.getBean(HarnessPoolConnector.class);
+        // The wired bean is the SdkHarnessBoundary decorator, so asking Spring
+        // for the concrete pool type finds nothing; resolve the owner instead.
+        pool = (HarnessPoolConnector) HostedGateTestSupport.connectorOwning(
+                spring.getBean(HarnessConnector.class));
         pool.refresh();
         assertThat(pool.supportsFencedTitles()).isTrue();
         String tenantA = "pool-a-" + UUID.randomUUID();
@@ -134,6 +140,21 @@ class HostedHarnessPoolMySqlIT {
                 Integer.class, tenantA, tenantB)).isEqualTo(4);
         assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM ma_operation WHERE tenant_id IN (?, ?)",
                 Integer.class, tenantA, tenantB)).isZero();
+        // With no member accepting, a Session the last owner released has no holder: the pool answers its
+        // own 503, never the drained owner's not-found that the scanner retired definitions on (#15795).
+        HostedHarnessClient secondClient = client(second);
+        pool.drainInstance("pool-b", UUID.randomUUID().toString());
+        await(() -> "DRAINED".equals(secondClient.readInstance().get("state")), 30);
+        assertThat(placements.get(tenantA, a1).state()).isEqualTo("RELEASED");
+        Map<String, Object> fire = Map.of("operationId", UUID.randomUUID().toString(), "kind", "fire_run",
+                "scheduleId", "asch_" + "0".repeat(32), "occurrenceKey", "manual:pool-released");
+        assertThatThrownBy(() -> pool.runAutomationOperation(tenantA, a1, fire))
+                .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                    assertThat(error.getStatus()).isEqualTo(503);
+                    assertThat(error.getCode()).isEqualTo("harness_pool_unavailable");
+                });
+        assertThat(jdbc.queryForObject("SELECT status FROM ma_session WHERE tenant_id = ? AND session_id = ?",
+                String.class, tenantA, a1)).isEqualTo("ACTIVE");
     }
 
     private String root(String tenant) {
