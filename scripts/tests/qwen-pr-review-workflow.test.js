@@ -40,6 +40,18 @@ const botLogin =
     .jobs['review-config'].steps.find((s) => s.name === 'Set review constants')
     ?.run.match(/bot_login=([A-Za-z0-9-]+)/)?.[1] ?? '';
 
+// The supersede kill dir is minted under RUNNER_TEMP with a fixed prefix and
+// never exported (R4-1), so the replay's forge stub can only DISCOVER it by
+// listing that prefix. The two literals live in different files; renaming one
+// side alone leaves the stub globbing nothing, the forged kill record never
+// lands, and the refusal replay goes vacuously green. Derive the production
+// prefix from the workflow text and pin the stub glob to it (the supersede
+// suite asserts the pair).
+const supersedeKillDirPrefix =
+  workflow.match(/SUPERSEDE_KILL_DIR="[^\n]*?\/tmp\}\/([^."]+)\.XXXXXX/)?.[1] ??
+  '';
+const forgedKillDirGlob = `"\${RUNNER_TEMP}"/qwen-review-supersede-kill.*`;
+
 // Capability probe, not a platform check: the FIFO wedge tests need
 // mkfifo(1). vitest.config excludes win32 only, so the merge_group/schedule
 // gated test_macos lane runs this suite too, and a host without mkfifo
@@ -488,7 +500,9 @@ function runScenario(
         // the stub DISCOVERS it by listing (no derivation), plants the kill
         // record plus SUPERSEDE_FILE, and dies non-retryably (a fatal
         // skips the retry reset that clears plants).
-        '  supersede_forged_kill_record) for d in "${RUNNER_TEMP}"/qwen-review-supersede-kill.*; do if [ -d "$d" ]; then printf "head-b" > "$d/killed"; fi; done; printf "head-b" > "$SUPERSEDE_FILE"; exit 3 ;;',
+        '  supersede_forged_kill_record) for d in ' +
+          forgedKillDirGlob +
+          '; do if [ -d "$d" ]; then printf "head-b" > "$d/killed"; fi; done; printf "head-b" > "$SUPERSEDE_FILE"; exit 3 ;;',
         '  retry_watcher_relaunch) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else i=0; until [ -f "$SUPERSEDE_FILE" ] || [ "$i" -ge 200 ]; do /bin/sleep 0.05; i=$((i+1)); done; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
         '  retry_clears_stale_signals) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; else { [ -f "$SUPERSEDE_FILE" ] && echo present || echo absent; } >> "$OBS"; r success false "ok"; fi ;;',
         '  compose_latch_reset) if [ "$n" -eq 1 ]; then r success false "[API Error: 503 upstream overloaded]"; : > "$SALVAGE_DIR/compose-seen"; else { [ -f "$SALVAGE_DIR/compose-seen" ] && echo present || echo absent; } >> "$OBS"; r success false "[API Error: 503 upstream overloaded]"; fi ;;',
@@ -4750,6 +4764,19 @@ describe('review supersede salvage (#10110)', () => {
     // Defined and armed before the retry loop starts.
     expect(run.indexOf('supersede_watcher()')).toBeLessThan(
       run.indexOf('attempt=1'),
+    );
+  });
+
+  it('discovers the kill dir with the prefix the workflow mints', () => {
+    // The kill dir is never exported, so the replayed agent can only reach
+    // it by DISCOVERING it: the forge stub lists RUNNER_TEMP for the prefix
+    // production mints. Rename either literal alone and the glob matches
+    // nothing — the forged record never lands, and the refusal replay below
+    // still passes without exercising the refusal. Pin the stub glob to the
+    // prefix derived from the workflow text so that one-sided edit is red.
+    expect(supersedeKillDirPrefix).not.toBe('');
+    expect(forgedKillDirGlob).toBe(
+      `"\${RUNNER_TEMP}"/${supersedeKillDirPrefix}.*`,
     );
   });
 
