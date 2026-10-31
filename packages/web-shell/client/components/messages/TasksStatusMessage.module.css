@@ -267,6 +267,32 @@
   grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
 }
 
+.monitorInlineMetrics {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+
+.monitorInlineMetric {
+  align-items: baseline;
+  display: inline-flex;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+.monitorInlineLabel {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.monitorInlineValue {
+  color: var(--foreground);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+}
+
 .monitorMetric {
   background: var(--muted);
   border: 1px solid var(--border);
@@ -312,6 +338,53 @@
   line-height: 1.5;
   overflow-wrap: anywhere;
   padding: 8px 10px;
+}
+
+.monitorSectionHeader {
+  align-items: center;
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 6px;
+}
+
+.shellSectionMeta {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.shellOutputLabel {
+  padding-top: 8px;
+}
+
+.shellOutput {
+  background: var(--muted);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  max-height: 240px;
+  overflow: auto;
+  overflow-wrap: anywhere;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+
+.shellOutputHint {
+  color: var(--muted-foreground);
+  font-size: 11px;
+}
+
+.shellCopyButton {
+  color: var(--muted-foreground);
+  flex: 0 0 auto;
+}
+
+.shellCopyButton:hover,
+.shellCopyButton:focus-visible {
+  color: var(--foreground);
 }
 
 .shellError {

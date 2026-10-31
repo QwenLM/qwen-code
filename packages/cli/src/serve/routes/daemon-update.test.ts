@@ -34,7 +34,7 @@ vi.mock('../../ui/utils/updateCheck.js', () => ({
 vi.mock('../../config/settings.js', () => ({ loadSettings: mocks.settings }));
 vi.mock('../../utils/installationInfo.js', () => ({
   getInstallationInfo: mocks.installation,
-  PackageManager: { NPM: 'npm' },
+  PackageManager: { NPM: 'npm', PNPM: 'pnpm', YARN: 'yarn', BUN: 'bun' },
   formatUpdateInstructions: () => ['npm install -g @qwen-code/qwen-code@2.0.0'],
 }));
 vi.mock('../../ui/standalone-update.js', () => ({
@@ -80,7 +80,7 @@ async function makeApp(
   const app = express();
   const credentials = new CredentialStore(options.token);
   credentials.addPairingToken('device', 'pairing');
-  credentials.addWebShellToken('web-shell-device');
+  credentials.addWebShellToken('paired-device', 'web-shell-device');
   app.use((req, res, next) => {
     if (options.secondary)
       tagListener(
@@ -529,6 +529,98 @@ describe('daemon update routes', () => {
     expect(
       (await request(await makeApp()).get('/daemon/update')).body.canInstall,
     ).toBe(false);
+  });
+
+  async function stubManagedLauncher() {
+    fixture = await mkdtemp(join(tmpdir(), 'qwen-daemon-update-'));
+    const bootstrap = join(fixture, 'cli-entry.js');
+    await writeFile(bootstrap, '');
+    await writeFile(
+      join(fixture, 'package.json'),
+      JSON.stringify({ name: '@qwen-code/qwen-code' }),
+    );
+    vi.stubEnv('QWEN_CODE_CLI', bootstrap);
+    vi.stubEnv('QWEN_CODE_MANAGED_NPM_PIN', JSON.stringify({ bootstrap }));
+    return realpath(bootstrap);
+  }
+
+  it.each(['pnpm', 'yarn', 'bun'])(
+    'offers one-click for global %s installations with a managed launcher',
+    async (packageManager) => {
+      const launcher = await stubManagedLauncher();
+      mocks.installation.mockReturnValue({
+        isGlobal: true,
+        packageManager,
+        updateCommand: `${packageManager} global update`,
+      });
+      mocks.npm.mockResolvedValue({ stagingDir: '/staged' });
+      const app = await makeApp();
+      expect((await request(app).get('/daemon/update')).body.canInstall).toBe(
+        true,
+      );
+      await ready(app);
+      expect(mocks.npm).toHaveBeenCalledWith('2.0.0', launcher);
+      expect(mocks.activateNpm).not.toHaveBeenCalled();
+    },
+  );
+
+  it('offers one-click for a root-owned npm prefix without an update command', async () => {
+    await stubManagedLauncher();
+    mocks.installation.mockReturnValue({
+      isGlobal: true,
+      packageManager: 'npm',
+      updateMessage:
+        'Update requires sudo. Please run: sudo npm install -g @qwen-code/qwen-code@latest',
+    });
+    mocks.npm.mockResolvedValue({ stagingDir: '/staged' });
+    expect(
+      (await request(await makeApp()).get('/daemon/update')).body.canInstall,
+    ).toBe(true);
+  });
+
+  it('keeps Homebrew installations manual even with a managed launcher', async () => {
+    await stubManagedLauncher();
+    mocks.installation.mockReturnValue({
+      isGlobal: true,
+      packageManager: 'homebrew',
+      updateMessage:
+        'Installed via Homebrew. Please update with "brew upgrade".',
+    });
+    const response = await request(await makeApp())
+      .get('/daemon/update')
+      .expect(200);
+    expect(response.body).toMatchObject({
+      state: 'available',
+      canInstall: false,
+      instructions: ['npm install -g @qwen-code/qwen-code@2.0.0'],
+    });
+    await request(await makeApp())
+      .post('/daemon/update/prepare')
+      .send({})
+      .expect(409);
+    expect(mocks.npm).not.toHaveBeenCalled();
+  });
+
+  it('keeps non-global installations manual even with a managed launcher', async () => {
+    await stubManagedLauncher();
+    mocks.installation.mockReturnValue({
+      isGlobal: false,
+      packageManager: 'pnpm',
+      updateCommand: 'pnpm add -g @qwen-code/qwen-code@latest',
+    });
+    const response = await request(await makeApp())
+      .get('/daemon/update')
+      .expect(200);
+    expect(response.body).toMatchObject({
+      state: 'available',
+      canInstall: false,
+      instructions: ['npm install -g @qwen-code/qwen-code@2.0.0'],
+    });
+    await request(await makeApp())
+      .post('/daemon/update/prepare')
+      .send({})
+      .expect(409);
+    expect(mocks.npm).not.toHaveBeenCalled();
   });
 
   it('requires operator authentication for mutations', async () => {

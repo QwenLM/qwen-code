@@ -9,6 +9,10 @@
 // then extensively hand-corrected for Taiwan vocabulary conventions.
 // This file is the authoritative source — do not overwrite with auto-generated output.
 export default {
+  'Generated UI': 'Generated UI 生成式介面',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    '在支援的本機工作階段中啟用內建 Generated UI。重新建立所屬工作階段後生效。',
+
   'Cannot disable an extension-provided MCP server here.':
     '無法在此處停用擴展提供的 MCP 伺服器。',
   'Cleared authentication for "{{name}}".': '已清空 "{{name}}" 的認證資訊。',
@@ -205,6 +209,7 @@ export default {
   'toolDisplayName.CronCreate': '建立定時任務',
   'toolDisplayName.CronList': '定時任務清單',
   'toolDisplayName.CronDelete': '刪除定時任務',
+  'toolDisplayName.AutofixPr': 'PR 自動修復',
   'toolDisplayName.LoopWakeup': '循環喚醒',
   'toolDisplayName.CreateSubSession': '建立子會話',
   'toolDisplayName.ListAgents': '列出 Agent',
@@ -714,6 +719,9 @@ export default {
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
     '要查看更改，必須重啟 Qwen Code。按 r 退出並立即應用更改。',
   'Code Mode Only (Experimental)': '僅程式碼模式（實驗性）',
+  'Mods (Experimental)': 'Mods（實驗性）',
+  'Enable experimental Mods from enabled extensions in trusted local terminal and headless sessions. Restart required.':
+    '在受信任的本機互動終端和無介面工作階段中載入已啟用擴充功能的實驗性 Mods。修改後需重新啟動。',
   'Vim Mode': 'Vim 模式',
   'Attribution: commit': '署名：提交',
   'Terminal Bell Notification': '終端響鈴通知',
@@ -2014,6 +2022,8 @@ export default {
   'System prompt': '系統提示',
   'Built-in tools': '內置工具',
   'MCP tools': 'MCP tools',
+  'Instruction files': '指令檔案',
+  'Auto memory': '自動記憶',
   'Memory files': '記憶檔案',
   Skills: '技能',
   Messages: '消息',

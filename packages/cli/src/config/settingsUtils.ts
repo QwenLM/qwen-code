@@ -286,6 +286,7 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'goals', key: 'modelProposed' },
   { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },
   { section: 'serve', key: 'tokenQr' },
+  { section: 'serve', key: 'maxSessions' },
   { section: 'ui', key: 'allowedApprovalModes' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;
@@ -302,6 +303,9 @@ export const WORKSPACE_RESTRICTED_ROOT_SETTINGS = [
   'advisorModel',
   'advisorMaxUses',
   'pluginConfigs',
+  // Where verification evidence gets published is the operator's call: a
+  // cloned repository must not redirect it to another fork.
+  'verifyPr',
 ] as const;
 
 /**

@@ -22,11 +22,15 @@
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, within } from '@testing-library/react';
+import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
 import type { LoadedSettings } from '../../config/settings.js';
 import { getCachedStringWidth } from '../utils/textUtils.js';
 
 const frameState = vi.hoisted(() => ({ width: 100 }));
-vi.mock('@opentui/react', () => ({
+vi.mock('@opentui/react', async () => ({
+  useAppContext: (
+    await import('../../test-utils/opentui-catalog.js')
+  ).catalogAppContext([]),
   useRenderer: () => ({
     addInputHandler: vi.fn(),
     removeInputHandler: vi.fn(),
@@ -110,10 +114,8 @@ vi.mock('@opentui/core', () => ({
 
 import { OpenTuiArenaDialog } from './dialogs-arena.js';
 import { DialogFrame } from './dialogs-shared.js';
-import {
-  OpenTuiMemoryDialog,
-  OpenTuiStatusLineDialog,
-} from './dialogs-memory-status.js';
+import { OpenTuiMemoryDialog } from './dialogs-memory-status.js';
+import { OpenTuiStatusLineDialog } from './dialogs-statusline.js';
 import {
   OpenTuiSkillsDialog,
   OpenTuiStatsDialog,
@@ -171,7 +173,12 @@ describe('sibling dialog frames (region clips, frame does not shrink)', () => {
 
   it('statusline frame opens flush and unshrinkable', () => {
     const { container } = render(
-      <OpenTuiStatusLineDialog settings={SETTINGS} onClose={() => {}} />,
+      <OpenTuiStatusLineDialog
+        config={{} as Config}
+        settings={SETTINGS}
+        addItem={vi.fn()}
+        onClose={() => {}}
+      />,
     );
     expect(layoutOf(container.firstElementChild)).toMatchObject({
       flexShrink: 0,

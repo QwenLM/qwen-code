@@ -44,6 +44,34 @@ function enclosingLayer(rule: Rule): string | undefined {
 }
 
 describe('build artifact — package boundary', () => {
+  it('keeps Generated UI retention out of the read-only transcript runtime', () => {
+    const withoutCss = (javascript: string) =>
+      javascript.replace(/^const __qwenWebShellCss=.*\n/gm, '');
+    expect(withoutCss(readTranscriptBundle())).not.toContain(
+      'data-generated-ui-slot',
+    );
+    expect(withoutCss(readPackageJavascript())).toContain(
+      'data-generated-ui-slot',
+    );
+  });
+
+  it('keeps deletion-only copy out of the read-only transcript', () => {
+    for (const copy of [
+      'Delete permanently',
+      '所选原始消息将从历史中永久删除。已有摘要、命令执行效果和项目文件保持不变。已进入摘要的信息仍可能影响后续回复。',
+      'Session history changed. Select the messages again before deleting.',
+    ]) {
+      expect(
+        readPackageJavascript().includes(copy),
+        `Interactive copy: ${copy}`,
+      ).toBe(true);
+      expect(
+        readTranscriptBundle().includes(copy),
+        `Read-only copy: ${copy}`,
+      ).toBe(false);
+    }
+  });
+
   it.each(['.', 'assets'])(
     'ships the spreadsheet worker in a lazy chunk in dist/%s',
     (directory) => {
@@ -126,6 +154,10 @@ describe('build artifact — package boundary', () => {
     expect(bundle).not.toContain('react/jsx-dev-runtime');
     expect(bundle).not.toContain('jsxDEV');
     expect(bundle).not.toContain('fileName:');
+  });
+
+  it('uses the host React DOM server renderer for conversation exports', () => {
+    expect(readPackageJavascript()).toContain('from "react-dom/server"');
   });
 
   it('externalizes @qwen-code/sdk subpaths', () => {
@@ -478,61 +510,22 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(js).not.toContain('vaul');
   });
 
-  it('keeps the transcript entry a fraction of the interactive entry', () => {
-    // The daemon hook runtime is NOT absent from this entry — MessageList
-    // renders McpStatusMessage, TasksStatusMessage and the artifact turn
-    // outputs, and those call the strict useDaemonActions /
-    // useDaemonWorkspace hooks, so the provider guards ship. Asserting their
-    // absence would assert something this entry does not deliver (see the
-    // docblock in client/transcript.ts and #11100).
-    //
-    // What the entry does deliver is a bounded payload, so bound it. The JS
-    // remainder measured 1,298,657 UTF-16 code units on main at fa4a4c92 and
-    // 1,300,341 here after adding author attribution for multi-agent
-    // transcripts. O3 result summaries bring it to 1,306,052, and
-    // session-agent replies (status, steps, token usage, squad labels) to
-    // 1,315,297 at e951f96; that rendering is intentional transcript UI.
-    // main grew the same entry in parallel — 1,309,207 at 1aba19c878, plus
-    // 3,033 for table fullscreen and Shadow DOM keyboard handling, reaching
-    // 1,312,240. Merging the two measures 1,320,366 in CI at d4304811. The W2
-    // managed cwd slice (#13760) adds its strings to the shared i18n table
-    // every entry ships — no interactive cwd code enters this graph — and
-    // measured 1,323,120 before main's host-status copy. After rebasing onto
-    // c34b8423, main measures 1,321,586 and this branch 1,324,022; substituting
-    // main's i18n table yields an identical JS remainder. The selection-copy
-    // menu strings (#13833) land in that same shared table — the menu itself
-    // stays stubbed out of this entry — and measure 1,325,251. The
-    // action-reminder help copy (#13832) entered that same table only after
-    // the 1,325,251 measurement was taken, so the entry was already past the
-    // 1,326,500 ceiling at that re-measure's own merge commit (#13964); the
-    // Managed task panel's copy (#13936) stays stubbed out of this entry.
-    // At 008c0de7 the remainder measures 1,327,531. The read-only Excel
-    // preview puts its ten excel.* strings into that same shared table in
-    // both locales; its parser, worker and markup stay inside the lazily
-    // imported SpreadsheetPreview chunk, so only the copy enters this graph.
-    // Merging 6212189f with this PR measures 1,330,011 UTF-16 code units.
-    // The 1,331,500 ceiling from main leaves 1,489 units of margin.
-    // File-tree mutation actions are excluded from the transcript build.
-    // At 31e02ace main measures 1,330,293; the read-only artifact hook with
-    // those actions excluded measures 1,330,497, below the same ceiling.
-    // Managed home, Workspace creation, approval and model/context copy also
-    // enter the shared table. With main 17d5f774 this branch measures
-    // 1,334,173 UTF-16 units; the unchanged 1,336,000 ceiling retains 1,827
-    // units of margin. Managed interactive code remains excluded here.
-    // Approval-policy copy (#14323) measures 1,336,282 at ebf1607d8f,
-    // versus 1,334,735 at its main parent 87de74860b. The 1,547-unit
-    // increase is shared i18n copy; substituting main's table restores the
-    // baseline. A 1,338,000 ceiling retains 1,718 units of margin.
-    // Attachment recovery copy measures 1,338,049 at 9c3555b334. Building
-    // with the base (6d9df42d99) i18n table measures 1,337,798; the 251-unit
-    // increase is shared copy, while Managed interactive code stays excluded.
-    // A 1,339,500 ceiling retains 1,451 units of margin.
-    // Re-measure and lower it if the entry gets leaner.
-    const js = readTranscriptBundle().replace(
-      /^const __qwenWebShellCss=[^\n]*\n/,
-      '',
-    );
-    expect(js.length).toBeLessThan(1_339_500);
+  it('keeps Managed tool-detail transport out of the transcript entry', () => {
+    expect(readPackageJavascript()).toContain('/tool-details/get');
+    expect(readTranscriptBundle()).not.toContain('/tool-details/get');
+  });
+
+  it('keeps Managed MCP management transport and copy out of the transcript entry', () => {
+    const transcript = readTranscriptBundle();
+    const packaged = readPackageJavascript();
+    for (const content of [
+      '/session-mcp/management/submit',
+      'Choose an exact definition published for this Runtime and Workspace.',
+      '原命令仍需确认，请先查询该命令，再开始其他修改。',
+    ]) {
+      expect(packaged).toContain(content);
+      expect(transcript).not.toContain(content);
+    }
   });
 
   it('keeps workspace mutations out of the read-only transcript entry', () => {
@@ -572,6 +565,14 @@ describe('build artifact — transcript entry (#11031)', () => {
       expect(bundle).not.toContain(`"${key}"`);
       expect(bundle).not.toContain(`'${key}'`);
     }
+  });
+
+  it('keeps Token Usage copy and lookups in the interactive entry only', () => {
+    expect(readTranscriptBundle()).not.toMatch(/["'`]tokenUsage\./);
+    const interactive = readPackageJavascript();
+    expect(interactive).toContain('tokenUsage.inputWithCacheRate');
+    expect(interactive).toContain('Failed to load token usage.');
+    expect(interactive).toContain('Token 消耗加载失败。');
   });
 
   it('carries no Live Voice strings and looks none up', () => {
@@ -658,13 +659,16 @@ describe('build artifact — transcript entry (#11031)', () => {
     expect(interactive).toContain('审阅 App 消息');
   });
 
-  it('keeps trajectory filter strings in the interactive entry only', () => {
+  it('keeps trajectory chrome strings in the interactive entry only', () => {
     const js = readTranscriptBundle().replace(
       /^const __qwenWebShellCss=[^\n]*\n/,
       '',
     );
-    expect(js).not.toMatch(/["'`]trajectory\.(filter|window)\./);
-    expect(readPackageJavascript()).toContain('trajectory.window.older');
+    expect(js).not.toMatch(
+      /["'`]trajectory\.(filter|window|summary|pill|boundary|about)\./,
+    );
+    expect(readPackageJavascript()).toContain('trajectory.window.return');
+    expect(readPackageJavascript()).toContain('trajectory.pill.live');
     expect(readPackageJavascript()).toContain('trajectory.filter.search');
     expect(readPackageJavascript()).toContain('Search loaded records');
   });

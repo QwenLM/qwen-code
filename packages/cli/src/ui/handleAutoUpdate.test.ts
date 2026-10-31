@@ -19,6 +19,7 @@ import { handleAutoUpdate, setUpdateHandler } from './handleAutoUpdate.js';
 import { performStandaloneUpdate } from './standalone-update.js';
 import { MessageType } from './types.js';
 import os from 'node:os';
+import * as npmRuntime from '../utils/npm-runtime.js';
 
 const { mockT, identityT } = vi.hoisted(() => {
   const identityT = (message: string, values?: Record<string, unknown>) =>
@@ -288,6 +289,26 @@ describe('handleAutoUpdate', () => {
         stdio: ['ignore', 'ignore', 'pipe'],
         windowsHide: true,
       },
+    );
+  });
+
+  it('starts a detached npm update worker with the original Node interpreter', () => {
+    vi.spyOn(npmRuntime, 'getNpmNodePath').mockReturnValue('/original/node');
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'npm install -g @qwen-code/qwen-code@latest',
+      isGlobal: true,
+      packageManager: PackageManager.NPM,
+    });
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+    expect(mockSpawn).toHaveBeenCalledWith(
+      '/original/node',
+      [process.argv[1]],
+      expect.objectContaining({
+        detached: true,
+        env: expect.objectContaining({
+          QWEN_CODE_MANAGED_NPM_UPDATE_VERSION: '2.0.0',
+        }),
+      }),
     );
   });
 

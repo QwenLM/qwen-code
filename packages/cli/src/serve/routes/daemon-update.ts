@@ -179,9 +179,15 @@ function createUpdateController(deps: UpdateRouteDeps) {
           };
         } else if (
           installation.isGlobal &&
-          installation.packageManager === PackageManager.NPM &&
-          installation.updateCommand
+          (installation.packageManager === PackageManager.NPM ||
+            installation.packageManager === PackageManager.PNPM ||
+            installation.packageManager === PackageManager.YARN ||
+            installation.packageManager === PackageManager.BUN)
         ) {
+          // Staging installs into a user-scoped isolated prefix and the
+          // shared cli-entry.js launcher resolves the pointer, so neither
+          // the installing package manager nor a root-owned global prefix
+          // bars one-click; the launcher identity check below is the gate.
           const launcher = await managedNpmLauncher(bootstrap, launcherStamp);
           if (launcher) {
             prepare = async () => {

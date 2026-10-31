@@ -25,8 +25,8 @@ function makeManager(): NodeReplKernelManager {
   return manager;
 }
 
-afterEach(() => {
-  while (managers.length > 0) managers.pop()?.dispose();
+afterEach(async () => {
+  await Promise.all(managers.splice(0).map((manager) => manager.dispose()));
 });
 
 function textOf(events: Array<{ type: string; text?: string }>): string {
@@ -37,6 +37,24 @@ function textOf(events: Array<{ type: string; text?: string }>): string {
 }
 
 describe('binding semantics through the real kernel', () => {
+  it.each([
+    ['1 + 1', ''],
+    ['nodeRepl.write(carried)', '1'],
+    ['carried += 1\nnodeRepl.write(carried) // trailing comment', '2'],
+  ])(
+    'accepts a semicolon-free cell after carried bindings: %s',
+    async (code, expected) => {
+      const manager = makeManager();
+      expect(
+        (await manager.exec({ code: 'var carried = 1;', timeoutMs: 30_000 }))
+          .status,
+      ).toBe('ok');
+      const result = await manager.exec({ code, timeoutMs: 30_000 });
+      expect(result.status).toBe('ok');
+      expect(textOf(result.events).trim()).toBe(expected);
+    },
+  );
+
   it('persists a var declared inside a block across cells', async () => {
     const manager = makeManager();
     const first = await manager.exec({
@@ -436,7 +454,7 @@ describe('binding semantics through the real kernel', () => {
       // The kernel child's cwd is `work`; on Windows a directory that is any
       // process's cwd cannot be removed (EBUSY). Dispose first, then retry
       // the removal across the child's asynchronous teardown.
-      manager.dispose();
+      await manager.dispose();
       fs.rmSync(store, {
         recursive: true,
         force: true,

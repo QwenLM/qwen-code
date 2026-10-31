@@ -1,0 +1,247 @@
+{
+  "fixtureKind": "synthetic protocol comparison; no cleanup qualification",
+  "observe": {
+    "format": "qwen-csi-file-finalize/1",
+    "bootSha256": "81bc88cf10de02ea0d8c58a93d3d0d3e607119f160b059f680289b0f5e05165f",
+    "identity": {
+      "profile": "csi-files-retirement/1",
+      "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+      "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+    },
+    "context": {
+      "protocolVersion": 3,
+      "managedContext": "managed-context/1",
+      "runtimeInstanceId": "runtime-01",
+      "runtimeIncarnation": "boot-01",
+      "leaseId": "lease-01",
+      "epoch": 4,
+      "provisionRequestId": "provision-01",
+      "tenantId": "tenant-a",
+      "workspaceId": "workspace-a",
+      "workspaceGeneration": "7",
+      "storageId": "storage://pvc/workspace-a",
+      "mountRoot": "/runtime/workspaces/workspace-a",
+      "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+      "isolationClass": "session"
+    },
+    "installedContext": {
+      "protocolVersion": 3,
+      "managedContext": "managed-context/1",
+      "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+      "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+      "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "workspace-a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/workspace-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+        "contextRevision": "1"
+      }
+    },
+    "storage": {
+      "clusterDomain": "cluster-a",
+      "namespace": "runtimes",
+      "pvcUid": "pvc-01",
+      "pvUid": "pv-01",
+      "driver": "diskplugin.csi.alibabacloud.com",
+      "volumeHandle": "opaque-handle",
+      "backendDomain": "ack:account-a:cn-beijing",
+      "diskSerial": "2zehn959sand8iuw2gyd",
+      "physicalKey": "fd253342f447e25d365b3ba1d37f108c06b25cfba254de78c7d830c36029c5cb",
+      "registrationRevision": "1",
+      "reservationId": "12345678-1234-5678-9abc-123456789abc",
+      "reservationRevision": "1"
+    },
+    "pod": {
+      "uid": "11111111-2222-3333-4444-555555555555",
+      "namespace": "runtimes",
+      "nodeName": "cn-beijing.10.135.59.43"
+    },
+    "mount": {
+      "mountId": "2194",
+      "device": "259:8",
+      "source": "/dev/nvme2n1",
+      "diskSerial": "2zehn959sand8iuw2gyd",
+      "rootDevice": "66312",
+      "rootInode": "2"
+    },
+    "operation": "observe",
+    "retirementId": "d911c54f-ad76-420f-8c76-fb124c0ce623",
+    "preparedCommitSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "frozenRequestSha256": null,
+    "cutSha256": null
+  },
+  "finalize": {
+    "format": "qwen-csi-file-finalize/1",
+    "bootSha256": "81bc88cf10de02ea0d8c58a93d3d0d3e607119f160b059f680289b0f5e05165f",
+    "identity": {
+      "profile": "csi-files-retirement/1",
+      "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+      "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+    },
+    "context": {
+      "protocolVersion": 3,
+      "managedContext": "managed-context/1",
+      "runtimeInstanceId": "runtime-01",
+      "runtimeIncarnation": "boot-01",
+      "leaseId": "lease-01",
+      "epoch": 4,
+      "provisionRequestId": "provision-01",
+      "tenantId": "tenant-a",
+      "workspaceId": "workspace-a",
+      "workspaceGeneration": "7",
+      "storageId": "storage://pvc/workspace-a",
+      "mountRoot": "/runtime/workspaces/workspace-a",
+      "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+      "isolationClass": "session"
+    },
+    "installedContext": {
+      "protocolVersion": 3,
+      "managedContext": "managed-context/1",
+      "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+      "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+      "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "workspace-a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/workspace-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+        "contextRevision": "1"
+      }
+    },
+    "storage": {
+      "clusterDomain": "cluster-a",
+      "namespace": "runtimes",
+      "pvcUid": "pvc-01",
+      "pvUid": "pv-01",
+      "driver": "diskplugin.csi.alibabacloud.com",
+      "volumeHandle": "opaque-handle",
+      "backendDomain": "ack:account-a:cn-beijing",
+      "diskSerial": "2zehn959sand8iuw2gyd",
+      "physicalKey": "fd253342f447e25d365b3ba1d37f108c06b25cfba254de78c7d830c36029c5cb",
+      "registrationRevision": "1",
+      "reservationId": "12345678-1234-5678-9abc-123456789abc",
+      "reservationRevision": "1"
+    },
+    "pod": {
+      "uid": "11111111-2222-3333-4444-555555555555",
+      "namespace": "runtimes",
+      "nodeName": "cn-beijing.10.135.59.43"
+    },
+    "mount": {
+      "mountId": "2194",
+      "device": "259:8",
+      "source": "/dev/nvme2n1",
+      "diskSerial": "2zehn959sand8iuw2gyd",
+      "rootDevice": "66312",
+      "rootInode": "2"
+    },
+    "operation": "finalize",
+    "retirementId": "d911c54f-ad76-420f-8c76-fb124c0ce623",
+    "preparedCommitSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "frozenRequestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "cutSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  },
+  "receipt": {
+    "format": "qwen-csi-file-finalize/1",
+    "bootSha256": "81bc88cf10de02ea0d8c58a93d3d0d3e607119f160b059f680289b0f5e05165f",
+    "identity": {
+      "profile": "csi-files-retirement/1",
+      "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+      "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d"
+    },
+    "context": {
+      "protocolVersion": 3,
+      "managedContext": "managed-context/1",
+      "runtimeInstanceId": "runtime-01",
+      "runtimeIncarnation": "boot-01",
+      "leaseId": "lease-01",
+      "epoch": 4,
+      "provisionRequestId": "provision-01",
+      "tenantId": "tenant-a",
+      "workspaceId": "workspace-a",
+      "workspaceGeneration": "7",
+      "storageId": "storage://pvc/workspace-a",
+      "mountRoot": "/runtime/workspaces/workspace-a",
+      "capabilityDigest": "sha256:116dcd2afce7292bdf0bf4c76010964f7a7148ad512b2939e48e3d55ea91118d",
+      "isolationClass": "session"
+    },
+    "installedContext": {
+      "protocolVersion": 3,
+      "managedContext": "managed-context/1",
+      "operationId": "740d59f2-cb0f-39fc-be84-d4c165d413d6",
+      "sessionId": "c911c54f-ad76-420f-8c76-fb124c0ce623",
+      "contextDigest": "sha256:e70969b850890acc6826d253a3bda8995dcc37719a6d1fbd19fb7023c676b4b1",
+      "binding": {
+        "tenantId": "tenant-a",
+        "workspaceId": "workspace-a",
+        "workspaceGeneration": "7",
+        "storageId": "storage://pvc/workspace-a",
+        "cwdRelative": ".",
+        "contextConfigRef": "sha256:c83c96362b4ce53b1a5e070c27212319102298d6aec02930b21a7e3509711902",
+        "contextRevision": "1"
+      }
+    },
+    "storage": {
+      "clusterDomain": "cluster-a",
+      "namespace": "runtimes",
+      "pvcUid": "pvc-01",
+      "pvUid": "pv-01",
+      "driver": "diskplugin.csi.alibabacloud.com",
+      "volumeHandle": "opaque-handle",
+      "backendDomain": "ack:account-a:cn-beijing",
+      "diskSerial": "2zehn959sand8iuw2gyd",
+      "physicalKey": "fd253342f447e25d365b3ba1d37f108c06b25cfba254de78c7d830c36029c5cb",
+      "registrationRevision": "1",
+      "reservationId": "12345678-1234-5678-9abc-123456789abc",
+      "reservationRevision": "1"
+    },
+    "pod": {
+      "uid": "11111111-2222-3333-4444-555555555555",
+      "namespace": "runtimes",
+      "nodeName": "cn-beijing.10.135.59.43"
+    },
+    "mount": {
+      "mountId": "2194",
+      "device": "259:8",
+      "source": "/dev/nvme2n1",
+      "diskSerial": "2zehn959sand8iuw2gyd",
+      "rootDevice": "66312",
+      "rootInode": "2"
+    },
+    "operation": "finalize",
+    "retirementId": "d911c54f-ad76-420f-8c76-fb124c0ce623",
+    "preparedCommitSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "frozenRequestSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "cutSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "state": "DRAINED",
+    "preCutObservationSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "cleanup": {
+      "compositionClosed": true,
+      "backend": {
+        "closed": true,
+        "blocked": false,
+        "pendingOperations": 0,
+        "openDescriptors": []
+      },
+      "mount": {
+        "admissionClosed": true,
+        "pendingOperations": 0,
+        "closeFailed": false,
+        "root": {
+          "admissionClosed": true,
+          "pendingOperations": 0,
+          "fd": null,
+          "device": "66312",
+          "inode": "2"
+        }
+      }
+    }
+  },
+  "observeCanonicalSha256": "739c6534ce3b38577911793d2d6505b03fc02b3bb0c0d9c4ae968b186eb8cf61",
+  "finalizeCanonicalSha256": "31c9405aabc81625517df9948ba515d5dc5ce406c5dc6d18db101349db7419eb"
+}

@@ -22,27 +22,27 @@
 
 ## 检查项
 
-| 检查         | 通过条件                                                                                                                     |
-| ------------ | ---------------------------------------------------------------------------------------------------------------------------- |
-| `java`       | Runtime feature version 不低于 21。                                                                                          |
-| `config`     | 外部 YAML 存在且可读；含 secret 的文件不得对 group 或 others 可读。                                                          |
-| `key-ring`   | 至少配置了 active key ID；同时输出 previous key ID。                                                                         |
-| `validation` | 绑定后的配置通过启动期属性校验。                                                                                             |
-| `auth`       | 非 loopback 绑定不使用 `auto`；signed 模式配置了签名密钥；insecure bind 会给出告警。                                         |
-| `harness`    | 启用的 Harness 具备 token、格式正确的 digest，且 `GET /capabilities` 返回 200。                                              |
-| `tool-path`  | Workspace files 与 Shell 的启用组合满足启动期的交叉校验规则。                                                                |
-| `broker`     | token、active 与 previous 凭据密钥均可解码为 32 字节；状态目录可写；provisioner 所需的 Node/worker 或 static endpoint 齐备。 |
-| `workspace`  | 配置的 Workspace `cwd` 存在且可写。                                                                                          |
-| `*-port`     | server 端口与已启用的 broker 端口可绑定。                                                                                    |
-| `database`   | MySQL 能执行 `SELECT 1`，`performance_schema` 授权可用，且 Flyway 版本与发布 manifest 一致（manifest 存在时）。              |
+| 检查         | 通过条件                                                                                                                                                                                                                                       |
+| ------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `java`       | Runtime feature version 不低于 21。                                                                                                                                                                                                            |
+| `config`     | 外部 YAML 存在且可读；含 secret 的文件不得对 group 或 others 可读。                                                                                                                                                                            |
+| `key-ring`   | 至少配置了 active key ID；同时输出 previous key ID。                                                                                                                                                                                           |
+| `validation` | 绑定后的配置通过启动期属性校验。                                                                                                                                                                                                               |
+| `auth`       | 非 loopback 绑定不使用 `auto`；signed 模式配置了签名密钥；insecure bind 会给出告警。                                                                                                                                                           |
+| `harness`    | 启用的 Harness 具备 token 和格式正确的 digest，`GET /capabilities` 返回 200，且协商过程与第一个 Session 相同，包括 capability digest 和每个 Workspace profile 的 lifecycle；Qwen Code 版本与 manifest 不同时给出警告。不与 Harness pool 协商。 |
+| `tool-path`  | Workspace files 与 Shell 的启用组合、isolation class，以及 mount、creation root 或 SSH 节点的要求满足启动期规则。                                                                                                                              |
+| `broker`     | token、active 与 previous 凭据密钥均可解码为 32 字节；状态目录可写；provisioner 所需的 Node/worker 或 static endpoint 齐备。                                                                                                                   |
+| `workspace`  | 配置的 Workspace `cwd` 存在且可写。                                                                                                                                                                                                            |
+| `*-port`     | server 端口与已启用的 broker 端口可绑定；使用 `--online` 时改为可以建立连接。                                                                                                                                                                  |
+| `workers`    | local-process 状态目录中没有上次运行遗留、仍在运行的 Runtime worker。                                                                                                                                                                          |
+| `database`   | MySQL 能执行 `SELECT 1`，`performance_schema` 授权可用，且 Flyway 版本与发布 manifest 一致（manifest 存在时）。                                                                                                                                |
 
-`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 使退出码为 1。端口检查会实际绑定配置地址，因此应在服务停止时运行。
+`WARN` 与 `SKIP` 不导致失败；任一 `FAIL` 使退出码为 1。端口检查会实际绑定配置地址，因此应在服务停止时运行；针对运行中的服务，请加上 `--online`。Harness 协商、`workers` 行和 `--online` 见 [2026-10-23-managed-agent-preflight-harness-workers-online.zh-CN.md](2026-10-23-managed-agent-preflight-harness-workers-online.zh-CN.md)。
 
 ## 非目标
 
-- 不校验 Harness capability digest。该值只能通过需要认证的 Hosted Session 请求观察，命令只报告可达性，digest 留给第一条 Turn。
+- 不与 Harness pool 的每个端点协商。开启 `harness.pool.enabled` 时，只有在 Session Store 已启用且配置了 binding key 后，`harness` 行才对 pool 的端点 SKIP，否则为 FAIL，与启动期守卫一致。
 - 不校验 Workspace mount 注册与 storage identity；这些仍由 “Verified physical Workspace recovery” 流程负责。
-- 不比对已安装的 Qwen Code 版本与 manifest。
 - 不执行修复、migration 或任何写入，只做只读探测。
 
 ## 实现

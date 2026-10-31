@@ -7,6 +7,9 @@ import type {
   ManagedSessionApproval,
 } from './managed-agent-provider';
 import { isManagedApprovalMode } from './managed-agent-provider';
+import { managedPermissionRulesEqual } from './managed-agent-provider';
+import type { ManagedPermissionRules } from './managed-agent-provider';
+import { parseManagedPermissionRules } from '@qwen-code/qwen-code-core/managed-runtime/managed-permission-rules.js';
 import { managedRequestId } from './managed-session-storage';
 
 interface ApprovalIntent {
@@ -16,6 +19,7 @@ interface ApprovalIntent {
   idempotencyKey: string;
   requestId: string;
   planMode?: boolean;
+  permissionRules?: ManagedPermissionRules;
 }
 
 function readIntent(
@@ -39,7 +43,16 @@ function readIntent(
         typeof value['planMode'] !== 'boolean')
     )
       return undefined;
-    return item as ApprovalIntent;
+    return {
+      ...(item as ApprovalIntent),
+      ...(value['permissionRules'] === undefined
+        ? {}
+        : {
+            permissionRules: parseManagedPermissionRules(
+              value['permissionRules'],
+            ),
+          }),
+    };
   } catch {
     return undefined;
   }
@@ -62,6 +75,7 @@ const DEFINITIVE_ERRORS = new Set([
   'session_context_busy',
   'session_operation_forbidden',
   'unsupported_feature',
+  'invalid_permission_rules',
 ]);
 
 export function useManagedApprovalChange(
@@ -188,6 +202,9 @@ export function useManagedApprovalChange(
           ...(intent.planMode === undefined
             ? {}
             : { planMode: intent.planMode }),
+          ...(intent.permissionRules === undefined
+            ? {}
+            : { permissionRules: intent.permissionRules }),
         },
         {
           clientId,
@@ -203,6 +220,11 @@ export function useManagedApprovalChange(
         result.approvalMode !== intent.approvalMode ||
         (intent.planMode !== undefined &&
           result.planMode !== intent.planMode) ||
+        (intent.permissionRules !== undefined &&
+          !managedPermissionRulesEqual(
+            result.permissionRules,
+            intent.permissionRules,
+          )) ||
         !Number.isSafeInteger(result.approvalRevision) ||
         result.approvalRevision <= intent.expectedRevision
       )
@@ -219,6 +241,25 @@ export function useManagedApprovalChange(
               latest.planMode !== intent.planMode)))
       )
         throw new Error('Approval selection is not confirmed');
+      if (
+        intent.permissionRules !== undefined &&
+        revision === result.approvalRevision
+      ) {
+        const confirmed = await api.queryOptions(intent.sessionId, {
+          clientId,
+          signal: abort.signal,
+        });
+        if (owner.signal.aborted) return;
+        if (
+          confirmed.approvalRevision < result.approvalRevision ||
+          (confirmed.approvalRevision === result.approvalRevision &&
+            !managedPermissionRulesEqual(
+              confirmed.permissionRules,
+              intent.permissionRules,
+            ))
+        )
+          throw new Error('Permission rules are not confirmed');
+      }
       update();
       setOptionsRevision((value) => value + 1);
       return true;
@@ -249,7 +290,11 @@ export function useManagedApprovalChange(
     }
   }
 
-  async function submit(approvalMode: ManagedApprovalMode, planMode?: boolean) {
+  async function submit(
+    approvalMode: ManagedApprovalMode,
+    planMode?: boolean,
+    permissionRules?: ManagedPermissionRules,
+  ) {
     const current = summaryRef.current;
     const options = optionsRef.current;
     if (
@@ -263,14 +308,25 @@ export function useManagedApprovalChange(
       current.capabilities.approvalModeChange !== true ||
       !provider.approvalChange ||
       !options?.supported ||
+      (permissionRules !== undefined &&
+        options.permissionRulesSupported !== true) ||
       (planMode !== undefined && options.planModeSupported !== true) ||
       !options.availableApprovalModes.includes(approvalMode) ||
-      !['created', 'completed', 'failed', 'cancelled'].includes(
+      (!['created', 'completed', 'failed', 'cancelled'].includes(
         current.phase,
-      ) ||
+      ) &&
+        (permissionRules !== undefined ||
+          planMode !== undefined ||
+          options.liveSupported !== true ||
+          current.phase === 'cancelling')) ||
       options.approvalRevision !== (current.approvalRevision ?? 0) ||
       (approvalMode === current.approvalMode &&
-        (planMode === undefined || planMode === Boolean(current.planMode)))
+        (planMode === undefined || planMode === Boolean(current.planMode)) &&
+        (permissionRules === undefined ||
+          managedPermissionRulesEqual(
+            permissionRules,
+            options.permissionRules,
+          )))
     )
       return;
     const intent: ApprovalIntent = {
@@ -280,6 +336,11 @@ export function useManagedApprovalChange(
       idempotencyKey: managedRequestId(),
       requestId: managedRequestId(),
       ...(planMode === undefined ? {} : { planMode }),
+      ...(permissionRules === undefined
+        ? {}
+        : {
+            permissionRules: parseManagedPermissionRules(permissionRules),
+          }),
     };
     if (!persist(key, intent)) {
       setState((value) => ({ ...value, errorCode: 'storage_unavailable' }));

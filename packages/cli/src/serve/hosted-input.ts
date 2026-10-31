@@ -85,7 +85,8 @@ export function parseHostedInput(value: unknown): {
       typeof item['mimeType'] === 'string'
     ) {
       const data = item['data'];
-      const mimeType = item['mimeType'];
+      const mimeType =
+        item['mimeType'] === 'image/jpg' ? 'image/jpeg' : item['mimeType'];
       if (!data || data.length > HOSTED_ATTACHMENT_INPUT_BYTES)
         throw new Error('Invalid Hosted image.');
       const bytes = Buffer.from(data, 'base64');
@@ -100,10 +101,12 @@ export function parseHostedInput(value: unknown): {
               bytes[0] === 255 &&
               bytes[1] === 216 &&
               bytes[2] === 255
-            : mimeType === 'image/webp' &&
-              bytes.length >= 12 &&
-              bytes.toString('ascii', 0, 4) === 'RIFF' &&
-              bytes.toString('ascii', 8, 12) === 'WEBP';
+            : mimeType === 'image/gif'
+              ? ['GIF87a', 'GIF89a'].includes(bytes.toString('latin1', 0, 6))
+              : mimeType === 'image/webp' &&
+                bytes.length >= 12 &&
+                bytes.toString('ascii', 0, 4) === 'RIFF' &&
+                bytes.toString('ascii', 8, 12) === 'WEBP';
       if (!valid || bytes.toString('base64') !== data)
         throw new Error('Invalid Hosted image.');
       attachments.push({ inlineData: { data, mimeType } });

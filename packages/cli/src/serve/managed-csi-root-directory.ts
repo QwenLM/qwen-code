@@ -75,6 +75,16 @@ export class ManagedCsiRootDirectory {
     return !this.fenced;
   }
 
+  retirementInspection() {
+    return {
+      admissionClosed: this.fenced,
+      pendingOperations: this.operations.size,
+      fd: this.handle.fd >= 0 ? this.handle.fd : null,
+      device: this.rootDevice,
+      inode: this.rootInode,
+    };
+  }
+
   async withVerifiedDirectory<T>(
     operation: (handle: FileHandle) => Promise<T>,
   ): Promise<T> {
