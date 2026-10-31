@@ -72,6 +72,9 @@ Non-goals (first version):
 - PRs in repositories without a matching local remote.
 - Resolving review threads. Reviewers keep that decision.
 - Opening new PRs or rewriting PR titles and descriptions.
+- Approving, merging or closing the PR, changing its review state, or turning
+  on auto-merge. Getting the PR ready to merge is the whole job; the
+  repository's own requirements and a person decide the rest.
 
 ## 4. User experience
 
@@ -96,6 +99,9 @@ Before it starts, the command shows one confirmation:
 - It will push commits to `<owner>/<repo>:<headRef>` and post replies on the
   PR, both under the user's own git and `gh` identity.
 - Verification runs repository-defined build and test commands.
+- It gets the PR ready to merge and no further: it never approves, changes
+  the review state, merges or turns on auto-merge, so the repository's
+  reviews and checks still decide and merging stays the user's.
 
 The confirmation is asked on every start, not on scheduled checks. A session
 that cannot show the confirmation needs `--yes`.
@@ -689,7 +695,11 @@ The helper decides what may be posted, against one fresh read of the PR
   posted (above) and skips a reply whose comments are all handled, and the
   summary when its comments are — unless the head is a push of the watch's
   that has no summary yet: each push gets one, once per head
-  (`summarizedSha`), whether or not it answers comments.
+  (`summarizedSha`), whether or not it answers comments. A summary is due
+  as well whenever the plan adds a `needsHuman` line this head has not
+  recorded, so a round that pushed nothing still reports what blocks it on
+  a head an earlier round already summarized; lines the watch still has
+  recorded do not post it twice.
 - `handledChecks` and `handledConflict` record failures and a conflict the
   round did not fix with a push, so prepared snapshots stop reporting them:
   a failure by its attempt (a re-run that fails again is new), a conflict by
@@ -1564,7 +1574,9 @@ disagreement, contradictory comments, a request outside the PR's scope) is
 replied to as "needs a human decision" and recorded in `needsHuman`. The loop
 keeps watching other events. The round answers such items on the PR, reports
 them in its message and names them in the reply plan's `needsHuman`, which
-`status` lists (Sections 6.5, 6.10).
+`status` lists (Sections 6.5, 6.10). A round that pushed nothing posts them
+as its summary too, so the PR shows that the watch stopped instead of going
+quiet (Section 9).
 
 ## 8. Trust model
 
@@ -1630,6 +1642,10 @@ Replies are on by default; `--no-reply` turns them off.
   or `Not changed: <reason>`, or `Needs a human decision: <question>`.
 - Each push gets one PR comment summarizing what it addressed: checks fixed or
   re-run, comments addressed, conflict resolved, and how it was verified.
+- A round that pushed nothing and left something for a person gets one too:
+  what it attempted, what blocks it and what a person has to decide. It goes
+  out once per head, and again only when the round adds a `needsHuman` line
+  that head has not recorded (Section 6.5).
 - Replies use the language of the comment they answer; the summary uses the
   language of the PR's title, which `snapshot` reports (`title`).
 - Every body ends with `<!-- qwen-autofix-pr:v1 -->`.

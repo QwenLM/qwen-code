@@ -884,6 +884,43 @@ describe('runReply', () => {
     });
   });
 
+  it('reports a blocked round even on a head an earlier round already summarized', () => {
+    writeState(paths.statePath, { ...state(), summarizedSha: HEAD });
+    const plan: ReplyPlan = {
+      summary: { body: 'Needs a human: Test fails outside the PR.' },
+      needsHuman: ['Test: whether the runner image is ours to fix'],
+    };
+    expect(reply(plan)).toMatchObject({ summarySkipped: false });
+    expect(posts().map((p) => p.path)).toEqual(['repos/o/r/issues/7/comments']);
+    // The same items never post it twice.
+    expect(reply(plan)).toMatchObject({ summarySkipped: true });
+    expect(posts()).toHaveLength(1);
+    // Nothing new for a person on a head already summarized: quiet.
+    expect(reply({ summary: { body: 'Still blocked.' } })).toMatchObject({
+      summarySkipped: true,
+    });
+    // A new item on that same head is reported.
+    expect(
+      reply({
+        summary: { body: 'Needs a human: the API change.' },
+        needsHuman: ['PRRC_101: whether to keep the API'],
+      }),
+    ).toMatchObject({ summarySkipped: false });
+    expect(posts()).toHaveLength(2);
+  });
+
+  it('with --no-post records a blocked summary and posts nothing', () => {
+    const plan: ReplyPlan = {
+      summary: { body: 'Needs a human: Test.' },
+      needsHuman: ['Test: the runner image'],
+    };
+    expect(reply(plan, false).posted).toEqual([]);
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+    expect(state().summarizedSha).toBe(HEAD);
+    expect(reply(plan)).toMatchObject({ summarySkipped: true });
+    expect(mocks.ghWithInput).not.toHaveBeenCalled();
+  });
+
   it('posts again when the reply an earlier run announced never reached the PR', () => {
     mocks.ghWithInput.mockImplementationOnce(() => {
       throw new Error('connection refused');

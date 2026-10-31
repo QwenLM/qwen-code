@@ -57,7 +57,8 @@ const MAX_NEEDS_HUMAN_CHARS = 300;
 export interface ReplyPlan {
   /** Replies to review threads, by the thread's first comment. */
   replies?: Array<{ replyTo: number; body: string; handled: string[] }>;
-  /** The round's PR comment: what the push addressed and how it was verified. */
+  /** The round's PR comment: what the push addressed and how it was
+   * verified, or — with nothing pushed — what blocks it and needs a person. */
   summary?: { body: string; handled?: string[] } | null;
   /** Comments handled without a reply of their own. */
   handled?: string[];
@@ -500,17 +501,16 @@ function replyLocked(
   // comments handled at once, and a round after a later failure would not
   // see them again.
   const now = new Date().toISOString();
+  const freshNeedsHuman = [...new Set(plan.needsHuman)].filter(
+    (text) =>
+      text !== '' &&
+      !(state.needsHuman ?? []).some(
+        (item) => item.sha === head && item.text === text,
+      ),
+  );
   const needsHuman = [
     ...(state.needsHuman ?? []),
-    ...[...new Set(plan.needsHuman)]
-      .filter(
-        (text) =>
-          text !== '' &&
-          !(state.needsHuman ?? []).some(
-            (item) => item.sha === head && item.text === text,
-          ),
-      )
-      .map((text) => ({ sha: head, at: now, text })),
+    ...freshNeedsHuman.map((text) => ({ sha: head, at: now, text })),
   ].slice(-MAX_NEEDS_HUMAN);
   if (needsHuman.length > 0) record({ needsHuman });
 
@@ -582,7 +582,11 @@ function replyLocked(
   }
 
   // A summary is posted once: one that handles comments, while any of them
-  // is still open; one that only reports a push, once per head.
+  // is still open; one that answers none, once per head. A round that leaves
+  // something new for a person gets its summary whatever was posted on this
+  // head before, so a blocked round is not silent where an earlier one
+  // already reported. What counts as new is the `needsHuman` list's own
+  // deduplication, which keeps the newest items of the watch.
   const summary = plan.summary;
   const summaryHandled = (summary?.handled ?? []).filter((id) => !done.has(id));
   // A head this watch pushed and has not summarized needs its summary even
@@ -591,9 +595,10 @@ function replyLocked(
     state.pushedShas.includes(head) && state.summarizedSha !== head;
   const summaryDue =
     summary !== null &&
-    ((summary.handled ?? []).length > 0
-      ? summaryHandled.length > 0 || pushUnsummarized
-      : state.summarizedSha !== head);
+    (freshNeedsHuman.length > 0 ||
+      ((summary.handled ?? []).length > 0
+        ? summaryHandled.length > 0 || pushUnsummarized
+        : state.summarizedSha !== head));
   if (summary && summaryDue) {
     // Its comments are recorded with it. `--no-post` records the same,
     // posting nothing.
