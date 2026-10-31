@@ -416,10 +416,10 @@ describe('autofix gate load clamps', () => {
 
     // 60_000 / 60_000 / '25%' on the ECS branch of core, cli and
     // vscode-ide-companion; acp-bridge and web-shell set the two timeouts but
-    // define no maxWorkers. vscode-ide-companion is in the list because the
-    // gate launches it with the same clamps: a config that does not carry the
-    // ECS maxWorkers leaves the gate's 25% cap as the only ceiling there,
-    // while normal CI runs the workspace unlimited on the shared hosts.
+    // define no maxWorkers. This config value is a default, not the lane
+    // ceiling: run-unit-test-lanes.sh exports VITEST_MAX_THREADS, vitest reads
+    // it into poolOptions.threads.maxThreads, and that resolves before
+    // config.maxWorkers. The branch covers runs carrying no such env.
     for (const config of [
       core.default,
       cli.default,
@@ -433,10 +433,10 @@ describe('autofix gate load clamps', () => {
       expect(config.test?.maxWorkers).toBe(clamps['maxWorkers']);
     }
     // Off the pool the config must leave maxWorkers alone, or a developer
-    // machine — and every fork PR lane, which passes no --maxWorkers — runs
-    // the workspace at 25% of its cores for no reason. The arms above cannot
-    // see that: they all stub a pool RUNNER_NAME, where `maxWorkers: '25%'`
-    // flattened out of the ternary is indistinguishable from the gated value.
+    // machine runs the workspace at 25% of its cores for no reason. The arms
+    // above cannot see that: they all stub a pool RUNNER_NAME, where
+    // `maxWorkers: '25%'` flattened out of the ternary is indistinguishable
+    // from the gated value.
     // Re-stub and re-import: `vi.unstubAllEnvs()` above restored the ambient
     // value, and the modules resolved under the ECS stub are already fixed at
     // it, so a second import round is the only way to read the other branch.
