@@ -1853,10 +1853,24 @@ already-committed output:
 npm run test:e2e:managed-harness-restart-approval-finished-before-commit
 ```
 
+A crash in the mixed-sibling approval gap (A3's native half) approves a two-call
+batch one sibling at a time and holds the replacement on the first approval it
+asks after the earlier sibling is decided, via a test-gated Harness hook
+(`QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL`, never set in production) set only on
+the generation that must crash. The runner kills it there; the next generation
+must re-hang the original pending Action with its original deadline, require that
+sibling's own Allow rather than inherit the earlier one, leave the decided sibling
+un-re-asked, and settle both calls once each in their original order:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-sibling-approval
+```
+
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
 `G3_VERIFY_REPORT_DIR` overrides the directory. The remaining rows stay
-focused or integration tested for now: mixed calls and rewritten inputs
-across a replacement, Hook/MCP/child uncertainty, the attempt and stream
+focused or integration tested for now: the rewritten-input and Hook-no-rerun half
+of mixed calls (a commandStep follow-up, since a native continuation refuses
+Hook/MCP sessions), Hook/MCP/child uncertainty, the attempt and stream
 identities plus the live SSE view, the round and cost budgets, and the
 mixed-version reader/bundle closure (#14481).
 
