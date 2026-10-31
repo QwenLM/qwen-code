@@ -454,6 +454,19 @@ class ManagedAgentApiContractTest {
     }
 
     @Test
+    void managedMcpSnapshotCountsOnlyLiveServersAgainstCapacity() {
+        ObjectNode withRetainedRemoval = mcpManagementSnapshot(32, 1);
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                withRetainedRemoval)).isEmpty();
+
+        ObjectNode tooManyLive = mcpManagementSnapshot(33, 0);
+        assertThat(CONTRACT.validate(
+                "/components/schemas/ManagedMcpManagementSnapshot",
+                tooManyLive)).isNotEmpty();
+    }
+
+    @Test
     void theCreateRequestRequiresACatchUpLimitOnlyWhenBounded() throws Exception {
         ObjectNode create = (ObjectNode) json("""
                 {"session_id":"s","goal":"g","cron":"0 2 * * *",
@@ -3681,6 +3694,23 @@ class ManagedAgentApiContractTest {
 
     private JsonNode json(String content) throws IOException {
         return objectMapper.readTree(content);
+    }
+
+    private ObjectNode mcpManagementSnapshot(int live, int removed) {
+        ObjectNode snapshot = objectMapper.createObjectNode()
+                .put("sessionId", "mcp-contract-session")
+                .put("revision", 1)
+                .put("supported", true);
+        snapshot.putArray("availableServers");
+        var servers = snapshot.putArray("servers");
+        for (int index = 0; index < live + removed; index++) {
+            servers.addObject()
+                    .put("serverId", "server-" + index)
+                    .put("serverRevision", 1)
+                    .put("definitionDigest", "a".repeat(64))
+                    .put("state", index < live ? "enabled" : "removed");
+        }
+        return snapshot;
     }
 
     private String errorCode(String content) {
