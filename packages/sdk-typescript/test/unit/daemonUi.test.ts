@@ -2817,6 +2817,35 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect((malformed[0] as { text: string }).text).not.toContain('secret');
   });
 
+  it('normalizes provider recovery progress frames to nothing', () => {
+    // #12020 follow-up: `retry_scheduled`/`model_fallback` are known daemon
+    // events with no transcript view state. Routing them to the
+    // unrecognized_event debug block would reset `activeUserBlockId` and burn
+    // the bounded diagnostics sidechannel, so they must reduce to [].
+    expect(
+      normalizeDaemonEvent({
+        id: 60,
+        v: 1,
+        type: 'retry_scheduled',
+        data: {
+          sessionId: 's-1',
+          attempt: 1,
+          maxRetries: 10,
+          delayMs: 60000,
+          message: '[API Error: Rate limit reached]',
+        },
+      }),
+    ).toEqual([]);
+    expect(
+      normalizeDaemonEvent({
+        id: 61,
+        v: 1,
+        type: 'model_fallback',
+        data: { sessionId: 's-1', fromModel: 'a', toModel: 'b' },
+      }),
+    ).toEqual([]);
+  });
+
   it('normalizes session branch events as structured sidechannel events', () => {
     const events = normalizeDaemonEvent({
       id: 59,

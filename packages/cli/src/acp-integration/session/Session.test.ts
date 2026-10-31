@@ -5680,6 +5680,63 @@ describe('Session', () => {
       expect(send).not.toHaveBeenCalled();
       expect(mockChat.sendMessageStream).toHaveBeenCalled();
     });
+
+    it('forwards retry progress notifications from the shared round', async () => {
+      useSharedRounds([
+        {
+          type: core.LlmEventType.Retry,
+          retryInfo: {
+            attempt: 2,
+            maxRetries: 10,
+            delayMs: 60000,
+            message: '429 Too Many Requests',
+            skipDelay: () => {},
+          },
+        },
+        text('ok'),
+      ]);
+
+      await prompt();
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/retry',
+        {
+          v: 1,
+          sessionId: 'test-session-id',
+          attempt: 2,
+          maxRetries: 10,
+          delayMs: 60000,
+          message: '429 Too Many Requests',
+        },
+      );
+    });
+
+    it('forwards model fallback notifications from the shared round', async () => {
+      useSharedRounds([
+        {
+          type: core.LlmEventType.ModelFallback,
+          fromModel: 'qwen3-coder',
+          toModel: 'qwen3-coder-flash',
+          statusCode: 429,
+          fallbackIndex: 1,
+        },
+        text('ok'),
+      ]);
+
+      await prompt();
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/model-fallback',
+        {
+          v: 1,
+          sessionId: 'test-session-id',
+          fromModel: 'qwen3-coder',
+          toModel: 'qwen3-coder-flash',
+          statusCode: 429,
+          fallbackIndex: 1,
+        },
+      );
+    });
   });
 
   describe('Managed Runtime batch close', () => {
@@ -5801,6 +5858,106 @@ describe('Session', () => {
 
       expect(execute).toHaveBeenCalled();
       expect(order).toEqual([]);
+    });
+  });
+
+  describe('turn progress notifications (#12020)', () => {
+    it('announces a scheduled retry with its attempt, budget and delay', async () => {
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            type: core.StreamEventType.RETRY,
+            retryInfo: {
+              attempt: 2,
+              maxRetries: 10,
+              delayMs: 60000,
+              message: '429 Too Many Requests',
+              skipDelay: () => {},
+            },
+          } as const;
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: { text: 'ok' },
+          } as const;
+        })(),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      // The payload must not leak `skipDelay` (a function) onto the wire.
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/retry',
+        {
+          v: 1,
+          sessionId: 'test-session-id',
+          attempt: 2,
+          maxRetries: 10,
+          delayMs: 60000,
+          message: '429 Too Many Requests',
+        },
+      );
+    });
+
+    it('stays silent on a retry that carries no retryInfo', async () => {
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield { type: core.StreamEventType.RETRY } as const;
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: { text: 'ok' },
+          } as const;
+        })(),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(mockClient.extNotification).not.toHaveBeenCalledWith(
+        'qwen/notify/session/retry',
+        expect.anything(),
+      );
+    });
+
+    it('announces a model fallback with the from and to models', async () => {
+      mockChat.sendMessageStream = vi.fn().mockResolvedValue(
+        (async function* () {
+          yield {
+            type: core.StreamEventType.MODEL_FALLBACK,
+            info: {
+              fromModel: 'qwen3-coder',
+              toModel: 'qwen3-coder-flash',
+              statusCode: 429,
+              fallbackIndex: 1,
+            },
+          } as const;
+          yield {
+            type: core.StreamEventType.CHUNK,
+            value: { text: 'ok' },
+          } as const;
+        })(),
+      );
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/model-fallback',
+        {
+          v: 1,
+          sessionId: 'test-session-id',
+          fromModel: 'qwen3-coder',
+          toModel: 'qwen3-coder-flash',
+          statusCode: 429,
+          fallbackIndex: 1,
+        },
+      );
     });
   });
 

@@ -93,10 +93,12 @@ This status marker does not set `awaitingResync`.
 
 ### Models
 
-| Type                  | Direction | Payload                                      |
-| --------------------- | --------- | -------------------------------------------- |
-| `model_switched`      | S->C      | `sessionId, modelId`                         |
-| `model_switch_failed` | S->C      | `sessionId, requestedModelId, error: string` |
+| Type                  | Direction | Payload                                                                                                                                  |
+| --------------------- | --------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `model_switched`      | S->C      | `sessionId, modelId`                                                                                                                     |
+| `model_switch_failed` | S->C      | `sessionId, requestedModelId, error: string`                                                                                             |
+| `retry_scheduled`     | S->C      | `sessionId, attempt, maxRetries, delayMs, message?, isContinuation?`; mid-turn provider recovery progress, not a turn terminal           |
+| `model_fallback`      | S->C      | `sessionId, fromModel, toModel, statusCode?, fallbackIndex?`; mid-turn switch to the next configured fallback model, not a turn terminal |
 
 ### MCP guardrails (PR 14b + F2)
 

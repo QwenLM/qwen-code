@@ -379,7 +379,10 @@ first and let it stream live.
 
 The stream emits `session_update` (LLM chunks, tool calls, usage),
 `permission_request` (tool needs approval), `permission_resolved`
-(someone voted), `model_switched`, `model_switch_failed`, and the terminal
+(someone voted), `retry_scheduled` (a provider call failed recoverably and
+the next attempt is backing off), `model_fallback` (the active model
+exhausted its retries and the turn is switching to the fallback chain),
+`model_switched`, `model_switch_failed`, and the terminal
 frames `session_died` (agent child crashed — SSE then closes) and
 `client_evicted` (your queue overflowed — SSE then closes).
 
