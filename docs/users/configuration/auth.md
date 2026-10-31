@@ -7,6 +7,8 @@ Qwen Code's first-run `/auth` menu has four top-level options. Pick the one that
 - **Third-party Providers**: choose a built-in provider and connect with an API key (DeepSeek, Grok, MiniMax, Z.AI, Kimi, Idealab, ModelScope, OpenRouter, Requesty).
 - **Custom Provider**: manually connect a local server, proxy, or unsupported provider — supports OpenAI, Anthropic, Gemini, and other compatible endpoints.
 
+In provider submenus, use ↑/↓ to navigate, Enter to select, and Esc to go back. On narrow terminals, the navigation hint wraps within the dialog's available height.
+
 > [!note]
 >
 > **Qwen OAuth** is no longer a selectable dialog entry — its free tier was discontinued on 2026-04-15. It remains documented below as a hard-coded, discontinued provider only.
