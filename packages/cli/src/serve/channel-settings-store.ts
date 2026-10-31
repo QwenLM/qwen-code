@@ -169,7 +169,7 @@ function assertSharedField(
     dmPolicy: new Set(['open', 'disabled']),
     groupPolicy: new Set(['disabled', 'allowlist', 'pairing', 'open']),
     sessionScope: new Set(['user', 'thread', 'chat_thread', 'single']),
-    dispatchMode: new Set(['steer', 'followup', 'collect']),
+    dispatchMode: new Set(['steer', 'followup', 'collect', 'inject']),
   };
   if (Object.hasOwn(enumValues, key)) {
     if (typeof value !== 'string' || !enumValues[key]!.has(value)) {
@@ -223,7 +223,7 @@ function assertSharedField(
             typeof nestedValue === 'boolean') ||
           (nestedKey === 'dispatchMode' &&
             typeof nestedValue === 'string' &&
-            ['collect', 'steer', 'followup'].includes(nestedValue)) ||
+            ['collect', 'steer', 'followup', 'inject'].includes(nestedValue)) ||
           (nestedKey === 'groupHistoryLimit' &&
             typeof nestedValue === 'number' &&
             Number.isFinite(nestedValue)) ||

@@ -124,6 +124,20 @@ export class GroupHistoryStore {
     return entries;
   }
 
+  /**
+   * Read the same slice `drain` would return without consuming it. Used when
+   * composing a prompt that may still be refused: the caller drains only once
+   * the text is actually delivered.
+   */
+  peek(key: string, limit: number): GroupHistoryEntry[] {
+    const normalizedLimit = normalizeLimit(limit);
+    if (normalizedLimit <= 0) {
+      return [];
+    }
+    const entries = this.loadState().entries.get(key) ?? [];
+    return entries.slice(-normalizedLimit);
+  }
+
   forget(key: string, messageId: string): void {
     const loaded = this.loadState();
     const current = loaded.entries.get(key);

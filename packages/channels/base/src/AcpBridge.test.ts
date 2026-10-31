@@ -20,6 +20,9 @@ import {
   CHANNEL_TASK_RESULT_PARTIAL_META_KEY,
   CHANNEL_TASK_OUTPUT_META_KEY,
   ChannelPromptCancelledError,
+  MID_TURN_DRAIN_BATCH,
+  MID_TURN_QUEUE_MAX_CHARS,
+  MID_TURN_QUEUE_MAX_MESSAGES,
   type ChannelLoopToolHandler,
   type ChannelPromptImage,
 } from './ChannelAgentBridge.js';
@@ -128,6 +131,8 @@ type TestableAcpBridge = AcpBridge & {
   };
   knownSessionIds: Set<string>;
   sessionBindingTokens: Map<string, object | undefined>;
+  midTurnMessageQueues: Map<string, string[]>;
+  undrainedMidTurnMessages: Map<string, string[]>;
   toolCallKindsBySession: Map<string, Map<string, string>>;
   channelLoopMcpServer: unknown;
   channelLoopToolHandlers: ChannelLoopToolHandler[];
@@ -351,6 +356,493 @@ describe('AcpBridge', () => {
         sessionId: 's-1',
       }),
     ).resolves.toStrictEqual({ messages: [], hasQueuedPrompt: false });
+  });
+
+  it('returns queued mid-turn messages once, per session', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    bridge.knownSessionIds.add('s-2');
+    expect(bridge.queueMidTurnMessage('s-1', 'first')).toStrictEqual({
+      accepted: true,
+    });
+    bridge.queueMidTurnMessage('s-1', 'second');
+    bridge.queueMidTurnMessage('s-2', 'other');
+
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
+    ).resolves.toStrictEqual({
+      messages: ['first', 'second'],
+      hasQueuedPrompt: false,
+    });
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
+    ).resolves.toStrictEqual({ messages: [], hasQueuedPrompt: false });
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-2' }),
+    ).resolves.toStrictEqual({
+      messages: ['other'],
+      hasQueuedPrompt: false,
+    });
+  });
+
+  it('ignores mid-turn messages for unknown sessions', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+
+    expect(bridge.queueMidTurnMessage('s-unknown', 'lost')).toStrictEqual({
+      accepted: false,
+      reason: 'unknown-session',
+    });
+
+    expect(bridge.midTurnMessageQueues.size).toBe(0);
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 's-unknown',
+      }),
+    ).resolves.toStrictEqual({ messages: [], hasQueuedPrompt: false });
+  });
+
+  it('rejects blank mid-turn messages', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+
+    expect(bridge.queueMidTurnMessage('s-1', '  \n\t')).toStrictEqual({
+      accepted: false,
+      reason: 'blank',
+    });
+    expect(bridge.midTurnMessageQueues.size).toBe(0);
+  });
+
+  it('caps one drain response at the ACP consumer batch and keeps the remainder queued', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    const queued = Array.from(
+      { length: MID_TURN_DRAIN_BATCH + 1 },
+      (_value, index) => `m${index}`,
+    );
+    for (const message of queued) {
+      expect(bridge.queueMidTurnMessage('s-1', message)).toStrictEqual({
+        accepted: true,
+      });
+    }
+
+    // The ACP child drops everything past its own batch cap, so the bridge may
+    // only hand it that many at once and must keep the rest queued.
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
+    ).resolves.toStrictEqual({
+      messages: queued.slice(0, MID_TURN_DRAIN_BATCH),
+      hasQueuedPrompt: false,
+    });
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
+    ).resolves.toStrictEqual({
+      messages: queued.slice(MID_TURN_DRAIN_BATCH),
+      hasQueuedPrompt: false,
+    });
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
+    ).resolves.toStrictEqual({ messages: [], hasQueuedPrompt: false });
+  });
+
+  it('bounds the mid-turn queue by message count', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      const total = MID_TURN_QUEUE_MAX_MESSAGES + 5;
+      const receipts = Array.from({ length: total }, (_value, index) =>
+        bridge.queueMidTurnMessage('s-1', `m${index}`),
+      );
+      expect(receipts.slice(0, MID_TURN_QUEUE_MAX_MESSAGES)).toStrictEqual(
+        Array.from({ length: MID_TURN_QUEUE_MAX_MESSAGES }, () => ({
+          accepted: true,
+        })),
+      );
+      expect(receipts[MID_TURN_QUEUE_MAX_MESSAGES]).toStrictEqual({
+        accepted: false,
+        reason: 'capacity',
+      });
+
+      const allQueued = Array.from(
+        { length: MID_TURN_QUEUE_MAX_MESSAGES },
+        (_value, index) => `m${index}`,
+      );
+      for (
+        let offset = 0;
+        offset < allQueued.length;
+        offset += MID_TURN_DRAIN_BATCH
+      ) {
+        await expect(
+          bridge.handleExtMethod('craft/drainMidTurnQueue', {
+            sessionId: 's-1',
+          }),
+        ).resolves.toStrictEqual({
+          messages: allQueued.slice(offset, offset + MID_TURN_DRAIN_BATCH),
+          hasQueuedPrompt: false,
+        });
+      }
+      expect(
+        stderr.mock.calls.some(
+          ([line]) =>
+            String(line).includes('Mid-turn queue at capacity') &&
+            String(line).includes('reason=capacity') &&
+            String(line).includes('caller owns fallback'),
+        ),
+      ).toBe(true);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('bounds the mid-turn queue by characters', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      // The character bound also rejects a single oversize message on an EMPTY
+      // queue, where no previously queued text contributes to the total.
+      expect(
+        bridge.queueMidTurnMessage(
+          's-1',
+          'x'.repeat(MID_TURN_QUEUE_MAX_CHARS + 1),
+        ),
+      ).toStrictEqual({ accepted: false, reason: 'capacity' });
+      expect(
+        bridge.queueMidTurnMessage('s-1', 'x'.repeat(MID_TURN_QUEUE_MAX_CHARS)),
+      ).toStrictEqual({ accepted: true });
+      expect(bridge.queueMidTurnMessage('s-1', 'y')).toStrictEqual({
+        accepted: false,
+        reason: 'capacity',
+      });
+
+      await expect(
+        bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
+      ).resolves.toStrictEqual({
+        messages: ['x'.repeat(MID_TURN_QUEUE_MAX_CHARS)],
+        hasQueuedPrompt: false,
+      });
+      expect(
+        stderr.mock.calls.some(
+          ([line]) =>
+            String(line).includes('Mid-turn queue at capacity') &&
+            String(line).includes('reason=capacity'),
+        ),
+      ).toBe(true);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('does not log the rejected message text when the queue is at capacity', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      for (let index = 0; index < MID_TURN_QUEUE_MAX_MESSAGES; index += 1) {
+        expect(bridge.queueMidTurnMessage('s-1', `m${index}`)).toStrictEqual({
+          accepted: true,
+        });
+      }
+      const canary = 'SECRET_CANARY_12345';
+      expect(bridge.queueMidTurnMessage('s-1', canary)).toStrictEqual({
+        accepted: false,
+        reason: 'capacity',
+      });
+
+      const logged = stderr.mock.calls.map(([line]) => String(line)).join('');
+      // The refusal is still diagnosable from metadata...
+      expect(logged).toContain('Mid-turn queue at capacity');
+      expect(logged).toContain('reason=capacity');
+      expect(logged).toContain('caller owns fallback');
+      // ...but the private message bytes never reach the process log.
+      expect(logged).not.toContain(canary);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('settles undrained mid-turn messages at the turn boundary instead of leaking them', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+    };
+    bridge.knownSessionIds.add('s-1');
+    expect(bridge.queueMidTurnMessage('s-1', 'leftover')).toStrictEqual({
+      accepted: true,
+    });
+
+    // The turn settles without the child ever draining the queue.
+    await bridge.prompt('s-1', 'start');
+
+    // The next drain must not hand the previous turn's text to the next turn.
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
+    ).resolves.toStrictEqual({ messages: [], hasQueuedPrompt: false });
+    // It was surfaced to the channel (which replays it as its own turn).
+    expect(bridge.takeUndrainedMidTurnMessages('s-1')).toStrictEqual([
+      'leftover',
+    ]);
+    expect(bridge.takeUndrainedMidTurnMessages('s-1')).toStrictEqual([]);
+  });
+
+  it('settles the mid-turn queue when the turn fails', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn().mockRejectedValue(new Error('agent failed')),
+    };
+    bridge.knownSessionIds.add('s-1');
+    expect(
+      bridge.queueMidTurnMessage('s-1', 'queued through the failure'),
+    ).toStrictEqual({ accepted: true });
+
+    await expect(bridge.prompt('s-1', 'start')).rejects.toThrow('agent failed');
+
+    // The rejected turn's finally must settle the queue: the next child drain
+    // gets nothing, and the channel can replay what it takes back. (The drain
+    // is asserted first because a take-back also clears the LIVE queue, which
+    // would hide a queue that was never settled.)
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
+    ).resolves.toStrictEqual({ messages: [], hasQueuedPrompt: false });
+    expect(bridge.takeUndrainedMidTurnMessages('s-1')).toStrictEqual([
+      'queued through the failure',
+    ]);
+    expect(bridge.takeUndrainedMidTurnMessages('s-1')).toStrictEqual([]);
+  });
+
+  it('drops a stale undrained mid-turn message when the next prompt starts', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+    };
+    bridge.knownSessionIds.add('s-1');
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    try {
+      expect(bridge.queueMidTurnMessage('s-1', 'stale leftover')).toStrictEqual(
+        { accepted: true },
+      );
+      // The first turn settles it into the undrained slot; the channel never
+      // takes it back before the next turn starts.
+      await bridge.prompt('s-1', 'first');
+      expect(bridge.undrainedMidTurnMessages.get('s-1')).toStrictEqual([
+        'stale leftover',
+      ]);
+
+      // A new turn must not inherit the abandoned text as its own input.
+      await bridge.prompt('s-1', 'second');
+      expect(bridge.undrainedMidTurnMessages.has('s-1')).toBe(false);
+      expect(bridge.takeUndrainedMidTurnMessages('s-1')).toStrictEqual([]);
+      expect(
+        stderr.mock.calls.some(([line]) =>
+          String(line).includes('Dropped 1 undrained mid-turn message(s)'),
+        ),
+      ).toBe(true);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('takes settled and still-queued mid-turn messages in arrival order', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+    };
+    bridge.knownSessionIds.add('s-1');
+    expect(bridge.queueMidTurnMessage('s-1', 'before')).toStrictEqual({
+      accepted: true,
+    });
+
+    // The turn settles 'before' into the undrained slot.
+    await bridge.prompt('s-1', 'start');
+    expect(bridge.undrainedMidTurnMessages.get('s-1')).toStrictEqual([
+      'before',
+    ]);
+    // 'after' is accepted in the window between settling and take-back, so it
+    // is still in the live queue.
+    expect(bridge.queueMidTurnMessage('s-1', 'after')).toStrictEqual({
+      accepted: true,
+    });
+
+    expect(bridge.takeUndrainedMidTurnMessages('s-1')).toStrictEqual([
+      'before',
+      'after',
+    ]);
+    expect(bridge.takeUndrainedMidTurnMessages('s-1')).toStrictEqual([]);
+  });
+
+  it('drops queued mid-turn messages when the owning turn is cancelled', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    bridge.queueMidTurnMessage('s-1', 'cancelled with the turn');
+
+    bridge.dropMidTurnMessages('s-1');
+
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-1' }),
+    ).resolves.toStrictEqual({ messages: [], hasQueuedPrompt: false });
+    expect(bridge.takeUndrainedMidTurnMessages('s-1')).toStrictEqual([]);
+  });
+
+  it('drops a settled undrained mid-turn message with the owning turn', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+    };
+    bridge.knownSessionIds.add('s-1');
+    expect(
+      bridge.queueMidTurnMessage('s-1', 'settled before the cancel'),
+    ).toStrictEqual({ accepted: true });
+
+    // The turn ends before draining, leaving the text in the settled slot; a
+    // cancel then drops it through the turn-owning drop method.
+    await bridge.prompt('s-1', 'start');
+    expect(bridge.undrainedMidTurnMessages.get('s-1')).toStrictEqual([
+      'settled before the cancel',
+    ]);
+
+    bridge.dropMidTurnMessages('s-1');
+
+    expect(bridge.takeUndrainedMidTurnMessages('s-1')).toStrictEqual([]);
+  });
+
+  it('clears queued mid-turn messages when a session is discarded', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    bridge.knownSessionIds.add('s-2');
+    bridge.queueMidTurnMessage('s-1', 'dropped with the session');
+    bridge.queueMidTurnMessage('s-2', 'kept');
+
+    await bridge.discardSession('s-1');
+
+    expect(bridge.midTurnMessageQueues.has('s-1')).toBe(false);
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', { sessionId: 's-2' }),
+    ).resolves.toStrictEqual({
+      messages: ['kept'],
+      hasQueuedPrompt: false,
+    });
+  });
+
+  it('clears the settled undrained slot when the owning session is discarded', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+    };
+    bridge.knownSessionIds.add('s-1');
+    expect(
+      bridge.queueMidTurnMessage('s-1', 'dropped with the session'),
+    ).toStrictEqual({ accepted: true });
+
+    // The turn ends before draining, leaving the text in the settled slot.
+    await bridge.prompt('s-1', 'start');
+    expect(bridge.undrainedMidTurnMessages.get('s-1')).toStrictEqual([
+      'dropped with the session',
+    ]);
+
+    await bridge.discardSession('s-1');
+
+    expect(bridge.undrainedMidTurnMessages.has('s-1')).toBe(false);
+    expect(bridge.takeUndrainedMidTurnMessages('s-1')).toStrictEqual([]);
+  });
+
+  it('clears every mid-turn queue on stop', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.knownSessionIds.add('s-1');
+    bridge.queueMidTurnMessage('s-1', 'queued');
+
+    bridge.stop();
+
+    expect(bridge.midTurnMessageQueues.size).toBe(0);
+  });
+
+  it('clears the settled undrained slot on stop', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = {
+      killed: false,
+      exitCode: null,
+      kill: vi.fn(),
+    } as unknown as TestableAcpBridge['child'];
+    bridge.connection = {
+      extMethod: vi.fn(),
+      prompt: vi.fn().mockResolvedValue({ stopReason: 'end_turn' }),
+    };
+    bridge.knownSessionIds.add('s-1');
+    expect(bridge.queueMidTurnMessage('s-1', 'settled')).toStrictEqual({
+      accepted: true,
+    });
+
+    // The turn ends before draining, leaving the text in the settled slot.
+    await bridge.prompt('s-1', 'start');
+    expect(bridge.undrainedMidTurnMessages.get('s-1')).toStrictEqual([
+      'settled',
+    ]);
+
+    bridge.stop();
+
+    expect(bridge.takeUndrainedMidTurnMessages('s-1')).toStrictEqual([]);
   });
 
   it('claims Guard continuations only for a session owned by this bridge', async () => {
