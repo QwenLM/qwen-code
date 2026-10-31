@@ -145,6 +145,18 @@ const failoverArms = [
     ],
   ],
   [
+    'Run after-earlier-tools crash E2E',
+    'test:e2e:managed-harness-restart-approval-after-earlier-tools',
+    [
+      '--continuation-failover',
+      '--harness-only',
+      '--g3-verify',
+      'allow',
+      '--g3-fault',
+      'after-earlier-tools',
+    ],
+  ],
+  [
     'Run approval decision reply-loss E2E',
     'test:e2e:managed-harness-restart-approval-decision-reply-lost',
     [
@@ -652,8 +664,8 @@ describe('Hosted real-process gates', () => {
     // Step ceilings today (201 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
     ['hosted-harness-mysql', 291, 304],
-    // Twenty-six failover arms at 10 each.
-    ['hosted-failover-e2e', 260, 275],
+    // Twenty-seven failover arms at 10 each.
+    ['hosted-failover-e2e', 270, 285],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
     (name, steps, ceiling) => {
