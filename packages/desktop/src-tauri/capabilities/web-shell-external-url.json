@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "web-shell-external-url",
-  "description": "Allows the daemon-served Web Shell to open browser-safe external URLs and to change the window zoom.",
+  "description": "Allows the daemon-served Web Shell to open browser-safe external URLs, change the window zoom, and persist its saved-connection and workspace-host catalogs.",
   "local": false,
   "remote": { "urls": ["http://127.0.0.1:*"] },
   "windows": ["main"],
@@ -15,6 +15,8 @@
         { "url": "mailto:*" }
       ]
     },
-    "allow-change-zoom"
+    "allow-change-zoom",
+    "allow-shell-state-read",
+    "allow-shell-state-write"
   ]
 }

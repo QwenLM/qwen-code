@@ -1541,6 +1541,17 @@ function testBootstrapBridgeConfiguration() {
     'allow-open-logs',
     'allow-restart-runtime',
   ]);
+  const webShellCapability = JSON.parse(
+    fs.readFileSync(
+      path.join(
+        packageDir,
+        'src-tauri',
+        'capabilities',
+        'web-shell-external-url.json',
+      ),
+      'utf8',
+    ),
+  );
 
   // Declaring an app ACL manifest makes every app command opt-in, so one that
   // is registered but missing from build.rs is denied at runtime with no build
@@ -1578,10 +1589,18 @@ function testBootstrapBridgeConfiguration() {
     [...registered].sort(),
     'build.rs must list exactly the commands main.rs registers.',
   );
+  // A registered command must be granted by at least one desktop capability:
+  // bootstrap commands stay on the local page, while Web Shell commands are
+  // reachable only from the daemon-served page.
+  const granted = new Set(
+    [...capability.permissions, ...webShellCapability.permissions].map(
+      (entry) => (typeof entry === 'string' ? entry : entry.identifier),
+    ),
+  );
   for (const command of listed) {
     assert.ok(
-      capability.permissions.includes(`allow-${command.replaceAll('_', '-')}`),
-      `The bootstrap capability must grant ${command}.`,
+      granted.has(`allow-${command.replaceAll('_', '-')}`),
+      `A desktop capability must grant ${command}.`,
     );
   }
   assert.ok(
@@ -1589,25 +1608,14 @@ function testBootstrapBridgeConfiguration() {
     'The zoom shortcut script invokes change_zoom; renaming the command means renaming it there too.',
   );
 
-  const webShellCapability = JSON.parse(
-    fs.readFileSync(
-      path.join(
-        packageDir,
-        'src-tauri',
-        'capabilities',
-        'web-shell-external-url.json',
-      ),
-      'utf8',
-    ),
-  );
   assert.equal(webShellCapability.local, false);
   assert.deepEqual(webShellCapability.remote, {
     urls: ['http://127.0.0.1:*'],
   });
   assert.deepEqual(webShellCapability.windows, ['main']);
-  // The daemon-served page reaches exactly two things: the external-URL opener
-  // and the zoom shortcut. The workspace, updater, and log commands stay
-  // bootstrap-only.
+  // The daemon-served page reaches the external-URL opener, the zoom shortcut,
+  // and the two shell-state commands. The workspace, updater, and log commands
+  // stay bootstrap-only.
   assert.deepEqual(webShellCapability.permissions, [
     'core:window:allow-start-dragging',
     {
@@ -1615,7 +1623,36 @@ function testBootstrapBridgeConfiguration() {
       allow: [{ url: 'http://*' }, { url: 'https://*' }, { url: 'mailto:*' }],
     },
     'allow-change-zoom',
+    'allow-shell-state-read',
+    'allow-shell-state-write',
   ]);
+
+  // The capability is port-wildcarded, so any loopback page passes its ACL; the
+  // runtime-origin check is what keeps other documents out of the persisted
+  // catalogs. Pin the call inside each command body — and keep the match
+  // bounded, because an unbounded one walks past the closing brace into the
+  // sibling command and passes with the gate deleted.
+  for (const command of ['shell_state_read', 'shell_state_write']) {
+    const start = main.indexOf(`fn ${command}(`);
+    assert.ok(start > 0, `main.rs must keep the ${command} command.`);
+    const body = main.slice(start, main.indexOf('\n}', start));
+    assert.ok(
+      body.length > 0 && !body.includes('/*'),
+      `${command} must keep its origin gate live, not commented out.`,
+    );
+    const gate = body.match(
+      /\n\s*require_runtime_origin\(&webview, state\.inner\(\)\)\?;/,
+    );
+    assert.ok(gate, `${command} must gate on require_runtime_origin.`);
+    // `shell_state_read` reaches the store through `Ok(state.settings…)`, so
+    // this lookup is not line-anchored: an anchored one leaves that command's
+    // ordering unchecked.
+    const storeAt = body.indexOf('state.settings.');
+    assert.ok(
+      storeAt === -1 || gate.index < storeAt,
+      `${command} must gate on require_runtime_origin before touching the store.`,
+    );
+  }
 
   assert.match(main, /title_bar_style\(tauri::TitleBarStyle::Overlay\)/);
   assert.match(main, /hidden_title\(true\)/);

@@ -1,5 +1,6 @@
 use command_group::{CommandGroup, GroupChild};
 use rand::RngCore;
+use std::collections::HashSet;
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read, Write};
@@ -12,7 +13,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
-use url::Url;
+use url::{Host, Url};
 
 const LISTEN_PREFIX: &str = "qwen serve listening on ";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
@@ -132,6 +133,52 @@ impl DesktopRuntime {
         url.set_fragment(Some(&format!("token={}", self.token)));
         url
     }
+
+    /// The boot URL plus one `fanout=<origin>` per saved remote host. The
+    /// daemon derives `connect-src` from the request URL alone, and the
+    /// catalogs are hydrated long after this document is served, so a saved
+    /// host stays blocked for that whole first document unless the URL names it.
+    pub fn authenticated_web_url_with_fanout(&self, origins: &[String]) -> Url {
+        let mut url = self.authenticated_web_url();
+        if origins.is_empty() {
+            return url;
+        }
+        {
+            let mut query = url.query_pairs_mut();
+            let mut seen = HashSet::new();
+            for origin in origins {
+                if seen.insert(origin.as_str()) {
+                    query.append_pair("fanout", origin);
+                }
+            }
+        }
+        url
+    }
+}
+
+/// The bare origin a stored catalog entry contributes to the boot document's
+/// `?fanout=` list, mirroring the daemon's `remoteDaemonConnectOrigins` rules:
+/// http/https only, no credentials, root path, no query, no fragment, and no
+/// bracketed IPv6 host (not a valid CSP host-source, so the daemon drops it).
+/// The daemon silently drops anything else, leaving that host CSP-blocked.
+pub fn fanout_origin(value: &str) -> Option<String> {
+    let url = Url::parse(value).ok()?;
+    if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    if matches!(url.host(), Some(Host::Ipv6(_))) {
+        return None;
+    }
+    if url.host().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.path() != "/"
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    Some(url.origin().ascii_serialization())
 }
 
 impl Drop for DesktopRuntime {
@@ -607,7 +654,7 @@ fn apply_daemon_path_env(command: &mut Command) {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_failure_output, apply_daemon_path_env, daemon_path_prepend_entries,
+        append_failure_output, apply_daemon_path_env, daemon_path_prepend_entries, fanout_origin,
         merged_daemon_path, parse_listening_url, resolve_workspace, runtime_arguments,
         DesktopRuntime, RuntimeStopped, FAILURE_OUTPUT_LIMIT,
     };
@@ -750,6 +797,57 @@ mod tests {
             "http://127.0.0.1:49152/#token=secret-token"
         );
         assert_eq!(runtime.base_url().as_str(), "http://127.0.0.1:49152/");
+    }
+
+    #[test]
+    fn boot_url_names_each_saved_origin_once_and_keeps_the_token_in_the_fragment() {
+        let runtime = DesktopRuntime {
+            id: 1,
+            base_url: Url::parse("http://127.0.0.1:49152/").expect("base URL"),
+            token: "secret-token".to_string(),
+            child: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            stopping: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        };
+        let url = runtime.authenticated_web_url_with_fanout(&[
+            "https://remote.example".to_string(),
+            "http://10.0.0.2:4170".to_string(),
+            "https://remote.example".to_string(),
+        ]);
+        let parsed = Url::parse(url.as_str()).expect("boot URL");
+        assert_eq!(parsed.fragment(), Some("token=secret-token"));
+        let fanout: Vec<_> = parsed
+            .query_pairs()
+            .filter(|(name, _)| name == "fanout")
+            .map(|(_, value)| value.into_owned())
+            .collect();
+        assert_eq!(fanout, ["https://remote.example", "http://10.0.0.2:4170"]);
+    }
+
+    #[test]
+    fn fanout_origin_keeps_only_bare_http_origins_the_daemon_accepts() {
+        assert_eq!(
+            fanout_origin("https://remote.example"),
+            Some("https://remote.example".to_string())
+        );
+        assert_eq!(
+            fanout_origin("https://remote.example/"),
+            Some("https://remote.example".to_string())
+        );
+        assert_eq!(
+            fanout_origin("http://10.0.0.2:4170"),
+            Some("http://10.0.0.2:4170".to_string())
+        );
+        for rejected in [
+            "https://remote.example/workspace",
+            "https://remote.example/?daemon=https://other.example",
+            "https://remote.example/#token=leak",
+            "https://user:pass@remote.example",
+            "ftp://remote.example",
+            "http://[::1]:4170",
+            "not a url",
+        ] {
+            assert_eq!(fanout_origin(rejected), None, "{rejected}");
+        }
     }
 
     #[test]

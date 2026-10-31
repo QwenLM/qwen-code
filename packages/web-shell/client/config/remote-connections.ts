@@ -6,6 +6,7 @@ import {
   navigateToDaemon,
   persistDaemonToken,
 } from './daemon';
+import { readShellState, writeShellState } from './shell-state';
 import { forgetWorkspaceHost } from './workspace-hosts';
 
 const STORAGE_KEY = 'qwen-remote-connections';
@@ -24,19 +25,13 @@ export function formatOriginHost(origin: string): string {
 }
 
 function storeRemoteConnections(origins: string[]): void {
-  try {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(origins));
-    window.dispatchEvent(new Event(REMOTE_CONNECTIONS_CHANGE_EVENT));
-  } catch {
-    // A connection remains usable in the current tab when persistence fails.
-  }
+  writeShellState(STORAGE_KEY, JSON.stringify(origins));
+  window.dispatchEvent(new Event(REMOTE_CONNECTIONS_CHANGE_EVENT));
 }
 
 export function readRemoteConnections(): string[] {
   try {
-    const value: unknown = JSON.parse(
-      window.localStorage.getItem(STORAGE_KEY) || '[]',
-    );
+    const value: unknown = JSON.parse(readShellState(STORAGE_KEY) || '[]');
     if (!Array.isArray(value)) return [];
     return Array.from(
       new Set(

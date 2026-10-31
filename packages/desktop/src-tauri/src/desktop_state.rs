@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -18,14 +19,21 @@ const MAX_ZOOM: f64 = 3.0;
 const ZOOM_STEP: f64 = 0.1;
 const ZOOM_GRID: f64 = 10.0;
 const DISABLE_SETTINGS_PERSISTENCE_ENV: &str = "QWEN_DESKTOP_DISABLE_SETTINGS_PERSISTENCE";
+/// The only keys the daemon-served Web Shell may persist through
+/// `shell_state_*`. Everything else is rejected so this surface cannot become a
+/// general-purpose file store.
+pub const SHELL_STATE_KEYS: &[&str] = &["qwen-remote-connections", "qwen-workspace-hosts"];
+/// Caps one catalog so a runaway page cannot bloat `desktop-state.json`.
+pub const SHELL_STATE_MAX_VALUE_BYTES: usize = 256 * 1024;
 static NEXT_WRITE_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct DesktopSettings {
     pub workspace: Option<PathBuf>,
     pub window: Option<WindowState>,
     pub zoom: Option<f64>,
+    pub shell_state: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -44,7 +52,10 @@ pub struct SettingsStore {
 
 impl SettingsStore {
     pub fn load(app: &AppHandle) -> Result<Self, String> {
-        let path = settings_path(app)?;
+        Self::load_from_path(settings_path(app)?)
+    }
+
+    pub(crate) fn load_from_path(path: PathBuf) -> Result<Self, String> {
         let settings = match fs::read_to_string(&path) {
             Ok(contents) => parse_settings(&contents),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -72,6 +83,22 @@ impl SettingsStore {
 
     pub fn zoom(&self) -> Option<f64> {
         self.with_settings(|settings| settings.zoom.map(|zoom| zoom.clamp(MIN_ZOOM, MAX_ZOOM)))
+    }
+
+    /// A catalog the daemon-served Web Shell persisted. Its page origin changes
+    /// every launch (the runtime binds an ephemeral loopback port), so browser
+    /// storage cannot carry these catalogs across restarts.
+    pub fn shell_state(&self, key: &str) -> Option<String> {
+        self.with_settings(|settings| settings.shell_state.get(key).cloned())
+    }
+
+    pub fn set_shell_state(&self, key: &str, value: &str) -> Result<(), String> {
+        validate_shell_state(key, value)?;
+        let key = key.to_string();
+        let value = value.to_string();
+        self.update(move |settings| {
+            settings.shell_state.insert(key, value);
+        })
     }
 
     /// Records a new zoom factor without writing it. Holding a zoom shortcut
@@ -186,6 +213,24 @@ fn parse_settings(contents: &str) -> DesktopSettings {
     serde_json::from_str(contents).unwrap_or_default()
 }
 
+pub fn is_shell_state_key_allowed(key: &str) -> bool {
+    SHELL_STATE_KEYS.contains(&key)
+}
+
+/// Shape checks shared by the command and the store, so a caller cannot bypass
+/// the allowlist by reaching `SettingsStore` directly.
+pub fn validate_shell_state(key: &str, value: &str) -> Result<(), String> {
+    if !is_shell_state_key_allowed(key) {
+        return Err(format!("Unsupported desktop shell state key: {key}"));
+    }
+    if value.len() > SHELL_STATE_MAX_VALUE_BYTES {
+        return Err(format!(
+            "Desktop shell state value for {key} exceeds {SHELL_STATE_MAX_VALUE_BYTES} bytes"
+        ));
+    }
+    Ok(())
+}
+
 fn saved_window_state(
     previous: Option<&WindowState>,
     position: PhysicalPosition<i32>,
@@ -254,8 +299,10 @@ fn write_atomic(path: &Path, contents: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_settings, saved_window_state, settings_persistence_disabled_value, write_atomic,
-        zoom_after, DesktopSettings, WindowState, DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM,
+        is_shell_state_key_allowed, parse_settings, saved_window_state,
+        settings_persistence_disabled_value, validate_shell_state, write_atomic, zoom_after,
+        DesktopSettings, SettingsStore, WindowState, DEFAULT_ZOOM, MAX_ZOOM, MIN_ZOOM,
+        SHELL_STATE_MAX_VALUE_BYTES,
     };
     use std::ffi::OsStr;
     use std::fs;
@@ -267,6 +314,7 @@ mod tests {
         assert!(settings.workspace.is_none());
         assert!(settings.window.is_none());
         assert!(settings.zoom.is_none());
+        assert!(settings.shell_state.is_empty());
     }
 
     #[test]
@@ -275,6 +323,73 @@ mod tests {
         assert!(settings.workspace.is_none());
         assert!(settings.window.is_none());
         assert!(settings.zoom.is_none());
+        assert!(settings.shell_state.is_empty());
+    }
+
+    #[test]
+    fn shell_state_round_trips_through_settings_json() {
+        let settings: DesktopSettings = serde_json::from_str(
+            r#"{"shellState":{"qwen-remote-connections":"[\"https://remote.example\"]"}}"#,
+        )
+        .expect("settings with shell state");
+
+        assert_eq!(
+            settings
+                .shell_state
+                .get("qwen-remote-connections")
+                .map(String::as_str),
+            Some("[\"https://remote.example\"]"),
+        );
+        let serialized = serde_json::to_string(&settings).expect("serialize");
+        assert!(serialized.contains("\"shellState\""));
+    }
+
+    #[test]
+    fn shell_state_rejects_unknown_keys_and_oversized_values() {
+        assert!(is_shell_state_key_allowed("qwen-remote-connections"));
+        assert!(is_shell_state_key_allowed("qwen-workspace-hosts"));
+        assert!(!is_shell_state_key_allowed("unrelated"));
+        assert!(validate_shell_state("unrelated", "[]").is_err());
+        assert!(validate_shell_state("qwen-remote-connections", "[]").is_ok());
+        assert!(validate_shell_state(
+            "qwen-remote-connections",
+            &"x".repeat(SHELL_STATE_MAX_VALUE_BYTES),
+        )
+        .is_ok());
+        assert!(validate_shell_state(
+            "qwen-remote-connections",
+            &"x".repeat(SHELL_STATE_MAX_VALUE_BYTES + 1),
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn shell_state_survives_a_settings_reload() {
+        let root = std::env::temp_dir().join(format!(
+            "qwen-desktop-shell-state-{}",
+            std::process::id()
+        ));
+        let path = root.join("desktop-state.json");
+        {
+            let store = SettingsStore::load_from_path(path.clone()).expect("store");
+            store
+                .set_shell_state(
+                    "qwen-remote-connections",
+                    "[\"https://remote.example\"]",
+                )
+                .expect("persist catalog");
+            assert!(store.set_shell_state("unrelated", "[]").is_err());
+        }
+
+        let reloaded = SettingsStore::load_from_path(path).expect("reload");
+        assert_eq!(
+            reloaded
+                .shell_state("qwen-remote-connections")
+                .as_deref(),
+            Some("[\"https://remote.example\"]"),
+        );
+        assert_eq!(reloaded.shell_state("unrelated"), None);
+        fs::remove_dir_all(root).expect("cleanup");
     }
 
     #[test]

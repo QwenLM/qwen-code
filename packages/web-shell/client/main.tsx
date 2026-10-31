@@ -34,6 +34,7 @@ import {
   removeDaemonTokenFromUrl,
   waitForDaemonTokenMessage,
 } from './config/daemon';
+import { hydrateShellState } from './config/shell-state';
 import { normalizeLanguage, type WebShellLanguage } from './i18n';
 import { WebShellThemeId, type WebShellTheme } from './themeContext';
 import { DEFAULT_BRAND_NAME, type WebShellResolvedBrand } from './brandContext';
@@ -55,12 +56,6 @@ const REQUESTED_DAEMON_TARGET =
   '';
 const INVALID_DAEMON_TARGET =
   Boolean(REQUESTED_DAEMON_TARGET) && !DAEMON_BASE_URL;
-// A `?daemon=` link can name any origin; one this browser has never connected
-// to is shown for confirmation instead of being probed on load.
-const UNCONFIRMED_DAEMON_TARGET =
-  Boolean(DAEMON_BASE_URL) &&
-  !isKnownDaemonTarget(DAEMON_BASE_URL) &&
-  !isRemoteConnectionKnown(DAEMON_BASE_URL);
 
 const STANDALONE_COMPOSER_TOOLBAR_ADDITIONS = ['addMenu', 'plan'] as const;
 
@@ -505,6 +500,21 @@ async function main() {
     document.documentElement.hasAttribute('data-web-shell-unsupported-browser')
   )
     return;
+  // The desktop shell persists the saved-connection and workspace-host
+  // catalogs outside this page's ephemeral loopback origin. Hydrate them
+  // before mounting so the first render already sees them.
+  await hydrateShellState();
+  // A `?daemon=` link can name any origin; one this browser has never
+  // connected to is shown for confirmation instead of being probed on load.
+  // Decided after hydration because the desktop shell keeps its saved-connection
+  // catalog in the settings file, so the page's own storage is empty until then
+  // — reading it earlier would demand confirmation for a host this computer
+  // already has saved. `isKnownDaemonTarget` stays in the test: sessionStorage
+  // is a store hydration never populates.
+  const unconfirmedDaemonTarget =
+    Boolean(DAEMON_BASE_URL) &&
+    !isKnownDaemonTarget(DAEMON_BASE_URL) &&
+    !isRemoteConnectionKnown(DAEMON_BASE_URL);
   const pairing = MANAGED_APP
     ? undefined
     : await exchangePairingCode(INVALID_DAEMON_TARGET ? '' : baseUrl);
@@ -536,7 +546,7 @@ async function main() {
         initialAddress={REQUESTED_DAEMON_TARGET || baseUrl}
         theme={getInitialTheme()}
         invalidTarget={INVALID_DAEMON_TARGET}
-        unconfirmedTarget={UNCONFIRMED_DAEMON_TARGET}
+        unconfirmedTarget={unconfirmedDaemonTarget}
       >
         {(token) =>
           MANAGED_APP ? (
