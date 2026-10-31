@@ -515,6 +515,23 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
     const connectHttp = (config = { httpUrl: 'http://test-server/mcp' }) =>
       connectToMcpServer('http-server', config, false, workspace());
 
+    it.each(['ENOTFOUND', 'ECONNREFUSED'])(
+      'retains stdio startup diagnostics mentioning %s',
+      async (code) => {
+        stubStdio({ close: vi.fn().mockResolvedValue(undefined) });
+        const diagnostic = `MCP server stderr:\n${code}: check the local database configuration`;
+        mockConnect(vi.fn().mockRejectedValue(new Error(diagnostic)));
+        await expect(
+          connectToMcpServer(
+            'local-server',
+            { command: 'local-mcp-server' },
+            false,
+            workspace(),
+          ),
+        ).rejects.toThrow(diagnostic);
+      },
+    );
+
     /** Connects the SSE server through a 401 with these token-store mocks. */
     function sse401(getCredentials: Mock, provider?: Obj) {
       mockConnect(
