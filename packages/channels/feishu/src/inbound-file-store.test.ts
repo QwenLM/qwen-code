@@ -36,6 +36,8 @@ vi.mock('node:os', async (importOriginal) => {
 describe('Feishu inbound file storage', () => {
   const systemTmpDir = tmpdir();
   const bytes = new Uint8Array([0, 1, 255]);
+  const resourceUrl =
+    'https://open.feishu.cn/open-apis/im/v1/messages/inbound-file/resources/file_1?type=file';
   let directory: string;
   let channel: FeishuChannel;
   let dispatch: MockInstance<FeishuChannel['handleInbound']>;
@@ -79,9 +81,7 @@ describe('Feishu inbound file storage', () => {
     });
     dispatch = vi.spyOn(channel, 'handleInbound').mockResolvedValue(undefined);
     vi.spyOn(global, 'fetch').mockImplementation(async (input) => {
-      expect(String(input)).toBe(
-        'https://open.feishu.cn/open-apis/im/v1/messages/inbound-file/resources/file_1?type=file',
-      );
+      expect(String(input)).toBe(resourceUrl);
       return new Response(bytes, {
         headers: { 'Content-Type': 'application/pdf' },
       });
@@ -100,6 +100,7 @@ describe('Feishu inbound file storage', () => {
 
   function receive(
     message: {
+      message_id?: string;
       parent_id?: string;
       message_type?: string;
       content?: string;
@@ -124,25 +125,57 @@ describe('Feishu inbound file storage', () => {
     });
   }
 
-  it('keeps successful files until the existing cleanup grace period', async () => {
+  it.each([
+    { messageType: 'file', text: '(file: report.pdf)' },
+    { messageType: 'media', text: '(video)' },
+  ])(
+    'keeps successful $messageType files until the existing cleanup grace period',
+    async ({ messageType, text }) => {
+      receive({ message_type: messageType });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      const attachment = dispatch.mock.calls[0]![0].attachments?.[0];
+      expect(attachment).toEqual({
+        type: 'file',
+        filePath: expect.any(String),
+        mimeType: 'application/pdf',
+        fileName: 'report.pdf',
+      });
+      expect(readFileSync(attachment!.filePath!)).toEqual(Buffer.from(bytes));
+      expect(dispatch.mock.calls[0]![0]).toMatchObject({
+        text,
+        syntheticText: true,
+      });
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(existsSync(attachment!.filePath!)).toBe(true);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
+    },
+  );
+
+  it('keeps two messages with the same filename in separate directories', async () => {
+    vi.mocked(fetch).mockImplementation(async (input) => {
+      expect([
+        resourceUrl,
+        resourceUrl.replace('/inbound-file/', '/inbound-file-2/'),
+      ]).toContain(String(input));
+      return new Response(bytes);
+    });
     receive();
+    receive({ message_id: 'inbound-file-2' });
     await vi.advanceTimersByTimeAsync(0);
-    expect(dispatch).toHaveBeenCalledTimes(1);
-    const attachment = dispatch.mock.calls[0]![0].attachments?.[0];
-    expect(attachment).toEqual({
-      type: 'file',
-      filePath: expect.any(String),
-      mimeType: 'application/pdf',
-      fileName: 'report.pdf',
-    });
-    expect(readFileSync(attachment!.filePath!)).toEqual(Buffer.from(bytes));
-    expect(dispatch.mock.calls[0]![0]).toMatchObject({
-      text: '(file: report.pdf)',
-      syntheticText: true,
-    });
-    await vi.advanceTimersByTimeAsync(59_999);
-    expect(existsSync(attachment!.filePath!)).toBe(true);
-    await vi.advanceTimersByTimeAsync(1);
+
+    expect(dispatch).toHaveBeenCalledTimes(2);
+    const paths = dispatch.mock.calls.map(
+      ([envelope]) => envelope.attachments![0]!.filePath!,
+    );
+    expect(new Set(paths.map((path) => dirname(path))).size).toBe(2);
+    expect(readdirSync(join(directory, 'channel-files'))).toHaveLength(2);
+    for (const path of paths) {
+      expect(path).toBe(join(dirname(path), 'report.pdf'));
+      expect(readFileSync(path)).toEqual(Buffer.from(bytes));
+    }
+    await vi.advanceTimersByTimeAsync(60_000);
     expect(readdirSync(join(directory, 'channel-files'))).toEqual([]);
   });
 
