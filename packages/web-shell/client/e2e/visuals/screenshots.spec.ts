@@ -25,6 +25,7 @@ import {
   completeReplay,
   FIXED_CAPTURE_TIME,
   fillComposer,
+  freezeWallClock,
   gotoNewSession,
   gotoSession,
   gotoSettingsHarness,
@@ -404,6 +405,65 @@ async function openSettingsPanel(page: Page): Promise<void> {
 
 for (const theme of THEMES) {
   test.describe(`web-shell screenshots (${theme})`, () => {
+    test('simple mobile composer', async ({ browser }, testInfo) => {
+      const baseURL = resolveBaseURL(testInfo);
+      const context = await browser.newContext({
+        ...devices['Pixel 7'],
+        viewport: { width: 390, height: 844 },
+        baseURL,
+        reducedMotion: 'reduce',
+      });
+      try {
+        const page = await context.newPage();
+        const scenario = createWebShellDaemonScenario({
+          voice: { enabled: true },
+        });
+        scenario.capabilities.features.push('voice_transcribe');
+        const daemon = await installScenario(page, scenario, baseURL);
+        await freezeWallClock(page);
+        const params = new URLSearchParams({
+          composerVariant: 'simple',
+          tags: 'false',
+          theme,
+          sessionId: scenario.sessionId,
+        });
+        await page.goto(
+          `/e2e/composer-layout-harness.html?${params.toString()}`,
+        );
+        const root = page
+          .locator('[data-web-shell-root]:not([data-web-shell-gate])')
+          .last();
+        await expect(root).toBeVisible();
+        expect(
+          (await root.getAttribute('class'))?.split(/\s+/).includes('dark'),
+        ).toBe(theme === 'dark');
+        await completeReplay(page, daemon, scenario.sessionId);
+        const composer = page.locator('[data-web-shell-composer]');
+        const microphone = composer.getByRole('button', {
+          name: 'Start voice dictation',
+          exact: true,
+        });
+        const send = composer.locator('[data-web-shell-composer-submit]');
+        await expect(microphone).toBeVisible();
+        await expect(send).toBeHidden();
+        await composer
+          .locator('textarea[data-web-shell-composer-editor]')
+          .fill('Review the simple composer.\nKeep this working draft.');
+        await composer.locator('[data-web-shell-composer-expand]').tap();
+        await expect(microphone).toBeVisible();
+        await composer.locator('[data-web-shell-composer-collapse]').tap();
+        await expect(composer).toHaveAttribute(
+          'data-web-shell-composer-variant',
+          'simple',
+        );
+        await expect(microphone).toBeHidden();
+        await expect(send).toBeVisible();
+        await captureScreenshot(page, `simple-composer-${theme}`);
+      } finally {
+        await context.close();
+      }
+    });
+
     test('mobile composer controls', async ({ browser }, testInfo) => {
       const baseURL = resolveBaseURL(testInfo);
       const context = await browser.newContext({
@@ -502,6 +562,84 @@ for (const theme of THEMES) {
         panel.getByRole('button', { name: 'Compress context', exact: true }),
       ).toBeEnabled();
       await captureScreenshot(page, `context-usage-${theme}`);
+    });
+
+    test('context instruction file preview', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd: '/workspace',
+        workspaceFiles: {
+          '/workspace/AGENTS.md':
+            '# AGENTS.md\n\n## Working Principles\n\n- Simplicity first: minimum code that solves the problem.\n- No abstractions for single-use code.\n',
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route(/\/session\/[^/]+\/context-usage(?:\?|$)/, (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            sessionId: scenario.sessionId,
+            workspaceCwd: scenario.workspaceCwd,
+            formattedText: '',
+            usage: {
+              modelName: 'Qwen Test',
+              totalTokens: 60_000,
+              contextWindowSize: 100_000,
+              breakdown: {
+                systemPrompt: 10_000,
+                builtinTools: 10_000,
+                mcpTools: 0,
+                instructionFiles: 5_000,
+                memoryFiles: 1_000,
+                skills: 10_000,
+                messages: 24_000,
+                freeSpace: 30_000,
+                autocompactBuffer: 10_000,
+              },
+              builtinTools: [],
+              mcpTools: [],
+              instructionFiles: [
+                {
+                  path: 'AGENTS.md',
+                  tokens: 5_000,
+                  absolutePath: '/workspace/AGENTS.md',
+                },
+              ],
+              memoryFiles: [{ path: 'auto memory', tokens: 1_000 }],
+              skills: [],
+              showDetails: true,
+            },
+          } satisfies DaemonSessionContextUsageStatus,
+        }),
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await page
+        .getByRole('button', { name: 'Context Usage', exact: true })
+        .click();
+      const panel = page.locator('[class*="panel"][aria-busy]');
+      await expect(panel).toContainText('Remaining 40.0k');
+      await panel.locator('summary').filter({ hasText: 'Advanced' }).click();
+      await panel
+        .locator('summary')
+        .filter({ hasText: 'Instruction files' })
+        .click();
+      await expect(
+        panel.getByRole('button', { name: 'AGENTS.md', exact: true }),
+      ).toBeVisible();
+      await captureScreenshot(page, `context-instruction-files-panel-${theme}`);
+      await panel
+        .getByRole('button', { name: 'AGENTS.md', exact: true })
+        .click();
+      await expect(
+        page.getByText('Simplicity', { exact: false }).first(),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `context-instruction-file-preview-${theme}`,
+      );
     });
 
     test('trajectory', async ({ page }, testInfo) => {
@@ -1865,6 +2003,52 @@ for (const theme of THEMES) {
       await submitLocalCommand(page, '/theme');
       await expect(page.locator('[data-web-shell-theme-dialog]')).toBeVisible();
       await captureScreenshot(page, `theme-dialog-${theme}`);
+    });
+
+    test('archived conversations settings', async ({ page }, testInfo) => {
+      const scenario = createWebShellDaemonScenario({
+        capabilities: {
+          features: ['session_events', 'workspace_settings', 'session_archive'],
+        },
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      await page.route(
+        /\/workspaces?\/[^/]+\/sessions(?:\?|$)/,
+        async (route) => {
+          const url = new URL(route.request().url());
+          const cwd = decodeURIComponent(url.pathname.split('/')[2]!);
+          await route.fulfill({
+            json: {
+              sessions:
+                url.searchParams.get('archiveState') === 'archived'
+                  ? [
+                      {
+                        sessionId: 'visual-archive',
+                        workspaceCwd: cwd,
+                        displayName: 'Archived project discussion',
+                        isArchived: true,
+                        updatedAt: '2026-10-25T00:00:00Z',
+                      },
+                    ]
+                  : [],
+            },
+          });
+        },
+      );
+      await gotoSession(page, scenario, daemon, theme);
+      await submitLocalCommand(page, '/settings');
+      await page
+        .getByRole('navigation', { name: 'Settings' })
+        .getByRole('button', { name: 'Archived conversations', exact: true })
+        .click();
+      await expect(
+        page.locator('[data-web-shell-archived-sessions]'),
+      ).toContainText('Archived project discussion');
+      await captureScreenshot(page, `archived-settings-${theme}`);
     });
 
     test(`settings panel`, async ({ page }, testInfo) => {

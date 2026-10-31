@@ -548,3 +548,5 @@ try {
 ## Human-origin workflow hints
 
 Streaming `SDKUserMessage` input supports per-message `origin: { kind: 'human' }` for original human submissions. Messages without the declaration and string convenience prompts remain ordinary chat without keyword activation. See the [workflow intent contract](../users/workflow-intent.md) ([简体中文](../users/workflow-intent.zh-CN.md)) for examples and exclusions.
+
+For an explicit session preference, use `options.workflowMode`, `getWorkflowMode()` and `setWorkflowMode(enabled)`. This mode also applies to ordinary submissions without a human-origin declaration. See [session Workflow mode](../users/workflow-mode.md) ([简体中文](../users/workflow-mode.zh-CN.md)) for readiness, persistence, supported owners and ACP/daemon controls.

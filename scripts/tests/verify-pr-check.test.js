@@ -10,7 +10,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { checkArtifacts } from '../../scripts/verify-pr-check.mjs';
+import {
+  checkArtifacts,
+  checkMutationCoverage,
+} from '../../scripts/verify-pr-check.mjs';
 
 const SCRIPT = fileURLToPath(
   new URL('../../scripts/verify-pr-check.mjs', import.meta.url),
@@ -173,6 +176,243 @@ describe('checkArtifacts', () => {
   });
 });
 
+// A round proved a repo test red on both arms, booked that red twice (head and
+// its base control), and published `findings` while its own verdict line said
+// neither reason was a defect in the PR. The prose taught how to prove a red
+// environmental and never how to count it afterwards.
+describe('failures ledger', () => {
+  const withFailures = (
+    failures,
+    verdict = 'findings',
+    fail = failures.length,
+  ) =>
+    check({
+      verdict: `${verdict}\n`,
+      report: `${verdict} · ${4 - fail} passed · ${fail} failed · 4 total · ${HEAD}\n`,
+      assertions: JSON.stringify({ pass: 4 - fail, fail, total: 4, failures }),
+    });
+
+  it('refuses the exact shape that shipped: findings with only environment reds', () => {
+    const result = withFailures(
+      [
+        { id: 'gh-config-dir-head', attribution: 'environment' },
+        { id: 'gh-config-dir-base-aa', attribution: 'environment' },
+      ],
+      'findings',
+      2,
+    );
+    expect(result.errors.join('\n')).toMatch(
+      /findings with 2 failed assertions and none attributed to the PR \(environment\)/,
+    );
+    expect(result.errors.join('\n')).toMatch(/expected-red pass/);
+  });
+
+  it('accepts findings when a failure is attributed to the PR', () => {
+    expect(
+      withFailures([{ id: 'budget-halt', attribution: 'pr' }]).errors,
+    ).toEqual([]);
+    expect(
+      withFailures([
+        { id: 'budget-halt', attribution: 'pr' },
+        { id: 'host-path', attribution: 'environment' },
+      ]).errors,
+    ).toEqual([]);
+  });
+
+  it('accepts inconclusive for a harness fault, which is the prescribed pairing', () => {
+    expect(
+      withFailures(
+        [{ id: 'flaky-probe', attribution: 'harness' }],
+        'inconclusive',
+      ).errors,
+    ).toEqual([]);
+  });
+
+  it('refuses blocked on a harness fault too', () => {
+    expect(
+      withFailures(
+        [{ id: 'flaky-probe', attribution: 'harness' }],
+        'blocked',
+      ).errors.join('\n'),
+    ).toMatch(/blocked with 1 failed assertion and none attributed to the PR/);
+  });
+
+  it('validates the ledger against the count and the vocabulary', () => {
+    const cases = [
+      ['not-an-array', /failures must be an array/],
+      [
+        [{ id: 'x', attribution: 'unknown' }],
+        /need an id and an attribution of/,
+      ],
+      [[{ attribution: 'pr' }], /need an id and an attribution of/],
+      [[{ id: '  ', attribution: 'pr' }], /need an id and an attribution of/],
+      [[], /lists 0 failures but counts fail 1/],
+    ];
+    for (const [failures, message] of cases) {
+      expect(withFailures(failures, 'findings', 1).errors.join('\n')).toMatch(
+        message,
+      );
+    }
+  });
+
+  // A malformed ledger is not an absent one: "carries no ledger" sends the
+  // reader looking in the wrong place, and the branch that skips that warning
+  // must not then read a null attribution list.
+  it('does not call a malformed ledger absent, and does not crash on it', () => {
+    for (const failures of [
+      'not-an-array',
+      [{ id: 'x', attribution: 'nope' }],
+      [],
+    ]) {
+      const result = withFailures(failures, 'findings', 1);
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.warnings.join('\n')).not.toMatch(
+        /carries no failures ledger/,
+      );
+    }
+  });
+
+  it('warns rather than fails when an older round carries no ledger', () => {
+    const result = check({
+      verdict: 'findings\n',
+      report: `findings · 3 passed · 1 failed · 4 total · ${HEAD}\n`,
+      assertions: JSON.stringify({ pass: 3, fail: 1, total: 4 }),
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).toMatch(/carries no failures ledger/);
+  });
+
+  it('accepts an empty ledger on a clean round', () => {
+    const result = check({
+      assertions: JSON.stringify({ pass: 4, fail: 0, total: 4, failures: [] }),
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
+  });
+});
+
+// "Every production commit since the previous round was mutated on its own"
+// shipped while two commits had no row. A coverage claim is universally
+// quantified over an enumerable set, so it is checked against that set.
+describe('checkMutationCoverage', () => {
+  const A = 'a'.repeat(40);
+  const B = 'b'.repeat(40);
+  const C = 'c'.repeat(40);
+  const matrix = (overrides = {}) =>
+    JSON.stringify({
+      coverageClaim: 'per-commit',
+      productionCommits: [A, B, C],
+      rows: [
+        { id: 'M1', commit: A },
+        { id: 'M2', commit: B },
+        { id: 'M3', commit: C },
+      ],
+      ...overrides,
+    });
+
+  it('stays silent when the round makes no per-commit claim', () => {
+    expect(checkMutationCoverage(null).errors).toEqual([]);
+    expect(checkMutationCoverage('').errors).toEqual([]);
+    expect(checkMutationCoverage('{"rows":[]}').errors).toEqual([]);
+    expect(
+      checkMutationCoverage(
+        JSON.stringify({ coverageClaim: 'per-guard', rows: [] }),
+      ).errors,
+    ).toEqual([]);
+  });
+
+  it('accepts a claim every commit backs', () => {
+    expect(checkMutationCoverage(matrix()).errors).toEqual([]);
+  });
+
+  // "Every commit was mutated" over no commits is vacuously true, and an
+  // empty list is the cheapest enumeration to supply. It is also the one
+  // incomplete list that satisfies the coverage check without this refusal.
+  it('refuses a claim over an empty enumeration', () => {
+    const result = checkMutationCoverage(
+      matrix({ productionCommits: [], rows: [] }),
+    );
+    expect(result.errors.join('\n')).toMatch(
+      /empty productionCommits list: a claim over an empty set is vacuously true/,
+    );
+    // The refusal has to recommend the recipe the skill actually teaches: the
+    // one that cuts at the first parent drops the PR's own feature-merge
+    // commits, which is the under-count this rule exists to prevent.
+    expect(result.errors.join('\n')).toContain(
+      'git log --no-merges <previous>..<head> --not <target>',
+    );
+    expect(result.errors.join('\n')).not.toContain('--first-parent');
+    // Dropping the claim is the honest way out for a docs-only round.
+    expect(
+      checkMutationCoverage(JSON.stringify({ rows: [], productionCommits: [] }))
+        .errors,
+    ).toEqual([]);
+  });
+
+  it('names the commits that have no row', () => {
+    const result = checkMutationCoverage(
+      matrix({ rows: [{ id: 'M1', commit: A }] }),
+    );
+    expect(result.errors.join('\n')).toMatch(
+      /2 of 3 production commits have no row/,
+    );
+    expect(result.errors.join('\n')).toContain(B);
+    expect(result.errors.join('\n')).toContain(C);
+  });
+
+  it('matches abbreviated and full OIDs in either direction', () => {
+    expect(
+      checkMutationCoverage(
+        matrix({
+          productionCommits: [A.slice(0, 10)],
+          rows: [{ id: 'M1', commit: A }],
+        }),
+      ).errors,
+    ).toEqual([]);
+    expect(
+      checkMutationCoverage(
+        matrix({
+          productionCommits: [A],
+          rows: [{ id: 'M1', commit: A.slice(0, 10) }],
+        }),
+      ).errors,
+    ).toEqual([]);
+  });
+
+  it('refuses a claim with no enumeration, and a malformed matrix', () => {
+    expect(
+      checkMutationCoverage(
+        matrix({ productionCommits: undefined }),
+      ).errors.join('\n'),
+    ).toMatch(/needs productionCommits\[\] from git log and rows\[\]/);
+    expect(
+      checkMutationCoverage(matrix({ rows: null })).errors.join('\n'),
+    ).toMatch(/needs productionCommits\[\] from git log and rows\[\]/);
+    expect(
+      checkMutationCoverage(
+        matrix({ productionCommits: ['zzzzzzz'] }),
+      ).errors.join('\n'),
+    ).toMatch(/must be hex commit ids/);
+    expect(checkMutationCoverage('not json').errors).toContain(
+      'mutations.json is not valid JSON',
+    );
+    expect(checkMutationCoverage('[]').errors).toContain(
+      'mutations.json must be an object with rows',
+    );
+  });
+
+  it('reaches the verdict through checkArtifacts, not just on its own', () => {
+    const result = checkArtifacts({
+      files: {
+        ...validFiles(),
+        mutations: matrix({ rows: [{ id: 'M1', commit: A }] }),
+      },
+      evidence: ['01-ab-cells.png'],
+    });
+    expect(result.errors.join('\n')).toMatch(/claims per-commit coverage but/);
+  });
+});
+
 // The CLI is the path a maintainer runs, so the exit codes are the contract.
 describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
   const run = (dir) =>
@@ -197,7 +437,7 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     expect(bad.stdout).toContain('failed: verdict=merge-ready');
   });
 
-  it('reads the verified head from the round snapshot', () => {
+  it('names the legacy snapshot when the round has none', () => {
     const root = mkdtempSync(join(tmpdir(), 'verify-pr-check-snapshot-'));
     tmpDirs.push(root);
     const artifacts = join(root, 'tmp', 'pr7-verify-20261026-120000');
@@ -224,6 +464,20 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`does not name the verified head ${head}`);
+    expect(result.stdout).toContain(
+      join(root, 'tmp', 'verify-context', 'pr7.json'),
+    );
+
+    for (const snapshot of ['{', '{}']) {
+      writeFileSync(join(artifacts, 'context.json'), snapshot);
+      const unreadable = run(artifacts);
+      expect(unreadable.status).toBe(0);
+      expect(unreadable.stdout).toContain(join(artifacts, 'context.json'));
+      expect(unreadable.stdout).toContain('fell back to presence-only');
+      expect(unreadable.stdout).not.toContain(
+        `does not name the verified head ${head}`,
+      );
+    }
   });
 
   it('exits 2 without a directory and 1 on a missing one', () => {

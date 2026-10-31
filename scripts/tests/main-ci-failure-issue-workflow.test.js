@@ -47,6 +47,7 @@ describe('main CI failure issue workflow', () => {
       'SDK Python': 'sdk-python',
       'Qwen Code CI': 'ci',
       'Desktop Checks': 'desktop-packaging-check',
+      'tui-parity': 'tui-parity',
     };
     // workflow_run matches the list as a set, so its order is not pinned.
     expect([...yml.on.workflow_run.workflows].sort()).toEqual(
@@ -83,7 +84,7 @@ describe('main CI failure issue workflow', () => {
         "((github.event.workflow_run.head_branch == 'main' && " +
         "(github.event.workflow_run.event == 'push' || " +
         "(github.event.workflow_run.event == 'schedule' && " +
-        'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks"]\'), github.event.workflow.name)))) || ' +
+        'contains(fromJSON(\'["Qwen Code CI","SDK Java","Desktop Checks","tui-parity"]\'), github.event.workflow.name)))) || ' +
         "(github.event.workflow_run.event == 'workflow_dispatch' && github.event.workflow.name == 'SDK Java') || " +
         "(github.event.workflow.name == 'Managed Agent gate' && " +
         'contains(fromJSON(\'["pull_request","pull_request_review"]\'), github.event.workflow_run.event))) }}',
@@ -104,6 +105,14 @@ describe('main CI failure issue workflow', () => {
     ['SDK Java', 'workflow_dispatch', 'feature', 'failure', true],
     ['SDK Python', 'workflow_dispatch', 'main', 'failure', false],
     ['SDK Java', 'schedule', 'main', 'failure', true],
+    ['tui-parity', 'schedule', 'main', 'failure', true],
+    ['tui-parity', 'schedule', 'main', 'success', false],
+    ['tui-parity', 'schedule', 'main', 'cancelled', false],
+    ['tui-parity', 'schedule', 'main', 'skipped', false],
+    ['tui-parity', 'schedule', 'feature', 'failure', false],
+    ['tui-parity', 'pull_request', 'feature', 'failure', false],
+    ['tui-parity', 'workflow_dispatch', 'feature', 'failure', false],
+    ['tui-parity', 'workflow_dispatch', 'main', 'failure', false],
     ['Managed Agent gate', 'push', 'main', 'failure', true],
     ['Managed Agent gate', 'pull_request_review', 'feature', 'failure', true],
     ['Managed Agent gate', 'pull_request', 'feature', 'failure', true],
@@ -340,15 +349,18 @@ cat "\${RUNNER_TEMP}/pulls.json"
       );
       expect(resolved.output).toBe('pr_number=14472\nfile_issue=false\n');
     });
-    it('files a main dispatch failure without a PR', () => {
-      const resolved = resolve([], {
-        EVENT_NAME: 'workflow_dispatch',
-        HEAD_BRANCH: 'main',
-      });
-      expect(resolved.output).toBe('pr_number=\nfile_issue=true\n');
-      expect(resolved.args).toBe('');
-      expect(resolved.stdout).not.toContain('::warning::');
-    });
+    it.each(['workflow_dispatch', 'schedule'])(
+      'files a main %s failure without a PR',
+      (event) => {
+        const resolved = resolve([], {
+          EVENT_NAME: event,
+          HEAD_BRANCH: 'main',
+        });
+        expect(resolved.output).toBe('pr_number=\nfile_issue=true\n');
+        expect(resolved.args).toBe('');
+        expect(resolved.stdout).not.toContain('::warning::');
+      },
+    );
     it('still files for a later attempt of a main run', () => {
       // The attempt guard lives in the PR-lookup else branch, so a main run
       // files at every attempt; hoisting it below the `fi` would silently
@@ -963,6 +975,7 @@ fi
         return {
           status: result.status,
           stdout: result.stdout,
+          stderr: result.stderr,
           migratedBody: existsSync(join(tmp, 'migrated-body.md'))
             ? readFileSync(join(tmp, 'migrated-body.md'), 'utf8')
             : null,
@@ -988,7 +1001,7 @@ fi
       'comments on an open workflow issue with suffix %s',
       (suffix) => {
         const result = run([botIssue(42, suffix)]);
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue comment 42');
         expect(result.output).toContain(
           'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
@@ -1014,7 +1027,7 @@ fi
       // aggregate's own body file is a third write site: a prepend narrowed to
       // the per-signature branch would silently drop it here.
       const result = run([botIssue(42)], { provisional: true });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('issue comment 42');
       expect(result.body).toMatch(
         /^> \*\*Provisional\.\*\* Main advanced past this head/,
@@ -1027,7 +1040,7 @@ fi
         issueBody:
           'Main CI failed at commit abc123.\n\n<!-- qwen-main-ci-failure:abc123 -->',
       });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('issue comment 42');
       expect(result.calls).toContain(
         'issue edit 42 --repo QwenLM/qwen-code --remove-label status/ready-for-agent --remove-label autofix/approved',
@@ -1047,7 +1060,7 @@ fi
           7: 'Tracked failure.\n\n<!-- qwen-main-ci-failure-test:aaa111bbb222 -->\n',
         },
       });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('issue create');
       expect(result.calls).not.toContain('issue comment 7');
       expect(result.calls).not.toContain('issue edit 7');
@@ -1062,7 +1075,7 @@ fi
           { ...botIssue(42), body: '<!-- main-ci-failure-aggregate:1234 -->' },
         ],
       });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('issue reopen 42');
       expect(result.calls).toContain('issue comment 42');
       expect(result.calls).not.toContain('issue comment 7');
@@ -1075,7 +1088,7 @@ fi
       const result = run([botIssue(42, ' — Foo.test')], {
         issueBodies: { 42: both },
       });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('issue comment 42');
       expect(result.calls).toContain(
         'issue edit 42 --repo QwenLM/qwen-code --title Main CI failed: SDK Java — no test identified (latest: 2026-10-24)',
@@ -1092,7 +1105,7 @@ fi
           },
         ],
       });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).not.toContain('issue reopen 7');
       expect(result.calls).toContain('issue create');
     });
@@ -1111,7 +1124,7 @@ fi
           { ...botIssue(42), body: '<!-- main-ci-failure-aggregate:1234 -->' },
         ],
       });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('issue reopen 42');
       expect(result.calls).toContain('issue comment 42');
       expect(result.calls).not.toContain('issue create');
@@ -1127,7 +1140,7 @@ fi
       const result = run([], {
         closedIssues: [{ ...botIssue(42, ' — Foo.test'), body: both }],
       });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('issue reopen 42');
       expect(result.calls).toContain('issue comment 42');
       expect(result.calls).not.toContain('issue create');
@@ -1151,7 +1164,7 @@ fi
           { ...botIssue(42, ' on abc123'), body: 'no markers here' },
         ],
       });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('issue reopen 42');
       expect(result.calls).toContain('issue comment 42');
       expect(result.calls).not.toContain('--remove-label');
@@ -1177,7 +1190,7 @@ fi
           ],
         },
       );
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('issue comment 42');
       expect(result.calls).not.toContain('issue comment 9');
       expect(result.calls).not.toMatch(/issue (edit|reopen) 9/);
@@ -1191,7 +1204,7 @@ fi
         botIssue(10, ' extra'),
         { ...botIssue(11), title: 'Main CI failed: SDK Python on abc123' },
       ]);
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain(
         'issue create --repo QwenLM/qwen-code --title Main CI failed: SDK Java --body-file',
       );
@@ -1211,7 +1224,7 @@ fi
       const result = run([
         { ...botIssue(7), author: { login: 'not-the-bot' } },
       ]);
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('issue create');
       expect(result.calls).not.toContain('issue comment 7');
     });
@@ -1231,7 +1244,7 @@ fi
           marked,
         ],
       });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('issue comment 42');
       expect(result.calls).not.toMatch(/issue (create|edit|reopen)/);
     });
@@ -1297,7 +1310,7 @@ fi
           issueBody: 'Original unmarked body',
           ...failure,
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue comment 42');
         expect(result.output).toContain(
           'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
@@ -1327,7 +1340,7 @@ fi
           { ...botIssue(42), body: '<!-- main-ci-failure-aggregate:1234 -->' },
         ],
       });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('issue reopen 42');
       expect(result.calls).toContain('issue comment 42');
       expect(result.calls).not.toContain('issue comment 9');
@@ -1336,7 +1349,7 @@ fi
 
     it('retries a transient light lookup failure and still records the failure', () => {
       const result = run([botIssue(42)], { lookupFailures: 1 });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls.match(/issue list .*--state open/g)).toHaveLength(2);
       expect(result.calls).toContain('issue comment 42');
     });
@@ -1345,7 +1358,7 @@ fi
       // Every lookup retries 3x; the comment carrying the occurrence gets the
       // same tolerance, or a transient 5xx permanently loses the record.
       const result = run([botIssue(42)], { failCommentOnce: true });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls.match(/issue comment 42/g)).toHaveLength(2);
       expect(result.output).toContain(
         'issue_url=https://github.com/QwenLM/qwen-code/issues/42',
@@ -1361,14 +1374,14 @@ fi
         issueBodies: { 7: tracked },
         closedIssues: [{ ...botIssue(7, ' — Foo.test'), body: tracked }],
       });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls.match(/issue reopen 7/g)).toHaveLength(2);
       expect(result.calls).toContain('issue comment 7');
     });
 
     it('retries a transient create failure for a fresh aggregate', () => {
       const result = run([], { failCreateOnce: true });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls.match(/issue create/g)).toHaveLength(2);
       expect(result.output).toContain(
         'issue_url=https://github.com/QwenLM/qwen-code/issues/999',
@@ -1401,7 +1414,7 @@ fi
 
     it('keeps a newly created failure record when adding triage labels fails', () => {
       const result = run([], { failEdit: true });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.output).toContain(
         'issue_url=https://github.com/QwenLM/qwen-code/issues/999',
       );
@@ -1419,7 +1432,7 @@ fi
           JSON.stringify([{ ...marked, number: 50 }]) +
           JSON.stringify([{ ...marked, number: 42 }]),
       });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('issue comment 42');
       expect(result.calls).not.toContain('issue create');
     });
@@ -1434,7 +1447,7 @@ fi
             botIssue(42, suffix),
           ],
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue reopen 42');
         expect(result.calls).toContain('issue comment 42');
         expect(result.calls.indexOf('issue reopen 42')).toBeLessThan(
@@ -1447,7 +1460,7 @@ fi
 
     it('creates a fresh aggregate when the bounded closed lookup fails', () => {
       const result = run([], { failClosedLookup: true });
-      expect(result.status).toBe(0);
+      expect(result.status, result.stderr).toBe(0);
       expect(result.calls).toContain('--state closed');
       expect(result.calls).toContain('issue create');
       expect(result.calls).not.toContain('issue reopen');
@@ -1528,7 +1541,7 @@ fi
           signatureTitle,
           testMarkers: `${markerA}\n${markerB}`,
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain(
           `issue create --repo QwenLM/qwen-code --title ${signatureTitle} --body-file`,
         );
@@ -1558,7 +1571,7 @@ fi
           testMarkers: markerA,
           provisional: true,
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.body).toMatch(
           /^> \*\*Provisional\.\*\* Main advanced past this head/,
         );
@@ -1588,7 +1601,7 @@ fi
           testMarkers: `${markerA}\n${markerB}`,
           issueBodies: { 7: tracked },
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue comment 7');
         expect(result.calls).not.toContain('issue create');
         expect(result.output).toContain(
@@ -1621,7 +1634,7 @@ fi
           testMarkers: `${markerA}\n${markerB}`,
           issueBodies: { 7: tracked },
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue comment 7');
         expect(result.calls).not.toContain('issue edit');
       });
@@ -1637,7 +1650,7 @@ fi
           issueBodies: { 7: tracked },
           provisional: true,
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue comment 7');
         expect(result.commentBody).toMatch(
           /^> \*\*Provisional\.\*\* Main advanced past this head/,
@@ -1655,7 +1668,7 @@ fi
           issueBodies: { 7: `<!-- ${markerA} -->\n` },
           failEdit: true,
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue comment 7');
         expect(result.output).toContain(
           'issue_url=https://github.com/QwenLM/qwen-code/issues/7',
@@ -1681,7 +1694,7 @@ fi
             },
           ],
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.stdout).toContain(
           'Falling back to the workflow aggregate',
         );
@@ -1698,7 +1711,7 @@ fi
             issueBodies: { 7: `<!-- ${markerA} -->\n` },
           },
         );
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue create');
         expect(result.calls).not.toContain('issue comment 7');
       });
@@ -1729,7 +1742,7 @@ fi
             issueBodies: { 9: retitled.body },
           },
         );
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue comment 9');
         expect(result.calls).not.toContain('issue create');
         expect(result.calls).not.toContain('issue edit');
@@ -1744,7 +1757,7 @@ fi
           testMarkers: markerA,
           failMarkerLookup: true,
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.stdout).toContain(
           'Falling back to the workflow aggregate',
         );
@@ -1767,7 +1780,7 @@ fi
           testMarkers: markerA,
           markerIssues: [foreign],
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue create');
         expect(result.calls).not.toContain('issue comment 9');
       });
@@ -1782,7 +1795,7 @@ fi
           issueBodies: { 7: tracked },
           closedIssues: [{ ...botIssue(7, ' — Foo.test'), body: tracked }],
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls.indexOf('issue reopen 7')).toBeLessThan(
           result.calls.indexOf('issue comment 7'),
         );
@@ -1810,7 +1823,7 @@ fi
             },
           ],
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).not.toContain('issue reopen 7');
         expect(result.calls).toContain('issue create');
       });
@@ -1821,7 +1834,7 @@ fi
           testMarkers: markerA,
           failClosedLookup: true,
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue comment 42');
         expect(result.calls).not.toContain('issue create');
       });
@@ -1840,7 +1853,7 @@ fi
             issueBodies: { 20: owned(markerA), 21: owned(markerB) },
           },
         );
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue comment 20');
         expect(result.calls).not.toContain('issue edit');
       });
@@ -1862,7 +1875,7 @@ fi
           },
           markerIssues: [retitled],
         });
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue comment 20');
         expect(result.calls).not.toContain('issue edit');
       });
@@ -1882,7 +1895,7 @@ fi
             },
           },
         );
-        expect(result.status).toBe(0);
+        expect(result.status, result.stderr).toBe(0);
         expect(result.calls).toContain('issue comment 20');
         expect(result.calls).not.toContain('issue edit');
         expect(result.stdout).toContain(
@@ -1953,13 +1966,15 @@ fi
     ).toBe(1);
     // The ids projection is bound to the array the download loop iterates and to
     // the payload the fetch wrote. Swapping it with the TSV projection below
-    // hands `mapfile` whole TSV lines so every log download 404s; renaming the
-    // array on one side only loses the failing-test details while the job/step
+    // hands the reader whole TSV lines so every log download 404s. Renaming
+    // the array on one side loses failing-test details while the job/step
     // summary still renders.
     expect(download).toContain(
-      'mapfile -t job_ids < <( jq -r \'.jobs[] | select(.conclusion == "failure") | .id\' "${jobs_json}" 2>/dev/null )',
+      'job_ids=() while IFS= read -r job_id; do job_ids+=("${job_id}") done < <( jq -r \'.jobs[] | select(.conclusion == "failure") | .id\' "${jobs_json}" 2>/dev/null )',
     );
-    expect(download).toContain('for job_id in "${job_ids[@]}"; do');
+    expect(download).toContain(
+      'for job_id in ${job_ids[@]+"${job_ids[@]}"}; do',
+    );
     // The same bindings for the projection this PR adds, plus the `|| true` that
     // keeps an errored jobs response from aborting the step under `bash -e`
     // before a failure summary is rendered, and the `2>/dev/null` that keeps the
@@ -2217,7 +2232,7 @@ printf '%s\\n' '{"jobs":[]}'
       // The annotation read is per check-run id taken from the jobs payload's
       // own check_run_url, and the match is the same grep the PR scan uses.
       expect(infraScript).toContain(
-        'jq -r \'.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | index("Report the tier result")) | not) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv\'',
+        'jq -r \'.jobs[] | select(.conclusion == "failure") | select(([(.steps // [])[] | select(.conclusion == "failure") | .name] | map(select(. == "Report the tier result" or . == "Require every macOS test group to pass")) | length) == 0) | [(.id | tostring), ((.check_run_url // "") | split("/")[-1])] | @tsv\'',
       );
       expect(infraScript).toContain(
         'gh api --paginate "repos/${REPO}/check-runs/${check_run_id}/annotations"',
@@ -2345,6 +2360,30 @@ printf '%s\\n' '{"jobs":[]}'
       );
       expect(out).toContain('infra_only=true');
     });
+
+    it.each([
+      ['No space left on device', 'true'],
+      ['AssertionError: expected the daemon to answer', 'false'],
+    ])(
+      'classifies the shard behind a failed macOS aggregate: %s',
+      (message, expected) => {
+        const out = classify(
+          [
+            failedJob(1001, 9001, [
+              { name: 'Run tests and generate reports', conclusion: 'failure' },
+            ]),
+            failedJob(1002, 9002, [
+              {
+                name: 'Require every macOS test group to pass',
+                conclusion: 'failure',
+              },
+            ]),
+          ],
+          { 9001: message, 9002: 'Process completed with exit code 1.' },
+        );
+        expect(out).toContain(`infra_only=${expected}`);
+      },
+    );
 
     it('keeps counting the reporter when its own runner died before any step', () => {
       // Filtering by the failing STEP name is what keeps this rerun: no step

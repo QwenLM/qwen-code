@@ -47,7 +47,7 @@ import type { SessionPrInfo } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
 import {
   backfillWorkspaceSessionPrs,
-  bindSessionPrsFromReviewPrompt,
+  bindSessionPrsFromPromptCommand,
   parsePrNumberFromWorktree,
   registerSessionPrBackfillRoutes,
 } from './session-pr-backfill.js';
@@ -2534,7 +2534,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: {
+        liveCommand: {
           sessionId: SESSION_A,
           rawCommand: '/review 77 --comment',
         },
@@ -2570,7 +2570,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 77' },
       },
     );
 
@@ -2591,7 +2591,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     // `/review 001_init.sql` is a file review, not PR 1 — the shared command
     // grammar must reject it before any platform query.
     await backfillWorkspaceSessionPrs(runtime, undefined, undefined, {
-      liveReview: { sessionId: SESSION_A, rawCommand: '/review 001_init.sql' },
+      liveCommand: { sessionId: SESSION_A, rawCommand: '/review 001_init.sql' },
     });
 
     expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
@@ -2601,6 +2601,229 @@ describe('backfillWorkspaceSessionPrs', () => {
         sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
       ),
     ).toBeNull();
+  });
+
+  it('binds a live /verify-pr number', async () => {
+    // Deep verification names the PR it proves; the session must carry the
+    // same badge a review of that PR would give it.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr 77 --publish',
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toMatchObject([
+      {
+        number: 77,
+        url: 'https://github.com/o/r/pull/77',
+        source: 'review',
+      },
+    ]);
+  });
+
+  it('binds a live /verify-pr whose --repo names this workspace', async () => {
+    // `--repo o/r` is how a maintainer states the PR's repository explicitly;
+    // when it is this workspace's own, the number is the same PR N.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(78, 'fix/78')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr 78 --repo o/r',
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.map((entry) => entry.number),
+    ).toEqual([78]);
+  });
+
+  it('does not bind a /verify-pr number scoped to another repository', async () => {
+    // `--repo other/x 77` names another repo's PR 77 — a different PR from
+    // this workspace's 77, which must never take its badge.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr 77 --repo other/x',
+    );
+
+    expect(result).toMatchObject({
+      scanned: 1,
+      bound: 0,
+      written: 0,
+      repoDeclined: 1,
+    });
+    expect(runtime.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('reports a /review declined by a --repo in its later prose', async () => {
+    // The qualifier is read off the whole prompt, so a pasted command in the
+    // body counts. Declining is right, but the decline has to be counted —
+    // otherwise the missing badge is indistinguishable from a silent miss.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/review 42\nSee: gh pr view 9 --repo acme/widgets',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'fix/42')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, repoDeclined: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('keeps a url form and a qualified number from binding this repo', async () => {
+    // The url form names another repo's PR 5 and the bare claim is scoped to
+    // the same other repo: merging them must not drop the qualifier and bind
+    // this workspace's PR 5, which is a different PR.
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    const record = (text: string, parent: string | null) =>
+      JSON.stringify({
+        uuid: `${SESSION_A}-${text}`,
+        parentUuid: parent,
+        sessionId: SESSION_A,
+        timestamp: '2026-08-02T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text }] },
+        cwd: workspaceCwd,
+      });
+    await fsp.writeFile(
+      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      `${record('/review https://github.com/other/x/pull/5', null)}\n` +
+        `${record('/verify-pr 5 --repo other/x', `${SESSION_A}-url`)}\n`,
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(5, 'fix/5')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('does not read /verify-pr-watch as the command', async () => {
+    // The `[ \t]+` separator after the command name rejects this, exactly
+    // like `/review-skill`; the lookahead only closes the number.
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr-watch 77',
+    );
+
+    expect(result).toBeUndefined();
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+  });
+
+  it('declines a /review that carries a stray --repo', async () => {
+    // `/review` has no `--repo` flag, but the shared grammar reads the
+    // qualifier off the prompt, so a stray one fails closed instead of
+    // binding a number the reviewer scoped elsewhere. The badge is missing,
+    // never wrong.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/review 77 --repo other/x',
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('binds a /verify-pr command recorded in the transcript', async () => {
+    // A TUI turn records the typed command in the slash_command system
+    // record; the sweep must read /verify-pr from it, not just /review.
+    const chatsDir = path.join(
+      new Storage(workspaceCwd).getProjectDir(),
+      'chats',
+    );
+    await fsp.mkdir(chatsDir, { recursive: true });
+    await fsp.writeFile(
+      path.join(chatsDir, `${SESSION_A}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${SESSION_A}-verify-88`,
+        parentUuid: null,
+        sessionId: SESSION_A,
+        timestamp: '2026-08-02T00:00:00.000Z',
+        type: 'system',
+        subtype: 'slash_command',
+        systemPayload: {
+          phase: 'invocation',
+          rawCommand: '/verify-pr 88 --publish',
+        },
+        cwd: workspaceCwd,
+      })}\n`,
+      'utf8',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(88, 'fix/88')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.map((entry) => entry.number),
+    ).toEqual([88]);
   });
 
   it('binds a live /review into the archive sidecar', async () => {
@@ -2618,7 +2841,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 79' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 79' },
       },
     );
 
@@ -2643,7 +2866,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: {
+        liveCommand: {
           sessionId: SESSION_A,
           rawCommand: '/review https://github.com/o/r/pull/43 --comment',
         },
@@ -2662,7 +2885,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     // The wrapper is exported for the prompt route; the trust gate must hold
     // even if a caller forgets to check it.
     const untrusted = { ...runtime, trusted: false } as WorkspaceRuntime;
-    await bindSessionPrsFromReviewPrompt(untrusted, SESSION_A, '/review 80');
+    await bindSessionPrsFromPromptCommand(untrusted, SESSION_A, '/review 80');
 
     expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
     expect(
@@ -2695,7 +2918,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 11' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 11' },
       },
     );
 
@@ -2738,7 +2961,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       {
         archiveCoordinator,
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 77' },
       },
     );
 
@@ -2784,7 +3007,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 77' },
       },
     );
 
@@ -2832,7 +3055,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 11' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 11' },
       },
     );
 
@@ -2865,7 +3088,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       undefined,
       undefined,
       {
-        liveReview: { sessionId: SESSION_A, rawCommand: '/review 5' },
+        liveCommand: { sessionId: SESSION_A, rawCommand: '/review 5' },
       },
     );
 
@@ -2910,7 +3133,7 @@ describe('backfillWorkspaceSessionPrs', () => {
         undefined,
         undefined,
         {
-          liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+          liveCommand: { sessionId: SESSION_A, rawCommand: '/review 77' },
         },
       );
 
@@ -2930,7 +3153,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       // makes removing the bound fail rather than merely run slowly.
       const prompt = '/review ' + 'http://a'.repeat(25_000);
       const started = Date.now();
-      await bindSessionPrsFromReviewPrompt(runtime, SESSION_A, prompt);
+      await bindSessionPrsFromPromptCommand(runtime, SESSION_A, prompt);
       expect(Date.now() - started).toBeLessThan(1_000);
 
       expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
@@ -2943,7 +3166,7 @@ describe('backfillWorkspaceSessionPrs', () => {
   );
 
   it('binds only the named session through the trusted wrapper', async () => {
-    // The wrapper must inject liveReview (target-only) and forward the lane.
+    // The wrapper must inject liveCommand (target-only) and forward the lane.
     await seedSession(SESSION_B);
     await seedReviewedNumbers(SESSION_B, 66, 66);
     const coordinator = new SessionArchiveCoordinator();
@@ -2953,7 +3176,7 @@ describe('backfillWorkspaceSessionPrs', () => {
       pullRequests: [pr(66, 'fix/66'), pr(77, 'fix/77')],
     });
 
-    await bindSessionPrsFromReviewPrompt(runtime, SESSION_A, '/review 77', {
+    await bindSessionPrsFromPromptCommand(runtime, SESSION_A, '/review 77', {
       archiveCoordinator: coordinator,
     });
 
@@ -2974,7 +3197,7 @@ describe('backfillWorkspaceSessionPrs', () => {
     // Without the wrapper's parse gate this would sweep and bind pr-123.
     await seedWorktreeSidecar(SESSION_C, 'pr-123', 'worktree-pr-123');
 
-    await bindSessionPrsFromReviewPrompt(runtime, SESSION_C, 'hello there');
+    await bindSessionPrsFromPromptCommand(runtime, SESSION_C, 'hello there');
 
     expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
     expect(
@@ -3014,7 +3237,7 @@ describe('backfillWorkspaceSessionPrs', () => {
         undefined,
         undefined,
         {
-          liveReview: { sessionId: SESSION_A, rawCommand: '/review 77' },
+          liveCommand: { sessionId: SESSION_A, rawCommand: '/review 77' },
         },
       );
 
@@ -3645,6 +3868,769 @@ describe('backfillWorkspaceSessionPrs', () => {
       url: 'https://github.com/stranger/repoB/pull/77',
       source: 'review',
     });
+  });
+
+  it('declines a --repo the grammar cannot read', async () => {
+    // A quoted value is what the skill itself documents
+    // (`gh pr view <n> --repo "$REPO"`); `-R` is gh's short form. Both must
+    // decline rather than fall back to this workspace's same-numbered PR.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo "other/x"');
+    await seedSession(SESSION_B);
+    await appendUserText(SESSION_B, '/verify-pr 77 -R other/x');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({
+      scanned: 2,
+      bound: 0,
+      written: 0,
+      repoDeclined: 2,
+    });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+      ),
+    ).toBeNull();
+    expect(runtime.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
+  });
+
+  it('reads --repo= and leaves --assets-repo alone', async () => {
+    // `--repo=other/x` is the same qualifier; `--assets-repo` is a different
+    // flag of the same command and must not swallow a legitimate binding.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo=other/x');
+    await seedSession(SESSION_B);
+    await appendUserText(SESSION_B, '/verify-pr 78 --assets-repo other/x');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77'), pr(78, 'fix/78')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ scanned: 2, bound: 1, repoDeclined: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+        )
+      )?.[0]?.number,
+    ).toBe(78);
+  });
+
+  it('binds when a later claim names this workspace', async () => {
+    // Turn 1 scoped the number to another repo; turn 2 named this one. The
+    // later explicit claim must not be lost to the earlier foreign one, or a
+    // session whose live bind was missed could never backfill.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 12 --repo other/x');
+    await appendUserText(SESSION_A, '/verify-pr 12 --repo o/r');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(12, 'fix/12')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 12, url: 'https://github.com/o/r/pull/12' });
+  });
+
+  it('lets an unqualified /review claim clear an earlier --repo', async () => {
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 5 --repo other/x');
+    await appendUserText(SESSION_A, '/review 5');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(5, 'fix/5')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 5, url: 'https://github.com/o/r/pull/5' });
+  });
+
+  it('binds a qualified number to the divergent page repo it named', async () => {
+    // The gh page lists a stranger repo and is not a confirmed fork parent, so
+    // the number is qualified to that repo while the url form names it too.
+    // The binding must carry the named page URL: the unqualified reading binds
+    // THIS workspace's PR 9, which the user never mentioned.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 9 --repo stranger/repoB');
+    await appendUserText(
+      SESSION_A,
+      '/review https://github.com/stranger/repoB/pull/9',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(9, 'whatever'),
+          url: 'https://github.com/stranger/repoB/pull/9',
+        },
+      ],
+    });
+    fetchAttributionRepoKeysMock.mockResolvedValue({
+      resolved: 'github.com/o/r',
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1, repoDeclined: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({
+      number: 9,
+      url: 'https://github.com/stranger/repoB/pull/9',
+    });
+  });
+
+  it('does not read /review77 as the command', async () => {
+    // The separator after the command name is what rejects this; there is no
+    // filename-character closure on the command token.
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/review77',
+    );
+
+    expect(result).toBeUndefined();
+    expect(fetchGitHubPullRequestsMock).not.toHaveBeenCalled();
+  });
+
+  it('matches the qualified spelling against the origin, not its string', async () => {
+    // `host/owner/repo` is the same repository; `OWNER/REPO` differs only in
+    // case; another host is another repository.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 11 --repo github.com/o/r');
+    await seedSession(SESSION_B);
+    await appendUserText(SESSION_B, '/verify-pr 12 --repo O/R');
+    await seedSession(SESSION_C);
+    await appendUserText(SESSION_C, '/verify-pr 13 --repo example.com/o/r');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(11, 'f11'), pr(12, 'f12'), pr(13, 'f13')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 2, repoDeclined: 1 });
+    const numbersIn = async (sessionId: string): Promise<number[]> =>
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(sessionId, 'active'),
+        )
+      )?.map((entry) => entry.number) ?? [];
+    expect(await numbersIn(SESSION_A)).toEqual([11]);
+    expect(await numbersIn(SESSION_B)).toEqual([12]);
+    expect(await numbersIn(SESSION_C)).toEqual([]);
+  });
+
+  it('binds a nested-group qualifier by its full path', async () => {
+    // The collapsed repo key keeps only two path segments, so a nested group
+    // must be compared on the origin's full path: the only correct spelling
+    // binds, and a sibling project in the same group does not.
+    fetchRemoteWebUrlMock.mockResolvedValue(
+      'https://gitlab.corp.com/group/sub/cli',
+    );
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 21 --repo group/sub/cli');
+    await seedSession(SESSION_B);
+    await appendUserText(SESSION_B, '/verify-pr 22 --repo group/sub/sibling');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(21, 'f21'),
+          url: 'https://gitlab.corp.com/group/sub/cli/pull/21',
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1, repoDeclined: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+      ),
+    ).toBeNull();
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({
+      number: 21,
+      url: 'https://gitlab.corp.com/group/sub/cli/pull/21',
+    });
+  });
+
+  it('binds a --repo naming the confirmed fork parent', async () => {
+    // The page is the fork's parent and gh's own resolution confirms it, so
+    // the parent's key joins the trusted identities: a qualifier naming the
+    // parent is this workspace's PR, while the fork hosts no PRs itself.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/forker/qwen');
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 31 --repo parent/repo');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(31, 'f31'),
+          url: 'https://github.com/parent/repo/pull/31',
+        },
+      ],
+    });
+    fetchAttributionRepoKeysMock.mockResolvedValue({
+      resolved: 'github.com/forker/qwen',
+      parent: 'github.com/parent/repo',
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({
+      number: 31,
+      url: 'https://github.com/parent/repo/pull/31',
+    });
+  });
+
+  it('declines a qualified number the named repository does not host', async () => {
+    // Fork layout with a trusted parent page: 77 exists only as the parent's
+    // PR while the user named the fork, and 78 is absent from the parent page
+    // the user named. Neither may be substituted with the other side's PR.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/me/fork');
+    fetchAttributionRepoKeysMock.mockResolvedValue({
+      resolved: 'github.com/me/fork',
+      parent: 'github.com/parent/repo',
+    });
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo me/fork');
+    await seedSession(SESSION_B);
+    await appendUserText(SESSION_B, '/verify-pr 78 --repo parent/repo');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(77, 'f77'),
+          url: 'https://github.com/parent/repo/pull/77',
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0, repoDeclined: 2 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('keeps an earlier unqualified claim above a later foreign qualifier', async () => {
+    // `/review 77` settled the number as this workspace's; a later
+    // `--repo other/repo` must not take that meaning away.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review 77');
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo other/repo');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 77, url: 'https://github.com/o/r/pull/77' });
+  });
+
+  it('keeps an unreadable qualifier beside a url form', async () => {
+    // A url form named another repo's PR 77 and the bare claim is qualified to
+    // something unreadable: neither command named this workspace's 77.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/review https://github.com/other/repo/pull/77',
+    );
+    await appendUserText(SESSION_A, '/verify-pr 77 -R other/repo');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('requires the whole path when the qualifier names a host', async () => {
+    // `host/sub/cli` is a different full path from `host/group/sub/cli`: an
+    // explicit host must match every segment, not just the tail.
+    fetchRemoteWebUrlMock.mockResolvedValue(
+      'https://gitlab.corp.com/group/sub/cli',
+    );
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/verify-pr 77 --repo https://gitlab.corp.com/sub/cli',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(77, 'f77'),
+          url: 'https://gitlab.corp.com/group/sub/cli/pull/77',
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, repoDeclined: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('declines the attached -R shorthand', async () => {
+    // gh accepts `-Rowner/repo`; the attached value must count as a
+    // qualifier, or the number binds this workspace's same-numbered PR.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 -Rother/x');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('does not read a shell -R as the qualifier', async () => {
+    // `chmod -R 755` carries no repository value; treating it as one would
+    // silently drop ordinary review prompts.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/review 77\n\nAfter merging, run chmod -R 755 dist before publishing.',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 77, url: 'https://github.com/o/r/pull/77' });
+  });
+
+  it('keeps the convention binding above a foreign qualifier', async () => {
+    // The session exists FOR PR 42 by convention; a foreign `--repo` on the
+    // same number must not suppress the strongest binding.
+    await seedSession(SESSION_A);
+    await seedWorktreeSidecar(SESSION_A, 'pr-42', 'worktree-pr-42');
+    await appendUserText(SESSION_A, '/verify-pr 42 --repo other/x');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'f42')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 42, source: 'worktree' });
+  });
+
+  it('declines a two-segment qualifier against a nested origin', async () => {
+    // `sub/cli` is a different top-level project from `group/sub/cli`, so the
+    // path comparison is exact in both directions.
+    fetchRemoteWebUrlMock.mockResolvedValue(
+      'https://gitlab.corp.com/group/sub/cli',
+    );
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo sub/cli');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, repoDeclined: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('declines an unreadable -R beside readable prose', async () => {
+    // A readable `--repo` in pasted prose must not excuse an unreadable one on
+    // the command itself.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/verify-pr 77 -R other/x\nSee: gh pr view 9 --repo o/r',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('binds a qualified number in a repository named pull', async () => {
+    // The first `pull` is the repository; only the trailing `/pull/<n>` is the
+    // route, so the identity must be stripped from the end.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/o/pull');
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo o/pull');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(77, 'f77'),
+          url: 'https://github.com/o/pull/pull/77',
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({
+      number: 77,
+      url: 'https://github.com/o/pull/pull/77',
+    });
+  });
+
+  it('declines a -R whose value is on the next line', async () => {
+    // The qualifier is unreadable there, which must decline rather than read
+    // as an unqualified number.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 -R\nother/repo');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('does not read a shell copy as the qualifier', async () => {
+    // `cp -R src/ backup/` carries no repository-shaped value, so the review's
+    // binding survives.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/review 77\nCheck cp -R src/ backup/ before merging.',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 77, url: 'https://github.com/o/r/pull/77' });
+  });
+
+  it('declines a quoted -R value', async () => {
+    // The quotes are how a shell spells the same qualifier; losing it would
+    // bind this workspace's same-numbered PR.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 -R "other/repo"');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('declines a -R value spelled as a URL', async () => {
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/verify-pr 77 -R https://github.com/other/repo',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('binds a qualifier spelled with a scheme', async () => {
+    // `https://host/owner/repo` names the same repository as the bare form.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/verify-pr 11 --repo https://github.com/o/r',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(11, 'f11')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+  });
+
+  it('binds a qualifier spelled in scp form', async () => {
+    // `git@host:owner/repo` normalizes to a host plus a two-segment path.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 12 --repo git@github.com:o/r');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(12, 'f12')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+  });
+
+  it('declines a qualified number when the origin is unresolvable', async () => {
+    // No workspace identity means no qualifier can be confirmed: the number
+    // declines rather than binding on an unverifiable match.
+    fetchRemoteWebUrlMock.mockResolvedValue(undefined);
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo o/r');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+  });
+
+  it('binds a form-named number even when the bare claim is foreign', async () => {
+    // The url form names this workspace's PR 9 explicitly; that exemption keeps
+    // a foreign bare claim from overriding the URL the user typed.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review https://github.com/o/r/pull/9');
+    await appendUserText(SESSION_A, '/verify-pr 9 --repo other/x');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(9, 'f9')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({ number: 9, url: 'https://github.com/o/r/pull/9' });
+  });
+
+  it('reads the merge_requests route shape for the qualified identity', async () => {
+    // GitLab spells the route `/-/merge_requests/<i>`; the identity must strip
+    // it, including the trailing `/-`, or a correct qualifier declines.
+    fetchRemoteWebUrlMock.mockResolvedValue(
+      'https://gitlab.corp.com/group/sub/cli',
+    );
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 21 --repo group/sub/cli');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        {
+          ...pr(21, 'f21'),
+          url: 'https://gitlab.corp.com/group/sub/cli/-/merge_requests/21',
+        },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.[0],
+    ).toMatchObject({
+      number: 21,
+      url: 'https://gitlab.corp.com/group/sub/cli/-/merge_requests/21',
+    });
+  });
+
+  it('declines a dotted first segment rather than guessing a group', async () => {
+    // `a.b/c` cannot be told apart from `host/owner`: the host reading wins,
+    // which leaves one path segment, so the qualifier declines. The origin is
+    // itself dotted so the case discriminates: reading the first segment as a
+    // group would match `a.b/c` and bind this PR.
+    fetchRemoteWebUrlMock.mockResolvedValue('https://github.com/a.b/c');
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77 --repo a.b/c');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [
+        { ...pr(77, 'f77'), url: 'https://github.com/a.b/c/pull/77' },
+      ],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0, repoDeclined: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('declines a quoted -R URL value', async () => {
+    // A shell-quoted URL is the same qualifier as the bare spelling, so it
+    // must keep the decline instead of vanishing into a local number.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/verify-pr 77 -R "https://github.com/other/repo"',
+    );
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'f77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, written: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
   });
 
   it('declines a /review url form the sidecar reader would reject', async () => {

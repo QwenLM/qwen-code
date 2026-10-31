@@ -8,6 +8,7 @@ import { describe, expect, it } from 'vitest';
 import { buildManagedAutoMemoryIndex } from './indexer.js';
 import {
   INDEX_TRUNCATION_NOTICE,
+  INDEX_TRUNCATION_NOTICE_START,
   INDEX_TRUNCATION_WARNING,
   MAX_INDEX_CHARS,
   MAX_INDEX_LINE_CHARS,
@@ -279,7 +280,7 @@ describe('managed auto-memory prompt helpers', () => {
       for (const entry of entries) {
         expect(result).toContain(entry);
       }
-      expect(result).toContain(INDEX_TRUNCATION_WARNING);
+      expect(result).toContain('only part of it was written.');
       expect(result).not.toContain('Only part of it was loaded.');
       expect(result).not.toContain('too many index entries');
     },
@@ -993,8 +994,12 @@ describe('managed auto-memory prompt helpers', () => {
       const result = buildManagedAutoMemoryPrompt('/tmp/memory', generated);
       expect(result).not.toContain('Only part of it was loaded.');
       expect(result).not.toContain('bring the total within');
-      if (generated.includes(INDEX_TRUNCATION_WARNING)) {
-        expect(result).toContain(INDEX_TRUNCATION_WARNING);
+      const noticeStart = generated.indexOf(INDEX_TRUNCATION_NOTICE_START);
+      if (description.length === 130) {
+        expect(noticeStart).toBeGreaterThanOrEqual(0);
+        expect(result).toContain(generated.slice(noticeStart));
+      } else {
+        expect(noticeStart).toBe(-1);
       }
     }
   });
@@ -1039,9 +1044,10 @@ describe('managed auto-memory prompt helpers', () => {
     const generated = buildManagedAutoMemoryIndex(docs);
     expect(generated.length).toBeGreaterThan(MAX_INDEX_CHARS);
     expect(generated).toContain(' — reference');
-    expect(generated).toContain(INDEX_TRUNCATION_WARNING);
+    const noticeStart = generated.indexOf(INDEX_TRUNCATION_NOTICE_START);
+    expect(noticeStart).toBeGreaterThanOrEqual(0);
     const result = buildManagedAutoMemoryPrompt('/tmp/memory', generated);
-    expect(result).toContain(INDEX_TRUNCATION_WARNING);
+    expect(result).toContain(generated.slice(noticeStart));
     expect(result).not.toMatch(
       /shortening nonempty `description` frontmatter/i,
     );

@@ -8,8 +8,10 @@ import { wrapSystemReminder } from '../core/environmentContext.js';
 import { normalizeContent } from '../utils/textUtils.js';
 import { AUTO_MEMORY_TREE_CATEGORIES } from './types.js';
 import {
+  describeDroppedIndexEntries,
   formatIndexEntry,
-  INDEX_TRUNCATION_NOTICE,
+  INDEX_SCAN_CAP_NOTICE_START,
+  INDEX_TRUNCATION_NOTICE_START,
   MAX_INDEX_LINES as MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
   MAX_INDEX_CHARS,
   MAX_INDEX_LINE_CHARS,
@@ -163,10 +165,6 @@ export const TRUSTING_RECALL_SECTION: readonly string[] = [
   'A memory that summarizes repo state (activity logs, architecture snapshots) is frozen in time. If the user asks about *recent* or *current* state, prefer `git log` or reading the code over recalling the snapshot.',
 ];
 
-const MAX_NAMED_DROPPED_ENTRIES = 3;
-const MAX_DROPPED_ENTRY_NAME_CHARS = 60;
-
-const INDEX_ENTRY_TITLE = /^\s*-\s*\[([^\]]+)\]/;
 function descriptionFreeIndexEntry(
   line: string,
 ): { min: number; max: number } | undefined {
@@ -181,48 +179,21 @@ function descriptionFreeIndexEntry(
   return { min, max };
 }
 
-function droppedEntryName(line: string): string {
-  const title = INDEX_ENTRY_TITLE.exec(line)?.[1]?.trim();
-  const text = title || line.trim();
-  if (text.length <= MAX_DROPPED_ENTRY_NAME_CHARS) {
-    return text;
-  }
-  let head = text.slice(0, MAX_DROPPED_ENTRY_NAME_CHARS - 1);
-  // Back off one unit when the cut lands inside a surrogate pair, the same
-  // guard truncateIndexField() applies: a lone surrogate on the wire breaks
-  // strict codecs on the receiving side.
-  const lastUnit = head.charCodeAt(head.length - 1);
-  if (lastUnit >= 0xd800 && lastUnit <= 0xdbff) {
-    head = head.slice(0, -1);
-  }
-  return `${head}…`;
-}
-
-function describeDroppedEntries(
-  dropped: readonly string[],
-  total: number,
-): string {
-  const removed = dropped.filter((line) => line.trim().length > 0);
-  if (removed.length === 0) {
-    return '';
-  }
-  const names = removed
-    .slice(0, MAX_NAMED_DROPPED_ENTRIES)
-    .map((line) => `"${droppedEntryName(line)}"`)
-    .join(', ');
-  const rest = removed.length - MAX_NAMED_DROPPED_ENTRIES;
-  return ` Dropped ${removed.length} of ${total} entries: ${names}${
-    rest > 0 ? `, +${rest} more` : ''
-  }.`;
-}
-
 function truncateManagedAutoMemoryIndex(indexContent: string): string {
   const trimmed = normalizeContent(indexContent).trim();
-  // Writer notices describe omissions before saving, not during prompt loading.
-  const hasWriterNotice = trimmed.endsWith(INDEX_TRUNCATION_NOTICE);
-  const entryContent = hasWriterNotice
-    ? trimmed.slice(0, -INDEX_TRUNCATION_NOTICE.length)
-    : trimmed;
+  const noticeStart = Math.max(
+    trimmed.lastIndexOf(INDEX_TRUNCATION_NOTICE_START),
+    trimmed.lastIndexOf(INDEX_SCAN_CAP_NOTICE_START),
+  );
+  // Exempt only bounded, single-paragraph writer metadata from entry budgets.
+  const hasWriterNotice =
+    noticeStart !== -1 &&
+    trimmed.length - noticeStart <= 1024 &&
+    !trimmed.slice(noticeStart + 2).includes('\n');
+  const writerNotice = hasWriterNotice ? trimmed.slice(noticeStart) : '';
+  const entryContent = (
+    hasWriterNotice ? trimmed.slice(0, noticeStart) : trimmed
+  ).trimEnd();
   const entries = entryContent.split('\n');
   const lineCount = entries.length;
   const charCount = entryContent.length;
@@ -305,7 +276,7 @@ function truncateManagedAutoMemoryIndex(indexContent: string): string {
           ? ` ${shorteningAdvice}`
           : ' Prune or merge entries to fit the character budget.';
 
-  return `${content}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${describeDroppedEntries(
+  return `${content}${writerNotice}\n\n> WARNING: MEMORY.md is ${reason}. Only part of it was loaded.${describeDroppedIndexEntries(
     dropped,
     entries.length,
   )}${lever} Make edits in the topic files; changes to regenerated index lines do not persist.`;
@@ -469,7 +440,7 @@ export function buildManagedAutoMemoryPrompt(
         '',
         ...MEMORY_FRONTMATTER_EXAMPLE,
         '',
-        '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry should be one line, under ~150 characters: `- [Title](file.md) — one-line hook`. It has no frontmatter. Never write memory content directly into `MEMORY.md`.',
+        '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry should be one line, under ~150 characters: `- [Title](file.md) — one-line hook`. It has no frontmatter. If a trailing warning is present, insert new pointers above it so it stays last. Never write memory content directly into `MEMORY.md`.',
         '',
         `- Every \`MEMORY.md\` index is available to memory maintenance agents — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise`,
         '- Keep the name, description, type, category, keywords, and usage_scenarios fields in memory files up-to-date with the complete content',
@@ -490,7 +461,7 @@ export function buildManagedAutoMemoryPrompt(
         '',
         ...MEMORY_FRONTMATTER_EXAMPLE,
         '',
-        `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path). This index file is an index, not a memory — each entry should be one line, under ~150 characters: \`- [Title](file.md) — one-line hook\`. It has no frontmatter. Never write memory content directly into \`${memoryDir}/MEMORY.md\`.`,
+        `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\` (the full absolute path). This index file is an index, not a memory — each entry should be one line, under ~150 characters: \`- [Title](file.md) — one-line hook\`. It has no frontmatter. If a trailing warning is present, insert new pointers above it so it stays last. Never write memory content directly into \`${memoryDir}/MEMORY.md\`.`,
         '',
         `- \`${memoryDir}/MEMORY.md\` is available to memory maintenance agents — lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep the index concise`,
         '- Keep the name, description, type, category, keywords, and usage_scenarios fields in memory files up-to-date with the complete content',

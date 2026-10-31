@@ -28,7 +28,7 @@ import {
   assertPositiveInteger,
   autofixPrPaths,
   checkAttemptKey,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
   rerunFloors,
   withWatchLock,
@@ -54,7 +54,7 @@ export function runRerun(
   task?: string,
 ): RerunOutcome {
   assertPositiveInteger(runId, 'run id');
-  const paths = autofixPrPaths(repoRoot(), prNumber);
+  const paths = autofixPrPaths(resolveWatchRoot(prNumber), prNumber);
   return withWatchLock(paths, prNumber, () =>
     rerunLocked(paths, prNumber, runId, task),
   );
