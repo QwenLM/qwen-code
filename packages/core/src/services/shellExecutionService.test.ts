@@ -2730,6 +2730,22 @@ describe('ShellExecutionService child_process fallback', () => {
       },
     );
 
+    it('keeps UTF-8 stderr cut off by a cancel as UTF-8 on a legacy code page', async () => {
+      useSystemEncoding('gbk');
+      // The first chunk ends inside 你, and the cancel cuts stderr inside 好.
+      const bytes = Buffer.from('ASCII\n你好世界');
+      const { result } = await simulateExecution('git log', (cp, ac) => {
+        emitOut(bytes.subarray(0, 8), 'stderr');
+        emitOut(bytes.subarray(8, 10), 'stderr');
+        ac.abort();
+        // The kill ends both streams before the exit is reported.
+        cp.stdout?.emit('end');
+        cp.stderr?.emit('end');
+        finish(1);
+      });
+      expect(result.output).toBe('ASCII\n你\ufffd');
+    });
+
     it('decodes UTF-8 output that a kill from outside the service cut inside a character with the code page', async () => {
       useSystemEncoding('gbk');
       // The output ends inside 好. Node reports both streams ended before
@@ -2793,6 +2809,20 @@ describe('ShellExecutionService child_process fallback', () => {
       expect(result.output).toBe('目浣');
     });
 
+    it('keeps complete stdout in the code page when a cancel ends the shell after stdout closed', async () => {
+      useSystemEncoding('gbk');
+      // 目浣 in GBK (C4 BF E4 BD) arrives complete and stdout ends before
+      // the cancel, so nothing cut it.
+      const { result } = await simulateExecution('build', (cp, ac) => {
+        emitOut(Buffer.from('c4bfe4bd', 'hex'));
+        cp.stdout?.emit('end');
+        ac.abort();
+        cp.stderr?.emit('end');
+        finish(1);
+      });
+      expect(result.output).toBe('目浣');
+    });
+
     it('decodes cut-off output that is not UTF-8 before the cut with the code page', async () => {
       useSystemEncoding('gbk');
       // 管理员 in GBK (B9 DC C0 ED D4 B1) is cut inside 员. Its lead byte D4
@@ -2816,9 +2846,25 @@ describe('ShellExecutionService child_process fallback', () => {
       // cannot tell them apart, and cut-off output is read as UTF-8 here:
       // UTF-8 output cut inside a character takes this shape whenever a
       // multibyte character comes before the cut, while GBK output takes it
-      // only when every character before the cut also forms UTF-8.
+      // only when its bytes up to the cut happen to be valid UTF-8.
       const { result } = await simulateExecution('type notes.txt', (cp, ac) => {
         emitOut(Buffer.from('c4bfe4', 'hex'));
+        ac.abort();
+        cp.stdout?.emit('end');
+        cp.stderr?.emit('end');
+        finish(1);
+      });
+      expect(result.output).toBe('Ŀ\ufffd');
+    });
+
+    it('counts a stream still open at a cancel as cut off, even if the program had finished writing it', async () => {
+      useSystemEncoding('gbk');
+      // The program wrote the complete 目浣 (GBK C4 BF E4 BD) and was still
+      // running when the cancel came. A cancel counts every stream still open
+      // as cut off, so these bytes read as UTF-8 Ŀ and a cut-off character,
+      // the same reading as in the test above.
+      const { result } = await simulateExecution('type notes.txt', (cp, ac) => {
+        emitOut(Buffer.from('c4bfe4bd', 'hex'));
         ac.abort();
         cp.stdout?.emit('end');
         cp.stderr?.emit('end');
