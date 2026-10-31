@@ -15,6 +15,7 @@ import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import { HostedHarnessProcess, waitUntil } from './hosted-harness-process.js';
 import { relayedHeaders, relayUpstream } from './hosted-relay-headers.js';
 import { isLegitimateMountRelease } from './hosted-mount-release.js';
+import { isProjectionPending } from './hosted-projection-pending.js';
 
 const configPath = process.argv[2];
 const config = JSON.parse(await readFile(configPath, 'utf8')) as {
@@ -688,7 +689,7 @@ async function runExistingCase() {
 }
 
 async function runRecoverySettlement() {
-  async function api(route: string, body?: object, expected = 200) {
+  async function request(route: string, body?: object) {
     if (proxyFailure) throw proxyFailure;
     const response = await fetch(config.storeUrl + route, {
       method: body ? 'POST' : 'GET',
@@ -701,11 +702,25 @@ async function runRecoverySettlement() {
       ...(body ? { body: JSON.stringify(body) } : {}),
       signal: AbortSignal.timeout(10_000),
     });
-    const text = await response.text();
-    assert.equal(response.status, expected, `${route}: ${text}`);
+    return { status: response.status, text: await response.text() };
+  }
+  async function api(route: string, body?: object, expected = 200) {
+    const { status, text } = await request(route, body);
+    assert.equal(status, expected, `${route}: ${text}`);
     return text ? JSON.parse(text) : {};
   }
   const route = `/v1/agents/sessions/${config.sessionId}`;
+  const itemsRoute = `${route}/items?limit=100`;
+  // The Java fixture polls again on this one answer (its itemsWhenProjected,
+  // #15909). Reading it through api() hard-failed the first lagging projection
+  // read taken right after the injected crash (#15892). undefined means "poll
+  // again"; every other non-200 still fails here with the body named.
+  async function itemsWhenProjected() {
+    const { status, text } = await request(itemsRoute);
+    if (isProjectionPending(status, text)) return undefined;
+    assert.equal(status, 200, `${itemsRoute}: ${text}`);
+    return text ? JSON.parse(text) : {};
+  }
   const turn = await api(
     `${route}/events`,
     {
@@ -795,11 +810,12 @@ async function runRecoverySettlement() {
     JSON.parse(report.originalCancelBody || '{}').promptId,
     report.promptId,
   );
-  await waitUntil(async () =>
-    JSON.stringify(await api(`${route}/items?limit=100`)).includes(
-      'FOLLOW_UP_OK',
-    ),
-  );
+  await waitUntil(async () => {
+    const items = await itemsWhenProjected();
+    return (
+      items !== undefined && JSON.stringify(items).includes('FOLLOW_UP_OK')
+    );
+  });
   assert.equal(
     report.operations.filter((operation) => operation === 'start').length,
     1,
