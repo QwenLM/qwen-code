@@ -1,3 +1,4 @@
+import { saveBlob } from '../../utils/saveBlob.js';
 import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import {
   Fragment,
@@ -3567,17 +3568,7 @@ export function WebShellSidebar({
           const blob = new Blob([result.content], {
             type: result.mimeType || 'text/html',
           });
-          const url = URL.createObjectURL(blob);
-          try {
-            const link = document.createElement('a');
-            link.href = url;
-            link.download = result.filename;
-            document.body.appendChild(link);
-            link.click();
-            link.remove();
-          } finally {
-            URL.revokeObjectURL(url);
-          }
+          await saveBlob(blob, result.filename);
         } catch (err) {
           onError(err, t('sidebar.exportFailed'));
         } finally {

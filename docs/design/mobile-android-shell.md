@@ -42,7 +42,7 @@ Per-device revocable daemon credentials are a maintainer-owned prerequisite. Thi
 
 Phase 2 must implement N profiles with client-minted stable keys and display names; switching profiles navigates to a new origin. Native cached workspace state must be keyed by profile and workspace ID, and capability checks must be performed per profile and connection. Migration must remove the development plaintext token after moving it into the approved credential store.
 
-Microphone permission bridging is superseded by the [microphone integration design](mobile-microphone-permission.md), including its close-on-background constraint for dictation and Qwen Live. File chooser, download handling, new-window handling, renderer-process recovery, lifecycle-aware SSE and notifications are not implemented here. System font-scale integration and complete pinch-zoom/accessibility acceptance also remain follow-ups. Browser H5 availability does not imply those native integrations already work.
+The initial spike's exclusions are superseded by the [connection-profile](mobile-connection-profiles.md), [native file-selection](mobile-file-selection.md), [microphone integration](mobile-microphone-permission.md), [connection recovery](mobile-connection-recovery.md), and [profile accessibility](mobile-profile-accessibility.md) slices. The [Blob-download slice](android-blob-downloads.md) adds a system Save picker and bounded native byte transport for supported exports; this PR implements that slice, rather than leaving download handling as unbuilt work. Its 16 MiB limit, provider-write cancellation semantics and stalled-provider limitations remain part of its acceptance boundary. New-window handling, lifecycle-aware SSE and notifications remain follow-ups, as do system font-scale integration and complete pinch-zoom/accessibility acceptance. Browser H5 availability alone does not imply native support.
 
 ## Reviewer Test Plan
 
@@ -59,4 +59,4 @@ JVM tests cover origin comparison, saved-root validation and external scheme res
 
 ## Follow-ups
 
-Production profile UI and credential migration; maintainer-provided per-device revocation; Keystore-backed storage; capability negotiation; lifecycle-aware SSE and native notifications with runtime permission handling; file selection, downloads, new windows and renderer recovery; font scaling and accessibility acceptance.
+Maintainer-provided per-device revocation; further capability negotiation; lifecycle-aware SSE and native notifications with runtime permission handling; new windows; font scaling and complete accessibility acceptance. Profile storage, file selection, microphone consent, connection recovery and Blob downloads are covered by the linked slices above, not additional unimplemented requirements of this spike.
