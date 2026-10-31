@@ -581,6 +581,7 @@ it.each([
     hooks: true,
     mcp: false,
     commandStep: 'none',
+    extensionConfig: false,
     verdict: 'refuse',
   },
   {
@@ -588,6 +589,7 @@ it.each([
     hooks: false,
     mcp: true,
     commandStep: 'none',
+    extensionConfig: false,
     verdict: 'refuse',
   },
   {
@@ -595,6 +597,7 @@ it.each([
     hooks: true,
     mcp: false,
     commandStep: 'stale',
+    extensionConfig: true,
     verdict: 'refuse',
   },
   {
@@ -602,11 +605,20 @@ it.each([
     hooks: true,
     mcp: false,
     commandStep: 'matching',
+    extensionConfig: true,
     verdict: 'pass',
+  },
+  {
+    owner: 'hooks with extensions and no commandStep',
+    hooks: true,
+    mcp: false,
+    commandStep: 'none',
+    extensionConfig: true,
+    verdict: 'refuse',
   },
 ])(
   'the saved-batch owner gate: $owner ($verdict)',
-  async ({ hooks, mcp, commandStep, verdict }) => {
+  async ({ hooks, mcp, commandStep, extensionConfig, verdict }) => {
     const root = await mkdtemp(path.join(tmpdir(), 'g3-a6-owner-'));
     const sessionKey = {
       tenantId: 'tenant',
@@ -673,7 +685,7 @@ it.each([
                 } as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
               }
             : {}),
-          ...(commandStep !== 'none'
+          ...(commandStep !== 'none' || extensionConfig
             ? { extensionConfig: { revision: 1, packages: [] } }
             : {}),
         },

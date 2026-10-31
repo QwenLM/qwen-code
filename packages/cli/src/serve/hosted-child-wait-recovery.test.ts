@@ -40,10 +40,12 @@ import {
   answerCommittedTurnCalls,
   answerResumedTurnCalls,
   fillParkedRoundAgentGaps,
+  fillParkedRoundCommandGaps,
   recoverHostedRuntimeTurn,
   settleCancelledAgentWaitRuns,
   settleInterruptedTurnRuntime,
 } from './hosted-runtime-recovery.js';
+import { HostedSessionCommandSession } from './hosted-session-command-session.js';
 import { parkNeedsNoRuntimeSettlement } from './hosted-harness-session.js';
 import { HostedChildAgentSession } from './hosted-child-agent-session.js';
 import { HostedTeamSession } from './hosted-team-session.js';
@@ -1161,10 +1163,10 @@ describe('hosted child wait recovery (#13708)', () => {
   });
 
   // A6 (R1-2): the cancel route and the interrupted-turn settle funnel
-  // pre-abort this fill so they terminate at once. Their abandonment fold
-  // is the pre-A6 story and must survive the guard — only the live-signal
-  // continue route blocks.
-  it('a pre-aborted fill keeps its abandonment fold without the ledger', async () => {
+  // pre-abort this fill so they terminate at once. Their exempted fold
+  // names the unknown outcome — never "never ran" — and only the
+  // live-signal continue route blocks.
+  it('a pre-aborted fill answers the unknown outcome without the ledger', async () => {
     await parkWedged(true);
     const replacement = await open('boot-2', false);
     try {
@@ -1193,11 +1195,231 @@ describe('hosted child wait recovery (#13708)', () => {
             (part) => part.functionResponse?.id === 'call-2',
           ),
       );
-      expect(JSON.stringify(callTwo?.message?.parts)).toContain(
-        'interrupted before this child agent was admitted',
-      );
+      const body = JSON.stringify(callTwo?.message?.parts);
+      expect(body).toContain('outcome is unknown');
+      expect(body).not.toContain('never ran');
     } finally {
       await replacement.close();
+    }
+  });
+
+  // A6 (R2-1): the resumed-turn answer shares the ledger family's rule —
+  // with the ledger unavailable it refuses the owed family call instead
+  // of writing "The tool call never ran"; with the ledger present the
+  // missing record stays the positive never-started proof and folds.
+  it('the resumed-turn answer refuses a ledger-less family call and folds an honest never-ran with the ledger', async () => {
+    await parkWedged(true);
+    const replacement = await open('boot-2', false);
+    try {
+      const consumption: string[] = [];
+      await settleTheChild(replacement);
+      await resumeTurn(replacement, consumption).resumeAgentWaitRuns(
+        [{ ...waitRun, functionCallId: 'call-1' }],
+        'recovered',
+        new AbortController().signal,
+      );
+      const error = await answerResumedTurnCalls({
+        session: replacement,
+        sessionId: SESSION_ID,
+        cwd: root,
+        promptId: PROMPT_ID,
+        children: undefined,
+      }).catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(HostedToolRecoveryRequiredError);
+      expect((error as HostedToolRecoveryRequiredError).cause).toBe(
+        'Child run ledger is unavailable; the gap cannot be proven never-started.',
+      );
+      const ids = toolResultEntries(await replacement.sink.project())
+        .flatMap((entry) => entry.message?.parts ?? [])
+        .map((part) => part.functionResponse?.id);
+      expect(ids).toEqual(['call-1']);
+      // The ledger-present control on the SAME owner (the refusal wrote
+      // nothing): call-2 has no child_run record, which is positive
+      // never-started evidence, so the answer folds.
+      await expect(
+        answerResumedTurnCalls({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          children: childrenOf(replacement),
+        }),
+      ).resolves.toBe(1);
+      const fold = JSON.stringify(
+        toolResultEntries(await replacement.sink.project()).find((entry) =>
+          entry.message?.parts?.some(
+            (part) => part.functionResponse?.id === 'call-2',
+          ),
+        )?.message?.parts,
+      );
+      expect(fold).toContain('never ran');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  // A6 (R2-3): the interrupted-turn settle funnel must terminate, so its
+  // ledger-less family gap folds the unknown-outcome answer — the funnel
+  // never writes "never ran" for a call whose ledger it does not hold,
+  // neither from the parked-round fill nor from the settlement's own
+  // answering pass (an agent call in a round the wait never named).
+  it('the interrupted-turn settle answers the unknown outcome for a ledger-less family gap', async () => {
+    await parkWedged(true);
+    const replacement = await open('boot-2', false);
+    try {
+      await replacement.sink.write({
+        uuid: 'assistant-2',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'test',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'model',
+          parts: [{ functionCall: { id: 'call-3', name: 'agent', args: {} } }],
+        },
+      });
+      await expect(
+        settleInterruptedTurnRuntime({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions: undefined,
+          toolProfile: true,
+          children: undefined,
+        }),
+      ).resolves.toBeDefined();
+      const folds = JSON.stringify(
+        toolResultEntries(await replacement.sink.project()),
+      );
+      expect(folds).toContain('outcome is unknown');
+      expect(folds).not.toContain('never ran');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  // A6 (R2-1): the command-wait gap fill never reads the ledger, so a
+  // family sibling of the command wait cannot be proven never started
+  // without it — the live continue route refuses, the pre-aborted
+  // terminating callers fold the unknown outcome.
+  it('refuses a ledger-less family sibling of a command wait, and answers the unknown outcome when pre-aborted', async () => {
+    const parkCommandWait = async (session: ManagedSession) => {
+      const harness = createManagedHarnessHandle(session);
+      const contentRef = await session.resources.publish(
+        'managed-input',
+        Buffer.from(JSON.stringify([{ type: 'text', text: 'plan' }])),
+      );
+      const admissionRef = await session.resources.publish(
+        'managed-admission',
+        Buffer.from(JSON.stringify({ promptId: PROMPT_ID, digest: 'x' })),
+      );
+      await session.authority.submitInput(
+        {
+          operation: 'submitInput',
+          commandId: PROMPT_ID,
+          sessionKey,
+          contentDigest: 'a'.repeat(64),
+        },
+        {
+          inputId: PROMPT_ID,
+          turnId: PROMPT_ID,
+          source: 'hosted-harness',
+          contentRef,
+          admissionRef,
+          deadline: null,
+          wakeReason: 'input',
+        },
+      );
+      await harness.ensureRunnable();
+      await session.sink.write({
+        uuid: 'assistant-1',
+        parentUuid: null,
+        sessionId: SESSION_ID,
+        timestamp: new Date().toISOString(),
+        type: 'assistant',
+        cwd: root,
+        version: 'test',
+        daemonPromptId: PROMPT_ID,
+        message: {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call-1', name: 'task_list', args: {} } },
+            { functionCall: { id: 'call-2', name: 'agent', args: {} } },
+          ],
+        },
+      });
+      await harness.commitAwaitCommand(
+        [
+          {
+            commandId: 'cmd-1',
+            functionCallId: 'call-1',
+            toolName: 'task_list',
+            modelMessageId: 'assistant-1',
+            folded: false,
+          },
+        ],
+        { turnId: PROMPT_ID, promptId: PROMPT_ID },
+        {
+          holdsWorkspaceMount: false,
+          attempt: { attemptId: 'attempt-1', routeRef: contentRef },
+        },
+      );
+    };
+    const commandsOf = (session: ManagedSession) =>
+      new HostedSessionCommandSession(
+        { authority: session.authority, resources: session.resources },
+        sessionKey,
+        childrenOf(session),
+        undefined,
+      );
+    const first = await open('boot-1', true);
+    try {
+      await parkCommandWait(first);
+      const commands = commandsOf(first);
+      const error = await fillParkedRoundCommandGaps({
+        managed: first,
+        sessionId: SESSION_ID,
+        promptId: PROMPT_ID,
+        cwd: root,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+        commands,
+        children: undefined,
+      }).catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(HostedToolRecoveryRequiredError);
+      // The refusal wrote nothing, so the same parked session serves the
+      // pre-aborted arm: the terminating caller folds the unknown outcome.
+      const preAborted = new AbortController();
+      preAborted.abort();
+      const filled = await fillParkedRoundCommandGaps({
+        managed: first,
+        sessionId: SESSION_ID,
+        promptId: PROMPT_ID,
+        cwd: root,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+        commands,
+        children: undefined,
+        signal: preAborted.signal,
+      });
+      expect(filled).toBe(1);
+      const callTwo = JSON.stringify(
+        toolResultEntries(await first.sink.project()).find((entry) =>
+          entry.message?.parts?.some(
+            (part) => part.functionResponse?.id === 'call-2',
+          ),
+        )?.message?.parts,
+      );
+      console.log(
+        'PROJECTION',
+        JSON.stringify(await first.sink.project(), null, 1).slice(0, 3000),
+      );
+      expect(callTwo).toContain('outcome is unknown');
+      expect(callTwo).not.toContain('never ran');
+    } finally {
+      await first.close();
     }
   });
 

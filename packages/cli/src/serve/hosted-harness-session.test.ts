@@ -27779,11 +27779,11 @@ describe('Hosted Harness Runtime turn takeover', () => {
     const transcript = await replacementHeaders(
       supertest(server).get(`/session/${SESSION_ID}/transcript`),
     ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
-    // Without the ledger the pre-aborted fill keeps its pre-A6
-    // never-admitted abandonment story instead of throwing.
-    expect(JSON.stringify(transcript.body)).toContain(
-      'cancelled before this child agent was admitted',
-    );
+    // Without the ledger the pre-aborted fill answers the unknown outcome
+    // — terminating, but claiming nothing about a child it cannot see.
+    const cancelledBody = JSON.stringify(transcript.body);
+    expect(cancelledBody).toContain('outcome is unknown');
+    expect(cancelledBody).not.toContain('never ran');
     await replacementHeaders(
       supertest(server).delete(`/session/${SESSION_ID}`),
     );

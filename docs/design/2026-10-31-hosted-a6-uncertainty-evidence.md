@@ -172,3 +172,35 @@ guarded and tested, while the first clause has three concrete evidence gaps:
   exist (out of scope here).
 - Whether Hook/MCP-profile Turn leases should join the cleanup-debt protocol
   (adjacent C3-scope observation above).
+
+## R2 review round (4 Suggestions — all fixed)
+
+- **Sibling writers (R2-1)**: the same never-ran fabrication survived at two
+  sibling writers on the recovery paths. `answerAbandonedTurnCalls` (hosted
+  mode, the continue route's resumed-turn answer) now refuses a ledger-less
+  family call — its caller's family catch maps the refusal to the retriable
+  block; the terminating `'all'` settlement keeps folding but on the honest
+  wording (below). `fillParkedRoundCommandGaps` (which never reads the
+  ledger) refuses the same shape on a live signal; its continue-route caller
+  passes the live signal, the cancel and settle callers pre-abort.
+- **Honest exempted wording (R2-3)**: the exempted (pre-aborted) folds and the
+  `'all'` settlement answer a ledger-less family call with a new dedicated
+  `HOSTED_CHILD_LEDGER_UNKNOWN_TEXT` — "outcome is unknown … record is
+  retained", `executionStatus: 'unknown'` — never "never ran" and never
+  "cancelled". The funnels still terminate without throwing.
+- **One family fact (R2-4)**: `CHILD_LEDGER_TOOL_NAMES = new Set(['agent',
+'workflow'])` lives in `hosted-workspace-tool-turn.ts` beside the answer
+  constants; all six former inline two-name literals (four in recovery, two
+  in the tool-turn mount-validation arms) read `.has(name)` from it. Not
+  `JOURNAL_ONLY_ANSWERABLE_TOOLS` — that set also holds the team names whose
+  gap answer is their own funnel.
+- **The extensions row (R2-2)**: the owner-gate matrix gained the row its
+  comment claimed — a Hook owner with `extensionConfig` and NO `commandStep`
+  is refused by the first arm; smuggling `&& !this.extensionConfig` into the
+  gate reds exactly that row.
+
+R2 delete-controls (quiet tree, failure-list adjudication): the family
+constant hollowed to `agent`-only at the fill guard; the resumed-answer
+refusal removed; the `'all'` settlement's unknown wording reverted; the
+command-gaps refusal removed; the extensions exemption smuggled into the
+gate — every row KILLED at exactly its named case, restores byte-identical.

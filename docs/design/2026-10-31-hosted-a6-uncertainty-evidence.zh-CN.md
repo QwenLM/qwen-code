@@ -138,3 +138,12 @@ A6 要求三个观察：缺失或未知的 producer 证据必须阻塞；不重�
   带持久 v3 续接的 hooks 会话接管夹具；它所把守的 tool-turn 兜底已双向钉住）。
 - 待 Hook/MCP e2e 夹具存在后，是否由后续切片打包 A6 故障臂（此处范围外）。
 - Hook/MCP profile Turn 的租约是否应加入清理债务协议（上文相邻 C3 范围观察）。
+
+## R2 评审轮（4 条建议——全部修复）
+
+- **兄弟写入点（R2-1）**：同一 never-ran 伪造在恢复路径的两个兄弟写入点上仍然存活。`answerAbandonedTurnCalls`（hosted 模式，即 continue 路由的 resumed-turn 应答）现在对无账本家族调用直接拒绝——调用方的家族 catch 把拒绝映射为可重试阻塞；终止性的 `'all'` 结算继续折叠，但使用诚实措辞（见下）。从不读账本的 `fillParkedRoundCommandGaps` 在存活信号下拒绝同一形状；其 continue 调用方传存活信号，cancel 与 settle 调用方预中止。
+- **诚实的豁免措辞（R2-3）**：被豁免（预中止）的折叠与 `'all'` 结算对无账本家族调用改用新的专用 `HOSTED_CHILD_LEDGER_UNKNOWN_TEXT`——「结果未知……记录保留」、`executionStatus: 'unknown'`——绝不写「never ran」也绝不写「cancelled」。漏斗仍不抛错、照常终止。
+- **家族单一事实源（R2-4）**：`CHILD_LEDGER_TOOL_NAMES = new Set(['agent', 'workflow'])` 定义在 `hosted-workspace-tool-turn.ts` 的应答常量旁；原先六处内联双名字字面量（recovery 四处、tool-turn 挂载校验两处）全部改读 `.has(name)`。不复用 `JOURNAL_ONLY_ANSWERABLE_TOOLS`——那套还包含团队名，其缺口应答是各自的 funnel。
+- **extensions 行（R2-2）**：owner 门矩阵补上了注释所声称的那一行——Hook owner + `extensionConfig` + 无 `commandStep` 被第一臂拒绝；向门里偷运 `&& !this.extensionConfig` 恰好使该行变红。
+
+R2 删除对照（安静树、完整失败清单判定）：把家族常量在守卫处挖空为仅 `agent`；移除 resumed-answer 拒绝；把 `'all'` 结算的 unknown 措辞改回；移除 command-gaps 拒绝；向门里偷运 extensions 豁免——每行恰好杀于命名用例，还原逐字节一致。

@@ -76,9 +76,11 @@ import {
   type HostedTeamSession,
 } from './hosted-team-session.js';
 import {
+  CHILD_LEDGER_TOOL_NAMES,
   fitChildResultInline,
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HOSTED_AGENT_WAIT_ABANDONED_TEXT,
+  HOSTED_CHILD_LEDGER_UNKNOWN_TEXT,
   HostedToolRecoveryRequiredError,
   hostedChildBackgroundStartedText,
   hostedBroadcastCommitted,
@@ -786,10 +788,9 @@ async function answerAbandonedTurnCalls(input: {
     // A background launch and a team tool write only to the journal, before
     // their answers: what committed is answered as committed, never as a
     // call that never ran.
-    const launched =
-      call.name === 'agent' || call.name === 'workflow'
-        ? input.children?.record(callKey)
-        : undefined;
+    const launched = CHILD_LEDGER_TOOL_NAMES.has(call.name)
+      ? input.children?.record(callKey)
+      : undefined;
     const sent =
       call.name === 'send_message'
         ? sentMessageText(input, functionCallId, callKey)
@@ -858,11 +859,22 @@ async function answerAbandonedTurnCalls(input: {
             call.name !== 'team_plan_approval' &&
             call.name !== 'send_message' &&
             !(
-              (call.name === 'agent' || call.name === 'workflow') &&
-              launched === undefined
+              CHILD_LEDGER_TOOL_NAMES.has(call.name) && launched === undefined
             )))
       )
         continue;
+      // A6: only a PRESENT ledger's missing record proves never started
+      // (admitLaunch commits before dispatch). The continue route's
+      // hosted mode refuses the family call outright — the route's catch
+      // maps the family to a retriable recovery block — while the
+      // terminating settlements ('all') keep folding, but with the
+      // unknown-outcome answer that claims nothing.
+      const ledgerUnknown =
+        CHILD_LEDGER_TOOL_NAMES.has(call.name) && input.children === undefined;
+      if (ledgerUnknown && uncommitted === 'hosted')
+        throw new HostedToolRecoveryRequiredError(
+          'Child run ledger is unavailable; the gap cannot be proven never-started.',
+        );
       // A call whose Runtime stop was never observed answers with the
       // honest unobservable outcome, never a cancellation nobody witnessed.
       const observed = !input.unobserved?.has(functionCallId);
@@ -870,18 +882,20 @@ async function answerAbandonedTurnCalls(input: {
         call.name,
         functionCallId,
         [],
-        !observed
-          ? "The Runtime execution's outcome could not be observed: the Broker fenced the record after losing its owner."
-          : committed
-            ? `The turn was interrupted after this call committed its team change, in full or in part (${input.message}); read task_list before retrying it.`
-            : `The tool call never ran: ${input.message}.`,
+        ledgerUnknown
+          ? HOSTED_CHILD_LEDGER_UNKNOWN_TEXT
+          : !observed
+            ? "The Runtime execution's outcome could not be observed: the Broker fenced the record after losing its owner."
+            : committed
+              ? `The turn was interrupted after this call committed its team change, in full or in part (${input.message}); read task_list before retrying it.`
+              : `The tool call never ran: ${input.message}.`,
       );
       const response = parts[0]?.functionResponse;
       if (!response || parts.length !== 1)
         throw new Error('Runtime result cannot be represented durably.');
       response.response = {
         ...response.response,
-        executionStatus: observed ? 'cancelled' : 'unknown',
+        executionStatus: ledgerUnknown || !observed ? 'unknown' : 'cancelled',
       };
     }
     await input.session.sink.write({
@@ -1508,18 +1522,32 @@ export async function fillParkedRoundAgentGaps(input: {
     // (admitLaunch commits before dispatch). Block, never fold "never ran".
     // An already-journaled gap owes nothing: a replayed fill stays silent.
     // The cancel route and the interrupted-turn settle funnel pre-abort this
-    // fill so they terminate at once; their abandonment folds keep the
-    // pre-A6 story. Only the live-signal continue route blocks — its catch
-    // maps the family to a retriable recovery block.
+    // fill so they terminate at once; their exempted fold keeps the
+    // pre-A6 story — but for a family call with no ledger it writes the
+    // unknown-outcome answer that claims nothing, never "never ran".
+    // Only the live-signal continue route blocks — its catch maps the
+    // family to a retriable recovery block.
     if (
       foldOwed &&
       children === undefined &&
-      (name === 'agent' || name === 'workflow') &&
-      input.signal?.aborted !== true
-    )
-      throw new HostedToolRecoveryRequiredError(
-        'Child run ledger is unavailable; the gap cannot be proven never-started.',
+      CHILD_LEDGER_TOOL_NAMES.has(name)
+    ) {
+      if (input.signal?.aborted !== true)
+        throw new HostedToolRecoveryRequiredError(
+          'Child run ledger is unavailable; the gap cannot be proven never-started.',
+        );
+      await writeFold(
+        convertToFunctionErrorResponse(
+          name,
+          callId,
+          [],
+          HOSTED_CHILD_LEDGER_UNKNOWN_TEXT,
+        ),
       );
+      filled += 1;
+      journaled.add(callId);
+      continue;
+    }
     const admitted =
       children === undefined
         ? undefined
@@ -1749,6 +1777,9 @@ export async function fillParkedRoundCommandGaps(input: {
   commands: HostedSessionCommandSession;
   children?: HostedChildAgentSession;
   messages?: HostedSessionMessageSession;
+  /** The continue route passes its live signal; the pre-aborted cancel
+   * and settle callers terminate at once on the exempted fold. */
+  signal?: AbortSignal;
 }): Promise<number> {
   const authorization = await input.managed.authority
     .harnessRunAuthorization()
@@ -1782,6 +1813,43 @@ export async function fillParkedRoundCommandGaps(input: {
     if (typeof callId !== 'string' || typeof name !== 'string') continue;
     if (waitedCalls.has(callId)) continue;
     const foldOwed = !journaled.has(callId);
+    if (
+      foldOwed &&
+      input.children === undefined &&
+      CHILD_LEDGER_TOOL_NAMES.has(name)
+    ) {
+      // A6: this fill never reads the ledger, so the sibling cannot be
+      // proven never started without it. A live signal (the continue
+      // route) refuses — its catch maps the family to a retriable block;
+      // a pre-aborted caller (cancel, settle) keeps terminating, on the
+      // unknown-outcome answer that claims nothing.
+      if (input.signal?.aborted !== true)
+        throw new HostedToolRecoveryRequiredError(
+          'Child run ledger is unavailable; the gap cannot be proven never-started.',
+        );
+      await input.managed.sink.write({
+        uuid: randomUUID(),
+        parentUuid: assistant.uuid,
+        sessionId: input.sessionId,
+        timestamp: new Date().toISOString(),
+        type: 'tool_result',
+        cwd: input.cwd,
+        version: 'hosted-harness/1',
+        model: 'recovered',
+        daemonPromptId: input.promptId,
+        message: {
+          role: 'user',
+          parts: convertToFunctionErrorResponse(
+            name,
+            callId,
+            [],
+            HOSTED_CHILD_LEDGER_UNKNOWN_TEXT,
+          ),
+        },
+      });
+      filled += 1;
+      continue;
+    }
     const sent =
       name === 'send_message'
         ? await sentMessageText(
@@ -1919,7 +1987,7 @@ async function settleJournalOnlyInterruptedTurn(input: {
       // exist, and a minted never-ran would be a false terminal for work
       // the journal may actually carry.
       if (
-        (call.name === 'agent' || call.name === 'workflow') &&
+        CHILD_LEDGER_TOOL_NAMES.has(call.name) &&
         input.children === undefined
       )
         return undefined;
@@ -2196,6 +2264,8 @@ export async function settleInterruptedTurnRuntime(input: {
           commands: input.commands,
         });
       }
+      const settleCommandFillAbort = new AbortController();
+      settleCommandFillAbort.abort();
       await fillParkedRoundCommandGaps({
         managed: input.session,
         sessionId: input.sessionId,
@@ -2205,6 +2275,7 @@ export async function settleInterruptedTurnRuntime(input: {
         commands: input.commands,
         children: input.children,
         messages: input.messages,
+        signal: settleCommandFillAbort.signal,
       });
     }
   }
