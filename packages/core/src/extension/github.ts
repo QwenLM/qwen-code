@@ -844,6 +844,8 @@ export async function downloadFromGitHubRelease(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
   signal?: AbortSignal,
+  target?: { platform: string; arch: string },
+  archiveSafety: TarArchiveSafetyOptions = {},
 ): Promise<GitHubDownloadResult> {
   const { source, ref } = installMetadata;
   const { owner, repo } = parseGitHubRepoForReleases(source);
@@ -859,7 +861,7 @@ export async function downloadFromGitHubRelease(
     throw new Error(`No release data found for ${owner}/${repo} at tag ${ref}`);
   }
 
-  const asset = findReleaseAsset(releaseData.assets);
+  const asset = findReleaseAsset(releaseData.assets, target);
   let archiveUrl: string | undefined;
   let isTar = false;
   let isZip = false;
@@ -907,7 +909,12 @@ export async function downloadFromGitHubRelease(
   }
 
   signal?.throwIfAborted();
-  await extractArchiveFile(downloadedAssetPath, destination, signal);
+  await extractArchiveFile(
+    downloadedAssetPath,
+    destination,
+    signal,
+    archiveSafety,
+  );
   signal?.throwIfAborted();
 
   await fs.promises.unlink(downloadedAssetPath);
@@ -921,6 +928,7 @@ export async function downloadFromArchiveUrl(
   installMetadata: ExtensionInstallMetadata,
   destination: string,
   signal?: AbortSignal,
+  archiveSafety: TarArchiveSafetyOptions = {},
 ): Promise<void> {
   const archiveExtension = getSupportedArchiveExtension(installMetadata.source);
   if (!archiveExtension) {
@@ -953,7 +961,12 @@ export async function downloadFromArchiveUrl(
   }
 
   signal?.throwIfAborted();
-  await extractArchiveFile(downloadedAssetPath, destination, signal);
+  await extractArchiveFile(
+    downloadedAssetPath,
+    destination,
+    signal,
+    archiveSafety,
+  );
   signal?.throwIfAborted();
   await fs.promises.unlink(downloadedAssetPath);
 }
@@ -995,9 +1008,12 @@ export async function extractArchiveFile(
   assertExtractedArchiveContainsExtensionSource(destination);
 }
 
-export function findReleaseAsset(assets: Asset[]): Asset | undefined {
-  const platform = os.platform();
-  const arch = os.arch();
+export function findReleaseAsset(
+  assets: Asset[],
+  target?: { platform: string; arch: string },
+): Asset | undefined {
+  const platform = target?.platform ?? os.platform();
+  const arch = target?.arch ?? os.arch();
 
   const platformArchPrefix = `${platform}.${arch}.`;
   const platformPrefix = `${platform}.`;
@@ -1011,8 +1027,13 @@ export function findReleaseAsset(assets: Asset[]): Asset | undefined {
   }
 
   // Check for platform specific asset
-  const platformAsset = assets.find((asset) =>
-    asset.name.toLowerCase().startsWith(platformPrefix),
+  const platformAsset = assets.find(
+    (asset) =>
+      asset.name.toLowerCase().startsWith(platformPrefix) &&
+      (!target ||
+        !/^(?:x64|arm64|arm|ia32|ppc64|s390x|riscv64)\./.test(
+          asset.name.toLowerCase().slice(platformPrefix.length),
+        )),
   );
   if (platformAsset) {
     return platformAsset;

@@ -18,68 +18,6 @@ on:
         required: false
         type: 'string'
         default: 'full'
-  pull_request:
-    branches:
-      - 'main'
-      - 'release/**'
-    paths:
-      - 'packages/sdk-java/**'
-      - '**/.mvn/**'
-      - 'packages/core/src/config/approval-modes.json'
-      - 'packages/core/src/managed-runtime/**'
-      - 'packages/cli/src/config/**'
-      - 'packages/core/src/config/**'
-      - 'packages/core/src/core/**'
-      - 'packages/cli/src/commands/serve.ts'
-      - 'packages/cli/src/serve/**'
-      - 'packages/cli/src/acp-integration/**'
-      - 'packages/acp-bridge/**'
-      - 'packages/sdk-typescript/src/daemon/**'
-      - 'integration-tests/fake-openai-server.ts'
-      - 'integration-tests/helpers/hosted-*'
-      - 'integration-tests/cli/hosted-latency-baseline.test.ts'
-      - 'integration-tests/baselines/hosted-latency.json'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'docs/developers/sdk-java.md'
-      - 'docs/design/java-daemon-sdk-alpha.md'
-      - 'scripts/run-java-daemon-sdk-e2e.ts'
-      - 'scripts/run-managed-agent-server-e2e.ts'
-      - 'scripts/check-failsafe-reports.js'
-      - 'scripts/check-flyway-migrations.js'
-      - '.github/workflows/sdk-java.yml'
-      - '.github/workflows/release-sdk-java.yml'
-  push:
-    branches:
-      - 'main'
-      - 'release/**'
-    paths:
-      - 'packages/sdk-java/**'
-      - '**/.mvn/**'
-      - 'packages/core/src/config/approval-modes.json'
-      - 'packages/core/src/managed-runtime/**'
-      - 'packages/cli/src/config/**'
-      - 'packages/core/src/config/**'
-      - 'packages/core/src/core/**'
-      - 'packages/cli/src/commands/serve.ts'
-      - 'packages/cli/src/serve/**'
-      - 'packages/cli/src/acp-integration/**'
-      - 'packages/acp-bridge/**'
-      - 'packages/sdk-typescript/src/daemon/**'
-      - 'integration-tests/fake-openai-server.ts'
-      - 'integration-tests/helpers/hosted-*'
-      - 'integration-tests/cli/hosted-latency-baseline.test.ts'
-      - 'integration-tests/baselines/hosted-latency.json'
-      - 'package.json'
-      - 'pnpm-lock.yaml'
-      - 'docs/developers/sdk-java.md'
-      - 'docs/design/java-daemon-sdk-alpha.md'
-      - 'scripts/run-java-daemon-sdk-e2e.ts'
-      - 'scripts/run-managed-agent-server-e2e.ts'
-      - 'scripts/check-failsafe-reports.js'
-      - 'scripts/check-flyway-migrations.js'
-      - '.github/workflows/sdk-java.yml'
-      - '.github/workflows/release-sdk-java.yml'
 
 permissions:
   contents: 'read'
@@ -261,7 +199,7 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
       # The Broker process tests spawn the Node fixture worker.
@@ -292,12 +230,44 @@ jobs:
             sleep $((attempt * 15))
           done
 
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
@@ -317,14 +287,21 @@ jobs:
           # place, so a seeded hardlink would let the unlocked runs mutate
           # the host cache. Drop them; Maven recreates them job-locally.
           find "${RUNNER_TEMP}/m2-repo" \
-            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
             -delete 2>/dev/null || true
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
           # so the install writes fresh inodes.
           rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-parent" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-contracts" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-control-plane" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           # The suite resolves from the job-local copy above, so it does not
           # touch host-shared state and must not hold the per-host lock.
           # On 2026-10-22 run 39771949573's fast tier failed at its
@@ -333,15 +310,26 @@ jobs:
           # lock wait after its own attempt 1 starved at 5400 seconds. A
           # suite hold measures in tens of minutes to hours; the write-back
           # is bounded at 300 seconds, whoever holds it.
-          mvn --batch-mode --no-transfer-progress clean test
-          if [ "${MATRIX_JAVA}" = "21" ]; then
-            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
-            cd ../../managed-agent-server
-            # The fast tier skips mysql-integration, which owns the full H2 unit suite.
-            if [ "${TIER}" = "fast" ]; then
-              mvn --batch-mode --no-transfer-progress clean test
-            else
-              mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test
+          # A red suite still reaches the write-back: its downloads were
+          # already made, and dropping them makes the next leg re-pay for
+          # them. Only the exit is deferred — a failure still stops the
+          # remaining suites, and the step ends with Maven's status.
+          mvn_status=0
+          mvn_stage='sdk-java test'
+          mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?
+          if [ "${mvn_status}" -eq 0 ] && [ "${MATRIX_JAVA}" = "21" ]; then
+            mvn_stage='sdk-java install'
+            mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install || mvn_status=$?
+            if [ "${mvn_status}" -eq 0 ]; then
+              cd ../../managed-agent-server
+              # The fast tier skips mysql-integration, which owns the full H2 unit suite.
+              if [ "${TIER}" = "fast" ]; then
+                mvn_stage='runtime-broker H2 suite'
+                mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?
+              else
+                mvn_stage='runtime-broker suite'
+                mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test || mvn_status=$?
+              fi
             fi
           fi
           # Only the write-back mutates host-shared state, so only it takes
@@ -351,9 +339,26 @@ jobs:
           # this runs, so an expired wait warns and skips the copy instead of
           # reddening a green suite.
           # A host fault takes the same warn-and-skip path as an expired wait.
+          # A tolerated skip still reports the deferred suite status.
+          # A red leg publishes downloads only, so it does not spend the green
+          # lane's queue budget delaying a failure that is already decided: it
+          # waits no longer than the copy itself is allowed to run.
+          lock_wait=9600
+          if [ "${mvn_status:-0}" -ne 0 ]; then
+            lock_wait=300
+          fi
+          # Name the deferred failure at every exit that can end a red step:
+          # the copy's output is the log tail, and every Maven failure exits 1,
+          # so the tail alone cannot tell the three suites apart.
+          mvn_report_failed_suite() {
+            if [ "${mvn_status:-0}" -ne 0 ]; then
+              echo "::error::Maven suite '${mvn_stage}' failed with status ${mvn_status}"
+            fi
+          }
           lock_setup_fault() {
             echo "::warning::Maven cache write-back skipped: $1; the gate result above is unaffected"
-            exit 0
+            mvn_report_failed_suite
+            exit "${mvn_status}"
           }
           cache_dir="${HOME}/.cache/qwen-code-ci"
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
@@ -379,12 +384,13 @@ jobs:
             exec 7> >(sed -u -e 's/^::error::/::warning::/' -e 's/lock not acquired within/lock wait exhausted/I')
             lock_filter=$!
             lock_rc=0
-            sdk_java_lock_acquire 9600 "${TIER}" >&7 2>&1 || lock_rc=$?
+            sdk_java_lock_acquire "${lock_wait}" "${TIER}" >&7 2>&1 || lock_rc=$?
             exec 7>&-
             wait "${lock_filter}" 2>/dev/null || true
             if [ "${lock_rc}" -ne 0 ]; then
               echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
-              exit 0
+              mvn_report_failed_suite
+              exit "${mvn_status}"
             fi
           else
             # release-sdk-java.yml resumes an existing tag by checking out
@@ -401,12 +407,14 @@ jobs:
               lock_setup_fault "${cache_dir} is not writable"
             exec 9>"${cache_dir}/sdk-java-tests.lock"
             lock_rc=0
-            flock --wait 9600 9 || lock_rc=$?
+            flock --wait "${lock_wait}" 9 || lock_rc=$?
             if [ "${lock_rc}" -eq 1 ]; then
               echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
-              exit 0
+              mvn_report_failed_suite
+              exit "${mvn_status}"
             elif [ "${lock_rc}" -ne 0 ]; then
               echo "::error::Maven cache write-back setup failed: flock exited ${lock_rc}"
+              mvn_report_failed_suite
               exit 1
             fi
           fi
@@ -416,15 +424,24 @@ jobs:
           # artifact missing for the next job to re-resolve, never truncated.
           # No write-back child inherits fd 9, or a cancelled job's survivor
           # would hold the host lock until it exits.
+          # The seed drops Maven's resolver tracking markers because they
+          # record a resolution outcome, and a hard-killed transfer leaves
+          # *.tmp fragments behind; a red suite can leave both in the
+          # job-local copy, and publishing either would make the failure
+          # stick for every reader of the host cache, so skip the same names.
           mkdir -p "${HOME}/.m2/repository" 9>&-
           cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
             echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
           fi
+          # Deferred so a failed suite still reaches the write-back; the
+          # step's status is the suite's, not the copy's.
+          mvn_report_failed_suite
+          exit "${mvn_status}"
 
       - name: 'Run Java SDK tests (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
@@ -456,8 +473,8 @@ jobs:
           path: |
             packages/sdk-java/qwencode/target/surefire-reports/*.txt
             packages/sdk-java/qwencode/target/surefire-reports/*.dumpstream
-            packages/managed-agent-server/target/surefire-reports/*.txt
-            packages/managed-agent-server/target/surefire-reports/*.dumpstream
+            packages/managed-agent-server/verification/target/surefire-reports/*.txt
+            packages/managed-agent-server/verification/target/surefire-reports/*.dumpstream
           if-no-files-found: 'ignore'
           retention-days: 7
 
@@ -615,33 +632,14 @@ jobs:
         run: 'node scripts/check-flyway-migrations.js packages/managed-agent-server packages/sdk-java/qwencode'
 
   mysql-integration:
-    name: 'Runtime Broker and Managed Agent ${{ matrix.label }} / Java 21'
+    name: 'Runtime Broker and Managed Agent MySQL / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     # Pool routing per the flyway job (#13245): hosted queue starvation fails
     # a zero-step job outright (#13623), the pool does not. The job is
     # pool-safe: the database is a per-leg container on a random host port,
     # both Maven runs use a job-local repository, and only the shared cache
     # write-back holds the test job's per-host sdk-java lock.
-    # Both legs run the same non-Hosted *IT family, as before #14936 removed
-    # the MariaDB service. The MariaDB leg is what keeps the published
-    # MariaDB-only V12 repair (RTRIM, error 1901) and the schema catalog's
-    # MariaDB branches falsifiable in CI (#14971).
     runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event_name != ''pull_request'' && github.event_name != ''pull_request_review'' || github.event.pull_request.head.repo.full_name == github.repository || contains(fromJSON(''["OWNER","MEMBER","COLLABORATOR"]''), github.event.pull_request.author_association))) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
-    strategy:
-      # One engine's failure must not cancel the other leg's evidence.
-      fail-fast: false
-      matrix:
-        include:
-          - database: 'mysql'
-            label: 'MySQL'
-            image: 'mysql:8.4.6'
-            client: 'mysql'
-            engine_args: '--innodb-use-native-aio=0 --skip-log-bin'
-          - database: 'mariadb'
-            label: 'MariaDB'
-            image: 'mariadb:10.11.18'
-            client: 'mariadb'
-            engine_args: '--innodb-use-native-aio=0'
     # On the pool this job takes the per-host sdk-java lock only for its
     # shared Maven cache write-back: both Maven runs resolve from a job-local
     # repository, so holding the lock across the whole integration suite
@@ -653,10 +651,7 @@ jobs:
     # not as an expected duration.
     timeout-minutes: 310
     env:
-      MYSQL_CONTAINER: 'qwen-code-sdk-java-${{ matrix.database }}-${{ github.run_id }}-${{ github.run_attempt }}'
-      DATABASE_IMAGE: '${{ matrix.image }}'
-      DATABASE_CLIENT: '${{ matrix.client }}'
-      DATABASE_ENGINE_ARGS: '${{ matrix.engine_args }}'
+      MYSQL_CONTAINER: 'qwen-code-sdk-java-mysql-${{ github.run_id }}-${{ github.run_attempt }}'
     steps:
       - name: 'Restore workspace ownership'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -788,15 +783,47 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
+
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
 
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
@@ -805,7 +832,7 @@ jobs:
       # and fail to boot with `io_setup() failed with EAGAIN` (#14416).
       # Service containers cannot take a command, so the database starts here
       # instead, with native AIO disabled and its datadir on tmpfs. The MySQL
-      # leg also binary-logs by default into that uncapped tmpfs, and this
+      # server binary-logs by default into that uncapped tmpfs, and this
       # disposable container has no replica and nothing reads the log.
       # Each fork needs its own instance: lock tests assert server-wide
       # InnoDB deadlock counters, which separate schemas cannot isolate.
@@ -813,39 +840,28 @@ jobs:
         shell: 'bash'
         run: |-
           set -euo pipefail
-          engine_args=()
-          if [[ -n "${DATABASE_ENGINE_ARGS}" ]]; then
-            read -r -a engine_args <<< "${DATABASE_ENGINE_ARGS}"
-          fi
           for fork in 1 2; do
             container="${MYSQL_CONTAINER}-${fork}"
             docker run --detach --name "${container}" \
               --publish '127.0.0.1::3306' \
               --mount type=tmpfs,destination=/var/lib/mysql \
               --env MYSQL_ROOT_PASSWORD='runtime-broker' \
-              "${DATABASE_IMAGE}" "${engine_args[@]}"
-            # MariaDB ships healthcheck.sh; the MySQL image does not, so each
-            # leg waits on the readiness signal its own image provides.
-            if [[ "${DATABASE_CLIENT}" == 'mariadb' ]]; then
-              health=(docker exec "${container}" healthcheck.sh --connect --innodb_initialized)
-            else
-              health=(docker exec "${container}" mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent)
-            fi
-            # A probe that is itself broken (image bump, renamed healthcheck.sh)
+              mysql:8.4.6 --innodb-use-native-aio=0 --skip-log-bin
+            # A probe that is itself broken (image bump, missing mysqladmin)
             # is otherwise indistinguishable from a server still starting.
             probe_out="${RUNNER_TEMP:-/tmp}/readiness-probe-${fork}.out"
             for attempt in {1..60}; do
-              if "${health[@]}" >"${probe_out}" 2>&1; then
+              if docker exec "${container}" mysqladmin ping --host=127.0.0.1 --user=root --password=runtime-broker --silent >"${probe_out}" 2>&1; then
                 break
               fi
               if ! docker inspect --format '{{.State.Running}}' "${container}" | grep -qx true; then
                 docker logs "${container}" || true
-                echo "::error::${DATABASE_IMAGE} container stopped during startup; last ${DATABASE_CLIENT} readiness probe said: $(cat "${probe_out}")"
+                echo "::error::MySQL container stopped during startup; last mysqladmin readiness probe said: $(cat "${probe_out}")"
                 exit 1
               fi
               if [[ "${attempt}" == '60' ]]; then
                 docker logs "${container}" || true
-                echo "::error::${DATABASE_IMAGE} not ready after 60 probes; last ${DATABASE_CLIENT} readiness probe said: $(cat "${probe_out}")"
+                echo "::error::MySQL not ready after 60 probes; last mysqladmin readiness probe said: $(cat "${probe_out}")"
                 exit 1
               fi
               sleep 2
@@ -860,7 +876,7 @@ jobs:
           # gate, not the server packet limit, is what the test exercises.
           # Set both disposable containers before their first JDBC connections.
           for fork in 1 2; do
-            docker exec "${MYSQL_CONTAINER}-${fork}" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" '"${DATABASE_CLIENT}"' --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
+            docker exec "${MYSQL_CONTAINER}-${fork}" sh -c 'MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --user=root --execute="SET GLOBAL max_allowed_packet=134217728; SELECT @@GLOBAL.max_allowed_packet"'
           done
       - name: 'Set up Node.js 22 (hosted)'
         if: "${{ runner.environment == 'github-hosted' }}"
@@ -911,14 +927,21 @@ jobs:
           # place, so a seeded hardlink would let the unlocked runs mutate
           # the host cache. Drop them; Maven recreates them job-locally.
           find "${RUNNER_TEMP}/m2-repo" \
-            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
             -delete 2>/dev/null || true
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
           # so the install writes fresh inodes.
           rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-parent" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-contracts" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-control-plane" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           # Both Maven runs resolve from the job-local copy above, so they do
           # not touch host-shared state and must not hold the per-host lock:
           # a MySQL verify can run for hours under pool contention, and the
@@ -1023,10 +1046,14 @@ jobs:
           # artifact missing for the next job to re-resolve, never truncated.
           # No write-back child inherits fd 9, or a cancelled job's survivor
           # would hold the host lock until it exits.
+          # This lane's Maven runs fail inline, so only a green run reaches
+          # this copy: a marker here can only come from a green run's own
+          # resolution, and the seed drops the same names so a seeded copy
+          # never republishes a stale outcome.
           mkdir -p "${HOME}/.m2/repository" 9>&-
           cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -1042,12 +1069,12 @@ jobs:
         if: 'failure() || cancelled()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
-          name: 'sdk-java-test-reports-${{ matrix.database }}-integration-java-21'
+          name: 'sdk-java-test-reports-mysql-integration-java-21'
           path: |
-            packages/managed-agent-server/target/surefire-reports/*.txt
-            packages/managed-agent-server/target/surefire-reports/*.dumpstream
-            packages/managed-agent-server/target/failsafe-reports/*.txt
-            packages/managed-agent-server/target/failsafe-reports/*.dumpstream
+            packages/managed-agent-server/verification/target/surefire-reports/*.txt
+            packages/managed-agent-server/verification/target/surefire-reports/*.dumpstream
+            packages/managed-agent-server/verification/target/failsafe-reports/*.txt
+            packages/managed-agent-server/verification/target/failsafe-reports/*.dumpstream
           if-no-files-found: 'ignore'
           retention-days: 7
 
@@ -1175,7 +1202,7 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -1268,10 +1295,14 @@ jobs:
         run: 'node scripts/check-failsafe-reports.js hosted packages/managed-agent-server'
       - name: 'Check Hosted latency measurements'
         run: |-
-          test -s packages/managed-agent-server/target/hosted-latency-baseline.json
+          test -s packages/managed-agent-server/verification/target/hosted-latency-baseline.json
           cd integration-tests
           npx vitest run cli/hosted-latency-baseline.test.ts
       - name: 'Run Runtime Broker fault gates'
+        # The gates need only the CLI bundle and the installed SDK, so a red
+        # Hosted verify above must not skip them: without this it did on 11
+        # of the 14 nights to 10-27. A failed setup step still does.
+        if: "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}"
         # Outlive the 600 s surefire fork plus compilation and report teardown.
         timeout-minutes: 20
         env:
@@ -1285,16 +1316,16 @@ jobs:
         with:
           name: 'hosted-harness-mysql-reports'
           path: |
-            packages/managed-agent-server/target/failsafe-reports/
-            packages/managed-agent-server/target/hosted-latency-baseline.json
-            packages/managed-agent-server/target/fg7-cases/
-            packages/managed-agent-server/target/fg8-cases/
-            packages/managed-agent-server/target/fg9-cases/
-            packages/managed-agent-server/target/fg10-cases/
-            packages/managed-agent-server/target/fg11-cases/
-            packages/managed-agent-server/target/fg12-cases/
-            packages/managed-agent-server/target/fg13-cases/
-            packages/managed-agent-server/target/l4-shell-lifecycle/
+            packages/managed-agent-server/verification/target/failsafe-reports/
+            packages/managed-agent-server/verification/target/hosted-latency-baseline.json
+            packages/managed-agent-server/verification/target/fg7-cases/
+            packages/managed-agent-server/verification/target/fg8-cases/
+            packages/managed-agent-server/verification/target/fg9-cases/
+            packages/managed-agent-server/verification/target/fg10-cases/
+            packages/managed-agent-server/verification/target/fg11-cases/
+            packages/managed-agent-server/verification/target/fg12-cases/
+            packages/managed-agent-server/verification/target/fg13-cases/
+            packages/managed-agent-server/verification/target/l4-shell-lifecycle/
           retention-days: 7
 
       - name: 'Verify Hosted admission gates'
@@ -1345,7 +1376,7 @@ jobs:
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'o4-mysql-gate-reports'
-          path: 'packages/managed-agent-server/target/failsafe-reports/'
+          path: 'packages/managed-agent-server/verification/target/failsafe-reports/'
           retention-days: 7
 
   hosted-failover-e2e:
@@ -1356,9 +1387,9 @@ jobs:
     # that a failing integration test there no longer skips them: they need
     # only the bundled CLI, the server jar and a runner-private mysqld, not
     # its MySQL service or cgroup root. Each arm also runs when an earlier
-    # one failed. Ceilings: 20 arms × 10 = 200 plus ~13 minutes for the
-    # uncapped setup steps (Checkout.. Install MySQL binaries): 213 + 2.
-    timeout-minutes: 215
+    # one failed. Ceilings: 26 arms × 10 = 260 plus ~13 minutes for the
+    # uncapped setup steps (Checkout.. Install MySQL binaries): 273 + 2.
+    timeout-minutes: 275
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     steps:
@@ -1374,7 +1405,7 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -1497,6 +1528,16 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-after-result
+      - name: 'Run finished-before-commit crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-finished-before-commit
+      - name: 'Run sibling-approval crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-sibling-approval
       - name: 'Run approval decision reply-loss E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
@@ -1507,6 +1548,26 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
+      - name: 'Run takeover load reply-loss E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-load-reply-lost
+      - name: 'Run committed terminal reply-loss E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-terminal-reply-lost
+      - name: 'Run missing terminal write E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-terminal-write-failed
+      - name: 'Run refused cleanup release E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-cleanup-failed
       - name: 'Run Harness-restart continuation closeout E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
@@ -1673,14 +1734,46 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
       - name: 'Install Managed Agent dependencies'
@@ -1697,14 +1790,21 @@ jobs:
           # place, so a seeded hardlink would let the unlocked runs mutate
           # the host cache. Drop them; Maven recreates them job-locally.
           find "${RUNNER_TEMP}/m2-repo" \
-            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
             -delete 2>/dev/null || true
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
           # so the install writes fresh inodes.
           rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-parent" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-contracts" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-control-plane" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Cache the RocketMQ distribution'
         uses: 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' # v6.1.0
@@ -1747,9 +1847,9 @@ jobs:
         with:
           name: 'event-transport-broker-gate-reports'
           path: |-
-            packages/managed-agent-server/target/failsafe-reports/
-            packages/managed-agent-server/target/event-transport-latency*.json
-            packages/managed-agent-server/target/event-transport-latency.jfr
+            packages/managed-agent-server/verification/target/failsafe-reports/
+            packages/managed-agent-server/verification/target/event-transport-latency*.json
+            packages/managed-agent-server/verification/target/event-transport-latency.jfr
             ${{ runner.temp }}/rocketmq/logs/
             ${{ runner.temp }}/rocketmq/home/logs/
           retention-days: 7
@@ -1901,14 +2001,46 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
       - name: 'Set up Node.js (hosted)'
@@ -1947,25 +2079,41 @@ jobs:
           # place, so a seeded hardlink would let the unlocked runs mutate
           # the host cache. Drop them; Maven recreates them job-locally.
           find "${RUNNER_TEMP}/m2-repo" \
-            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' \) \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
             -delete 2>/dev/null || true
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
           # so the install writes fresh inodes.
           rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-parent" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-contracts" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-control-plane" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Install libfaketime'
         # The clock-skew row moves one node's whole wall clock. A pool host
         # keeps the package between jobs, so install only when it is missing;
-        # sudo -n fails fast instead of prompting.
+        # sudo -n fails fast instead of prompting. The multiarch directory is
+        # resolved rather than assumed: the aarch64 pool hosts run this lane
+        # too, and libfaketime lands under aarch64-linux-gnu there.
         run: |-
-          if ! test -f /usr/lib/x86_64-linux-gnu/faketime/libfaketimeMT.so.1; then
+          set -uo pipefail
+          lib="$(find /usr/lib -maxdepth 3 -name libfaketimeMT.so.1 -print -quit 2>/dev/null || true)"
+          if [[ -z "${lib}" ]]; then
             sudo -n apt-get -o DPkg::Lock::Timeout=300 update -q
             sudo -n apt-get -o DPkg::Lock::Timeout=300 install -y -q faketime
+            lib="$(find /usr/lib -maxdepth 3 -name libfaketimeMT.so.1 -print -quit 2>/dev/null || true)"
           fi
-          test -f /usr/lib/x86_64-linux-gnu/faketime/libfaketimeMT.so.1
+          if [[ -z "${lib}" ]]; then
+            echo "::error::libfaketime is not installed for this architecture"
+            exit 1
+          fi
+          echo "FAKETIME_LIB=${lib}" >> "${GITHUB_ENV}"
       # Pool hosts share one host-wide fs.aio-nr budget across concurrent
       # jobs, and a mysqld that reserves native AIO contexts can exhaust it
       # and fail to boot with `io_setup() failed with EAGAIN` (#14416).
@@ -2033,7 +2181,7 @@ jobs:
             -Dqwen.gate.rocketmq.endpoints=127.0.0.1:${RMQ_PROXY_GRPC_PORT} \
             -Dqwen.gate.rocketmq.topic=qwen-managed-events \
             -Dqwen.gate.rocketmq.work-dir="${RUNNER_TEMP}/rocketmq" \
-            -Dqwen.gate.faketime.library=/usr/lib/x86_64-linux-gnu/faketime/libfaketimeMT.so.1 \
+            -Dqwen.gate.faketime.library="${FAKETIME_LIB}" \
             clean verify && \
             node scripts/check-failsafe-reports.js event-transport-multi-node packages/managed-agent-server
       - name: 'Upload multi-node gate reports'
@@ -2042,8 +2190,8 @@ jobs:
         with:
           name: 'event-transport-multi-node-gate-reports'
           path: |-
-            packages/managed-agent-server/target/failsafe-reports/
-            packages/managed-agent-server/target/mq3-multi-node/
+            packages/managed-agent-server/verification/target/failsafe-reports/
+            packages/managed-agent-server/verification/target/mq3-multi-node/
             ${{ runner.temp }}/rocketmq/logs/
             ${{ runner.temp }}/rocketmq/home/logs/
           retention-days: 7
@@ -2227,7 +2375,15 @@ jobs:
             echo "::warning::Expected Node 22.x but found $(node -v); daemon E2E will run against the runner's Node."
           fi
 
+      # setup-java resolves the requested version through api.adoptium.net on
+      # every run, even when the tool cache already holds that JDK, and the
+      # lookup has no timeout: on the Hangzhou hosts it stalled and held this
+      # step for close to two hours (run 40262799523). Bound the attempt and
+      # fall back to the pool's own cache or mirror when it does not finish.
       - name: 'Set up Java'
+        id: 'setup_java'
+        timeout-minutes: 3
+        continue-on-error: true
         uses: 'actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654' # v5.2.0
         with:
           distribution: 'temurin'
@@ -2236,12 +2392,54 @@ jobs:
           cache-dependency-path: 'packages/sdk-java/qwencode/pom.xml'
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
+      - name: 'Set up Java (pool fallback)'
+        if: "${{ steps.setup_java.outcome != 'success' }}"
+        # Bounded like the attempt it replaces: a host that reaches neither
+        # Adoptium nor the mirror must not hold a runner for the download
+        # budget.
+        timeout-minutes: 10
+        env:
+          JAVA_SPEC: '11'
+        run: 'bash .github/scripts/install-pool-jdk.sh'
+
+      - name: 'Point Maven at the pool mirror'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: 'bash .github/scripts/configure-maven-mirror.sh'
+
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 

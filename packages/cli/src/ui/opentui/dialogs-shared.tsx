@@ -17,14 +17,26 @@
  * native to OpenTUI: hover highlights, left-click selects, wheel scrolls.
  */
 
-import { useEffect, useRef, useState, type ReactNode } from 'react';
-import { MouseButton } from '@opentui/core';
-import { useKeyboard } from '@opentui/react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
+import { MouseButton, type KeyEvent } from '@opentui/core';
+import {
+  useAppContext,
+  useKeyboard,
+  useTerminalDimensions,
+} from '@opentui/react';
 import { C } from './theme.js';
 import { useBatchSafeCursor } from './batch-cursor.js';
 import { keyMatchers, Command } from '../keyMatchers.js';
 import { toOriginalKey } from './key-map.js';
+import { getCachedStringWidth, truncateToWidth } from '../utils/textUtils.js';
 import {
+  type scrollDialogLayout,
   applyNumberSelectKey,
   computeInitialActiveIndex,
   findNextEnabledIndex,
@@ -82,13 +94,39 @@ export function dialogContentWidth(terminalWidth: number): number {
 export function DialogFrame(props: {
   children?: ReactNode;
   borderColor?: string;
+  /**
+   * Stretch to the whole popup region, as the ink dialogs that take an
+   * explicit `clampDialogHeight(availableTerminalHeight)` do. Only those may
+   * set it: ink leaves every other dialog content-height at the top of the
+   * region, with the unused rows blank below it.
+   */
+  fill?: boolean;
+  bodyLayout?: ReturnType<typeof scrollDialogLayout>;
 }) {
   return (
     <box
+      key={
+        props.bodyLayout?.compact
+          ? `compact-${props.bodyLayout.border}`
+          : 'normal'
+      }
       flexDirection="column"
       borderStyle="rounded"
+      border={props.bodyLayout?.border === false ? [] : true}
       borderColor={props.borderColor ?? C.borderDefault}
-      padding={1}
+      paddingLeft={1}
+      paddingRight={1}
+      paddingTop={props.bodyLayout?.compact ? 0 : 1}
+      paddingBottom={props.bodyLayout?.compact ? 0 : 1}
+      flexGrow={props.fill ? 1 : 0}
+      // Region-mounted, like the sibling frames: a shrinkable frame lets a
+      // short region squeeze the body's unsized text rows to zero and paint
+      // them over each other mid-list, while the keys keep committing the
+      // rows that stopped painting (measured on /mcp's tool list). Natural
+      // height keeps the rows contiguous for the region's clip to cut at the
+      // tail, the way ink clips /stats; the list-carrying bodies window
+      // themselves from the region budget instead of relying on the clip.
+      flexShrink={0}
     >
       {props.children}
     </box>
@@ -119,6 +157,13 @@ export function DialogTabBar(props: {
   activeId: string;
   hint?: string;
 }) {
+  const { width } = useTerminalDimensions();
+  // Every caller's chrome budget charges the bar as one row; the hint gets
+  // the columns the tabs leave rather than wrapping onto a second.
+  const tabsWidth = props.tabs.reduce(
+    (total, tab) => total + getCachedStringWidth(` ${tab.label} `) + 2,
+    0,
+  );
   return (
     <box flexDirection="row">
       {props.tabs.map((tab) => {
@@ -135,7 +180,15 @@ export function DialogTabBar(props: {
           </box>
         );
       })}
-      {props.hint ? <text fg={C.dim}> {props.hint}</text> : null}
+      {props.hint ? (
+        <text fg={C.dim}>
+          {' '}
+          {truncateToWidth(
+            props.hint,
+            Math.max(0, dialogAreaWidth(width) - tabsWidth - 1),
+          )}
+        </text>
+      ) : null}
     </box>
   );
 }
@@ -170,6 +223,25 @@ export interface UseDialogSelectResult<TItem extends DialogListItem<unknown>> {
   selectIndex: (index: number) => void;
   highlightIndex: (index: number) => void;
   items: readonly TItem[];
+}
+
+export function useFocusedKeyboard(
+  focused: boolean,
+  handler: (key: KeyEvent) => void,
+): void {
+  const { keyHandler } = useAppContext();
+  const currentHandler = useRef(handler);
+  useLayoutEffect(() => {
+    currentHandler.current = handler;
+  });
+  useEffect(() => {
+    if (!focused) return;
+    const listener = (key: KeyEvent) => currentHandler.current(key);
+    keyHandler?.on('keypress', listener);
+    return () => {
+      keyHandler?.off('keypress', listener);
+    };
+  }, [keyHandler, focused]);
 }
 
 /**
@@ -240,8 +312,22 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   // The number-select flush reads the highlight at timeout time via a ref,
   // not inside a setState updater — updaters must stay pure (StrictMode
   // double-invokes them) and React re-renders keep the ref current.
-  const latestRef = useRef({ items, activeIndex, onSelect });
-  latestRef.current = { items, activeIndex, onSelect };
+  const latestRef = useRef({
+    items,
+    activeIndex,
+    focused,
+    onSelect,
+    scrollOffset,
+    maxItemsToShow,
+  });
+  latestRef.current = {
+    items,
+    activeIndex,
+    focused,
+    onSelect,
+    scrollOffset,
+    maxItemsToShow,
+  };
 
   // Ink parity: useSelectionList re-runs its INITIALIZE reducer on every
   // items change — the cursor follows the active item's key when it
@@ -277,8 +363,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
   );
 
   // BaseSelectionList scroll-follow: the window only moves when the
-  // highlight would leave it.
+  // highlight would leave it. A zero-row window has no anchor to follow to —
+  // the rule would ping-pong between the highlight and the list end — so the
+  // offset is left alone until the budget paints rows again.
   useEffect(() => {
+    if (maxItemsToShow < 1) return;
     const next = followScrollOffset(
       activeIndex,
       scrollOffset,
@@ -336,7 +425,7 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     onSelect?.(item.value);
   };
 
-  useKeyboard((key) => {
+  const handleKey = (key: KeyEvent) => {
     if (!focused || items.length === 0) return;
     const original = toOriginalKey(key);
 
@@ -355,6 +444,37 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       );
       numberBuffer.current = result.buffer;
       if (result.activeIndex !== undefined) {
+        // A completed number may only address a row the painted window shows:
+        // on a short terminal the window is narrower than the list, and
+        // moving to (or committing) an unpainted row would persist a choice
+        // the user never saw — on a highlight-driven step like the scope one,
+        // the highlight move alone already retargets what the next Enter
+        // writes. A prefix that could still extend into a painted row keeps
+        // its buffer and waits for the completing digit instead: it never
+        // moves the highlight and never arms the committing flush, because
+        // both commit the highlight.
+        const painted = selectionWindow(
+          scrollOffset,
+          items.length,
+          maxItemsToShow,
+        );
+        if (
+          result.activeIndex < painted.start ||
+          result.activeIndex >= painted.end
+        ) {
+          if (result.selectNow) {
+            numberBuffer.current = '';
+          } else {
+            // The kept prefix still expires on the same clock a live entry
+            // flushes on, except this timer only clears: a prefix refused a
+            // minute ago must not complete against the next digit.
+            numberTimer.current = setTimeout(
+              clearNumberBuffer,
+              NUMBER_SELECT_TIMEOUT_MS,
+            );
+          }
+          return;
+        }
         moveCursor(result.activeIndex);
         const item = items[result.activeIndex];
         if (item) onHighlight?.(item.value, result.activeIndex);
@@ -369,6 +489,22 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
           // Flush against the highlight at timeout time, outside any setState
           // updater (updaters are pure and StrictMode re-runs them).
           const latest = latestRef.current;
+          if (!latest.focused) return;
+          // The digit armed this against the window it was typed into; a
+          // resize in between can leave the highlight unpainted, and the
+          // flush commits it a second later with nothing on screen to show
+          // for it.
+          const painted = selectionWindow(
+            latest.scrollOffset,
+            latest.items.length,
+            latest.maxItemsToShow,
+          );
+          if (
+            latest.activeIndex < painted.start ||
+            latest.activeIndex >= painted.end
+          ) {
+            return;
+          }
           const item = latest.items[latest.activeIndex];
           if (item && !item.disabled) latest.onSelect?.(item.value);
         }, NUMBER_SELECT_TIMEOUT_MS);
@@ -380,6 +516,11 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
     // original hook clears its buffer on a non-numeric key.
     clearNumberBuffer();
 
+    // The zero-row budget that refuses Enter has no painted row for the
+    // arrows to reach either: a highlight move fires onHighlight, and on a
+    // highlight-driven step like the scope one that alone retargets what the
+    // next Enter writes.
+    if (maxItemsToShow < 1) return;
     if (keyMatchers[Command.SELECTION_UP](original)) {
       highlightIndex(findNextEnabledIndex(items, cursorRef.current, 'up'));
       return;
@@ -389,10 +530,29 @@ export function useDialogSelect<TItem extends DialogListItem<unknown>>(
       return;
     }
     if (original.name === 'return') {
+      // A held arrow hands its whole burst to the handler the last render
+      // registered: the cursor moves by ref while `scrollOffset` stays at the
+      // rendered value, so Enter can land on a row the painted window never
+      // showed. Re-check membership at commit time, mirroring the digit guard.
+      const painted = selectionWindow(
+        scrollOffset,
+        items.length,
+        maxItemsToShow,
+      );
+      if (
+        cursorRef.current < painted.start ||
+        cursorRef.current >= painted.end
+      ) {
+        return;
+      }
       const item = items[cursorRef.current];
       if (item && !item.disabled) onSelect?.(item.value);
     }
+  };
+  useLayoutEffect(() => {
+    if (!focused) clearNumberBuffer();
   });
+  useFocusedKeyboard(focused, handleKey);
 
   return {
     activeIndex,

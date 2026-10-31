@@ -22,14 +22,19 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
-import type { ChatCompletionToolWithCache } from './types.js';
 import {
   DEFAULT_TIMEOUT,
   DEFAULT_MAX_RETRIES,
   DISABLED_REQUEST_TIMEOUT_MS,
 } from '../constants.js';
+import { trailingReattachPartCount } from '../../../services/image-payload-references.js';
+import { appendAutoMemoryContext } from '../../../memory/request-context.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
+import {
+  buildDashScopeSourceConfig,
+  QWENCLOUD_MAAS_HOSTS,
+} from '../../dashscope-source-config.js';
 
 const mockDebugLogger = vi.hoisted(() => ({
   debug: vi.fn(),
@@ -284,6 +289,18 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
       ],
       [
+        'should return true for Model Studio workspace-dedicated URL',
+        'https://llm-abc123.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for international workspace-dedicated URL',
+        'https://llm-abc123.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for Model Studio trial URL',
+        'https://trial.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      ],
+      [
         'should return true for internal aliyun-inc.com subdomain',
         'https://model-gateway.aliyun-inc.com/dashscope/v1',
       ],
@@ -298,6 +315,22 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       [
         'should return true for port-bearing alicloudapi.com URL',
         'https://gateway.alicloudapi.com:8443/v1',
+      ],
+      [
+        'should return true for QwenCloud China MaaS URL',
+        'https://maas.qianwenaiapi.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for QwenCloud International MaaS URL',
+        'https://maas.qwencloudapi.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for QwenCloud Token Plan URL',
+        'https://token-plan.maas.qianwenaiapi.com/compatible-mode/v1',
+      ],
+      [
+        'should return true for QwenCloud Global Token Plan URL',
+        'https://token-plan.maas.qwencloudapi.com/compatible-mode/v1',
       ],
     ])('%s', (_title, baseUrl) => {
       expect(isDashScope(baseUrl)).toBe(true);
@@ -351,13 +384,45 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'https://notaliyun-inc.com/v1',
         'https://alibaba-inc.com.evil.com/v1',
         'https://aliyun-inc.com.evil.com/v1',
-        'https://not-token-plan.cn-beijing.maas.aliyuncs.com/v1',
+        'https://maas.aliyuncs.com/v1',
+        'https://notmaas.aliyuncs.com/v1',
         'https://token-plan.cn-beijing.maas.aliyuncs.com.evil.com/v1',
+        'https://evil.example.com/llm-abc123.cn-beijing.maas.aliyuncs.com/v1',
         'https://notalicloudapi.com/v1',
         'https://alicloudapi.com.evil.com/v1',
+        'https://notmaas.qianwenaiapi.com/v1',
+        'https://maas.qianwenaiapi.com.evil.com/v1',
+        'https://maas.qwencloudapi.com.evil.com/v1',
+        'https://notmaas.qwencloudapi.com/v1',
+        'https://token-plan.maas.qwencloudapi.com.evil.com/v1',
       ].forEach((baseUrl) => {
         expect(isDashScope(baseUrl)).toBe(false);
       });
+    });
+
+    // Admission and attribution read the same host list but apply different
+    // rules: admission suffix-matches (any MaaS subdomain is served as
+    // DashScope), attribution exact-matches only the bare and `token-plan.`
+    // forms. That split is deliberate — see the "Exact host match" bullet in
+    // docs/design/qwencloud-source-attribution.md — and its cost is that a new
+    // MaaS subdomain is routed as QwenCloud while going unattributed. Pinned on
+    // both sides so widening either one has to be a conscious edit.
+    it('admits every known QwenCloud host and its Token Plan form, and attributes both', () => {
+      for (const host of QWENCLOUD_MAAS_HOSTS) {
+        for (const baseUrl of [
+          `https://${host}/compatible-mode/v1`,
+          `https://token-plan.${host}/compatible-mode/v1`,
+        ]) {
+          expect(isDashScope(baseUrl)).toBe(true);
+          expect(buildDashScopeSourceConfig(baseUrl)).toBeDefined();
+        }
+      }
+    });
+
+    it('admits a MaaS subdomain that attribution deliberately leaves unattributed', () => {
+      const unattributed = 'https://other.maas.qwencloudapi.com/v1';
+      expect(isDashScope(unattributed)).toBe(true);
+      expect(buildDashScopeSourceConfig(unattributed)).toBeUndefined();
     });
 
     it('should return false for non-DashScope configurations', () => {
@@ -481,6 +546,52 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         'X-DashScope-OssResourceResolve',
       );
     });
+
+    it.each([
+      [undefined, 'qwen-code-cli'],
+      ['CLI', 'qwen-code-cli'],
+      ['desktop', 'qwen-code-desktop'],
+    ])(
+      'attributes channel %s over a conflicting custom header',
+      (channel, t1) => {
+        const headers = gen(
+          {
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://maas.qwencloudapi.com/compatible-mode/v1',
+            customHeaders: {
+              'x-dashscope-source-config': 'user',
+              'X-Custom': '1',
+            },
+          },
+          { ...mockCliConfig, getChannel: () => channel } as Config,
+        ).buildHeaders();
+
+        expect(headers['X-DashScope-Source-Config']).toBe(
+          JSON.stringify({
+            channel: 'qwencloud-inner-agents',
+            source: 'model',
+            tags: { t1, t2: 'payg' },
+          }),
+        );
+        expect(headers).not.toHaveProperty('x-dashscope-source-config');
+        expect(headers['X-Custom']).toBe('1');
+      },
+    );
+
+    it.each([
+      [
+        'Bailian',
+        AuthType.USE_OPENAI,
+        'https://dashscope.aliyuncs.com/compatible-mode/v1',
+      ],
+      // The registry's Qwen OAuth baseUrl; the real endpoint is swapped in at
+      // runtime from the OAuth credentials and is never a QwenCloud host.
+      ['Qwen OAuth', AuthType.QWEN_OAUTH, 'DYNAMIC_QWEN_OAUTH_BASE_URL'],
+    ])('should not attribute %s requests', (_name, authType, baseUrl) => {
+      expect(gen({ authType, baseUrl }).buildHeaders()).not.toHaveProperty(
+        'X-DashScope-Source-Config',
+      );
+    });
   });
 
   describe('buildClient', () => {
@@ -541,6 +652,53 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       expect(OpenAI).toHaveBeenCalledWith(
         expect.objectContaining({ timeout: DISABLED_REQUEST_TIMEOUT_MS }),
       );
+    });
+
+    // The attribution value is first-party: the user's entry is replaced before
+    // the request is built, so their value can never reach the wire. The
+    // dynamic-header warning says it "will not be sent" and offers a switch
+    // that cannot help, which describes the wrong thing (#15107 item 2).
+    it('does not warn about a placeholder in the reserved attribution header', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const cli = {
+        ...mockCliConfig,
+        getChannel: () => 'CLI',
+        getOutboundAllowDynamicHeaderValues: () => false,
+      } as unknown as Config;
+
+      gen(
+        {
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://maas.qwencloudapi.com/compatible-mode/v1',
+          customHeaders: { 'x-dashscope-source-config': '${session_id}' },
+        },
+        cli,
+      ).buildClient();
+
+      expect(warn).not.toHaveBeenCalled();
+      warn.mockRestore();
+    });
+
+    it('still warns about a placeholder in any other custom header', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const cli = {
+        ...mockCliConfig,
+        getChannel: () => 'CLI',
+        getOutboundAllowDynamicHeaderValues: () => false,
+      } as unknown as Config;
+
+      gen(
+        {
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://maas.qwencloudapi.com/compatible-mode/v1',
+          customHeaders: { 'X-Trace-Id': '${session_id}' },
+        },
+        cli,
+      ).buildClient();
+
+      expect(warn).toHaveBeenCalledTimes(1);
+      expect(String(warn.mock.calls[0][0])).toContain('X-Trace-Id');
+      warn.mockRestore();
     });
   });
 
@@ -1384,13 +1542,13 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       // Neither the last message nor the tools get cache control when not streaming.
       expect(result.messages[3].role).toBe('user');
       expect(result.messages[3].content).toBe('Hello!');
-      const tools = result.tools as ChatCompletionToolWithCache[];
+      const tools = result.tools as Array<{ cache_control?: unknown }>;
       expect(tools).toBeDefined();
       expect(tools).toHaveLength(1);
       expect(tools[0].cache_control).toBeUndefined();
     });
 
-    it('should add cache control to system, last history message, and last tool definition for streaming requests', () => {
+    it('should add cache control to system and last history message but not tool definitions for streaming requests', () => {
       const result = provider.buildRequest(
         {
           ...baseRequest,
@@ -1402,10 +1560,12 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       );
       expectCachedSystemAndTools(result);
       expect(result.messages[3].content).toEqual([cachedText('Hello!')]);
-      const tools = result.tools as ChatCompletionToolWithCache[];
+      // DashScope ignores cache_control on tool definitions; the system
+      // marker already covers them because they render before the system.
+      const tools = result.tools as Array<{ cache_control?: unknown }>;
       expect(tools).toBeDefined();
       expect(tools).toHaveLength(1);
-      expect(tools[0].cache_control).toEqual(EPHEMERAL);
+      expect(tools[0].cache_control).toBeUndefined();
     });
 
     it('should not add cache control to tool messages when request.tools is undefined', () => {
@@ -1734,10 +1894,45 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       );
       const content = contentAt(result, 1);
       expect(content).toHaveLength(3);
-      // Breakpoint lands on the stable text block, not the reattach marker/image.
-      expect(content?.[0]).toMatchObject(cachedText('Stable user text'));
+      // The gateway's cache boundary is message-level, so no block inside the
+      // attachment-bearing message is marked; with no earlier conversational
+      // message, the conversation anchor degrades onto the system message.
+      expect(content?.[0]).not.toHaveProperty('cache_control');
       expect(content?.[1]).not.toHaveProperty('cache_control');
       expect(content?.[2]).not.toHaveProperty('cache_control');
+      expect(result.messages[0]?.content).toEqual([
+        cachedText('System prompt'),
+      ]);
+    });
+
+    it('places the conversation breakpoint before the request-only memory catalog', () => {
+      // Driven end to end through the real append + counter: the catalog part
+      // is regenerated per request and never stored, so anchoring on it writes
+      // an entry the next turn cannot read back (issue #11627's invariant).
+      const contents = appendAutoMemoryContext(
+        [{ role: 'user', parts: [{ text: 'what changed?' }] }],
+        'current memory catalog',
+      );
+      const result = streamed(
+        [
+          { role: 'system', content: 'System prompt' },
+          {
+            role: 'user',
+            content: [txt('what changed?'), txt('current memory catalog')],
+          },
+        ],
+        trailingReattachPartCount(contents),
+      );
+      const content = contentAt(result, 1);
+      expect(trailingReattachPartCount(contents)).toBe(1);
+      // Same message-level rule: the part carrying the regenerated catalog
+      // shares its message with the stable question, so nothing in this
+      // message is marked; the anchor degrades onto the system message.
+      expect(content?.[0]).not.toHaveProperty('cache_control');
+      expect(content?.[1]).not.toHaveProperty('cache_control');
+      expect(result.messages[0]?.content).toEqual([
+        cachedText('System prompt'),
+      ]);
     });
 
     it('walks back to the previous message when the whole last message is reattach', () => {
@@ -1800,7 +1995,7 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       ]);
     });
 
-    it('walks the anchor back past a current-turn inline image to stable text', () => {
+    it('lifts the conversation breakpoint off the attachment-bearing message instead of anchoring within it', () => {
       const result = streamed(
         [
           { role: 'system', content: 'System prompt' },
@@ -1817,10 +2012,71 @@ describe('DashScopeOpenAICompatibleProvider', () => {
         2,
       );
       const content = contentAt(result, 1);
-      // Breakpoint lands on the prompt text, not the inline image the next
-      // turn textualizes.
-      expect(content?.[0]).toMatchObject(cachedText('look at this screenshot'));
+      // A block-level anchor inside this message measures the same as no
+      // conversation breakpoint at all on the message-level gateway, so no
+      // block here is marked — the anchor moves before the whole message.
+      expect(content?.[0]).not.toHaveProperty('cache_control');
       expect(content?.[1]).not.toHaveProperty('cache_control');
+      expect(content?.[2]).not.toHaveProperty('cache_control');
+      expect(content?.[3]).not.toHaveProperty('cache_control');
+      expect(result.messages[0]?.content).toEqual([
+        cachedText('System prompt'),
+      ]);
+    });
+
+    it('anchors on the assistant message preceding the attachment-bearing user message', () => {
+      const result = streamed(
+        [
+          { role: 'system', content: 'System prompt' },
+          { role: 'assistant', content: 'Earlier answer' },
+          {
+            role: 'user',
+            content: [
+              txt('Follow-up question'),
+              txt('Recent images reattached'),
+              reattachImageBlock,
+            ],
+          },
+        ],
+        2,
+      );
+      // The dominant interactive layout: the conversation breakpoint moves
+      // entirely before the attachment-bearing message, so the cached prefix
+      // covers the whole prior conversation.
+      expect(result.messages[1]?.content).toEqual([
+        cachedText('Earlier answer'),
+      ]);
+      const content = contentAt(result, 2);
+      expect(content?.[0]).not.toHaveProperty('cache_control');
+      expect(content?.[1]).not.toHaveProperty('cache_control');
+      expect(content?.[2]).not.toHaveProperty('cache_control');
+    });
+
+    it('skips an empty-string tool result when stepping back off the attachment-bearing message', () => {
+      const result = streamed(
+        [
+          { role: 'system', content: 'System prompt' },
+          { role: 'tool', tool_call_id: 'call_1', content: '' },
+          {
+            role: 'user',
+            content: [
+              txt('Stable user text'),
+              txt('Recent images reattached'),
+              reattachImageBlock,
+            ],
+          },
+        ],
+        2,
+      );
+      // The empty tool result stays a bare string and carries no anchor.
+      expect(result.messages[1]?.content).toBe('');
+      const content = contentAt(result, 2);
+      expect(content?.[0]).not.toHaveProperty('cache_control');
+      // With no earlier conversational content, the conversation anchor
+      // degrades to the system message.
+      expect(result.messages[0]?.content).toEqual([
+        cachedText('System prompt'),
+      ]);
     });
   });
 
@@ -1874,6 +2130,37 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       ],
     ])('%s', (_title, model, extra, expected) => {
       expect(hello(model, extra)['max_tokens']).toBe(expected);
+    });
+
+    // DashScope serves MiniMax-M2.5 with a 32K cap, below the 64K default the
+    // shared table derives from the MiniMax API; anything above is a 400.
+    it.each([
+      ['the default', {}, 32768],
+      ['an over-cap request value', { max_tokens: 64000 }, 32768],
+      ['an in-cap request value', { max_tokens: 1000 }, 1000],
+    ])(
+      'caps MiniMax-M2.5 output at the DashScope limit for %s',
+      (_t, extra, expected) => {
+        expect(hello('MiniMax-M2.5', extra)['max_tokens']).toBe(expected);
+      },
+    );
+
+    it('caps an explicit samplingParams max_tokens for MiniMax-M2.5', () => {
+      const result = hello(
+        'MiniMax-M2.5',
+        { max_tokens: 64000 },
+        gen({ samplingParams: { max_tokens: 64000 } }),
+      );
+      expect(result['max_tokens']).toBe(32768);
+    });
+
+    it('caps an extra_body max_tokens for MiniMax-M2.5', () => {
+      const result = hello(
+        'MiniMax-M2.5',
+        {},
+        gen({ extra_body: { max_tokens: 64000 } }),
+      );
+      expect(result['max_tokens']).toBe(32768);
     });
 
     it('should preserve other request parameters when limiting max_tokens', () => {

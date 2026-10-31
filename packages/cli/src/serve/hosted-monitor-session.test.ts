@@ -4,11 +4,12 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from '@qwen-code/qwen-code-core/managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { SessionWriterLease } from '@qwen-code/qwen-code-core/services/session-writer-lease.js';
 import {
   LocalManagedSessionAuthority,
@@ -23,30 +24,8 @@ import {
   monitorRebuildAllowed,
 } from './hosted-monitor-session.js';
 
-// monitor_run is enabled by the H3 enablement slice; this suite drives the
-// hosted orchestrator ahead of it, like the core authority suite does.
-const enablement = vi.hoisted(() => ({ monitorRun: true }));
-
-vi.mock(
-  '@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js',
-  async (importOriginal) => {
-    const actual =
-      await importOriginal<
-        typeof import('@qwen-code/qwen-code-core/managed-runtime/managed-session-records.js')
-      >();
-    return {
-      ...actual,
-      assertManagedSessionDomainEnabled: (
-        domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
-      ) => {
-        if (domain !== 'monitor_run' || !enablement.monitorRun) {
-          actual.assertManagedSessionDomainEnabled(domain);
-        }
-      },
-    };
-  },
-);
-
+// monitor_run is enabled by the H3 enablement slice (#13856): this suite
+// drives the hosted orchestrator through the real gate, with no lift.
 const sessionId = '550e8400-e29b-41d4-a716-446655440000';
 const sessionKey = {
   tenantId: 'tenant-1',
@@ -103,7 +82,6 @@ function manifestBody(over: {
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
-  enablement.monitorRun = true;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
   }
@@ -149,7 +127,10 @@ async function withOrchestrator<T>(
   });
   try {
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',

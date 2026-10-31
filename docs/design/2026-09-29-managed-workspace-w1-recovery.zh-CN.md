@@ -31,7 +31,7 @@ W0 已持久保存 binding，并提供 Runtime 接管与回收。W1 补充的是
 | 文件历史      | `hosted-workspace-tool-turn.ts:67,78` 明确不提供 undo 备份，worker 也关闭文件 checkpoint。其他 Managed 路径能够记录 `file_history`。             | `file_history` 记录只是元数据，不包含全部备份字节；备份可能在 Workspace 外的 Session 文件历史目录中。 |
 | 公开路径      | 调研基线的 main 仍对 Workspace 执行设门禁；[G0 #12955](https://github.com/QwenLM/qwen-code/pull/12955) 当时尚未合并，且仅开放初始文件工具 Turn。 | 可以先开发 W1 内部能力；公开恢复与后续 Turn 验收需要另行接通产品路由。                                |
 
-上述 Java 路径位于 `packages/sdk-java/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/` 或 `packages/sdk-java/runtime-broker/src/main/java/com/alibaba/qwen/code/runtimebroker/`。TypeScript Hosted 路径位于 `packages/cli/src/serve/`。
+上述 Java 路径位于 `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/` 或 `packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/runtimebroker/`。TypeScript Hosted 路径位于 `packages/cli/src/serve/`。
 
 已合入的 [W0e 恢复设计](2026-09-27-managed-workspace-recovery.zh-CN.md)、[受信任重启切片](2026-09-28-local-reboot-recovery.zh-CN.md)和 [G2 接管扫描](managed-runtime-takeover-scan.zh-CN.md)继续定义各自范围。它们的物理停止与原执行结果证据不能证明文件内容完整。
 
@@ -88,7 +88,7 @@ W1a 维护先关闭新工作入口，结算或取消原执行，证明全部写�
 
 旧二进制不会读取新增 guard 字段。W1 变更启用前，所有能够控制该 storage 的进程都必须停止/排空并统一升级。维护证据还必须覆盖普通工具和其他能够写入目录的外部服务；升级 Java 并不能隔离它们。首版使用离线部署，避免再建在线版本协调系统。完成 schema migration 不等于完成安全升级。回滚至旧二进制时，服务和入口必须保持停止，直到显式对账完成。持久 fence 或关闭新开关无法约束不读取新增列的旧二进制。
 
-物理 mount guard 使用默认关闭的 Broker 属性 `verified-workspace-recovery-enabled`。Hosted Workspace 冷加载校验始终启用，不受该属性控制；省略 tool profile 或 Shell `captureBytes` 时采用保存的 definition，显式提供的值必须精确匹配。保存的审批设置继续固定。私有入口 `WorkspaceStorageRegistrationMain` 支持 `register`、`inspect`、`fence` 和 `restore-original`；修改操作必须显式声明离线维护，并使用精确的 operation ID。[服务端 README](../../packages/sdk-java/managed-agent-server/README.md)给出了调用方式和升级顺序。该声明本身不能停止外部写入者。登记和执行需要受信任的 Linux 身份提供者；本地 H2 测试使用合成提供者，不能代替 Linux 验收。
+物理 mount guard 使用默认关闭的 Broker 属性 `verified-workspace-recovery-enabled`。Hosted Workspace 冷加载校验始终启用，不受该属性控制；省略 tool profile 或 Shell `captureBytes` 时采用保存的 definition，显式提供的值必须精确匹配。保存的审批设置继续固定。私有入口 `WorkspaceStorageRegistrationMain` 支持 `register`、`inspect`、`fence` 和 `restore-original`；修改操作必须显式声明离线维护，并使用精确的 operation ID。[服务端 README](../../packages/managed-agent-server/README.md)给出了调用方式和升级顺序。该声明本身不能停止外部写入者。登记和执行需要受信任的 Linux 身份提供者；本地 H2 测试使用合成提供者，不能代替 Linux 验收。
 
 ### 5.4 已确认的 W1a 恢复契约（2026-09-30）
 

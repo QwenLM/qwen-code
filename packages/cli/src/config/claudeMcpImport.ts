@@ -13,6 +13,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import stripJsonComments from 'strip-json-comments';
 import { SettingScope, type LoadedSettings } from './settings.js';
+import { stripUtf8Bom } from './execution-sandbox-settings.js';
 
 export type ClaudeMcpImportSource = 'all' | 'claude-code' | 'claude-desktop';
 export type ClaudeMcpImportScope = 'user' | 'project';
@@ -102,7 +103,7 @@ function readJsonObject(filePath: string): {
 
   let parsed: unknown;
   try {
-    parsed = JSON.parse(stripJsonComments(raw));
+    parsed = JSON.parse(stripJsonComments(stripUtf8Bom(raw)));
   } catch (error) {
     return {
       found: true,

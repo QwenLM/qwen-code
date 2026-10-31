@@ -26,6 +26,7 @@ import {
   CHROME_NATIVE_HOST_NAME,
   CHROME_NATIVE_HOST_REVISION,
 } from './bridge/protocol.js';
+import { arePermissionBitsEnforced } from './test-utils/permission-bits.js';
 
 const roots: string[] = [];
 
@@ -178,9 +179,7 @@ describe('Chrome Native Host installer', () => {
     );
   });
 
-  it
-    .skipIf(process.platform === 'win32' || process.getuid?.() === 0)
-    .each(['launcher', 'manifest'])(
+  it.skipIf(!arePermissionBitsEnforced()).each(['launcher', 'manifest'])(
     'preserves an unreadable %s during install, status and uninstall',
     async (kind) => {
       const fixture = createFixture();
@@ -265,7 +264,7 @@ describe('Chrome Native Host installer', () => {
   });
 
   it
-    .skipIf(process.platform === 'win32' || process.getuid?.() === 0)
+    .skipIf(!arePermissionBitsEnforced())
     .each(['launcher', 'manifest'] as const)(
     'keeps a correct %s usable in a read-only directory',
     async (kind) => {
@@ -313,7 +312,7 @@ describe('Chrome Native Host installer', () => {
     },
   );
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'propagates a required launcher update failure and updates when writable',
     async () => {
       const fixture = createFixture();

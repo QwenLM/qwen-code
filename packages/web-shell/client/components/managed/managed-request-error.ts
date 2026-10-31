@@ -25,3 +25,16 @@ export function isNonRetryableClientError(error: unknown): boolean {
     status !== 429
   );
 }
+
+/**
+ * A 401/403. This client re-derives its credentials on every request, so an
+ * expired short-lived token gets a fresh answer on the very next attempt
+ * once the host refreshes — never a terminal condition.
+ */
+export function isAuthFailure(error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('status' in error)) {
+    return false;
+  }
+  const status = (error as { status?: unknown }).status;
+  return status === 401 || status === 403;
+}

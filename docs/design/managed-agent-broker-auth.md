@@ -8,7 +8,7 @@ Tracks [#13180](https://github.com/QwenLM/qwen-code/issues/13180).
 
 ## 1. Problem statement
 
-The Managed Agent Runtime Broker (`packages/sdk-java/managed-agent-server`)
+The Managed Agent Runtime Broker (`packages/managed-agent-server`)
 currently trusts client-asserted identity and client-minted credentials.
 Five gaps combine into cross-tenant read/write of any hosted Session's
 durable transcript when the broker is reachable without a gateway:
@@ -175,8 +175,7 @@ Startup guards (all fail fast with a named property):
   `service-base-url` (runtimes reach the publication surface with the
   writer credential).
 - `session-store.enabled` with a plaintext `session-store.base-url` whose
-  host is outside the client's literal-only loopback set (`localhost`,
-  `*.localhost`, `127.0.0.0/8`, `[::1]`) and no
+  host is outside the literal-only loopback set (§4.5) and no
   `session-store.allow-insecure-http` — every harness would refuse the
   advertised URL at attach time, so the broker refuses at startup instead.
 
@@ -293,12 +292,48 @@ VARBINARY(2048) NULL;` (same type as
   approvals to the authenticated actor instead of a header-asserted one
   (G1), closing the "guessable actor" hole.
 
-### 4.5 TypeScript client transport guard (G5)
+### 4.5 Session-store transport guards (G5)
 
-`ManagedSessionStoreHttpClient` rejects a base URL whose protocol is
-`http:` and whose hostname is not loopback (`localhost`, `*.localhost`,
-`127.0.0.0/8`, `[::1]`) unless the new option `allowInsecureHttp: true` is
-passed. `BridgeManagedSessionStore` gains the matching optional
+A session-store base URL whose protocol is `http:` and whose hostname is
+not loopback is refused unless plaintext is explicitly opted in. Three
+gates enforce this:
+
+1. Route boundary. `parseBridgeManagedSessionStore` (acp-bridge) parses
+   the `managedSessionStore` descriptor of the hosted `POST /session` and
+   `POST /session/:id/load` routes. It type-checks `allowInsecureHttp`
+   first, so a non-boolean value is refused as
+   `managedSessionStore.allowInsecureHttp is invalid`, then refuses a
+   plaintext non-loopback base URL unless `allowInsecureHttp` is `true`.
+   The route answers either refusal before the Session is opened, with
+   status `400`, code `invalid_managed_session_store`, and the error
+   message.
+2. Store client. `ManagedSessionStoreHttpClient`, built by
+   `createHttpManagedSessionStores`, applies the same rule to its
+   `baseUrl` and `allowInsecureHttp` options, so the guard holds for any
+   direct caller of the exported factory, not only the hosted routes;
+   there its refusal is answered with the same `400` and code.
+3. Broker startup. `BrokerSecurity` refuses to start when an enabled
+   session store advertises a plaintext base URL outside its loopback set
+   without `session-store.allow-insecure-http` (§4.1), because every
+   harness would refuse that URL at attach time.
+
+Both TypeScript gates classify the hostname after WHATWG URL parsing,
+which folds IPv4 short and hex forms (`127.1`, `0x7f.1`) to
+`127.0.0.1`: loopback is `localhost`, `*.localhost`, a dotted-quad IPv4
+literal in `127.0.0.0/8`, or `[::1]`. A DNS name that only starts with
+`127.` (`127.example.com`, `127.foo.example.test`) is not loopback. The
+broker matches the host text as written, without canonicalization or a
+resolver lookup: `localhost`, `*.localhost`, `[::1]`, or `127` followed by
+one to three dot-separated decimal groups. Each gate keeps its own
+classifier (core `isLoopbackHostname`, acp-bridge
+`isManagedSessionStoreLoopback`, broker `isLiteralLoopbackHost`), so a
+change to the loopback set must update all three.
+
+Decision: IPv4-mapped loopback (`[::ffff:127.0.0.1]`, which WHATWG URL
+canonicalizes to `[::ffff:7f00:1]`) is outside the loopback set of all
+three gates; such a URL must use HTTPS or the opt-in.
+
+`BridgeManagedSessionStore` gains the matching optional
 `allowInsecureHttp` boolean, produced by the broker's
 `qwen.managed-agent.session-store.allow-insecure-http` setting (env
 `QWEN_MANAGED_AGENT_SESSION_STORE_ALLOW_INSECURE_HTTP`) and serialized into
@@ -394,8 +429,13 @@ for loopback deployments without a binding key.
    open-mode creation, or created before V40) answers to any caller in its
    tenant, matching its read ACL; pre-migration workspace Sessions keep
    their current behavior.
-5. `createHttpManagedSessionStores({ baseUrl: 'http://<non-loopback>' })`
-   throws unless `allowInsecureHttp: true`.
+5. `parseBridgeManagedSessionStore({ baseUrl: 'http://<non-loopback>' })`
+   and `createHttpManagedSessionStores({ baseUrl: 'http://<non-loopback>' })`
+   throw unless `allowInsecureHttp: true`, and the hosted `POST /session`
+   route answers the parser's refusal with status `400` and code
+   `invalid_managed_session_store`; the parser refuses a non-boolean
+   `allowInsecureHttp` as invalid; IPv4-mapped loopback counts as
+   non-loopback.
 
 ## 9. Open questions
 

@@ -8,15 +8,24 @@
     "hook_execution": null,
     "child_run": {
       "shell": "background_shell",
-      "child_agent": "child_agent"
+      "child_agent": "child_agent",
+      "workflow": "workflow"
     },
     "child_acceptance": null,
     "channel_route": null,
-    "channel_delivery": null
+    "channel_delivery": "channel_delivery"
   },
   "additionalRecordBodies": {
+    "tool_stage": null,
+    "history_maintenance": null,
     "schedule": null,
-    "automation_run": "automation_run"
+    "automation_run": "automation_run",
+    "session_message": null,
+    "session_command": null,
+    "team_state": null,
+    "team_task": null,
+    "team_message": null,
+    "team_plan": null
   },
   "taskStates": [
     "pending",
@@ -39,6 +48,7 @@
   "taskKinds": [
     "automation_run",
     "background_shell",
+    "channel_delivery",
     "child_agent",
     "monitor",
     "workflow"

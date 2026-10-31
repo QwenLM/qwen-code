@@ -194,3 +194,35 @@ describe('Plan chip close mark', () => {
     expect(tint).toBeGreaterThan(generic);
   });
 });
+
+describe('Composer tag right inset', () => {
+  // The label and value keep the four-value shorthand with a 0 right
+  // component, and the remove button closes the chip when the tag has one. A
+  // chip whose tag is not removable has no such button, so it ends on
+  // `.tagContent`, which is the box that has to carry the inset itself
+  // (issue #11997). Moving the inset onto the text, or dropping this rule,
+  // is what the pair of assertions below rules out.
+  it('puts the inset on the content box that ends the chip', () => {
+    expect(
+      sorted(entries((selector) => selector === '.tagContent:last-child')),
+    ).toEqual([
+      {
+        at: '',
+        selectors: ['.tagContent:last-child'],
+        decls: ['padding-right: 7px'],
+      },
+    ]);
+  });
+
+  it('leaves the text boxes without a right padding of their own', () => {
+    const shorthand = entries((selector) =>
+      /^\.tag(Label|Value)$/.test(selector),
+    )
+      .map((entry) => entry.decls.find((decl) => decl.startsWith('padding:')))
+      .filter((decl): decl is string => decl !== undefined);
+    expect(shorthand).toEqual([
+      'padding: 3px 0 3px 7px',
+      'padding: 3px 0 3px 0.5ch',
+    ]);
+  });
+});

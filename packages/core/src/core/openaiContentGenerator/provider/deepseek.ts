@@ -9,6 +9,7 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import type { ReasoningEffort } from '../../reasoning-effort.js';
 import { REASONING_EFFORT_TIERS } from '../../reasoning-effort.js';
+import { applyDeepSeekReasoningEffort } from '../../deepseek-reasoning.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import type { GenerateContentConfig } from '@google/genai';
 import { ensureReasoningContentOnAssistantMessage } from './utils.js';
@@ -120,14 +121,14 @@ export class DeepSeekOpenAICompatibleProvider extends DefaultOpenAICompatiblePro
   ): OpenAI.Chat.ChatCompletionCreateParams {
     const baseRequest = super.buildRequest(request, userPromptId);
 
-    const profile = this.getReasoningCapabilities(request.model)?.profile;
+    const profile = this.getReasoningCapabilities(baseRequest.model)?.profile;
     const reshaped =
-      (!profile ||
-        this.contentGeneratorConfig.samplingParams?.['reasoning'] !==
-          undefined ||
-        this.contentGeneratorConfig.extra_body?.['reasoning'] !== undefined) &&
+      (!profile || profile === 'deepseek-openai') &&
       isDeepSeekHostname(this.contentGeneratorConfig)
-        ? translateReasoningEffort(baseRequest)
+        ? applyDeepSeekReasoningEffort(
+            baseRequest,
+            this.contentGeneratorConfig.baseUrl,
+          )
         : baseRequest;
     if (!reshaped.messages?.length) {
       return reshaped;
@@ -192,58 +193,4 @@ function flattenContentParts(
     ...message,
     content: text,
   } as OpenAI.Chat.ChatCompletionMessageParam;
-}
-
-// DeepSeek's chat-completions endpoint accepts a flat `reasoning_effort`
-// body parameter (Possible values: high, max — see
-// https://api-docs.deepseek.com/zh-cn/api/create-chat-completion). The
-// standard qwen-code config shape is `reasoning: { effort, ... }` which gets
-// passed through verbatim by the OpenAI pipeline. Translate to the flat
-// shape DeepSeek expects so user-configured effort levels actually take
-// effect; otherwise the nested `reasoning` object is ignored and the server
-// silently defaults to `high`. Backward-compatible mapping per the doc:
-// low / medium → high (the API does this anyway, but we surface it
-// explicitly so logs / dashboards are accurate).
-function translateReasoningEffort(
-  request: OpenAI.Chat.ChatCompletionCreateParams,
-): OpenAI.Chat.ChatCompletionCreateParams {
-  // The SDK type narrows reasoning_effort to 'low'|'medium'|'high', but
-  // DeepSeek extends it with 'max'. Treat the request as a loose record
-  // here so we can set 'max' without fighting the upstream union.
-  const r = request as unknown as Record<string, unknown>;
-  const nested = r['reasoning'] as { effort?: unknown } | undefined;
-  const nestedEffort = nested?.effort;
-  if (typeof nestedEffort !== 'string' || !nestedEffort) {
-    return request;
-  }
-
-  const next: Record<string, unknown> = { ...r };
-  // Don't clobber an already-set top-level reasoning_effort (user override
-  // via samplingParams or extra_body).
-  if (
-    typeof next['reasoning_effort'] !== 'string' ||
-    !next['reasoning_effort']
-  ) {
-    // Backward-compat mapping per the doc: low/medium → high, xhigh → max.
-    // Surface it client-side so logs reflect the wire value the server will
-    // actually act on (the server does the same mapping if we passed the
-    // raw value through, but explicit is better for observability).
-    let normalized = nestedEffort;
-    if (normalized === 'low' || normalized === 'medium') normalized = 'high';
-    else if (normalized === 'xhigh') normalized = 'max';
-    next['reasoning_effort'] = normalized;
-  }
-
-  // Drop only the duplicated `effort` key from the nested form so we don't
-  // ship two competing values for the same knob. Other keys inside
-  // `reasoning` (e.g. an extra_body-injected `budget_tokens`) stay
-  // intact — they're orthogonal data the server can ignore or honor on
-  // its own, and silently swallowing them here would be a surprise.
-  if (nested && Object.keys(nested).length === 1) {
-    delete next['reasoning'];
-  } else if (nested) {
-    const { effort: _drop, ...rest } = nested as Record<string, unknown>;
-    next['reasoning'] = rest;
-  }
-  return next as unknown as OpenAI.Chat.ChatCompletionCreateParams;
 }

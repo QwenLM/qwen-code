@@ -62,6 +62,7 @@
       "@qwen-code/audio-capture": ["../audio-capture/src/index.ts"],
       "@qwen-code/audio-capture/*": ["../audio-capture/src/*"],
       "@qwen-code/sdk": ["../sdk-typescript/src/index.ts"],
+      "@qwen-code/sdk/daemon/ui": ["../sdk-typescript/src/daemon/ui/index.ts"],
       "@qwen-code/sdk/daemon/ui/transcript": [
         "../sdk-typescript/src/daemon/ui/transcript.ts"
       ],

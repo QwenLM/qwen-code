@@ -5,7 +5,13 @@
  */
 
 import { spawn } from 'node:child_process';
-import { existsSync, readFileSync, statSync, utimesSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  readFileSync,
+  statSync,
+  utimesSync,
+} from 'node:fs';
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os, { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -25,6 +31,7 @@ import {
   sweepWorkerLedger,
   testInternals,
 } from './managed-runtime-ledger.js';
+import { isUnprovenSweepReport } from '../runtime/managed-quarantine-report.js';
 
 /**
  * A controllable rmSync for the unlink-failure paths: enrolled paths throw
@@ -43,6 +50,14 @@ const readFileSyncControl = vi.hoisted(() => ({ failing: new Set<string>() }));
 const writeFileSyncControl = vi.hoisted(() => ({
   failingPrefix: new Set<string>(),
 }));
+// A controllable chmodSync for the owner-only-heal failure path: enrolled
+// paths throw EPERM, as a chmod refused by the owner or the mount does,
+// everything else passes through.
+const chmodSyncControl = vi.hoisted(() => ({ failing: new Set<string>() }));
+// The warn channel of the module under test: a best-effort step that
+// degrades must say so, and the suite can only see that through the logger.
+// Transparent: every call still reaches the real logger.
+const debugWarnings = vi.hoisted(() => ({ messages: [] as string[] }));
 // A count of the blocking ps consults the module under test issues:
 // every process-table read goes through one execFileSync, so a fanout that
 // should share one consult shows up as a count here. Transparent: every
@@ -89,6 +104,17 @@ vi.mock('node:fs', async (importOriginal) => {
       }
       return actual.rmSync(target, options);
     },
+    chmodSync: ((target: unknown, ...rest: unknown[]): unknown => {
+      if (typeof target === 'string' && chmodSyncControl.failing.has(target)) {
+        throw Object.assign(new Error(`EPERM: cannot chmod ${target}`), {
+          code: 'EPERM',
+        });
+      }
+      return (actual.chmodSync as (...args: unknown[]) => unknown)(
+        target,
+        ...rest,
+      );
+    }) as typeof actual.chmodSync,
     readFileSync: ((target: unknown, ...rest: unknown[]): unknown => {
       if (
         typeof target === 'string' &&
@@ -105,6 +131,29 @@ vi.mock('node:fs', async (importOriginal) => {
     }) as typeof actual.readFileSync,
   };
 });
+
+vi.mock(
+  '@qwen-code/qwen-code-core/utils/debugLogger.js',
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import('@qwen-code/qwen-code-core/utils/debugLogger.js')
+      >();
+    return {
+      ...actual,
+      createDebugLogger: (tag?: string) => {
+        const logger = actual.createDebugLogger(tag);
+        return {
+          ...logger,
+          warn: (...args: unknown[]) => {
+            debugWarnings.messages.push(args.map(String).join(' '));
+            logger.warn(...args);
+          },
+        };
+      },
+    };
+  },
+);
 
 const POSIX = process.platform !== 'win32';
 
@@ -150,11 +199,23 @@ async function settledGroupTable(pgid: number): Promise<void> {
   // a busy host; an old stranger member would read the young leader's record
   // as 'ours'. Wait until the table shows this group alone before an age
   // judgement runs against it.
+  //
+  // The leader's elapsed column must also be datable: on some hosts ps
+  // reports a just-born process with the negative-elapsed wraparound (e.g.
+  // 441077234-00:18:40, which parsePsElapsed rightly rejects) until it ages
+  // past the glitch, and an undatable row judges 'unknown' — never 'ours',
+  // never 'recycled' — so a sweep that must identify the process holds it
+  // instead of killing it.
   await waitFor(() => {
     const members = [...queryProcessTable().values()].filter(
       (row) => row.pgid === pgid,
     );
-    return members.length === 1 && members[0]!.pid === pgid ? true : undefined;
+    const leader = members[0];
+    return members.length === 1 &&
+      leader!.pid === pgid &&
+      leader!.runningMs !== undefined
+      ? true
+      : undefined;
   });
 }
 
@@ -201,6 +262,113 @@ describe('Managed Runtime ledger', () => {
   });
 
   describe('worker-side document', () => {
+    it.skipIf(!POSIX)(
+      'creates the ledger directory and staging-written file owner-only',
+      async () => {
+        // The ledger names live pids and call ids: another local user able
+        // to traverse $HOME/.qwen must not read them, so both the directory
+        // and every file the tmp+rename dance produces land owner-only
+        // regardless of the ambient umask.
+        const ledgerDir = path.join(root, 'owned');
+        const workFile = path.join(ledgerDir, 'ledger.json');
+        const ledger = ManagedRuntimeLedger.create({
+          workFile,
+          worker: {
+            pid: process.pid,
+            pgid: process.pid,
+            incarnation: 'inc',
+            startedAt: Date.now(),
+          },
+        });
+        ledger.addGroup({ pgid: 4242, callId: 'c1', startedAt: 123 });
+        expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
+        expect(statSync(workFile).mode & 0o777).toBe(0o600);
+      },
+    );
+
+    it.skipIf(!POSIX)(
+      'tightens a ledger directory an earlier build left loose',
+      async () => {
+        // mkdirSync's mode applies only at creation, so a directory left
+        // loose by a pre-hardening build must be chmod'd back to owner-only
+        // or the pids inside stay listable by another local user.
+        const ledgerDir = path.join(root, 'loose');
+        await mkdir(ledgerDir, { recursive: true });
+        chmodSync(ledgerDir, 0o755);
+        ManagedRuntimeLedger.create({
+          workFile: path.join(ledgerDir, 'ledger.json'),
+          worker: {
+            pid: process.pid,
+            pgid: process.pid,
+            incarnation: 'inc',
+            startedAt: Date.now(),
+          },
+        });
+        expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
+      },
+    );
+
+    it.skipIf(!POSIX)(
+      'tightens only the ledger directory, never the shared ancestors above it',
+      async () => {
+        // The tmp tree above the ledger dir holds checkpoints, history and
+        // logs owned by other features and shared across sessions: only the
+        // leaf is ours to make owner-only.
+        const control = path.join(root, 'ambient');
+        await mkdir(control, { recursive: true });
+        const ambient = statSync(control).mode & 0o777;
+        const ledgerDir = path.join(root, 'shared', 'managed-runtime');
+        ManagedRuntimeLedger.create({
+          workFile: path.join(ledgerDir, 'ledger.json'),
+          worker: {
+            pid: process.pid,
+            pgid: process.pid,
+            incarnation: 'inc',
+            startedAt: Date.now(),
+          },
+        });
+        expect(statSync(ledgerDir).mode & 0o777).toBe(0o700);
+        expect(statSync(path.dirname(ledgerDir)).mode & 0o777).toBe(ambient);
+      },
+    );
+
+    it.skipIf(!POSIX)(
+      'still writes the ledger when the directory refuses the chmod, and says so',
+      async () => {
+        // A chmod the owner or the mount refuses — a root-created leaf, a
+        // shared CI cache, sshfs/CIFS — must not fail the creation: the
+        // directory stays writable, the ledger lands, and the silent
+        // degradation is warned instead of swallowed.
+        const ledgerDir = path.join(root, 'unchmoddable');
+        const workFile = path.join(ledgerDir, 'ledger.json');
+        chmodSyncControl.failing.add(ledgerDir);
+        debugWarnings.messages.length = 0;
+        try {
+          const ledger = ManagedRuntimeLedger.create({
+            workFile,
+            worker: {
+              pid: process.pid,
+              pgid: process.pid,
+              incarnation: 'inc',
+              startedAt: Date.now(),
+            },
+          });
+          ledger.addGroup({ pgid: 4242, callId: 'c1', startedAt: 123 });
+        } finally {
+          chmodSyncControl.failing.delete(ledgerDir);
+        }
+        const written = JSON.parse(await readFile(workFile, 'utf8')) as {
+          version: number;
+          groups: Array<{ pgid: number }>;
+        };
+        expect(written.version).toBe(1);
+        expect(written.groups.map((group) => group.pgid)).toContain(4242);
+        expect(
+          debugWarnings.messages.some((message) => message.includes(ledgerDir)),
+        ).toBe(true);
+      },
+    );
+
     it('writes the worker record at creation and persists groups synchronously', async () => {
       const workFile = path.join(root, 'nested', 'ledger.json');
       const ledger = ManagedRuntimeLedger.create({
@@ -635,16 +803,18 @@ describe('Managed Runtime ledger', () => {
     it('parses table rows, skips the unparseable, and keeps the undatable', () => {
       const rows = testInternals.parseProcessTable(
         [
-          '  123   100 00:05 node worker.js managed-runtime-worker',
-          '  456   100 01:02:03 sleep 300',
+          '  123   100 00:05 S node worker.js managed-runtime-worker',
+          '  456   100 01:02:03 S sleep 300',
           'garbage line',
-          '  789   100 not-a-time whatever',
-          '  790   100 441077234-00:18:40 node wrapped.js',
+          '  789   100 not-a-time S whatever',
+          '  790   100 441077234-00:18:40 S node wrapped.js',
+          '  791   100 00:07 Z node zombie.js',
         ].join('\n'),
       );
       expect(rows.get(123)).toMatchObject({
         pgid: 100,
         runningMs: 5_000,
+        state: 'S',
         args: 'node worker.js managed-runtime-worker',
       });
       expect(rows.get(456)?.args).toBe('sleep 300');
@@ -656,6 +826,7 @@ describe('Managed Runtime ledger', () => {
         runningMs: undefined,
         args: 'node wrapped.js',
       });
+      expect(rows.get(791)).toMatchObject({ pgid: 100, state: 'Z' });
     });
 
     it.skipIf(!POSIX)(
@@ -664,6 +835,7 @@ describe('Managed Runtime ledger', () => {
         const table = queryProcessTable();
         const row = table.get(process.pid);
         expect(row).toBeDefined();
+        expect(row!.state).toBeDefined();
         expect(row!.args.length).toBeGreaterThan(0);
         expect(row!.runningMs).toBeGreaterThanOrEqual(0);
       },
@@ -729,6 +901,19 @@ describe('Managed Runtime ledger', () => {
   });
 
   describe('sweepWorkerLedger', () => {
+    it('the sweep report predicate pairs with the class that produces it', () => {
+      // The acp-integration boundary reads the shape, never the class: a
+      // rename on the producer must redden here, not degrade a message there.
+      expect(
+        isUnprovenSweepReport(
+          new LedgerSweepUnprovenError('/x/a.json', [4123], 'unproven'),
+        ),
+      ).toBe(true);
+      expect(isUnprovenSweepReport(null)).toBe(false);
+      expect(isUnprovenSweepReport({ workFile: 1, remaining: [] })).toBe(false);
+      expect(isUnprovenSweepReport({ workFile: 'a' })).toBe(false);
+    });
+
     it('answers absent for a missing file, having proven nothing', async () => {
       await expect(
         sweepWorkerLedger(path.join(root, 'absent.json')),
@@ -803,6 +988,9 @@ describe('Managed Runtime ledger', () => {
         if (!ours.pid) throw new Error('spawn failed');
         strays.add(ours);
         const oursPid = ours.pid;
+        // The sweep must date the worker's row to judge it ours; see
+        // settledGroupTable.
+        await settledGroupTable(oursPid);
         const ourFile = path.join(root, 'ours.json');
         makeLedgerFile(ourFile, { pid: oursPid });
         await sweepWorkerLedger(ourFile, {});
@@ -919,6 +1107,9 @@ describe('Managed Runtime ledger', () => {
         worker.on('exit', () => undefined);
         if (!worker.pid) throw new Error('spawn failed');
         strays.add(worker);
+        // The sweep must date the worker's row to judge it ours; see
+        // settledGroupTable.
+        await settledGroupTable(worker.pid);
         const workFile = path.join(root, 'ledger.json');
         testInternals.writeLedgerDocument(
           workFile,
@@ -1333,6 +1524,215 @@ describe('Managed Runtime ledger', () => {
       expect(signal).not.toHaveBeenCalledWith(202, 'SIGKILL');
       expect(existsSync(workFile)).toBe(false);
     });
+
+    it('resolves a group whose only member is a zombie', async () => {
+      // In a container whose ACP host is PID 1, a SIGKILLed group's members
+      // are reaped by no one and stay zombies: kill(-pgid, 0) answers
+      // 'alive' forever. A zombie runs nothing, so the identity judge proves
+      // the group gone instead of holding the engine quarantined for the
+      // container's life.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 42424246 }, [
+        { pgid: 202, startedAt: Date.now() - 150_000 },
+      ]);
+      const signal = vi.fn(() => 'sent' as const);
+      await sweepWorkerLedger(workFile, {
+        sys: {
+          platform: 'linux',
+          liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+          signal,
+          table: () =>
+            new Map([
+              [
+                202,
+                {
+                  pid: 202,
+                  pgid: 202,
+                  runningMs: 150_000,
+                  state: 'Z',
+                  args: 'defunct',
+                },
+              ],
+            ]),
+        },
+      });
+      expect(signal).not.toHaveBeenCalled();
+      expect(existsSync(workFile)).toBe(false);
+    });
+
+    it('keeps a live survivor accountable beside a zombie leader', async () => {
+      // Filtering zombies must not drop the group's still-running members:
+      // a zombie leader beside an old-enough survivor is still the recorded
+      // group and keeps its kill-and-prove path.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 42424246 }, [
+        { pgid: 202, startedAt: Date.now() - 150_000 },
+      ]);
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+            signal,
+            table: () =>
+              new Map([
+                [
+                  202,
+                  {
+                    pid: 202,
+                    pgid: 202,
+                    runningMs: 150_000,
+                    state: 'Z',
+                    args: 'defunct',
+                  },
+                ],
+                [
+                  303,
+                  {
+                    pid: 303,
+                    pgid: 202,
+                    runningMs: 147_000,
+                    args: 'node our-shell-child.js',
+                  },
+                ],
+              ]),
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [202] });
+      expect(signal).toHaveBeenCalledWith(202, 'SIGKILL');
+      expect(existsSync(workFile)).toBe(true);
+    });
+
+    it('keeps a multithreaded zombie leader accountable', async () => {
+      // EXIT_ZOMBIE with live sibling threads: procps prints `Zl` for the
+      // leader, and the group still runs work, so it must not be dropped as
+      // a plain zombie.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 42424246 }, [
+        { pgid: 202, startedAt: Date.now() - 150_000 },
+      ]);
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+            signal,
+            table: () =>
+              new Map([
+                [
+                  202,
+                  {
+                    pid: 202,
+                    pgid: 202,
+                    runningMs: 150_000,
+                    state: 'Zl',
+                    args: 'node our-shell-leader.js',
+                  },
+                ],
+              ]),
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [202] });
+      expect(signal).toHaveBeenCalledWith(202, 'SIGKILL');
+      expect(existsSync(workFile)).toBe(true);
+    });
+
+    it("keeps a zombie leader's age when a live survivor is younger", async () => {
+      // The zombie leader's start time still proves this is the recorded
+      // group; a child created after the record must not turn it 'unknown'
+      // and leave it running.
+      const workFile = path.join(root, 'ledger.json');
+      makeLedgerFile(workFile, { pid: 42424246 }, [
+        { pgid: 202, startedAt: Date.now() - 150_000 },
+      ]);
+      const signal = vi.fn(() => 'sent' as const);
+      await expect(
+        sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+            signal,
+            table: () =>
+              new Map([
+                [
+                  202,
+                  {
+                    pid: 202,
+                    pgid: 202,
+                    runningMs: 150_000,
+                    state: 'Z',
+                    args: 'defunct',
+                  },
+                ],
+                [
+                  303,
+                  {
+                    pid: 303,
+                    pgid: 202,
+                    runningMs: 30_000,
+                    args: 'node young-child.js',
+                  },
+                ],
+              ]),
+          },
+        }),
+      ).rejects.toMatchObject({ remaining: [202] });
+      expect(signal).toHaveBeenCalledWith(202, 'SIGKILL');
+      expect(existsSync(workFile)).toBe(true);
+    });
+
+    it.each([false, true])(
+      'treats a reused pgid with a young zombie leader as recycled (witnessed=%s)',
+      async (exitWitnessed) => {
+        // A younger zombie leader on the recorded pgid proves the original
+        // group is gone; without the leader row the verdict would be
+        // 'unknown', signalling an unrelated child in witnessed mode or
+        // holding the stale ledger in unwitnessed mode.
+        const workFile = path.join(root, 'ledger.json');
+        makeLedgerFile(workFile, { pid: 42424246 }, [
+          { pgid: 202, startedAt: Date.now() - 150_000 },
+        ]);
+        const signal = vi.fn(() => 'sent' as const);
+        await sweepWorkerLedger(workFile, {
+          proofTimeoutMs: 300,
+          ...(exitWitnessed ? { exitWitnessed: true } : {}),
+          sys: {
+            platform: 'linux',
+            liveness: (id) => (id === 202 ? 'alive' : 'gone'),
+            signal,
+            table: () =>
+              new Map([
+                [
+                  202,
+                  {
+                    pid: 202,
+                    pgid: 202,
+                    runningMs: 30_000,
+                    state: 'Z',
+                    args: 'defunct',
+                  },
+                ],
+                [
+                  303,
+                  {
+                    pid: 303,
+                    pgid: 202,
+                    runningMs: 10_000,
+                    args: 'node unrelated.js',
+                  },
+                ],
+              ]),
+          },
+        });
+        expect(signal).not.toHaveBeenCalled();
+        expect(existsSync(workFile)).toBe(false);
+      },
+    );
 
     it('holds a leaderless group whose survivors are all younger than the record', async () => {
       // No live leader to date the group by and no survivor old enough to
@@ -2586,6 +2986,9 @@ describe('Managed Runtime ledger', () => {
         const proc = spawnGroupLeader();
         strays.add(proc);
         const shell = proc.pid!;
+        // The sweep must date the group's row to judge it the record's; see
+        // settledGroupTable.
+        await settledGroupTable(shell);
         makeLedgerFile(path.join(directory, 'good.json'), { pid: 42424241 }, [
           { pgid: shell, startedAt: Date.now() },
         ]);
@@ -2631,6 +3034,9 @@ describe('Managed Runtime ledger', () => {
         const proc = spawnGroupLeader();
         strays.add(proc);
         const shell = proc.pid!;
+        // The sweep must date the group's row to judge it the record's; see
+        // settledGroupTable.
+        await settledGroupTable(shell);
         makeLedgerFile(
           path.join(directory, 'remaining.json'),
           { pid: 42424242 },
@@ -2768,6 +3174,9 @@ describe('Managed Runtime ledger', () => {
         const proc = spawnGroupLeader();
         strays.add(proc);
         const live = proc.pid!;
+        // The second sweep below must date the group's row to judge it the
+        // record's; see settledGroupTable.
+        await settledGroupTable(live);
         const workFile = path.join(directory, 'own.json');
         makeLedgerFile(workFile, { pid: 42424244 }, [
           { pgid: live, startedAt: Date.now() },

@@ -2,7 +2,9 @@
 
 [English](web-shell-browser-notification-details.md) | [简体中文](web-shell-browser-notification-details.zh-CN.md)
 
-Following the base implementation in #11398, this enhancement lets users identify the session behind a notification, preview this turn's reply, and click to return to that session. Permissions, background triggers, and deduplication remain those of the base implementation; the built-in entry now defaults the preference on as described in the branding design. The public Web Shell branding options are described in the [branding design](web-shell-browser-notification-branding.md); no daemon route or wire field is added.
+Status: current as of 2026-10-12 for turn-end content limits, icons, and session navigation. The [action reminder design](../browser-action-notifications.md) extends triggers and updates the task label. Authorization follows the amended [branding integration contract](web-shell-browser-notification-branding.md#configuration-and-integration).
+
+Following the base implementation in #11398, this enhancement lets users identify the session behind a notification, preview this turn's reply, and click to return to that session. For turn-end reminders, background triggers and deduplication remain those of the base implementation; the built-in entry now defaults the preference on as described in the branding design. The public Web Shell branding options are described in the [branding design](web-shell-browser-notification-branding.md); no daemon route or wire field is added.
 
 ## Content and icon
 

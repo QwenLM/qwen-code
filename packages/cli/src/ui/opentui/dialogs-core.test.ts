@@ -14,12 +14,14 @@
 import { describe, it, expect } from 'vitest';
 import {
   applyNumberSelectKey,
+  chromeRows,
   computeInitialActiveIndex,
   cycleTab,
   findNextEnabledIndex,
   followScrollOffset,
   getSelectionScrollOffset,
   matchesSearchQuery,
+  regionListWindow,
   selectionWindow,
   type DialogListItem,
 } from './dialogs-core.js';
@@ -99,6 +101,110 @@ describe('scroll window rules (BaseSelectionList parity)', () => {
 
   it('selectionWindow never slices past the item count', () => {
     expect(selectionWindow(0, 3, 10).end).toBe(3);
+  });
+
+  it('selectionWindow clamps an offset the window outgrew', () => {
+    // The follow rule leaves the offset alone while the highlight stays
+    // inside, so a region grow can hand in an offset past the last full
+    // window. Painting from it would show fewer rows than the budget allows
+    // — and no arrows, since the budget just decided the whole list fits.
+    expect(selectionWindow(3, 5, 5)).toEqual({
+      start: 0,
+      end: 5,
+      showUp: false,
+      showDown: false,
+    });
+    expect(selectionWindow(18, 20, 5)).toEqual({
+      start: 15,
+      end: 20,
+      showUp: true,
+      showDown: false,
+    });
+    // A mid-list offset inside the bound passes through unchanged.
+    expect(selectionWindow(12, 20, 3).start).toBe(12);
+  });
+});
+
+describe('regionListWindow (the rows a region-mounted list pays for itself)', () => {
+  it('caps at the ink constant and flags the arrows when truncated without a region', () => {
+    expect(regionListWindow(undefined, { fixed: 8 }, 20, 10)).toEqual({
+      maxItemsToShow: 10,
+      showScrollArrows: true,
+    });
+    expect(regionListWindow(undefined, { fixed: 8 }, 4, 10)).toEqual({
+      maxItemsToShow: 4,
+      showScrollArrows: false,
+    });
+  });
+
+  it('subtracts the chrome and pays the scroll arrows out of the window', () => {
+    // 15 - 8 = 7 rows left; the window is a strict subset with more than two
+    // rows to spare, so two of them buy the ▲/▼ affordance.
+    expect(regionListWindow(15, { fixed: 8 }, 20, 10)).toEqual({
+      maxItemsToShow: 5,
+      showScrollArrows: true,
+    });
+  });
+
+  it('spends a tight window on items instead of arrows', () => {
+    // 10 - 8 = 2 rows: too tight to spend two of them on the affordance.
+    expect(regionListWindow(10, { fixed: 8 }, 20, 10)).toEqual({
+      maxItemsToShow: 2,
+      showScrollArrows: false,
+    });
+  });
+
+  it('floors at zero, not one, when the region cannot pay the chrome', () => {
+    expect(regionListWindow(8, { fixed: 8 }, 20, 10)).toEqual({
+      maxItemsToShow: 0,
+      showScrollArrows: false,
+    });
+    expect(regionListWindow(3, { fixed: 8 }, 20, 10)).toEqual({
+      maxItemsToShow: 0,
+      showScrollArrows: false,
+    });
+  });
+
+  it('never windows past the item count', () => {
+    expect(regionListWindow(40, { fixed: 8 }, 6, 10)).toEqual({
+      maxItemsToShow: 6,
+      showScrollArrows: false,
+    });
+  });
+
+  it('charges each chrome text run the rows it wraps into at its painted width', () => {
+    // The 30-column run wraps to three rows at ten columns: the charge is 9,
+    // not the 7 a flat one-row count gives, and the window pays the
+    // difference so the frame cannot grow past the region.
+    const chrome = {
+      fixed: 6,
+      runs: [{ text: 'x'.repeat(30), width: 10 }],
+    };
+    expect(regionListWindow(15, chrome, 20, 10)).toEqual({
+      maxItemsToShow: 4,
+      showScrollArrows: true,
+    });
+  });
+
+  it('keeps the zero floor when the measured chrome eats the region', () => {
+    expect(
+      regionListWindow(
+        9,
+        { fixed: 6, runs: [{ text: 'x'.repeat(30), width: 10 }] },
+        20,
+        10,
+      ),
+    ).toEqual({ maxItemsToShow: 0, showScrollArrows: false });
+  });
+
+  it('adds rows a dialog-level measurement already derived', () => {
+    expect(
+      chromeRows({
+        fixed: 4,
+        measuredRows: 3,
+        runs: [{ text: 'x'.repeat(25), width: 10 }],
+      }),
+    ).toBe(10);
   });
 });
 

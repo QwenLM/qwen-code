@@ -19,7 +19,9 @@ import {
 } from './managed-automation-record.js';
 import {
   assertManagedSessionDomainEnabled,
+  assertManagedSessionScheduleSessionModeEnabled,
   MANAGED_SESSION_ENABLED_DOMAINS,
+  MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES,
   ManagedSessionRecordError,
 } from './managed-session-records.js';
 
@@ -32,6 +34,8 @@ interface Fixture {
   start: boolean;
   /** The clause substring both validators must report on an invalid case. */
   error?: string;
+  /** Keys removed after the patch: a record missing a required key. */
+  omit?: readonly string[];
 }
 const fixtures = JSON.parse(
   readFileSync(
@@ -53,12 +57,23 @@ const fixtures = JSON.parse(
   templates: Record<Domain, Record<string, unknown>>;
   cases: Fixture[];
   successors: Array<
-    Omit<Fixture, 'patch' | 'start'> & {
+    Omit<Fixture, 'patch' | 'start' | 'omit'> & {
       before: Record<string, unknown>;
       after: Record<string, unknown>;
     }
   >;
 };
+
+/** `merge` followed by dropping `omit`'s top-level keys. */
+function record(
+  base: Record<string, unknown>,
+  patch: Record<string, unknown>,
+  omit: readonly string[] = [],
+): Record<string, unknown> {
+  const value = merge(base, patch);
+  for (const key of omit) delete value[key];
+  return value;
+}
 
 function merge(
   base: Record<string, unknown>,
@@ -105,12 +120,21 @@ describe('managed-automation-record/1 shared contract', () => {
       projectManagedTask(null, parsed.run, 1_000).definitionRevision,
     ).toBeNull();
     expect((parsed.record as AutomationRun).definitionRevision).toBe(3);
+    // H6b enabled both domains for submission; the mode gate beside the
+    // domain list is what still refuses a per_run definition.
     for (const domain of ['schedule', 'automation_run'] as const) {
-      expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain(domain);
-      expect(() => assertManagedSessionDomainEnabled(domain)).toThrow(
-        ManagedSessionRecordError,
-      );
+      expect(MANAGED_SESSION_ENABLED_DOMAINS).toContain(domain);
+      expect(() => assertManagedSessionDomainEnabled(domain)).not.toThrow();
     }
+    expect(MANAGED_SESSION_ENABLED_SCHEDULE_SESSION_MODES).toEqual([
+      'persistent',
+    ]);
+    expect(() =>
+      assertManagedSessionScheduleSessionModeEnabled('persistent'),
+    ).not.toThrow();
+    expect(() =>
+      assertManagedSessionScheduleSessionModeEnabled('per_run'),
+    ).toThrow(ManagedSessionRecordError);
   });
 
   it('pins the closed keys, fixed keys and policy vocabularies', () => {
@@ -122,6 +146,7 @@ describe('managed-automation-record/1 shared contract', () => {
         'definitionDigest',
         'definitionRevision',
         'enabled',
+        'gate',
         'goal',
         'kind',
         'overlap',
@@ -138,6 +163,7 @@ describe('managed-automation-record/1 shared contract', () => {
       [
         'automationRunId',
         'definitionRevision',
+        'gateOutputRef',
         'kind',
         'occurrenceKey',
         'run',
@@ -153,6 +179,7 @@ describe('managed-automation-record/1 shared contract', () => {
       [
         'automationRunId',
         'definitionRevision',
+        'gateOutputRef',
         'kind',
         'occurrenceKey',
         'scheduleId',
@@ -174,10 +201,14 @@ describe('managed-automation-record/1 shared contract', () => {
 
   it.each(fixtures.cases)('$id', (fixture) => {
     const body = MANAGED_EXTENSION_RECORD_BODIES[fixture.domain]!;
-    const record = merge(fixtures.templates[fixture.domain], fixture.patch);
+    const candidate = record(
+      fixtures.templates[fixture.domain],
+      fixture.patch,
+      fixture.omit,
+    );
     if (fixture.valid) {
-      const parsed = body.parse(record);
-      expect(parsed.record).toEqual(record);
+      const parsed = body.parse(candidate);
+      expect(parsed.record).toEqual(candidate);
       expect(Object.isFrozen(parsed.record)).toBe(true);
       for (const value of Object.values(
         parsed.record as Record<string, unknown>,
@@ -193,9 +224,9 @@ describe('managed-automation-record/1 shared contract', () => {
     } else {
       // Every invalid case names the clause that must refuse it, so a
       // masked guard can never slip a fixture green.
-      expect(() => body.parse(record)).toThrow(fixture.error as string);
+      expect(() => body.parse(candidate)).toThrow(fixture.error as string);
     }
-    expect(body.isStart(record)).toBe(fixture.start);
+    expect(body.isStart(candidate)).toBe(fixture.start);
   });
 
   it.each(fixtures.successors)('$id', (fixture) => {

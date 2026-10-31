@@ -11,6 +11,8 @@ import type {
   GoalTurnHost,
   GoalTurnPermit,
 } from '@qwen-code/qwen-code-core';
+import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import { restorePasteDraft } from '../utils/paste-placeholders.js';
 import { isSlashCommand } from '../utils/commandUtils.js';
 import type { PeerQueuedDelivery } from '../../peerMessaging/peer-messaging.js';
 
@@ -24,6 +26,12 @@ export interface QueuedUserSubmission {
   kind: 'user';
   modelText: string;
   submittedPrompt?: string;
+  /** Editable user text; merged pastes can rename its placeholder IDs while
+   * submittedPrompt retains the original Hook declaration. */
+  displayText?: string;
+  humanInput?: HumanPromptInput;
+  hasUnknownInput?: boolean;
+  pasteExpansions?: ReadonlyMap<string, string>;
   turnKey: string;
   /**
    * Shell intent recorded when the message was submitted. The drain routes
@@ -65,6 +73,12 @@ export interface UseMessageQueueReturn {
     deferUntilIdle?: boolean,
     submittedPrompt?: string,
     shellMode?: boolean,
+    metadata?: {
+      displayText?: string;
+      humanInput?: HumanPromptInput;
+      hasUnknownInput?: boolean;
+      pasteExpansions?: ReadonlyMap<string, string>;
+    },
   ) => void;
   addPeerMessage: (
     message: string,
@@ -94,6 +108,12 @@ export interface UseMessageQueueReturn {
     submittedPrompt?: string,
     deferUntilIdle?: boolean,
     shellMode?: boolean,
+    metadata?: {
+      displayText?: string;
+      humanInput?: HumanPromptInput;
+      hasUnknownInput?: boolean;
+      pasteExpansions?: ReadonlyMap<string, string>;
+    },
   ) => void;
   restorePeerMessage: (
     message: string,
@@ -108,6 +128,10 @@ interface QueuedMessage {
   key: string;
   text: string;
   submittedPrompt?: string;
+  displayText?: string;
+  humanInput?: HumanPromptInput;
+  hasUnknownInput?: boolean;
+  pasteExpansions?: ReadonlyMap<string, string>;
   deferUntilIdle: boolean;
   /**
    * Shell intent recorded at submit time (see QueuedUserSubmission).
@@ -140,11 +164,42 @@ function aggregateUserMessages(
   const submittedPrompt = messages
     .map((message) => message.submittedPrompt ?? message.text)
     .join('\n\n');
+  let pasteExpansions = new Map<string, string>();
+  const displayTexts = messages.map((message) => {
+    const display =
+      message.displayText ?? message.submittedPrompt ?? message.text;
+    if (!message.pasteExpansions?.size) return display;
+    const restored = restorePasteDraft(
+      display,
+      message.pasteExpansions,
+      pasteExpansions,
+    );
+    pasteExpansions = restored.pasteExpansions;
+    return restored.text;
+  });
+  const humanTexts = messages.flatMap(({ humanInput }) =>
+    humanInput === undefined ? [] : [humanInput.text],
+  );
   return {
     kind: 'user',
     modelText: text,
     turnKey: messages[0].key,
     submittedPrompt,
+    ...(messages.some(({ displayText }) => displayText !== undefined)
+      ? { displayText: displayTexts.join('\n\n') }
+      : {}),
+    ...(pasteExpansions.size > 0 ? { pasteExpansions } : {}),
+    ...(humanTexts.length > 0
+      ? {
+          humanInput: { text: humanTexts.join('\n\n') },
+          ...(messages.some(
+            (message) =>
+              message.hasUnknownInput || message.humanInput === undefined,
+          )
+            ? { hasUnknownInput: true }
+            : {}),
+        }
+      : {}),
     // Callers keep batches intent-homogeneous, so every member carries the
     // same value; the first represents the batch.
     ...(messages[0].shellMode === undefined
@@ -166,6 +221,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
       deferUntilIdle = false,
       submittedPrompt?: string,
       shellMode?: boolean,
+      metadata?: {
+        displayText?: string;
+        humanInput?: HumanPromptInput;
+        hasUnknownInput?: boolean;
+        pasteExpansions?: ReadonlyMap<string, string>;
+      },
     ) => {
       const text = message.trim();
       if (!text) return;
@@ -176,6 +237,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
           text,
           deferUntilIdle,
           submittedPrompt,
+          ...metadata,
           ...(shellMode === undefined ? {} : { shellMode }),
         },
       ];
@@ -358,7 +420,9 @@ export function useMessageQueue(): UseMessageQueueReturn {
 
   const getQueuedMessagesText = useCallback(() => {
     if (queuedMessages.length === 0) return '';
-    return queuedMessages.map(({ text }) => text).join('\n\n');
+    return queuedMessages
+      .map(({ text, displayText }) => displayText ?? text)
+      .join('\n\n');
   }, [queuedMessages]);
 
   const popAllMessages = useCallback(
@@ -386,6 +450,12 @@ export function useMessageQueue(): UseMessageQueueReturn {
       submittedPrompt?: string,
       deferUntilIdle = false,
       shellMode?: boolean,
+      metadata?: {
+        displayText?: string;
+        humanInput?: HumanPromptInput;
+        hasUnknownInput?: boolean;
+        pasteExpansions?: ReadonlyMap<string, string>;
+      },
     ) => {
       const restored = messages
         .map((text) => text.trim())
@@ -397,6 +467,7 @@ export function useMessageQueue(): UseMessageQueueReturn {
             ? { submittedPrompt }
             : {}),
           deferUntilIdle,
+          ...(messages.length === 1 ? metadata : {}),
           ...(shellMode === undefined ? {} : { shellMode }),
         }));
       if (restored.length === 0) return;
@@ -452,7 +523,9 @@ export function useMessageQueue(): UseMessageQueueReturn {
   );
 
   return {
-    messageQueue: queuedMessages.map(({ text }) => text),
+    messageQueue: queuedMessages.map(
+      ({ text, displayText }) => displayText ?? text,
+    ),
     pendingSubmissionCount: queuedMessages.length + queuedGoalTurns.length,
     addMessage,
     addPeerMessage,
