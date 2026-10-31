@@ -232,19 +232,12 @@ alone cannot authorize it.
 O3 requires O2 publication to be configured, including
 `qwen.managed-agent.tool-publication.verification-bytes-per-second` and
 `qwen.managed-agent.tool-publication.max-verification-timeout`. These required
-O2 verification settings are separate from the O3 content-read timeout below.
+O2 verification settings are separate from the O3 content-read timeout,
+`artifacts.read-timeout`.
 
-All settings below use the `qwen.managed-agent.artifacts` prefix:
-
-| Setting                      | Default | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ---------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`                    | `false` | Enable projection and public reads when O2 object storage is configured. Receipt sources are recorded even while disabled.                                                                                                                                                                                                                                                                                                            |
-| `publish-original`           | `false` | Approve original stream representations for current Workspace readers.                                                                                                                                                                                                                                                                                                                                                                |
-| `publish-preview`            | `false` | Additionally approve bounded previews for every Session reader; requires original publication approval.                                                                                                                                                                                                                                                                                                                               |
-| `max-concurrent-reads`       | `4`     | Maximum simultaneous content responses per server process.                                                                                                                                                                                                                                                                                                                                                                            |
-| `read-timeout`               | `2m`    | Elapsed-time budget checked between stream chunks, capped by the fixed two-minute output read lease; storage requests also use the storage client's timeouts.                                                                                                                                                                                                                                                                         |
-| `read-revalidation-interval` | `5s`    | How often an in-flight download re-runs the access check (workspace grant, read policy, session lifecycle); `PT0S` re-verifies every chunk. A revocation lands at the first chunk boundary after the window's end; chunks written inside the window still reach the client — up to 1 MiB for a Range request, and up to a full `read-timeout`'s worth of a streaming download. Once the re-check denies, no further chunk is written. |
-| `projection-interval`        | `1s`    | Cadence of the tool-result projection pass (claim processing). Bound through a `@Scheduled` placeholder, so a suffix-less number binds as milliseconds — unlike the typed settings above.                                                                                                                                                                                                                                             |
+The O3 settings use the `qwen.managed-agent.artifacts` prefix; the
+[configuration reference](../../docs/users/managed-agent-configuration-reference.md#qwenmanaged-agentartifacts)
+lists each with its default and limits.
 
 A product can replace `ManagedArtifactPolicy` for narrower publication or
 actor rules. Published previews persist in shared events. Policy changes do
@@ -372,15 +365,10 @@ refuses, by file and line, any line it might read differently from systemd or
 a shell, such as a continuation, a carriage return from CRLF line endings, a
 `;` comment, an unterminated quote or text after a closing quote.
 
-Create a Session:
-
-```bash
-curl -sS http://127.0.0.1:8080/v1/agents/sessions \
-  -H 'Content-Type: application/json' \
-  -H 'X-Qwen-Tenant-Id: demo' \
-  -H 'Idempotency-Key: create-1' \
-  -d '{"agent_id":"qwen-code","input":[{"type":"input_text","text":"hello"}]}'
-```
+Create a Session and read its events as in
+[Run a first Session](../../docs/users/managed-agent-reference-deployment.md#run-a-first-session);
+the requests are the same against this development server. The Session
+examples below use the same `default` tenant.
 
 The returned `id` is an RFC UUID and is the canonical identity used by
 the public API, Hosted Harness transcript, and Runtime Broker. The server does
@@ -410,32 +398,32 @@ not carry the operation id yet. See the
 curl -sS -X PATCH \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID \
   -H 'Content-Type: application/json' \
-  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'X-Qwen-Tenant-Id: default' \
   -H 'Idempotency-Key: rename-1' \
   -d '{"title":"investigate checkout failure"}'
 
 curl -sS -X POST \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/close \
-  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'X-Qwen-Tenant-Id: default' \
   -H 'Idempotency-Key: close-1'
 
 curl -sS \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/operations/$OPERATION_ID \
-  -H 'X-Qwen-Tenant-Id: demo'
+  -H 'X-Qwen-Tenant-Id: default'
 
 curl -sS -X POST \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/archive \
-  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'X-Qwen-Tenant-Id: default' \
   -H 'Idempotency-Key: archive-1'
 
 curl -sS -X POST \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/unarchive \
-  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'X-Qwen-Tenant-Id: default' \
   -H 'Idempotency-Key: unarchive-1'
 
 curl -sS -X DELETE \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID \
-  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'X-Qwen-Tenant-Id: default' \
   -H 'Idempotency-Key: delete-1'
 ```
 
@@ -686,18 +674,9 @@ chains stay the authority; the ledger locates, leases and indexes. The
 land. Design:
 [managed automation runtime](../../docs/design/2026-10-07-managed-automation-runtime.md).
 
-All settings below use the `qwen.managed-agent.automation` prefix:
-
-| Setting              | Default | Meaning                                                                                                                                                                                                              |
-| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`            | `false` | Run the scanner and admit the mutation routes (`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`); the read routes answer either way.                                                                                          |
-| `scan-delay`         | `10s`   | Fixed delay between scanner ticks.                                                                                                                                                                                   |
-| `lease`              | `60s`   | How long one scanner holds a definition; a stalled scanner yields it afterwards, and the fence it held no longer writes.                                                                                             |
-| `late-tolerance`     | `5m`    | A slot older than this when the scanner sees it is late and follows the definition's catch-up policy (`none`, `latest`, `bounded`).                                                                                  |
-| `lookback`           | `24h`   | Slots older than this are neither fired nor recorded; it bounds every catch-up by age.                                                                                                                               |
-| `max-slots-per-tick` | `1000`  | Slots **returned** per definition per tick: the walk itself follows the lookback window (its minutes are enumerated regardless), and the result set's surplus is cut at the oldest end and logged.                   |
-| `concurrency`        | `4`     | Non-terminal runs an `allow` definition may hold at once; beyond it an occurrence is recorded `skipped` with reason `count_limit`.                                                                                   |
-| `scanner-threads`    | `4`     | Definition rows one tick works at once on its bounded pool; the tick joins them before returning. A row leases from its claim time, never from the tick's start, so a long tick hands out no already-expired leases. |
+The settings use the `qwen.managed-agent.automation` prefix; the
+[configuration reference](../../docs/users/managed-agent-configuration-reference.md#qwenmanaged-agentautomation)
+lists each with its default and limits.
 
 ## Full WebShell dual-path development entry
 
@@ -1164,30 +1143,14 @@ The YAML-only ring, the retirement query, the operator-recovery ring and the
 single-key-pair CSI/migration entries are normative in [Rotate the Runtime credential key](../../docs/users/managed-agent-reference-deployment.md#rotate-the-runtime-credential-key),
 with the rationale in the [rotation design](../../docs/design/2026-10-15-runtime-credential-key-rotation.md).
 
-Two optional knobs change how the Broker listens and how long it waits for a
-dispatched v3 execution's result:
+Two optional settings change how the Broker listens and how long it waits for
+a dispatched v3 execution's result: `runtime-broker.allow-non-loopback` and
+`runtime-broker.v3-result-window`. Read their entries in the
+[configuration reference](../../docs/users/managed-agent-configuration-reference.md#qwenmanaged-agentruntime-broker)
+before changing either.
 
-```bash
-# Default false: the Broker refuses to bind a non-loopback address. This face
-# is plaintext HTTP with one global bearer token and no per-tenant
-# authorization, so set it only behind a layer that terminates TLS and
-# authorizes callers — restricting the network alone still puts that token on
-# the wire, and whoever reads it owns every execution the Broker admits.
-export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK='false'
-# Default 30m, minimum 1s: how long the Broker keeps polling the worker for
-# a dispatched v3 execution's result. When the window lapses the execution
-# is marked UNKNOWN instead of polling on, so a value shorter than your
-# longest tool call degrades that call to UNKNOWN. A suffix-less number
-# binds as seconds: startup refuses a value below the 1s floor but accepts
-# a stale milliseconds-style override (1800000 becomes 1800000 seconds),
-# so always write the suffix. Raising it above 30m buys nothing on the
-# shipped path: the TypeScript client stops observing a v3 execution at
-# its own fixed 30-minute deadline.
-export QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW='30m'
-```
-
-The same unit rule applies to every `qwen.managed-agent.*` duration setting: a
-suffix-less number binds as seconds except for `runtime-broker.retention.max-age`,
+Every `qwen.managed-agent.*` duration setting binds a suffix-less number as
+seconds except for `runtime-broker.retention.max-age`,
 which binds as days, and the millisecond-bound settings below.
 Millisecond-bound settings — `auth.allowed-drift` (so
 a stale `300000` keeps meaning five minutes instead of widening the
@@ -1306,15 +1269,10 @@ The former separate Broker `schema.sql` has been removed.
 
 Runtime JDBC retention is disabled by default. It removes old terminal
 executions, Sessions and bindings in bounded batches on a dedicated scheduler;
-it does not stop workers or delete Workspace files. Configure
-`qwen.managed-agent.runtime-broker.retention` with these environment variables:
-
-| Variable                                          | Default | Meaning                                                                                                                               |
-| ------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_ENABLED`    | `false` | Enable cleanup when the Runtime Broker is also enabled                                                                                |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_MAX_AGE`    | `30d`   | Minimum age of eligible terminal records; must be at least 1ms; unit-less values use days; explicit units such as `12h` are preserved |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_BATCH_SIZE` | `100`   | Per-tick bound on scanned bindings, scanned children and total deleted rows; 1–1000                                                   |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_SCAN_DELAY` | `1m`    | Positive delay between ticks, at least 1ms                                                                                            |
+it does not stop workers or delete Workspace files. Its settings use the
+`qwen.managed-agent.runtime-broker.retention` prefix; the
+[configuration reference](../../docs/users/managed-agent-configuration-reference.md#qwenmanaged-agentruntime-brokerretention)
+lists them with their environment variables, defaults and limits.
 
 Recovery records, Workspace holders and CSI retirement keep their bindings.
 Child Session lineage also keeps a binding until its canonical parent child_run
