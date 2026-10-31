@@ -2789,6 +2789,7 @@ describe('qwen-triage verify hardening', () => {
           GH_STUB_DIFF: diffFile,
           GH_STUB_OID: prOid ?? 'oid-1',
           GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          GITHUB_RUN_ID: '1',
           GITHUB_STEP_SUMMARY: '/dev/null',
           GITHUB_OUTPUT: out,
           RUNNER_TEMP: temp,
@@ -4018,9 +4019,7 @@ describe('qwen-triage verify hardening round 2', () => {
       const work = join(dir, 'work');
       const art = join(work, 'verify-results', 'prA-verify-1');
       mkdirSync(join(art, 'evidence'), { recursive: true });
-      mkdirSync(join(work, 'verify-results', 'prB-verify-2', 'evidence'), {
-        recursive: true,
-      });
+      mkdirSync(join(art, 'scratch', 'evidence'), { recursive: true });
       const png = (p, bytes) =>
         writeFileSync(
           p,
@@ -4030,11 +4029,8 @@ describe('qwen-triage verify hardening round 2', () => {
           ]),
         );
       png(join(art, 'evidence', '01-ab.png'), 500);
-      // Same sanitized name in a second artifact dir -> must not duplicate.
-      png(
-        join(work, 'verify-results', 'prB-verify-2', 'evidence', '01-ab.png'),
-        500,
-      );
+      // Same sanitized name in a nested evidence dir -> must not duplicate.
+      png(join(art, 'scratch', 'evidence', '01-ab.png'), 500);
       writeFileSync(join(art, 'evidence', '02-fake.png'), 'not a png');
       png(join(art, 'evidence', '03-big.png'), 2 * 1024 * 1024);
       png(join(art, 'evidence', '04-edge.png'), 2 * 1024 * 1024 - 9);
@@ -4084,7 +4080,11 @@ describe('qwen-triage verify hardening round 2', () => {
         '![01-ab](https://assets.example.test/pr-assets/verify/pr7999-77-1/01-ab.png)',
       );
       expect(comment).not.toContain('02-fake');
-      expect(comment).toContain('did not pass the hosting checks');
+      // The text file, the oversize file and the duplicate: a duplicate
+      // copied over the first counts as hosted and drops this to 2.
+      expect(comment).toContain(
+        '_3 additional image(s) did not pass the hosting checks',
+      );
 
       // Upload failure -> text-only, never an aborted report.
       const out2 = join(dir, 'comment2.md');
@@ -4451,8 +4451,10 @@ describe('qwen-triage verify hardening round 2', () => {
 
   // Every publish fixture returned [] for the comments listing, so the
   // PATCH arm — the one that must reuse a live status comment instead of
-  // stranding it — was never executed by any test.
-  it('patches a live status comment instead of posting a duplicate', () => {
+  // stranding it — was never executed by any test. The publisher used to
+  // take the newest marker comment, which under queued publishers was
+  // often another round's, and one round's report overwrote the other's.
+  it("patches this run's own status comment and no other", () => {
     const publishStep = stepIn(
       'publish-verify',
       'Post verification report comment',
@@ -4523,16 +4525,18 @@ describe('qwen-triage verify hardening round 2', () => {
         return readFileSync(calls, 'utf8');
       };
 
-      // A live status comment owned by the bot must be PATCHed, not
-      // duplicated — otherwise the "running" line is stranded forever.
-      // One page of comments, matching `gh --paginate` output shape.
-      const patched = run([
-        {
-          id: 555,
-          user: { login: 'qwen-code-ci-bot' },
-          body: `${M}\n${RUNNING}\n\nrunning`,
-        },
-      ]);
+      // A live status as the status step writes it, for the given run
+      // (the fixture publishes as run 1).
+      const status = (id, runId, login = 'qwen-code-ci-bot') => ({
+        id,
+        user: { login },
+        body: `${M}\n${RUNNING}\n<!-- qwen-triage:verify-run=${runId} -->\n\nrunning`,
+      });
+
+      // This run's own live status must be PATCHed, not duplicated —
+      // otherwise the "running" line is stranded forever. One page of
+      // comments, matching `gh --paginate` output shape.
+      const patched = run([status(555, 1)]);
       expect(patched).toContain('PATCH');
       expect(patched).toContain('/issues/comments/555');
       expect(patched).not.toContain('POST');
@@ -4542,15 +4546,42 @@ describe('qwen-triage verify hardening round 2', () => {
 
       // A comment carrying the marker but owned by someone else must not be
       // touched; the report is posted fresh instead.
-      const foreign = run([
-        {
-          id: 777,
-          user: { login: 'someone-else' },
-          body: `${M}\n${RUNNING}\n\nrunning`,
-        },
-      ]);
+      const foreign = run([status(777, 1, 'someone-else')]);
       expect(foreign).toContain('POST');
       expect(foreign).not.toContain('/issues/comments/777');
+
+      // Publishers queue, so the newest marker comment can be another
+      // round's: its live status is that round's to replace, and an earlier
+      // round's report is kept. This real report is posted fresh beside
+      // either.
+      const report = (id) => ({
+        id,
+        user: { login: 'qwen-code-ci-bot' },
+        body: `${M}\n<!-- qwen-triage:verify-substantive -->\n\nearlier report`,
+      });
+      for (const comments of [
+        [report(600), status(601, 2)],
+        [status(601, 2), report(602)],
+      ]) {
+        const calls = run(comments);
+        expect(calls).toContain('POST');
+        expect(calls).not.toContain('PATCH');
+      }
+
+      // The run marker is matched whole: run 1 does not own run 12's.
+      expect(run([status(612, 12)])).not.toContain('PATCH');
+
+      // The own status is found even when a later round's sits after it,
+      // and a weak notice replaces it just the same.
+      const own = run([status(555, 1), status(556, 2)]);
+      expect(own).toContain('/issues/comments/555');
+      expect(own).not.toContain('/issues/comments/556');
+      const cancelled = run([status(555, 1), status(556, 2)], {
+        VERIFY_RESULT: 'cancelled',
+      });
+      expect(cancelled).toContain('PATCH');
+      expect(cancelled).toContain('/issues/comments/555');
+      expect(cancelled).not.toContain('POST');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -6068,6 +6099,61 @@ describe('qwen-triage verify publish fidelity', () => {
     }
   });
 
+  // Images were collected across every round, oldest first, while the
+  // report came from the newest: an earlier round holding eight images
+  // filled the cap, and the published report showed none of its own.
+  it("illustrates the published round with that round's own images", () => {
+    const dir = fixture();
+    const results = join(dir, 'work', 'verify-results');
+    const png = (round, name) => {
+      mkdirSync(join(results, round, 'evidence'), { recursive: true });
+      writeFileSync(
+        join(results, round, 'evidence', `${name}.png`),
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0]),
+      );
+    };
+    const images = (env) =>
+      [
+        ...render(dir, {
+          AGENT_VERDICT: 'merge-ready',
+          VERIFY_ASSETS_UPLOADER: 'true',
+          ALIYUN_OSS_BUCKET: 'b',
+          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://oss.example.test',
+          ...env,
+        }).matchAll(/!\[([^\]]+)\]\(https:\/\/oss\.example\.test\//g),
+      ].map((m) => m[1]);
+    try {
+      // An earlier complete round with a full set, the newest complete
+      // round with one image, and a newer directory holding images only.
+      mkdirSync(join(results, 'prA-verify-0'));
+      writeFileSync(join(results, 'prA-verify-0', 'report.md'), '## old\n');
+      writeFileSync(
+        join(results, 'prA-verify-0', 'assertions.json'),
+        '{"pass":10,"fail":0,"total":10}',
+      );
+      for (let i = 1; i <= 8; i++) png('prA-verify-0', `0${i}-old`);
+      png('prA-verify-1', '09-new');
+      png('prA-verify-2', '10-stray');
+      expect(images({ NAME: 'ev-report' })).toEqual(['09-new']);
+
+      // Reportless: the round whose counts are shown.
+      rmSync(join(results, 'prA-verify-0', 'report.md'));
+      rmSync(join(results, 'prA-verify-1', 'report.md'));
+      expect(images({ NAME: 'ev-counts', VERDICT: 'timeout' })).toEqual([
+        '09-new',
+      ]);
+
+      // Neither report nor counts anywhere: the newest round directory.
+      rmSync(join(results, 'prA-verify-0', 'assertions.json'));
+      rmSync(join(results, 'prA-verify-1', 'assertions.json'));
+      expect(images({ NAME: 'ev-none', VERDICT: 'timeout' })).toEqual([
+        '10-stray',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // verdict.txt has one reader. The verify job used to read its own copy
   // from whichever round directory its search found first and hand the
   // publisher that word.
@@ -6305,69 +6391,111 @@ describe('qwen-triage verify publish fidelity', () => {
     }
   });
 
+  // The status step's comment block, run verbatim as run 1 with a stubbed
+  // gh that serves one page of `gh api --paginate` output and records every
+  // write and the snapshot read.
+  const statusComment = (comments) => {
+    const resolve = step('Resolve PR and snapshot metadata');
+    const start = resolve.indexOf("MARKER='<!-- qwen-triage:verify -->'");
+    const end = resolve.indexOf('echo "decision=run"', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const dir = mkdtempSync(join(tmpdir(), 'verify-status-'));
+    try {
+      writeFileSync(
+        join(dir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'case "$*" in',
+          '  "api user --jq .login") echo qwen-code-ci-bot ;;',
+          '  *"--method GET"*) cat "$LISTING" ;;',
+          '  *"--method PATCH"*) echo "PATCH $*" >> "$CALLS" ;;',
+          '  *"--jq .body") echo "SNAP $*" >> "$CALLS"; echo previous ;;',
+          '  *"/issues/7999/comments -f body="*) echo "POST $*" >> "$CALLS" ;;',
+          '  *) echo "UNEXPECTED $*" >> "$CALLS"; exit 1 ;;',
+          'esac',
+        ].join('\n'),
+        { mode: 0o755 },
+      );
+      writeFileSync(join(dir, 'listing.json'), JSON.stringify(comments));
+      writeFileSync(join(dir, 'calls'), '');
+      mkdirSync(join(dir, 'verify-context'));
+      const script = resolve.slice(start, end).replace(/^ {10}/gm, '');
+      const res = spawnSync('bash', ['-c', `set -euo pipefail\n${script}`], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          LISTING: join(dir, 'listing.json'),
+          CALLS: join(dir, 'calls'),
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          GITHUB_RUN_ID: '1',
+          PR_NUMBER: '7999',
+          RUN_URL: 'u',
+          RUNNER_TEMP: dir,
+        },
+      });
+      expect(res.status).toBe(0);
+      const calls = readFileSync(join(dir, 'calls'), 'utf8');
+      expect(calls).not.toContain('UNEXPECTED');
+      return calls;
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const BOT = { login: 'qwen-code-ci-bot' };
+  const liveStatus = (id, runId, user = BOT) => ({
+    id,
+    user,
+    body: `<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-state=running -->\n<!-- qwen-triage:verify-run=${runId} -->\n\nrunning`,
+  });
+
   // The follow-up snapshot must select the newest SUBSTANTIVE report, not
   // the newest non-running comment: a cancelled notice passes that test.
   it('snapshots the newest substantive report, not a weak notice', () => {
-    const resolve = step('Resolve PR and snapshot metadata');
-    // Run the workflow's own selector verbatim against a fixture shaped
-    // exactly like one page of `gh api --paginate` output, so no rewriting
-    // of the expression is needed.
-    const jqProgram = resolve.match(/jq -rs --arg m[^']*'([\s\S]*?end)'/)?.[1];
-    expect(jqProgram).toBeTruthy();
-    expect(jqProgram).toContain('contains($sub)');
+    const calls = statusComment([
+      {
+        id: 101,
+        user: BOT,
+        body: '<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-substantive -->\n\nREAL REPORT',
+      },
+      {
+        id: 102,
+        user: BOT,
+        body: '<!-- qwen-triage:verify -->\n\ncancelled notice',
+      },
+    ]);
+    expect(calls).toContain(
+      'SNAP api repos/QwenLM/qwen-code/issues/comments/101 ',
+    );
+    expect(calls).not.toContain('comments/102');
+  });
 
-    const dir = mkdtempSync(join(tmpdir(), 'verify-snap-'));
-    try {
-      const comments = join(dir, 'c.json');
-      writeFileSync(
-        comments,
-        JSON.stringify([
-          {
-            id: 101,
-            user: { login: 'qwen-code-ci-bot' },
-            body: '<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-substantive -->\n\nREAL REPORT',
-          },
-          {
-            id: 102,
-            user: { login: 'qwen-code-ci-bot' },
-            body: '<!-- qwen-triage:verify -->\n\ncancelled notice',
-          },
-        ]),
-      );
-      const runJq = (program) =>
-        spawnSync(
-          'jq',
-          [
-            '-rs',
-            '--arg',
-            'm',
-            '<!-- qwen-triage:verify -->',
-            '--arg',
-            's',
-            '<!-- qwen-triage:verify-state=running -->',
-            '--arg',
-            'sub',
-            '<!-- qwen-triage:verify-substantive -->',
-            '--arg',
-            'bot',
-            'qwen-code-ci-bot',
-            program,
-            comments,
-          ],
-          { encoding: 'utf8' },
-        ).stdout.trim();
+  // Verify jobs run one at a time per PR, but the previous round's
+  // publisher is often still queued, so its live status is still there.
+  // Taking it over put both rounds into one comment, and the later report
+  // overwrote the earlier one.
+  it("reuses only its own run's status comment", () => {
+    const own = statusComment([liveStatus(201, 1), liveStatus(202, 2)]);
+    expect(own).toContain(
+      'PATCH api --method PATCH repos/QwenLM/qwen-code/issues/comments/201 ',
+    );
+    expect(own).not.toContain('comments/202');
+    expect(own).toContain('<!-- qwen-triage:verify-run=1 -->');
 
-      // The newest comment is the weak notice, but the snapshot must be the
-      // substantive report behind it.
-      expect(runJq(jqProgram)).toBe('102\tfalse\t101');
-      // Control: selecting "newest non-running comment" picks the notice.
-      expect(
-        runJq(
-          '[.[][] | select((.body | startswith($m)) and .user.login == $bot)] | map(select(.body | contains($s) | not)) | last | "\\(.id)"',
-        ),
-      ).toBe('102');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+    // Another round's live status, a run id that only starts with ours,
+    // and our run marker in a comment the bot does not own: none is ours.
+    for (const comment of [
+      liveStatus(202, 2),
+      liveStatus(212, 12),
+      liveStatus(203, 1, { login: 'someone-else' }),
+    ]) {
+      const calls = statusComment([comment]);
+      expect(calls).not.toContain('PATCH');
+      expect(calls).toContain('POST');
+      expect(calls).toContain('<!-- qwen-triage:verify-run=1 -->');
     }
   });
 
@@ -7431,13 +7559,13 @@ describe('qwen-triage verify round-3 hardening', () => {
   });
 
   // A crashed run with no report has nothing to preserve, so it must not
-  // claim the substantive marker and overwrite the previous round's report.
+  // claim the substantive marker and displace the previous round's report
+  // as the next round's snapshot.
   it('marks a body substantive only when a report exists', () => {
     const publish = stepIn(
       'publish-verify',
       'Post verification report comment',
     );
-    expect(publish).toMatch(/if \[ -z "\$REPORT" \]; then\s+WEAK_BODY=true/);
     expect(publish).toMatch(
       /if \[ -n "\$REPORT" \]; then\s+printf '%s\\n' '<!-- qwen-triage:verify-substantive -->'/,
     );
