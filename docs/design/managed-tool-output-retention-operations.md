@@ -25,11 +25,11 @@ Use Java 21 and build/install the checkout's Java SDK and Runtime Broker depende
 Set `QWEN_O4_MYSQL_PASSWORD` through the test environment rather than command arguments. Do not put credentials in the JDBC URL or logs. IPv6 literal hosts and the non-sensitive options allowPublicKeyRetrieval, useSSL, sslMode, characterEncoding, connectTimeout and socketTimeout are supported and preserved for the generated database and child. User/password, plugin, userinfo and other connection options are rejected. Run the full profiles from a clean report directory, without integration-test selectors; the explicit Gate classes stay outside ordinary CI's IT family. A successful Maven command alone is insufficient: the source-derived report check below must also pass, with no skipped/failed case or selector property. The plugin's failIfNoSpecifiedTests cannot cover every empty method selector, so preserve the two-stage entry joined by &&; failure of either stage is a failed gate:
 
 ```sh
-mvn -f packages/sdk-java/managed-agent-server/pom.xml \
+mvn -f packages/managed-agent-server/pom.xml \
   -P o4-mysql-gates \
   -Dqwen.o4.mysql.url=jdbc:mysql://127.0.0.1:3306/qwen_o4_gate \
   -Dqwen.o4.mysql.user=o4_test clean verify checkstyle:check && \
-  node scripts/check-failsafe-reports.js o4-mysql packages/sdk-java/managed-agent-server
+  node scripts/check-failsafe-reports.js o4-mysql packages/managed-agent-server
 ```
 
 The MySQL gate executes the retention and collection regression cases on real SQL, proves a writer waits for the retirement lock, kills child JVMs after a physical PUT/DELETE and before SQL acknowledgment, pauses a reader with SIGSTOP past its real two-minute lease, and replays a delayed unknown PUT after a successful retry. Storage for the process faults is a controlled filesystem adapter. SIGSTOP/SIGCONT needs macOS or Linux; Windows does not establish this gate. The child writes only readiness/result markers, not raw output or credentials. A normally returning runner kills owned children before dropping their database. Active child pauses stop after at most five minutes or parent exit, and a required regression proves an unresumed child exits. SIGSTOP prevents that watchdog from running: after cancellation, verify child.pid against the exact child command and case directory, then terminate only that owned process, including a stopped child, before dropping its generated schema. Failed cases retain their temporary directory and surface child.log in assertions. Record the tested revision, fresh case totals and retained failure paths.
@@ -39,13 +39,13 @@ The 100 MiB and 1 GiB cases use already-admitted catalog fixtures with 1 MiB obj
 The OSS profile repeats the database/process cases and substitutes real OSS for the capacity cases, then checks real deletion, explicit nonexistent-object success, discarded delete responses and an identity denied DeleteObject. It requires a dedicated **private bucket that has never enabled versioning**, with `o4-test` in its name, and creates a fresh `o4-tests/<UUID>/` prefix per storage case. Cleanup deletes only deterministic keys owned by that case. It does not modify bucket IAM or sweep prefixes.
 
 ```sh
-mvn -f packages/sdk-java/managed-agent-server/pom.xml \
+mvn -f packages/managed-agent-server/pom.xml \
   -P o4-oss-gates \
   -Dqwen.o4.mysql.url=jdbc:mysql://127.0.0.1:3306/qwen_o4_gate \
   -Dqwen.o4.mysql.user=o4_test \
   -Dqwen.o4.oss.region=cn-hangzhou \
   -Dqwen.o4.oss.test-bucket=my-o4-test-bucket clean verify checkstyle:check && \
-  node scripts/check-failsafe-reports.js o4-oss packages/sdk-java/managed-agent-server
+  node scripts/check-failsafe-reports.js o4-oss packages/managed-agent-server
 ```
 
 Supply the normal test identity via `OSS_ACCESS_KEY_ID`, `OSS_ACCESS_KEY_SECRET` and optional `OSS_SESSION_TOKEN`. Supply the negative-test identity via `OSS_DELETE_DENIED_ACCESS_KEY_ID`, `OSS_DELETE_DENIED_ACCESS_KEY_SECRET` and optional `OSS_DELETE_DENIED_SESSION_TOKEN`. The negative identity must permit GetBucketVersioning and GetBucketAcl but deny DeleteObject for the fresh test prefix; missing identities fail the gate. Both identities use the same production factory for regional HTTPS endpoint validation, V4 signing and zero implicit retries. Its nonzero SDK limit only exposes failed GET statuses to a strategy that never permits native replay; bounded explicit GET retries check their original guards before each request. PUT and DELETE remain single SDK attempts. Teardown retries only keys not already acknowledged as deleted; failed PUT keys remain tracked. The OSS fork budget is 5400 seconds, distinct from each 1800-second capacity-method timeout, to leave room for both sizes and inherited process/database cases. Full segment read-back is retained as evidence; these budgets do not guarantee a pass on a slow or throttled link. On a killed fork, cleanup cannot be assumed: inspect its generated schema, child PID and recorded fresh o4-tests/<UUID>/ prefixes, and remove only its exact owned keys. A thrown response-loss fixture follows a real successful OSS deletion; this is not a claim that the network itself dropped that response.

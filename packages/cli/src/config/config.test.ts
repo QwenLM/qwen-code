@@ -52,6 +52,14 @@ const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
 const mockUpdateHandler = vi.hoisted(() => vi.fn());
 const mockBatchHandler = vi.hoisted(() => vi.fn());
+const mockMemoryHandler = vi.hoisted(() => vi.fn());
+vi.mock('../commands/memory.js', () => ({
+  memoryCommand: {
+    command: 'memory <subcommand> <source>',
+    builder: { 'dry-run': { type: 'boolean' }, json: { type: 'boolean' } },
+    handler: mockMemoryHandler,
+  },
+}));
 const mockSessionServiceInstance = vi.hoisted(() => ({
   loadLastSession: vi.fn(),
   loadSession: vi.fn(),
@@ -321,6 +329,25 @@ describe('isValidSessionId', () => {
 });
 
 describe('parseArguments', () => {
+  it.each(['on', 'off'] as const)(
+    'accepts explicit workflow mode %s',
+    async (mode) => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--workflow-mode',
+        mode,
+        '-p',
+        'ordinary',
+      ];
+      expect(await parseArguments()).toMatchObject({ workflowMode: mode });
+    },
+  );
+
+  it('preserves an absent workflow mode as undefined', async () => {
+    process.argv = ['node', 'script.js', '-p', 'ordinary'];
+    expect((await parseArguments()).workflowMode).toBeUndefined();
+  });
   const originalArgv = process.argv;
 
   afterEach(() => {
@@ -516,6 +543,27 @@ describe('parseArguments', () => {
     process.argv = ['node', 'script.js', '-p', 'query'];
     expect((await parseArguments()).sandbox).toBeUndefined();
   });
+
+  it.each(['--debug', '--safe-mode'])(
+    'exits after prefixed memory preview: %s',
+    async (flag) => {
+      process.argv = [
+        'node',
+        'script.js',
+        flag,
+        'memory',
+        'import',
+        'codex',
+        '--dry-run',
+        '--json',
+      ];
+      mockMemoryHandler.mockClear();
+      await expect(parseArguments()).rejects.toThrow(
+        'process.exit unexpectedly called with "0"',
+      );
+      expect(mockMemoryHandler).toHaveBeenCalledTimes(1);
+    },
+  );
 
   it('includes every approval mode description in --help', async () => {
     process.argv = ['node', 'script.js', '--help'];
@@ -1458,6 +1506,83 @@ describe('loadCliConfig', () => {
     resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
   });
+
+  it('H03 forwards only an explicitly supplied workflow ancestor provider', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    await loadCliConfig({}, argv);
+    expect(
+      mockConfigConstructorParams.mock.lastCall?.[0]
+        .workflowAncestorTrustProvider,
+    ).toBeUndefined();
+    const provider = vi.fn(async (dirs: readonly string[]) =>
+      dirs.map(() => true),
+    );
+    await loadCliConfig(
+      {},
+      argv,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      { workflowAncestorTrustProvider: provider },
+    );
+    expect(mockConfigConstructorParams.mock.lastCall?.[0]).toHaveProperty(
+      'workflowAncestorTrustProvider',
+      provider,
+    );
+    expect(provider).not.toHaveBeenCalled();
+  });
+
+  it.each(['bare', 'safe', 'ssh', 'agent-host', 'provisional'] as const)(
+    'H03 strips a supplied ancestor provider from %s sessions',
+    async (kind) => {
+      process.argv = [
+        'node',
+        'script.js',
+        ...(kind === 'bare' ? ['--bare'] : []),
+        ...(kind === 'safe' ? ['--safe-mode'] : []),
+      ];
+      if (kind === 'ssh') {
+        sshWorkspaceProbe.mockReturnValueOnce({
+          host: 'host',
+          port: 2222,
+          directory: '/srv/project',
+        });
+      }
+      const provider = vi.fn(async (dirs: readonly string[]) =>
+        dirs.map(() => true),
+      );
+      await loadCliConfig(
+        {},
+        await parseArguments(),
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          workflowAncestorTrustProvider: provider,
+          ...(kind === 'agent-host'
+            ? { agentHostReadOnly: true as const }
+            : {}),
+          ...(kind === 'provisional'
+            ? { provisionalWorkspace: true as const }
+            : {}),
+        },
+      );
+      expect(
+        mockConfigConstructorParams.mock.lastCall?.[0]
+          .workflowAncestorTrustProvider,
+      ).toBeUndefined();
+      expect(provider).not.toHaveBeenCalled();
+    },
+  );
 
   it.each([undefined, 'workspace', 'project'] as const)(
     'registers bundled Mem0 read-only over repository MCP configuration: %s',
@@ -2881,6 +3006,37 @@ describe('loadCliConfig', () => {
     );
   });
 
+  it.each([undefined, false, true])(
+    'passes the resolved Generated UI setting, on by default, as a runtime candidate: %s',
+    async (enabled) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({ experimental: { generatedUi: enabled } }, argv);
+      expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+        expect.objectContaining({
+          bundledGeneratedUi: expect.objectContaining({
+            enabled: enabled !== false,
+          }),
+        }),
+      );
+    },
+  );
+
+  it('does not prepare a Generated UI server for Safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    await loadCliConfig({ experimental: { generatedUi: true } }, argv);
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bundledGeneratedUi: {
+          enabled: true,
+          unavailableReason: 'unsupported-runtime',
+          explicit: true,
+        },
+      }),
+    );
+  });
+
   it('should keep the session writer lease disabled by default', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -3218,6 +3374,32 @@ describe('loadCliConfig', () => {
       expect(mockConfigConstructorParams).not.toHaveBeenCalled();
     },
   );
+
+  it('leaves a Managed transcript to a Managed host on resume', async () => {
+    const sessionId = '123e4567-e89b-42d3-a456-426614174000';
+    mockSessionServiceInstance.loadSession.mockResolvedValue({
+      conversation: { sessionId, messages: [] },
+    });
+    mockSessionServiceInstance.assertLegacySessionExecution.mockClear();
+
+    await loadCliConfig(
+      {},
+      { resume: sessionId } as CliArgs,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      false,
+      { executionEngine: 'managed' },
+    );
+
+    expect(
+      mockSessionServiceInstance.assertLegacySessionExecution,
+    ).not.toHaveBeenCalled();
+    expect(mockConfigConstructorParams).toHaveBeenCalled();
+  });
 
   it('rebinds a selective restore projection to the forked session', async () => {
     const sourceSessionId = '123e4567-e89b-42d3-a456-426614174000';
@@ -3919,6 +4101,39 @@ describe('loadCliConfig', () => {
         tools: { webSearch: { maxPerSession: 10 } },
       });
       expect(config.getWebSearchSettings()).toEqual({ maxPerSession: 10 });
+    });
+
+    it('lets WEB_SEARCH_ALLOWED_HOSTS override tools.webSearch.allowedHosts', async () => {
+      vi.stubEnv(
+        'WEB_SEARCH_ALLOWED_HOSTS',
+        ' gw.example.com , other.example.net ,',
+      );
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'gw.example.com',
+        'other.example.net',
+      ]);
+    });
+
+    it('falls back to tools.webSearch.allowedHosts when the env var is empty', async () => {
+      vi.stubEnv('WEB_SEARCH_ALLOWED_HOSTS', '   ');
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'settings.example.com',
+      ]);
+    });
+
+    it('passes an allowedHosts-only setting through without other web search keys', async () => {
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['gw.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({
+        allowedHosts: ['gw.example.com'],
+      });
     });
 
     // Both modes must turn the tool off explicitly: leaving the settings
@@ -6178,6 +6393,49 @@ describe('loadCliConfig chatCompression', () => {
     });
   });
 
+  it('passes model.loopProtection to the core config, defaulting to warn', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const load = (loopProtection?: unknown) =>
+      loadCliConfig(
+        { model: { loopProtection } } as Settings,
+        argv,
+        undefined,
+        [],
+      );
+    expect((await load('stop')).getLoopProtection()).toBe('stop');
+    expect((await load('off')).getLoopProtection()).toBe('off');
+    expect((await load()).getLoopProtection()).toBe('warn');
+    expect((await load('never')).getLoopProtection()).toBe('warn');
+  });
+
+  it('warns once about an invalid model.loopProtection value', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    try {
+      for (let i = 0; i < 2; i++) {
+        const config = await loadCliConfig(
+          { model: { loopProtection: 'Stop' } } as unknown as Settings,
+          argv,
+          undefined,
+          [],
+        );
+        expect(config.getLoopProtection()).toBe('warn');
+      }
+      const warnings = errorSpy.mock.calls.filter(([message]) =>
+        String(message).includes('model.loopProtection'),
+      );
+      expect(warnings).toEqual([
+        [
+          'WARNING: Invalid model.loopProtection value "Stop": expected "warn", "stop" or "off"; using the default "warn".',
+        ],
+      ]);
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it('should have undefined chatCompression if not in settings', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -6291,6 +6549,23 @@ describe('loadCliConfig workflowsEnabled', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.isWorkflowsEnabled()).toBe(false);
   });
+
+  it.each([undefined, false, true])(
+    'DW03: maps the public keyword opt-out %s into the Core gate',
+    async (disableWorkflowKeywordTrigger) => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      const config = await loadCliConfig(
+        { ui: { disableWorkflowKeywordTrigger } },
+        argv,
+        undefined,
+        [],
+      );
+      expect(config.getWorkflowKeywordTriggerEnabled()).toBe(
+        disableWorkflowKeywordTrigger !== true,
+      );
+    },
+  );
 
   // The regression this whole setting exists to prevent: `workflowsEnabled`
   // was declared on ConfigParameters and read by isWorkflowsEnabled(), but

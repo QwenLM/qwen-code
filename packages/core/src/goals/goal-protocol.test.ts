@@ -23,6 +23,7 @@ import {
   goalPauseReasonForFailure,
   goalPauseReasonForHeadlessFailure,
   goalPauseReasonForRunBudget,
+  goalTokenBudgetReason,
   goalTurnBudgetReason,
   validateGoalPauseReason,
 } from './goal-protocol.js';
@@ -144,6 +145,11 @@ describe('legacy evidence limit reasons', () => {
 });
 
 describe('Goal cadence budget reasons', () => {
+  it('formats singular and plural token budgets', () => {
+    expect(goalTokenBudgetReason(1)).toContain('(1 token)');
+    expect(goalTokenBudgetReason(2)).toContain('(2 tokens)');
+  });
+
   it('formats singular and plural turn budgets', () => {
     expect(goalTurnBudgetReason(1)).toContain('(1 turn)');
     expect(goalTurnBudgetReason(2)).toContain('(2 turns)');

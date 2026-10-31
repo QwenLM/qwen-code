@@ -18,6 +18,7 @@ import * as path from 'node:path';
 import {
   SlashCommandStatus,
   ToolConfirmationOutcome,
+  makeFakeConfig,
 } from '@qwen-code/qwen-code-core';
 import type { Config } from '@qwen-code/qwen-code-core';
 import {
@@ -38,6 +39,14 @@ import {
   type OpenTuiDispatchOutcome,
 } from './commands-dispatch.js';
 import type { OpenTuiCommandHost } from './commands-context.js';
+import * as interactiveMods from '../../services/interactive-mod-session.js';
+import { helpCommand } from '../commands/helpCommand.js';
+import { clearCommand } from '../commands/clearCommand.js';
+import { vimCommand } from '../commands/vimCommand.js';
+import {
+  OpenTuiSlashGateway,
+  normalizeQuitSubmission,
+} from './slash-gateway.js';
 
 const { logSlashCommandSpy, loadInteractiveCommandsMock } = vi.hoisted(() => ({
   logSlashCommandSpy: vi.fn(),
@@ -123,7 +132,11 @@ function createFakeHost(): FakeHost {
       push('clearItems');
       items.length = 0;
     },
-    loadHistory: () => push('loadHistory'),
+    loadHistory: (history) => {
+      items.splice(0, items.length, ...history);
+      push('loadHistory');
+    },
+    resetTranscript: () => push('resetTranscript'),
     refreshStatic: () => push('refreshStatic'),
     clearPendingState: () => push('clearPendingState'),
     cancelBtw: () => push('cancelBtw'),
@@ -229,6 +242,196 @@ async function dispatch(
 }
 
 describe('guards (ink handleSlashCommand parity)', () => {
+  it.each(['unchanged', 'changed'] as const)(
+    'keeps command history current across an await when history is %s',
+    async (kind) => {
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let before: readonly HistoryItem[] | undefined;
+      let after: readonly HistoryItem[] = [];
+      const recordSlashCommand = vi.fn();
+      const config = makeFakeConfig({});
+      config.getChatRecordingService = () =>
+        ({ recordSlashCommand }) as unknown as ReturnType<
+          Config['getChatRecordingService']
+        >;
+      const host = createFakeHost();
+      host.addItem({ type: 'info', text: 'before-await' }, 1);
+      const command = stub({
+        name: 'history-getter',
+        action: async (context) => {
+          before = context.ui.history;
+          await held;
+          after = context.ui.history;
+          context.ui.addItem({ type: 'info', text: 'own-result' }, 3);
+        },
+      });
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [command],
+      );
+      const pending = dispatcher.handle('/history-getter');
+      try {
+        await vi.waitFor(() => expect(before).toBeDefined());
+        expect(before).toEqual(host.getHistory());
+        if (kind === 'changed')
+          host.addItem({ type: 'info', text: 'after-await' }, 2);
+        const expected = [...host.getHistory()];
+        release();
+        expect(await pending).toEqual({ kind: 'handled' });
+        expect(after).toEqual(expected);
+        expect(after.every((item, index) => item === expected[index])).toBe(
+          true,
+        );
+        expect(
+          host.items.filter(
+            (item) => 'text' in item && item.text === 'own-result',
+          ),
+        ).toHaveLength(1);
+        expect(
+          recordSlashCommand.mock.calls.find(
+            ([value]) => value.phase === 'result',
+          )?.[0].outputHistoryItems,
+        ).toEqual([{ type: 'info', text: 'own-result' }]);
+      } finally {
+        release();
+        try {
+          await pending;
+        } finally {
+          dispatcher.dispose();
+        }
+      }
+    },
+  );
+  it.each([
+    ['startup', 'Error'],
+    ['startup', 'string'],
+    ['command', 'Error'],
+    ['command', 'string'],
+  ])(
+    'sanitizes Mod %s errors thrown as %s before display and recording',
+    async (phase, errorType) => {
+      const message =
+        '\u001b[31mMod failed\u001b[0m\u0007\u0008\u007f\u009f\u202e\n\t检查配置 \u001b]8;;https://example.invalid\u0007details\u001b]8;;\u0007\u2066\u2069';
+      const error = errorType === 'Error' ? new Error(message) : message;
+      const recordSlashCommand = vi.fn();
+      const config = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        getChatRecordingService: () => ({ recordSlashCommand }),
+      } as unknown as Config;
+      const initialize = vi.fn().mockImplementation(async () => {
+        if (phase === 'startup') throw error;
+      });
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          initialize,
+        } as unknown as interactiveMods.InteractiveModSession);
+      const action = vi.fn().mockRejectedValue(error);
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [stub({ name: 'test', kind: CommandKind.FILE, action })],
+      );
+      try {
+        expect(await dispatcher.handle('/test')).toEqual({ kind: 'handled' });
+        expect(initialize).toHaveBeenCalledOnce();
+        expect(action).toHaveBeenCalledTimes(phase === 'startup' ? 0 : 1);
+        const expected = {
+          type: 'error',
+          text: 'Mod failed\n\t检查配置 details',
+        };
+        expect(host.items).toContainEqual(expect.objectContaining(expected));
+        expect(recordSlashCommand).toHaveBeenCalledWith({
+          phase: 'result',
+          rawCommand: '/test',
+          outputHistoryItems: [expected],
+        });
+        expect(error instanceof Error ? error.message : error).toBe(message);
+      } finally {
+        dispatcher.dispose();
+        owner.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ['/compress', 'compress', CommandKind.BUILT_IN, false],
+    ['/summarize', 'compress', CommandKind.BUILT_IN, false],
+    ['/help', 'help', CommandKind.FILE, false],
+    ['/exit', 'quit', CommandKind.FILE, false],
+    ['/alpha /beta work', 'alpha', CommandKind.SKILL, false],
+    ['/help', 'help', CommandKind.BUILT_IN, true],
+    ['/exit', 'quit', CommandKind.BUILT_IN, true],
+  ])(
+    'allows only actual recovery commands after startup failure: %s (%s, %s)',
+    async (input, name, kind, recovery) => {
+      const error = new Error('Config startup failed');
+      const config = {
+        initialize: vi.fn().mockRejectedValue(error),
+        getGeminiClient: () => undefined,
+        getSessionId: () => 'mod-startup-failed',
+      } as unknown as Config;
+      const failStartup = vi.fn();
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          ready: new Promise(() => {}),
+          failStartup,
+        } as unknown as interactiveMods.InteractiveModSession);
+      const action = vi
+        .fn()
+        .mockResolvedValue({ type: 'submit_prompt', content: 'must not run' });
+      const command = recovery
+        ? name === 'help'
+          ? helpCommand
+          : quitCommand
+        : stub({
+            name,
+            kind,
+            altNames:
+              name === 'compress'
+                ? ['summarize']
+                : name === 'quit'
+                  ? ['exit']
+                  : undefined,
+            action,
+          });
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [command, stub({ name: 'beta', kind: CommandKind.SKILL, action })],
+      );
+      try {
+        const outcome = await dispatcher.handle(input);
+        expect(action).not.toHaveBeenCalled();
+        expect(failStartup).toHaveBeenCalledTimes(recovery ? 0 : 1);
+        if (recovery) {
+          expect(outcome).toMatchObject({
+            kind: name === 'help' ? 'open_dialog' : 'quit',
+          });
+          expect(config.initialize).not.toHaveBeenCalled();
+        } else {
+          expect(outcome).toEqual({ kind: 'handled' });
+          expect(host.items).toContainEqual(
+            expect.objectContaining({
+              type: 'error',
+              text: 'Config startup failed',
+            }),
+          );
+        }
+      } finally {
+        dispatcher.dispose();
+        owner.mockRestore();
+      }
+    },
+  );
+
   it('returns false for non-slash input and path-like input', async () => {
     const { outcome: plain } = await dispatch('hello world', []);
     expect(plain).toBe(false);
@@ -435,6 +638,198 @@ describe('mustDeferDuringStreaming (ink AppContainer mid-turn gate)', () => {
   });
 });
 
+describe('command registry owner publication', () => {
+  it.each(['session', 'target'] as const)(
+    'keeps the healthy registry after a held load (%s)',
+    async (change) => {
+      loadInteractiveCommandsMock.mockReset();
+      const config = makeFakeConfig({
+        chatRecording: false,
+        usageStatisticsEnabled: false,
+      });
+      let session = config.getSessionId();
+      let target = config.getTargetDir();
+      const sessionRead = vi
+        .spyOn(config, 'getSessionId')
+        .mockImplementation(() => session);
+      const targetRead = vi
+        .spyOn(config, 'getTargetDir')
+        .mockImplementation(() => target);
+      const oldAction = vi.fn(
+        (): SlashCommandActionReturn => ({
+          type: 'message',
+          messageType: 'info',
+          content: 'OLD_REGISTRY_ACTION',
+        }),
+      );
+      const healthyAction = vi.fn(
+        (): SlashCommandActionReturn => ({
+          type: 'message',
+          messageType: 'info',
+          content: 'HEALTHY_REGISTRY_ACTION',
+        }),
+      );
+      const oldCommands = [stub({ name: 'registry-owned', action: oldAction })];
+      const healthyCommands = [
+        stub({ name: 'registry-owned', action: healthyAction }),
+      ];
+      let releaseOld!: (commands: SlashCommand[]) => void;
+      const held = new Promise<SlashCommand[]>((resolve) => {
+        releaseOld = resolve;
+      });
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        healthyCommands,
+      );
+      const gateway = new OpenTuiSlashGateway();
+      gateway.attach(dispatcher);
+      loadInteractiveCommandsMock
+        .mockReturnValueOnce(held)
+        .mockResolvedValue(healthyCommands);
+      const pending = dispatcher.loadCommands().catch(() => undefined);
+      try {
+        expect(loadInteractiveCommandsMock).toHaveBeenCalledExactlyOnceWith(
+          config,
+          undefined,
+          services.settings,
+        );
+        if (change === 'session') session = 'healthy-successor-session';
+        else target = '/owned/healthy-successor-workspace';
+        await dispatcher.loadCommands();
+        expect(await gateway.dispatch('/registry-owned')).toEqual({
+          kind: 'dispatched',
+          outcome: { kind: 'handled' },
+        });
+        expect(host.items.at(-1)).toMatchObject({
+          type: 'info',
+          text: 'HEALTHY_REGISTRY_ACTION',
+        });
+        host.items.length = 0;
+        releaseOld(oldCommands);
+        await pending;
+        expect(await gateway.dispatch('/registry-owned')).toEqual({
+          kind: 'dispatched',
+          outcome: { kind: 'handled' },
+        });
+        expect(host.items.at(-1)).toMatchObject({
+          type: 'info',
+          text: 'HEALTHY_REGISTRY_ACTION',
+        });
+        expect(dispatcher.commands).toEqual(healthyCommands);
+        expect(oldAction).not.toHaveBeenCalled();
+        expect(healthyAction).toHaveBeenCalledTimes(2);
+      } finally {
+        releaseOld(healthyCommands);
+        await pending;
+        dispatcher.dispose();
+        sessionRead.mockRestore();
+        targetRead.mockRestore();
+      }
+    },
+  );
+});
+
+describe('startup registry request ownership', () => {
+  it.each(['session', 'target'] as const)(
+    'does not execute a successor action for a held old request (%s)',
+    async (change) => {
+      loadInteractiveCommandsMock.mockReset();
+      const config = makeFakeConfig({
+        chatRecording: false,
+        usageStatisticsEnabled: false,
+      });
+      let session = config.getSessionId();
+      let target = config.getTargetDir();
+      const sessionRead = vi
+        .spyOn(config, 'getSessionId')
+        .mockImplementation(() => session);
+      const targetRead = vi
+        .spyOn(config, 'getTargetDir')
+        .mockImplementation(() => target);
+      const skillManagerRead = vi
+        .spyOn(config, 'getSkillManager')
+        .mockReturnValue(
+          {} as NonNullable<ReturnType<Config['getSkillManager']>>,
+        );
+      const oldAction = vi.fn(
+        (): SlashCommandActionReturn => ({
+          type: 'message',
+          messageType: 'info',
+          content: 'OLD_SELFHEAL_ACTION',
+        }),
+      );
+      const successorAction = vi.fn(
+        (): SlashCommandActionReturn => ({
+          type: 'message',
+          messageType: 'info',
+          content: 'HEALTHY_SUCCESSOR_ACTION',
+        }),
+      );
+      const oldCommands = [
+        stub({ name: 'workspace-action', action: oldAction }),
+      ];
+      const healthyCommands = [
+        stub({ name: 'workspace-action', action: successorAction }),
+      ];
+      let releaseOld!: (commands: SlashCommand[]) => void;
+      const held = new Promise<SlashCommand[]>((resolve) => {
+        releaseOld = resolve;
+      });
+      loadInteractiveCommandsMock
+        .mockReturnValueOnce(held)
+        .mockResolvedValue(healthyCommands);
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [],
+      );
+      const gateway = new OpenTuiSlashGateway();
+      gateway.attach(dispatcher);
+      const pending = gateway.dispatch('/workspace-action');
+      try {
+        await vi.waitFor(() =>
+          expect(loadInteractiveCommandsMock).toHaveBeenCalledOnce(),
+        );
+        expect(gateway.isBusy()).toBe(true);
+        if (change === 'session') session = 'healthy-successor-session';
+        else target = '/owned/healthy-successor-workspace';
+        await dispatcher.loadCommands();
+        expect(dispatcher.commands).toEqual(healthyCommands);
+        releaseOld(oldCommands);
+        expect(await pending).toEqual({
+          kind: 'dispatched',
+          outcome: { kind: 'handled' },
+        });
+        expect(gateway.isBusy()).toBe(false);
+        const oldCallsBeforeFresh = oldAction.mock.calls.length;
+        const successorCallsFromOldRequest = successorAction.mock.calls.length;
+        host.items.length = 0;
+        expect(await gateway.dispatch('/workspace-action')).toEqual({
+          kind: 'dispatched',
+          outcome: { kind: 'handled' },
+        });
+        expect(host.items.at(-1)).toMatchObject({
+          type: 'info',
+          text: 'HEALTHY_SUCCESSOR_ACTION',
+        });
+        expect(successorCallsFromOldRequest).toBe(0);
+        expect(oldCallsBeforeFresh).toBe(0);
+        expect(successorAction).toHaveBeenCalledOnce();
+      } finally {
+        releaseOld(healthyCommands);
+        await pending.catch(() => undefined);
+        dispatcher.dispose();
+        skillManagerRead.mockRestore();
+        sessionRead.mockRestore();
+        targetRead.mockRestore();
+      }
+    },
+  );
+});
+
 describe('startup-window registry self-heal', () => {
   beforeEach(() => {
     loadInteractiveCommandsMock.mockReset();
@@ -458,6 +853,8 @@ describe('startup-window registry self-heal', () => {
     ...services,
     config: {
       getSkillManager,
+      getSessionId: () => 'startup-registry-session',
+      getTargetDir: () => '/owned/startup-registry-workspace',
     } as unknown as Config,
   });
 
@@ -685,33 +1082,44 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
     ).toBeUndefined();
   });
 
-  it('replaces the vim toggle message with a faithful unsupported notice (G-11b)', async () => {
-    const commands = [
-      stub({
-        name: 'vim',
-        action: async (context) => {
-          const enabled = await context.ui.toggleVimEnabled();
-          return {
-            type: 'message',
-            messageType: 'info',
-            content: enabled
-              ? 'Entered Vim mode. Run /vim again to exit.'
-              : 'Exited Vim mode.',
-          };
-        },
-      }),
-    ];
-    // The host reports vim off (the renderer has no vim mode); without the
-    // override the ink message would misleadingly say "Exited Vim mode."
-    const { outcome, host } = await dispatch('/vim', commands, {
-      toggleVimEnabled: async () => false,
-    });
-    expect(outcome).toEqual({ kind: 'handled' });
-    expect(host.items.at(-1)).toMatchObject({
-      type: 'info',
-      text: 'Vim mode is not yet available in the OpenTUI renderer.',
-    });
-  });
+  it.each([
+    [true, 'Entered Vim mode. Run /vim again to exit.'],
+    [false, 'Exited Vim mode.'],
+  ])(
+    'preserves the shared /vim message and recording when enabled is %s',
+    async (enabled, message) => {
+      const toggleVimEnabled = vi.fn().mockResolvedValue(enabled);
+      const recordSlashCommand = vi.fn();
+      const config = {
+        getChatRecordingService: () => ({ recordSlashCommand }),
+      } as unknown as Config;
+      const host = createFakeHost();
+      host.toggleVimEnabled = toggleVimEnabled;
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [vimCommand],
+      );
+
+      expect(await dispatcher.handle('/vim')).toEqual({ kind: 'handled' });
+      expect(toggleVimEnabled).toHaveBeenCalledTimes(1);
+      expect(host.items).toHaveLength(2);
+      expect(host.items[0]).toMatchObject({ type: 'user', text: '/vim' });
+      expect(host.items[1]).toMatchObject({ type: 'info', text: message });
+      expect(recordSlashCommand).toHaveBeenCalledTimes(2);
+      expect(recordSlashCommand).toHaveBeenNthCalledWith(1, {
+        phase: 'invocation',
+        rawCommand: '/vim',
+        sentToModel: false,
+        hiddenInvocation: false,
+      });
+      expect(recordSlashCommand).toHaveBeenNthCalledWith(2, {
+        phase: 'result',
+        rawCommand: '/vim',
+        outputHistoryItems: [{ type: 'info', text: message }],
+      });
+    },
+  );
 
   it('parent commands without an action list subcommands (info)', async () => {
     const commands = [
@@ -942,7 +1350,8 @@ describe('result mapping (all SlashCommandActionReturn kinds)', () => {
   it('load_history applies client history, clears, then re-adds items', async () => {
     const setHistory = vi.fn();
     const config = {
-      getGeminiClient: () => ({ setHistory }),
+      getSessionId: () => 'load-history-session',
+      getLlmClient: () => ({ setHistory }),
     } as unknown as Config;
     const commands = [
       stub({
@@ -1133,6 +1542,349 @@ describe('stacked skills (ink merge parity)', () => {
 describe('cancellation, telemetry and recording', () => {
   beforeEach(() => {
     logSlashCommandSpy.mockClear();
+  });
+
+  it.each([false, true])(
+    'owns cancellation while durable recall is pending (cancel=%s)',
+    async (cancel) => {
+      const { Logger } = await import(
+        '@qwen-code/qwen-code-core/core/logger.js'
+      );
+      const { Storage } = await import(
+        '@qwen-code/qwen-code-core/config/storage.js'
+      );
+      const owned = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'slash-cancel-recall-'),
+      );
+      let finishLogging = () => {};
+      const logging = new Promise<void>((resolve) => {
+        finishLogging = resolve;
+      });
+      let enterLogger = () => {};
+      const loggerEntered = new Promise<void>((resolve) => {
+        enterLogger = resolve;
+      });
+      try {
+        const storage = new Storage(
+          path.join(owned, 'project'),
+          path.join(owned, 'runtime'),
+        );
+        const logger = new Logger('deferred-command', storage);
+        await logger.initialize();
+        const logMessage = logger.logMessage.bind(logger);
+        const log = vi
+          .spyOn(logger, 'logMessage')
+          .mockImplementationOnce(async (...args) => {
+            enterLogger();
+            await logging;
+            return logMessage(...args);
+          });
+        const heldAction = vi.fn(() => ({
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: 'held command completed',
+        }));
+        const nextAction = vi.fn(() => ({
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: 'next command completed',
+        }));
+        const config = makeFakeConfig();
+        const sessionId = config.getSessionId();
+        const host = createFakeHost();
+        const gateway = new OpenTuiSlashGateway();
+        gateway.attach(
+          new OpenTuiSlashDispatcher(host, { ...services, config, logger }, [
+            stub({ name: 'held', action: heldAction }),
+            stub({ name: 'next', action: nextAction }),
+          ]),
+        );
+        const pending = gateway.dispatch('/held');
+        try {
+          await loggerEntered;
+          expect(gateway.isBusy()).toBe(true);
+          expect(heldAction).not.toHaveBeenCalled();
+          if (cancel) gateway.cancel();
+          finishLogging();
+          const settlement = await pending;
+          const firstBusy = gateway.isBusy();
+          const firstCalls = heldAction.mock.calls.length;
+          const firstProducedInfo = host.items.some(
+            (item) => item.text === 'held command completed',
+          );
+          const successor = await gateway.dispatch('/next');
+          expect(successor).toEqual({
+            kind: 'dispatched',
+            outcome: { kind: 'handled' },
+          });
+          expect(nextAction).toHaveBeenCalledOnce();
+          expect(host.items.at(-1)).toMatchObject({
+            text: 'next command completed',
+          });
+          expect(gateway.isBusy()).toBe(false);
+          expect(config.getSessionId()).toBe(sessionId);
+          expect(log).toHaveBeenCalledTimes(2);
+          expect(settlement).toEqual({
+            kind: 'dispatched',
+            outcome: { kind: 'handled' },
+          });
+          expect(firstBusy).toBe(false);
+          expect(firstCalls).toBe(cancel ? 0 : 1);
+          expect(firstProducedInfo).toBe(!cancel);
+        } finally {
+          finishLogging();
+          try {
+            await pending;
+          } finally {
+            log.mockRestore();
+          }
+        }
+      } finally {
+        finishLogging();
+        fs.rmSync(owned, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(['logger rejection', 'session change'] as const)(
+    'releases recall ownership after %s without running the old action',
+    async (change) => {
+      const { Logger } = await import(
+        '@qwen-code/qwen-code-core/core/logger.js'
+      );
+      const { Storage } = await import(
+        '@qwen-code/qwen-code-core/config/storage.js'
+      );
+      const owned = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'slash-recall-owner-'),
+      );
+      let finishLogging = () => {};
+      const logging = new Promise<void>((resolve) => {
+        finishLogging = resolve;
+      });
+      let enterLogger = () => {};
+      const loggerEntered = new Promise<void>((resolve) => {
+        enterLogger = resolve;
+      });
+      try {
+        const storage = new Storage(
+          path.join(owned, 'project'),
+          path.join(owned, 'runtime'),
+        );
+        const logger = new Logger('recall-owner', storage);
+        await logger.initialize();
+        const failure = new Error('owned recall write failed');
+        const logMessage = logger.logMessage.bind(logger);
+        const log = vi
+          .spyOn(logger, 'logMessage')
+          .mockImplementationOnce(async (...args) => {
+            enterLogger();
+            await logging;
+            if (change === 'logger rejection') throw failure;
+            return logMessage(...args);
+          });
+        const oldAction = vi.fn(() => ({
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: 'old command completed',
+        }));
+        const nextAction = vi.fn(() => ({
+          type: 'message' as const,
+          messageType: 'info' as const,
+          content: 'successor completed',
+        }));
+        const config = makeFakeConfig();
+        let sessionId = config.getSessionId();
+        const session = vi
+          .spyOn(config, 'getSessionId')
+          .mockImplementation(() => sessionId);
+        const host = createFakeHost();
+        const gateway = new OpenTuiSlashGateway();
+        gateway.attach(
+          new OpenTuiSlashDispatcher(host, { ...services, config, logger }, [
+            stub({ name: 'old', action: oldAction }),
+            stub({ name: 'next', action: nextAction }),
+          ]),
+        );
+        const settlement = gateway.dispatch('/old').then(
+          (outcome) => ({ outcome, error: undefined }),
+          (error: unknown) => ({ outcome: undefined, error }),
+        );
+        try {
+          await loggerEntered;
+          expect(gateway.isBusy()).toBe(true);
+          expect(oldAction).not.toHaveBeenCalled();
+          if (change === 'session change') sessionId = 'successor-session';
+          finishLogging();
+          const result = await settlement;
+          const firstBusy = gateway.isBusy();
+          const firstProcessing = host.processingFlags.at(-1);
+          const firstItems = [...host.items];
+          const firstTelemetryCalls = logSlashCommandSpy.mock.calls.length;
+          const successor = await gateway.dispatch('/next');
+          expect(successor).toEqual({
+            kind: 'dispatched',
+            outcome: { kind: 'handled' },
+          });
+          expect(nextAction).toHaveBeenCalledOnce();
+          expect(host.items.at(-1)).toMatchObject({
+            text: 'successor completed',
+          });
+          expect(gateway.isBusy()).toBe(false);
+          expect(host.processingFlags.at(-1)).toBe(false);
+          expect(log).toHaveBeenCalledTimes(2);
+          expect(oldAction).not.toHaveBeenCalled();
+          expect(firstBusy).toBe(false);
+          expect(firstProcessing).not.toBe(true);
+          expect(firstItems).toEqual([]);
+          expect(firstTelemetryCalls).toBe(0);
+          if (change === 'logger rejection') {
+            expect(result.error).toBe(failure);
+            expect(result.outcome).toBeUndefined();
+          } else {
+            expect(result.error).toBeUndefined();
+            expect(result.outcome).toEqual({
+              kind: 'dispatched',
+              outcome: { kind: 'handled' },
+            });
+            expect(config.getSessionId()).toBe('successor-session');
+          }
+        } finally {
+          finishLogging();
+          try {
+            await settlement;
+          } finally {
+            log.mockRestore();
+            session.mockRestore();
+          }
+        }
+      } finally {
+        finishLogging();
+        fs.rmSync(owned, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each(['/clear', '/reset', '/new'])(
+    '%s retains input ownership through Mod shutdown and chat reset',
+    async (input) => {
+      let finishEnd = () => {};
+      const ending = new Promise<void>((resolve) => {
+        finishEnd = resolve;
+      });
+      let finishReset = () => {};
+      const resetting = new Promise<void>((resolve) => {
+        finishReset = resolve;
+      });
+      const syncSession = vi.fn(() => ending);
+      const resetChat = vi.fn(() => resetting);
+      const config = makeFakeConfig();
+      vi.spyOn(config, 'initialize').mockResolvedValue();
+      vi.spyOn(config, 'startNewSession').mockReturnValue('new-session');
+      vi.spyOn(config, 'getToolRegistry').mockReturnValue(undefined!);
+      vi.spyOn(config, 'getLlmClient').mockReturnValue({
+        resetChat,
+      } as unknown as ReturnType<Config['getLlmClient']>);
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          initialize: vi.fn().mockResolvedValue(undefined),
+          syncSession,
+          invalidateTools: vi.fn(),
+          restoreTools: vi.fn().mockResolvedValue(undefined),
+        } as unknown as interactiveMods.InteractiveModSession);
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [clearCommand],
+      );
+      const gateway = new OpenTuiSlashGateway();
+      gateway.attach(dispatcher);
+      const pending = gateway.dispatch(input);
+      try {
+        await vi.waitFor(() =>
+          expect(syncSession).toHaveBeenCalledWith('clear'),
+        );
+        gateway.cancel();
+        await Promise.resolve();
+        expect(gateway.isBusy()).toBe(true);
+        expect(host.processingFlags.at(-1)).toBe(true);
+        expect(
+          host.items.some((item) => item.text === 'Command cancelled.'),
+        ).toBe(false);
+        expect(await gateway.dispatch('next prompt')).toMatchObject({
+          kind: 'rejected',
+        });
+        expect(host.calls).not.toContain('clearItems');
+
+        finishEnd();
+        await vi.waitFor(() => expect(resetChat).toHaveBeenCalledOnce());
+        gateway.cancel();
+        await Promise.resolve();
+        expect(gateway.isBusy()).toBe(true);
+        expect(host.processingFlags.at(-1)).toBe(true);
+        finishReset();
+        await pending;
+        expect(gateway.isBusy()).toBe(false);
+        expect(host.processingFlags.at(-1)).toBe(false);
+        expect(await gateway.dispatch('next prompt')).toEqual({
+          kind: 'dispatched',
+          outcome: false,
+        });
+      } finally {
+        finishEnd();
+        finishReset();
+        await pending;
+        owner.mockRestore();
+      }
+    },
+  );
+
+  it('keeps a file command named clear cancellable', async () => {
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+      stub({
+        name: 'clear',
+        kind: CommandKind.FILE,
+        action: () => new Promise(() => {}),
+      }),
+    ]);
+    const pending = dispatcher.handle('/clear');
+    dispatcher.cancel();
+    await expect(pending).resolves.toEqual({ kind: 'handled' });
+    expect(host.processingFlags.at(-1)).toBe(false);
+    expect(host.items.some((item) => item.text === 'Command cancelled.')).toBe(
+      true,
+    );
+  });
+
+  it('releases a failed clear and lets the next command cancel normally', async () => {
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(host, services, [
+      {
+        ...clearCommand,
+        action: async () => {
+          throw new Error('reset failed');
+        },
+      },
+      stub({ name: 'compress', action: () => new Promise(() => {}) }),
+    ]);
+    const gateway = new OpenTuiSlashGateway();
+    gateway.attach(dispatcher);
+    await gateway.dispatch('/clear');
+    expect(gateway.isBusy()).toBe(false);
+    expect(host.items.at(-1)).toMatchObject({
+      type: 'error',
+      text: 'reset failed',
+    });
+    const pending = gateway.dispatch('/compress');
+    await Promise.resolve();
+    gateway.cancel();
+    await pending;
+    expect(gateway.isBusy()).toBe(false);
+    expect(host.processingFlags.at(-1)).toBe(false);
+    expect(host.items.at(-1)).toMatchObject({ text: 'Command cancelled.' });
   });
 
   it('cancel() aborts the action and reports like ink', async () => {
@@ -1666,5 +2418,181 @@ describe('isIdleRef parity (command actions see pre-dispatch idle state)', () =>
 
     expect(linkedHost.isStreaming()).toBe(true);
     expect(host.items.some((item) => item.type === 'goal_state')).toBe(false);
+  });
+});
+
+describe('durable slash recall admission', () => {
+  it('load_history applies client history and replaces the canonical replay batch', async () => {
+    const setHistory = vi.fn();
+    const config = {
+      getSessionId: () => 'original',
+      getLlmClient: () => ({ setHistory }),
+    } as unknown as Config;
+    const commands = [
+      stub({
+        name: 'restore',
+        action: () => ({
+          type: 'load_history',
+          history: [{ type: 'info', text: 'restored' }],
+          clientHistory: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        }),
+      }),
+    ];
+    const host = createFakeHost();
+    const dispatcher = new OpenTuiSlashDispatcher(
+      host,
+      { ...services, config },
+      commands,
+    );
+    const outcome = await dispatcher.handle('/restore');
+    expect(outcome).toEqual({ kind: 'handled' });
+    expect(setHistory).toHaveBeenCalledWith([
+      { role: 'user', parts: [{ text: 'hi' }] },
+    ]);
+    expect(host.calls).toEqual(
+      expect.arrayContaining(['clearItems', 'loadHistory', 'resetTranscript']),
+    );
+    expect(host.items.at(-1)).toMatchObject({ type: 'info', text: 'restored' });
+  });
+
+  it.each(['session', 'same-session-history'] as const)(
+    'does not publish delayed load_history over %s',
+    async (change) => {
+      let release!: () => void;
+      let sessionId = 'original';
+      const setHistory = vi.fn(
+        () =>
+          new Promise<void>((resolve) => {
+            release = resolve;
+          }),
+      );
+      const config = {
+        getSessionId: () => sessionId,
+        getLlmClient: () => ({ setHistory }),
+      } as unknown as Config;
+      const host = createFakeHost();
+      const dispatcher = new OpenTuiSlashDispatcher(
+        host,
+        { ...services, config },
+        [
+          stub({
+            name: 'restore',
+            action: () => ({
+              type: 'load_history',
+              history: [{ type: 'info', text: 'old' }],
+              clientHistory: [],
+            }),
+          }),
+        ],
+      );
+      const pending = dispatcher.handle('/restore');
+      await vi.waitFor(() => expect(setHistory).toHaveBeenCalledOnce());
+      if (change === 'session') sessionId = 'new';
+      host.loadHistory([{ id: 900, type: 'user', text: 'successor' }]);
+      host.calls.length = 0;
+      release();
+      expect(await pending).toEqual({ kind: 'handled' });
+      expect(host.items).toEqual([
+        { id: 900, type: 'user', text: 'successor' },
+      ]);
+      expect(host.calls).not.toContain('clearItems');
+      expect(host.calls).not.toContain('resetTranscript');
+    },
+  );
+
+  it.each(['/quit', '/exit', 'exit', 'quit', ':q', ':q!', ':wq', ':wq!'])(
+    'keeps the latest real prompt after bare quit token %s',
+    async (token) => {
+      const { Logger, MessageSenderType } = await import(
+        '@qwen-code/qwen-code-core/core/logger.js'
+      );
+      const { Storage } = await import(
+        '@qwen-code/qwen-code-core/config/storage.js'
+      );
+      const owned = fs.mkdtempSync(path.join(os.tmpdir(), 'quit-recall-'));
+      try {
+        const storage = new Storage(
+          path.join(owned, 'project'),
+          path.join(owned, 'runtime'),
+        );
+        const logger = new Logger('before-quit', storage);
+        await logger.initialize();
+        await logger.logMessage(MessageSenderType.USER, 'latest real prompt');
+        const gateway = new OpenTuiSlashGateway();
+        gateway.attach(
+          new OpenTuiSlashDispatcher(
+            createFakeHost(),
+            { ...services, logger },
+            [quitCommand],
+          ),
+        );
+        expect(
+          await gateway.dispatch(normalizeQuitSubmission(token)),
+        ).toMatchObject({
+          kind: 'dispatched',
+          outcome: { kind: 'quit' },
+        });
+        const cold = new Logger('after-quit', storage);
+        await cold.initialize();
+        expect(await cold.getPreviousUserMessages()).toEqual([
+          'latest real prompt',
+        ]);
+      } finally {
+        fs.rmSync(owned, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([
+    '/quit extra',
+    '/exit --help',
+    '/ quit',
+    '/help',
+    '/clear',
+    '/reset',
+    '/new',
+  ])('preserves exact trimmed durable recall for %s', async (query) => {
+    const { Logger, MessageSenderType } = await import(
+      '@qwen-code/qwen-code-core/core/logger.js'
+    );
+    const { Storage } = await import(
+      '@qwen-code/qwen-code-core/config/storage.js'
+    );
+    const owned = fs.mkdtempSync(path.join(os.tmpdir(), 'slash-recall-'));
+    try {
+      const storage = new Storage(
+        path.join(owned, 'project'),
+        path.join(owned, 'runtime'),
+      );
+      const logger = new Logger('before-command', storage);
+      await logger.initialize();
+      await logger.logMessage(MessageSenderType.USER, 'latest real prompt');
+      const dispatcher = new OpenTuiSlashDispatcher(
+        createFakeHost(),
+        { ...services, logger },
+        [
+          helpCommand,
+          quitCommand,
+          ...['clear', 'reset', 'new'].map((name) =>
+            stub({
+              name,
+              action: () => ({
+                type: 'message',
+                messageType: 'info',
+                content: 'control',
+              }),
+            }),
+          ),
+        ],
+      );
+      await dispatcher.handle(`  ${query}  `);
+      const cold = new Logger('after-command', storage);
+      await cold.initialize();
+      expect((await cold.getPreviousUserMessages()).sort()).toEqual(
+        [query, 'latest real prompt'].sort(),
+      );
+    } finally {
+      fs.rmSync(owned, { recursive: true, force: true });
+    }
   });
 });

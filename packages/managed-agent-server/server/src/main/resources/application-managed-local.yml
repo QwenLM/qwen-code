@@ -1,0 +1,42 @@
+spring:
+  datasource:
+    url: 'jdbc:h2:file:${QWEN_MANAGED_AGENT_LOCAL_DATA_DIRECTORY}/database/managed;MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_ON_EXIT=FALSE;WRITE_DELAY=0'
+    driver-class-name: 'org.h2.Driver'
+    username: 'qwen'
+    password: ''
+  h2:
+    console:
+      enabled: false
+
+management:
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      group:
+        readiness:
+          include: 'readinessState,db'
+
+qwen:
+  managed-agent:
+    auth:
+      mode: 'signed'
+    harness:
+      enabled: true
+      workspace-files-enabled: true
+      workspace-shell-enabled: true
+      approval-mode: 'default'
+    session-store:
+      enabled: true
+      base-url: '${QWEN_MANAGED_AGENT_SESSION_STORE_BASE_URL:http://127.0.0.1:${server.port:8080}}'
+      workspace-id: '${QWEN_MANAGED_AGENT_WORKSPACE_ID}'
+    runtime-broker:
+      enabled: true
+      provisioner: 'local-process'
+      durable-local-process: true
+      verified-workspace-recovery-enabled: true
+      trusted-local-reboot-recovery: '${QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY:false}'
+      workspace-id: '${QWEN_MANAGED_AGENT_WORKSPACE_ID}'
+      workspace-cwd: '${QWEN_MANAGED_AGENT_LOCAL_DATA_DIRECTORY}/legacy'
+      workspace-creation-root: '${QWEN_MANAGED_AGENT_LOCAL_DATA_DIRECTORY}/workspaces'
+      state-directory: '${QWEN_MANAGED_AGENT_LOCAL_DATA_DIRECTORY}/runtime'

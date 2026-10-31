@@ -6,7 +6,7 @@ Status: proposed for implementation in #14157.
 
 ## Problem
 
-The repository builds `qwen-managed-agent-server` and `qwen-managed-runtime-broker`, but the protected Java release publishes only `qwencode-sdk`. Hosted acceptance therefore uses ad hoc source builds. An operator cannot download one reviewed server artifact, verify its source revision, determine its compatible Harness and schema, or follow a defined upgrade path.
+The repository builds `qwen-managed-agent-server`, including its Runtime Broker sources, but the protected Java SDK release publishes only `qwencode-sdk`. Hosted acceptance therefore needs an application distribution. An operator must be able to download a reviewed server artifact, verify its source revision, determine its compatible Harness and schema, and follow a defined upgrade path.
 
 ## Goals
 
@@ -14,11 +14,11 @@ The repository builds `qwen-managed-agent-server` and `qwen-managed-runtime-brok
 - Tie every distribution to one exact source revision and explicit compatibility metadata.
 - Make the same artifact buildable in pull-request CI and a non-publishing manual dry run.
 - Provide a complete first-release deployment and upgrade procedure for one Java control plane on one trusted Linux host.
-- Keep the embedded Broker visible as a versioned component without turning it into a separate service.
+- Include the embedded Broker in the versioned server component.
 
 ## Non-goals
 
-- Enabling public Shell, v2 capability advertisement, Automation, Channels, or retention defaults.
+- Enabling public Shell execution, Automation, Channels, or retention defaults. Canonical Shell v2 capability advertisement follows the [Shell lifecycle design](2026-10-23-managed-shell-lifecycle.md).
 - Publishing a container image or choosing a long-term container registry.
 - Supporting multiple surviving Java control planes, cross-host takeover, public CSI, or a stable support tier.
 - Bundling the npm CLI or Hosted Harness into the Java archive.
@@ -30,9 +30,20 @@ The release asset is `qwen-managed-agent-reference-<version>.tar.gz`. It contain
 ```text
 bin/qwen-managed-agent-server
 bin/qwen-managed-agent-operator-recovery
+bin/qwen-managed-agent-admin
+bin/qwen-managed-agent-bootstrap
+bin/qwen-managed-agent-bootstrap.mjs
+bin/qwen-managed-agent-upgrade
+bin/qwen-managed-agent-upgrade.mjs
+config/application.example.yml
+systemd/qwen-hosted-harness.service
+systemd/qwen-managed-agent-server.service
+systemd/harness.env.example
+systemd/server.env.example
+systemd/README.md
+systemd/README.zh-CN.md
 lib/qwen-managed-agent-server-<component-version>.jar
 lib/qwen-managed-agent-server-<component-version>-operator-recovery.jar
-lib/qwen-managed-runtime-broker-<component-version>.jar
 docs/deployment.md
 docs/deployment.zh-CN.md
 docs/server-reference.md
@@ -43,9 +54,13 @@ SHA256SUMS
 LICENSE
 ```
 
-The launchers use the bundle-relative JAR paths and forward their arguments to Java. The Broker JAR is supplied for provenance and inspection; the server continues to embed it and no standalone Broker process is introduced.
+The launchers use bundle-relative JAR paths. When the operator creates `config/application.yml` at the bundle root, they export `SPRING_CONFIG_ADDITIONAL_LOCATION` for it unless the variable is already set, so positional arguments reach Java unchanged. The template carries no active settings, so copying it changes nothing until it is edited. The server JAR includes Broker classes and resources; no separate Broker artifact or process is introduced. The `systemd/` templates encode the documented kill modes: `process` for the control plane so Runtime workers survive a Broker restart, and `mixed` for the Harness so its tool processes terminate with it. The control-plane unit also counts the JVM's exit status 143 after `SIGTERM` as success.
 
 The release also publishes a detached copy of `manifest.json` and `SHA256SUMS.txt`. The detached checksum file covers the archive and detached manifest. The in-bundle checksum file covers every payload file and `manifest.json`.
+
+## Credential bootstrap
+
+`bin/qwen-managed-agent-bootstrap` generates the shared Harness token and capability digest, the broker token and the Runtime credential key, and writes `harness.env`, `server.env` and `application.yml` with mode 0600. It refuses to overwrite without `--force` and prints paths only. The digest is an arbitrary shared identifier: the Harness echoes the configured value instead of deriving one from its capability set. The generator does not invent datasource credentials.
 
 ## Manifest contract
 
@@ -56,14 +71,14 @@ The release also publishes a detached copy of `manifest.json` and `SHA256SUMS.tx
 - the exact Qwen Code version and Hosted Harness profile from the same source tree;
 - the Serve protocol, Runtime Broker protocol, public API, Java, Node.js, and Flyway migration compatibility read from the same source tree;
 - the accepted one-control-plane, trusted-Linux, embedded-Broker topology;
-- explicit `false` values for public Shell and v2 advertisement defaults;
+- explicit defaults: public Shell execution is `false`, canonical Shell v2 advertisement is `true`, and MCP lifecycle remains explicitly enabled;
 - the bundled deployment and recovery documentation paths.
 
 Packaging fails when a required artifact or compatibility source is absent or ambiguous. It does not guess a value or publish a partially described artifact.
 
 ## Release workflow
 
-Pull requests that change the distribution inputs run the packaging unit test, build the three Java modules, assemble the real bundle, verify its checksums, and upload it as a short-lived Actions artifact.
+Pull requests that change the distribution inputs run the packaging unit test, build the Java SDK and combined server module, assemble the real bundle, verify its checksums, and upload it as a short-lived Actions artifact.
 
 A manual dispatch accepts an experimental SemVer such as `0.1.0-alpha.1` and a `dry_run` flag. Dry runs perform the same build and verification without GitHub mutations. A non-dry run is accepted only from `main`: it creates a hidden draft, uploads and verifies the exact asset set, atomically creates the tag at the manifest revision, and only then publishes the prerelease. An existing tag or release, a concurrent tag race, or an incomplete upload fails closed. Assets are never replaced in place, and an incomplete draft is not public.
 
@@ -73,7 +88,7 @@ The distribution version is independent of the Maven component versions. The man
 
 The operator verifies `SHA256SUMS.txt`, extracts the archive, reads `manifest.json`, installs the exact compatible Qwen CLI/Harness, configures MySQL and the existing server environment, starts `qwen serve --profile hosted-harness`, then starts the bundled server launcher. `/actuator/health` is the startup gate.
 
-Upgrade uses one stopped admission window on the accepted single-control-plane topology: retain the database, Runtime credential key, and durable Runtime state; back them up; stop ingress, server, and Harness; verify the new artifact and compatibility manifest; start the matching Harness; then start the new server and allow Flyway to migrate forward. Traffic resumes only after health and a new no-tool Turn succeed. Database downgrade is not supported; rollback after a migration requires restoring the pre-upgrade database and state backup before accepting new writes.
+Upgrade uses one stopped admission window on the accepted single-control-plane topology: retain the database, Runtime credential key, and durable Runtime state; back them up; stop ingress, server, and Harness; verify the new artifact and compatibility manifest; start the matching Harness; then start the new server and allow Flyway to migrate forward. Traffic resumes only after health and a new no-tool Turn succeed. Database downgrade is not supported; rollback after a migration requires restoring the pre-upgrade database and state backup before accepting new writes. On the systemd layout, `bin/qwen-managed-agent-upgrade` runs the stop, backup, install, start and verification in phases, and prints the steps it leaves to the operator, such as stopping ingress and installing the Harness, where they fall; see the [upgrade command design](2026-10-25-managed-agent-upgrade-command.md).
 
 ## Failure semantics
 
@@ -87,7 +102,7 @@ Upgrade uses one stopped admission window on the accepted single-control-plane t
 ## Validation plan
 
 1. Run the packaging unit test with synthetic component artifacts and inspect the extracted archive.
-2. Build the actual SDK, Broker, and server JARs, create the bundle, and verify both checksum layers.
+2. Build the actual SDK and server JARs, create the bundle, and verify both checksum layers.
 3. Extract the exact archive, start it against MySQL with a matching Hosted Harness, and check health plus one no-tool Session/Turn.
 4. Restart the same deployment from the extracted bundle and confirm the existing Session remains readable and a subsequent Turn succeeds.
 5. Review the full branch diff, run the ponytail simplification pass, and validate the workflow syntax and affected Java build gates.
@@ -97,10 +112,10 @@ Upgrade uses one stopped admission window on the accepted single-control-plane t
 - CI and a manual dry run produce the same named release assets without publishing.
 - The manifest identifies the exact source and every declared compatibility boundary.
 - A consumer can verify and extract the artifact without a repository checkout.
-- The bundled server and operator-recovery launchers use only bundle-relative files.
+- The bundled server, operator-recovery and admin launchers use only bundle-relative files.
 - The exact extracted server can start and complete the reference smoke path.
 - The production workflow publishes only an immutable experimental prerelease from `main`.
-- Public Shell and v2 advertisement remain disabled by default.
+- Public Shell execution remains disabled by default; canonical Shell v2 capability advertisement is enabled by default, and MCP lifecycle requires explicit enablement.
 
 ## Follow-up work
 

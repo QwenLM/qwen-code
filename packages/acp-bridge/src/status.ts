@@ -141,6 +141,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionContextUsage: 'qwen/status/session/context_usage',
   sessionSupportedCommands: 'qwen/status/session/supported_commands',
   sessionTasks: 'qwen/status/session/tasks',
+  sessionTaskRuntime: 'qwen/status/session/task_runtime',
   sessionAgents: 'qwen/status/session/agents',
   sessionAgentTrace: 'qwen/status/session/agent_trace',
   sessionStats: 'qwen/status/session/stats',
@@ -155,6 +156,7 @@ export const SERVE_STATUS_EXT_METHODS = {
   sessionSavedWorkflow: 'qwen/status/session/saved_workflow',
   sessionTranscript: 'qwen/status/session/transcript',
   sessionTurnIndex: 'qwen/status/session/turn_index',
+  sessionMessageGroups: 'qwen/status/session/message_groups',
   sessionRewindSnapshots: 'qwen/status/session/rewind_snapshots',
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
@@ -183,6 +185,7 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionBtw: 'qwen/control/session/btw',
   sessionShellHistory: 'qwen/control/session/shell_history',
   sessionLanguage: 'qwen/control/session/language',
+  sessionMessagesDelete: 'qwen/control/session/messages_delete',
   sessionRewind: 'qwen/control/session/rewind',
   sessionContinue: 'qwen/control/session/continue',
   sessionTitle: 'qwen/control/session/title',
@@ -207,9 +210,18 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceGenerationStart: 'qwen/control/workspace/generation/start',
   workspaceGenerationCancel: 'qwen/control/workspace/generation/cancel',
   workspaceSessionWorkflow: 'qwen/control/workspace/session-workflow',
+  /**
+   * Add or remove one extra directory in the workspace context. Applies to
+   * every live session of the runtime and persists the resulting list to the
+   * workspace setting `context.includeDirectories`. Params:
+   * `{ action: 'add' | 'remove', path }`; result:
+   * `{ primaryDirectory, directories, changed, warnings }`.
+   */
+  workspaceDirectories: 'qwen/control/workspace/directories',
   workspaceMemoryRememberAvailability:
     'qwen/control/workspace/memory/remember/availability',
   workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
+  workspaceMemoryImportPlan: 'qwen/control/workspace/memory/import/plan',
   workspaceMemoryForget: 'qwen/control/workspace/memory/forget',
   workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
   /**
@@ -574,6 +586,13 @@ export interface ServeWorkspaceSkillsStatus {
   runtimeEpoch?: number;
   skills: ServeWorkspaceSkillStatus[];
   errors?: ServeStatusCell[];
+  /** Daemon observation metadata; omitted by direct runtime/config reads. */
+  snapshot?: {
+    observedAt: number;
+    ageMs: number;
+    stale: boolean;
+    refreshing: boolean;
+  };
 }
 
 /**
@@ -654,6 +673,7 @@ export interface ServeSessionContextStatus {
       | 'interrupted_turn'
       | 'degraded_history';
     canContinue: boolean;
+    cancellationConfirmationId?: string;
   };
   state: {
     models?: unknown;
@@ -667,6 +687,8 @@ export interface ServeContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
   mcpTools: number;
+  /** Instructions are separate when present; older producers combine them with memory. */
+  instructionFiles?: number;
   memoryFiles: number;
   skills: number;
   /** Startup prelude outside the skill listing. Absent from older servers. */
@@ -694,6 +716,13 @@ export interface ServeContextToolDetail {
 export interface ServeContextMemoryDetail {
   path: string;
   tokens: number;
+  /**
+   * Absolute on-disk path when the row maps to a file the context preview
+   * can open: inside the session workspace, or a global memory file. Absent
+   * for synthetic aggregates and instruction files outside that readable
+   * scope (parent-directory or extension files). Absent from older servers.
+   */
+  absolutePath?: string;
 }
 
 export interface ServeContextSkillDetail {
@@ -710,6 +739,7 @@ export interface ServeSessionContextUsage {
   breakdown: ServeContextCategoryBreakdown;
   builtinTools: ServeContextToolDetail[];
   mcpTools: ServeContextToolDetail[];
+  instructionFiles?: ServeContextMemoryDetail[];
   memoryFiles: ServeContextMemoryDetail[];
   skills: ServeContextSkillDetail[];
   isEstimated?: boolean;
@@ -720,6 +750,14 @@ export interface ServeSessionContextUsageStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
   workspaceCwd: string;
+  /**
+   * Stable workspace root the session was admitted under. Unlike
+   * `workspaceCwd` (the live target dir, which moves when a session enters a
+   * worktree or `cd`s into a subdirectory), this stays at the registered
+   * workspace root, so a client can resolve the owning workspace for file
+   * reads. Absent from older servers.
+   */
+  workspaceRoot?: string;
   usage: ServeSessionContextUsage;
   formattedText: string;
 }
@@ -1140,6 +1178,47 @@ export interface ServeSessionTasksStatus {
   tasks: ServeSessionTaskStatus[];
 }
 
+/**
+ * Point-in-time detail for one running or retained shell task.
+ *
+ * The tasks list carries lifecycle facts only; this surface carries the
+ * things that need a filesystem read or an OS probe and are therefore fetched
+ * on demand by an open detail panel.
+ */
+export interface ServeSessionShellTaskRuntime {
+  /**
+   * Resident set size of the shell's process tree, in bytes. Absent when the
+   * pid is unknown, the process already exited, or the platform probe failed.
+   * Shared pages are counted once per process, so this is an upper bound for
+   * "how much this task holds".
+   */
+  memoryBytes?: number;
+  /** Size of the captured stdout/stderr file, in bytes. */
+  outputBytes?: number;
+  /** Epoch ms of the output file's last write. */
+  outputModifiedAt?: number;
+  /**
+   * Tail of the captured stdout/stderr, sanitized for display. Absent when
+   * the file is missing or empty.
+   */
+  outputTail?: string;
+  /** True when `outputTail` starts mid-file (the head was dropped). */
+  outputTailTruncated?: boolean;
+  /**
+   * Read failure message. Fields from a part that did succeed may still be
+   * present (the stat and the tail read fail independently).
+   */
+  outputError?: string;
+}
+
+export interface ServeSessionTaskRuntimeStatus {
+  v: typeof STATUS_SCHEMA_VERSION;
+  sessionId: string;
+  taskId: string;
+  /** Null when the task is unknown/evicted or is not a shell task. */
+  runtime: ServeSessionShellTaskRuntime | null;
+}
+
 export interface ServeSessionAgentsStatus {
   v: typeof STATUS_SCHEMA_VERSION;
   sessionId: string;
@@ -1186,6 +1265,19 @@ export interface ServeSessionStatsModelMetrics {
     cached: number;
     /** Reasoning tokens, shown as a subset of generated output. */
     thoughts: number;
+  };
+  /** Streaming timing; absent until a streamed request records its TTFT. */
+  generation?: {
+    /** Streamed requests with a recorded time to first token. */
+    timedRequests: number;
+    totalTtftMs: number;
+    /**
+     * Time from the first to the last visible output, summed over requests
+     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
+     */
+    totalGenerationDurationMs: number;
+    /** Output tokens of the requests in `totalGenerationDurationMs`. */
+    totalThroughputOutputTokens: number;
   };
 }
 

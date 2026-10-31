@@ -36,6 +36,12 @@ import {
 } from './chatRecordingService.js';
 import * as processLiveness from '../utils/process-liveness.js';
 import { SessionService } from './sessionService.js';
+import { prepareTranscriptRecords } from '../utils/transcript-records.js';
+import {
+  buildApiHistoryFromConversation,
+  getRecordRewindId,
+} from './session-api-history.js';
+import { serializeSnapshot } from './fileHistoryService.js';
 import {
   getSessionWriterLockPath,
   SessionTranscriptChangedError,
@@ -50,6 +56,7 @@ import type {
   SessionWriterLeaseTestCommandInput,
   SessionWriterLeaseTestResponse,
 } from './session-writer-lease.test-helper.js';
+import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 const lstatFault = vi.hoisted(() => ({
   path: undefined as string | undefined,
@@ -1320,17 +1327,22 @@ describe('SessionWriterLease', () => {
     await fs.unlink(targetPath);
   });
 
-  itPosix('classifies an unreadable owned lock as unavailable', async () => {
-    const { lease, lockPath } = await leaseFor();
-    await fs.chmod(lockPath, 0o000);
+  // Needs permission bits to bind: root with its DAC capabilities reads the
+  // mode-000 lock anyway, and Windows ignores the mode.
+  it.skipIf(!arePermissionBitsEnforced())(
+    'classifies an unreadable owned lock as unavailable',
+    async () => {
+      const { lease, lockPath } = await leaseFor();
+      await fs.chmod(lockPath, 0o000);
 
-    try {
-      await expectUnavailable(lease.assertOwnedAndUnchanged());
-    } finally {
-      await fs.chmod(lockPath, 0o600);
-      await lease.release();
-    }
-  });
+      try {
+        await expectUnavailable(lease.assertOwnedAndUnchanged());
+      } finally {
+        await fs.chmod(lockPath, 0o600);
+        await lease.release();
+      }
+    },
+  );
 
   it('fails closed on a malformed lock', async () => {
     const fixture = await createFixture();
@@ -2316,6 +2328,21 @@ describe('SessionWriterLease', () => {
       await lease.release().catch(() => undefined);
     });
 
+    it('retries a retryable seal failure instead of memoizing the rejection', async () => {
+      const fixture = await createFixture('retryable-seal-session');
+      const lease = await SessionWriterLease.acquire(fixture.options);
+      await lease.appendJsonLine({ record: 'a' });
+      // A transient store fault fails the seal once (review round 14, R14-4).
+      vi.spyOn(lease, 'sealForHandoffOnce' as never).mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+      await expect(lease.sealForHandoff()).rejects.toThrow('disk full');
+      // The retryable failure cleared the memoized promise, so a later seal
+      // retries rather than replaying the rejection.
+      await lease.sealForHandoff();
+      expect(lease.isReleased).toBe(true);
+    });
+
     it('blocks a baseline writer from a sealed managed lock', async () => {
       const fixture = await createFixture('managed-takeover-guard-session');
       const first = await SessionWriterLease.acquire({
@@ -2364,6 +2391,90 @@ describe('SessionWriterLease', () => {
       await replacement.release();
     });
 
+    // A sealed Managed record whose commit proof fails validation is not a
+    // seal at all: isLockRecord rejects the whole record, so acquire fails
+    // closed on a malformed lock rather than handing a certified takeover a
+    // corrupt proof. Every case corrupts only the commit proof, leaving the
+    // owner fields, schema version and transcript proof valid, so the clause
+    // under test is the only thing that can reject the record.
+    it.each<[string, string, Record<string, unknown>]>([
+      ['a fractional sequence', 'fractional', { last_commit_sequence: 6.5 }],
+      ['a non-numeric sequence', 'textual', { last_commit_sequence: '7' }],
+      ['a negative sequence', 'negative', { last_commit_sequence: -1 }],
+      ['an absent sequence', 'absent', { last_commit_sequence: undefined }],
+      [
+        'a 63-character hash',
+        'short-hash',
+        { committed_prefix_hash: 'a'.repeat(63) },
+      ],
+      [
+        'an uppercase hash',
+        'uppercase-hash',
+        { committed_prefix_hash: 'A'.repeat(64) },
+      ],
+      [
+        'a non-hex hash',
+        'non-hex-hash',
+        { committed_prefix_hash: 'g'.repeat(64) },
+      ],
+      // Only the typeof guard rejects this one: an array stringifies to the
+      // same 64 hex characters the pattern accepts.
+      [
+        'an array-wrapped hash',
+        'array-hash',
+        { committed_prefix_hash: ['a'.repeat(64)] },
+      ],
+    ])(
+      'fails closed on a sealed managed lock with %s',
+      async (_label, slug, patch) => {
+        const fixture = await createFixture(`managed-corrupt-proof-${slug}`);
+        const lease = await SessionWriterLease.acquire({
+          ...fixture.options,
+          lockSchema: managedSchema,
+        });
+        await lease.appendJsonLine({ record: 'managed' });
+        await lease.sealForHandoff(commitProof);
+        const sealed = await readJson(fixture.lockPath);
+        const corruptRaw = JSON.stringify({ ...sealed, ...patch });
+        await fs.writeFile(fixture.lockPath, corruptRaw);
+
+        await expectUnavailable(acquire(fixture.options));
+        // Failing closed leaves the corrupt seal in place for diagnosis.
+        await expect(fs.readFile(fixture.lockPath, 'utf8')).resolves.toBe(
+          corruptRaw,
+        );
+      },
+    );
+
+    it('keeps a zero commit sequence a genuine seal', async () => {
+      const fixture = await createFixture('managed-zero-sequence-proof');
+      const lease = await SessionWriterLease.acquire({
+        ...fixture.options,
+        lockSchema: managedSchema,
+      });
+      await lease.appendJsonLine({ record: 'managed' });
+      await lease.sealForHandoff(commitProof);
+      const sealed = await readJson(fixture.lockPath);
+      // The bound is >= 0, not > 0: sequence 0 stays a real seal, so a plain
+      // acquire conflicts and a certified one is handed the proof.
+      await fs.writeFile(
+        fixture.lockPath,
+        JSON.stringify({ ...sealed, last_commit_sequence: 0 }),
+      );
+
+      await expectConflict(acquire(fixture.options));
+      const replacement = await acquire({
+        ...fixture.options,
+        takeoverPolicy: 'certified',
+        lockSchema: managedSchema,
+      });
+      expect(replacement.takeoverCommitProof).toEqual({
+        ...commitProof,
+        last_commit_sequence: 0,
+      });
+      await replacement.release();
+    });
+
     it('refuses an unsupported managed lock format version at acquire', async () => {
       const fixture = await createFixture('managed-format-guard-session');
       await expect(
@@ -2408,7 +2519,10 @@ describe('SessionWriterLease', () => {
         lockSchema: { schemaVersion: 3, formatVersion: 2 },
       });
       expect(replacement.takeoverCommitProof).toEqual(commitProof);
-      await replacement.release();
+      await expect(replacement.release()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await replacement.sealForHandoff(commitProof);
     });
 
     it('rebuilds the transcript proof after discarding an uncommitted tail', async () => {
@@ -2512,7 +2626,10 @@ describe('SessionWriterLease', () => {
         ...fixture.options,
         lockSchema: { schemaVersion: 3, formatVersion: 2 },
       });
-      await newer.release();
+      await expect(newer.release()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await newer.sealForHandoff(commitProof);
     });
 
     it('lets a newer managed format take over an older sealed lock', async () => {
@@ -2538,7 +2655,10 @@ describe('SessionWriterLease', () => {
         state: 'active',
         format_version: 2,
       });
-      await replacement.release();
+      await expect(replacement.release()).rejects.toBeInstanceOf(
+        SessionWriterUnavailableError,
+      );
+      await replacement.sealForHandoff(commitProof);
     });
   });
 
@@ -3116,5 +3236,632 @@ describe('SessionWriterLease', () => {
     expect(
       reloaded?.conversation.messages.map((message) => message.uuid),
     ).toEqual(physicalRecords.map((message) => message.uuid));
+  });
+});
+
+describe('restore checkpoint branch on confirmed real transcript bytes', () => {
+  async function restoreFixture(
+    run: (value: {
+      fixture: Fixture;
+      recorder: ChatRecordingService;
+      input: Parameters<ChatRecordingService['restoreToolBranch']>[0];
+    }) => Promise<void>,
+    parallel = false,
+  ) {
+    const fixture = await createFixture('restore-real-disk');
+    const config = createConfig(fixture);
+    await initializeConfig(config);
+    const recorder = config.getChatRecordingService();
+    if (!recorder) throw new Error('Real initialized recorder missing');
+    const args = {
+      file_path: path.join(fixture.projectRoot, 'owned-a'),
+      old_string: 'A',
+      new_string: 'B',
+    };
+    const siblingArgs = {
+      file_path: path.join(fixture.projectRoot, 'owned-b'),
+      old_string: 'X',
+      new_string: 'Y',
+    };
+    const promptId = `${fixture.options.sessionId}########0`;
+    try {
+      recorder.recordUserMessage(
+        'ORIGINAL_USER',
+        undefined,
+        { displayText: 'Original title input', hookContext: '' },
+        promptId,
+        'daemon-original',
+      );
+      recorder.recordAssistantTurn({
+        model: 'test-model',
+        message: [
+          { functionCall: { id: 'call-a', name: 'edit', args } },
+          ...(parallel
+            ? [
+                {
+                  functionCall: {
+                    id: 'call-b',
+                    name: 'edit',
+                    args: siblingArgs,
+                  },
+                },
+              ]
+            : []),
+        ],
+      });
+      recorder.recordToolResult(
+        [
+          {
+            functionResponse: {
+              id: 'call-a',
+              name: 'edit',
+              response: { output: 'OLD_A' },
+            },
+          },
+        ],
+        { callId: 'call-a', status: 'success' },
+      );
+      if (parallel)
+        recorder.recordToolResult(
+          [
+            {
+              functionResponse: {
+                id: 'call-b',
+                name: 'edit',
+                response: { output: 'OLD_B_SUCCESS' },
+              },
+            },
+          ],
+          { callId: 'call-b', status: 'success' },
+        );
+      recorder.recordAssistantTurn({
+        model: 'test-model',
+        message: 'DISCARDED_INITIAL_ANSWER',
+      });
+      recorder.recordUserMessage(
+        'DISCARDED_LATER_USER',
+        undefined,
+        undefined,
+        undefined,
+        'daemon-discarded',
+      );
+      recorder.recordAssistantTurn({
+        model: 'test-model',
+        message: 'DISCARDED_LATER_ANSWER',
+      });
+      await recorder.flush();
+      const input: Parameters<ChatRecordingService['restoreToolBranch']>[0] = {
+        sessionId: fixture.options.sessionId,
+        originalCallId: 'call-a',
+        name: 'edit',
+        args,
+        promptId,
+        execution: { callId: 'physical-new-a', name: 'edit', args },
+        responseParts: [
+          {
+            functionResponse: {
+              id: 'physical-new-a',
+              name: 'edit',
+              response: { output: 'NEW_A_ACTUAL_NOT_OLD' },
+            },
+          },
+          { inlineData: { mimeType: 'image/png', data: 'TkVX' } },
+          { text: 'NEW_TRAILING_CONTEXT' },
+        ],
+        toolCallResult: {
+          callId: 'physical-new-a',
+          status: 'success',
+          resultDisplay: 'NEW_DISPLAY',
+        },
+        truncatedCount: 3,
+        survivingFileHistorySnapshots: [],
+        isCurrent: () => true,
+      };
+      await run({ fixture, recorder, input });
+    } finally {
+      await recorder.close().catch(() => undefined);
+    }
+  }
+
+  it('keeps retained ancestry when a new prompt is rewound after restoring a tool branch', async () => {
+    await restoreFixture(async ({ fixture, recorder, input }) => {
+      const original = await readRecords(fixture.transcriptPath);
+      const discarded = original.find(
+        (record) =>
+          record.type === 'user' &&
+          record.message?.parts?.some(
+            (part) => part.text === 'DISCARDED_LATER_USER',
+          ),
+      );
+      expect(discarded).toBeDefined();
+      const discardedId = getRecordRewindId(discarded!);
+      expect(discardedId).toBeDefined();
+      expect(recorder.getRewindDaemonPromptId(input.promptId!)).toBe(
+        'daemon-original',
+      );
+      expect(recorder.getRewindDaemonPromptId(discardedId!)).toBe(
+        'daemon-discarded',
+      );
+      expect(await recorder.restoreToolBranch(input)).toBe(true);
+      expect(recorder.getRewindTurnIndex(input.promptId!)).toBe(0);
+      expect(recorder.getRewindTurnIndex(discardedId!)).toBe(-1);
+      expect(recorder.getRewindDaemonPromptId(input.promptId!)).toBe(
+        'daemon-original',
+      );
+      expect(recorder.getRewindDaemonPromptId(discardedId!)).toBeUndefined();
+
+      const nextPromptId = `${input.sessionId}########2`;
+      recorder.recordUserMessage(
+        'NEXT_AFTER_RESTORE',
+        undefined,
+        undefined,
+        nextPromptId,
+        'daemon-after-restore',
+      );
+      expect(recorder.getRewindDaemonPromptId(nextPromptId)).toBe(
+        'daemon-after-restore',
+      );
+      const index = recorder.getRewindTurnIndex(nextPromptId);
+      expect(index).toBe(1);
+      recorder.rewindRecording(index, { truncatedCount: 1 }, []);
+      recorder.recordUserMessage('SUCCESSOR_AFTER_REWIND');
+      await recorder.flush();
+      await recorder.close();
+
+      const active = prepareTranscriptRecords(
+        await readRecords(fixture.transcriptPath),
+      ).records as ChatRecord[];
+      const resumed = await sessionServiceFor(fixture).loadSession(
+        input.sessionId,
+      );
+      expect(resumed?.conversation.messages).toEqual(active);
+      const text = JSON.stringify(resumed?.conversation.messages);
+      expect(text).toContain('ORIGINAL_USER');
+      expect(text).toContain('NEW_A_ACTUAL_NOT_OLD');
+      expect(text).toContain('SUCCESSOR_AFTER_REWIND');
+      expect(text).not.toContain('DISCARDED_');
+      expect(text).not.toContain('NEXT_AFTER_RESTORE');
+    });
+  });
+
+  it('retains all original parallel call parts, persists only selected NEW result and excludes old sibling success', async () => {
+    await restoreFixture(async ({ fixture, recorder, input }) => {
+      const originalParts = structuredClone(input.responseParts);
+      // This is the actual pre-effects API, with real user-ancestor prompt identity.
+      expect(() => recorder.assertRestoreToolBranchAnchor(input)).not.toThrow();
+      expect(await recorder.restoreToolBranch(input)).toBe(true);
+      await recorder.flush();
+      const physical = await readRecords(fixture.transcriptPath);
+      expect(JSON.stringify(physical)).toContain('OLD_A');
+      expect(JSON.stringify(physical)).toContain('OLD_B_SUCCESS');
+      const selected = prepareTranscriptRecords(physical)
+        .records as ChatRecord[];
+      expect(JSON.stringify(selected)).not.toContain('OLD_A');
+      expect(JSON.stringify(selected)).not.toContain('OLD_B_SUCCESS');
+      expect(JSON.stringify(selected)).not.toContain('DISCARDED_');
+      const calls = selected
+        .flatMap((record) => record.message?.parts ?? [])
+        .filter((part) => part.functionCall);
+      expect(calls.map((part) => part.functionCall?.id)).toEqual([
+        'call-a',
+        'call-b',
+      ]);
+      const results = selected.filter(
+        (record) => record.type === 'tool_result',
+      );
+      expect(results).toHaveLength(1);
+      expect(results[0].message?.parts).toEqual([
+        {
+          functionResponse: {
+            id: 'call-a',
+            name: 'edit',
+            response: { output: 'NEW_A_ACTUAL_NOT_OLD' },
+          },
+        },
+        originalParts[1],
+        originalParts[2],
+      ]);
+      expect(results[0].toolCallResult).toMatchObject({
+        callId: 'call-a',
+        status: 'success',
+        resultDisplay: 'NEW_DISPLAY',
+      });
+      expect(input.responseParts).toEqual(originalParts);
+      expect(input.execution.callId).toBe('physical-new-a');
+      const resumed = await sessionServiceFor(fixture).loadSession(
+        input.sessionId,
+      );
+      expect(
+        resumed?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(selected.map((record) => record.uuid));
+      const api = buildApiHistoryFromConversation({ messages: selected });
+      expect(
+        api
+          .flatMap((content) => content.parts ?? [])
+          .filter((part) => part.functionResponse?.id === 'call-a'),
+      ).toHaveLength(1);
+      expect(
+        api
+          .flatMap((content) => content.parts ?? [])
+          .filter((part) => part.functionResponse?.id === 'call-b'),
+      ).toHaveLength(0);
+      // B is explicitly unresolved; no claim of a completed multi-tool/cold UI contract.
+    }, true);
+  });
+
+  it.each(['error', 'cancelled'] as const)(
+    'records actual %s without reviving old success',
+    async (status) => {
+      await restoreFixture(async ({ fixture, recorder, input }) => {
+        expect(
+          await recorder.restoreToolBranch({
+            ...input,
+            responseParts: [
+              {
+                functionResponse: {
+                  id: 'physical-new-a',
+                  name: 'edit',
+                  response: { error: `NEW_${status}` },
+                },
+              },
+            ],
+            toolCallResult: { callId: 'physical-new-a', status },
+          }),
+        ).toBe(true);
+        await recorder.flush();
+        const selected = prepareTranscriptRecords(
+          await readRecords(fixture.transcriptPath),
+        ).records as ChatRecord[];
+        expect(
+          selected.find((record) => record.type === 'tool_result')
+            ?.toolCallResult?.status,
+        ).toBe(status);
+        expect(JSON.stringify(selected)).toContain(`NEW_${status}`);
+        expect(JSON.stringify(selected)).not.toContain('OLD_A');
+      });
+    },
+  );
+
+  it.each([true, false])(
+    'preserves the current Workflow mode %s across tool restore and cold load',
+    async (enabled) => {
+      await restoreFixture(async ({ fixture, recorder, input }) => {
+        await recorder.recordSessionWorkflowMode(!enabled);
+        await recorder.recordSessionWorkflowMode(enabled);
+        expect(await recorder.restoreToolBranch(input)).toBe(true);
+        await recorder.flush();
+        const selected = prepareTranscriptRecords(
+          await readRecords(fixture.transcriptPath),
+        ).records;
+        expect(
+          selected
+            .filter((record) => record.subtype === 'session_workflow_mode')
+            .map((record) => record.systemPayload),
+        ).toEqual([{ enabled }]);
+        expect(recorder.getSessionWorkflowMode()).toBe(enabled);
+
+        const before = await fs.readFile(fixture.transcriptPath, 'utf8');
+        await recorder.recordSessionWorkflowMode(enabled);
+        await recorder.flush();
+        expect(await fs.readFile(fixture.transcriptPath, 'utf8')).toBe(before);
+        await recorder.close();
+        const resumed = await sessionServiceFor(fixture).loadSession(
+          input.sessionId,
+        );
+        expect(
+          resumed?.conversation.messages
+            .filter((record) => record.subtype === 'session_workflow_mode')
+            .map((record) => record.systemPayload),
+        ).toEqual([{ enabled }]);
+      });
+    },
+  );
+
+  it('retains actual model/approval/title metadata and serialized surviving file snapshots', async () => {
+    await restoreFixture(async ({ fixture, recorder, input }) => {
+      await recorder.recordSessionModel({
+        modelId: 'selected-model',
+        authType: 'openai',
+      });
+      await recorder.recordSessionApprovalMode({ mode: ApprovalMode.DEFAULT });
+      await recorder.recordCustomTitle('Selected custom title');
+      const snapshot = {
+        promptId: input.promptId!,
+        trackedFileBackups: {},
+        timestamp: new Date('2026-10-23T00:00:00Z'),
+      };
+      expect(
+        await recorder.restoreToolBranch({
+          ...input,
+          survivingFileHistorySnapshots: [snapshot],
+        }),
+      ).toBe(true);
+      await recorder.flush();
+      const selected = prepareTranscriptRecords(
+        await readRecords(fixture.transcriptPath),
+      ).records;
+      for (const subtype of [
+        'session_model',
+        'session_approval_mode',
+        'custom_title',
+        'file_history_snapshot',
+      ])
+        expect(selected.some((record) => record.subtype === subtype)).toBe(
+          true,
+        );
+      expect(
+        selected.findLast((record) => record.subtype === 'session_model')
+          ?.systemPayload,
+      ).toMatchObject({ modelId: 'selected-model', authType: 'openai' });
+      expect(
+        selected.findLast(
+          (record) => record.subtype === 'session_approval_mode',
+        )?.systemPayload,
+      ).toEqual({ mode: ApprovalMode.DEFAULT });
+      expect(
+        selected.findLast(
+          (record) => record.subtype === 'file_history_snapshot',
+        )?.systemPayload,
+      ).toEqual({ snapshots: [serializeSnapshot(snapshot)] });
+      expect(recorder.getUserDisplayTextsForTitle()).toEqual([
+        'Original title input',
+      ]);
+    });
+  });
+
+  it('keeps the original model anchor when publishing an authorized replay with different execution arguments', async () => {
+    await restoreFixture(async ({ fixture, recorder, input }) => {
+      input.execution.args = { ...input.args, new_string: 'USER_APPROVED' };
+      expect(await recorder.restoreToolBranch(input)).toBe(true);
+      await recorder.flush();
+      const selected = prepareTranscriptRecords(
+        await readRecords(fixture.transcriptPath),
+      ).records as ChatRecord[];
+      const call = selected
+        .flatMap((record) => record.message?.parts ?? [])
+        .find(
+          (part) => part.functionCall?.id === input.originalCallId,
+        )?.functionCall;
+      expect(call?.args).toEqual(input.args);
+      const result = selected.findLast(
+        (record) => record.type === 'tool_result',
+      );
+      expect(result?.message?.parts?.[0].functionResponse?.id).toBe(
+        input.originalCallId,
+      );
+      expect(result?.message?.parts?.[0].functionResponse?.response).toEqual({
+        output: 'NEW_A_ACTUAL_NOT_OLD',
+      });
+      const resumed = await sessionServiceFor(fixture).loadSession(
+        input.sessionId,
+      );
+      expect(
+        resumed?.conversation.messages.map((record) => record.uuid),
+      ).toEqual(selected.map((record) => record.uuid));
+    });
+  });
+
+  it.each([
+    'missing',
+    'wrong session',
+    'wrong prompt',
+    'ambiguous',
+    'wrong original args',
+  ] as const)(
+    'pre-effects admission refuses %s without any transcript mutation',
+    async (mode) => {
+      await restoreFixture(async ({ fixture, recorder, input }) => {
+        if (mode === 'ambiguous') {
+          recorder.recordAssistantTurn({
+            model: 'test-model',
+            message: [
+              {
+                functionCall: { id: 'call-a', name: 'edit', args: input.args },
+              },
+            ],
+          });
+          await recorder.flush();
+        }
+        const before = await fs.readFile(fixture.transcriptPath);
+        const invalid = {
+          ...input,
+          ...(mode === 'missing' ? { originalCallId: 'absent' } : {}),
+          ...(mode === 'wrong session'
+            ? { sessionId: 'different-session' }
+            : {}),
+          ...(mode === 'wrong prompt' ? { promptId: 'wrong-prompt' } : {}),
+          ...(mode === 'wrong original args'
+            ? { args: { ...input.args, new_string: 'NOT_THE_MODEL_CALL' } }
+            : {}),
+        };
+        expect(() => recorder.assertRestoreToolBranchAnchor(invalid)).toThrow();
+        await expect(recorder.restoreToolBranch(invalid)).rejects.toThrow();
+        expect(await fs.readFile(fixture.transcriptPath)).toEqual(before);
+      });
+    },
+  );
+
+  it('rechecks ownership after a held real flush and preserves successor bytes on the original branch', async () => {
+    await restoreFixture(async ({ fixture, recorder, input }) => {
+      let release!: () => void;
+      writeFault.contains = 'HELD_PRECOMMIT';
+      writeFault.wait = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const entered = new Promise<void>((resolve) => {
+        writeFault.onEntered = resolve;
+      });
+      recorder.recordUserMessage('HELD_PRECOMMIT');
+      try {
+        await entered;
+        let current = true;
+        const pending = recorder.restoreToolBranch({
+          ...input,
+          isCurrent: () => current,
+        });
+        current = false;
+        recorder.recordUserMessage('HEALTHY_SUCCESSOR');
+        release();
+        expect(await pending).toBe(false);
+        await recorder.flush();
+        const physical = await readRecords(fixture.transcriptPath);
+        expect(physical.some((record) => record.subtype === 'rewind')).toBe(
+          false,
+        );
+        expect(
+          JSON.stringify(prepareTranscriptRecords(physical).records),
+        ).toContain('HEALTHY_SUCCESSOR');
+      } finally {
+        release();
+        writeFault.contains = undefined;
+        writeFault.wait = undefined;
+      }
+    });
+  });
+
+  it('reprojects a user buffered behind an actual held rewind write for later ordinary rewind', async () => {
+    await restoreFixture(async ({ fixture, recorder, input }) => {
+      let release!: () => void;
+      writeFault.contains = '"subtype":"rewind"';
+      writeFault.wait = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      const entered = new Promise<void>((resolve) => {
+        writeFault.onEntered = resolve;
+      });
+      const pending = recorder.restoreToolBranch(input);
+      try {
+        await entered;
+        recorder.recordUserMessage('BUFFERED_POSTCOMMIT');
+        release();
+        expect(await pending).toBe(true);
+        await recorder.flush();
+        const physical = await readRecords(fixture.transcriptPath);
+        const buffered = physical.find((record) =>
+          record.message?.parts?.some(
+            (part) => part.text === 'BUFFERED_POSTCOMMIT',
+          ),
+        );
+        expect(buffered).toBeDefined();
+        recorder.rewindRecording(1, { truncatedCount: 1 });
+        await recorder.flush();
+        const later = await readRecords(fixture.transcriptPath);
+        expect(
+          later.filter((record) => record.subtype === 'rewind').at(-1)
+            ?.parentUuid,
+        ).toBe(buffered?.parentUuid);
+        expect(
+          JSON.stringify(prepareTranscriptRecords(later).records),
+        ).toContain('NEW_A_ACTUAL_NOT_OLD');
+        expect(
+          JSON.stringify(prepareTranscriptRecords(later).records),
+        ).not.toContain('BUFFERED_POSTCOMMIT');
+      } finally {
+        release();
+        writeFault.contains = undefined;
+        writeFault.wait = undefined;
+      }
+    });
+  });
+
+  it('does not count a rejected strict write as persisted completion', async () => {
+    await restoreFixture(async ({ fixture, recorder, input }) => {
+      const original = SessionWriterLease.prototype.appendJsonLine;
+      const fault = vi
+        .spyOn(SessionWriterLease.prototype, 'appendJsonLine')
+        .mockImplementation(function (
+          this: SessionWriterLease,
+          value: unknown,
+        ) {
+          if ((value as ChatRecord).subtype === 'rewind')
+            return Promise.reject(new Error('ACTUAL_ADAPTER_REJECTED'));
+          return original.call(this, value);
+        });
+      try {
+        const before = await fs.readFile(fixture.transcriptPath);
+        const physicalBefore = await readRecords(fixture.transcriptPath);
+        await expect(recorder.restoreToolBranch(input)).rejects.toThrow(
+          'ACTUAL_ADAPTER_REJECTED',
+        );
+        await expect(recorder.flush()).rejects.toThrow();
+        expect(await fs.readFile(fixture.transcriptPath)).toEqual(before);
+        const actual = await readRecords(fixture.transcriptPath);
+        expect(actual.some((record) => record.subtype === 'rewind')).toBe(
+          false,
+        );
+        expect(recorder.getTranscriptCursor()).toEqual({
+          recordId: actual.at(-1)?.uuid,
+        });
+        expect(actual.at(-1)?.uuid).toBe(physicalBefore.at(-1)?.uuid);
+      } finally {
+        fault.mockRestore();
+      }
+    });
+  });
+
+  it('keeps the actually committed rewind prefix when the following NEW tool result write fails', async () => {
+    await restoreFixture(async ({ fixture, recorder, input }) => {
+      const original = SessionWriterLease.prototype.appendJsonLine;
+      const fault = vi
+        .spyOn(SessionWriterLease.prototype, 'appendJsonLine')
+        .mockImplementation(function (
+          this: SessionWriterLease,
+          value: unknown,
+        ) {
+          const record = value as ChatRecord;
+          if (
+            record.type === 'tool_result' &&
+            JSON.stringify(record.message).includes('NEW_A_ACTUAL_NOT_OLD')
+          )
+            return Promise.reject(new Error('ACTUAL_SECOND_LINE_REJECTED'));
+          return original.call(this, value);
+        });
+      try {
+        const physicalBefore = await readRecords(fixture.transcriptPath);
+        await expect(recorder.restoreToolBranch(input)).rejects.toThrow(
+          'ACTUAL_SECOND_LINE_REJECTED',
+        );
+        await expect(recorder.flush()).rejects.toThrow();
+        const physical = await readRecords(fixture.transcriptPath);
+        expect(physical.slice(0, physicalBefore.length)).toEqual(
+          physicalBefore,
+        );
+        expect(JSON.stringify(physical)).toContain('OLD_A');
+        const added = physical.slice(physicalBefore.length);
+        expect(added).toHaveLength(1);
+        expect(added[0]).toMatchObject({ type: 'system', subtype: 'rewind' });
+        const anchor = physicalBefore.find((record) =>
+          record.message?.parts?.some(
+            (part) => part.functionCall?.id === 'call-a',
+          ),
+        );
+        expect(added[0].parentUuid).toBe(anchor?.uuid);
+        expect(recorder.getTranscriptCursor()).toEqual({
+          recordId: physical.at(-1)?.uuid,
+        });
+        expect(recorder.getTranscriptCursor().recordId).toBe(added[0].uuid);
+        expect(recorder.getTranscriptCursor().recordId).not.toBe(
+          physicalBefore.at(-1)?.uuid,
+        );
+        const selected = prepareTranscriptRecords(physical)
+          .records as ChatRecord[];
+        expect(selected.at(-1)?.uuid).toBe(added[0].uuid);
+        expect(JSON.stringify(selected)).not.toContain('OLD_A');
+        expect(JSON.stringify(selected)).not.toContain('NEW_A_ACTUAL_NOT_OLD');
+        expect(JSON.stringify(selected)).not.toContain('DISCARDED_');
+        expect(
+          selected
+            .flatMap((record) => record.message?.parts ?? [])
+            .filter((part) => part.functionCall?.id === 'call-a'),
+        ).toHaveLength(1);
+        expect(
+          selected
+            .flatMap((record) => record.message?.parts ?? [])
+            .filter((part) => part.functionResponse?.id === 'call-a'),
+        ).toHaveLength(0);
+      } finally {
+        fault.mockRestore();
+      }
+    });
   });
 });

@@ -41,14 +41,15 @@ describe('token plan provider', () => {
       'qwen3.6-plus',
       'qwen3.7-max',
       'qwen3.8-max',
-      'qwen3.8-max-preview',
       'qwen3.6-flash',
       'deepseek-v4-pro',
       'deepseek-v4-flash-0731',
-      'deepseek-v3.2',
+      'deepseek-v4.1-flash',
+      'deepseek-v4.1-flash-1017',
       'kimi-k2.7-code',
       'kimi-k2.6',
       'kimi-k2.5',
+      'glm-5.3',
       'glm-5.2',
       'glm-5.1',
       'glm-5',
@@ -77,18 +78,37 @@ describe('token plan provider', () => {
       template.find((model) => model.id === 'qwen3.6-plus')?.generationConfig
         ?.modalities,
     ).toEqual({ image: true, video: true });
-    expect(
-      template.find((model) => model.id === 'qwen3.8-max')?.generationConfig,
-    ).toEqual({
-      extra_body: { enable_thinking: true },
-      thinkingMandatory: true,
+    // qwen3.8-max is hybrid on Token Plan: it can be turned off and takes
+    // the full effort ladder up to max.
+    const qwen38Max = template.find((model) => model.id === 'qwen3.8-max');
+    expect(qwen38Max?.generationConfig).toEqual({
       contextWindowSize: 1000000,
       modalities: { image: true, video: true },
     });
+    expect(qwen38Max?.capabilities?.reasoning).toEqual({
+      thinking: true,
+      efforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'xhigh',
+      disableField: 'reasoning_effort',
+    });
     expect(
-      template.find((model) => model.id === 'qwen3.8-max-preview')
+      template.find((model) => model.id === 'deepseek-v4.1-flash')
         ?.generationConfig?.modalities,
-    ).toEqual({ image: true, video: true });
+    ).toEqual({ image: true });
+    // glm-5.3 and MiniMax-M2.5 reject enable_thinking: false.
+    for (const id of ['glm-5.3', 'MiniMax-M2.5']) {
+      const model = template.find((entry) => entry.id === id);
+      expect(model?.generationConfig?.thinkingMandatory).toBe(true);
+      expect(model?.capabilities?.reasoning?.canDisable).toBe(false);
+    }
+    // glm-5.2 is hybrid: declaring the enable_thinking switch lets Off ship.
+    expect(
+      template.find((model) => model.id === 'glm-5.2')?.capabilities?.reasoning,
+    ).toEqual({
+      thinking: true,
+      toggleOnly: true,
+      disableField: 'enable_thinking',
+    });
     expect(
       template.find((model) => model.id === 'kimi-k2.5')?.generationConfig
         ?.modalities,

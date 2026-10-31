@@ -132,6 +132,8 @@ import {
 } from '../routes/workspace-setup-github.js';
 import { parseWorkspaceVoiceUpdateParams } from '../routes/workspace-voice.js';
 import {
+  redactWorkflowModeFromConfigOptions,
+  redactWorkflowModeFromSessionState,
   redactWorkflowsFromAvailableCommandsEvent,
   redactWorkflowsFromSupportedCommands,
 } from '../workflow-session-gate.js';
@@ -277,6 +279,27 @@ function sessionWriterRpcError(err: unknown):
   };
 }
 
+function withGeneratedUiReceipt(
+  generatedUi: BridgeRestoredSession['generatedUi'],
+  state: Record<string, unknown> = {},
+): Record<string, unknown> {
+  const { generatedUi: _stateGeneratedUi, ...response } = state;
+  const meta = isObject(response['_meta']) ? response['_meta'] : undefined;
+  const { generatedUi: _stateGeneratedUiMeta, ...publicMeta } = meta ?? {};
+  return {
+    ...response,
+    ...(generatedUi ? { generatedUi } : {}),
+    ...(meta || generatedUi
+      ? {
+          _meta: {
+            ...publicMeta,
+            ...(generatedUi ? { generatedUi } : {}),
+          },
+        }
+      : {}),
+  };
+}
+
 const debugLogger = createDebugLogger('ACP_HTTP_DISPATCH');
 
 type PermissionResponse = Parameters<
@@ -310,6 +333,7 @@ const SSH_METHODS = new Set([
     'session/detach',
     'session/context_usage',
     'session/tasks',
+    'session/task_runtime',
     'session/agents',
     'session/agent_trace',
     'session/attachments',
@@ -379,6 +403,7 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/detach`,
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
+  `${QWEN_METHOD_NS}session/task_runtime`,
   `${QWEN_METHOD_NS}session/agents`,
   `${QWEN_METHOD_NS}session/agent_trace`,
   `${QWEN_METHOD_NS}session/attachments`,
@@ -471,6 +496,7 @@ const TRUSTED_WORKSPACE_METHODS = new Set<string>([
 ]);
 
 const WORKSPACE_GENERATION_MUTATION_METHODS = new Set<string>([
+  'session/set_config_option',
   'session/new',
   'session/load',
   'session/resume',
@@ -543,7 +569,11 @@ const MAX_FILE_LINE_LIMIT = 2000;
  * setter's rejection message so the advertised set and the set reported as
  * supported cannot drift apart.
  */
-const HTTP_ACP_CONFIG_OPTION_IDS: readonly string[] = ['model', 'mode'];
+const HTTP_ACP_CONFIG_OPTION_IDS: readonly string[] = [
+  'model',
+  'mode',
+  'workflow_mode',
+];
 
 class AcpParamError extends Error {}
 
@@ -1524,6 +1554,15 @@ export class AcpDispatcher {
     return value;
   }
 
+  private parseRequireIdle(params: Record<string, unknown>): boolean {
+    const value = params['requireIdle'];
+    if (value === undefined) return false;
+    if (typeof value !== 'boolean') {
+      throw new AcpParamError('`requireIdle` must be a boolean');
+    }
+    return value;
+  }
+
   private rejectActiveLiveSessionMutation(
     conn: AcpConnection,
     id: JsonRpcId | undefined,
@@ -1588,13 +1627,13 @@ export class AcpDispatcher {
 
   /**
    * The session's ACP-shaped config options supported by this HTTP transport
-   * (currently model and mode), read from the child's own session state.
+   * (model, mode, and workflow_mode), read from the child's own session state.
    * Every response built from this helper (`session/new`,
    * `session/load`/`session/resume`, `session/fork`, and the
    * `session/set_config_option` result) is gated to the ids the transport
    * can route. Raw-state surfaces (context status, REST load/resume state)
-   * intentionally carry the child's full unfiltered set — they report session
-   * state. Best-effort — `undefined` on error.
+   * retain other child options but omit Workflow mode for untrusted workspaces.
+   * Best-effort — `undefined` on error.
    */
   private async configOptionsFor(
     sessionId: string,
@@ -1604,20 +1643,27 @@ export class AcpDispatcher {
       const ctx = (await bridge.getSessionContextStatus(sessionId)) as {
         state?: { configOptions?: unknown };
       };
-      const co = ctx?.state?.configOptions;
-      return Array.isArray(co)
-        ? co.filter(
-            (option) =>
-              isObject(option) &&
-              HTTP_ACP_CONFIG_OPTION_IDS.includes(option['id'] as string),
-          )
-        : undefined;
+      return this.filterConfigOptions(ctx?.state?.configOptions);
     } catch (err) {
       writeStderrLine(
         `qwen serve: /acp configOptionsFor(${logSafe(sessionId)}) failed: ${logSafe(errMsg(err))}`,
       );
       return undefined;
     }
+  }
+
+  private filterConfigOptions(options: unknown): unknown[] | undefined {
+    return Array.isArray(options)
+      ? options.filter(
+          (option) =>
+            isObject(option) &&
+            HTTP_ACP_CONFIG_OPTION_IDS.includes(option['id'] as string) &&
+            !(
+              option['id'] === 'workflow_mode' &&
+              (this.fsFactory?.sshWorkspace || !this.isWorkspaceTrusted())
+            ),
+        )
+      : undefined;
   }
 
   /**
@@ -2165,6 +2211,7 @@ export class AcpDispatcher {
                 id,
                 {
                   sessionId: session.sessionId,
+                  ...withGeneratedUiReceipt(session.generatedUi),
                   ...(session.startupConfigApplied
                     ? {
                         modelApplied: true,
@@ -2469,7 +2516,10 @@ export class AcpDispatcher {
               );
               const loadModels = this.extractModelState(loadConfigOptions);
               const loadModes = this.extractModeState(loadConfigOptions);
-              const loadState = restored.state ?? {};
+              const loadState =
+                this.fsFactory?.sshWorkspace || !this.isWorkspaceTrusted()
+                  ? redactWorkflowModeFromConfigOptions(restored.state ?? {})
+                  : (restored.state ?? {});
               const loadMeta = isObject(loadState._meta)
                 ? loadState._meta
                 : undefined;
@@ -2516,18 +2566,20 @@ export class AcpDispatcher {
                 conn,
                 id,
                 {
-                  ...loadState,
-                  ...(replayStatus
-                    ? {
-                        _meta: {
-                          ...(loadMeta ?? {}),
-                          [QWEN_META_KEY]: {
-                            ...(loadQwenMeta ?? {}),
-                            sessionLoadReplay: replayStatus,
+                  ...withGeneratedUiReceipt(restored.generatedUi, {
+                    ...loadState,
+                    ...(replayStatus
+                      ? {
+                          _meta: {
+                            ...(loadMeta ?? {}),
+                            [QWEN_META_KEY]: {
+                              ...(loadQwenMeta ?? {}),
+                              sessionLoadReplay: replayStatus,
+                            },
                           },
-                        },
-                      }
-                    : {}),
+                        }
+                      : {}),
+                  }),
                   ...(loadConfigOptions
                     ? { configOptions: loadConfigOptions }
                     : {}),
@@ -2818,6 +2870,7 @@ export class AcpDispatcher {
                 id,
                 {
                   sessionId: result.sessionId,
+                  ...withGeneratedUiReceipt(result.generatedUi),
                   ...(configOptions ? { configOptions } : {}),
                   ...(models ? { models } : {}),
                   ...(modes ? { modes } : {}),
@@ -3215,6 +3268,48 @@ export class AcpDispatcher {
                 { persist: params['persist'] === true },
                 ctx,
               );
+            } else if (configId === 'workflow_mode') {
+              if (
+                (rawValue !== 'on' && rawValue !== 'off') ||
+                params['persist'] !== undefined ||
+                this.fsFactory?.sshWorkspace
+              ) {
+                if (id !== undefined) {
+                  this.replySession(
+                    conn,
+                    sessionId,
+                    id,
+                    undefined,
+                    error(
+                      id,
+                      RPC.INVALID_PARAMS,
+                      'Workflow mode requires on/off on a supported local session and does not accept persist',
+                    ),
+                  );
+                }
+                return;
+              }
+              if (!this.isWorkspaceTrusted()) {
+                if (id !== undefined) {
+                  this.replySession(
+                    conn,
+                    sessionId,
+                    id,
+                    undefined,
+                    error(id, -32003, 'Workspace is not trusted.', {
+                      errorKind: 'untrusted_workspace',
+                      httpStatus: 403,
+                    }),
+                  );
+                }
+                return;
+              }
+              await this.bridge.setSessionConfigOption(
+                sessionId,
+                { sessionId, configId, value: rawValue },
+                ctx,
+                assertGenerationOpen,
+              );
             } else {
               // Ids advertised by raw-state surfaces but unroutable here
               // (e.g. reasoning_effort) must fail loud, not fall into mode.
@@ -3235,6 +3330,7 @@ export class AcpDispatcher {
             }
             // Response returns the updated config option set (per ACP).
             const configOptions = await this.configOptionsFor(sessionId);
+            assertGenerationOpen?.();
             this.replySession(conn, sessionId, id, { configOptions });
           });
           return;
@@ -3332,10 +3428,13 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/context`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
+          const status = await this.bridge.getSessionContextStatus(sessionId);
           this.replyConn(
             conn,
             id,
-            await this.bridge.getSessionContextStatus(sessionId),
+            this.fsFactory?.sshWorkspace || !this.isWorkspaceTrusted()
+              ? redactWorkflowModeFromSessionState(status)
+              : status,
           );
           return;
         }
@@ -4114,6 +4213,26 @@ export class AcpDispatcher {
             includeWorkflows:
               this.isWorkspaceTrusted() && params['includeWorkflows'] === true,
           });
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/task_runtime`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const taskId = params['taskId'];
+          if (typeof taskId !== 'string' || taskId.length === 0) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, RPC.INVALID_PARAMS, '`taskId` is required'),
+              );
+            }
+            return;
+          }
+          const result = await this.bridge.getSessionTaskRuntime(
+            sessionId,
+            taskId,
+          );
           this.replyConn(conn, id, result as unknown);
           return;
         }
@@ -5369,6 +5488,7 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}sessions/archive`: {
           const ids = this.parseSessionIds(params);
           const resolveConflicts = this.parseResolveConflicts(params);
+          const requireIdle = this.parseRequireIdle(params);
           if (this.rejectActiveLiveSessionMutation(conn, id, ids)) return;
           const svc = new SessionService(this.boundWorkspace, {
             onWarning: logSessionArchiveWarning,
@@ -5382,6 +5502,7 @@ export class AcpDispatcher {
                 bridge: this.bridge,
                 coordinator: this.archiveCoordinator,
                 resolveConflicts,
+                requireIdle,
                 assertCanMutate: assertGenerationOpen,
               }),
           );
@@ -5957,9 +6078,25 @@ export class AcpDispatcher {
         const shaped = this.isWorkspaceTrusted()
           ? event
           : redactWorkflowsFromAvailableCommandsEvent(event);
+        let data = shaped.data;
+        if (
+          isObject(data) &&
+          isObject(data['update']) &&
+          data['update']['sessionUpdate'] === 'config_option_update'
+        ) {
+          data = {
+            ...data,
+            update: {
+              ...data['update'],
+              configOptions: this.filterConfigOptions(
+                data['update']['configOptions'],
+              ),
+            },
+          };
+        }
         conn.sendSession(
           sessionId,
-          notification('session/update', shaped.data),
+          notification('session/update', data),
           event.id,
         );
         return;

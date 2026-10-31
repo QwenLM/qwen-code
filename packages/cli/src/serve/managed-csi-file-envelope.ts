@@ -26,6 +26,7 @@ import { resolveManagedRuntimeBrokerBaseUrl } from './managed-runtime-broker-url
 
 export const MANAGED_CSI_FILE_PROTOCOL = 'managed-csi/2';
 export const MANAGED_CSI_FILE_PREFIX = '/internal/managed-runtime/csi/v2';
+export const CSI_FILE_FINALIZATION_FORMAT = 'qwen-csi-file-finalize/1';
 export const MANAGED_CSI_FILE_ROUTES = Object.freeze(
   ['context-attest', 'context', 'attest', 'drain'].map((name) =>
     Object.freeze({
@@ -58,11 +59,16 @@ export type ManagedCsiFileBoot = ManagedCsiFileBootFields &
   (
     | { readonly version: 4 }
     | { readonly version: 5; readonly authority: ManagedCsiNativeAuthority }
+    | {
+        readonly version: 6;
+        readonly authority: ManagedCsiNativeAuthority;
+        readonly finalization: typeof CSI_FILE_FINALIZATION_FORMAT;
+      }
   );
 
 export interface ManagedCsiFileReady {
   readonly type: 'ready';
-  readonly version: 4 | 5;
+  readonly version: 4 | 5 | 6;
   readonly managedCsi: typeof MANAGED_CSI_FILE_PROTOCOL;
   readonly identity: ManagedCsiFileIdentity;
   readonly context: ManagedContextReady;
@@ -96,10 +102,12 @@ export function parseManagedCsiFileBoot(value: unknown): ManagedCsiFileBoot {
       value !== null &&
       typeof value === 'object' &&
       'version' in value &&
-      value.version === 5;
+      (value.version === 5 || value.version === 6);
+    const finalizationBoot = authorityBoot && value.version === 6;
     const boot = closed(value, [
       ...(authorityBoot ? ['authority'] : []),
       'context',
+      ...(finalizationBoot ? ['finalization'] : []),
       'identity',
       'managedCsi',
       'storage',
@@ -121,6 +129,8 @@ export function parseManagedCsiFileBoot(value: unknown): ManagedCsiFileBoot {
     if (
       boot['type'] !== 'boot' ||
       (boot['version'] !== 4 && !authorityBoot) ||
+      (finalizationBoot &&
+        boot['finalization'] !== CSI_FILE_FINALIZATION_FORMAT) ||
       boot['managedCsi'] !== MANAGED_CSI_FILE_PROTOCOL ||
       identity['profile'] !== 'csi-files-retirement/1' ||
       identity['capabilityDigest'] !== CSI_FILES_RETIREMENT_CAPABILITY_DIGEST ||
@@ -139,13 +149,20 @@ export function parseManagedCsiFileBoot(value: unknown): ManagedCsiFileBoot {
       context: data.context,
       storage: data.storage,
     };
-    return authorityBoot
+    return finalizationBoot
       ? Object.freeze({
           ...fields,
-          version: 5 as const,
+          version: 6 as const,
           authority: readManagedCsiNativeAuthority(boot['authority']),
+          finalization: CSI_FILE_FINALIZATION_FORMAT,
         })
-      : Object.freeze({ ...fields, version: 4 as const });
+      : authorityBoot
+        ? Object.freeze({
+            ...fields,
+            version: 5 as const,
+            authority: readManagedCsiNativeAuthority(boot['authority']),
+          })
+        : Object.freeze({ ...fields, version: 4 as const });
   } catch {
     throw new Error('Managed CSI file boot document is invalid.');
   }

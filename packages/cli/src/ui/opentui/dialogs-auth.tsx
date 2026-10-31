@@ -36,6 +36,7 @@ import type {
   ModelWireApi,
 } from '@qwen-code/qwen-code-core';
 import {
+  QWENCLOUD_PROVIDERS,
   ALIBABA_PROVIDERS,
   THIRD_PARTY_PROVIDERS,
   AuthEvent,
@@ -47,7 +48,6 @@ import {
   findExistingProviderModels,
   findProviderByCredentials,
   findProviderById,
-  getDefaultModelIds,
   getErrorMessage,
   logAuth,
 } from '@qwen-code/qwen-code-core';
@@ -101,11 +101,13 @@ import { useBatchSafeCursor, useBatchSafeState } from './batch-cursor.js';
 
 type ViewLevel =
   | 'main'
+  | 'qwencloud-select'
   | 'alibaba-select'
   | 'thirdparty-select'
   | 'provider-setup';
 
 type MainOption =
+  | 'QWENCLOUD'
   | 'ALIBABA_MODELSTUDIO'
   | 'THIRD_PARTY_PROVIDERS'
   | 'CUSTOM_PROVIDER';
@@ -118,6 +120,14 @@ interface RadioItem {
 }
 
 const MAIN_ITEMS: RadioItem[] = [
+  {
+    key: 'QWENCLOUD',
+    label: t('QwenCloud'),
+    description: t(
+      'Official recommended setup: Token Plan or Standard API Key',
+    ),
+    value: 'QWENCLOUD',
+  },
   {
     key: 'ALIBABA_MODELSTUDIO',
     label: t('Alibaba ModelStudio'),
@@ -163,10 +173,11 @@ const PROTOCOL_ITEMS: RadioItem[] = [
   },
 ];
 
-const VIEW_TITLES: Record<string, string> = {
-  main: t('Connect a Provider'),
-  'alibaba-select': t('Alibaba ModelStudio · Access Method'),
-  'thirdparty-select': t('Third-party Providers · Provider'),
+const VIEW_TITLES: Record<string, () => string> = {
+  main: () => t('Connect a Provider'),
+  'qwencloud-select': () => t('QwenCloud · Access Method'),
+  'alibaba-select': () => t('Alibaba ModelStudio · Access Method'),
+  'thirdparty-select': () => t('Third-party Providers · Provider'),
 };
 
 function providerToItem(config: ProviderConfig): RadioItem {
@@ -1367,6 +1378,10 @@ function AuthDialogFlow({
 
   // -- Sub-menu items ---------------------------------------------------------
 
+  const qwencloudItems = useMemo(
+    () => QWENCLOUD_PROVIDERS.map(providerToItem),
+    [],
+  );
   const alibabaItems = useMemo(() => ALIBABA_PROVIDERS.map(providerToItem), []);
   const thirdPartyItems = useMemo(
     () => THIRD_PARTY_PROVIDERS.map(providerToItem),
@@ -1393,8 +1408,7 @@ function AuthDialogFlow({
   const getExistingModelIds = (providerConfig: ProviderConfig): string[] => {
     const saved = findSavedModels(providerConfig);
     if (!saved) return [];
-    const builtinIds = new Set(getDefaultModelIds(providerConfig));
-    return saved.models.map((m) => m.id).filter((id) => !builtinIds.has(id));
+    return saved.models.map((m) => m.id);
   };
 
   const handleProviderSelect = useCallback(
@@ -1415,6 +1429,7 @@ function AuthDialogFlow({
   );
 
   const subMenus: Record<string, RadioItem[]> = {
+    'qwencloud-select': qwencloudItems,
     'alibaba-select': alibabaItems,
     'thirdparty-select': thirdPartyItems,
   };
@@ -1429,8 +1444,9 @@ function AuthDialogFlow({
   );
   // Land on the tab matching the active provider's uiGroup (ink parity).
   const defaultMainIndex = useMemo(() => {
-    if (matchedProvider?.uiGroup === 'third-party') return 1;
-    if (matchedProvider?.uiGroup === 'custom') return 2;
+    if (matchedProvider?.uiGroup === 'third-party') return 2;
+    if (matchedProvider?.uiGroup === 'custom') return 3;
+    if (matchedProvider?.uiGroup === 'alibaba') return 1;
     return 0;
   }, [matchedProvider]);
 
@@ -1440,6 +1456,9 @@ function AuthDialogFlow({
     (value: MainOption) => {
       clearErrors();
       switch (value) {
+        case 'QWENCLOUD':
+          pushView('qwencloud-select');
+          break;
         case 'ALIBABA_MODELSTUDIO':
           pushView('alibaba-select');
           break;
@@ -1493,11 +1512,11 @@ function AuthDialogFlow({
   const contentWidth = dialogContentWidth(width);
   const viewTitle = useMemo(() => {
     if (viewLevel !== 'provider-setup') {
-      return VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'];
+      return (VIEW_TITLES[viewLevel] ?? VIEW_TITLES['main'])();
     }
     const p = setupFlow.state.provider;
     if (!p) return t('Provider Setup');
-    const flowTitle = p.uiLabels?.flowTitle ?? p.label;
+    const flowTitle = t(p.uiLabels?.flowTitle ?? p.label);
     const { stepIndex, totalSteps, step } = setupFlow.state;
     return t('{{flowTitle}} · Step {{step}}/{{total}} · {{stepLabel}}', {
       flowTitle,
