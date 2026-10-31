@@ -18,6 +18,7 @@ import {
   handleError,
   handleToolError,
   handleCancellationError,
+  handleBudgetExceededError,
   handleMaxTurnsExceededError,
 } from './errors.js';
 import { _resetCleanupFunctionsForTest, registerCleanup } from './cleanup.js';
@@ -853,6 +854,106 @@ describe('errors', () => {
       });
     });
   });
+
+  describe.each([
+    ['cancellation', OutputFormat.JSON, 130],
+    ['cancellation', OutputFormat.STREAM_JSON, 130],
+    ['budget', OutputFormat.JSON, 55],
+    ['budget', OutputFormat.STREAM_JSON, 55],
+  ] as const)(
+    '%s exit commitment observer in %s',
+    (reason, outputFormat, exitCode) => {
+      beforeEach(() => {
+        vi.mocked(mockConfig.getOutputFormat).mockReturnValue(outputFormat);
+      });
+
+      afterEach(() => {
+        mockWriteStderrLine.mockReset();
+      });
+
+      const terminate = (onExitCommitted: () => void) =>
+        reason === 'cancellation'
+          ? handleCancellationError(mockConfig, onExitCommitted)
+          : handleBudgetExceededError(
+              mockConfig,
+              {
+                kind: 'wall-time',
+                limit: 1,
+                observed: 1,
+                message: 'Run aborted: wall-time budget exceeded',
+              },
+              onExitCommitted,
+            );
+
+      it('does not commit exit when stderr throws and permits a later exit', async () => {
+        const writeError = new Error('stderr write failed');
+        const onExitCommitted = vi.fn();
+        const cleanup = vi.fn();
+        registerCleanup(cleanup);
+        mockWriteStderrLine.mockImplementationOnce(() => {
+          throw writeError;
+        });
+
+        await expect(terminate(onExitCommitted)).rejects.toBe(writeError);
+
+        expect(onExitCommitted).not.toHaveBeenCalled();
+        expect(cleanup).not.toHaveBeenCalled();
+        expect(processExitSpy).not.toHaveBeenCalled();
+
+        await expect(terminate(onExitCommitted)).rejects.toThrow(
+          `process.exit called with code: ${exitCode}`,
+        );
+        expect(onExitCommitted).toHaveBeenCalledOnce();
+        expect(cleanup).toHaveBeenCalledOnce();
+        expect(processExitSpy).toHaveBeenCalledExactlyOnceWith(exitCode);
+      });
+
+      it('notifies once before cleanup and exit, excluding a reentrant handler', async () => {
+        const events: string[] = [];
+        mockWriteStderrLine.mockImplementation(() => {
+          events.push('write');
+        });
+        const onReentrantExitCommitted = vi.fn();
+        let reentrantSettled = false;
+        const onExitCommitted = vi.fn(() => {
+          events.push('committed');
+          void terminate(onReentrantExitCommitted).then(
+            () => {
+              reentrantSettled = true;
+            },
+            () => {
+              reentrantSettled = true;
+            },
+          );
+        });
+        const cleanup = vi.fn(() => {
+          events.push('cleanup');
+        });
+        registerCleanup(cleanup);
+        processExitSpy.mockImplementation((code) => {
+          events.push(`exit:${code}`);
+          throw new Error(`process.exit called with code: ${code}`);
+        });
+
+        await expect(terminate(onExitCommitted)).rejects.toThrow(
+          `process.exit called with code: ${exitCode}`,
+        );
+
+        expect(events).toEqual([
+          'write',
+          'committed',
+          'write',
+          'cleanup',
+          `exit:${exitCode}`,
+        ]);
+        expect(onExitCommitted).toHaveBeenCalledOnce();
+        expect(onReentrantExitCommitted).not.toHaveBeenCalled();
+        expect(cleanup).toHaveBeenCalledOnce();
+        expect(processExitSpy).toHaveBeenCalledExactlyOnceWith(exitCode);
+        expect(reentrantSettled).toBe(false);
+      });
+    },
+  );
 
   describe('cleanup-before-exit invariant', () => {
     // Regression: previously these handlers called process.exit synchronously,

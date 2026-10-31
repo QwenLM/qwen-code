@@ -1077,6 +1077,67 @@ describe('Gemini Client (client.ts)', () => {
     return reg;
   };
 
+  describe('pending memory task ownership', () => {
+    it('returns an independent snapshot without transferring queue ownership', () => {
+      const task = Promise.resolve(1);
+      client['pendingMemoryTaskPromises'] = [task];
+
+      const snapshot = client.getPendingMemoryTaskPromises();
+      snapshot.length = 0;
+
+      expect(client.getPendingMemoryTaskPromises()).toHaveLength(1);
+      expect(client.getPendingMemoryTaskPromises()[0]).toBe(task);
+      expect(client.consumePendingMemoryTaskPromises()[0]).toBe(task);
+      expect(client.getPendingMemoryTaskPromises()).toEqual([]);
+    });
+
+    it('removes only the supplied identities and preserves newly queued work', () => {
+      const settled = Promise.resolve(2);
+      const retained = Promise.resolve(2);
+      const newTask = Promise.resolve(3);
+      client['pendingMemoryTaskPromises'] = [settled, retained];
+      const snapshot = client.getPendingMemoryTaskPromises();
+      client['pendingMemoryTaskPromises'].push(newTask);
+
+      client.removePendingMemoryTaskPromises([snapshot[0]!]);
+      client.removePendingMemoryTaskPromises([settled]);
+
+      const remaining = client.getPendingMemoryTaskPromises();
+      expect(remaining).toHaveLength(2);
+      expect(remaining[0]).toBe(retained);
+      expect(remaining[1]).toBe(newTask);
+      client.removePendingMemoryTaskPromises(snapshot);
+      const consumed = client.consumePendingMemoryTaskPromises();
+      expect(consumed).toHaveLength(1);
+      expect(consumed[0]).toBe(newTask);
+    });
+
+    it('delivers retained memory counts through the destructive consumer only once', async () => {
+      const alreadyObserved = Promise.resolve(2);
+      const retainedWrite = Promise.resolve(3);
+      const noWrite = Promise.resolve(0);
+      client['pendingMemoryTaskPromises'] = [
+        alreadyObserved,
+        retainedWrite,
+        noWrite,
+      ];
+      const abandonedSnapshot = client.getPendingMemoryTaskPromises();
+      client.removePendingMemoryTaskPromises([abandonedSnapshot[0]!]);
+
+      const firstDelivery = await Promise.all(
+        client.consumePendingMemoryTaskPromises(),
+      );
+      client.removePendingMemoryTaskPromises(abandonedSnapshot);
+      const secondDelivery = await Promise.all(
+        client.consumePendingMemoryTaskPromises(),
+      );
+
+      expect(firstDelivery.filter((count) => count > 0)).toEqual([3]);
+      expect(secondDelivery).toEqual([]);
+      expect(client.getPendingMemoryTaskPromises()).toEqual([]);
+    });
+  });
+
   describe('initialize', () => {
     const restoreFromRuntime = (runtime: object) =>
       vi
