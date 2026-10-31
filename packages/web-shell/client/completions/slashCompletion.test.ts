@@ -68,6 +68,390 @@ describe('getSlashCommandArgumentHint', () => {
   });
 });
 
+describe('getSlashCommandArgumentHint progressive skill hints', () => {
+  const verifyPr: CommandInfo[] = [
+    {
+      name: 'verify-pr',
+      description: 'Verify a PR',
+      source: 'skill',
+      argumentHint: '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>]',
+    },
+  ];
+
+  it('shows remaining flags after the required argument is typed', () => {
+    expect(
+      getSlashCommandArgumentHint('/verify-pr 15871', verifyPr, 'en'),
+    ).toBe('[--publish] [--watch] [--repo <owner>/<repo>]');
+    expect(
+      getSlashCommandArgumentHint('/verify-pr 15871 --publish', verifyPr, 'en'),
+    ).toBe('[--watch] [--repo <owner>/<repo>]');
+  });
+
+  it('consumes a flag value and keeps the value hint while it is missing', () => {
+    expect(
+      getSlashCommandArgumentHint(
+        '/verify-pr 15871 --repo alice/repo',
+        verifyPr,
+        'en',
+      ),
+    ).toBe('[--publish] [--watch]');
+    expect(
+      getSlashCommandArgumentHint('/verify-pr 15871 --repo', verifyPr, 'en'),
+    ).toBe('<owner>/<repo> [--publish] [--watch]');
+  });
+
+  it('puts a pending flag value before the remaining arguments', () => {
+    expect(
+      getSlashCommandArgumentHint('/verify-pr --repo', verifyPr, 'en'),
+    ).toBe('<owner>/<repo> <pr-number> [--publish] [--watch]');
+    expect(
+      getSlashCommandArgumentHint(
+        '/verify-pr --repo alice/repo 15871',
+        verifyPr,
+        'en',
+      ),
+    ).toBe('[--publish] [--watch]');
+  });
+
+  it('rejects a flag prefix that is followed by more arguments', () => {
+    expect(
+      getSlashCommandArgumentHint(
+        '/verify-pr 15871 --pub --watch',
+        verifyPr,
+        'en',
+      ),
+    ).toBeNull();
+    expect(
+      getSlashCommandArgumentHint(
+        '/verify-pr 15871 --pub --bogus',
+        verifyPr,
+        'en',
+      ),
+    ).toBeNull();
+  });
+
+  it.each(['skill-dir-command', 'bundled-skill'] as const)(
+    'recognizes live-session source %s as skill-backed',
+    (source) => {
+      const commands: CommandInfo[] = [
+        {
+          name: 'verify-pr',
+          description: 'Verify a PR',
+          source,
+          argumentHint: '<pr-number> [--publish]',
+        },
+      ];
+      expect(getSlashCommandArgumentHint('/verify-pr', commands, 'en')).toBe(
+        '<pr-number> [--publish]',
+      );
+      expect(
+        getSlashCommandArgumentHint('/verify-pr 15871', commands, 'en'),
+      ).toBe('[--publish]');
+    },
+  );
+
+  it('recognizes extension skills by session membership, not by the shared plugin source', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'ext:probe',
+        description: 'Extension skill',
+        source: 'plugin-command',
+        argumentHint: '<id> [--watch]',
+      },
+      {
+        name: 'plugin-tool',
+        description: 'Ordinary plugin command',
+        source: 'plugin-command',
+        argumentHint: '<target>',
+      },
+    ];
+    const skillNames = new Set(['ext:probe']);
+    expect(
+      getSlashCommandArgumentHint('/ext:probe 42', commands, 'en', skillNames),
+    ).toBe('[--watch]');
+    expect(
+      getSlashCommandArgumentHint(
+        '/plugin-tool 42',
+        commands,
+        'en',
+        skillNames,
+      ),
+    ).toBeNull();
+    expect(
+      getSlashCommandArgumentHint('/plugin-tool', commands, 'en', skillNames),
+    ).toBe('<target>');
+  });
+
+  it('matches skill membership case-insensitively and covers source-less entries', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'Ext:Probe',
+        description: 'Synthesized skill entry without a top-level source',
+        argumentHint: '<id> [--watch]',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint(
+        '/Ext:Probe 42',
+        commands,
+        'en',
+        new Set(['ext:probe']),
+      ),
+    ).toBe('[--watch]');
+  });
+
+  it('keeps the matching flag group visible while the flag is being typed', () => {
+    expect(
+      getSlashCommandArgumentHint('/verify-pr 15871 --pub', verifyPr, 'en'),
+    ).toBe('[--publish] [--watch] [--repo <owner>/<repo>]');
+  });
+
+  it('hides the hint once every hint token is consumed', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'demo',
+        description: 'Demo',
+        source: 'skill',
+        argumentHint: '<id> [--yes]',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint('/demo 1 --yes', commands, 'en'),
+    ).toBeNull();
+  });
+
+  it('hides the hint for arguments the hint cannot describe', () => {
+    expect(
+      getSlashCommandArgumentHint('/verify-pr 15871 --bogus', verifyPr, 'en'),
+    ).toBeNull();
+    expect(
+      getSlashCommandArgumentHint('/verify-pr 15871 extra', verifyPr, 'en'),
+    ).toBeNull();
+  });
+
+  it('keeps a required placeholder in the hint when a flag is typed first', () => {
+    expect(
+      getSlashCommandArgumentHint('/verify-pr --publish', verifyPr, 'en'),
+    ).toBe('<pr-number> [--watch] [--repo <owner>/<repo>]');
+  });
+
+  it('consumes free-text placeholders entirely', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'create-issue',
+        description: 'Create an issue',
+        source: 'skill',
+        argumentHint: '<feature idea or bug description>',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint(
+        '/create-issue add dark mode',
+        commands,
+        'en',
+      ),
+    ).toBeNull();
+  });
+
+  it('prefers the literal mode branch over optional placeholders', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'autofix-pr',
+        description: 'Autofix a PR',
+        source: 'skill',
+        argumentHint: '[<pr>] [--once] | status [<pr>] | stop [<pr>]',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint('/autofix-pr status', commands, 'en'),
+    ).toBe('[<pr>]');
+    expect(
+      getSlashCommandArgumentHint('/autofix-pr 15871', commands, 'en'),
+    ).toBe('[--once]');
+    expect(
+      getSlashCommandArgumentHint('/autofix-pr stop 15871', commands, 'en'),
+    ).toBeNull();
+  });
+
+  it('supports flag value alternatives and optional placeholders before flags', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'review',
+        description: 'Review',
+        source: 'skill',
+        argumentHint:
+          '[pr-number|file-path] [--effort low|medium|high] [--fix]',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint('/review 15871 --effort', commands, 'en'),
+    ).toBe('low|medium|high [--fix]');
+    expect(
+      getSlashCommandArgumentHint(
+        '/review 15871 --effort high',
+        commands,
+        'en',
+      ),
+    ).toBe('[--fix]');
+    expect(getSlashCommandArgumentHint('/review --fix', commands, 'en')).toBe(
+      '[pr-number|file-path] [--effort low|medium|high]',
+    );
+  });
+
+  it('hides the hint when a flag is repeated beyond its hint group', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'demo',
+        description: 'Demo',
+        source: 'skill',
+        argumentHint: '<id> [--yes] [--no]',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint('/demo 1 --yes --yes', commands, 'en'),
+    ).toBeNull();
+  });
+
+  it('does not swallow a following flag as a missing flag value', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'demo',
+        description: 'Demo',
+        source: 'skill',
+        argumentHint: '<id> [--repo <owner>/<repo>] [--watch]',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint('/demo 1 --repo --watch', commands, 'en'),
+    ).toBe('<owner>/<repo>');
+  });
+
+  it('degrades gracefully on malformed hints', () => {
+    for (const hint of [
+      '[',
+      '<',
+      '[--x',
+      '|',
+      '||',
+      '[[]]',
+      '[]',
+      '<>',
+      '[] []',
+    ]) {
+      const commands: CommandInfo[] = [
+        {
+          name: 'demo',
+          description: 'Demo',
+          source: 'skill',
+          argumentHint: hint,
+        },
+      ];
+      expect(
+        getSlashCommandArgumentHint('/demo 1 --yes', commands, 'en'),
+      ).toBeNull();
+    }
+  });
+
+  it('hides the original empty-group witness instead of echoing a leftover token', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'demo',
+        description: 'Demo',
+        source: 'skill',
+        argumentHint: '[] []',
+      },
+    ];
+    expect(getSlashCommandArgumentHint('/demo x', commands, 'en')).toBeNull();
+  });
+
+  it('hides whitespace-only empty groups instead of echoing them', () => {
+    for (const hint of ['[ ] [ ]', '< > < >', '[\t] [\t]']) {
+      const commands: CommandInfo[] = [
+        {
+          name: 'demo',
+          description: 'Demo',
+          source: 'skill',
+          argumentHint: hint,
+        },
+      ];
+      expect(getSlashCommandArgumentHint('/demo x', commands, 'en')).toBeNull();
+    }
+  });
+
+  it('consumes flags typed after a free-text placeholder', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'demo',
+        description: 'Demo',
+        source: 'skill',
+        argumentHint: '<task description> [--dry-run] [--verbose]',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint(
+        '/demo update deps --dry-run',
+        commands,
+        'en',
+      ),
+    ).toBe('[--verbose]');
+    expect(
+      getSlashCommandArgumentHint(
+        '/demo --dry-run update deps',
+        commands,
+        'en',
+      ),
+    ).toBe('[--verbose]');
+    expect(
+      getSlashCommandArgumentHint(
+        '/demo update deps --dry-run --verbose',
+        commands,
+        'en',
+      ),
+    ).toBeNull();
+    expect(
+      getSlashCommandArgumentHint('/demo update deps --dry', commands, 'en'),
+    ).toBe('[--dry-run] [--verbose]');
+    expect(
+      getSlashCommandArgumentHint('/demo update deps --bogus', commands, 'en'),
+    ).toBeNull();
+  });
+
+  it('does not re-ask for a flag after a spaced single-value placeholder', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'verify-pr',
+        description: 'Verify a PR',
+        source: 'skill',
+        argumentHint: '<PR number> [--publish] [--watch]',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint('/verify-pr 15871 --publish', commands, 'en'),
+    ).toBe('[--watch]');
+  });
+
+  it('keeps absorbing multi-word prose when no flag follows', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'demo',
+        description: 'Demo',
+        source: 'skill',
+        argumentHint: '<feature idea or bug description> [--draft]',
+      },
+    ];
+    expect(
+      getSlashCommandArgumentHint(
+        '/demo add dark mode --draft',
+        commands,
+        'en',
+      ),
+    ).toBeNull();
+    expect(
+      getSlashCommandArgumentHint('/demo add dark mode', commands, 'en'),
+    ).toBe('[--draft]');
+  });
+});
+
 describe('getSlashCommandCompletionResult', () => {
   it.each(['en', 'zh-CN'] as const)(
     'keeps Skill names separate from built-in syntax in %s',

@@ -12,6 +12,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionSt
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.RenewWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.SealWriterRequest;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels.WriterGrant;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.AgentDefinitionRequest;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
@@ -122,11 +123,19 @@ class ManagedAgentMySqlIT {
         var transactions = new TransactionTemplate(new DataSourceTransactionManager(source));
         for (String model : List.of("model-a", "model-b")) {
             var input = List.<Map<String, Object>>of(Map.of("type", "input_text", "text", "first"));
-            var admitted = transactions.execute(status -> store.insertWorkspaceSessionCommand(tenant, "actor", model,
-                    "digest-" + model, "qwen-code", null, null, input,
-                    com.alibaba.qwen.code.daemon.SubmitHarnessTurn.computePayloadDigest(input),
-                    new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection("ws", "."),
-                    mode, true, null, false, List.of(), false, model));
+            var admitted = transactions.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenant)
+                    .actorId("actor")
+                    .idempotencyKey(model)
+                    .requestDigest("digest-" + model)
+                    .agentId("qwen-code")
+                    .input(input)
+                    .payloadDigest(com.alibaba.qwen.code.daemon.SubmitHarnessTurn.computePayloadDigest(input))
+                    .selection(new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection("ws", "."))
+                    .requestedApprovalMode(mode)
+                    .approvalSelectionSupported(true)
+                    .modelId(model)
+                    .build()));
             assertThat(jdbc.queryForMap("SELECT model_id,model_revision,approval_mode,approval_revision FROM ma_turn"
                     + " WHERE tenant_id=? AND session_id=?", tenant, admitted.sessionId()))
                     .containsEntry("model_id", model).containsEntry("model_revision", 1L)
@@ -180,17 +189,14 @@ class ManagedAgentMySqlIT {
                 null);
         assertThatThrownBy(
                         () ->
-                                store.insertWorkspaceSessionCommand(
-                                        createTenant,
-                                        "actor",
-                                        "create-mode",
-                                        "bound-digest",
-                                        "qwen-code",
-                                        null,
-                                        null,
-                                        List.of(),
-                                        null,
-                                        new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection("ws-a", ".")))
+                                store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                                        .tenantId(createTenant)
+                                        .actorId("actor")
+                                        .idempotencyKey("create-mode")
+                                        .requestDigest("bound-digest")
+                                        .agentId("qwen-code")
+                                        .selection(new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection("ws-a", "."))
+                                        .build()))
                 .isInstanceOfSatisfying(
                         ManagedAgentException.class,
                         error -> assertThat(error.getCode()).isEqualTo("idempotency_conflict"));
@@ -881,17 +887,14 @@ class ManagedAgentMySqlIT {
             Admission created =
                     transactions.execute(
                             status ->
-                                    store.insertWorkspaceSessionCommand(
-                                            tenant,
-                                            actor,
-                                            "Create-Workspace",
-                                            digest,
-                                            "qwen-code",
-                                            null,
-                                            null,
-                                            List.of(),
-                                            null,
-                                            new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection(workspace, ".")));
+                                    store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                                            .tenantId(tenant)
+                                            .actorId(actor)
+                                            .idempotencyKey("Create-Workspace")
+                                            .requestDigest(digest)
+                                            .agentId("qwen-code")
+                                            .selection(new com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection(workspace, "."))
+                                            .build()));
             assertThat(registry.canRead(tenant, actor, workspace)).isTrue();
             assertThat(registry.canRead(tenant, "actor-a", workspace)).isFalse();
             assertThat(registry.canRead(tenant, actor, "workspace-a")).isFalse();
