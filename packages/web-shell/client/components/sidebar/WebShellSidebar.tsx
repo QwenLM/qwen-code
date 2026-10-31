@@ -487,6 +487,8 @@ interface WebShellSidebarProps {
   canOpenSplitView?: boolean;
   onNewSession: (workspaceCwd?: string) => Promise<boolean> | boolean;
   onNewStandaloneSession?: () => Promise<boolean> | boolean;
+  onLeaveCurrentStandaloneForDelete: (sessionId: string) => Promise<boolean>;
+  currentSessionRunning?: boolean;
   onLoadSession: (
     sessionId: string,
     workspaceCwd?: string,
@@ -1133,6 +1135,8 @@ export function WebShellSidebar({
   canOpenSplitView,
   onNewSession,
   onNewStandaloneSession,
+  onLeaveCurrentStandaloneForDelete,
+  currentSessionRunning,
   onLoadSession,
   onOpenHostSession,
   onSelectCurrentSession,
@@ -5084,7 +5088,11 @@ export function WebShellSidebar({
         !session.hasActivePrompt && session.activeWorkState === 'active';
       // Archiving closes the live session daemon-side, which would end the
       // running work; keep the action visible but inert while it runs.
-      const running = Boolean(session.hasActivePrompt || sessionWorkActive);
+      const running = Boolean(
+        session.hasActivePrompt ||
+          sessionWorkActive ||
+          (standalone?.active && currentSessionRunning),
+      );
       const backgroundRunning =
         !session.hasActivePrompt && session.hasRunningBackgroundTasks;
       const needsUserInput =
@@ -5116,18 +5124,18 @@ export function WebShellSidebar({
       const showDelete = standalone
         ? sessionActionItems.has('delete')
         : canShowDeleteSession(session);
-      // `showDelete` already applied the workspace-scope gate — standalone rows
-      // bypass it on purpose — so the disabled state only carries #12619's rule:
-      // the session this client is attached to is deletable once it goes idle.
-      // The no-workspace row is the exception: its delete route answers
-      // `session_busy` while this tab is still attached, so offering it would be
-      // a button that can never succeed. Keep it disabled until the user opens
-      // another chat (leaving first, then deleting, is tracked separately).
-      const currentStandalone = Boolean(standalone?.active);
+      const currentStandaloneNotReady = Boolean(
+        standalone?.active &&
+          (connection.status !== 'connected' ||
+            !connection.clientId ||
+            connection.error ||
+            connection.loadingTranscript ||
+            connection.catchingUp),
+      );
       const deleteDisabled =
-        busy || currentStandalone || (isCurrent && running);
-      const deleteDisabledTitle = currentStandalone
-        ? t('sidebar.currentStandaloneDeleteDisabled')
+        busy || currentStandaloneNotReady || (isCurrent && running);
+      const deleteDisabledTitle = currentStandaloneNotReady
+        ? t('sidebar.currentStandaloneNotReady')
         : isCurrent && running
           ? t('sidebar.currentDeleteDisabled')
           : undefined;
@@ -5547,7 +5555,12 @@ export function WebShellSidebar({
     },
     [
       busySessionIds,
+      connection.catchingUp,
+      connection.clientId,
+      connection.loadingTranscript,
+      connection.status,
       canDeleteSession,
+      currentSessionRunning,
       canShowDeleteSession,
       canOrganizeSession,
       canRenameSession,
@@ -6015,6 +6028,7 @@ export function WebShellSidebar({
                 })
               }
               onLoadSession={onLoadStandaloneSession}
+              onLeaveCurrentSession={onLeaveCurrentStandaloneForDelete}
               onRenameSession={(sessionId, displayName) =>
                 onSessionRenameConfirmed?.(undefined, sessionId, displayName)
               }
@@ -6070,6 +6084,7 @@ export function WebShellSidebar({
     handleStandaloneMutation,
     managedArchivedSessions,
     onError,
+    onLeaveCurrentStandaloneForDelete,
     onLoadStandaloneSession,
     onSessionRenameConfirmed,
     onStandaloneNotice,
@@ -7812,6 +7827,7 @@ export function WebShellSidebar({
                         : undefined
                     }
                     onLoadSession={onLoadStandaloneSession}
+                    onLeaveCurrentSession={onLeaveCurrentStandaloneForDelete}
                     onRenameSession={(sessionId, displayName) =>
                       onSessionRenameConfirmed?.(
                         undefined,

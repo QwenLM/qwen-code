@@ -238,7 +238,8 @@ export interface CreateDaemonSessionActionsArgs {
   sessionConfigGeneration: SessionConfigSyncMap;
   sessionRecoveryGeneration: WeakMap<DaemonSessionClient, number>;
   heartbeatSupportedRef: RefBox<boolean>;
-  manualSessionClearRef: RefBox<boolean>;
+  manualSessionClearRef: RefBox<boolean | Promise<void>>;
+  pendingStrictDetachRef: RefBox<Promise<void> | undefined>;
   skipNextCleanupDetachSessionRef: RefBox<DaemonSessionClient | undefined>;
   passiveAssistantDoneTimerRef: TimerRef;
   /**
@@ -473,6 +474,7 @@ export function createDaemonSessionActions({
   sessionRecoveryGeneration,
   heartbeatSupportedRef,
   manualSessionClearRef,
+  pendingStrictDetachRef,
   skipNextCleanupDetachSessionRef,
   passiveAssistantDoneTimerRef,
   daemonActivePromptRef,
@@ -2716,14 +2718,71 @@ export function createDaemonSessionActions({
       return loadPromise;
     },
 
-    async clearSession(options?: { dropSessionContext?: boolean }) {
+    async clearSession(options?: {
+      dropSessionContext?: boolean;
+      requireDetachSessionId?: string;
+    }) {
       const session = sessionRef.current;
-      manualSessionClearRef.current = true;
-      if (session) onGeneratedUiInvalidated?.(session, 'cleared');
+      const requiredSessionId = options?.requireDetachSessionId;
+      let strictClearOwnsSession = false;
+      if (!requiredSessionId) {
+        manualSessionClearRef.current = true;
+        if (session) onGeneratedUiInvalidated?.(session, 'cleared');
+      }
       if (pendingPersistedReasoningAction) {
         await pendingPersistedReasoningAction.catch(() => undefined);
       }
-      if (sessionRef.current === session) {
+      if (requiredSessionId) {
+        const connection = getConnection();
+        if (
+          !session ||
+          session.sessionId !== requiredSessionId ||
+          sessionRef.current !== session ||
+          connection.sessionId !== requiredSessionId
+        ) {
+          throw new Error('Current session changed before detach');
+        }
+        if (!session.clientId || connection.clientId !== session.clientId) {
+          throw new Error('Current session attachment is not ready for detach');
+        }
+        const detach = withActionTimeout(
+          session.detach(),
+          'Clear session timed out',
+        );
+        // Recovery may discard the handle. Only this intent may undo itself;
+        // a later clear or navigation replaces it with its own boolean intent.
+        manualSessionClearRef.current = detach;
+        pendingStrictDetachRef.current = detach;
+        try {
+          await detach;
+          strictClearOwnsSession =
+            manualSessionClearRef.current === detach &&
+            (!sessionRef.current || sessionRef.current === session);
+          if (manualSessionClearRef.current === detach) {
+            manualSessionClearRef.current = strictClearOwnsSession;
+          }
+          if (!strictClearOwnsSession) {
+            throw new Error('Current session changed during detach');
+          }
+        } catch (error) {
+          if (manualSessionClearRef.current === detach) {
+            manualSessionClearRef.current = false;
+          }
+          throw error;
+        } finally {
+          if (pendingStrictDetachRef.current === detach) {
+            pendingStrictDetachRef.current = undefined;
+          }
+        }
+      }
+      if (
+        requiredSessionId
+          ? strictClearOwnsSession
+          : sessionRef.current === session
+      ) {
+        if (requiredSessionId && session) {
+          onGeneratedUiInvalidated?.(session, 'cleared');
+        }
         const refreshStandaloneOptions =
           getConnection().sessionContext?.kind === 'standalone';
         clearActiveSessionState();
@@ -2740,7 +2799,7 @@ export function createDaemonSessionActions({
           setRestoreSessionNonce((nonce) => nonce + 1);
         }
       }
-      if (session) {
+      if (session && !requiredSessionId) {
         try {
           await withActionTimeout(session.detach(), 'Clear session timed out');
         } catch (error) {

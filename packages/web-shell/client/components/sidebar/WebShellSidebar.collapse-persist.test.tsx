@@ -251,6 +251,7 @@ function renderSidebar(
       onOpenSessions={() => {}}
       onOpenSplitView={() => {}}
       onNewSession={props.onNewSession ?? (() => false)}
+      onLeaveCurrentStandaloneForDelete={async () => false}
       onLoadSession={loadSession}
       onLoadStandaloneSession={props.onLoadStandaloneSession}
       onStandaloneNotice={props.onStandaloneNotice}
