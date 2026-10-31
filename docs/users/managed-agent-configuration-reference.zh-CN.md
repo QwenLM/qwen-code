@@ -52,7 +52,7 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `enabled` | — | 布尔 | `false` | 是否将工具结果投影为公开工具结果和制品，以及是否提供制品读取 API。除非同时开启 `qwen.managed-agent.tool-publication.enabled`，否则读取返回未找到；读取还要求已认证的 actor。即使为 false，已提交的工具回执仍会被记录下来等待投影，因此之后开启时，关闭期间记录的工具结果也会被投影。 |
+| `enabled` | — | 布尔 | `false` | 是否将工具结果投影为公开工具结果和制品，以及是否提供制品读取 API。除非同时开启 `qwen.managed-agent.tool-publication.enabled`，否则读取返回未找到；读取还要求已认证的 actor。即使为 false，已提交的工具回执仍会被记录下来等待投影，因此之后开启时，关闭期间记录的工具结果也会被投影。私有 CSI 通道创建的 Session（`csi-session` 管理命令）例外：它们的回执从不记录，因此其工具结果从不投影。 |
 | `max-concurrent-reads` | — | 整数 | `4` | 本服务进程可同时提供的制品内容下载数；超出的下载返回 HTTP 429 `artifact_read_limit` 并带 `Retry-After: 1`。至少为 `1`（否则启动时拒绝）。 |
 | `projection-interval` | — | 时长 | `1000` | 工具结果投影任务的运行间隔；每次最多将 8 个待处理的工具结果投影为公开工具结果和制品。纯数字按毫秒解析，也可使用带单位的值如 `1s`。`qwen.managed-agent.artifacts.enabled` 不为 true 时该任务不做任何事。 |
 | `publish-original` | — | 布尔 | `false` | 投影时是否将工具结果中已封存的 stdout 和 stderr 流发布为可下载制品，以及可读取该 Session 的 actor 是否可以下载它们。需要开启 `qwen.managed-agent.artifacts.enabled`。 |
@@ -81,11 +81,11 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `concurrency` | — | 整数 | `4` | 重叠策略为 `allow` 的单个自动化定义可同时持有的未结束运行数；超出后，再到期的槽位记为 `skipped`，原因为 `count_limit`。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
 | `enabled` | `QWEN_MANAGED_AGENT_AUTOMATION_ENABLED` | 布尔 | `false` | 是否运行自动化扫描器，并受理自动化的创建、修改、退役与手动运行路由；关闭时这些路由返回 `409 automation_unavailable`，读取路由照常应答。这些路由还要求开启 `qwen.managed-agent.session-store.enabled`。开启后，自动化的计数或时长若不为正，启动时拒绝。 |
 | `late-tolerance` | `QWEN_MANAGED_AGENT_AUTOMATION_LATE_TOLERANCE` | 时长 | `5m` | 扫描器发现到期槽位时，允许其迟到多久仍按计划触发。更迟的槽位按定义的补跑策略（`none`、`latest` 或 `bounded`）处理，未被补跑的记为错过。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
-| `lease` | `QWEN_MANAGED_AGENT_AUTOMATION_LEASE` | 时长 | `60s` | 扫描轮次或手动运行持有自动化定义租约的时长，从认领时起算；租约过期后其他节点即可认领该定义，自该认领起，原持有者对它的写入都会被拒绝。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
+| `lease` | `QWEN_MANAGED_AGENT_AUTOMATION_LEASE` | 时长 | `60s` | 扫描器或手动运行持有自动化定义租约的时长，从认领该定义时起算；租约过期后其他节点即可认领该定义，自该认领起，原持有者对它的写入都会被拒绝。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
 | `lookback` | `QWEN_MANAGED_AGENT_AUTOMATION_LOOKBACK` | 时长 | `24h` | 扫描器为定义推导到期槽位时最多回看的时长；早于该窗口（或早于定义启用时刻）的槽位既不触发也不记录，从而限定所有补跑的范围。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
 | `max-slots-per-tick` | — | 整数 | `1000` | 单个扫描轮次中每个定义最多保留的到期槽位数；回看窗口内超出时，最旧的槽位被截去并记录一条警告。该上限不会缩短扫描本身：扫描器仍会从该定义上一轮扫描停下的位置起逐分钟检查，最多覆盖整个回看窗口。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
 | `scan-delay` | `QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY` | 时长 | `10s` | 自动化扫描器从一轮扫描结束到下一轮开始之间等待的时长。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
-| `scanner-threads` | — | 整数 | `4` | 单个扫描轮次并行处理的定义行数；该轮会等待所有行处理完毕，下一轮才开始。每一行的租约都从该行自己的认领时刻起算，而不是从本轮开始时起算，因此扫描轮次再长也不会发放已经过期的租约。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
+| `scanner-threads` | — | 整数 | `4` | 单个扫描轮次并行处理的定义行数；该轮会等待所有行处理完毕，下一轮才开始。由于租约不是从本轮开始时起算（见 `qwen.managed-agent.automation.lease`），扫描轮次再长也不会发放已经过期的租约。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
 
 ## `qwen.managed-agent.channels`
 
