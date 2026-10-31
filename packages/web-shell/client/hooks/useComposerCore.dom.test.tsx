@@ -342,6 +342,128 @@ describe('useComposerCore tooltip portal', () => {
 });
 
 describe('useComposerCore history and drafts', () => {
+  it.each([
+    ['panel', 'ArrowUp', false],
+    ['panel', 'ArrowDown', false],
+    ['search', 'ArrowUp', false],
+    ['search', 'ArrowDown', false],
+    ['panel', 'ArrowUp', true],
+    ['panel', 'ArrowDown', true],
+    ['search', 'ArrowUp', true],
+    ['search', 'ArrowDown', true],
+  ] as const)(
+    'keeps caret control after a wrapped %s recall followed by %s (paged: %s)',
+    async (recall, key, paged) => {
+      const entry = 'line one line two line three';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify([entry, 'middle prompt', 'newest prompt']),
+      );
+      const onFocusFooter = vi.fn(() => true);
+      await mount({ onFocusFooter });
+      act(() => latest!.setText('unsent draft'));
+      if (paged) {
+        act(() => pressHistoryKey('ArrowUp'));
+        expect(latest!.getText()).toBe('newest prompt');
+      }
+      act(() => latest!.searchState.openHistorySearch());
+      if (recall === 'panel') {
+        act(() => latest!.searchState.restoreSearchMatch!(entry));
+        act(() => latest!.searchState.closeSearch(false));
+      } else {
+        act(() =>
+          latest!.searchState.handleSearchInput({
+            target: { value: 'line two' },
+            nativeEvent: { isComposing: false },
+          } as unknown as React.ChangeEvent<HTMLInputElement>),
+        );
+        act(() =>
+          latest!.searchState.handleSearchKeyDown({
+            key: 'Tab',
+            nativeEvent: { isComposing: false },
+            preventDefault: vi.fn(),
+          } as unknown as React.KeyboardEvent<HTMLInputElement>),
+        );
+      }
+      expect(latest!.getText()).toBe(entry);
+      const view = latest!.viewRef.current!;
+      vi.spyOn(view, 'coordsAtPos').mockImplementation((position) => {
+        const top =
+          position === 0 ? 0 : position === view.state.doc.length ? 44 : 22;
+        return { left: 0, right: 1, top, bottom: top + 22 };
+      });
+      act(() => view.dispatch({ selection: { anchor: 12 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+      expect(onFocusFooter).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([false, true])(
+    'keeps ArrowDown in a short panel recall until paging returns to its draft (paged: %s)',
+    async (paged) => {
+      const entry = 'short entry';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify([entry, 'newest prompt']),
+      );
+      const onFocusFooter = vi.fn(() => true);
+      await mount({ onFocusFooter });
+      act(() => latest!.setText('unsent draft'));
+      if (paged) {
+        act(() => pressHistoryKey('ArrowUp'));
+        expect(latest!.getText()).toBe('newest prompt');
+      }
+      act(() => latest!.searchState.restoreSearchMatch!(entry));
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(latest!.getText()).toBe(entry);
+      expect(onFocusFooter).not.toHaveBeenCalled();
+
+      act(() => pressHistoryKey('ArrowUp'));
+      expect(latest!.getText()).toBe('newest prompt');
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(latest!.getText()).toBe(entry);
+      act(() => pressHistoryKey('ArrowDown'));
+      expect(onFocusFooter).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'keeps a selected history entry when pressing %s',
+    async (key) => {
+      const entry = 'recalled entry';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify(['older prompt', entry]),
+      );
+      await mount();
+      act(() => pressHistoryKey('ArrowUp'));
+      expect(latest!.getText()).toBe(entry);
+      const view = latest!.viewRef.current!;
+      act(() => view.dispatch({ selection: { anchor: 2, head: 8 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+    },
+  );
+
+  it.each(['ArrowUp', 'ArrowDown'] as const)(
+    'keeps hard-newline history text while %s moves inside it',
+    async (key) => {
+      const entry = 'line one\nline two\nline three';
+      localStorage.setItem(
+        getPromptHistoryStorageKey(),
+        JSON.stringify(['older prompt', entry]),
+      );
+      await mount();
+      act(() => latest!.setText('unsent draft'));
+      act(() => pressHistoryKey('ArrowUp'));
+      const view = latest!.viewRef.current!;
+      act(() => view.dispatch({ selection: { anchor: 12 } }));
+      act(() => pressHistoryKey(key));
+      expect(latest!.getText()).toBe(entry);
+    },
+  );
+
   it('places the caret after a draft restored on initial mount', async () => {
     localStorage.setItem(
       getSessionDraftKey('restored-session'),
@@ -3100,6 +3222,24 @@ describe('useComposerCore tags', () => {
 
     expect(latest!.getText()).toBe(draftText);
     expect(latest!.composerTags).toEqual([draftTag]);
+  });
+
+  it('does not restore old draft tags after paging from a panel recall', async () => {
+    await mount();
+    act(() => {
+      latest!.setText('previous prompt');
+      latest!.submitText();
+      latest!.setText('draft prompt');
+      latest!.addTags([
+        { id: 'file:draft.txt', value: 'draft.txt', serialized: '@draft.txt' },
+      ]);
+    });
+    act(() => pressHistoryKey('ArrowUp'));
+    act(() => latest!.searchState.restoreSearchMatch!('selected prompt'));
+    act(() => pressHistoryKey('ArrowUp'));
+    act(() => pressHistoryKey('ArrowDown'));
+    expect(latest!.getText()).toBe('selected prompt');
+    expect(latest!.composerTags).toEqual([]);
   });
 
   it('restores tags when Tab or a search-result selection recalls history', async () => {

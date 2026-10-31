@@ -1457,27 +1457,39 @@ function shallowEqualSlashMenu(
 
 type MultilineHistoryBoundary = 'editor' | 'handled' | 'history';
 
+// Arrow paging needs both the browse flag (cleared on edits) and an armed index.
 function handleMultilineHistoryBoundary(
   view: EditorView,
   direction: 'up' | 'down',
+  isPagingHistory: boolean,
 ): MultilineHistoryBoundary {
   const doc = view.state.doc;
-  if (doc.lines <= 1) return 'history';
-
   const selection = view.state.selection.main;
   if (!selection.empty) return 'editor';
+  if (isPagingHistory && doc.lines === 1) return 'history';
 
   const head = selection.head;
-  const line = doc.lineAt(head);
+  const caret = view.coordsAtPos(head, selection.assoc < 0 ? -1 : 1);
+  // Bidi visual sides may lie inside the logical line; compare vertical rows.
+  const sharesRowWith = (edge: number) => {
+    if (!caret) return doc.lineAt(head).number === doc.lineAt(edge).number;
+    const bounds = view.coordsAtPos(edge);
+    return (
+      bounds !== null && caret.top < bounds.bottom && bounds.top < caret.bottom
+    );
+  };
+  const onFirstRow = sharesRowWith(0);
+  const onLastRow = sharesRowWith(doc.length);
+  if (doc.lines === 1 && onFirstRow && onLastRow) return 'history';
 
-  // Let CodeMirror handle normal multi-line cursor movement first. Once the
-  // cursor is on the edge line, one more arrow key snaps to the true edge;
+  // Let CodeMirror move between visual rows, including soft wraps. Once the
+  // cursor is on the edge row, one more arrow key snaps to the true edge;
   // the next press can browse prompt history instead of feeling stuck.
   if (direction === 'up') {
-    if (line.number > 1) return 'editor';
-    if (head > line.from) {
+    if (!onFirstRow) return 'editor';
+    if (head > 0) {
       view.dispatch({
-        selection: { anchor: line.from },
+        selection: { anchor: 0 },
         scrollIntoView: true,
       });
       return 'handled';
@@ -1485,10 +1497,10 @@ function handleMultilineHistoryBoundary(
     return 'history';
   }
 
-  if (line.number < doc.lines) return 'editor';
-  if (head < line.to) {
+  if (!onLastRow) return 'editor';
+  if (head < doc.length) {
     view.dispatch({
-      selection: { anchor: line.to },
+      selection: { anchor: doc.length },
       scrollIntoView: true,
     });
     return 'handled';
@@ -2651,6 +2663,11 @@ export function useComposerCore(
       // flag and re-arms persistence (handleMobileChange or a programmatic
       // write on touch, the CodeMirror update listener on desktop).
       historyBrowseActiveRef.current = true;
+      (shellModeRef.current
+        ? shellHistoryActionsRef.current
+        : historyActionsRef.current
+      ).reset();
+      if (!shellModeRef.current) clearPromptHistoryDraftTags();
       if (!view) {
         if (isTouchComposer) {
           // Plain-text restore: inline tag chips are not recreated on the
@@ -2661,7 +2678,12 @@ export function useComposerCore(
       }
       restoreHistoryEntry(view, text);
     },
-    [isTouchComposer, restoreHistoryEntry, setMobileText],
+    [
+      clearPromptHistoryDraftTags,
+      isTouchComposer,
+      restoreHistoryEntry,
+      setMobileText,
+    ],
   );
   const composerInputRef = useRef(composerInput);
   composerInputRef.current = composerInput;
@@ -3783,7 +3805,11 @@ export function useComposerCore(
             closeSlashMenu();
             closeAtMenu();
           }
-          const multilineBoundary = handleMultilineHistoryBoundary(view, 'up');
+          const multilineBoundary = handleMultilineHistoryBoundary(
+            view,
+            'up',
+            isBrowsingHistory && history.isNavigating(),
+          );
           if (multilineBoundary === 'handled') return true;
           if (multilineBoundary === 'editor') return false;
           if (shellModeRef.current) {
@@ -3841,6 +3867,7 @@ export function useComposerCore(
           const multilineBoundary = handleMultilineHistoryBoundary(
             view,
             'down',
+            isBrowsingHistory && history.isNavigating(),
           );
           if (multilineBoundary === 'handled') return true;
           if (multilineBoundary === 'editor') return false;
@@ -3853,6 +3880,7 @@ export function useComposerCore(
           }
           const next = history.navigateDown();
           if (next === null) {
+            if (isBrowsingHistory) return true;
             return onFocusFooterRef.current?.() ?? false;
           }
           const returningToPromptDraft = !history.isNavigating();
