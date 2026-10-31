@@ -558,16 +558,24 @@ async fn install_update(webview: WebviewWindow, app: AppHandle) -> Result<(), St
 const REMOTE_CONNECTIONS_KEY: &str = "qwen-remote-connections";
 const WORKSPACE_HOSTS_KEY: &str = "qwen-workspace-hosts";
 
+// Past roughly 24 KB of URL the daemon answers 431 and the shell cannot load at
+// all — and nothing in the app can reset that, only hand-editing the settings
+// file. Thirty-two origins keep the boot URL near a kilobyte; hosts past the cap
+// stay in the catalog and are reachable the way they always were, after a reload.
+const MAX_LAUNCH_FANOUT_ORIGINS: usize = 32;
+
 /// Origins the very first document of a launch must be served with. The daemon
 /// derives `connect-src` from the request URL alone, while the catalogs reach
 /// the client only through hydration, so without this a saved host is blocked
 /// until the user reloads or clicks through to it.
 fn launch_fanout_origins(settings: &SettingsStore, page_origin: &str) -> Vec<String> {
-    fanout_origins_from_catalogs(
+    let mut origins = fanout_origins_from_catalogs(
         settings.shell_state(REMOTE_CONNECTIONS_KEY).as_deref(),
         settings.shell_state(WORKSPACE_HOSTS_KEY).as_deref(),
         page_origin,
-    )
+    );
+    origins.truncate(MAX_LAUNCH_FANOUT_ORIGINS);
+    origins
 }
 
 fn fanout_origins_from_catalogs(
@@ -1026,8 +1034,9 @@ mod tests {
         bootstrap_workspace, default_workspace_override_dir, default_workspace_path,
         ensure_workspace_dir, fanout_origins_from_catalogs, is_allowed_navigation,
         is_bootstrap_url, is_runtime_origin, is_safe_external_url, is_same_origin,
-        is_shell_state_key_allowed, origin_of, updates_disabled_value, BOOTSTRAP_URL,
-        REMOTE_CONNECTIONS_KEY, WORKSPACE_HOSTS_KEY,
+        is_shell_state_key_allowed, launch_fanout_origins, origin_of, updates_disabled_value,
+        BOOTSTRAP_URL, MAX_LAUNCH_FANOUT_ORIGINS, REMOTE_CONNECTIONS_KEY, SettingsStore,
+        WORKSPACE_HOSTS_KEY,
     };
     use std::ffi::{OsStr, OsString};
     use std::fs;
@@ -1123,6 +1132,67 @@ mod tests {
             fanout_origins_from_catalogs(connections, hosts, "http://127.0.0.1:49152"),
             ["https://remote.example", "http://10.0.0.2:4170"]
         );
+    }
+
+    /// A store backed by a real settings file — the same file the IPC writes.
+    fn settings_with_shell_state(shell_state: serde_json::Value) -> (PathBuf, SettingsStore) {
+        let root = std::env::temp_dir().join(format!(
+            "qwen-desktop-launch-fanout-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).expect("temp dir");
+        let path = root.join("desktop-state.json");
+        let contents = serde_json::json!({ "shellState": shell_state });
+        std::fs::write(&path, contents.to_string()).expect("settings");
+        let store = SettingsStore::load_from_path(path).expect("store");
+        (root, store)
+    }
+
+    #[test]
+    fn launch_fanout_origins_reads_the_persisted_catalogs() {
+        let shell_state = serde_json::json!({
+            "qwen-remote-connections": serde_json::Value::Array(vec![
+                "https://only-in-connections.example/".into(),
+                "http://127.0.0.1:49152".into(),
+            ])
+            .to_string(),
+            "qwen-workspace-hosts": serde_json::Value::Array(vec![
+                serde_json::json!({ "origin": "https://remote.example" }),
+                serde_json::json!({ "origin": "http://10.0.0.2:4170" }),
+            ])
+            .to_string(),
+        });
+        let (root, store) = settings_with_shell_state(shell_state);
+        assert_eq!(
+            launch_fanout_origins(&store, "http://127.0.0.1:49152"),
+            [
+                "https://only-in-connections.example",
+                "https://remote.example",
+                "http://10.0.0.2:4170",
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn launch_fanout_origins_caps_the_boot_url() {
+        let shell_state = serde_json::json!({
+            "qwen-remote-connections": serde_json::Value::Array(
+                (0..MAX_LAUNCH_FANOUT_ORIGINS + 8)
+                    .map(|index| format!("http://10.0.0.{}:4170", index + 1).into())
+                    .collect(),
+            )
+            .to_string(),
+        });
+        let (root, store) = settings_with_shell_state(shell_state);
+        let origins = launch_fanout_origins(&store, "http://127.0.0.1:49152");
+        assert_eq!(origins.len(), MAX_LAUNCH_FANOUT_ORIGINS);
+        assert_eq!(origins.first().map(String::as_str), Some("http://10.0.0.1:4170"));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

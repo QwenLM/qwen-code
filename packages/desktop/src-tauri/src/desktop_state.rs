@@ -55,7 +55,7 @@ impl SettingsStore {
         Self::load_from_path(settings_path(app)?)
     }
 
-    fn load_from_path(path: PathBuf) -> Result<Self, String> {
+    pub(crate) fn load_from_path(path: PathBuf) -> Result<Self, String> {
         let settings = match fs::read_to_string(&path) {
             Ok(contents) => parse_settings(&contents),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {

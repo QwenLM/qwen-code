@@ -53,7 +53,7 @@ WebView2 按 origin 隔离 `localStorage` 与 `sessionStorage`，因此每次启
 
 ### 启动导航
 
-`start_runtime` 在导航前读取两个目录，为每个 daemon 可接受的已保存主机（仅 http/https、无账号密码、根路径、无 query 与 fragment）追加一个 `fanout=<origin>`，并跳过页面 origin。daemon 只根据请求 URL 生成 `connect-src`，因此缺少这些参数时，已保存主机在整个首次文档期间都会被拦截；而水合必然发生在该文档下发之后。
+`start_runtime` 在导航前读取两个目录，为每个 daemon 可接受的已保存主机（仅 http/https、不接受方括号 IPv6 字面量、无账号密码、根路径、无 query 与 fragment）追加一个 `fanout=<origin>`，跳过页面 origin，并把列表上限设为三十二个。daemon 只根据请求 URL 生成 `connect-src`，因此缺少这些参数时，已保存主机在整个首次文档期间都会被拦截；而水合必然发生在该文档下发之后。这个上限让 URL 远低于 daemon 的请求头上限——超过上限的文档会被直接拒绝，外壳根本无法加载；超出上限的主机走原先的重载路径。
 
 ### 工作区主机目录规则
 

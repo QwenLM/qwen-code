@@ -13,7 +13,7 @@ use std::sync::{
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
-use url::Url;
+use url::{Host, Url};
 
 const LISTEN_PREFIX: &str = "qwen serve listening on ";
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(45);
@@ -158,11 +158,15 @@ impl DesktopRuntime {
 
 /// The bare origin a stored catalog entry contributes to the boot document's
 /// `?fanout=` list, mirroring the daemon's `remoteDaemonConnectOrigins` rules:
-/// http/https only, no credentials, root path, no query and no fragment. The
-/// daemon silently drops anything else, leaving that host CSP-blocked.
+/// http/https only, no credentials, root path, no query, no fragment, and no
+/// bracketed IPv6 host (not a valid CSP host-source, so the daemon drops it).
+/// The daemon silently drops anything else, leaving that host CSP-blocked.
 pub fn fanout_origin(value: &str) -> Option<String> {
     let url = Url::parse(value).ok()?;
     if !matches!(url.scheme(), "http" | "https") {
+        return None;
+    }
+    if matches!(url.host(), Some(Host::Ipv6(_))) {
         return None;
     }
     if url.host().is_none()
@@ -839,6 +843,7 @@ mod tests {
             "https://remote.example/#token=leak",
             "https://user:pass@remote.example",
             "ftp://remote.example",
+            "http://[::1]:4170",
             "not a url",
         ] {
             assert_eq!(fanout_origin(rejected), None, "{rejected}");

@@ -53,7 +53,7 @@ Both call `require_runtime_origin`, which compares the calling webview's URL ori
 
 ### Boot navigation
 
-`start_runtime` reads both catalogs before navigating and appends one `fanout=<origin>` per saved host the daemon accepts (http/https, no credentials, root path, no query or fragment), skipping the page origin. The daemon derives `connect-src` from the request URL alone, so without those parameters a saved host would stay blocked for the whole first document of a launch; hydration necessarily runs after that document is served.
+`start_runtime` reads both catalogs before navigating and appends one `fanout=<origin>` per saved host the daemon accepts (http/https, no host that is a bracketed IPv6 literal, no credentials, root path, no query or fragment), skipping the page origin and capping the list at thirty-two origins. The daemon derives `connect-src` from the request URL alone, so without those parameters a saved host would stay blocked for the whole first document of a launch; hydration necessarily runs after that document is served. The cap keeps the URL far below the daemon's header limit, past which the document is refused before the shell can load at all; hosts beyond it keep the older reload path.
 
 ### Workspace-host catalog rule
 
