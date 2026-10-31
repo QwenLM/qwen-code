@@ -36,6 +36,15 @@ name: 'Fleet Shepherd'
 #                        so deferring to it starves the watchdog forever
 #                        (2026-08-19, an oversized workflow file)
 #
+# The dashboard also carries a READ-ONLY Actions queue census: repo-wide
+# queued depth, in-progress count, wait distribution, the queued breakdown
+# by workflow and by event, and the digested/new/still-queued diff against
+# the previous tick's run-id set. It pulls no lever and opens no issue:
+# whether a backlog is fixable in-repo at all (event fan-out) or is pool
+# capacity / a GitHub incident is an attribution call that stays with a
+# human. Measurement caveats and the aged-tail rationale:
+# docs/design/2026-10-28-shepherd-queue-census.md
+#
 # It also maintains a single "Fleet Shepherd Dashboard" issue (edited in
 # place, never comment spam) so fleet state is observable at a glance. The
 # dashboard additionally lists the TAKEOVER pool (open PRs carrying
@@ -73,7 +82,23 @@ name: 'Fleet Shepherd'
 # trigger CI and all writes carry the bot identity.
 on:
   schedule:
-    - cron: '*/15 * * * *'
+    # Two cadences, two concurrency groups (see the group expression below).
+    # Fifteen minutes was the wrong shape, but not because the loop starved to
+    # zero: the group keeps ONE active run, and later arrivals are replaced
+    # while that run waits out the pool (measured 2026-10-28: two scheduled
+    # runs queued 120 and 135 minutes across 8-9 later arrivals, then both
+    # ran). Throughput is therefore pool-bound — roughly one landing per pool
+    # latency — and */30 changes that not at all. What it buys is half the
+    # pending churn against a shared queue; the second serialized lane below is
+    # what actually shortens recovery.
+    - cron: '*/30 * * * *' # the fleet tick
+    - cron: '10,40 * * * *' # the rescue watch: dispatches a rescue when no tick has landed
+  # The only way to enter the rescue group. repository_dispatch is also what
+  # makes a rescue run identifiable in the run list, so the watch can tell its
+  # own outstanding dispatch from a scheduled tick that is merely queued.
+  repository_dispatch:
+    types:
+      - 'shepherd-rescue'
   workflow_dispatch:
     inputs:
       dry_run:
@@ -82,12 +107,36 @@ on:
         default: false
         type: 'boolean'
 
+# Each lane names itself, because the watch has to tell its own runs apart from
+# the ticks it is watching: it reads this workflow's run history, and both
+# crons arrive as `event: schedule` — the title is the only field that differs.
+# Only the SCHEDULE branches may claim a lane title: `github.event.schedule`
+# is undefined for `workflow_dispatch`, so a manual run — the documented dry-run
+# escape hatch — must not fall through to 'shepherd tick' and reset the
+# staleness clock for a threshold.
+run-name: >-
+  ${{ github.event_name == 'repository_dispatch' && 'shepherd rescue'
+  || (github.event_name == 'schedule'
+      && (github.event.schedule == '10,40 * * * *' && 'shepherd watch'
+          || 'shepherd tick'))
+  || (inputs.dry_run && 'shepherd manual dry' || 'shepherd manual') }}
+
 permissions:
   contents: 'read'
   actions: 'write'
 
+# Three groups, because a pending run is REPLACED by the next arrival in the
+# same group: `cancel-in-progress: false` protects only runs that already
+# started. One shared group is what made the shepherd eat itself (18 of 30 runs
+# cancelled within a second of the next creation, nothing ran 14:13-15:19
+# Beijing on 2026-10-28, dashboard stale). The rescue group is separate so those
+# runs are never replaced, and the watch group is separate so the watch cannot
+# be cancelled by the very ticks it is watching.
 concurrency:
-  group: 'fleet-shepherd'
+  group: >-
+    ${{ github.event_name == 'repository_dispatch' && 'fleet-shepherd-rescue'
+    || (github.event.schedule == '10,40 * * * *' && 'fleet-shepherd-watchdog'
+    || 'fleet-shepherd') }}
   cancel-in-progress: false
 
 env:
@@ -103,6 +152,24 @@ env:
   # liveness watchdog sat at in-flight=1 for 18 hours while the loop was dark.
   # Generous by design: it must never fire on an ordinary runner queue.
   ZOMBIE_QUEUED_MINUTES: "${{ vars.QWEN_SHEPHERD_ZOMBIE_QUEUED_MINUTES || '30' }}"
+  # Queue census: pages of 100 queued runs, capped so a surge cannot turn one
+  # tick into an unbounded read. Past the cap the enumerated id set is
+  # incomplete, so waits are a floor and no comparable snapshot is recorded.
+  QUEUE_MAX_PAGES: '5'
+  # The queue's aged tail is a DIFFERENT population, not slow runs. Measured
+  # 2026-10-28: 81 of 231 queued runs were created on 2026-08-19 — the 500 KB
+  # incident above — and nothing sat between 1 day and 70 days. Left in, they
+  # put the wait p50 at 243m/max at 70 days and ranked two workflows with ZERO
+  # live queued runs into the fan-out top-5. A day is the line because no
+  # ordinary runner wait crosses it; it is NOT the wedge threshold above,
+  # which is tuned for this loop's own dispatches and would swallow a live
+  # queue whose median wait is already hours.
+  QUEUE_AGED_HOURS: '24'
+  # Every per-tick cap below is a per-TICK blast-radius bound; the hourly
+  # ceiling it implies halves when the tick period doubles (12 to 6 syncs,
+  # 8 to 4 conflict dispatches, 12 to 6 closes, 20 to 10 cleanups). That is
+  # accepted: the caps exist to bound one tick's damage, and a burst that
+  # needs more than a tick's worth now takes two ticks.
   MAX_SYNCS_PER_TICK: '3'
   MAX_CONFLICT_DISPATCHES_PER_TICK: '2'
   # No-op closes per tick. Notices are uncapped: they are marker-deduped per
@@ -111,15 +178,19 @@ env:
   MAX_NOOP_CLOSES_PER_TICK: '3'
   # The close waits until its notice is at least GRACE old, and treats a
   # notice older than MAX_AGE as absent (a fresh one is posted first). GRACE
-  # is 600, not the 900 of one schedule interval, on measured tick spacing
-  # (399 gaps between 400 consecutive scheduled ticks): median about 950 s,
-  # min 427 s, 44% under 900 s but 7.5% under 600 s — 900 would push nearly
-  # half of all closes to a third tick for no human benefit, while 600 still
-  # replaces the worst window the review measured (a queued successor
-  # released 75 s after a delayed tick ended: about 2 minutes from notice to
-  # close). The notice's "usually within about 20" minutes is the measured
-  # figure for THIS floor (median 16.9 min from a notice to the first tick at
-  # least 600 s later, 72% within 20) — re-measure it if GRACE changes.
+  # must stay below one tick period, or a close would slip to the tick AFTER
+  # the first eligible one.
+  #
+  # Every figure here is derived from the CURRENT period (1800 s, cron */30).
+  # The first eligible tick falls 600-2400 s after the notice, so the notice
+  # promises "within about 40" minutes and never less than 10. That bound is
+  # arithmetic, not measurement: the 399-gap study that used to justify 600
+  # over 900 was taken against a 900 s spacing and cannot describe this cron,
+  # so it is retired rather than left beside the new numbers. The bound also
+  # assumes the next tick RUNS when it fires; under the pool congestion this
+  # file measures (completions 80-150 minutes apart) the real window stretches
+  # to the next completion. Re-derive both numbers together if either the
+  # grace or the cron changes.
   NOOP_NOTICE_GRACE_SEC: '600'
   NOOP_NOTICE_MAX_AGE_SEC: '86400'
   DASHBOARD_TITLE: 'Fleet Shepherd Dashboard'
@@ -150,6 +221,16 @@ env:
   RESUME_COMMAND_GRACE_SEC: '7200'
   # Stale needs-human cleanups (manual UI releases on fork PRs) per tick.
   MAX_CLEANUPS_PER_TICK: '5'
+  # The rescue watch fires when no tick has COMPLETED for this long. It must
+  # exceed the completion gap a HEALTHY loop produces, which is pool-bound, not
+  # interval-bound: this PR measured a live median wait of 146 minutes and its
+  # own ticks queueing 120-135 minutes, so ordinary completions are 80-150
+  # minutes apart. 75 would have doubled a working shepherd; 240 clears the
+  # worst measured gap with room, and accepts a detection window of 240-270
+  # minutes (the threshold plus up to one watch interval) — plus roughly one
+  # pool wait for the watch and the rescue to be scheduled. Slower detection is
+  # the price of never firing on a merely slow loop.
+  SHEPHERD_STALE_MINUTES: '240'
 
 jobs:
   shepherd:
@@ -159,8 +240,9 @@ jobs:
     # that pool. When the pool is wedged, drained, or offline — exactly when
     # the shepherd is needed — a pool-routed shepherd would queue behind the
     # failure it exists to fix, and recovery would need the manual kill-switch
-    # flip the shepherd exists to avoid. One 15-minute hosted job per tick is
-    # a negligible queue cost for that independence.
+    # flip the shepherd exists to avoid. That independence is no longer free:
+    # the hosted pool itself now queues past a tick interval, which is why the
+    # cadence and the rescue watch below exist.
     runs-on: 'ubuntu-latest'
     timeout-minutes: 15
     steps:
@@ -170,6 +252,10 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ACTIONS_TOKEN: '${{ github.token }}'
           DRY_RUN: '${{ inputs.dry_run }}'
+          # The rescue watch is a separate mode, not a lever: it reads this
+          # workflow's own run history and either dispatches one rescue or
+          # does nothing, then exits before any dashboard work.
+          WATCHDOG_MODE: "${{ github.event.schedule == '10,40 * * * *' }}"
         run: |-
           # Explicit, not implied: the act() contract, every if-wrapper, and
           # the behavioral test all assume these semantics (Actions' default
@@ -214,6 +300,119 @@ jobs:
             exit 1
           fi
 
+          # ---- rescue watch (separate mode, no lever, no dashboard) --------
+          # Runs on the 10,40 cadence in its OWN concurrency group, so the very
+          # ticks it watches cannot cancel it. Its only possible write is one
+          # repository_dispatch, which lands in a third group where the next
+          # scheduled tick cannot replace it — that is the whole point, since
+          # replacement is what keeps the loop at one landing per pool latency.
+          #
+          # Deliberately placed AFTER the bot-identity gate: this workflow's own
+          # token is contents:read and cannot create a dispatch, so the write
+          # rides CI_DEV_BOT_PAT like every other PAT write here, and every PAT
+          # write must first prove it is the bot. A rotated or misconfigured
+          # secret then fails the tick at the identity gate instead of minting
+          # rescues attributed to a human account.
+          #
+          # ONE table decides everything here, and it is the same table the
+          # design note carries. A run belongs to a LIVE lane if it is a
+          # scheduled tick, a live manual dispatch, or a rescue; the watch and a
+          # dry manual run belong to neither column:
+          #
+          #   live lane, status != completed    -> IN FLIGHT, defer the rescue
+          #   live lane, completed, !cancelled  -> PROGRESS, resets the clock
+          #   watch / dry manual                -> neither, ever
+          #
+          # Deliberately the simple rule. Three rounds of trying to separate
+          # `pending`, `queued` and a WEDGED `queued` produced a fix-induced
+          # critical each time: counting too little dispatched a rescue beside a
+          # tick that was about to start (two full ticks, one blind dashboard
+          # write overwriting the other's watermark); counting too much silenced
+          # the lane; and an age cutoff could not tell a saturated pool from a
+          # wedge without borrowing the very threshold that triggers the rescue.
+          #
+          # KNOWN LIMITATION, accepted deliberately: a wedged holder — a run
+          # GitHub created and never started, the class documented at
+          # ZOMBIE_QUEUED_MINUTES — suppresses the rescue for as long as it sits
+          # there. The remedy is manual: list this workflow's own runs
+          # (`gh run list --workflow qwen-fleet-shepherd.yml`), check
+          # `gh run view <id> --json jobs` on the one that never started, and
+          # delete it. The dashboard's wedge banner cannot name it — that banner
+          # is built from autofix runs, not from these. Automating the delete was
+          # judged worse than the manual step, because the automatic version kept
+          # misreading a merely slow pool as a dead one.
+          #
+          # Completion, not success: a shepherd that fails on every tick is
+          # broken, not starved, and re-dispatching it each watch would multiply
+          # the failure. A rescue counts as progress because it IS a full tick.
+          #
+          # The title is the only field that separates the lanes — both crons
+          # arrive as `event: schedule`. Runs created before this PR carry the
+          # workflow name instead, so the legacy title counts as a tick too:
+          # without that, the first watch after merge would see no tick in the
+          # window and dispatch on the sentinel age. Drop the legacy arm once
+          # the window has rolled past this PR.
+          #
+          # Every read fails CLOSED. An unreadable history dispatches nothing; a
+          # history that comes back EMPTY dispatches nothing either, since an
+          # empty answer is no evidence. A history of runs that contains no tick
+          # at all is different: that is evidence the tick lane has produced
+          # nothing, which is precisely what this watch exists to repair, so it
+          # must still be able to fire.
+          if [[ "${WATCHDOG_MODE}" == 'true' ]]; then
+            if ! env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh run list --repo "${REPO}" \
+              --workflow qwen-fleet-shepherd.yml --limit 40 \
+              --json event,status,conclusion,updatedAt,displayTitle > /tmp/self-runs.json 2> /dev/null; then
+              echo "::warning::shepherd run history unreadable; rescue watch takes no action this tick"
+              exit 0
+            fi
+            # `-e` plus `empty` makes an empty ARRAY a failure: jq -r '@tsv' over
+            # [] would print "0<TAB>0<TAB>" and hand the decision three zeroes,
+            # approving a rescue on no evidence.
+            if ! WATCH_STATE="$(jq -er '
+              if length == 0 then empty
+              else
+                ([ .[] | select(.displayTitle == "shepherd tick"
+                                or .displayTitle == "shepherd manual"
+                                or .displayTitle == "Fleet Shepherd") ]) as $live
+                | ([ .[] | select(.event == "repository_dispatch") ]) as $rescues
+                | ($live + $rescues) as $lane
+                | [ ($lane | map(select(.status != "completed")) | length),
+                    ([ $rescues[] | select(.status != "completed") ] | length),
+                    ([ $lane[]
+                       | select(.status == "completed" and .conclusion != "cancelled")
+                       | .updatedAt ] | max // "") ]
+                | @tsv
+              end' /tmp/self-runs.json 2> /dev/null)"; then
+              echo "::warning::shepherd run history unusable; rescue watch takes no action this tick"
+              exit 0
+            fi
+            IFS="$(printf '\t')" read -r WATCH_INPROGRESS WATCH_RESCUE WATCH_LAST <<< "${WATCH_STATE}"
+            # updatedAt, not createdAt: a run that waited ninety minutes for a
+            # runner and finished a minute ago is FRESH.
+            WATCH_AGE=999999
+            if [[ -n "${WATCH_LAST}" && "${WATCH_LAST}" != "null" ]]; then
+              WATCH_AGE=$(( (NOW_EPOCH - $(date -u -d "${WATCH_LAST}" +%s)) / 60 ))
+            fi
+            echo "⛑ rescue watch: last completion ${WATCH_LAST:-none in window} (${WATCH_AGE}m ago), threshold ${SHEPHERD_STALE_MINUTES}m, live runs not completed ${WATCH_INPROGRESS}, unresolved rescues ${WATCH_RESCUE}"
+            # Rescue first: an outstanding rescue is also a live run, so the
+            # in-flight gate below would otherwise shadow this branch and an
+            # operator could not tell a stuck rescue from a stuck tick.
+            if [[ "${WATCH_RESCUE}" -gt 0 ]]; then
+              echo "⛑ a rescue is already queued or running; no second one"
+            elif [[ "${WATCH_INPROGRESS}" -gt 0 ]]; then
+              echo "⛑ a live run is queued or running; no rescue"
+            elif [[ "${WATCH_AGE}" -lt "${SHEPHERD_STALE_MINUTES}" ]]; then
+              echo "⛑ the shepherd is current; no rescue"
+            elif gh api -X POST "repos/${REPO}/dispatches" \
+              -f event_type=shepherd-rescue > /dev/null 2>&1; then
+              echo "⛑ no tick has completed for ${WATCH_AGE}m — dispatched a rescue"
+            else
+              echo "::warning::rescue dispatch failed; the next watch tick retries"
+            fi
+            exit 0
+          fi
+
           # ---- dashboard lookup (also carries the liveness watermark) -----
           # Exact-title equality (an in:title search is substring-based, and a
           # bystander issue merely CONTAINING the title must never be
@@ -248,9 +447,21 @@ jobs:
               echo "::warning::dashboard body read failed; dashboard write and liveness lever skipped this tick"
             fi
           fi
-          PREV_LIVENESS_LINE="$(grep -oE '<!-- fleet-shepherd liveness-dispatched: [^>]* -->' <<< "${PREV_DASH}" | head -1 || true)"
+          # ^...$ anchoring, not a bare search: both markers are emitted by their
+          # own echo at column 0, so anchoring loses nothing the renderer
+          # produces and refuses a mid-line lookalike. Without it, a queue row
+          # naming a workflow `evil <!-- fleet-shepherd liveness-dispatched: ...`
+          # won the head -1 (it renders above the real marker) and held the
+          # liveness gate shut for as long as the forged value outlived the row.
+          PREV_LIVENESS_LINE="$(grep -oE '^<!-- fleet-shepherd liveness-dispatched: [^>]* -->$' <<< "${PREV_DASH}" | head -1 || true)"
           PREV_LIVENESS="$(grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z' <<< "${PREV_LIVENESS_LINE}" | head -1 || true)"
           PREV_LIVENESS_RUN="$(grep -oE 'run=[0-9]+' <<< "${PREV_LIVENESS_LINE}" | head -1 | cut -d= -f2 || true)"
+          # The queue census keeps its previous run-id set the same way. It is
+          # written ONLY for a complete enumeration, so an absent marker means
+          # "no comparable sample", never "the queue was empty".
+          PREV_QUEUE_LINE="$(grep -oE '^<!-- fleet-shepherd queue-sample: [^>]* -->$' <<< "${PREV_DASH}" | head -1 || true)"
+          PREV_QUEUE_IDS="$(grep -oE 'ids=[0-9,]*' <<< "${PREV_QUEUE_LINE}" | head -1 | cut -d= -f2 || true)"
+          PREV_QUEUE_TS="$(grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:]{8}Z' <<< "${PREV_QUEUE_LINE}" | head -1 || true)"
 
           # ---- scan liveness watchdog -------------------------------------
           # GitHub cron is unreliable (observed 16h of silence on a */10
@@ -426,6 +637,156 @@ jobs:
             done <<< "${MATCHED}"
           done < <(jq -r '.[] | select(.status != "completed") | .databaseId' /tmp/scan-runs.json 2> /dev/null)
           [[ "${SHEP_BUSY}" != ' ' ]] && echo "🚧 review-address in flight/queued for PR(s):${SHEP_BUSY}"
+
+          # ---- Actions queue census (read-only, no lever) ------------------
+          # Repo-wide, not autofix-only: the shepherd's own runs are a small
+          # share of the queue, and a census scoped to them would miss the
+          # fan-out that actually fills it. Reads use the workflow token for
+          # the same reason the liveness reads do. Every failure is UNKNOWN,
+          # never zero — a census that reported an empty queue during an API
+          # outage would be worse than no census.
+          QUEUE_OK=true
+          QUEUE_COMPLETE=false
+          QUEUE_DEPTH=''
+          QUEUE_RUNNING=''
+          QUEUE_N=0
+          QUEUE_RECENT_N=0
+          QUEUE_AGED_N=0
+          QUEUE_AGED_OLDEST=''
+          QUEUE_WAIT='n/a'
+          QUEUE_ROWS=''
+          QUEUE_EVENTS=''
+          QUEUE_TREND=''
+          QUEUE_IDS=''
+          rm -f /tmp/queue-pages.jsonl
+          for ((QUEUE_PAGE = 1; QUEUE_PAGE <= QUEUE_MAX_PAGES; QUEUE_PAGE++)); do
+            if ! env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh api \
+              "repos/${REPO}/actions/runs?status=queued&per_page=100&page=${QUEUE_PAGE}" \
+              > /tmp/queue-page.json 2> /dev/null \
+              || ! QUEUE_PAGE_N="$(jq -er '.workflow_runs | if type == "array" then length else error("runs not an array") end' /tmp/queue-page.json 2> /dev/null)" \
+              || ! jq -c '.workflow_runs' /tmp/queue-page.json >> /tmp/queue-pages.jsonl 2> /dev/null; then
+              QUEUE_OK=false
+              echo "::warning::queued-run enumeration failed at page ${QUEUE_PAGE}; queue census skipped this tick"
+              break
+            fi
+            # Committed only on success: the substitution above captures the
+            # empty stdout of a failing jq, so assigning directly would leave
+            # QUEUE_N empty for the diagnostic line that reports how far the
+            # enumeration got.
+            QUEUE_N="${QUEUE_PAGE_N}"
+            if [[ "${QUEUE_PAGE}" == "1" ]] && ! QUEUE_DEPTH="$(jq -er '.total_count' /tmp/queue-page.json 2> /dev/null)"; then
+              QUEUE_OK=false
+              # jq prints "null" before exiting nonzero; the substitution has
+              # already captured it. Unknown depth is empty, not that string.
+              QUEUE_DEPTH=''
+              echo "::warning::queued-run total_count unreadable; queue census skipped this tick"
+              break
+            fi
+            # A short page is the last page. Stopping on the page COUNT alone
+            # would call an exactly-full queue truncated forever.
+            if [[ "${QUEUE_PAGE_N}" -lt 100 ]]; then
+              QUEUE_COMPLETE=true
+              break
+            fi
+          done
+          if [[ "${QUEUE_OK}" == "true" ]] \
+            && ! QUEUE_RUNNING="$(env GITHUB_TOKEN="${ACTIONS_TOKEN}" gh api \
+              "repos/${REPO}/actions/runs?status=in_progress&per_page=1" --jq '.total_count' 2> /dev/null)"; then
+            QUEUE_OK=false
+            echo "::warning::in-progress count unreadable; queue census skipped this tick"
+          fi
+          if [[ "${QUEUE_OK}" == "true" ]]; then
+            # unique_by(.id) at the merge, once, and it only fixes ONE of the
+            # two offset-paging hazards: an ARRIVAL between two page requests
+            # shifts rows back and duplicates the boundary run, which inflates
+            # the counts and the marker id set. A DEPARTURE shifts rows forward,
+            # so the run at the page edge is never read — it is absent from this
+            # enumeration while present in the previous one, and the trend
+            # counts it as digested while it sits in the queue. That direction
+            # cannot be repaired by de-duplication; it is stated on the
+            # dashboard's trend line instead of being hidden behind a
+            # de-duplication comment that describes the opposite direction.
+            if ! jq -s 'add // [] | unique_by(.id)' /tmp/queue-pages.jsonl > /tmp/queue-runs.json 2> /dev/null; then
+              QUEUE_OK=false
+              echo "::warning::queued-run pages could not be merged; queue census skipped this tick"
+            fi
+          fi
+          if [[ "${QUEUE_OK}" == "true" ]]; then
+            # Every stat below is `|| QUEUE_OK=false`, never a bare assignment:
+            # under set -e one unparseable created_at would otherwise abort the
+            # WHOLE tick — taking the levers and the dashboard write down with
+            # a read-only report. A payload jq cannot read voids the census,
+            # exactly like a failed API read.
+            #
+            # QUEUE_N is the last PAGE's length inside the loop; the census
+            # needs the whole enumeration.
+            QUEUE_N="$(jq -r 'length' /tmp/queue-runs.json)" || QUEUE_OK=false
+            # One definition of "aged", shared by the split, the waits and the
+            # breakdown so they can never disagree about which population they
+            # describe. Unknown age is NOT evidence of an aged run (same rule
+            # as ZOMBIE_JQ): such a run stays in the live population.
+            QUEUE_JQ='def aged($now; $hrs): .created_at != null and ((($now | tonumber) - (.created_at | fromdateiso8601)) >= ($hrs | tonumber) * 3600);'
+            QUEUE_AGED_N="$(jq -r --arg now "${NOW_EPOCH}" --arg hrs "${QUEUE_AGED_HOURS}" "${QUEUE_JQ}"'
+              [ .[] | select(aged($now; $hrs)) ] | length' /tmp/queue-runs.json)" || QUEUE_OK=false
+            QUEUE_RECENT_N=$((QUEUE_N - QUEUE_AGED_N))
+            QUEUE_AGED_OLDEST="$(jq -r --arg now "${NOW_EPOCH}" --arg hrs "${QUEUE_AGED_HOURS}" "${QUEUE_JQ}"'
+              [ .[] | select(aged($now; $hrs)) | .created_at ] | sort | first // ""' /tmp/queue-runs.json)" || QUEUE_OK=false
+            # Waits and breakdown describe the LIVE population only. A run
+            # without created_at has unknown age: it is dropped from the
+            # distribution rather than counted as a zero-minute wait.
+            QUEUE_WAIT="$(jq -r --arg now "${NOW_EPOCH}" --arg hrs "${QUEUE_AGED_HOURS}" "${QUEUE_JQ}"'
+              [ .[] | select(aged($now; $hrs) | not) | select(.created_at != null)
+                | ((($now | tonumber) - (.created_at | fromdateiso8601)) / 60 | floor) ] | sort
+              | if length == 0 then "n/a"
+                else "p50 \(.[length / 2 | floor])m · max \(.[-1])m" end' /tmp/queue-runs.json)" || QUEUE_OK=false
+            # `.name` is UNTRUSTED and reaches a control signal: a run executes
+            # the workflow file of the branch it came from, so whoever owns that
+            # branch picks the name (the autofix bot and any write-access
+            # contributor included; fork-triggered runs are documented here as
+            # executing the BASE file, so that case is not claimed). This
+            # section is emitted BEFORE the liveness marker that the next tick
+            # recovers with `head -1`. A name carrying a newline could
+            # therefore end the row early and land a forged watermark above
+            # the real one, and that watermark gates the liveness dispatch.
+            # Control characters collapse to spaces here; the rows then join
+            # on a REAL newline and print with '%s', not '%b', so no escape
+            # sequence is interpreted anywhere downstream — the R4-10 escaping
+            # on the takeover rows exists because those stay on '%b'. Pipes are
+            # escaped for the table.
+            QUEUE_ROWS="$(jq -r --arg now "${NOW_EPOCH}" --arg hrs "${QUEUE_AGED_HOURS}" "${QUEUE_JQ}"'
+              [ .[] | select(aged($now; $hrs) | not) ]
+              | group_by(.name) | map({name: (.[0].name // ""), n: length}) | sort_by(-.n) | .[0:5]
+              | if length == 0 then ""
+                else (map("| \(.name | gsub("[\\r\\n\\t]"; " ") | gsub("\\|"; "\\|") | gsub("<!--"; "<\\!--")) | \(.n) |") | join("\n")) end' /tmp/queue-runs.json)" || QUEUE_OK=false
+            QUEUE_EVENTS="$(jq -r --arg now "${NOW_EPOCH}" --arg hrs "${QUEUE_AGED_HOURS}" "${QUEUE_JQ}"'
+              [ .[] | select(aged($now; $hrs) | not) ]
+              | group_by(.event) | map({event: .[0].event, n: length}) | sort_by(-.n) | .[0:6]
+              | map("\(.event) \(.n)") | join(" · ")' /tmp/queue-runs.json)" || QUEUE_OK=false
+            QUEUE_IDS="$(jq -r 'map(.id | tostring) | join(",")' /tmp/queue-runs.json)" || QUEUE_OK=false
+            # Depth is non-monotonic: it falls when runs are cancelled and rises
+            # while the queue drains, so two depths cannot answer "is it going
+            # down". Only the id-set difference can, and only between two
+            # COMPLETE enumerations — a capped one would count runs that merely
+            # left the window as digested. The diff spans EVERY enumerated run,
+            # aged tail included: "no longer queued" is true whatever the age,
+            # and filtering here would report a run crossing the age line as
+            # digested while it sits in the very same queue.
+            # QUEUE_N > 0 as well: a zero-length page with a positive depth is
+            # the disagreement case, and diffing the previous set against an
+            # empty one reports the WHOLE previous queue as digested — total
+            # drainage on the very tick that read nothing.
+            if [[ "${QUEUE_COMPLETE}" == "true" && "${QUEUE_N}" -gt 0 ]]; then
+              QUEUE_TREND="$(jq -r --arg prev "${PREV_QUEUE_IDS}" '
+                ($prev | split(",") | map(select(. != "")) | unique) as $p
+                | map(.id | tostring) as $c
+                | ($c | map({key: ., value: true}) | from_entries) as $cs
+                | ($p | map({key: ., value: true}) | from_entries) as $ps
+                | if ($p | length) == 0 then ""
+                  else "digested \([$p[] | select($cs[.] != true)] | length) · new \([$c[] | select($ps[.] != true)] | length) · still queued \([$p[] | select($cs[.] == true)] | length)"
+                end' /tmp/queue-runs.json)" || QUEUE_OK=false
+            fi
+          fi
+          echo "🧮 queue: ok=${QUEUE_OK} complete=${QUEUE_COMPLETE} depth=${QUEUE_DEPTH:-unknown} running=${QUEUE_RUNNING:-unknown} enumerated=${QUEUE_N} live=${QUEUE_RECENT_N} aged=${QUEUE_AGED_N} wait=${QUEUE_WAIT} trend=${QUEUE_TREND:-none}"
 
 
           # Live opt-out recheck used immediately before every MUTATING lever:
@@ -911,7 +1272,7 @@ jobs:
                 # close path's REST read is lowercase; never mix the two.
                 ACTION_NOTE='PR no longer open at this head — no notice'
               elif act "#${pr}: post no-op notice" \
-                gh pr comment "${pr}" --repo "${REPO}" --body "$(printf '🫥 No-op detected: GitHub'"'"'s test merge of head `%s` into `main` (as of `%s`, the `main` it was built against) has the same tree as that `main`, so merging this PR would change nothing — `main` already carries every change it proposes (usually because another PR landed the same fix first). Unless the head moves, the Fleet Shepherd closes this PR on a later tick: no sooner than %s minutes from now, usually within about 20. A live autofix run for this PR, an unreadable state, or the per-tick close cap postpones it, and the `%s` label parks it for a human. To keep it open, add the `%s` label — the fleet-wide opt-out: the PR leaves the dashboard and every shepherd lever until it is removed.\n\n<details>\n<summary>中文说明</summary>\n\n🫥 检测到空壳：GitHub 对 head `%s` 与 `main`（以 `%s` 为准，即构建该试合并时的 `main`）的试合并结果和那个 `main` 的树完全相同，合入本 PR 不会改变任何内容 —— `main` 已包含本 PR 提出的全部改动（通常是另一个 PR 先合入了相同的修复）。若 head 不再变动，Fleet Shepherd 会在之后的某个 tick 关闭本 PR：最早在 %s 分钟之后，通常在约 20 分钟内。本 PR 有在飞的 autofix 运行、状态不可读、或触及每 tick 关闭上限时会顺延；带有 `%s` 标签则交由人工处理。如需保留，请添加 `%s` 标签（车队级退出开关：标签存续期间，本 PR 不出现在仪表盘上，也不经过任何 shepherd 杠杆）。\n\n</details>\n\n<!-- fleet-shepherd noop-notice sha=%s -->' "${head}" "${NOOP_BASE}" "${grace_min}" "${NEEDS_HUMAN_LABEL}" "${SKIP_LABEL}" "${head}" "${NOOP_BASE}" "${grace_min}" "${NEEDS_HUMAN_LABEL}" "${SKIP_LABEL}" "${head}")"; then
+                gh pr comment "${pr}" --repo "${REPO}" --body "$(printf '🫥 No-op detected: GitHub'"'"'s test merge of head `%s` into `main` (as of `%s`, the `main` it was built against) has the same tree as that `main`, so merging this PR would change nothing — `main` already carries every change it proposes (usually because another PR landed the same fix first). Unless the head moves, the Fleet Shepherd closes this PR on a later tick: no sooner than %s minutes from now, usually within about 40 (grace plus one tick interval, assuming the next tick runs promptly; a congested runner pool stretches this). A live autofix run for this PR, an unreadable state, or the per-tick close cap postpones it, and the `%s` label parks it for a human. To keep it open, add the `%s` label — the fleet-wide opt-out: the PR leaves the dashboard and every shepherd lever until it is removed.\n\n<details>\n<summary>中文说明</summary>\n\n🫥 检测到空壳：GitHub 对 head `%s` 与 `main`（以 `%s` 为准，即构建该试合并时的 `main`）的试合并结果和那个 `main` 的树完全相同，合入本 PR 不会改变任何内容 —— `main` 已包含本 PR 提出的全部改动（通常是另一个 PR 先合入了相同的修复）。若 head 不再变动，Fleet Shepherd 会在之后的某个 tick 关闭本 PR：最早在 %s 分钟之后，通常在约 40 分钟内（宽限期加一个节拍间隔，前提是下一跳能及时起跑；runner 池拥堵时会更久）。本 PR 有在飞的 autofix 运行、状态不可读、或触及每 tick 关闭上限时会顺延；带有 `%s` 标签则交由人工处理。如需保留，请添加 `%s` 标签（车队级退出开关：标签存续期间，本 PR 不出现在仪表盘上，也不经过任何 shepherd 杠杆）。\n\n</details>\n\n<!-- fleet-shepherd noop-notice sha=%s -->' "${head}" "${NOOP_BASE}" "${grace_min}" "${NEEDS_HUMAN_LABEL}" "${SKIP_LABEL}" "${head}" "${NOOP_BASE}" "${grace_min}" "${NEEDS_HUMAN_LABEL}" "${SKIP_LABEL}" "${head}")"; then
                 NOTICES=$(( NOTICES + 1 ))
                 ACTION_NOTE='no-op notice posted — closes on a later tick unless the head moves'
               else
@@ -1671,9 +2032,62 @@ jobs:
             echo '| PR | Author | Updated | Note |'
             echo '| --- | --- | --- | --- |'
             printf '%b' "${HUMAN_ROWS}"
+            echo
+            echo '## Actions queue'
+            echo
+            if [[ "${QUEUE_OK}" != "true" ]]; then
+              echo '⚠️ Queue snapshot unreadable this tick — depth, waits and trend are UNKNOWN, not zero. Any previous sample is kept so the next readable tick still has a baseline.'
+            elif [[ "${QUEUE_DEPTH}" == "0" ]]; then
+              echo "Queued 0 · in progress ${QUEUE_RUNNING} — the queue is empty at this tick."
+            else
+              echo "Queued ${QUEUE_DEPTH} · in progress ${QUEUE_RUNNING} · enumerated ${QUEUE_N} (${QUEUE_RECENT_N} live + ${QUEUE_AGED_N} aged)"
+              echo
+              if [[ "${QUEUE_AGED_N}" -gt 0 ]]; then
+                echo "> ⚠️ **${QUEUE_AGED_N} queued run(s) are older than ${QUEUE_AGED_HOURS}h** (oldest ${QUEUE_AGED_OLDEST:-unknown}). They are excluded from the waits and the breakdown below: a run this old was never started, and counting it names last season's workflows as today's fan-out. The list is status+age only — check \`gh run view <id> --json jobs\` before deleting any."
+                echo
+              fi
+              echo "Wait since creation (live, under ${QUEUE_AGED_HOURS}h): ${QUEUE_WAIT}"
+              echo
+              if [[ "${QUEUE_COMPLETE}" != "true" ]]; then
+                echo "> ⚠️ Enumeration capped at ${QUEUE_MAX_PAGES} pages of 100 — the waits above are a FLOOR and the breakdown covers the newest ${QUEUE_N} only. No sample is recorded, so no trend until the queue fits again."
+              elif [[ -n "${QUEUE_TREND}" ]]; then
+                echo "Since ${PREV_QUEUE_TS}: ${QUEUE_TREND} (every enumerated run, aged tail included). Depth alone is not drainage — only digested > new is. One caveat: a run that departs between page requests can read as digested while still queued."
+              else
+                echo 'No comparable previous sample (first tick, or the last one was empty, unreadable or capped) — no trend this tick.'
+              fi
+              echo
+              if [[ "${QUEUE_N}" == "0" ]]; then
+                # Depth>0 with nothing enumerated is a DISAGREEMENT, not an
+                # empty queue: a lagging count, or the last queued runs started
+                # between the two reads. Printing "the queue is empty" here was
+                # the outage-read-as-empty outcome this section forbids.
+                echo "Nothing enumerated while the depth read ${QUEUE_DEPTH} — the two reads disagree, so this is not reported as an empty queue and no sample is recorded."
+              elif [[ "${QUEUE_RECENT_N}" == "0" ]]; then
+                echo "No live runs queued — everything enumerated is in the aged tail above."
+              else
+                echo "| Workflow | Queued (live) |"
+                echo '| --- | --- |'
+                # '%s', not '%b': the rows already carry real newlines and the
+                # names are untrusted — nothing here may interpret an escape.
+                # The doubled newline terminates the last row and keeps the
+                # blank line the other tables get from their '%b' payload.
+                printf '%s\n\n' "${QUEUE_ROWS}"
+                echo "Events (live): ${QUEUE_EVENTS}"
+              fi
+            fi
             if [[ -n "${LIVENESS_OUT}" ]]; then
               echo
               echo "<!-- fleet-shepherd liveness-dispatched: ${LIVENESS_OUT} run=${LIVENESS_RUN_OUT:-none} -->"
+            fi
+            # Recorded only for a COMPLETE, readable enumeration; otherwise the
+            # previous marker is carried forward verbatim so an outage or a
+            # capped surge cannot masquerade as "everything was digested".
+            if [[ "${QUEUE_OK}" == "true" && "${QUEUE_COMPLETE}" == "true" && "${QUEUE_N}" -gt 0 ]]; then
+              echo
+              echo "<!-- fleet-shepherd queue-sample: ts=$(date -u +%Y-%m-%dT%H:%M:%SZ) ids=${QUEUE_IDS} -->"
+            elif [[ -n "${PREV_QUEUE_LINE}" ]]; then
+              echo
+              echo "${PREV_QUEUE_LINE}"
             fi
           } > /tmp/dashboard.md
           # Every act() call is if-wrapped: act propagates the real exit code

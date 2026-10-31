@@ -31,7 +31,7 @@ moment the detection below can see it (see _Which `main`_).
 Nothing in the automation closes such a PR once triage has run. The autofix agent lane
 holds no GitHub write credentials (it said so itself on #11376), the loop's
 push-and-report step has the bot PAT but no close path, and `stale.yml` only
-acts after 60 + 30 days. The Fleet Shepherd walks the bot fleet every 15
+acts after 60 + 30 days. The Fleet Shepherd walks the bot fleet every 30
 minutes with the bot PAT and already owns the fleet's other levers (conflict
 dispatch, stale-base sync, liveness, takeover auto-release), so it is the
 natural home for one more.
@@ -114,7 +114,8 @@ The no-op close takes two steps on separate ticks, both posted as the bot:
    head is on the PR, post a bilingual notice: what was detected and against
    which `main` commit, that the PR closes on a later tick unless the head
    moves — no sooner than 10 minutes from the notice, usually within about
-   20 — what can postpone it (a live autofix run for the PR, an unreadable
+   40 (one tick interval, and longer when the runner pool is congested) — what
+   can postpone it (a live autofix run for the PR, an unreadable
    state, the per-tick close cap), that `autofix/needs-human` parks it for a
    human, and that `autofix/skip` keeps it open. `autofix/skip` is the
    fleet-wide opt-out, not a no-op-lever switch: the PR leaves the shepherd's
@@ -132,16 +133,21 @@ A push between the two steps moves the head, which voids the notice and
 starts the pair over. A head that regains a diff simply never re-enters the
 lever.
 
-**The notice's age window.** Tick spacing is not a contract: over 399 gaps
-between 400 consecutive scheduled ticks the median was about 950 s and the
-minimum 427 s, and the review measured a queued successor released 75 s after a
-delayed tick ended — about 2 minutes from notice to close. So the reaction
+**The notice's age window.** Tick spacing is not a contract, so the reaction
 window the notice promises is enforced on the notice's own timestamp rather
-than assumed from the schedule. The close waits until the notice is at least
-`NOOP_NOTICE_GRACE_SEC` (600) old. It is 600 rather than the 900 of one
-schedule interval because 44% of real gaps are under 900 s but only 7.5% are
-under 600 s — 900 would push nearly half of all closes to a third tick for no
-human benefit, where 600 does so for about one close in ten. A notice older
+than assumed from the schedule. (The original justification quoted a 399-gap
+study — median about 950 s, minimum 427 s, and a successor released 75 s after a
+delayed tick, "about 2 minutes from notice to close". Those figures belong to
+the 900 s cadence and are retired with it: a 950 s median is impossible under an
+1800 s cron, and a two-minute close is unreachable while the grace forbids any
+notice younger than 600 s.) The close waits until the notice is at least
+`NOOP_NOTICE_GRACE_SEC` (600) old. The grace must stay below one tick period
+so a close lands on the first eligible tick rather than the one after it. The
+44%-under-900 s study that originally argued 600 over 900 was taken against a
+900 s spacing; the cadence is now 1800 s (cron `*/30`), so that study is retired
+rather than quoted beside the new numbers. With this period the first eligible
+tick falls 600-2400 s after the notice — the "about 40 minutes" the notice
+promises — and longer when the runner pool is congested. A notice older
 than `NOOP_NOTICE_MAX_AGE_SEC` (86400) has spent its warning — it sat through
 a long deferral, or through an `autofix/skip` that was removed more than a day
 after it — so it is treated as absent and a fresh notice is posted first,
@@ -302,7 +308,7 @@ Rails, identical in kind to the conflict lever's:
   tick would count a close it did not perform. The window is the gap between
   two consecutive API calls and the end state is identical (PR closed, comment
   posted), so it is accepted rather than engineered around.
-- **Cost.** One GraphQL call per mergeable `autofix/*` PR per tick (about 15 PRs every 15
+- **Cost.** One GraphQL call per mergeable `autofix/*` PR per tick (about 15 PRs every 30
   minutes) on top of the compare call the walk already makes; comment history
   is read only for PRs the probe flags, the timestamp conversion runs only
   for a flagged PR that already carries a notice, and the live-run listing

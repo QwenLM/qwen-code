@@ -116,7 +116,10 @@ re-checked immediately before the mutation, mirroring every existing lever.
   notice comment is dedup'd, so currently-paused PRs are labeled by the
   regular scan rotation after deploy — note the scan's idle backoff defers
   PRs idle >24h (exactly the paused population) to ~1 scan in 4, so expect
-  the backfill within a few hours (median ~2h, p90 ~6h), not minutes.
+  the backfill within a few hours (median ~2h, p90 ~6h), not minutes. That
+  rotation is the **autofix review scan** (`qwen-autofix.yml`, cron `*/10`),
+  not the Fleet Shepherd tick: changing the shepherd's cadence does not
+  change this estimate.
 - **Auto-release keyed on the notice timestamp**, not label age: labels carry
   no timestamps, and the notice is written by the same identity-verified path
   that applies the label. Resume evidence newer than the notice vetoes the
@@ -150,7 +153,7 @@ re-checked immediately before the mutation, mirroring every existing lever.
   latest label-apply (a stale unlabel from an earlier takeover cycle must
   never heal this cycle's label), and clears the stale label — bounded per
   tick, skip-vetoed, and never triggered by the bot's own auto-release.
-- **Shepherd timing:** 15-minute tick with a per-tick release cap — a backlog
+- **Shepherd timing:** 30-minute tick with a per-tick release cap — a backlog
   of expired PRs drains over a few ticks rather than one burst.
 
 ## Files affected
