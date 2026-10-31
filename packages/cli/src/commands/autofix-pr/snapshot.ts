@@ -9,7 +9,9 @@
 //
 // Two modes share the reading and the trust rules:
 // - Prepared mode compares against the state file `prepare` wrote and never
-//   moves the cursor: only a later push, reply, re-run or sync does.
+//   moves the cursor: only a later push, reply, re-run or sync does. It
+//   records only which checks it saw fail and pass, for the budget of fix
+//   pushes per failing check.
 // - `--gate` is the probe behind a scheduled task's gate
 //   (docs/design/2026-10-21-scheduled-task-gate.md): it needs no worktree,
 //   keeps its own cursor of what it already reported, prints only the
@@ -40,6 +42,8 @@ import {
 } from '../review/lib/gate-budget.js';
 import { normalizeSegment } from '../review/lib/remote-match.js';
 import {
+  MAX_CHECK_FIX_PUSHES,
+  MAX_FAILING_CHECKS,
   REPLY_MARKER,
   assertWatching,
   autofixPrPaths,
@@ -53,9 +57,12 @@ import {
   requireState,
   rerunFloors,
   sameRepository,
+  withWatchLock,
   writeGateCursor,
+  writeState,
   type AutofixPrGateCursor,
   type AutofixPrState,
+  type FailingCheck,
 } from './state.js';
 import { remoteRef } from './worktree.js';
 import {
@@ -343,6 +350,10 @@ export type SnapshotEvent =
       /** GitHub could not start the workflow: no job ran, so there is no
        * log to fix from and nothing `gh run rerun --failed` re-runs. */
       startupFailure?: true;
+      /** Prepared mode only: the check failed again on the heads of
+       * `MAX_CHECK_FIX_PUSHES` of the watch's own pushes with no pass seen
+       * between, so it is not fixed again but left for a person. */
+      exhausted?: true;
     }
   | {
       type: 'review_thread';
@@ -396,6 +407,8 @@ const TRUSTED_ASSOCIATIONS: Record<string, Trust> = {
 const FAILED_CONCLUSIONS = new Set(['FAILURE', 'TIMED_OUT', 'STARTUP_FAILURE']);
 const FAILED_STATUSES = new Set(['FAILURE', 'ERROR']);
 const PENDING_STATUSES = new Set(['PENDING', 'EXPECTED']);
+/** What a check run ends in when it passed; a status passes on `SUCCESS`. */
+const PASSED_CONCLUSIONS = new Set(['SUCCESS', 'NEUTRAL']);
 /** Comment bodies in gate output are cut to this many characters. */
 const GATE_BODY_CHARS = 1000;
 /** Reported comment ids the query no longer returns are bounded to this
@@ -648,6 +661,231 @@ export function checkEvents(
       contexts.pageInfo.hasNextPage ||
       Boolean(commit.checkSuites?.pageInfo?.hasPreviousPage),
   };
+}
+
+/** What a commit's checks ended in, by check identity: a check that is
+ * still running, was cancelled or skipped, or is not listed has no entry. */
+export type CheckResults = ReadonlyMap<string, 'passed' | 'failed'>;
+
+/** Commits a read asks GitHub about for the fix budget, at most. */
+export const MAX_CHECK_LOOKUPS = 4;
+
+function checkResults(
+  contexts: CheckContext[],
+): Map<string, 'passed' | 'failed'> {
+  const results = new Map<string, 'passed' | 'failed'>();
+  for (const ctx of latestContexts(contexts)) {
+    const [failed, passed] =
+      ctx.__typename === 'CheckRun'
+        ? ctx.status === 'COMPLETED'
+          ? [
+              FAILED_CONCLUSIONS.has(ctx.conclusion ?? ''),
+              PASSED_CONCLUSIONS.has(ctx.conclusion ?? ''),
+            ]
+          : [false, false]
+        : [FAILED_STATUSES.has(ctx.state), ctx.state === 'SUCCESS'];
+    if (failed) results.set(checkIdentity(ctx), 'failed');
+    else if (passed) results.set(checkIdentity(ctx), 'passed');
+  }
+  return results;
+}
+
+/**
+ * The watch's red checks once a round has read `pr`: the budget of fix
+ * pushes per failing check (Section 10). A check is recorded on the first
+ * head a round sees it fail on, and every later push of the watch it fails
+ * on spends one of its pushes; a pass ends the record, and a head someone
+ * else pushed gives every check its pushes back.
+ *
+ * The gate wakes no round for a pass, so a round may never read one: the
+ * watch can push again (for a comment) before its fix's checks end, or a
+ * re-run can pass after the round moved on. When a recorded check fails on
+ * a later push of the watch, `resultsOn` therefore says what it ended in on
+ * the watch's pushes in between that the record has not counted — and, when
+ * a round re-ran it there, on the head it last failed on: a pass there
+ * starts the count over, a failure on a push in between spends one (a
+ * re-run that failed again on the last head spends nothing more), and no
+ * result
+ * (still running, cancelled, not listed, or GitHub not answering) spends
+ * nothing. A return to a push of the watch older than the latest one the
+ * record counted spends nothing.
+ */
+export function trackFailingChecks(
+  pr: PrData,
+  state: AutofixPrState,
+  resultsOn: (sha: string) => CheckResults | null = () => null,
+): FailingCheck[] {
+  const records = state.failingChecks ?? [];
+  const commit = pr.commits.nodes[0]?.commit;
+  if (pr.state !== 'OPEN' || !commit || commit.oid !== pr.headRefOid) {
+    return records;
+  }
+  const head = pr.headRefOid;
+  // Where a head stands among the watch's pushes, oldest first; -1 for one
+  // someone else pushed.
+  const pushOrder = (sha: string | undefined) =>
+    sha === undefined ? -1 : state.pushedShas.lastIndexOf(sha);
+  const at = pushOrder(head);
+  // A count starts from the latest push of the watch: a return to an older
+  // one is no new push.
+  const baseline = at >= 0 ? head : state.pushedShas.at(-1);
+  const now = checkResults(commit.statusCheckRollup?.contexts.nodes ?? []);
+  // `<identity>@<head>` of the checks a round re-ran on a head.
+  const reran = new Set(
+    rerunFloors(state).map((entry) => entry.replace(/@\d+$/, '')),
+  );
+  const fresh = (identity: string, check: string): FailingCheck => ({
+    identity,
+    check,
+    head,
+    pushes: 0,
+    ...(baseline === undefined ? {} : { lastPush: baseline }),
+  });
+  const names = new Map<string, string>();
+  for (const ctx of latestContexts(
+    commit.statusCheckRollup?.contexts.nodes ?? [],
+  )) {
+    names.set(
+      checkIdentity(ctx),
+      ctx.__typename === 'CheckRun' ? ctx.name : ctx.context,
+    );
+  }
+  const kept: FailingCheck[] = [];
+  const updated: FailingCheck[] = [];
+  const seen = new Set<string>();
+  for (const record of records) {
+    seen.add(record.identity);
+    const result = now.get(record.identity);
+    if (result === 'passed') continue;
+    let next: FailingCheck;
+    if (at < 0) {
+      // Someone else pushed: whatever it holds, the check is theirs again.
+      next =
+        result === 'failed'
+          ? fresh(record.identity, names.get(record.identity)!)
+          : {
+              ...record,
+              pushes: 0,
+              ...(baseline === undefined ? {} : { lastPush: baseline }),
+            };
+    } else if (result === 'failed' && at > pushOrder(record.lastPush)) {
+      let pushes = record.pushes;
+      // A re-run on the head it last failed on may have passed since.
+      if (
+        record.head !== head &&
+        reran.has(`${record.identity}@${record.head}`) &&
+        resultsOn(record.head)?.get(record.identity) === 'passed'
+      ) {
+        pushes = 0;
+      }
+      // The watch's pushes in between, oldest first: the newest of them
+      // are asked about, the rest count as no result.
+      const between = state.pushedShas
+        .slice(pushOrder(record.lastPush) + 1, at)
+        .slice(-(MAX_CHECK_LOOKUPS - 1));
+      for (const sha of between) {
+        const there = resultsOn(sha)?.get(record.identity);
+        if (there === 'passed') pushes = 0;
+        else if (there === 'failed') pushes += 1;
+      }
+      next = {
+        identity: record.identity,
+        check: names.get(record.identity)!,
+        head,
+        pushes: pushes + 1,
+        lastPush: head,
+      };
+    } else if (result === 'failed') {
+      next = { ...record, check: names.get(record.identity)!, head };
+    } else {
+      kept.push(record);
+      continue;
+    }
+    // The ones a read changed go last, so the cap drops the stalest.
+    if (JSON.stringify(next) === JSON.stringify(record)) kept.push(record);
+    else updated.push(next);
+  }
+  for (const [identity, result] of now) {
+    if (result === 'failed' && !seen.has(identity)) {
+      updated.push(fresh(identity, names.get(identity)!));
+    }
+  }
+  return [...kept, ...updated].slice(-MAX_FAILING_CHECKS);
+}
+
+const COMMIT_CHECKS_QUERY = `query($owner: String!, $name: String!, $oid: GitObjectID!, $after: String) {
+  repository(owner: $owner, name: $name) {
+    object(oid: $oid) {
+      ... on Commit {
+        statusCheckRollup {
+          contexts(first: 100, after: $after) {
+            pageInfo { hasNextPage endCursor }
+            ${CHECK_CONTEXT_FIELDS}
+          }
+        }
+      }
+    }
+  }
+}`;
+
+/**
+ * What the checks of one commit of the PR's repository ended in, paged as
+ * the PR's own checks are; null when GitHub does not answer, which the
+ * budget takes for no result.
+ */
+export function commitCheckResults(
+  target: Pick<PrTarget, 'owner' | 'repo'>,
+  sha: string,
+): CheckResults | null {
+  const contexts: CheckContext[] = [];
+  let after: string | null = null;
+  // A rollup cut at the page limit may hold a later run of a check on the
+  // pages not read: no answer, rather than a wrong one.
+  let cut = true;
+  try {
+    for (let page = 0; page < MAX_CHECK_PAGES; page += 1) {
+      const data = JSON.parse(
+        gh(
+          'api',
+          'graphql',
+          '-f',
+          `query=${COMMIT_CHECKS_QUERY}`,
+          '-f',
+          `owner=${target.owner}`,
+          '-f',
+          `name=${target.repo}`,
+          '-f',
+          `oid=${sha}`,
+          ...(after === null ? [] : ['-f', `after=${after}`]),
+        ),
+      ) as {
+        data?: {
+          repository?: {
+            object?: {
+              statusCheckRollup?: {
+                contexts: {
+                  pageInfo: { hasNextPage: boolean; endCursor?: string | null };
+                  nodes: CheckContext[];
+                };
+              } | null;
+            } | null;
+          } | null;
+        };
+      };
+      const rollup = data.data?.repository?.object?.statusCheckRollup;
+      if (rollup) contexts.push(...rollup.contexts.nodes);
+      after = rollup?.contexts.pageInfo.hasNextPage
+        ? (rollup.contexts.pageInfo.endCursor ?? null)
+        : null;
+      if (after === null) {
+        cut = Boolean(rollup?.contexts.pageInfo.hasNextPage);
+        break;
+      }
+    }
+  } catch {
+    return null;
+  }
+  return cut ? null : checkResults(contexts);
 }
 
 /**
@@ -1030,11 +1268,25 @@ export function buildSnapshot(
   // A run the round could not re-run yet is offered again once it ended.
   const deferredRuns = new Set(state.deferredRuns ?? []);
   const held = new Set(state.heldChecks ?? []);
+  // A check the watch's last pushes did not turn green is offered once
+  // more per head, to be answered as a person's, not fixed again.
+  const exhausted = new Set(
+    (state.failingChecks ?? [])
+      .filter((record) => record.pushes >= MAX_CHECK_FIX_PUSHES)
+      .map((record) => record.identity),
+  );
   for (const failure of checks.failed) {
     if (heldByDeferral(failure, pr.headRefOid, deferredRuns, held)) continue;
     const { event, attempt } = failure;
     const key = checkAttemptKey(event.check, pr.headRefOid, attempt);
-    if (!handledChecks.has(key)) events.push({ ...event, key });
+    if (handledChecks.has(key)) continue;
+    events.push({
+      ...event,
+      key,
+      ...(exhausted.has(failure.identity) && !event.startupFailure
+        ? { exhausted: true as const }
+        : {}),
+    });
   }
   if (checks.pending.length > 0) {
     events.push({ type: 'ci_pending', checks: checks.pending });
@@ -2081,20 +2333,56 @@ export function runSnapshot(args: SnapshotArgs): void {
   if (pr.state === 'OPEN' && pr.headRefOid !== state.lastKnownHeadSha) {
     branchHead = remoteRef(state.pushTarget, `refs/heads/${state.headRefName}`);
   }
+  // What this read says of each check counts toward its fix budget before
+  // the round sees it — a read of the head the watch knows only: any other
+  // is the API lagging behind the branch, or a push the round syncs to and
+  // reads again.
+  const known = (watch: AutofixPrState) =>
+    pr.headRefOid === watch.lastKnownHeadSha;
+  const unchanged = (watch: AutofixPrState, next: FailingCheck[]) =>
+    JSON.stringify(next) === JSON.stringify(watch.failingChecks ?? []);
+  // Asked only for a recorded check failing on a later push, at most
+  // MAX_CHECK_LOOKUPS commits a read, each once.
+  const looked = new Map<string, CheckResults | null>();
+  const resultsOn = (sha: string) => {
+    if (!looked.has(sha)) {
+      looked.set(
+        sha,
+        looked.size < MAX_CHECK_LOOKUPS ? commitCheckResults(state, sha) : null,
+      );
+    }
+    return looked.get(sha) ?? null;
+  };
+  // Most reads change no record (a merged PR, a head read before, a green
+  // one): those leave the lock to the other helpers, as before.
+  const current =
+    !known(state) || unchanged(state, trackFailingChecks(pr, state, resultsOn))
+      ? state
+      : withWatchLock(paths, args.pr, () => {
+          const fresh = requireState(paths.statePath, args.pr);
+          if (!known(fresh)) return fresh;
+          const failingChecks = trackFailingChecks(pr, fresh, resultsOn);
+          if (unchanged(fresh, failingChecks)) return fresh;
+          const next = { ...fresh, failingChecks };
+          writeState(paths.statePath, next);
+          return next;
+        });
   // The comments' bodies run past what a line of tool output shows on a PR
   // with any history: the snapshot goes to a file the round reads, and the
   // line says what to do and where it is.
-  const built = buildSnapshot(pr, state, branchHead);
+  const built = buildSnapshot(pr, current, branchHead);
   // A failed check on a branch behind its base may be the base's fault:
   // one lazy compare tells the brief to merge the base first. A workflow
-  // that never started has no log to blame on the base, and a lagging
-  // snapshot carries no checks at all.
+  // that never started has no log to blame on the base, a check left for a
+  // person is not fixed this round, and a lagging snapshot carries no
+  // checks at all.
   const staleBase =
     built.action === 'fix' &&
     built.events.some(
-      (event) => event.type === 'ci_failed' && !event.startupFailure,
+      (event) =>
+        event.type === 'ci_failed' && !event.startupFailure && !event.exhausted,
     ) &&
-    baseIsBehind(state, pr.headRefOid);
+    baseIsBehind(current, pr.headRefOid);
   const snapshot: Snapshot = staleBase ? { ...built, baseBehind: true } : built;
   // A body is written as its lines, and a long line folded: `read_file`
   // pages a file by lines and cuts what one read returns at 25,000

@@ -303,6 +303,38 @@ describe('runSync (real git, bare remote)', () => {
     expect(run(repo, 'rev-parse', 'HEAD')).toBe(run(repo, 'rev-parse', 'main'));
   });
 
+  it("gives every check its fix pushes back when it adopts someone else's push", () => {
+    // The watch pushed `fix`; a check failed on it once.
+    const fix = commitIn(paths.worktreePath, 'fix.txt');
+    run(paths.worktreePath, 'push', '-q', 'origin', 'HEAD:feat');
+    run(remote, 'update-ref', 'refs/pull/7/head', fix);
+    // Recorded on the head before the watch's push, counting from none.
+    const red = {
+      identity: 'run:1:2:pull_request:Test',
+      check: 'Test',
+      head: featSha,
+      pushes: 2,
+    };
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      lastKnownHeadSha: featSha,
+      pushedShas: [fix],
+      failingChecks: [red],
+    });
+    // Following its own push spends and gives back nothing.
+    expect(runSync(7)).toMatchObject({ synced: true, headSha: fix });
+    expect(readState(paths.statePath)!.failingChecks).toEqual([red]);
+    // Someone else pushes on top: whether or not a round reads it, the
+    // check's pushes are back, counted from the watch's latest push.
+    run(repo, 'fetch', '-q', 'origin', 'feat');
+    run(repo, 'branch', '-f', 'feat', 'FETCH_HEAD');
+    const theirs = pushFromElsewhere('theirs.txt');
+    expect(runSync(7)).toMatchObject({ synced: true, headSha: theirs });
+    expect(readState(paths.statePath)!.failingChecks).toEqual([
+      { ...red, pushes: 0, lastPush: fix },
+    ]);
+  });
+
   it('asks for a merge when the worktree holds work the new head lacks, and changes nothing', () => {
     const ours = commitIn(paths.worktreePath, 'ours.txt');
     const theirs = pushFromElsewhere('theirs.txt');

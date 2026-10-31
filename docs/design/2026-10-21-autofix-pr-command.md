@@ -370,6 +370,43 @@ Event rules:
   and the run's id, once per head
   (`<workflow>@<head>@#startup:<workflow id>:<event>`), with no log and
   nothing to re-run, so the skill answers it as needing a human.
+- The budget of fix pushes per failing check (Section 10) is the one record
+  a prepared snapshot keeps, in `failingChecks` of the state file: one entry
+  per check (by its identity, as above) that a round saw fail and has not
+  seen pass since, with the head it last failed on, the number of the
+  watch's later pushes it failed on, and the push the count runs to
+  (`lastPush`). It counts pushes, not fixes: a push for a review comment
+  that the check fails on counts too. A pass (`SUCCESS` or `NEUTRAL`; a
+  status's `SUCCESS`) ends the entry. Someone else's push gives every entry
+  its pushes back, counted again from the watch's latest push: `sync` does
+  so when it adopts one, whether or not a round reads it, and so does a
+  read of such a head (the one `prepare` resumed at). A return to an
+  earlier push of the watch spends nothing. Only a read of the head the
+  watch knows (the one `sync` or `push` recorded) counts: any other is the
+  API lagging behind the branch, or a push the round syncs to and reads
+  again. The gate wakes no round for a pass, so a round may never read one:
+  the watch can push again (for a comment) before its fix's checks end, or
+  a re-run can pass after the round moved on. So when a check fails on a
+  later push of the watch, the snapshot asks GitHub what it ended in on the
+  watch's pushes in between that the entry did not count, and — when a
+  round re-ran it there — on the head it last failed on
+  (`commitCheckResults`: one GraphQL read of a commit's rollup, paged like
+  the PR's, a rollup cut at the page limit taken for no answer; at most 4
+  commits a read, each once; the three newest pushes in between). A pass
+  there starts the count over; a failure on a push in between spends one (a
+  re-run that failed again on the last head spends nothing more); no result
+  (still running, cancelled, not listed, or no answer from GitHub) spends
+  nothing. Only a read that changes an entry takes the watch's lock, to
+  re-read the state and write it; the entries a read changed go last, and
+  at most 100 are kept. Once 3 pushes left a check failing, its `ci_failed`
+  carries `exhausted: true`, and the skill answers it as needing a human
+  instead of fixing it again — once per head, like any failure handled
+  without a push — until a pass ends the entry or someone else's push gives
+  it back. A pass someone saw only on a head the watch counted (a re-run
+  started by hand there) is not asked about. The entry stays with the
+  watch through a take-over, a resume and a recreated worktree; a new start
+  begins without it, as the push budget does, and so does every
+  `--in-place` start (one round each).
 - A comment of a review not submitted yet (`PENDING`) is a draft only its
   author sees, and is skipped. A bot asks in the comment that opens a
   thread (and in a review); its replies answer someone and are not
@@ -1425,9 +1462,8 @@ comes, or comes too late, leaves the attempt to the `abandoned_fix` round.
 `reply` without `--no-post` refuses on a watch started with `--no-reply`, so
 that option holds even when a turn forgets it.
 
-**Not in this step.** The budget of fix attempts per failing check without
-turning green (Section 10) needs a record of which checks passed, which no
-helper keeps yet; it stays a proposal.
+The budget of fix pushes per failing check (Section 10) came after this
+step: prepared snapshots record which checks failed and passed (Section 6.2).
 
 ### 6.15 The Web Shell: watches and their tasks
 
@@ -1687,14 +1723,14 @@ Replies are on by default; `--no-reply` turns them off.
 
 Budgets, stored in the state file:
 
-| Budget                                               | Default | When exhausted                 |
-| ---------------------------------------------------- | ------- | ------------------------------ |
-| Fix attempts per failing check without turning green | 3       | stop the loop                  |
-| Re-runs per check per head SHA                       | 1       | treat the next failure as real |
-| Fix attempts per review comment                      | 1       | never offered again            |
-| Pushes per start                                     | 10      | stop the loop                  |
-| Consecutive external head moves                      | 2       | stop the loop                  |
-| Minutes one background fix may run                   | 30      | stop its agent, discard it     |
+| Budget                                             | Default | When exhausted                    |
+| -------------------------------------------------- | ------- | --------------------------------- |
+| Fix pushes per failing check without turning green | 3       | left for a person until it passes |
+| Re-runs per check per head SHA                     | 1       | treat the next failure as real    |
+| Fix attempts per review comment                    | 1       | never offered again               |
+| Pushes per start                                   | 10      | stop the loop                     |
+| Consecutive external head moves                    | 2       | stop the loop                     |
+| Minutes one background fix may run                 | 30      | stop its agent, discard it        |
 
 Stop conditions: the PR is merged or closed; `/autofix-pr stop`; a budget in
 the table says stop; the cron job expires. Every stop but the scheduled task's expiry (7 days by default: `experimental.cronRecurringMaxAgeDays`, or `QWEN_CODE_CRON_MAX_AGE_DAYS`), which ends the watch without a round, runs `cleanup` and
@@ -1806,7 +1842,10 @@ Delivery plan:
    background (Section 6.14), stopped at the 30-minute limit of Section 10.
    The Web Shell shows each watch on its task's card and on a PR watches
    page, and stops one in the session that owns it (Section 6.15).
-   Still to come: the fix-attempts-per-failing-check budget of Section 10.
+   Delivered later (2026-10-31): the budget of fix pushes per failing check
+   of Section 10. When it runs out, the check is answered as needing a human
+   and the watch goes on, rather than stopping: the watch still answers
+   review feedback and the other checks.
 5. Follow-ups: a configurable bot allowlist.
 
 Open questions:
