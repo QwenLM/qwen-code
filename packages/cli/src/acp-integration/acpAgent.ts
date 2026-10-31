@@ -1565,6 +1565,7 @@ type QwenCoreSettingKey =
   | 'tools.approvalMode'
   | 'general.vimMode'
   | 'general.enableAutoUpdate'
+  | 'general.updateMode'
   | 'general.showSessionRecap'
   | 'general.sessionRecapAwayThresholdMinutes'
   | 'general.terminalBell'
@@ -1636,6 +1637,10 @@ const QWEN_CORE_SETTING_DEFINITIONS = {
   },
   'general.vimMode': { type: 'boolean' },
   'general.enableAutoUpdate': { type: 'boolean' },
+  'general.updateMode': {
+    type: 'enum',
+    values: ['auto', 'notify', 'off'],
+  },
   'general.showSessionRecap': { type: 'boolean' },
   'general.sessionRecapAwayThresholdMinutes': { type: 'number', min: 1 },
   'general.terminalBell': { type: 'boolean' },

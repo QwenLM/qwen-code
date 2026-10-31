@@ -72,6 +72,7 @@ import {
   spawnedEnvironmentView,
 } from './storage-paths-lite.js';
 import { readConfigFile } from './read-config-file.js';
+import { normalizeUpdateModeInPlace } from '../utils/update-mode.js';
 
 export {
   DEFAULT_EXCLUDED_ENV_VARS,
@@ -1575,6 +1576,15 @@ function readSettingsLayers(
   } else if (workspaceSettings.ui?.theme === 'VS2015') {
     workspaceSettings.ui.theme = DEFAULT_DARK_THEME_NAME;
   }
+
+  // Resolve the legacy update gate into general.updateMode so every reader
+  // (merged settings, settings dialog, daemon per-scope values) sees one
+  // consistent value while the deprecated enableAutoUpdate key is still on
+  // disk. The settings file itself is never rewritten by this (#14274).
+  normalizeUpdateModeInPlace(systemSettings);
+  normalizeUpdateModeInPlace(systemDefaultSettings);
+  normalizeUpdateModeInPlace(userSettings);
+  normalizeUpdateModeInPlace(workspaceSettings);
 
   // For the initial trust check we can only use the scopes that do not need
   // the decision being computed. `system-defaults` participates so an operator

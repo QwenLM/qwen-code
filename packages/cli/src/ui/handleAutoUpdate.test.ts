@@ -139,6 +139,45 @@ describe('handleAutoUpdate', () => {
     expect(mockSpawn).not.toHaveBeenCalled();
   });
 
+  it('notify mode emits update-received with manual wording and never installs (#14274)', () => {
+    mockSettings.merged.general!.updateMode = 'notify';
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
+      updateMessage:
+        'Please run npm i -g @qwen-code/qwen-code@latest to update',
+      isGlobal: true,
+      packageManager: PackageManager.NPM,
+    });
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+
+    // The manual wording is resolved from the real install state, not the
+    // old hardcoded "auto-update on" assumption.
+    expect(mockGetInstallationInfo).toHaveBeenCalledWith('/root', false);
+    expect(emitSpy).toHaveBeenCalledWith('update-received', {
+      message:
+        'An update is available!\nPlease run npm i -g @qwen-code/qwen-code@latest to update',
+    });
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('an explicit auto mode installs even when the legacy flag is false (#14274)', () => {
+    mockSettings.merged.general!.updateMode = 'auto';
+    mockSettings.merged.general!.enableAutoUpdate = false;
+    mockGetInstallationInfo.mockReturnValue({
+      updateCommand: 'npm i -g @qwen-code/qwen-code@latest',
+      updateMessage:
+        'Installed with npm. Attempting to automatically update now...',
+      isGlobal: true,
+      packageManager: PackageManager.NPM,
+    });
+
+    handleAutoUpdate(mockUpdateInfo, mockSettings, '/root', mockSpawn);
+
+    expect(mockGetInstallationInfo).toHaveBeenCalledWith('/root', true);
+    expect(mockSpawn).toHaveBeenCalledTimes(1);
+  });
+
   it('should emit "update-received" but not update if no update command is found', () => {
     mockGetInstallationInfo.mockReturnValue({
       updateCommand: undefined,

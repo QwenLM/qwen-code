@@ -20,6 +20,7 @@ import {
   SKIP_UPDATE_CHECK_ENV_VAR,
   requestUpdateOnExit,
 } from '../utils/processUtils.js';
+import { resolveUpdateMode } from '../utils/update-mode.js';
 
 const debugLogger = createDebugLogger('STARTUP_PREFETCH');
 
@@ -155,7 +156,7 @@ export function startPostRenderPrefetches(
   postRenderStarted.add(config);
 
   if (
-    settings.merged.general?.enableAutoUpdate !== false &&
+    resolveUpdateMode(settings.merged.general) !== 'off' &&
     process.env[SKIP_UPDATE_CHECK_ENV_VAR] !== 'true' &&
     !process.env[CUSTOM_SANDBOX_IMAGE_ENV_VAR]
   ) {
@@ -206,8 +207,21 @@ export function startPostRenderPrefetches(
             });
             return;
           }
-          const installationInfo = getInstallationInfo(projectRoot, true);
+          const updateMode = resolveUpdateMode(settings.merged.general);
+          // Pass the real install state (the previous code hardcoded true)
+          // so notification wording matches the effective mode (#14274).
+          const installationInfo = getInstallationInfo(
+            projectRoot,
+            updateMode === 'auto',
+          );
           if (installationInfo.packageManager === 'npm') {
+            void handleAutoUpdate(result.info, settings, projectRoot);
+            return;
+          }
+          // 'notify' never installs: route every package manager through
+          // handleAutoUpdate, which emits update-received (with manual
+          // instructions for non-npm managers) before its install gate.
+          if (updateMode === 'notify') {
             void handleAutoUpdate(result.info, settings, projectRoot);
             return;
           }

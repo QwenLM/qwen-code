@@ -50,7 +50,8 @@ Shell 执行。卡片区分执行、捕获与交付状态，面板按固定版�
 重启会结束正在运行的工作。更新目标是连接的服务，远程连接时也是远程机器上的安装。
 
 支持具备进程替换能力的 macOS/Linux CLI 服务，以及独立安装或受管理的全局 npm
-安装。关闭 `general.enableAutoUpdate`、旧服务、桌面 shell、不支持的安装及嵌入式
+安装。`general.updateMode` 设为 `"off"`（旧键 `general.enableAutoUpdate: false`
+等同）、旧服务、桌面 shell、不支持的安装及嵌入式
 服务不显示按钮。临时配对连接也不提供更新入口。使用自定义 `sidebar.footer.items` 时，通过 `update` 项控制此功能。
 
 ## 工作区文件浏览

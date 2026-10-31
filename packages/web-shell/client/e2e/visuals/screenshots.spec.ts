@@ -316,13 +316,18 @@ function createSettingsPanelScenario(
 ): WebShellDaemonScenario {
   const descriptors: DaemonSettingDescriptor[] = [
     {
-      key: 'general.enableAutoUpdate',
-      type: 'boolean',
-      label: 'Auto-update',
+      key: 'general.updateMode',
+      type: 'enum',
+      label: 'Update Mode',
       category: 'General',
       requiresRestart: false,
-      default: true,
-      values: { effective: true },
+      default: 'auto',
+      options: [
+        { value: 'auto', label: 'Auto (check + install)' },
+        { value: 'notify', label: 'Notify only (check, never install)' },
+        { value: 'off', label: 'Off (no startup check)' },
+      ],
+      values: { effective: 'auto' },
     },
     {
       key: 'general.showSessionRecap',
