@@ -104,6 +104,91 @@ describe('board CLI', () => {
     );
   });
 
+  it.each([
+    ['CaseJson', 'casejson'],
+    ['CASEJSON', 'casejson'],
+    ['casejson', 'casejson'],
+    ['Board_42-A', 'board_42-a'],
+  ])(
+    'reports the canonical storage name for board %s',
+    async (name, canonical) => {
+      await parse(`board show --board ${name} --json`);
+      expect(JSON.parse(written(stdout)).board).toBe(canonical);
+      expect(core.listBoardTasks).toHaveBeenCalledWith(canonical);
+      expect(core.listAsks).toHaveBeenCalledWith(canonical);
+    },
+  );
+
+  it.each([
+    ['CaseJson', 'casejson'],
+    ['CASEJSON', 'casejson'],
+    ['casejson', 'casejson'],
+    ['Board_42-A', 'board_42-a'],
+  ])(
+    'reports the canonical storage name in the plain-text heading for board %s',
+    async (name, canonical) => {
+      await parse(`board show --board ${name}`);
+      expect(written(stdout).split('\n')[0]).toBe(`board: ${canonical}`);
+      expect(core.listBoardTasks).toHaveBeenCalledWith(canonical);
+      expect(core.listAsks).toHaveBeenCalledWith(canonical);
+    },
+  );
+
+  it('normalizes the board without changing actor or suggested owner spelling', async () => {
+    core.createBoardTask.mockResolvedValue({ id: TASK_ID, subject: 'check' });
+    await parse(
+      'board task check --board MixedBoard --as MiXeDActor --owner OwNeR --json',
+    );
+    expect(core.createBoardTask).toHaveBeenCalledWith({
+      board: 'mixedboard',
+      createdBy: 'MiXeDActor',
+      subject: 'check',
+      owner: 'OwNeR',
+    });
+  });
+
+  it('compares actors exactly without folding case', async () => {
+    core.listBoardTasks.mockResolvedValue([
+      {
+        schemaVersion: 1,
+        id: TASK_ID,
+        subject: 'check',
+        createdBy: 'web',
+        owner: 'web',
+        status: 'pending',
+        createdAt: 1,
+        updatedAt: 1,
+        notes: [],
+      },
+    ]);
+    core.listAsks.mockResolvedValue([
+      {
+        schemaVersion: 1,
+        id: ASK_ID,
+        from: 'web',
+        to: 'api',
+        question: 'status?',
+        state: 'open',
+        createdAt: 1,
+        expiresAt: 2,
+        answer: null,
+        reason: null,
+        settledAt: null,
+      },
+    ]);
+
+    await parse('board show --board demo --as Web --json');
+    const strict = JSON.parse(written(stdout));
+    expect(strict.tasks).toEqual([]);
+    expect(strict.asks).toEqual([]);
+
+    stdout.mockClear();
+    await parse('board show --board demo --as web --json');
+    const exact = JSON.parse(written(stdout));
+    expect(exact.tasks).toHaveLength(1);
+    expect(exact.asks).toHaveLength(1);
+  });
+
   it('passes the declared actor when answering', async () => {
     core.answerAsk.mockResolvedValue({ id: ASK_ID, state: 'answered' });
     await parse(`board answer ${ASK_ID} yes --board demo --as web --json`);
@@ -278,6 +363,42 @@ describe('board CLI', () => {
 });
 
 describe('board rendering', () => {
+  it('preserves mixed-case actor labels in the show panel', () => {
+    const output = renderBoard({
+      board: 'mixedboard',
+      tasks: [
+        {
+          schemaVersion: 1,
+          id: TASK_ID,
+          subject: 'check',
+          createdBy: 'MiXeDActor',
+          owner: 'OwNeR',
+          status: 'pending',
+          createdAt: 1,
+          updatedAt: 1,
+          notes: [],
+        },
+      ],
+      asks: [
+        {
+          schemaVersion: 1,
+          id: ASK_ID,
+          from: 'MiXeDActor',
+          to: 'OwNeR',
+          question: 'status?',
+          state: 'open',
+          createdAt: 1,
+          expiresAt: 2,
+          answer: null,
+          reason: null,
+          settledAt: null,
+        },
+      ],
+    });
+    expect(output).toContain('MiXeDActor -> OwNeR: status?');
+    expect(output).toContain('OwNeR: check');
+  });
+
   it('keeps full actionable ids and one line per item', () => {
     const output = renderBoard({
       board: 'demo',
