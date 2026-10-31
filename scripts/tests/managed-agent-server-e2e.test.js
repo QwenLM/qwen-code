@@ -470,12 +470,13 @@ describe('managed-agent-server e2e runner', () => {
     // identifiers (which appear at several runner sites): giving the recovery
     // generation the flag, or flipping the default to true, must red here.
     expect(source).toMatch(
-      /startReplacementHarness\(\s*'Replacement Hosted Harness',\s*approvalFault === 'finished-before-commit',?\s*\)/,
+      /startReplacementHarness\(\s*'Replacement Hosted Harness',\s*approvalFault === 'finished-before-commit',\s*approvalFault === 'sibling-approval',?\s*\)/,
     );
     expect(source).toMatch(
       /startReplacementHarness\(\s*'Post-fault recovery Harness',?\s*\)/,
     );
     expect(source).toContain('crashBeforeAssistantCommit = false');
+    expect(source).toContain('holdPendingSiblingApproval = false');
     // B3a asserts the durable crash precondition (the approved result settled)
     // from MySQL like the sibling crash arms, not only the hook's log line.
     expect(source).toContain(
@@ -539,6 +540,114 @@ describe('managed-agent-server e2e runner', () => {
     expect(harnessSource).toContain(
       'E2E holding finished turn before assistant commit',
     );
+    // A3 crashes the replacement inside a two-call approval batch — sibling[0]
+    // decided, sibling[1] still requested — via a test-gated hook on the first
+    // approval the replacement asks. The barrier proves the crash landed in
+    // the approval gap; the recovery assertions prove the decided sibling was
+    // not re-asked, the pending sibling kept its original Action/deadline and
+    // earned its own Allow, and both siblings recovered in order, once each.
+    const toolTurnSource = read(
+      'packages/cli/src/serve/hosted-workspace-tool-turn.ts',
+    );
+    expect(source).toContain("'sibling-approval'");
+    expect(source).toContain('call_managed_continuation_sibling');
+    expect(source).toContain(
+      'QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL: session.id',
+    );
+    // The flag rides only the crashing generation, gated on the parameter.
+    expect(source).toMatch(
+      /holdPendingSiblingApproval\s*\?\s*\{\s*QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL: session\.id\s*\}/,
+    );
+    expect(toolTurnSource).toContain(
+      "process.env['QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL']",
+    );
+    expect(toolTurnSource).toContain('E2E holding pending sibling approval');
+    // The barrier asserts the durable approval-gap shape, not the log alone,
+    // and the shape checks sit between the barrier and the SIGKILL.
+    expect(source).toContain("'Pending sibling approval held'");
+    expect(source).toContain(
+      'Sibling-approval crash did not land in the approval gap',
+    );
+    expect(source).toContain(
+      'Sibling-approval crash plan is not the pending second sibling',
+    );
+    const a3Barrier = source.indexOf("'Pending sibling approval held'");
+    const a3Crash = source.indexOf('await crashChild(', a3Barrier);
+    expect(a3Barrier).toBeGreaterThan(-1);
+    expect(a3Crash).toBeGreaterThan(a3Barrier);
+    const a3Window = source.slice(a3Barrier, a3Crash);
+    expect(a3Window).toContain('siblingPlan.approvalOrdinal !== 1');
+    expect(a3Window).toContain("decidedSibling?.[1] !== 'decided'");
+    expect(a3Window).toContain("pendingSibling?.[1] !== 'requested'");
+    // The recovery generation re-decides the ORIGINAL pending sibling and
+    // asserts its identity/deadline survived before answering.
+    expect(source).toContain('const siblingBefore = await fetchJson');
+    expect(source).toContain(
+      'Recovery did not preserve the pending sibling Action/deadline',
+    );
+    expect(source).toContain('actions/${siblingApprovalId}/responses');
+    // Two siblings settle once each under their original identities: the
+    // count, both Action rows, the pending sibling's own decision, the second
+    // file effect and the order-sensitive final plan are all pinned.
+    // R1-7 / F1: anchor each count ternary to its own site. The bare `? 2 : 1`
+    // matches both expectedExecutions and expectedOriginalPlanCalls, so each is
+    // pinned separately and narrowing either one (2 -> 1) reds here at unit
+    // speed, not only at the real-stack barrier.
+    expect(source).toMatch(
+      /const expectedExecutions =[\s\S]*?approvalFault === 'sibling-approval'\s*\?\s*2\s*:\s*1/,
+    );
+    // `\s*`, not `[\s\S]*?`: the gap here is whitespace-only, so a tight anchor
+    // cannot span past this site to the expectedExecutions ternary and mask a
+    // narrowed count (the spanning form stays green under `? 2` -> `? 1`).
+    expect(source).toMatch(
+      /const expectedOriginalPlanCalls =\s*approvalFault === 'sibling-approval'\s*\?\s*2\s*:\s*1/,
+    );
+    // R1-7: pin the per-call identity loop itself (match by prepare key, not
+    // the pre-PR single-execution shape), so reverting it reds here at unit
+    // speed rather than only on a full real-stack run.
+    expect(source).toContain(
+      'for (const [ordinal, call] of plan.calls.entries())',
+    );
+    expect(source).toContain('(row) => row[1] === call.prepareKey');
+    expect(source).toContain(
+      'Replacement changed the original prepared execution identity for call',
+    );
+    // R1-4: the decided sibling is read and asserted still decided with its
+    // original deadline BEFORE the pending sibling is answered.
+    expect(source).toContain('const decidedBefore = await fetchJson');
+    expect(source).toContain("decidedBefore.state !== 'decided'");
+    expect(source).toContain(
+      'Recovery re-touched the decided sibling Action/deadline',
+    );
+    // R1-5: execution order is gated on settled_at along the plan, not only
+    // the plan resource order, so a reverse dispatch reds.
+    expect(source).toContain(
+      'request_digest, settled_at FROM qwen_managed_agent.ma_tool_execution',
+    );
+    expect(source).toContain('settledAtByOrdinal.push(Number(execution[8]))');
+    expect(source).toContain(
+      'Replacement settled the siblings out of plan order',
+    );
+    expect(source).toContain('Sibling approval identities/states differ');
+    expect(source).toContain('Stored sibling decision differs');
+    expect(source).toContain('Sibling physical file assertion failed');
+    expect(source).toContain('Sibling recovery reordered or rewrote call');
+    expect(source).toContain(
+      'Sibling recovery changed the original Action IDs',
+    );
+    // The order assertion reads the recovered final plan the way recovery
+    // does (latest hosted.batch.planned link for the batch, stage final).
+    expect(source).toContain('siblingFinalPlan(');
+    const a3PlanFn = source.indexOf('function siblingFinalPlan(');
+    expect(a3PlanFn).toBeGreaterThan(-1);
+    const a3PlanFnBody = source.slice(
+      a3PlanFn,
+      source.indexOf('\n}', a3PlanFn),
+    );
+    expect(a3PlanFnBody).toContain('qwen_managed_agent.ma_session_journal_tx');
+    expect(a3PlanFnBody).toContain("event.kind !== 'hosted.batch.planned'");
+    expect(a3PlanFnBody).toContain("payload['batchId'] !== batchId");
+    expect(a3PlanFnBody).toContain("plan.stage !== 'final'");
   });
 
   // R4-2 (behavioural): the source pins above assert the window helper's
@@ -627,6 +736,106 @@ describe('managed-agent-server e2e runner', () => {
     ).toThrow(
       /after the assistant commit: commitSequence=27 attemptSequence=25/,
     );
+  });
+
+  // A3 (behavioural): exercise siblingFinalPlan on injected journal rows and
+  // plan resources, so the latest-link selection, the batch filter and both
+  // throw branches are proven on data, not on text. runMysql is injected
+  // through load() and dispatches on the query (journal HEX rows vs the plan
+  // resource, keyed by resource_id); the helper stays a top-level declaration
+  // so extracted() can walk it.
+  it('behaves siblingFinalPlan on injected journal rows', () => {
+    const batchId = 'batch_a3';
+    const call = (ordinal, actionId) => ({
+      runtimeCallId: `rc_${ordinal}`,
+      partIndex: ordinal,
+      prepareKey: `rs:rc_${ordinal}`,
+      requestDigest: `sha256:digest_${ordinal}`,
+      actionId,
+    });
+    const finalPlan = {
+      stage: 'final',
+      calls: [call(0, 'action_0'), call(1, 'action_1')],
+    };
+    const planned = (sequence, batch = batchId, resourceId = 'res_final') => ({
+      kind: 'hosted.batch.planned',
+      sequence,
+      payload: { batchId: batch, planRevision: 1, planRef: { resourceId } },
+    });
+    const journalRows = (events) =>
+      Buffer.from(
+        events
+          .map((event) =>
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: event,
+            }),
+          )
+          .join('\n'),
+        'utf8',
+      ).toString('hex');
+    const run = (events, plans = { res_final: finalPlan }) =>
+      load(
+        ['siblingFinalPlan', 'sqlString'],
+        'siblingFinalPlan',
+        'runMysql',
+      )((_port, query) => {
+        if (query.includes('ma_session_journal_tx')) return journalRows(events);
+        if (query.includes('ma_resource')) {
+          const resourceId = query.match(/resource_id='([^']+)'/)?.[1];
+          const plan = plans[resourceId];
+          if (!plan) throw new Error(`no plan for ${String(resourceId)}`);
+          return JSON.stringify(plan);
+        }
+        throw new Error(`unexpected query: ${query}`);
+      }).siblingFinalPlan(0, 'filter', batchId);
+
+    // The hosted.batch.planned link for the batch resolves the final plan.
+    expect(run([planned(10)])).toEqual(finalPlan);
+    // The highest-sequence link wins, even when rows arrive unsorted: each
+    // link points at a different resource, so selecting the older one reds.
+    const newerPlan = {
+      stage: 'final',
+      calls: [call(0, 'action_0'), call(1, 'action_new')],
+    };
+    // Descending input kills a last-row-wins implementation.
+    expect(
+      run([planned(30, batchId, 'res_new'), planned(20, batchId, 'res_old')], {
+        res_new: newerPlan,
+        res_old: finalPlan,
+      }),
+    ).toEqual(newerPlan);
+    // Ascending input (the real query's ORDER BY first_sequence direction, so
+    // the newest link is the LAST row) kills a first-match implementation: a
+    // first-match guard would pick the stale res_old here. Both directions
+    // together force a genuine highest-sequence selection.
+    expect(
+      run([planned(20, batchId, 'res_old'), planned(30, batchId, 'res_new')], {
+        res_new: newerPlan,
+        res_old: finalPlan,
+      }),
+    ).toEqual(newerPlan);
+    // Another batch's link is not this batch's plan.
+    expect(() => run([planned(10, 'other_batch')])).toThrow(
+      /no final batch plan link/,
+    );
+    // No link at all.
+    expect(() => run([])).toThrow(/no final batch plan link/);
+    // A non-final plan resource is refused: recovery must resume the final plan.
+    expect(() =>
+      run([planned(10)], { res_final: { stage: 'approval', calls: [] } }),
+    ).toThrow(/not a final batch plan/);
+    // Non-planned events are skipped, not parsed as the batch plan link.
+    expect(
+      run([
+        {
+          kind: 'message.committed',
+          sequence: 5,
+          payload: { role: 'assistant' },
+        },
+        planned(10),
+      ]),
+    ).toEqual(finalPlan);
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,

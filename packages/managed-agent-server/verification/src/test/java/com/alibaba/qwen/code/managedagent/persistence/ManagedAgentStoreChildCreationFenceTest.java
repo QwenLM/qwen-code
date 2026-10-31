@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
@@ -62,9 +63,14 @@ class ManagedAgentStoreChildCreationFenceTest {
         transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(source));
         parent = transactions.execute(ignored -> store
-                .insertWorkspaceSessionCommand("tenant", "owner", "create",
-                        "digest", "qwen-code", null, null, List.of(), null,
-                        new WorkspaceSelection("workspace", "."))
+                .insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId("tenant")
+                        .actorId("owner")
+                        .idempotencyKey("create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build())
                 .sessionId());
     }
 

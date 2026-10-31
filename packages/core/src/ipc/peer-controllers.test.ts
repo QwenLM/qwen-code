@@ -4,10 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import lockfile from 'proper-lockfile';
 import {
   addPeerController,
   CONTROLLER_TOKEN_PREFIX,
@@ -171,6 +172,40 @@ describe('addPeerController', () => {
       'three',
       'two',
     ]);
+  });
+
+  it('lets one same-process writer reach the file lock at a time', async () => {
+    // #15581: concurrent writers in one process used to contend for the
+    // file lock, and the last one ran out of retries whenever the
+    // holder's fsync was slow. They now queue in memory first.
+    const realLock = lockfile.lock.bind(lockfile);
+    let inFlight = 0;
+    let peak = 0;
+    const lockSpy = vi
+      .spyOn(lockfile, 'lock')
+      .mockImplementation(async (file, options) => {
+        peak = Math.max(peak, ++inFlight);
+        try {
+          const release = await realLock(file, options);
+          return async () => {
+            try {
+              await release();
+            } finally {
+              inFlight--;
+            }
+          };
+        } catch (error) {
+          inFlight--;
+          throw error;
+        }
+      });
+    try {
+      await Promise.all(['one', 'two', 'three', 'four'].map(add));
+      expect(lockSpy).toHaveBeenCalledTimes(4);
+      expect(peak).toBe(1);
+    } finally {
+      lockSpy.mockRestore();
+    }
   });
 
   it('completes a write after a stale-lock takeover', async () => {

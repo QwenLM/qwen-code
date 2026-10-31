@@ -6,6 +6,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedHookRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -794,8 +795,14 @@ class WorkspaceLifecycleStoreTest {
                     WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
             jdbc.update("INSERT INTO ma_workspace_access (tenant_id, workspace_id, actor_id, role)"
                     + " VALUES ('tenant', 'workspace', ?, 'OPERATOR')", "owner".getBytes(StandardCharsets.UTF_8));
-            session = transactions.execute(ignored -> store.insertWorkspaceSessionCommand("tenant", "owner", "create", "digest", "qwen-code",
-                    null, null, List.of(), null, new WorkspaceSelection("workspace", ".")).sessionId());
+            session = transactions.execute(ignored -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId("tenant")
+                    .actorId("owner")
+                    .idempotencyKey("create")
+                    .requestDigest("digest")
+                    .agentId("qwen-code")
+                    .selection(new WorkspaceSelection("workspace", "."))
+                    .build()).sessionId());
         }
 
         ManagedSessionStoreModels.CommitTransactionRequest promptCommit(String turn, boolean settled) throws Exception {
