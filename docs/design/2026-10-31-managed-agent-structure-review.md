@@ -85,8 +85,10 @@ projection, worktrees, MCP management, definition pins, skills, and extension
 projection. Its 7 public `set*`/`configure*` methods are mutable post-
 construction wiring: the bean can be observed before it is fully assembled.
 `RuntimeBrokerService` mixes provisioning, binding CAS, leases, cancellation,
-recovery scans, tool holds, extension commands, and observation cooldowns in a
-single class. Tests mirror the shape: `RuntimeBrokerServiceTest` is 8,002
+recovery scans, and extension commands in a single class; the observation
+cooldown and the tool-hold inventory are the first concerns delegated to
+extracted collaborators (see the P1 extraction slices below). Tests mirror
+the shape: `RuntimeBrokerServiceTest` is 8,002
 lines and `HarnessCoordinatorTest` is 4,910 lines.
 
 **D2. Telescoping session-creation API.** `insertWorkspaceSessionCommand` has
@@ -225,7 +227,19 @@ cross-cutting "how the system works today" tour.
   permits connection-sharing SQL helpers to stay in one package.
   Replace the 7 public setters with constructor injection; express any real
   cycle with `ObjectProvider` or `@Lazy` instead of mutable wiring. Split the
-  mirrored test files in the same slices.
+  mirrored test files in the same slices. Setter investigation (2026-10-31):
+  four of the seven setters are Spring `@Autowired(required = false)`
+  optional-dependency injection (`lifecycle`, `definitions`,
+  `sessionWorktrees`, `journalEventTransport`) and three are required plain
+  `@Autowired` injection (`extensionPackages`, `creationSkills`,
+  `worktreeFiles` — its bean is supplied by
+  `ManagedAgentConfiguration.managedWorktreeFiles()`; the direct calls in
+  `VerificationFixtures` are test setup, not production wiring). Converting
+  them to constructor `ObjectProvider` injection is a large change to this
+  central 7,700-line class with ~30 test wiring sites, and its correctness
+  depends on Spring runtime assembly that the manual-setter unit tests do
+  not fully exercise; it warrants a dedicated design pass and full
+  integration verification before implementation, not an incremental slice.
 - `RuntimeBrokerService`: extract module-internal collaborators for recovery
   scanning, cancellation, tool holds, and observation cooldown; the service
   becomes a facade. The module already exists, so no cross-module contract
@@ -247,6 +261,24 @@ cross-cutting "how the system works today" tour.
   pinning it (a pre-existing gap, identical at the base); pin it when the
   reconciliation path becomes its own collaborator and the ordering is a
   seam-level contract rather than a private lambda's internal sequence.
+- Reconciliation, recovery scanning and cancellation are **not** clean
+  standalone seams (investigated 2026-10-31). Unlike the cooldown and the
+  hold inventory — which own their state — these paths share the service's
+  core mutable state and lifecycle machinery: the `sessions`, `liveBindings`
+  and `reconciliations` concurrent maps, the binding-lifecycle helpers
+  (`requireAnswerableBinding`, `requireLiveBinding`, `invalidateBinding`,
+  `provisioner.isUsable`), and the CAS execution settle
+  (`absorbRuntimeStatus` → `settleUnstartedBackgroundSiblings`). Extracting
+  any of them now would inject a dozen maps/helpers/callbacks into a
+  "collaborator" that is the god class under another name. The prerequisite
+  is a **shared-state registry** slice: move the three maps and the
+  binding-lifecycle helpers behind a `RuntimeBindingRegistry` (or similar)
+  that owns them, leaving the service to delegate. Once that registry
+  exists, reconciliation/recovery/cancellation depend on a narrow owner
+  instead of the service's internals and become extractable, and the M6
+  ordering becomes a seam-level contract a test can pin. This registry
+  slice is larger and riskier than the two clean seams and should be
+  designed and reviewed on its own before implementation.
 - Apply the same treatment to `ManagedSessionStore` and
   `QwenHostedHarnessConnector` afterwards, each as its own slice.
 

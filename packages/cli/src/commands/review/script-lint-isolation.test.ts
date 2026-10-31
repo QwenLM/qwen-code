@@ -84,3 +84,40 @@ describe('script-lint — hadolint fails closed when config isolation is unavail
     expect(r.ok).toBe(false);
   });
 });
+
+// The actionlint twin of the guard above (PR #16001 review): without the
+// private neutral config, actionlint auto-loads the reviewed repository's
+// `.github/actionlint.yaml`, and a PR-added ignore-all rule there suppresses
+// every diagnostic — the exact #15974 expression finding included. Same two
+// properties, same mutation attribution: delete the actionlint guard in
+// `runTool` and #2 reddens while #1 stays green.
+describe('script-lint — actionlint fails closed when config isolation is unavailable', () => {
+  it('adds no -config-file when a private neutral config cannot be created', () => {
+    expect(
+      buildToolInvocation('actionlint', '/w/.github/workflows/ci.yml').argv,
+    ).not.toContain('-config-file');
+  });
+
+  it('errors a workflow (fail closed) instead of linting it unisolated', () => {
+    const wt = join(workDir, 'repo-al');
+    mkdirSync(join(wt, '.github', 'workflows'), { recursive: true });
+    writeFileSync(
+      join(wt, '.github', 'workflows', 'ci.yml'),
+      'name: CI\non: push\njobs: {}\n',
+    );
+    const plan = join(wt, 'plan.json');
+    writeFileSync(
+      plan,
+      JSON.stringify({
+        files: [{ path: '.github/workflows/ci.yml', kind: 'source' }],
+      }),
+    );
+
+    const r = runScriptLint({ plan, worktree: wt });
+    expect(r.checked).toEqual([]);
+    expect(r.errored).toHaveLength(1);
+    expect(r.errored[0].tool).toBe('actionlint');
+    expect(r.errored[0].reason).toContain('isolation');
+    expect(r.ok).toBe(false);
+  });
+});

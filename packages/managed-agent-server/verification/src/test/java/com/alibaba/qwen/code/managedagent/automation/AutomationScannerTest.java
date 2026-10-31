@@ -813,7 +813,7 @@ class AutomationScannerTest {
     }
 
     @Test
-    void aScannerThatLostItsLeaseCannotMoveTheLedger() {
+    void aScannerWhoseLeaseWasTakenCannotMoveTheLedger() {
         PublicAutomation automation = define("* * * * *", "skip", "none", null,
                 true);
         String id = automation.id();
@@ -863,6 +863,66 @@ class AutomationScannerTest {
                 .contains(AutomationLedgerStore.OUTCOME_FIRED);
         assertThat(ledger.findOccurrence(tenant, id, key).orElseThrow()
                 .definitionRevision()).isEqualTo(1);
+    }
+
+    @Test
+    void aLapsedLeaseStillWritesUntilAnotherClaimMovesTheFence() {
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        String id = automation.id();
+        String key = "schedule:2026-06-01T10:01:00Z";
+        AutomationLedgerStore.ScheduleRow row = ledger.findSchedule(tenant, id)
+                .orElseThrow();
+        long fence = ledger.claim(tenant, id, "scanner-a", T0 + 60_000, T0);
+        assertThat(fence).isPositive();
+        // Past lease_until with nobody else claiming: owner and fence still
+        // match, so a tick that outlived its lease records and settles.
+        long late = T0 + 61_000;
+        assertThat(ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow
+                        .decision(row, key, T0 + MINUTE,
+                                AutomationScanner.TRIGGER_SCHEDULED,
+                                AutomationLedgerStore.OUTCOME_FIRING, null, fence,
+                                late), "scanner-a"))
+                .map(AutomationLedgerStore.OccurrenceRow::fence).contains(fence);
+        assertThat(ledger.repinOccurrence(tenant, id, key, 1, "scanner-a", fence,
+                late)).isTrue();
+        assertThat(ledger.deferOccurrence(tenant, id, key, 1, late + 1_000,
+                "slow", "scanner-a", fence, late)).isTrue();
+        assertThat(ledger.settleOccurrence(tenant, id, key,
+                AutomationLedgerStore.OUTCOME_FIRED, null, "scanner-a", fence,
+                late)).isTrue();
+        assertThat(ledger.advanceWatermark(tenant, id, "scanner-a", fence,
+                T0 + MINUTE, late)).isTrue();
+        String next = "schedule:2026-06-01T10:02:00Z";
+        assertThat(ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow
+                .decision(row, next, T0 + 2 * MINUTE,
+                        AutomationScanner.TRIGGER_SCHEDULED,
+                        AutomationLedgerStore.OUTCOME_FIRING, null, fence, late),
+                "scanner-a")).isPresent();
+        assertThat(ledger.settleOccurrence(tenant, id, next,
+                AutomationLedgerStore.OUTCOME_SKIPPED, "gate_failed",
+                "probe exited 2", "scanner-a", fence, late)).isTrue();
+        assertThat(ledger.findOccurrence(tenant, id, next).orElseThrow()
+                .lastError()).isEqualTo("probe exited 2");
+        assertThat(ledger.recordGateOutcome(row, row.definitionRevision(),
+                "scanner-a", fence, AutomationLedgerStore.GATE_FAILED,
+                "probe exited 2", late)).isTrue();
+        ledger.block(tenant, id, "scanner-a", fence, "cron * does not compile",
+                late);
+        ScheduleRow held = ledger.findSchedule(tenant, id).orElseThrow();
+        assertThat(held.gateLastError()).isEqualTo("probe exited 2");
+        assertThat(held.blockedReason()).isEqualTo("cron * does not compile");
+        ledger.release(tenant, id, "scanner-a", fence, late);
+        assertThat(ledger.findSchedule(tenant, id).orElseThrow().leaseOwner())
+                .isNull();
+        // The next claim moves the fence; from then on the earlier holder
+        // moves nothing.
+        assertThat(ledger.claim(tenant, id, "scanner-b", late + 60_000, late + 1))
+                .isGreaterThan(fence);
+        assertThat(ledger.advanceWatermark(tenant, id, "scanner-a", fence,
+                T0 + 2 * MINUTE, late + 2)).isFalse();
+        assertThat(ledger.findSchedule(tenant, id).orElseThrow()
+                .watermarkSlot()).isEqualTo(T0 + MINUTE);
     }
 
     @Test

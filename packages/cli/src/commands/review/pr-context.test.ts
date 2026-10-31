@@ -105,6 +105,7 @@ import {
   buildMarkdown,
   carriesBlockerSignal,
   isIssueBlocker,
+  blockerInventoryPath,
   extractCodeRefs,
   classifyInlineThreads,
   fullBody,
@@ -3812,6 +3813,147 @@ describe('runPrContext stale context-file removal (handler level)', () => {
       }),
     ).rejects.toThrow(/must look like/);
     expect(rmSyncMock).not.toHaveBeenCalled();
+  });
+});
+
+describe('runPrContext blocker inventory (handler level)', () => {
+  // The machine-readable floor compose-review's blockerReCheckGate joins
+  // with the round's blockerRulings (#15974: a review-level blocker went
+  // unruled and nothing noticed). The inventory must span all three
+  // channels the walk owes — and exclude the ledger carriers whose
+  // findings are ruled through the work list.
+  const META = JSON.stringify({
+    title: 'T',
+    body: null,
+    author: { login: 'a' },
+    baseRefName: 'main',
+    headRefName: 'b',
+    headRefOid: 's',
+    additions: 1,
+    deletions: 1,
+    changedFiles: 1,
+    state: 'OPEN',
+  });
+  const LEDGER_CARRIER_BODY =
+    '**[Critical]** R1-1: carried finding\n\n' +
+    '<!-- qwen-review-ledger {"v":1,"round":1,"findings":[]} -->';
+
+  let outDir: string;
+  beforeEach(() => {
+    outDir = mkdtempSync(join(tmpdir(), 'pr-context-inventory-'));
+    ghMock.mockClear();
+    ghMock.mockReturnValue(META);
+    ghApiAllMock.mockClear();
+    currentUserMock.mockClear();
+    currentUserMock.mockReturnValue('review-bot');
+    ensureAuthenticatedMock.mockReturnValue(undefined);
+    writeFileSyncMock.mockClear();
+    renameSyncMock.mockClear();
+    rmSyncMock.mockClear();
+    process.exitCode = undefined;
+  });
+  afterEach(() => rmSync(outDir, { recursive: true, force: true }));
+
+  const run = (out: string): Promise<void> =>
+    Promise.resolve(
+      prContextCommand.handler({
+        pr_number: '42',
+        owner_repo: 'o/r',
+        out,
+      } as never) as void,
+    );
+
+  function withBlockers(): void {
+    ghApiAllMock.mockImplementation((path: string) => {
+      if (path.endsWith('/pulls/42/comments')) {
+        return [
+          {
+            id: 101,
+            user: { login: 'someone' },
+            path: 'a.ts',
+            line: 3,
+            body: '**[Critical]** the guard checks the wrong variable',
+          },
+        ];
+      }
+      if (path.endsWith('/issues/42/comments')) {
+        return [
+          {
+            id: 202,
+            user: { login: 'maintainer' },
+            body: '**[Critical]** this still breaks on Windows',
+          },
+        ];
+      }
+      if (path.endsWith('/pulls/42/reviews')) {
+        return [
+          {
+            id: 303,
+            user: { login: 'reviewer' },
+            state: 'CHANGES_REQUESTED',
+            body: '**[Critical]** the workflow cannot load',
+            submitted_at: '2026-10-30T00:00:00Z',
+          },
+          {
+            // Ledger carrier: ruled through the work list, not a second
+            // time here — counting it would demand a ruling per carried
+            // Critical every round.
+            id: 304,
+            user: { login: 'review-bot' },
+            state: 'COMMENTED',
+            body: LEDGER_CARRIER_BODY,
+            submitted_at: '2026-10-29T00:00:00Z',
+          },
+          {
+            id: 305,
+            user: { login: 'someone' },
+            state: 'APPROVED',
+            body: 'looks good to me',
+            submitted_at: '2026-10-28T00:00:00Z',
+          },
+        ];
+      }
+      return [];
+    });
+  }
+
+  /** The inventory the handler wrote, read back off the mocked fs calls. */
+  function writtenInventory(out: string): { blockers: string[] } {
+    const inventoryPath = blockerInventoryPath(out);
+    const write = writeFileSyncMock.mock.calls.find((c) =>
+      String(c[0]).startsWith(`${inventoryPath}.`),
+    );
+    expect(write).toBeDefined();
+    expect(renameSyncMock).toHaveBeenCalledWith(write![0], inventoryPath);
+    return JSON.parse(write![1] as string) as { blockers: string[] };
+  }
+
+  it('spans inline roots, issue blockers and review bodies; excludes ledger carriers', async () => {
+    withBlockers();
+    const out = join(outDir, 'qwen-review-pr-42-context.md');
+    await run(out);
+    const inv = writtenInventory(out);
+    expect(inv.blockers).toEqual(['comment:101', 'comment:202', 'review:303']);
+  });
+
+  it('writes an empty inventory when nothing promotes — the gate stays inert', async () => {
+    ghApiAllMock.mockReturnValue([]);
+    const out = join(outDir, 'qwen-review-pr-42-context.md');
+    await run(out);
+    expect(writtenInventory(out).blockers).toEqual([]);
+  });
+
+  it('removes the stale inventory up front, with the context it belongs to', async () => {
+    // A failed run must leave no inventory behind: a stale one would check
+    // the next round's rulings against the previous round's blocker set.
+    ghMock.mockImplementation(() => {
+      throw new Error('HTTP 403: rate limited');
+    });
+    const out = join(outDir, 'qwen-review-pr-42-context.md');
+    await expect(run(out)).rejects.toThrow(/rate limited/);
+    expect(rmSyncMock).toHaveBeenCalledWith(blockerInventoryPath(out), {
+      force: true,
+    });
   });
 });
 
