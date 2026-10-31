@@ -434,6 +434,7 @@ function renderSidebar(
     footer?: Parameters<typeof WebShellSidebar>[0]['footer'];
     onNewSession?: (workspaceCwd?: string) => boolean;
     onNewStandaloneSession?: () => Promise<boolean> | boolean;
+    standaloneSessionsReloadToken?: number;
     onLoadSession?: (sessionId: string, workspaceCwd?: string) => void;
     onLoadStandaloneSession?: (sessionId: string) => void;
     onStandaloneNotice?: (message: string) => void;
@@ -481,6 +482,9 @@ function renderSidebar(
           onOpenSplitView={() => {}}
           onNewSession={overrides.onNewSession ?? (() => false)}
           onNewStandaloneSession={overrides.onNewStandaloneSession}
+          standaloneSessionsReloadToken={
+            overrides.standaloneSessionsReloadToken
+          }
           onLoadSession={overrides.onLoadSession ?? (() => {})}
           onLoadStandaloneSession={overrides.onLoadStandaloneSession}
           onStandaloneNotice={overrides.onStandaloneNotice}
@@ -7066,6 +7070,75 @@ describe('WebShellSidebar standalone grouping', () => {
 
     expect(listStandaloneSessionsPage).toHaveBeenCalledTimes(1);
   });
+
+  it.each([false, true])(
+    'refreshes recovered standalone membership with Recent sessions expanded=%s',
+    async (recentExpanded) => {
+      window.localStorage.setItem(
+        'qwen.web-shell.sidebar.workspace-expanded:recent-sessions',
+        String(recentExpanded),
+      );
+      const standaloneCapabilities = {
+        ...capabilities,
+        features: [...capabilities.features, 'standalone_sessions_v1'],
+      };
+      connection.capabilities = standaloneCapabilities;
+      workspace.capabilities = standaloneCapabilities;
+      let isArchived = true;
+      listStandaloneSessionsPage.mockImplementation(
+        async ({ archiveState }: { archiveState: string }) => ({
+          sessions:
+            archiveState === (isArchived ? 'archived' : 'active')
+              ? [
+                  {
+                    sessionId: 'standalone-recovered',
+                    workspaceCwd: '/private/standalone/standalone-recovered',
+                    displayName: 'Recovered conversation',
+                    sourceType: 'standalone',
+                    context: { kind: 'standalone' },
+                    updatedAt: '2026-08-31T00:00:00.000Z',
+                    isArchived,
+                  },
+                ]
+              : [],
+        }),
+      );
+      const props = {
+        onLoadStandaloneSession: vi.fn(),
+        onStandaloneNotice: vi.fn(),
+      };
+      renderSidebar({ ...props, standaloneSessionsReloadToken: 0 });
+      await openArchiveSettings();
+      await vi.waitFor(() =>
+        expect(
+          container.querySelector('[data-testid="standalone-archived-group"]')
+            ?.textContent,
+        ).toContain('Recovered conversation'),
+      );
+      listStandaloneSessionsPage.mockClear();
+
+      isArchived = false;
+      renderSidebar({ ...props, standaloneSessionsReloadToken: 1 });
+
+      await vi.waitFor(() => {
+        expect(listStandaloneSessionsPage).toHaveBeenCalledWith({
+          archiveState: 'archived',
+          pageSize: 50,
+        });
+        expect(
+          container.querySelector(
+            recentExpanded
+              ? '[data-testid="recent-sessions"]'
+              : '[data-testid="standalone-active-group"]',
+          )?.textContent,
+        ).toContain('Recovered conversation');
+        expect(
+          container.querySelector('[data-testid="standalone-archived-group"]')
+            ?.textContent ?? '',
+        ).not.toContain('Recovered conversation');
+      });
+    },
+  );
 
   it('refreshes both standalone groups after archive and restore', async () => {
     window.localStorage.setItem(

@@ -6000,7 +6000,7 @@ export function WebShellSidebar({
                 !connection.loadingTranscript &&
                 !connection.catchingUp
               }
-              refreshKey={standaloneRefreshKey}
+              refreshKey={standaloneRefreshKey + standaloneSessionsReloadToken}
               renderSession={(session, standalone) =>
                 renderSessionRow(session, {
                   isArchived: standalone.isArchived,
@@ -6073,6 +6073,7 @@ export function WebShellSidebar({
     sessionArchiveEnabled,
     standaloneArchivedStatus,
     standaloneRefreshKey,
+    standaloneSessionsReloadToken,
     archivedStandaloneSessionsVisible,
     standaloneSessionsVisible,
     t,
@@ -7824,7 +7825,9 @@ export function WebShellSidebar({
                     organizationEnabled={organizationEnabled}
                     currentSessionId={connection.sessionId}
                     refreshKey={
-                      standaloneRefreshKey + workspaceSessionsReloadToken
+                      standaloneRefreshKey +
+                      standaloneSessionsReloadToken +
+                      workspaceSessionsReloadToken
                     }
                     renderSession={(entry) => {
                       const isStandalone = entry.workspaceCwd === undefined;
