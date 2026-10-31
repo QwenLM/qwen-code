@@ -1034,6 +1034,11 @@ export class QQChannel extends ChannelBase {
         '你是通过 QQ Bot 与用户对话的 AI 助手。',
         '支持 Markdown 格式，回复自然流畅即可。',
         '消息前缀 [atMention=true] 表示该消息 @了你，[atMention=false] 表示未 @你。',
+        ...(this.qqConfig.forwardBotMessages === true
+          ? [
+              '消息前缀 [bot] 表示该消息来自另一个机器人（不是人类成员）；是否回复由你自主判断。',
+            ]
+          : []),
         '不想回复时只输出 <noreply> 即可，消息不会发出。',
         '',
         '以下规则仅适用于群聊消息。C2C 私聊中请始终正常回复。',
@@ -5665,16 +5670,16 @@ export class QQChannel extends ChannelBase {
     const isSlash = effectiveIsAtBot && rawCommandText.startsWith('/');
     const commandText = sanitizePromptText(rawCommandText);
 
-    // Deliberately NOT hard-blocking bot messages — QQ Bot API may deliver
-    // self-echoes or other bot messages. Instead, tag with [bot] prefix so the
-    // model can judge relevance and decide whether to respond. Hard-blocking
-    // would prevent intentional bot-to-bot interactions that the operator
-    // explicitly configures. The [bot] prefix gives the model enough context
-    // to ignore irrelevant bot traffic.
-    // NOTE: Both callers (handleGroup, handleGroupAll) guard against bot
-    // messages before reaching prepareGroupMessage, so isBot is always false
-    // here. The check is retained as defense-in-depth in case a future
-    // caller skips the guard.
+    // Bot-authored messages are a feature when the operator opts in, and the
+    // switch is the whole tradeoff: QQ does not echo a bot's own messages, so
+    // this traffic is another bot talking in the group, and no automatic rate
+    // cap follows the switch — the group's human members and the model's own
+    // silence rules are the guard. Dropping them is the default. A
+    // user-supplied `[bot]` is stripped above, so the tag cannot be forged.
+    const botTag =
+      event.author?.bot === true && this.qqConfig.forwardBotMessages === true
+        ? '[bot] '
+        : '';
 
     const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
     const openIdSuffix =
@@ -5729,7 +5734,7 @@ export class QQChannel extends ChannelBase {
       : senderIdentity
         ? `(${truncateCodePoints(sanitizeSenderName(senderIdentity), 8)}…)`
         : '';
-    const head = `[atMention=${effectiveIsAtBot}]${openIdSuffix} [${safeName}${senderTag}]: `;
+    const head = `[atMention=${effectiveIsAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderTag}]: `;
     const body = sanitizePromptText(
       this.qqConfig.allowMention !== false ? safeDisplayText : safeCleanText,
     );
@@ -5872,7 +5877,7 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (event.author.bot) {
+    if (event.author.bot && this.qqConfig.forwardBotMessages !== true) {
       process.stderr.write(`[QQ:${this.name}] Bot C2C message dropped\n`);
       return;
     }
@@ -5893,6 +5898,10 @@ export class QQChannel extends ChannelBase {
     this.setReplyMsgId(chatId, event.id);
     const senderName = event.author.username || event.author.id || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
+    const botTag =
+      event.author.bot === true && this.qqConfig.forwardBotMessages === true
+        ? '[bot] '
+        : '';
     const cleanText = rawContent.trim();
     // Strip system-reserved tags that could be forged by users
     const safeContent = cleanText
@@ -5906,7 +5915,7 @@ export class QQChannel extends ChannelBase {
       ? mediaPlaceholder(media)
       : isSlash || this.config.messageRoutes
         ? body
-        : `[atMention=true] [${safeName}]: ${body}`;
+        : `[atMention=true] ${botTag}[${safeName}]: ${body}`;
     const envelope: Envelope = {
       channelName: this.name,
       senderId: chatId,
@@ -5942,7 +5951,7 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (event.author.bot) {
+    if (event.author.bot && this.qqConfig.forwardBotMessages !== true) {
       process.stderr.write(
         `[QQ:${this.name}] Bot message dropped in group ${sanitizeLogText(event.group_openid, 64)}\n`,
       );
@@ -6039,7 +6048,7 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
-    if (event.author.bot) {
+    if (event.author.bot && this.qqConfig.forwardBotMessages !== true) {
       process.stderr.write(
         `[QQ:${this.name}] Bot message dropped in group ${sanitizeLogText(event.group_openid, 64)}\n`,
       );
