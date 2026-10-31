@@ -1476,6 +1476,20 @@ jobs:
       - name: 'Run .github/scripts helper tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
+          # Route os.tmpdir() off the host /tmp tmpfs: its inode quota is
+          # small and shared across the pool, and e2e-build.test.mjs creates
+          # thousands of chunk files there (#15965 ENOSPC with 202G free).
+          # Same routing as the unit lanes (#10035), private per-run dir
+          # included: RUNNER_TEMP is shared, and a cancelled battery never
+          # reaches its own after() cleanup, so the fixture tree would stick
+          # around in _work/_temp. A hard kill stays uncovered either way.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          HELPER_TMPDIR="$(mktemp -d "${TMPDIR}/helper-tests-XXXXXX" 2>/dev/null)" || HELPER_TMPDIR=""
+          if [ -n "$HELPER_TMPDIR" ]; then
+            TMPDIR="$HELPER_TMPDIR"
+            export TMPDIR
+            trap 'rm -rf "$HELPER_TMPDIR"' EXIT
+          fi
           node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} 2>&1 | tee "${RUNNER_TEMP}/helper-attempt1.log" || {
             node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} &&
               echo "::warning::helper tests failed once and the retry absorbed it; attempt-1 failures: $(grep -E '^not ok' "${RUNNER_TEMP}/helper-attempt1.log" | head -5 | paste -sd ';' -) — count this toward the #12772 helper-battery recurrence threshold"
@@ -1538,13 +1552,16 @@ jobs:
         needs.classify_pr.outputs.skip_ci != 'true' &&
         (needs.classify_pr.outputs.ci_profile || 'full') == 'full'
       }}
-    # Run 40915920935 lost module requests to ERR_NETWORK_CHANGED on the
-    # shared ARM64 pool, before the app mounted. Use a fresh hosted runner
-    # to isolate this browser gate from other jobs' host network changes.
-    # Self-hosted steps below are dormant on this routing and retained for
-    # reversibility. Only the checkout-metadata and Node-preflight guards are
-    # pinned by tests; the font baseline guard is parked while this lane is hosted.
-    runs-on: 'ubuntu-latest'
+    # Keep the classifier's trust and hosted overrides, but use ARM64 for
+    # this lane independently of the ordinary Linux CI fleet. The history
+    # below is x64-specific, not a verdict on ARM64, but it is why this lane
+    # is fragile: #11250 moved it back to hosted after four pool attempts
+    # failed (run 34081409590). Three ran the smoke unpinned at 8 workers,
+    # half the host's 16 cores, against hosted's 2, and timed out broadly on
+    # visibility and clock waits. The fourth's transcript gate took 73 s
+    # against its 60 s budget while npm install alone took 28 min on that
+    # host. The smoke step pins the hosted worker count.
+    runs-on: '${{ contains(fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]''), ''self-hosted'') && fromJSON(''["self-hosted", "linux", "arm64"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     # Slow hosted mirrors kept downloading past 23 min; reserve time for
     # the 208 smoke tests and artifact cleanup after installation.
     timeout-minutes: 60
