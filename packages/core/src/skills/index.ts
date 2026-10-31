@@ -38,7 +38,7 @@ export {
 } from './types.js';
 
 // Main management class
-export { SkillManager } from './skill-manager.js';
+export { SkillManager, getActiveSkillWatcherCount } from './skill-manager.js';
 
 // Priority normalization, shared with the `/skills` display sort
 export { normalizeSkillPriority } from './skill-load.js';

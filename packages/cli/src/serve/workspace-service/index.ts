@@ -135,8 +135,9 @@ export {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Start throttle for background revalidation, measured from task start.
-const WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS = 1_000;
+// Start throttle for background revalidation, measured from task start. Shared
+// with the daemon-local catalog so both freshness policies stay equal.
+export const WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS = 1_000;
 // Wire-visible age at which snapshot.stale becomes true.
 const WORKSPACE_SKILLS_STALE_AFTER_MS = 1_000;
 const WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS = 5_000;

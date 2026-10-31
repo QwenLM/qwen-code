@@ -18,13 +18,19 @@ import {
   ExtensionManager,
   ExtensionStore,
   SkillManager,
+  getActiveSkillWatcherCount,
 } from '@qwen-code/qwen-code-core';
 import {
   ENV_CORRUPTED_PATH,
   ENV_WAS_RECOVERED,
   getUserSettingsPath,
 } from '../config/settings.js';
-import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
+import {
+  SKILLS_REVALIDATE_INTERVAL_MS,
+  createWorkspaceSkillsStatusProvider,
+  disposeAllSkillsWatchers,
+  disposeWorkspaceSkillsWatchers,
+} from './workspace-skills-status.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
 
 describe('createWorkspaceSkillsStatusProvider', () => {
@@ -34,6 +40,7 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     vi.stubEnv('QWEN_HOME', qwenHome);
   });
   afterEach(async () => {
+    disposeAllSkillsWatchers();
     vi.unstubAllEnvs();
     await fsp.rm(qwenHome, { recursive: true, force: true });
     vi.restoreAllMocks();
@@ -717,6 +724,545 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     });
     provider.invalidate?.(workspace);
     expect(await readSkill()).toBeUndefined();
+  });
+
+  it('starts one watcher set per workspace and stops it on invalidation and disposal', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-watch-'),
+    );
+    try {
+      const startWatching = vi.spyOn(SkillManager.prototype, 'startWatching');
+      const stopWatching = vi.spyOn(SkillManager.prototype, 'stopWatching');
+      const provider = createWorkspaceSkillsStatusProvider();
+      await provider(workspace);
+      await provider(workspace);
+      // Repeat reads reuse the retained SkillManager instead of re-watching.
+      expect(startWatching).toHaveBeenCalledTimes(1);
+
+      provider.invalidate?.(workspace);
+      expect(stopWatching).toHaveBeenCalledTimes(1);
+
+      await provider(workspace);
+      expect(startWatching).toHaveBeenCalledTimes(2);
+
+      provider.dispose?.();
+      expect(stopWatching).toHaveBeenCalledTimes(2);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('shares one watcher set between providers serving the same workspace', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-shared-'),
+    );
+    try {
+      await fsp.mkdir(path.join(workspace, '.qwen', 'skills'), {
+        recursive: true,
+      });
+      const first = createWorkspaceSkillsStatusProvider();
+      const second = createWorkspaceSkillsStatusProvider();
+      await first(workspace);
+      const firstCount = getActiveSkillWatcherCount();
+      expect(firstCount).toBeGreaterThan(0);
+
+      // The second provider serves the same workspace from its own retained
+      // manager, but it subscribes to the same native watchers.
+      await second(workspace);
+      expect(getActiveSkillWatcherCount()).toBe(firstCount);
+
+      first.dispose?.();
+      expect(getActiveSkillWatcherCount()).toBe(firstCount);
+
+      second.dispose?.();
+      await vi.waitFor(() => expect(getActiveSkillWatcherCount()).toBe(0));
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('does not watch or create the user Skills directory for an untrusted workspace', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-untrusted-'),
+    );
+    try {
+      const startWatching = vi.spyOn(SkillManager.prototype, 'startWatching');
+      const status = await createWorkspaceSkillsStatusProvider({
+        workspaceTrusted: false,
+        includeUntrustedSkills: true,
+      })(workspace);
+      expect(status.initialized).toBe(true);
+      expect(startWatching).not.toHaveBeenCalled();
+      await expect(
+        fsp.stat(path.join(qwenHome, 'skills')),
+      ).rejects.toMatchObject({ code: 'ENOENT' });
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('does not watch or create the user Skills directory in safe mode', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-safe-'),
+    );
+    try {
+      vi.stubEnv('QWEN_CODE_SAFE_MODE', '1');
+      const startWatching = vi.spyOn(SkillManager.prototype, 'startWatching');
+      const status = await createWorkspaceSkillsStatusProvider()(workspace);
+      expect(status.initialized).toBe(true);
+      expect(startWatching).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('does not leave a watcher behind when an invalidation discards the build', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-discard-'),
+    );
+    try {
+      await fsp.mkdir(path.join(workspace, '.qwen', 'skills'), {
+        recursive: true,
+      });
+      const startWatching = vi.spyOn(SkillManager.prototype, 'startWatching');
+      const provider = createWorkspaceSkillsStatusProvider();
+      const pending = provider(workspace);
+      // Invalidate while the first build is still scanning: it must not install
+      // its manager, and nothing may re-subscribe that discarded manager.
+      provider.invalidate?.(workspace);
+      await pending;
+      await vi.waitFor(() => expect(getActiveSkillWatcherCount()).toBe(0));
+      expect(startWatching).toHaveBeenCalledTimes(1);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('stops the tracked watchers when a workspace is removed and re-watches on the next read', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-remove-'),
+    );
+    try {
+      await fsp.mkdir(path.join(workspace, '.qwen', 'skills'), {
+        recursive: true,
+      });
+      const provider = createWorkspaceSkillsStatusProvider();
+      await provider(workspace);
+      const watchingCount = getActiveSkillWatcherCount();
+      expect(watchingCount).toBeGreaterThan(0);
+
+      const stopWatching = vi.spyOn(SkillManager.prototype, 'stopWatching');
+      disposeWorkspaceSkillsWatchers(workspace);
+      expect(stopWatching).toHaveBeenCalledTimes(1);
+      await vi.waitFor(() => expect(getActiveSkillWatcherCount()).toBe(0));
+
+      // The provider itself is still alive after a workspace removal, so a
+      // later read must re-subscribe instead of serving a stale cache.
+      await provider(workspace);
+      await vi.waitFor(() =>
+        expect(getActiveSkillWatcherCount()).toBe(watchingCount),
+      );
+
+      provider.dispose?.();
+      await vi.waitFor(() => expect(getActiveSkillWatcherCount()).toBe(0));
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('does not start watchers for a throwaway snapshot', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-snapshot-'),
+    );
+    try {
+      const directory = path.join(workspace, '.qwen', 'skills', 'direct');
+      await fsp.mkdir(directory, { recursive: true });
+      await fsp.writeFile(
+        path.join(directory, 'SKILL.md'),
+        '---\nname: direct\ndescription: Direct\n---\nBODY_direct',
+      );
+      const startWatching = vi.spyOn(SkillManager.prototype, 'startWatching');
+      const snapshot =
+        await createWorkspaceSkillsStatusProvider().snapshot(workspace);
+      expect(snapshot.skills.map((skill) => skill.name)).toContain('direct');
+      expect(startWatching).not.toHaveBeenCalled();
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('discovers a project Skill created, edited, and removed on disk', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-refresh-'),
+    );
+    try {
+      const startedAt = 1_000_000;
+      const provider = createWorkspaceSkillsStatusProvider();
+      // Only the read itself sees the advanced clock, so the polling below runs
+      // on real time.
+      const readAt = async (offsetMs: number) => {
+        const clock = vi
+          .spyOn(Date, 'now')
+          .mockReturnValue(startedAt + offsetMs);
+        try {
+          return await provider(workspace);
+        } finally {
+          clock.mockRestore();
+        }
+      };
+      const readSkills = async () => (await provider(workspace)).skills;
+      const skillNames = async () =>
+        (await readSkills()).map((skill) => skill.name);
+      await readAt(0);
+      expect(await skillNames()).not.toContain('external-skill');
+
+      const directory = path.join(
+        workspace,
+        '.qwen',
+        'skills',
+        'external-skill',
+      );
+      const manifest = path.join(directory, 'SKILL.md');
+      await fsp.mkdir(directory, { recursive: true });
+      await fsp.writeFile(
+        manifest,
+        '---\nname: external-skill\ndescription: External\n---\nBODY_external',
+      );
+      await readAt(SKILLS_REVALIDATE_INTERVAL_MS);
+      await vi.waitFor(
+        async () => expect(await skillNames()).toContain('external-skill'),
+        { timeout: 5_000 },
+      );
+
+      await fsp.writeFile(
+        manifest,
+        '---\nname: external-skill\ndescription: Edited\n---\nBODY_edited',
+      );
+      await readAt(SKILLS_REVALIDATE_INTERVAL_MS * 2);
+      await vi.waitFor(
+        async () =>
+          expect(
+            (await readSkills()).find(
+              (skill) => skill.name === 'external-skill',
+            )?.description,
+          ).toBe('Edited'),
+        { timeout: 5_000 },
+      );
+
+      await fsp.rm(directory, { recursive: true, force: true });
+      await readAt(SKILLS_REVALIDATE_INTERVAL_MS * 3);
+      await vi.waitFor(
+        async () => expect(await skillNames()).not.toContain('external-skill'),
+        { timeout: 5_000 },
+      );
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('applies on-disk Skill changes through the watcher instead of the revalidation fallback', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-watcher-'),
+    );
+    try {
+      // The Skills directory exists before the watcher starts, so the change
+      // below must arrive through a watcher event, not the 1 s fallback.
+      const skillsDir = path.join(workspace, '.qwen', 'skills');
+      await fsp.mkdir(skillsDir, { recursive: true });
+      // Freeze the clock so no read can schedule a background revalidation.
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      const originalRefreshCache = SkillManager.prototype.refreshCache;
+      const provider = createWorkspaceSkillsStatusProvider();
+      await provider(workspace);
+      const refreshSpy = vi.spyOn(SkillManager.prototype, 'refreshCache');
+      refreshSpy.mockImplementation(function (
+        this: SkillManager,
+        options?: Parameters<SkillManager['refreshCache']>[0],
+      ) {
+        if (options?.levels) {
+          return Promise.reject(new Error('revalidation scan must not run'));
+        }
+        return originalRefreshCache.call(this, options);
+      });
+      const skillNames = async () =>
+        (await provider(workspace)).skills.map((skill) => skill.name);
+
+      const directory = path.join(skillsDir, 'watched');
+      const manifest = path.join(directory, 'SKILL.md');
+      const writeManifest = (description: string) =>
+        fsp.writeFile(
+          manifest,
+          `---\nname: watched\ndescription: ${description}\n---\nBODY_${description}`,
+        );
+      await fsp.mkdir(directory, { recursive: true });
+      await writeManifest('Watched');
+      // Linux establishes the inotify watches asynchronously after `watch()`
+      // returns, so a write that lands in that window is folded into the
+      // initial scan (which `ignoreInitial` discards) and never replayed.
+      // Rewrite until an event is delivered: the frozen clock keeps the
+      // fallback scan out of this, so only a live watcher can observe it.
+      await vi.waitFor(
+        async () => {
+          if (!(await skillNames()).includes('watched')) {
+            await writeManifest('Watched');
+          }
+          expect(await skillNames()).toContain('watched');
+        },
+        { timeout: 10_000, interval: 250 },
+      );
+
+      await fsp.writeFile(
+        manifest,
+        '---\nname: watched\ndescription: Edited\n---\nBODY_edited',
+      );
+      await vi.waitFor(
+        async () =>
+          expect(
+            (await provider(workspace)).skills.find(
+              (skill) => skill.name === 'watched',
+            )?.description,
+          ).toBe('Edited'),
+        { timeout: 5_000 },
+      );
+
+      await fsp.rm(directory, { recursive: true, force: true });
+      await vi.waitFor(
+        async () => expect(await skillNames()).not.toContain('watched'),
+        { timeout: 5_000 },
+      );
+
+      // Every observation above came from the watcher's cache refresh.
+      expect(
+        refreshSpy.mock.calls.filter(([options]) => options?.levels),
+      ).toHaveLength(0);
+      clock.mockRestore();
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('revalidates in the background at the pinned interval instead of blocking a read', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-window-'),
+    );
+    try {
+      // The revalidation window is one second. Pin the literal: comparing the
+      // catalog constant to the runtime constant is an alias against an alias
+      // and stays green whichever way either is retuned.
+      expect(SKILLS_REVALIDATE_INTERVAL_MS).toBe(1_000);
+      const startedAt = 1_000_000;
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+      const originalRefreshCache = SkillManager.prototype.refreshCache;
+      const provider = createWorkspaceSkillsStatusProvider();
+      await provider(workspace);
+      const refreshSpy = vi.spyOn(SkillManager.prototype, 'refreshCache');
+      // Keep the revalidation in flight so each offset observes the throttle
+      // rather than a completed scan.
+      refreshSpy.mockImplementation(function (
+        this: SkillManager,
+        options?: Parameters<SkillManager['refreshCache']>[0],
+      ) {
+        if (options?.levels) return new Promise<never>(() => {});
+        return originalRefreshCache.call(this, options);
+      });
+      const forcedScans = () =>
+        refreshSpy.mock.calls.filter(([options]) => options?.levels).length;
+
+      clock.mockReturnValue(startedAt + SKILLS_REVALIDATE_INTERVAL_MS - 1);
+      await provider(workspace);
+      expect(forcedScans()).toBe(0);
+
+      clock.mockReturnValue(startedAt + SKILLS_REVALIDATE_INTERVAL_MS);
+      const status = await provider(workspace);
+      expect(forcedScans()).toBe(1);
+      // The read answered from the retained cache instead of waiting for the
+      // scan it just started.
+      expect(status.initialized).toBe(true);
+
+      clock.mockReturnValue(startedAt + SKILLS_REVALIDATE_INTERVAL_MS + 1);
+      await provider(workspace);
+      expect(forcedScans()).toBe(1);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('restarts the revalidation window from the scan it just ran', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-restart-'),
+    );
+    try {
+      const startedAt = 1_000_000;
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+      const originalRefreshCache = SkillManager.prototype.refreshCache;
+      const provider = createWorkspaceSkillsStatusProvider();
+      await provider(workspace);
+      const refreshSpy = vi.spyOn(SkillManager.prototype, 'refreshCache');
+      refreshSpy.mockImplementation(function (
+        this: SkillManager,
+        options?: Parameters<SkillManager['refreshCache']>[0],
+      ) {
+        if (options?.levels) return Promise.resolve();
+        return originalRefreshCache.call(this, options);
+      });
+      const forcedScans = () =>
+        refreshSpy.mock.calls.filter(([options]) => options?.levels).length;
+
+      clock.mockReturnValue(startedAt + SKILLS_REVALIDATE_INTERVAL_MS);
+      await provider(workspace);
+      expect(forcedScans()).toBe(1);
+      // Let the scan settle so the next read observes the restarted window.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      clock.mockReturnValue(startedAt + SKILLS_REVALIDATE_INTERVAL_MS + 1);
+      await provider(workspace);
+      expect(forcedScans()).toBe(1);
+
+      clock.mockReturnValue(startedAt + SKILLS_REVALIDATE_INTERVAL_MS * 2);
+      await provider(workspace);
+      expect(forcedScans()).toBe(2);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('revalidates after a backwards clock step instead of freezing', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-clock-'),
+    );
+    try {
+      const startedAt = 1_000_000;
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+      const originalRefreshCache = SkillManager.prototype.refreshCache;
+      const provider = createWorkspaceSkillsStatusProvider();
+      await provider(workspace);
+      const refreshSpy = vi.spyOn(SkillManager.prototype, 'refreshCache');
+      refreshSpy.mockImplementation(function (
+        this: SkillManager,
+        options?: Parameters<SkillManager['refreshCache']>[0],
+      ) {
+        if (options?.levels) return Promise.resolve();
+        return originalRefreshCache.call(this, options);
+      });
+
+      // NTP correction or a snapshot restore moves the clock back an hour; the
+      // negative interval must not read as "just revalidated".
+      clock.mockReturnValue(startedAt - 3_600_000);
+      await provider(workspace);
+
+      expect(
+        refreshSpy.mock.calls.filter(([options]) => options?.levels),
+      ).toHaveLength(1);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('shares one background revalidation between concurrent readers', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-burst-'),
+    );
+    try {
+      const startedAt = 1_000_000;
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+      const originalRefreshCache = SkillManager.prototype.refreshCache;
+      const provider = createWorkspaceSkillsStatusProvider();
+      await provider(workspace);
+      const refreshSpy = vi.spyOn(SkillManager.prototype, 'refreshCache');
+      refreshSpy.mockImplementation(function (
+        this: SkillManager,
+        options?: Parameters<SkillManager['refreshCache']>[0],
+      ) {
+        if (options?.levels) return new Promise<never>(() => {});
+        return originalRefreshCache.call(this, options);
+      });
+      const forcedScans = () =>
+        refreshSpy.mock.calls.filter(([options]) => options?.levels).length;
+
+      clock.mockReturnValue(startedAt + SKILLS_REVALIDATE_INTERVAL_MS);
+      // This read starts the revalidation and stays in flight.
+      await provider(workspace);
+      expect(forcedScans()).toBe(1);
+
+      // Past the window again, with no scan completed: without the shared
+      // promise each reader would start its own.
+      clock.mockReturnValue(startedAt + SKILLS_REVALIDATE_INTERVAL_MS * 2);
+      await Promise.all(Array.from({ length: 10 }, () => provider(workspace)));
+
+      expect(forcedScans()).toBe(1);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the retained catalog when a background revalidation fails and retries later', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-retry-'),
+    );
+    try {
+      const startedAt = 1_000_000;
+      const clock = vi.spyOn(Date, 'now').mockReturnValue(startedAt);
+      const originalRefreshCache = SkillManager.prototype.refreshCache;
+      const directory = path.join(workspace, '.qwen', 'skills', 'kept');
+      await fsp.mkdir(directory, { recursive: true });
+      await fsp.writeFile(
+        path.join(directory, 'SKILL.md'),
+        '---\nname: kept\ndescription: Kept\n---\nBODY_kept',
+      );
+      const provider = createWorkspaceSkillsStatusProvider();
+      const status = await provider(workspace);
+      expect(status.skills.map((skill) => skill.name)).toContain('kept');
+
+      const refreshSpy = vi.spyOn(SkillManager.prototype, 'refreshCache');
+      refreshSpy.mockImplementation(function (
+        this: SkillManager,
+        options?: Parameters<SkillManager['refreshCache']>[0],
+      ) {
+        if (options?.levels) return Promise.reject(new Error('scan failed'));
+        return originalRefreshCache.call(this, options);
+      });
+      clock.mockReturnValue(startedAt + SKILLS_REVALIDATE_INTERVAL_MS);
+      // The read answers from the cache; the failed revalidation is logged, not
+      // surfaced as a broken catalog.
+      expect((await provider(workspace)).initialized).toBe(true);
+      await vi.waitFor(
+        () =>
+          expect(mockWriteStderrLine).toHaveBeenCalledWith(
+            expect.stringContaining('revalidation failed'),
+          ),
+        { timeout: 5_000 },
+      );
+      // Read *after* the rejection handler has run: the retained catalog must
+      // survive the failure, not just the read that scheduled it.
+      expect(
+        (await provider(workspace)).skills.map((skill) => skill.name),
+      ).toContain('kept');
+
+      const added = path.join(workspace, '.qwen', 'skills', 'added');
+      await fsp.mkdir(added, { recursive: true });
+      await fsp.writeFile(
+        path.join(added, 'SKILL.md'),
+        '---\nname: added\ndescription: Added\n---\nBODY_added',
+      );
+      refreshSpy.mockImplementation(function (
+        this: SkillManager,
+        options?: Parameters<SkillManager['refreshCache']>[0],
+      ) {
+        return originalRefreshCache.call(this, options);
+      });
+      clock.mockReturnValue(startedAt + SKILLS_REVALIDATE_INTERVAL_MS * 2);
+      await provider(workspace);
+      clock.mockRestore();
+      await vi.waitFor(
+        async () =>
+          expect(
+            (await provider(workspace)).skills.map((skill) => skill.name),
+          ).toContain('added'),
+        { timeout: 5_000 },
+      );
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
   });
 
   it.each(['safe', 'untrusted', 'inert-untrusted'] as const)(

@@ -14,6 +14,9 @@ const mockCreateDaemonWorkspaceService = vi.hoisted(() =>
 
 vi.mock('./workspace-service/index.js', () => ({
   createDaemonWorkspaceService: mockCreateDaemonWorkspaceService,
+  // The Skills status provider reuses the runtime interval for its revalidation
+  // fallback; the barrel is mocked here, so the constant has to be present.
+  WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS: 1_000,
 }));
 
 const { createServeApp } = await import('./server.js');

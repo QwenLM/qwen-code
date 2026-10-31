@@ -231,6 +231,9 @@ describe('SkillManager', () => {
   });
 
   afterEach(() => {
+    // Release this test's shared watcher subscriptions so the next test starts
+    // from an empty registry.
+    manager.stopWatching();
     vi.restoreAllMocks();
   });
 
@@ -1677,6 +1680,56 @@ describe('SkillManager', () => {
         Object.defineProperty(process, 'platform', { value: platform });
         vi.resetModules();
       }
+    });
+
+    it('retries the watch after chokidar reports an attach error', async () => {
+      vi.mocked(fsSync.existsSync).mockImplementation(
+        (p) => String(p) === PROJECT_QWEN_DIR,
+      );
+      mockReaddir();
+      mockWatch.mockClear();
+      const firstWatcher = Object.assign(new EventEmitter(), {
+        close: vi.fn().mockResolvedValue(undefined),
+      });
+      mockWatch.mockReturnValueOnce(firstWatcher);
+
+      await manager.startWatching();
+      expect(manager.hasActiveWatcher()).toBe(true);
+
+      // chokidar reports attach failures through the watcher's `error` event,
+      // after `startWatching()` resolved. The start latch has to clear so a
+      // later call retries instead of short-circuiting on a start that never
+      // attached.
+      firstWatcher.emit('error', new Error('EMFILE: too many open files'));
+
+      expect(manager.hasActiveWatcher()).toBe(false);
+      const secondWatcher = Object.assign(new EventEmitter(), {
+        close: vi.fn().mockResolvedValue(undefined),
+      });
+      mockWatch.mockReturnValueOnce(secondWatcher);
+
+      await manager.startWatching();
+
+      expect(manager.hasActiveWatcher()).toBe(true);
+      expect(secondWatcher.listenerCount('all')).toBe(1);
+    });
+
+    it('clears the start latch when no watcher attaches, so a later call retries', async () => {
+      // No skill directory exists, so `updateWatchersFromCache()` attaches no
+      // watcher. The start must not stay latched as "started": a later call has
+      // to run the start path again instead of short-circuiting.
+      vi.mocked(fsSync.existsSync).mockReturnValue(false);
+      mockReaddir();
+      const refreshSpy = vi.spyOn(manager, 'refreshCache');
+
+      await manager.startWatching();
+
+      expect(manager.hasActiveWatcher()).toBe(false);
+      expect(refreshSpy).toHaveBeenCalledOnce();
+
+      await manager.startWatching();
+
+      expect(refreshSpy).toHaveBeenCalledTimes(2);
     });
 
     it('should pass ignored function and shallow depth to chokidar', async () => {
