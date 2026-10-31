@@ -1669,6 +1669,46 @@ describe('SDK Java Flyway re-check of open PRs', () => {
   });
 });
 
+describe('SDK Java Hosted latency baseline CI contract', () => {
+  it('checks hosted latency measurements directly after failsafe reports', () => {
+    const block = job('hosted-harness-mysql');
+    const failsafeStep = step(
+      block,
+      'Check that every Hosted integration test class ran',
+    );
+    const latencyStep = step(block, 'Check Hosted latency measurements');
+
+    const failsafeIndex = block.indexOf(failsafeStep);
+    const latencyIndex = block.indexOf(latencyStep);
+    // Assert adjacency: latency step must immediately follow the failsafe step
+    expect(latencyIndex).toBeGreaterThan(failsafeIndex);
+    const between = block.slice(
+      failsafeIndex + failsafeStep.length,
+      latencyIndex,
+    );
+    expect(between).not.toContain('- name:');
+
+    expect(failsafeStep).toContain(
+      'node scripts/check-failsafe-reports.js hosted packages/managed-agent-server',
+    );
+    expect(latencyStep).toContain(
+      'test -s packages/managed-agent-server/verification/target/hosted-latency-baseline.json',
+    );
+    expect(latencyStep).toContain(
+      'npx vitest run cli/hosted-latency-baseline.test.ts',
+    );
+  });
+
+  it('uploads the hosted-latency-baseline.json artifact', () => {
+    const block = job('hosted-harness-mysql');
+    const uploadStep = step(block, 'Upload Hosted process reports');
+    expect(uploadStep).toContain('actions/upload-artifact@');
+    expect(uploadStep).toContain(
+      'packages/managed-agent-server/verification/target/hosted-latency-baseline.json',
+    );
+  });
+});
+
 // #13623: three main runs lost their GitHub-hosted lanes to runner-queue
 // starvation — every failed job recorded zero steps and no assigned runner
 // while the pool legs passed. The MySQL lane is pool-safe (per-job

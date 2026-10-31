@@ -70,6 +70,39 @@ describe('Hosted latency baseline gate', () => {
     );
   });
 
+  it('reports five comparison deltas and the no-tool null branch', () => {
+    const baseline = fixture();
+    const report = fixture();
+    // Mutate fields to test the 5 delta properties
+    report.samples[1].modelRounds[0].firstTextMs += 10;
+    report.samples[1].firstVisibleTextMs += 20;
+    report.samples[1].turnCompleteMs += 30;
+    report.samples[1].toolWaitMs = report.samples[1].toolWaitMs! + 40;
+    // Maintain invariants: toolWaitMs = runtimeReadyMs - first.finishedMs
+    // (15200 + 10) - (250 - 30) = 14990 = 14950 + 40
+    report.samples[1].runtimeReadyMs += 10;
+    report.samples[1].modelRounds[0].finishedMs -= 30;
+    // Maintain chain: runtimeReadyMs <= acquireMs <= executionStartMs < modelRounds[1].requestMs
+    report.samples[1].acquireMs = report.samples[1].acquireMs! + 10;
+    report.samples[1].executionStartMs =
+      report.samples[1].executionStartMs! + 10;
+    report.samples[1].modelRounds[1].requestMs += 10;
+    report.samples[1].storeRequests += 5;
+
+    const deltas = compareHostedLatency(baseline, report);
+    const toolDelta = deltas.find((d) => d.scenario === 'tool');
+    expect(toolDelta).toBeDefined();
+    expect(toolDelta!.firstModelTextDeltaMs).toBe(10);
+    expect(toolDelta!.firstVisibleTextDeltaMs).toBe(20);
+    expect(toolDelta!.turnCompleteDeltaMs).toBe(30);
+    expect(toolDelta!.toolWaitDeltaMs).toBe(40);
+    expect(toolDelta!.storeRequestsDelta).toBe(5);
+
+    const noToolDelta = deltas.find((d) => d.scenario === 'no-tool');
+    expect(noToolDelta).toBeDefined();
+    expect(noToolDelta!.toolWaitDeltaMs).toBeNull();
+  });
+
   it.each([
     ['missing scenario', (r: HostedLatencyMeasurement) => r.samples.pop()],
     [
@@ -173,6 +206,27 @@ describe('Hosted latency baseline gate', () => {
       'wrong wait duration',
       (r: HostedLatencyMeasurement) => {
         r.samples[1].toolWaitMs = 0;
+      },
+    ],
+    [
+      'inconsistent tool-wait arithmetic',
+      (r: HostedLatencyMeasurement) => {
+        r.samples[1].toolWaitMs =
+          r.samples[1].runtimeReadyMs -
+          r.samples[1].modelRounds[0].finishedMs +
+          1;
+      },
+    ],
+    [
+      'completion before first text',
+      (r: HostedLatencyMeasurement) => {
+        r.samples[0].turnCompleteMs = r.samples[0].firstVisibleTextMs - 1;
+      },
+    ],
+    [
+      'execution before acquisition',
+      (r: HostedLatencyMeasurement) => {
+        r.samples[1].executionStartMs = r.samples[1].acquireMs! - 1;
       },
     ],
   ] as const)('rejects %s', (_name, mutate) => {
