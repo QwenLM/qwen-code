@@ -112,6 +112,15 @@ export interface QQChannelConfig {
    * A non-integer or a value below -1 warns on stderr and falls back to `-1`.
    */
   moderationRecallWindowMs?: number;
+  /**
+   * Expose the outbound file tool (`qq_send_file`) to the agent in this
+   * channel's sessions. Default false: the tool lets the model hand a local
+   * file to QQ under the bot's own identity, so it stays off until the channel
+   * opts in. Only files inside the session workspace or the system temporary
+   * directory, non-empty and at most 20 MB, can be sent.
+   */
+  fileTools?: boolean;
+
   /** Max buffer chars before forcing an immediate flush (stream+cron). Default 4096. */
   bufferFlushLength?: number;
   /** Max reconnect attempts before giving up. Default 20. 0 = unlimited. */

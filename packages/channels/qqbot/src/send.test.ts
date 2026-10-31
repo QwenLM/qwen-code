@@ -12,9 +12,12 @@ import type {
   Envelope,
 } from '@qwen-code/channel-base';
 import { isValidChatId, DeliveryError } from './QQChannel.js';
+import { QQ_FILE_TYPE, QQRichMediaError } from './api.js';
+import type { QQMediaKind } from './file-tools.js';
 
 const {
   mockSendQQMessage,
+  mockUploadQQRichMedia,
   mockFetchAccessToken,
   mockFetchGatewayUrl,
   MockWebSocket,
@@ -53,6 +56,7 @@ const {
 
   return {
     mockSendQQMessage: vi.fn(),
+    mockUploadQQRichMedia: vi.fn(),
     mockFetchAccessToken: vi.fn(),
     mockFetchGatewayUrl: vi.fn(),
     mockBaseHandleInbound: vi.fn((_env: Envelope) => Promise.resolve()),
@@ -70,12 +74,19 @@ vi.mock('node:fs', () => ({
   existsSync: vi.fn(() => false),
 }));
 
-vi.mock('./api.js', () => ({
-  sendQQMessage: mockSendQQMessage,
-  getApiBase: () => 'https://api.sgroup.qq.com',
-  fetchAccessToken: mockFetchAccessToken,
-  fetchGatewayUrl: mockFetchGatewayUrl,
-}));
+vi.mock('./api.js', async (importOriginal) => {
+  // Keep the real error class and error-code parser: the sendQQMedia assertions
+  // below must exercise the production code, not a copy of it.
+  const actual = await importOriginal<typeof import('./api.js')>();
+  return {
+    ...actual,
+    sendQQMessage: mockSendQQMessage,
+    getApiBase: () => 'https://api.sgroup.qq.com',
+    fetchAccessToken: mockFetchAccessToken,
+    fetchGatewayUrl: mockFetchGatewayUrl,
+    uploadQQRichMedia: mockUploadQQRichMedia,
+  };
+});
 
 import {
   renameSync,
@@ -5700,5 +5711,421 @@ describe('disconnect clears routing state', () => {
     // resetRoutingState drops the routing maps: keeping a stale chat type
     // would let a later resolveRoute classify a removed chat as deliverable.
     expect(chatTypeMap.size).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// sendQQMedia: the outbound media path shares the text path's delivery core
+// ---------------------------------------------------------------------------
+describe('sendQQMedia', () => {
+  interface SendMediaInput {
+    sessionId: string;
+    chatId: string;
+    kind: QQMediaKind;
+    fileName: string;
+    bytes: Buffer;
+  }
+  interface SendMediaResult {
+    ok: boolean;
+    message?: string;
+  }
+  type SendQQMedia = (input: SendMediaInput) => Promise<SendMediaResult>;
+
+  function makeChannel(overrides?: {
+    chatType?: 'c2c' | 'group';
+    sessionAnchor?: string;
+    chatAnchor?: string;
+  }): QQChannelInstance {
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        dmPolicy: 'open',
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    if (overrides?.chatType) {
+      (chp['chatTypeMap'] as Map<string, string>).set(
+        'test-chat-id',
+        overrides.chatType,
+      );
+    }
+    const stamp = { timestamp: Date.now() };
+    if (overrides?.sessionAnchor) {
+      (
+        chp['sessionReplyMsgId'] as Map<
+          string,
+          { msgId: string; timestamp: number }
+        >
+      ).set('s1', { msgId: overrides.sessionAnchor, ...stamp });
+    }
+    if (overrides?.chatAnchor) {
+      (
+        chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
+      ).set('test-chat-id', { msgId: overrides.chatAnchor, ...stamp });
+    }
+    return ch;
+  }
+
+  function sendMedia(
+    ch: QQChannelInstance,
+    input: SendMediaInput,
+  ): Promise<SendMediaResult> {
+    const fn = (ch as unknown as { sendQQMedia: SendQQMedia }).sendQQMedia;
+    return fn.call(ch, input);
+  }
+
+  function seqOf(ch: QQChannelInstance, msgId: string): number | undefined {
+    return (ch as unknown as Record<string, unknown>)['msgSeqMap'] instanceof
+      Map
+      ? (
+          (ch as unknown as Record<string, unknown>)['msgSeqMap'] as Map<
+            string,
+            number
+          >
+        ).get(msgId)
+      : undefined;
+  }
+
+  const input: SendMediaInput = {
+    sessionId: 's1',
+    chatId: 'test-chat-id',
+    kind: 'file',
+    fileName: 'report.pdf',
+    bytes: Buffer.from('body'),
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    mockUploadQQRichMedia.mockResolvedValue({
+      fileInfo: 'FILE-INFO',
+      ttl: 86400,
+    });
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: 'refreshed-token',
+      expiresIn: 7200,
+    });
+  });
+
+  it('sends msg_type=7 with the uploaded file_info anchored to the session reply', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+
+    const result = await sendMedia(ch, input);
+
+    expect(result).toEqual({ ok: true });
+    expect(mockUploadQQRichMedia).toHaveBeenCalledWith(
+      expect.objectContaining({
+        scope: 'users',
+        chatId: 'test-chat-id',
+        fileName: 'report.pdf',
+        accessToken: 'test-token',
+        fileType: QQ_FILE_TYPE.file,
+      }),
+    );
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      {
+        msg_type: 7,
+        media: { file_info: 'FILE-INFO' },
+        msg_id: 'msg-anchor',
+        msg_seq: 1,
+      },
+    );
+  });
+
+  it('routes the upload through the group scope for a group chat', async () => {
+    const ch = makeChannel({ chatType: 'group', sessionAnchor: 'msg-anchor' });
+
+    await sendMedia(ch, input);
+
+    expect(mockUploadQQRichMedia).toHaveBeenCalledWith(
+      expect.objectContaining({ scope: 'groups' }),
+    );
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/groups/test-chat-id/messages',
+      'test-token',
+      expect.objectContaining({ msg_type: 7 }),
+    );
+  });
+
+  it('shares the msg_seq counter with the text path under one anchor', async () => {
+    const ch = makeChannel({
+      chatType: 'c2c',
+      sessionAnchor: 'msg-anchor',
+      chatAnchor: 'msg-anchor',
+    });
+
+    await sendMedia(ch, input);
+    expect(seqOf(ch, 'msg-anchor')).toBe(1);
+
+    mockSendQQMessage.mockClear();
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    // The text send must continue the same counter; restarting at 1 would
+    // replay a (msg_id, msg_seq) pair QQ silently dedupes.
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      expect.objectContaining({ msg_id: 'msg-anchor', msg_seq: 2 }),
+    );
+  });
+
+  it('sends without an anchor when the session has none', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+
+    const result = await sendMedia(ch, input);
+
+    expect(result).toEqual({ ok: true });
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { msg_type: 7, media: { file_info: 'FILE-INFO' } },
+    );
+  });
+
+  it('refuses to send when active messages are disabled and there is no anchor', async () => {
+    const ch = makeChannel({ chatType: 'group' });
+    (
+      (ch as unknown as Record<string, unknown>)[
+        'groupActiveMsgEnabled'
+      ] as Map<string, boolean>
+    ).set('test-chat-id', false);
+
+    const result = await sendMedia(ch, input);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('active messages are disabled');
+    expect(mockUploadQQRichMedia).not.toHaveBeenCalled();
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('reports an upload failure instead of sending anything', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    mockUploadQQRichMedia.mockRejectedValue(
+      new QQRichMediaError('merge', 200, 40093002, 'over quota'),
+    );
+
+    const result = await sendMedia(ch, input);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('daily file-sending limit');
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('retries as an active message when the anchored send is rejected', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    mockSendQQMessage
+      .mockResolvedValueOnce(
+        mockResponse(false, 400, JSON.stringify({ code: 40034004 })),
+      )
+      .mockResolvedValueOnce(mockResponse(true));
+
+    const result = await sendMedia(ch, input);
+
+    expect(result).toEqual({ ok: true });
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    // The retry must drop the anchor: carrying msg_id/msg_seq would replay the
+    // passive attempt that was just rejected.
+    expect(mockSendQQMessage).toHaveBeenLastCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      { msg_type: 7, media: { file_info: 'FILE-INFO' } },
+    );
+    // The rejected passive attempt must not consume a msg_seq.
+    expect(seqOf(ch, 'msg-anchor')).toBe(0);
+  });
+
+  it('rolls back the seq and reports the active retry failure without a text fallback', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    mockSendQQMessage.mockResolvedValue(
+      mockResponse(false, 400, JSON.stringify({ code: 40034004 })),
+    );
+
+    const result = await sendMedia(ch, input);
+
+    expect(result.ok).toBe(false);
+    // The specific text, not just the code: the generic branch also contains it.
+    expect(result.message).toContain('safe to retry');
+    expect(result.message).not.toContain('rejected the file message');
+    // Never a text send: replacing the file with a text message would read as
+    // success while the user never received the file.
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(mockSendQQMessage).toHaveBeenLastCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat-id/messages',
+      'test-token',
+      expect.objectContaining({ msg_type: 7 }),
+    );
+    expect(seqOf(ch, 'msg-anchor')).toBe(0);
+  });
+
+  it('does not retry an expired file handle', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    mockSendQQMessage.mockResolvedValue(
+      mockResponse(false, 400, JSON.stringify({ code: 304080 })),
+    );
+
+    const result = await sendMedia(ch, input);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('handle expired');
+    // The handle is gone, so re-sending the same file_info would fail again.
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(seqOf(ch, 'msg-anchor')).toBe(0);
+  });
+
+  it('rolls the seq back once when the active retry throws', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    const msgSeqMap = (ch as unknown as Record<string, unknown>)[
+      'msgSeqMap'
+    ] as Map<string, number>;
+    mockSendQQMessage
+      .mockResolvedValueOnce(
+        mockResponse(false, 400, JSON.stringify({ code: 40034004 })),
+      )
+      .mockImplementationOnce(async () => {
+        // A concurrent send under the same msgId took the next seq while this
+        // one was in flight; rolling back again would erase its allocation.
+        msgSeqMap.set('msg-anchor', (msgSeqMap.get('msg-anchor') ?? 0) + 1);
+        throw new Error('socket hang up');
+      });
+
+    const result = await sendMedia(ch, input);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('did not complete');
+    expect(seqOf(ch, 'msg-anchor')).toBe(1);
+  });
+
+  it('does not retry an anchored send that was rate limited', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    mockSendQQMessage.mockResolvedValue(
+      mockResponse(false, 429, JSON.stringify({ code: 11244 })),
+    );
+
+    const result = await sendMedia(ch, input);
+
+    expect(result.ok).toBe(false);
+    // A retry would double the rate-limit pressure the 429 just reported.
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(seqOf(ch, 'msg-anchor')).toBe(0);
+  });
+
+  it('does not retry as an active message when the chat forbids active messages', async () => {
+    const ch = makeChannel({ chatType: 'group', sessionAnchor: 'msg-anchor' });
+    (
+      (ch as unknown as Record<string, unknown>)[
+        'groupActiveMsgEnabled'
+      ] as Map<string, boolean>
+    ).set('test-chat-id', false);
+    mockSendQQMessage.mockResolvedValue(
+      mockResponse(false, 400, JSON.stringify({ code: 40034004 })),
+    );
+
+    const result = await sendMedia(ch, input);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('active messages are disabled');
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(seqOf(ch, 'msg-anchor')).toBe(0);
+  });
+
+  it('reads the error code from a body longer than the log excerpt', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    mockSendQQMessage.mockResolvedValue(
+      mockResponse(
+        false,
+        400,
+        JSON.stringify({ message: 'x'.repeat(400), code: 304080 }),
+      ),
+    );
+
+    const result = await sendMedia(ch, input);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('handle expired');
+  });
+
+  it('reports a transport error as a tool failure rather than throwing', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    mockSendQQMessage.mockRejectedValue(new Error('socket hang up'));
+
+    const result = await sendMedia(ch, input);
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('did not complete');
+    expect(seqOf(ch, 'msg-anchor')).toBe(0);
+  });
+
+  it('maps each media kind to its platform file_type', async () => {
+    const cases: Array<[QQMediaKind, number]> = [
+      ['file', QQ_FILE_TYPE.file],
+      ['image', QQ_FILE_TYPE.image],
+      ['video', QQ_FILE_TYPE.video],
+      ['voice', QQ_FILE_TYPE.voice],
+    ];
+
+    for (const [kind, fileType] of cases) {
+      const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+
+      await sendMedia(ch, { ...input, kind });
+
+      expect(mockUploadQQRichMedia).toHaveBeenLastCalledWith(
+        expect.objectContaining({ fileType }),
+      );
+    }
+  });
+
+  it('prefixes an upload failure with the tool that was invoked', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    mockUploadQQRichMedia.mockRejectedValue(
+      new QQRichMediaError('merge', 200, 850019, 'unsupported'),
+    );
+
+    const result = await sendMedia(ch, {
+      ...input,
+      kind: 'image',
+      fileName: 'chart.png',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('qq_send_image:');
+    expect(result.message).toContain('does not support this file format');
+  });
+
+  it('prefixes a send failure with the tool that was invoked', async () => {
+    const ch = makeChannel({ chatType: 'c2c', sessionAnchor: 'msg-anchor' });
+    mockSendQQMessage.mockResolvedValue(
+      mockResponse(false, 429, JSON.stringify({ code: 11244 })),
+    );
+
+    const result = await sendMedia(ch, {
+      ...input,
+      kind: 'voice',
+      fileName: 'note.wav',
+    });
+
+    expect(result.ok).toBe(false);
+    expect(result.message).toContain('qq_send_voice:');
   });
 });

@@ -4621,3 +4621,128 @@ describe('channel-base test double', () => {
     expect(mocked.truncateUtf16Units).toBe(actual.truncateUtf16Units);
   });
 });
+
+// The outbound media tools are what the model calls to hand a local file back
+// to the chat, so their registration switch and chat binding are pinned here
+// rather than only in the tool-unit tests.
+describe('outbound media tool registration', () => {
+  function registeredTools(
+    configOverrides?: Record<string, unknown>,
+  ): Array<{ name: string; owner?: string }> {
+    const registered: Array<{ name: string; owner?: string }> = [];
+    makeChannel(configOverrides, {
+      registerChannelTool: (tool: { name: string; owner?: string }) =>
+        registered.push(tool),
+    });
+    return registered;
+  }
+
+  const OUTBOUND_TOOL_NAMES = [
+    'qq_send_file',
+    'qq_send_image',
+    'qq_send_video',
+    'qq_send_voice',
+  ];
+
+  function fileToolNames(configOverrides?: Record<string, unknown>): string[] {
+    return registeredTools(configOverrides)
+      .map((tool) => tool.name)
+      .filter((name) => OUTBOUND_TOOL_NAMES.includes(name));
+  }
+
+  it('registers nothing by default', () => {
+    expect(fileToolNames()).toEqual([]);
+  });
+
+  it('registers the four outbound media tools when fileTools is true', () => {
+    expect(fileToolNames({ fileTools: true })).toEqual(OUTBOUND_TOOL_NAMES);
+  });
+
+  it('treats any value other than true as disabled', () => {
+    expect(fileToolNames({ fileTools: false })).toEqual([]);
+    expect(fileToolNames({ fileTools: 'yes' })).toEqual([]);
+  });
+
+  it('tags the tools with the owning channel', () => {
+    expect(registeredTools({ fileTools: true })).toEqual(
+      OUTBOUND_TOOL_NAMES.map((name) =>
+        expect.objectContaining({ name, owner: 'test-bot' }),
+      ),
+    );
+  });
+
+  it('skips registration on bridges without channel tool support', () => {
+    expect(() => makeChannel({ fileTools: true })).not.toThrow();
+  });
+
+  type FileTool = {
+    name: string;
+    handler: (
+      args: Record<string, unknown>,
+      context: { sessionId: string },
+    ) => Promise<string | { text: string; isError?: boolean }>;
+  };
+
+  function fileToolWithRouter(router: Record<string, unknown>): FileTool {
+    const registered: FileTool[] = [];
+    makeChannel(
+      { fileTools: true },
+      { registerChannelTool: (tool: FileTool) => registered.push(tool) },
+      { router: { getSessionCwd: () => '/tmp', ...router } },
+    );
+    const tool = registered.find((entry) => entry.name === 'qq_send_file');
+    if (!tool) throw new Error('qq_send_file was not registered');
+    return tool;
+  }
+
+  async function callTool(
+    tool: FileTool,
+    sessionId: string,
+  ): Promise<{ text: string; isError: boolean }> {
+    const result = await tool.handler(
+      { path: '/definitely/not/here' },
+      { sessionId },
+    );
+    return typeof result === 'string'
+      ? { text: result, isError: false }
+      : { text: result.text, isError: result.isError === true };
+  }
+
+  it('resolves the chat from the router and then checks the path', async () => {
+    const tool = fileToolWithRouter({
+      getTarget: () => ({
+        channelName: 'test-bot',
+        chatId: 'user-chat-id',
+      }),
+    });
+
+    const result = await callTool(tool, 's1');
+
+    // Past the binding gate: the path check is what fails now.
+    expect(result.text).toContain('the file does not exist');
+    expect(result.text).not.toContain('No QQ chat is bound');
+  });
+
+  it('refuses the tool when the router has no target for the session', async () => {
+    const tool = fileToolWithRouter({ getTarget: () => undefined });
+
+    const result = await callTool(tool, 's1');
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('No QQ chat is bound');
+  });
+
+  it('does not send through another channel target', async () => {
+    const tool = fileToolWithRouter({
+      getTarget: () => ({
+        channelName: 'other-bot',
+        chatId: 'other-chat-id',
+      }),
+    });
+
+    const result = await callTool(tool, 's1');
+
+    expect(result.isError).toBe(true);
+    expect(result.text).toContain('No QQ chat is bound');
+  });
+});
