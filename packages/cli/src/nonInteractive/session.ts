@@ -56,6 +56,15 @@ import {
 
 const debugLogger = createDebugLogger('NON_INTERACTIVE_SESSION');
 
+// Both shipped SDKs abandon an initialize control request after 60 s
+// (`DEFAULT_CONTROL_REQUEST_TIMEOUT` in the TypeScript SDK,
+// `control_request = 60.0` in the Python SDK). The deferred reply is a
+// readiness signal, so bounding it below that budget is what keeps a slow
+// config initialization (MCP discovery can be configured up to 300 s per
+// server) from failing the handshake on the client while the CLI keeps
+// initializing.
+export const SDK_INITIALIZE_REPLY_TIMEOUT_MS = 55_000;
+
 interface MonitorStartedQueueItem {
   task_id: string;
   tool_use_id?: string;
@@ -409,6 +418,43 @@ class Session {
   }
 
   /**
+   * Awaits config initialization, but gives up before the SDK clients abandon
+   * the initialize request. The deferred reply is a readiness signal, so its
+   * bound is what stops a slow init from leaving the success frame addressed
+   * to a request_id the client has already dropped.
+   */
+  private async awaitConfigInitializationWithReplyTimeout(
+    requestId: string,
+    options: ConfigInitializeOptions,
+  ): Promise<boolean> {
+    let timeoutId: NodeJS.Timeout | undefined;
+    const timedOut = new Promise<false>((resolve) => {
+      timeoutId = setTimeout(
+        () => resolve(false),
+        SDK_INITIALIZE_REPLY_TIMEOUT_MS,
+      );
+    });
+    try {
+      const initialized = await Promise.race([
+        this.ensureConfigInitialized(options).then(() => true),
+        timedOut,
+      ]);
+      if (initialized) {
+        return true;
+      }
+    } finally {
+      clearTimeout(timeoutId);
+    }
+
+    const message = `Initialization did not finish within ${
+      SDK_INITIALIZE_REPLY_TIMEOUT_MS / 1000
+    }s`;
+    this.dispatcher?.sendError(requestId, message);
+    this.failInitialization(new Error(message));
+    return false;
+  }
+
+  /**
    * SDK mode initialization flow
    * Dispatches initialize request and initializes config with MCP support
    */
@@ -428,7 +474,13 @@ class Session {
         this.dispatcher?.sdkMcpController.createSendSdkMcpMessage();
 
       // Initialize config with SDK MCP message support
-      await this.ensureConfigInitialized({ sendSdkMcpMessage });
+      const initialized = await this.awaitConfigInitializationWithReplyTimeout(
+        request.request_id,
+        { sendSdkMcpMessage },
+      );
+      if (!initialized) {
+        return;
+      }
 
       if (initResponse) {
         this.dispatcher?.sendSuccess(request.request_id, initResponse);

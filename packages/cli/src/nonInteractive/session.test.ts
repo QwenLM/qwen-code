@@ -11,7 +11,10 @@ import {
   type Config,
 } from '@qwen-code/qwen-code-core';
 import type { Content } from '@google/genai';
-import { runNonInteractiveStreamJson } from './session.js';
+import {
+  runNonInteractiveStreamJson,
+  SDK_INITIALIZE_REPLY_TIMEOUT_MS,
+} from './session.js';
 import type {
   CLIUserMessage,
   CLIControlRequest,
@@ -428,6 +431,38 @@ describe('runNonInteractiveStreamJson', () => {
     expect(mockDispatcher.sendSuccess).toHaveBeenCalledWith('req-1', {
       ready: true,
     });
+  });
+
+  it('replies to initialize with an error when config initialization outlasts the client budget', async () => {
+    vi.useFakeTimers();
+    try {
+      config = createConfig({
+        initialize: vi.fn(() => new Promise<void>(() => {})),
+      });
+      mockDispatcher.dispatch.mockResolvedValue({ ready: true });
+
+      mockInputReader.read = async function* () {
+        yield createControlRequest('initialize');
+      };
+
+      const run = runNonInteractiveStreamJson(config, '');
+      await vi.advanceTimersByTimeAsync(0);
+      expect(config.initialize).toHaveBeenCalledOnce();
+      expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(SDK_INITIALIZE_REPLY_TIMEOUT_MS);
+      await run;
+
+      expect(mockDispatcher.sendSuccess).not.toHaveBeenCalled();
+      expect(mockDispatcher.sendError).toHaveBeenCalledWith(
+        'req-1',
+        `Initialization did not finish within ${
+          SDK_INITIALIZE_REPLY_TIMEOUT_MS / 1000
+        }s`,
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('replies to initialize with an error when SDK mode initialization fails', async () => {
