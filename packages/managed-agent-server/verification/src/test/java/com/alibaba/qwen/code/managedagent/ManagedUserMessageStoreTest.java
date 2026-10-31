@@ -1,5 +1,6 @@
 package com.alibaba.qwen.code.managedagent;
 
+import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
@@ -9,7 +10,6 @@ import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Com
 import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Message;
 import com.alibaba.qwen.code.managedagent.repository.ManagedUserMessageStore.Snapshot;
 import com.alibaba.qwen.code.managedagent.session.ManagedAgentService;
-import com.alibaba.qwen.code.managedagent.workspace.WorkspaceToolProfiles;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;

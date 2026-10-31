@@ -719,7 +719,7 @@ class ExternalPublicFilesE2E {
     }
 
     private List<JsonNode> history(String session) throws IOException {
-        String scope = com.alibaba.qwen.code.managedagent.persistence.ManagedSessionStore.sessionScopeKey(TENANT, session);
+        String scope = com.alibaba.qwen.code.managedagent.repository.ManagedSessionStore.sessionScopeKey(TENANT, session);
         List<JsonNode> history = new ArrayList<>();
         for (byte[] transaction : jdbc.queryForList("SELECT record_bytes FROM ma_session_journal_tx"
                 + " WHERE tenant_id = ? AND session_id = ? AND operation = 'commitFileHistory' ORDER BY journal_revision",

@@ -1,14 +1,14 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
-import com.alibaba.qwen.code.managedagent.session.AgentStateStore;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalStorageRegistry;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalStorageRegistry.RegisteredExternalStorage;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.RegisteredExternalStorage;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 

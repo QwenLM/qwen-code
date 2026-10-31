@@ -1,7 +1,11 @@
 package com.alibaba.qwen.code.runtimebroker;
 
+import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.InMemoryToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalHttpRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner;
+import com.alibaba.qwen.code.runtimebroker.service.RuntimeBrokerService;
 import com.sun.net.httpserver.HttpServer;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.junit.jupiter.api.Test;
@@ -366,9 +370,26 @@ class RuntimeExternalWorkspaceDrainTest {
         private RuntimeBrokerService service = newService();
 
         RuntimeBrokerService newService() {
-            return new RuntimeBrokerService(ignored -> CompletableFuture.completedFuture(scope), provider, transport,
-                    repository, sessions, executions, "broker", Duration.ofMinutes(1), Duration.ofMinutes(1), clock,
-                    () -> UUID.randomUUID().toString());
+            try {
+                var constructor = RuntimeBrokerService.class.getDeclaredConstructor(
+                        com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver.class,
+                        com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner.class,
+                        com.alibaba.qwen.code.runtimebroker.RuntimeTransport.class,
+                        com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository.class,
+                        com.alibaba.qwen.code.runtimebroker.RuntimeSessionRepository.class,
+                        com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository.class,
+                        String.class, Duration.class, Duration.class,
+                        Clock.class, java.util.function.Supplier.class);
+                constructor.setAccessible(true);
+                return constructor.newInstance(
+                        (com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver)
+                                ignored -> CompletableFuture.completedFuture(scope),
+                        provider, transport, repository, sessions, executions, "broker",
+                        Duration.ofMinutes(1), Duration.ofMinutes(1), clock,
+                        (java.util.function.Supplier<String>) () -> UUID.randomUUID().toString());
+            } catch (ReflectiveOperationException error) {
+                throw new IllegalStateException("Construct the broker service fixture", error);
+            }
         }
         // Lifecycle authorization is an external repository boundary here; MySQL tests
         // separately prove its real row locks and that rejected cleanup retains H.

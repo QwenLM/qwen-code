@@ -13,6 +13,7 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
+import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 import com.sun.net.httpserver.HttpServer;

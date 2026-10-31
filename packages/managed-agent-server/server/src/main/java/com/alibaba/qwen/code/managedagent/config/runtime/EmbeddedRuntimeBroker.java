@@ -10,8 +10,6 @@ import com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistratio
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationDataStore;
 import com.alibaba.qwen.code.managedagent.persistence.ToolPublicationStore;
 import com.alibaba.qwen.code.managedagent.persistence.WorkspaceExecutionStore;
-import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
-import java.util.concurrent.CompletableFuture;
 import com.alibaba.qwen.code.managedagent.workspace.SshWorkspaceService;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.RuntimeRecoveryCoordinator;
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeProvisioner;
@@ -19,6 +17,7 @@ import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeReso
 import com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceRuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.HarnessSessionResolver;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisioner;
 import com.alibaba.qwen.code.runtimebroker.RuntimePublicationGrant;
@@ -53,6 +52,7 @@ import java.time.Duration;
 import java.util.List;
 import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
 public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {

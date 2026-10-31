@@ -471,9 +471,9 @@ class EmbeddedRuntimeBrokerTest {
         var manager = new org.springframework.jdbc.datasource.DataSourceTransactionManager(source);
         var registrations = new com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistrationStore(jdbc, manager);
         registrations.registerExternalStorage("tenant", "register",
-                new com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistration(
-                        new com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistration.ExternalStorageIdentity("provider", "physical", 1),
-                        new com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistration.StorageAlias("workspace", "/alias/workspace", "/remote/workspace")));
+                new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration(
+                        new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.ExternalStorageIdentity("provider", "physical", 1),
+                        new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.StorageAlias("workspace", "/alias/workspace", "/remote/workspace")));
         new com.alibaba.qwen.code.managedagent.persistence.ExternalWorkspaceMaterializationStore(jdbc, manager)
                 .materialize("tenant", "workspace", "Name", "actor", "materialize");
         var properties = properties();

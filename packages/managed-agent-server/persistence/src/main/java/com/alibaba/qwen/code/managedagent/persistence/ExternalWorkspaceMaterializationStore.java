@@ -1,14 +1,13 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptNamespace;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.ReceiptScope;
 import com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaKeys;
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
-import static com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;

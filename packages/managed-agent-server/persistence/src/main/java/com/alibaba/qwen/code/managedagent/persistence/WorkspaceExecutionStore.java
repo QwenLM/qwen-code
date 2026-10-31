@@ -3,10 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.SessionRecord;
-import static com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable;
 import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcExternalWorkspaceOwnership;
-import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
@@ -15,6 +12,8 @@ import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcExternalWorkspaceOwnership;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
 import org.apache.commons.codec.digest.DigestUtils;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -25,6 +24,8 @@ import org.springframework.transaction.support.TransactionTemplate;
 
 import java.nio.charset.StandardCharsets;
 import java.util.List;
+
+import static com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable;
 
 @Repository
 public class WorkspaceExecutionStore

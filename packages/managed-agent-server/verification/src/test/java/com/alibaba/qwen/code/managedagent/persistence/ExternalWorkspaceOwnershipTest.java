@@ -1,8 +1,6 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.JdbcRuntimeSessionRepository;
-import com.alibaba.qwen.code.runtimebroker.JdbcToolExecutionRepository;
+import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
@@ -12,11 +10,14 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSession;
 import com.alibaba.qwen.code.runtimebroker.RuntimeSessionRecord;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.adapter.security.AesGcmSecretProtector;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalRuntimeClient;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeSessionRepository;
+import com.alibaba.qwen.code.runtimebroker.persistence.JdbcToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner;
-import com.alibaba.qwen.code.runtimebroker.security.AesGcmSecretProtector;
+import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;

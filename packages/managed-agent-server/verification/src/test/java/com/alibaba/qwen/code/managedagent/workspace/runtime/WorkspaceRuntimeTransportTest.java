@@ -315,7 +315,7 @@ class WorkspaceRuntimeTransportTest {
 
     @Test
     void externalPreclaimFailureOwnsNothingAndRestartReleaseStillDetachesWithoutMembership() throws Exception {
-        var fixture = externalFixture(runtime -> CompletableFuture.failedFuture(WorkspaceExecutionStore.unavailable()));
+        var fixture = externalFixture(runtime -> CompletableFuture.failedFuture(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()));
         assertThatThrownBy(() -> fixture.transport().acquire(fixture.lease(), fixture.session()).toCompletableFuture().join())
                 .hasCauseInstanceOf(RuntimeBrokerException.class);
         verify(fixture.ownership()).requireExternalExecution(any());
@@ -340,7 +340,7 @@ class WorkspaceRuntimeTransportTest {
     @Test
     void externalReclaimRefusesUnavailableRegistrationBeforeClaimingStorage() throws Exception {
         var fixture = externalFixture(runtime -> CompletableFuture.completedFuture(null));
-        doThrow(WorkspaceExecutionStore.unavailable()).when(fixture.ownership()).requireExternalExecution(any());
+        doThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()).when(fixture.ownership()).requireExternalExecution(any());
         unavailable(() -> fixture.transport().reclaimMount(fixture.lease(), fixture.session()));
         verify(fixture.ownership(), never()).claim(any(), any(), any(), any());
         verifyNoInteractions(fixture.http());
@@ -388,7 +388,7 @@ class WorkspaceRuntimeTransportTest {
                     .isInstanceOf(RuntimeBrokerException.class);
         }
         verifyNoInteractions(fixture.http());
-        doThrow(WorkspaceExecutionStore.unavailable()).when(fixture.ownership()).requireExternalExecution(any());
+        doThrow(com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable()).when(fixture.ownership()).requireExternalExecution(any());
         unavailable(() -> fixture.transport().control(fixture.lease(), fixture.session(), Map.of("kind", "workspace-context")));
         fixture.transport().control(fixture.lease(), fixture.session(), Map.of("kind", "raw-file-history", "action", "snapshot"))
                 .toCompletableFuture().join();
