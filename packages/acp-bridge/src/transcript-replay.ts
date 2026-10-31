@@ -122,6 +122,8 @@ export interface TranscriptReplayMachineOptions {
   readonly presentation?: TranscriptReplayPresentationAdapter;
   readonly onDiagnostic?: (diagnostic: TranscriptProjectionDiagnostic) => void;
   readonly skipFinalizeCallIds?: ReadonlySet<string>;
+  /** Preserve call origins even when duplicate call IDs were renamed. */
+  readonly skipFinalizeRecordIds?: ReadonlySet<string>;
   /**
    * Emit a timing frame for every `ui_telemetry` record (see
    * {@link createTranscriptTimingUpdate}). Off by default: these frames add
@@ -1258,6 +1260,9 @@ class DefaultTranscriptReplayMachine implements TranscriptReplayMachine {
     const skip = this.options.skipFinalizeCallIds;
     let ordinal = 0;
     for (const pending of [...this.pendingToolCalls.values()]) {
+      if (this.options.skipFinalizeRecordIds?.has(pending.sourceRecordId)) {
+        continue;
+      }
       if (
         skip &&
         (skip.has(pending.callId) ||

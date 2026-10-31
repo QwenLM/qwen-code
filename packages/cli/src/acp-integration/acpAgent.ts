@@ -5499,7 +5499,9 @@ class QwenAgent implements Agent {
 
   /**
    * Whether an ungated restore replay (qwen/session/loadUpdates) may
-   * finalize dangling tool calls. A session with an active turn — a client
+   * finalize unmatched calls in the trailing replay turn. When false,
+   * bulk replay still finalizes earlier unmatched calls (#9953).
+   * A session with an active turn — a client
    * prompt or an autonomous goal/cron/notification turn — may still owe the
    * trailing call's result, so the replay keeps it pending and lets the
    * live stream deliver it (#9704). Samples the turn state before the
