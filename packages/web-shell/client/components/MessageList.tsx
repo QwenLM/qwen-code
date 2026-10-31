@@ -19,7 +19,10 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonContextMemoryDetail,
+  DaemonSessionArtifact,
+} from '@qwen-code/sdk/daemon';
 import type {
   ToolGroupMessage as DaemonToolGroupMessage,
   ThinkingMessage as DaemonThinkingMessage,
@@ -108,6 +111,11 @@ export interface MessageListProps {
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Open a context instruction file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
@@ -3034,6 +3042,7 @@ export const MessageList = memo(
       terminalBackgroundShellTaskIds,
       pendingApproval,
       onShowContextDetail,
+      onOpenMemoryFile,
       onImagePreview,
       onAttachmentPreview,
       onInsightReportOpen,
@@ -5982,6 +5991,7 @@ export const MessageList = memo(
               deleteMessageDisabled={deletion?.active}
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
+              onOpenMemoryFile={onOpenMemoryFile}
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
               onTurnOutputOpen={onTurnOutputOpen}
@@ -6092,6 +6102,7 @@ export const MessageList = memo(
         transcriptRenderMode,
         handleAutomaticAgentExpansionChange,
         onShowContextDetail,
+        onOpenMemoryFile,
         displayItems,
         scrollToMessage,
         onImagePreview,

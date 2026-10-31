@@ -484,8 +484,9 @@ public class ManagedAgentPropertiesTest {
 
     @Test
     public void theProjectionIntervalTicksOnTheArtifactScheduler() {
-        // The README's projection-interval row publishes the :1000 fallback
-        // as a 1s cadence; @Scheduled reads a bare number as timeUnit() —
+        // The configuration reference publishes the :1000 fallback as the
+        // projection-interval default and reads it as milliseconds, a 1s
+        // cadence; @Scheduled reads a bare number as timeUnit() —
         // milliseconds by default — so the placeholder, the scheduler
         // qualifier and the unit are pinned together: adding
         // timeUnit = SECONDS stretches the pass to ~17 minutes and must go

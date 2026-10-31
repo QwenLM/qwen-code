@@ -349,6 +349,10 @@ export function createDaemonChannelBridgeFacade(
       bridge.registerChannelLoopToolHandler.bind(bridge);
   }
 
+  if (bridge.registerChannelTool) {
+    facade.registerChannelTool = bridge.registerChannelTool.bind(bridge);
+  }
+
   return facade;
 }
 
