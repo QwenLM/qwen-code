@@ -1824,12 +1824,25 @@ un-re-asked, and settle both calls once each in their original order:
 npm run test:e2e:managed-harness-restart-approval-sibling-approval
 ```
 
+A crash after several earlier tool rounds (B3) runs a multi-round fixture with two
+earlier tools and holds the replacement while a later post-tool request is open
+(the hold is on the fake-model side, so no serve hook is needed). The runner kills
+it there; the next generation must resume the saved logical round and restore the
+turn cost snapshot and per-model token ledger rather than restart them, with each
+earlier execution occurring once and the later request reissued deep-equal. "Cost
+budget" here is the TurnBudget snapshot plus the token ledger, not a cumulative
+spend gate:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-after-earlier-tools
+```
+
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
 `G3_VERIFY_REPORT_DIR` overrides the directory. The remaining rows stay
 focused or integration tested for now: the rewritten-input and Hook-no-rerun half
 of mixed calls (a commandStep follow-up, since a native continuation refuses
 Hook/MCP sessions), Hook/MCP/child uncertainty, the attempt and stream
-identities plus the live SSE view, the round and cost budgets, and the
+identities plus the live SSE view, and the
 mixed-version reader/bundle closure (#14481).
 
 Two arms keep a former owner alive while its replacement finishes the Turn
