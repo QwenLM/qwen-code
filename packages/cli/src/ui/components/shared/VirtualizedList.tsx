@@ -40,6 +40,19 @@ export type VirtualizedListProps<T> = {
   containerHeight?: number;
   showScrollbar?: boolean;
   measureAtFullHeight?: boolean;
+  /**
+   * Follow the tail when content grows or is measured. Defaults to true for
+   * conversation-style logs. A viewport anchored to its first row (e.g. the
+   * `/btw` side answer) passes false so a late measurement cannot jump the
+   * view to the bottom.
+   */
+  stickToBottom?: boolean;
+  /**
+   * Fade the scrollbar out once the user stops scrolling. Defaults to true.
+   * Pass false for a surface that has no other way to advertise that more
+   * content exists (e.g. the `/btw` answer panel).
+   */
+  scrollbarAutoHide?: boolean;
 };
 
 export type VirtualizedListRef<T> = {
@@ -215,6 +228,9 @@ function VirtualizedList<T>(
   });
 
   const [isStickingToBottom, setIsStickingToBottom] = useState(() => {
+    if (props.stickToBottom === false) {
+      return false;
+    }
     const scrollToEnd =
       initialScrollIndex === SCROLL_TO_ITEM_END ||
       (typeof initialScrollIndex === 'number' &&
@@ -408,6 +424,16 @@ function VirtualizedList<T>(
   const prevContainerHeight = useRef(scrollableContainerHeight);
 
   useLayoutEffect(() => {
+    if (props.stickToBottom === false) {
+      // Top-anchored viewport: never chase the tail when the content is
+      // measured or grows. Keep the bookkeeping refs current so nothing else
+      // reads a stale "previous" frame if the mode is ever flipped.
+      prevDataLength.current = data.length;
+      prevTotalHeight.current = totalHeight;
+      prevScrollTop.current = actualScrollTop;
+      prevContainerHeight.current = scrollableContainerHeight;
+      return;
+    }
     const contentPreviouslyFit =
       prevTotalHeight.current <= prevContainerHeight.current;
     const wasScrolledToBottomPixels =
@@ -479,6 +505,7 @@ function VirtualizedList<T>(
     offsets,
     isStickingToBottom,
     props.targetScrollIndex,
+    props.stickToBottom,
   ]);
 
   useLayoutEffect(() => {
@@ -880,6 +907,11 @@ function VirtualizedList<T>(
   // reflows (which would force per-item re-measure + a visible jitter).
   const { isVisible: scrollbarThumbActive, flashScrollbar } =
     useAnimatedScrollbar();
+  // The transcript lets the bar fade out so it does not compete with the
+  // conversation; a small panel that has no other scroll affordance (the
+  // `/btw` answer) keeps it painted while content overflows.
+  const scrollbarPainted =
+    scrollbarThumbActive || props.scrollbarAutoHide === false;
 
   // `clampedScrollTop` updates on every scroll-driven recompute, so a
   // layout-effect keyed on it is the cheapest "the user just scrolled"
@@ -915,7 +947,7 @@ function VirtualizedList<T>(
           // after the idle window. The column keeps width 1 in all states, so
           // the viewport never reflows (which would force a per-item
           // re-measure + visible jitter).
-          if (!scrollbarThumbActive) {
+          if (!scrollbarPainted) {
             return (
               <Text key={i} selectable={false}>
                 {' '}
@@ -936,7 +968,7 @@ function VirtualizedList<T>(
     totalHeight,
     clampedScrollTop,
     maxScroll,
-    scrollbarThumbActive,
+    scrollbarPainted,
   ]);
 
   // The host passes `containerHeight` as the *maximum* viewport height (the

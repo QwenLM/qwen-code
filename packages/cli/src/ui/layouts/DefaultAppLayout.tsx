@@ -30,7 +30,10 @@ import { useAgentViewState } from '../contexts/AgentViewContext.js';
 import { useTerminalSize } from '../hooks/useTerminalSize.js';
 import { StreamingState } from '../types.js';
 import { getStickyTodoMaxVisibleItemsForMode } from '../utils/todoSnapshot.js';
-import { getDialogMaxHeight } from '../utils/layoutUtils.js';
+import {
+  getDialogMaxHeight,
+  getBtwAnswerMaxRows,
+} from '../utils/layoutUtils.js';
 
 export const DefaultAppLayout: React.FC = () => {
   const uiState = useUIState();
@@ -59,6 +62,7 @@ export const DefaultAppLayout: React.FC = () => {
     uiState.staticExtraHeight,
   );
   const dialogHeight = uiState.constrainHeight ? dialogMaxHeight : undefined;
+  const btwAnswerMaxRows = getBtwAnswerMaxRows(uiState.terminalHeight);
   const shouldShowStickyTodos =
     uiState.stickyTodos !== null &&
     !uiState.dialogsVisible &&
@@ -129,6 +133,7 @@ export const DefaultAppLayout: React.FC = () => {
                     <BtwMessage
                       btw={uiState.btwItem.btw}
                       containerWidth={uiState.mainAreaWidth}
+                      maxAnswerRows={btwAnswerMaxRows}
                     />
                   </Box>
                 )}

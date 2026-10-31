@@ -5,8 +5,16 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { render } from 'ink-testing-library';
+import { act } from '@testing-library/react';
 import { renderWithProviders } from '../../../test-utils/render.js';
+import { KeypressProvider } from '../../contexts/KeypressContext.js';
 import { BtwMessage } from './BtwMessage.js';
+
+const PAGE_DOWN = '\x1b[6~';
+
+const longAnswer = (lines: number) =>
+  Array.from({ length: lines }, (_, i) => `line-${i}`).join('\n');
 
 describe('BtwMessage', () => {
   it('is wrapped in React.memo to avoid unnecessary layout rerenders', () => {
@@ -83,5 +91,59 @@ describe('BtwMessage', () => {
     expect(output).toContain('Enter');
     expect(output).toContain('Escape');
     expect(output).toContain('dismiss');
+  });
+
+  it('caps a long answer at maxAnswerRows and scrolls the rest into view', async () => {
+    const ui = (
+      <KeypressProvider kittyProtocolEnabled={false}>
+        <BtwMessage
+          btw={{
+            question: 'long question',
+            answer: longAnswer(40),
+            isPending: false,
+          }}
+          containerWidth={60}
+          maxAnswerRows={4}
+        />
+      </KeypressProvider>
+    );
+
+    const { stdin, lastFrame, rerender } = render(ui);
+    rerender(ui);
+    await act(async () => {});
+
+    // The panel shows the top of the answer and clips the rest instead of
+    // growing with the content.
+    expect(lastFrame()).toContain('line-0');
+    expect(lastFrame()).not.toContain('line-39');
+    expect(lastFrame()!.split('\n').length).toBeLessThan(40);
+
+    // The clipped rows stay reachable: PageDown moves the viewport.
+    await act(async () => {
+      for (let i = 0; i < 12; i++) {
+        stdin.write(PAGE_DOWN);
+      }
+    });
+    await act(async () => {});
+
+    expect(lastFrame()).not.toContain('line-0');
+    expect(lastFrame()).toContain('line-39');
+  });
+
+  it('renders the whole answer when no maxAnswerRows is given', () => {
+    const { lastFrame } = renderWithProviders(
+      <BtwMessage
+        btw={{
+          question: 'long question',
+          answer: longAnswer(40),
+          isPending: false,
+        }}
+        containerWidth={60}
+      />,
+    );
+
+    const output = lastFrame() ?? '';
+    expect(output).toContain('line-0');
+    expect(output).toContain('line-39');
   });
 });

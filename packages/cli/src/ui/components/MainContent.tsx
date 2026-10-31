@@ -534,8 +534,12 @@ export const MainContent = ({
     // the menu. The selection controller only PAUSES (it must keep the current
     // selection — the menu's Copy Selection offers it — and clearing it the
     // instant the menu opens would hide what is about to be copied).
+    // While the /btw answer panel is open it owns keyboard and wheel
+    // scrolling: it renders its own viewport in the bottom controls region, so
+    // leaving this list subscribed too would scroll both surfaces on every
+    // keypress and wheel tick.
     const viewportInteractive =
-      !uiState.dialogsVisible && contextMenuOpen === null;
+      !uiState.dialogsVisible && contextMenuOpen === null && !uiState.btwItem;
 
     return (
       <OverflowProvider>
