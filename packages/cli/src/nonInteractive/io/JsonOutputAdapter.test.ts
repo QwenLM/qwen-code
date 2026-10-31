@@ -498,6 +498,49 @@ describe('JsonOutputAdapter', () => {
       );
     });
 
+    it('should report a refusal after a retry retracted the turn text', () => {
+      // Previous prompt's turn, ended by its own result.
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 1,
+      });
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'First answer',
+      });
+      // The provider retries and the consumer discards the streamed text, so
+      // it is not this turn's answer any more.
+      adapter.restartAttempt(false, []);
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      adapter.finalizeAssistantMessage();
+      stdoutWriteSpy.mockClear();
+
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const resultMessage = JSON.parse(output).findLast(
+        (msg: unknown) =>
+          typeof msg === 'object' &&
+          msg !== null &&
+          'type' in msg &&
+          msg.type === 'result',
+      );
+
+      expect(resultMessage.is_error).toBe(true);
+      expect(resultMessage).not.toHaveProperty('result');
+    });
+
     it('should emit success result as text to stdout in text mode', () => {
       vi.mocked(mockConfig.getOutputFormat).mockReturnValue(OutputFormat.TEXT);
 

@@ -1112,6 +1112,34 @@ describe('StreamJsonOutputAdapter', () => {
       );
     });
 
+    it('should report a refusal after a retry retracted the turn text', () => {
+      adapter.startAssistantMessage();
+      adapter.processEvent({
+        type: LlmEventType.Content,
+        value: 'First answer',
+      });
+      // The provider retries and the consumer discards the streamed text, so
+      // it is not this turn's answer any more.
+      adapter.restartAttempt(false, []);
+      adapter.processEvent({
+        type: LlmEventType.UserPromptSubmitBlocked,
+        value: { reason: 'policy', originalPrompt: 'run it' },
+      });
+      stdoutWriteSpy.mockClear();
+      adapter.emitResult({
+        isError: false,
+        durationMs: 1000,
+        apiDurationMs: 800,
+        numTurns: 2,
+      });
+
+      const output = stdoutWriteSpy.mock.calls[0][0] as string;
+      const parsed = JSON.parse(output);
+
+      expect(parsed.is_error).toBe(true);
+      expect(parsed).not.toHaveProperty('result');
+    });
+
     it('should stop reporting the refusal once the next turn answers', () => {
       // Previous prompt's turn, ended by its own result — see the token-limit
       // case above.

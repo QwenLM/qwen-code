@@ -676,6 +676,9 @@ export abstract class BaseJsonOutputAdapter {
       }
       return;
     }
+    // A discarded attempt's text is not the turn's answer any more, so a
+    // refusal that lands after this retry must not sample it as delivered.
+    this.turnProducedText = false;
     this.startAssistantMessageInternal(this.mainAgentMessageState);
   }
 
