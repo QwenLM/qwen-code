@@ -513,7 +513,9 @@ public class ManagedAgentProperties
                             + " managed Workspace features must be disabled");
         }
         if (!"session".equals(runtimeBroker.getIsolationClass())
-                || !"session".equals(runtimeBroker.getBoundSessionIsolationClass())
+                || !("session".equals(runtimeBroker.getBoundSessionIsolationClass())
+                        || ExternalRuntimeKinds.isWorkspace(provisioner)
+                                && "workspace".equals(runtimeBroker.getBoundSessionIsolationClass()))
                 || runtimeBroker.isSessionCreateWarm()) {
             throw new IllegalStateException("External Runtime requires session isolation without Session-create warm");
         }
