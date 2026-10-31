@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.catalog.AgentDefinitionExtensions;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.StoreModels;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
@@ -60,8 +61,14 @@ class WorkspaceCsiRetainedArtifactsTest {
                 + " VALUES ('foreign','workspace',1,'ordinary-storage','Fixture',?,?,'ACTIVE')", WorkspaceExecutionProfile.CONFIG_REF, WorkspaceExecutionProfile.POLICY_REF);
         jdbc.update("INSERT INTO ma_workspace_access (tenant_id,workspace_id,actor_id,role) VALUES ('foreign','workspace',?,'OPERATOR')",
                 com.alibaba.qwen.code.managedagent.repository.ManagedWorkspaceRegistry.actorKey("foreign", "actor"));
-        session = tx.execute(status -> store.insertWorkspaceSessionCommand("foreign", "actor", "create", "a".repeat(64), "qwen-code",
-                null, null, List.of(), null, new WorkspaceSelection("workspace", ".")).sessionId());
+        session = tx.execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                .tenantId("foreign")
+                .actorId("actor")
+                .idempotencyKey("create")
+                .requestDigest("a".repeat(64))
+                .agentId("qwen-code")
+                .selection(new WorkspaceSelection("workspace", "."))
+                .build()).sessionId());
     }
 
     @AfterEach

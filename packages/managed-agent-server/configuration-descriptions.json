@@ -79,8 +79,8 @@
       "zh": "内置 `qwen-code` agent 的修订号标签，会固定在使用它的每个 Session 上；请求中指定 `qwen-code` 的其他修订号会被拒绝。长度必须为 1 到 128 个字符（否则启动时拒绝）。"
     },
     "qwen.managed-agent.artifacts.enabled": {
-      "en": "Whether tool results are projected into public tool results and artifacts, and whether the artifact read API is served. Reads answer not found unless `qwen.managed-agent.tool-publication.enabled` is also true, and they require an authenticated actor.",
-      "zh": "是否将工具结果投影为公开工具结果和制品，以及是否提供制品读取 API。除非同时开启 `qwen.managed-agent.tool-publication.enabled`，否则读取返回未找到；读取还要求已认证的 actor。"
+      "en": "Whether tool results are projected into public tool results and artifacts, and whether the artifact read API is served. Reads answer not found unless `qwen.managed-agent.tool-publication.enabled` is also true, and they require an authenticated actor. Even while it is false, committed tool receipts are still recorded for projection, so turning it on later also projects the tool results recorded while it was off.",
+      "zh": "是否将工具结果投影为公开工具结果和制品，以及是否提供制品读取 API。除非同时开启 `qwen.managed-agent.tool-publication.enabled`，否则读取返回未找到；读取还要求已认证的 actor。即使为 false，已提交的工具回执仍会被记录下来等待投影，因此之后开启时，关闭期间记录的工具结果也会被投影。"
     },
     "qwen.managed-agent.artifacts.max-concurrent-reads": {
       "en": "How many artifact content downloads this server process serves at once; a download beyond that gets HTTP 429 `artifact_read_limit` with `Retry-After: 1`. Must be at least 1 (startup refusal).",
@@ -100,12 +100,12 @@
       "zh": "投影后的工具结果是否附带一段简短文本预览（取自某个流开头最多 8 KiB，并去除 ANSI 与控制字符），所有 Session 读者均可见。需要开启 `qwen.managed-agent.artifacts.publish-original`。"
     },
     "qwen.managed-agent.artifacts.read-revalidation-interval": {
-      "en": "How often an in-flight artifact download re-checks the caller's access (Workspace grant, read policy, Session state); `PT0S` checks before every chunk. Chunks written within the window still reach the client after a revocation. A bare number is seconds.",
-      "zh": "进行中的制品下载重新检查调用方访问权限（Workspace 授权、读取策略、Session 状态）的间隔；`PT0S` 表示每个数据块前都检查。权限撤销后，窗口内已写出的数据块仍会送达客户端。不带单位的数字按秒解析。"
+      "en": "How often an in-flight artifact download re-checks the caller's access (Workspace grant, read policy, Session state); `PT0S` checks before every chunk. After a revocation, what is written before the next check still reaches the client: up to one window's worth of a streaming download, or a whole Range response of at most 1 MiB, which is written in one piece after its last check. Once a check denies, nothing more is written. A bare number is seconds.",
+      "zh": "进行中的制品下载重新检查调用方访问权限（Workspace 授权、读取策略、Session 状态）的间隔；`PT0S` 表示每个数据块前都检查。权限撤销后，下一次检查之前写出的内容仍会送达客户端：流式下载最多为一个窗口内写出的数据；Range 请求的响应（最多 1 MiB）在最后一次检查后一次性写出，会完整送达。某次检查拒绝后，不再写出任何内容。不带单位的数字按秒解析。"
     },
     "qwen.managed-agent.artifacts.read-timeout": {
-      "en": "How long one artifact content download may take in total; the limit is checked between chunks: a download that exceeds it before its first chunk gets `503 artifact_unavailable`, and one already streaming is cut off mid-body. Must be positive (startup refusal). A bare number is seconds.",
-      "zh": "单次制品内容下载允许的总时长；在数据块之间检查：首个数据块发出前超出则返回 `503 artifact_unavailable`，已在传输中的下载会被中途截断。必须为正（否则启动时拒绝）。不带单位的数字按秒解析。"
+      "en": "How long one artifact content download may take in total; the limit is checked between chunks: a download that exceeds it before its first chunk gets `503 artifact_unavailable`, and one already streaming is cut off mid-body. Whatever this value, the download also ends the same way when one storage read receives nothing for 50 seconds (the OSS client's default socket timeout, which no setting changes), or when the gap between two chunks lets its lease on the stored output lapse: the lease is renewed as chunks are read, so a gap of more than 90 seconds can end it and one of two minutes always does. Must be positive (startup refusal). A bare number is seconds.",
+      "zh": "单次制品内容下载允许的总时长；在数据块之间检查：首个数据块发出前超出则返回 `503 artifact_unavailable`，已在传输中的下载会被中途截断。无论此值多大，以下情况也会以同样方式结束下载：一次存储读取 50 秒内未收到任何数据（OSS 客户端的默认 socket 超时，没有设置可以修改）；或两个数据块之间的间隔长到让下载对已存储输出持有的读租约过期——租约随数据块读取而续期，间隔超过 90 秒就可能结束下载，满两分钟则一定结束。必须为正（否则启动时拒绝）。不带单位的数字按秒解析。"
     },
     "qwen.managed-agent.auth.allow-insecure-bind": {
       "en": "Whether to override the startup guards against unauthenticated or plaintext exposure: it lets `open` or `auto` mode serve a non-loopback `server.address`, the internal surface leave loopback without `qwen.managed-agent.session-store.binding-key`, and `qwen.managed-agent.harness.base-url` or `qwen.managed-agent.tool-publication.service-base-url` use plaintext `http` to a remote host. It does not lift the Harness pool TLS rule or the local directory import loopback rule. The preflight check warns while it is set.",
@@ -141,16 +141,16 @@
       "zh": "扫描器发现到期槽位时，允许其迟到多久仍按计划触发。更迟的槽位按定义的补跑策略（`none`、`latest` 或 `bounded`）处理，未被补跑的记为错过。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
     },
     "qwen.managed-agent.automation.lease": {
-      "en": "How long a scanner tick or a manual run holds an automation definition's lease, counted from its claim; once it lapses another node may claim the definition. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
-      "zh": "扫描轮次或手动运行持有自动化定义租约的时长，从认领时起算；租约过期后其他节点即可认领该定义。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
+      "en": "How long a scanner tick or a manual run holds an automation definition's lease, counted from its claim; once it lapses another node may claim the definition, and from that claim on the earlier holder's writes to it are refused. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
+      "zh": "扫描轮次或手动运行持有自动化定义租约的时长，从认领时起算；租约过期后其他节点即可认领该定义，自该认领起，原持有者对它的写入都会被拒绝。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
     },
     "qwen.managed-agent.automation.lookback": {
       "en": "How far back the scanner derives a definition's due slots; slots older than this, or older than the definition's arming, are neither fired nor recorded, which bounds every catch-up. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
       "zh": "扫描器为定义推导到期槽位时最多回看的时长；早于该窗口（或早于定义启用时刻）的槽位既不触发也不记录，从而限定所有补跑的范围。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
     },
     "qwen.managed-agent.automation.max-slots-per-tick": {
-      "en": "How many due slots the scanner keeps per definition in one tick; when the lookback window holds more, the oldest are cut and a warning is logged. Startup refuses a value below 1 when `qwen.managed-agent.automation.enabled` is true.",
-      "zh": "单个扫描轮次中每个定义最多保留的到期槽位数；回看窗口内超出时，最旧的槽位被截去并记录一条警告。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。"
+      "en": "How many due slots the scanner keeps per definition in one tick; when the lookback window holds more, the oldest are cut and a warning is logged. The limit does not shorten the scan itself: the scanner still checks every minute from where its previous tick for the definition stopped, up to the whole lookback window. Startup refuses a value below 1 when `qwen.managed-agent.automation.enabled` is true.",
+      "zh": "单个扫描轮次中每个定义最多保留的到期槽位数；回看窗口内超出时，最旧的槽位被截去并记录一条警告。该上限不会缩短扫描本身：扫描器仍会从该定义上一轮扫描停下的位置起逐分钟检查，最多覆盖整个回看窗口。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。"
     },
     "qwen.managed-agent.automation.scan-delay": {
       "en": "How long the automation scanner waits between the end of one tick and the start of the next. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
@@ -461,8 +461,8 @@
       "default": ""
     },
     "qwen.managed-agent.runtime-broker.allow-non-loopback": {
-      "en": "Whether the embedded Runtime Broker may bind a non-loopback address in `qwen.managed-agent.runtime-broker.host`, such as `0.0.0.0`; without it, startup refuses such an address. The listener serves one global bearer token over plaintext HTTP, so enable it only behind a layer that terminates TLS and authorizes callers. The `managed-local` profile refuses a non-loopback host regardless.",
-      "zh": "是否允许内嵌 Runtime Broker 绑定 `qwen.managed-agent.runtime-broker.host` 中的非回环地址（例如 `0.0.0.0`）；未开启时，此类地址启动时拒绝。该监听器通过明文 HTTP 使用同一个全局 bearer token，因此只应在终止 TLS 并对调用方鉴权的前置层之后开启。`managed-local` profile 无论此项如何都拒绝非回环 host。"
+      "en": "Whether the embedded Runtime Broker may bind a non-loopback address in `qwen.managed-agent.runtime-broker.host`, such as `0.0.0.0`; without it, startup refuses such an address. The listener serves one global bearer token over plaintext HTTP, with no per-tenant authorization, so enable it only behind a layer that terminates TLS and authorizes callers: restricting the network alone still sends the token in clear text, and whoever reads it can drive every execution the Broker admits. The `managed-local` profile refuses a non-loopback host regardless.",
+      "zh": "是否允许内嵌 Runtime Broker 绑定 `qwen.managed-agent.runtime-broker.host` 中的非回环地址（例如 `0.0.0.0`）；未开启时，此类地址启动时拒绝。该监听器通过明文 HTTP 使用同一个全局 bearer token，且没有按租户的鉴权，因此只应在终止 TLS 并对调用方鉴权的前置层之后开启：仅限制网络仍会以明文传输该 token，读到它的人可以操控 Broker 接纳的所有执行。`managed-local` profile 无论此项如何都拒绝非回环 host。"
     },
     "qwen.managed-agent.runtime-broker.bound-session-isolation-class": {
       "en": "How Runtime workers are shared among Sessions bound to a mounted local Workspace: `session` gives each Session its own worker, `workspace` lets the Sessions of one Workspace share one. Startup refuses other values. `workspace` requires the `local-process` provisioner with `qwen.managed-agent.runtime-broker.durable-local-process` and cannot combine with `qwen.managed-agent.runtime-broker.child-workspaces-enabled`; Session worktrees and public child agents need `session`. SSH-bound Sessions always use `session`.",
@@ -641,8 +641,8 @@
       "zh": "Linux 主机整机重启后，Broker 是否把内核 boot ID 的变化视为原本地 worker 已停止的证据，并在所有执行都已终结后清除这些已保存 Runtime 绑定的持有者。它每 5 秒扫描 8 个已保存的绑定，从不启动替代 worker，也不重放执行。要求 `qwen.managed-agent.runtime-broker.durable-local-process` 和 `local-process` provisioner；不满足条件、在 macOS 上或配置了常驻 Workspace 时启动时拒绝。"
     },
     "qwen.managed-agent.runtime-broker.v3-result-window": {
-      "en": "How long the Runtime Broker keeps waiting for the worker's result of a dispatched Shell or Monitor execution that publishes its output (Tool v3, with `qwen.managed-agent.tool-publication.enabled`) before marking it `UNKNOWN`; a value shorter than the longest such call turns that call into `UNKNOWN`. Other tool executions do not use this window. A suffix-less number binds as seconds. Startup refuses a value below `1s`.",
-      "zh": "Runtime Broker 等待 worker 返回已派发的、会发布输出的 Shell 或 Monitor 执行（Tool v3，开启 `qwen.managed-agent.tool-publication.enabled` 时使用）结果的最长时间，超时后把该执行标记为 `UNKNOWN`；若短于最长的此类调用，该调用会变成 `UNKNOWN`。其他工具执行不使用此窗口。不带单位的数字按秒解析。低于 `1s` 时启动时拒绝。"
+      "en": "How long the Runtime Broker keeps waiting for the worker's result of a dispatched Shell or Monitor execution that publishes its output (Tool v3, with `qwen.managed-agent.tool-publication.enabled`) before marking it `UNKNOWN`; a value shorter than the longest such call turns that call into `UNKNOWN`. Other tool executions do not use this window. A value above `30m` buys nothing on the shipped path: the Hosted Harness stops waiting for a Tool v3 execution after its own fixed 30 minutes. A suffix-less number binds as seconds. Startup refuses a value below `1s`.",
+      "zh": "Runtime Broker 等待 worker 返回已派发的、会发布输出的 Shell 或 Monitor 执行（Tool v3，开启 `qwen.managed-agent.tool-publication.enabled` 时使用）结果的最长时间，超时后把该执行标记为 `UNKNOWN`；若短于最长的此类调用，该调用会变成 `UNKNOWN`。其他工具执行不使用此窗口。大于 `30m` 在随发行版提供的执行路径上没有作用：Hosted Harness 自身等待 Tool v3 执行的期限固定为 30 分钟。不带单位的数字按秒解析。低于 `1s` 时启动时拒绝。"
     },
     "qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled": {
       "en": "Whether LOCAL Workspace execution is gated on a verified physical storage registration: before tools, file access or child Git run, the server checks that the Workspace root still matches its registered identity and marker, and otherwise refuses with `409 workspace_unavailable`. Required by `qwen.managed-agent.runtime-broker.workspace-creation-root` and `qwen.managed-agent.runtime-broker.local-directory-import-enabled`; without `qwen.managed-agent.runtime-broker.workspace-mounts` it also satisfies the Workspace source that `qwen.managed-agent.harness.workspace-files-enabled` needs. Startup refuses it with external provisioners and resident Workspaces.",
