@@ -988,19 +988,24 @@ jobs:
     timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''90'' || ''45'') }}'
     env:
       LINT_BASE_SHA: "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}"
-      # Untrusted fork code runs here (lint_runner): per-job HOME stops it
-      # planting ~/.gitconfig / ~/.npmrc state a later trusted job inherits.
-      # Caches are re-pointed in the npm-cache step; rationale and residual
-      # risks in docs/design/2026-10-31-lint-ecs-fork-routing.md.
-      HOME: '${{ runner.temp }}/qwen-lint-home'
+      # This lane executes PR code for EVERY pull request, untrusted forks
+      # included, on a pool that shares one HOME across ~27 registrations
+      # (docs/design/autofix-gate-runner-isolation.md). A per-job HOME keeps a
+      # fork's ~/.gitconfig, ~/.npmrc and ~/.cache/qwen-code/npm out of the
+      # next trusted job's reach. Cost: cold npm and pnpm caches — the 90/45
+      # ceiling above already prices cold installs.
+      HOME: '${{ runner.temp }}/qwen-ci-home'
+      USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
     permissions:
       contents: 'read'
       pull-requests: 'read'
     steps:
-      # The job-level HOME is a fresh runner.temp subdirectory; create it
-      # before the hygiene steps' `git config --global` writes there.
-      - name: 'Create per-job HOME'
-        run: 'mkdir -p "$HOME"'
+      # The steps below write $HOME before anything would create it (git
+      # safe.directory, npm config); an isolated HOME that does not exist yet
+      # fails those writes instead of isolating them.
+      - name: 'Create isolated HOME'
+        run: 'mkdir -p "${HOME}" "${USERPROFILE}"'
+
       # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
       # verify) may leave root-owned, read-only files anywhere in the workspace.
       # Restore ownership and write permission unconditionally so the checkout
@@ -1336,16 +1341,9 @@ jobs:
       - name: 'Configure persistent npm cache (self-hosted)'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.environment == 'self-hosted' }}"
         run: |-
-          # HOME is per-job here; derive the runner account's real home so the
-          # caches stay shared and warm. XDG_DATA_HOME lands pnpm's store on
-          # its Linux default path; pnpm integrity-checks store reads against
-          # the lockfile. Full rationale: the lint-ecs-fork-routing design doc.
-          real_home="$(getent passwd "$(id -un)" | cut -d: -f6)"
-          cache_dir="${real_home}/.cache/qwen-code/npm"
+          cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "XDG_DATA_HOME=${real_home}/.local/share" >> "${GITHUB_ENV}"
-          echo "COREPACK_HOME=${real_home}/.cache/node/corepack" >> "${GITHUB_ENV}"
           echo "Using persistent npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
@@ -2263,7 +2261,8 @@ jobs:
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.
-    # Same self-hosted scoping as `test`: hosted fallback routing
+    # Same self-hosted scoping as `test` (this lane keeps the association-gated
+    # ubuntu_runner, unlike lint_and_static): hosted fallback routing
     # keeps the pre-contention ceiling, and the ARM64 fleet — which carries
     # no `ecs-qwen` label — gets the contended-pool allowance it runs under.
     timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''60'' || ''30'') }}'
