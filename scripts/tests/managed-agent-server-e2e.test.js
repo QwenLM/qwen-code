@@ -1090,6 +1090,211 @@ describe('managed-agent-server e2e runner', () => {
     );
   });
 
+  // B2 (behavioural): the stream-identity grouping on injected public events —
+  // distinct item/part ids per prefix text, sequences collected, and blanked
+  // (null-identity) deltas excluded from the identity sets.
+  it('behaves b2DeltaIdentity on injected public events', () => {
+    const group = load(['b2DeltaIdentity', 'eventText'], 'b2DeltaIdentity')()
+      .b2DeltaIdentity;
+    const delta = (sequence, text, itemId, partId) => ({
+      sequence,
+      terminal: false,
+      type: 'item.output_text.delta',
+      item_id: itemId,
+      content_part_id: partId,
+      data: { text },
+    });
+    const events = [
+      delta(1, 'PARTIAL_ONE', 'item-1', 'part-1'),
+      delta(2, 'PARTIAL_ONE more', 'item-1', 'part-1'),
+      delta(5, 'PARTIAL_TWO', 'item-2', 'part-2'),
+      delta(9, 'ANSWER', 'item-3', 'part-3'),
+      delta(1, '', null, null), // a retracted delta carries no identity
+    ];
+    expect(group(events, 'PARTIAL_ONE')).toEqual({
+      itemIds: ['item-1'],
+      partIds: ['part-1'],
+      sequences: [1, 2],
+    });
+    expect(group(events, 'PARTIAL_TWO')).toEqual({
+      itemIds: ['item-2'],
+      partIds: ['part-2'],
+      sequences: [5],
+    });
+    expect(group(events, 'ANSWER')).toEqual({
+      itemIds: ['item-3'],
+      partIds: ['part-3'],
+      sequences: [9],
+    });
+    expect(group(events, 'ABSENT')).toEqual({
+      itemIds: [],
+      partIds: [],
+      sequences: [],
+    });
+  });
+
+  // B2 (behavioural): the attempt-identity reader on injected journal HEX rows —
+  // prompt-scoped, oldest first, skipping foreign events (runMysql injected).
+  it('behaves b2ModelAttempts on injected journal rows', () => {
+    const journalRows = (events) =>
+      Buffer.from(
+        events
+          .map((event) =>
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: event,
+            }),
+          )
+          .join('\n'),
+        'utf8',
+      ).toString('hex');
+    const attempt = (sequence, attemptId, state) => ({
+      kind: 'model.attempt',
+      sequence,
+      payload: { attemptId, state },
+    });
+    const rows = journalRows([
+      attempt(30, 'turn_b2:main:c', 'started'),
+      { kind: 'message.committed', sequence: 20, payload: {} },
+      attempt(10, 'turn_b2:main:a', 'output_committed'),
+      attempt(20, 'turn_b2:main:b', 'abandoned'),
+      attempt(40, 'other_turn:main:z', 'started'),
+    ]);
+    const attempts = load(
+      ['b2ModelAttempts', 'sqlString'],
+      'b2ModelAttempts',
+      'runMysql',
+    )(() => rows).b2ModelAttempts(0, 'filter', 'turn_b2');
+    expect(attempts).toEqual([
+      { attemptId: 'turn_b2:main:a', state: 'output_committed', sequence: 10 },
+      { attemptId: 'turn_b2:main:b', state: 'abandoned', sequence: 20 },
+      { attemptId: 'turn_b2:main:c', state: 'started', sequence: 30 },
+    ]);
+  });
+
+  // B2 (behavioural): the SSE client on an injected fetch — frames split across
+  // chunks, multi-frame chunks, Last-Event-ID passthrough, lastId tracking and
+  // the early-close failure. fetch is injected through load().
+  it('behaves readPublicSse on injected chunk streams', async () => {
+    const readSse = (stub) =>
+      load(
+        ['readPublicSse', 'b2SseControllers'],
+        'readPublicSse',
+        'fetch',
+      )(stub).readPublicSse;
+    const frame = (id, event) =>
+      `id: ${id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
+    const delta = (sequence, text) => ({
+      sequence,
+      terminal: false,
+      type: 'item.output_text.delta',
+      data: { text },
+    });
+    const terminal = (sequence) => ({
+      sequence,
+      terminal: true,
+      type: 'turn.completed',
+      data: {},
+    });
+    const chunksOf = (text, size) => {
+      const chunks = [];
+      for (let i = 0; i < text.length; i += size)
+        chunks.push(Buffer.from(text.slice(i, i + size), 'utf8'));
+      return chunks;
+    };
+    const stubFetch = (chunks, seen) => async (url, init) => {
+      seen.url = url;
+      seen.headers = init.headers;
+      return {
+        ok: true,
+        body: (async function* () {
+          for (const chunk of chunks) yield chunk;
+        })(),
+      };
+    };
+    const stream =
+      frame(1, delta(1, 'PREFIX')) +
+      frame(2, {
+        sequence: 2,
+        terminal: false,
+        type: 'stream.reconciled',
+        data: {},
+      }) +
+      frame(3, delta(3, 'ANSWER')) +
+      frame(4, terminal(4));
+    // One byte per chunk: every frame boundary is split.
+    const seen = {};
+    const capture = await readSse(stubFetch(chunksOf(stream, 1), seen))(
+      'http://spring/events',
+      {
+        headers: { 'x-qwen-tenant-id': 't' },
+        after: 0,
+        until: (events) => events.some((event) => event.terminal),
+        timeoutMs: 5_000,
+      },
+    );
+    expect(seen.url).toBe('http://spring/events?after=0');
+    expect(seen.headers.accept).toBe('text/event-stream');
+    expect(capture.lastId).toBe('4');
+    expect(capture.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4]);
+    // Last-Event-ID is passed through and takes the URL without after.
+    const seenReplay = {};
+    await readSse(stubFetch(chunksOf(stream, 7), seenReplay))(
+      'http://spring/events',
+      {
+        headers: {},
+        lastEventId: '0',
+        until: (events) => events.some((event) => event.terminal),
+        timeoutMs: 5_000,
+      },
+    );
+    expect(seenReplay.url).toBe('http://spring/events');
+    expect(seenReplay.headers['last-event-id']).toBe('0');
+    // A stream that closes before the predicate holds is a failure, not a pass.
+    await expect(
+      readSse(stubFetch(chunksOf(frame(1, delta(1, 'PREFIX')), 3), {}))(
+        'http://spring/events',
+        {
+          headers: {},
+          until: (events) => events.some((event) => event.terminal),
+          timeoutMs: 5_000,
+        },
+      ),
+    ).rejects.toThrow(/closed before the capture completed/);
+  });
+
+  // B2: pin the identity/live-SSE observations and their harness-only gate so a
+  // regression reds here at unit speed, not only in the real-stack lane.
+  it('pins the B2 stream-identity and live-SSE observations', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toContain('function b2DeltaIdentity(');
+    expect(source).toContain('function b2ModelAttempts(');
+    expect(source).toContain('async function readPublicSse(');
+    expect(source).toContain('item_id?: string | null;');
+    expect(source).toContain('content_part_id?: string | null;');
+    expect(source).toContain('B2 attempt identities:');
+    expect(source).toContain('B2 live SSE:');
+    expect(source).toContain('B2 stream identities:');
+    expect(source).toContain('B2 replay view:');
+    expect(source).toContain('b2-identities.json');
+    // The live capture starts before the first prefix and only in the
+    // harness-only model-round variant; the frozen control plane keeps scope.
+    const captureAt = source.indexOf('b2LiveCapture = readPublicSse(');
+    expect(captureAt).toBeGreaterThan(-1);
+    expect(source.slice(captureAt - 400, captureAt)).toContain(
+      'if (harnessOnly)',
+    );
+    // The converged live view is the deltas after the LAST retraction — the
+    // public stream.reconciled frame has no payload, so a raw concatenation of
+    // every delta frame would still include the dead prefixes.
+    expect(source).toContain('event.sequence > b2LastReconciled');
+    // The audit checks run only after the existing model-round audit, gated on
+    // harnessOnly, and the replay uses Last-Event-ID rather than after.
+    const auditAt = source.indexOf('B2 attempt identities:');
+    expect(source.slice(auditAt - 600, auditAt)).toContain('if (harnessOnly)');
+    expect(source).toContain("lastEventId: '0',");
+  });
+
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,
   // but the ordering assertion was gated at 20 s, so a --runtime-delay-ms 15000
   // run silently skipped it. Pin the threshold to the criterion's delay and

@@ -1513,6 +1513,161 @@ function assertB3CostContinuity(
   }
 }
 
+// B2: one identity group per prefix text — the item/part ids the public deltas
+// carried while that prefix was live. After retraction the reload view blanks
+// those deltas, so the dead generations' identities survive only in the live
+// SSE capture; that is what makes the live view load-bearing.
+function b2DeltaIdentity(
+  events: PublicEvent[],
+  text: string,
+): { itemIds: string[]; partIds: string[]; sequences: number[] } {
+  const deltas = events.filter(
+    (event) =>
+      event.type === 'item.output_text.delta' &&
+      eventText(event).includes(text),
+  );
+  const distinct = (values: Array<string | null | undefined>): string[] => [
+    ...new Set(values.filter((id): id is string => typeof id === 'string')),
+  ];
+  return {
+    itemIds: distinct(deltas.map((event) => event.item_id)),
+    partIds: distinct(deltas.map((event) => event.content_part_id)),
+    sequences: deltas.map((event) => event.sequence),
+  };
+}
+
+// B2: the original prompt's model attempts, oldest first, read from the journal
+// the way recovery reads them (HEX + decode, never --batch text). Each streaming
+// generation must open a new attemptId.
+function b2ModelAttempts(
+  port: number,
+  sessionFilter: string,
+  promptId: string,
+): Array<{ attemptId: string; state: string; sequence: number }> {
+  const rows = runMysql(
+    port,
+    `SELECT HEX(record_bytes) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} ORDER BY first_sequence`,
+  ).split('\n');
+  const attempts: Array<{
+    attemptId: string;
+    state: string;
+    sequence: number;
+  }> = [];
+  for (const row of rows) {
+    if (!row || row === 'NULL') continue;
+    for (const line of Buffer.from(row, 'hex').toString('utf8').split('\n')) {
+      if (!line) continue;
+      const record = JSON.parse(line) as {
+        subtype?: unknown;
+        managedSession?: {
+          kind?: unknown;
+          sequence?: unknown;
+          payload?: Record<string, unknown>;
+        };
+      };
+      if (record.subtype !== 'managed_session_event_v1') continue;
+      const event = record.managedSession;
+      if (
+        !event ||
+        event.kind !== 'model.attempt' ||
+        typeof event.sequence !== 'number'
+      )
+        continue;
+      const attemptId = event.payload?.['attemptId'];
+      if (
+        typeof attemptId !== 'string' ||
+        !attemptId.startsWith(`${promptId}:main:`)
+      )
+        continue;
+      attempts.push({
+        attemptId,
+        state: String(event.payload?.['state'] ?? ''),
+        sequence: event.sequence,
+      });
+    }
+  }
+  return attempts.sort((a, b) => a.sequence - b.sequence);
+}
+
+interface B2SseCapture {
+  events: PublicEvent[];
+  lastId: string;
+}
+
+// Open SSE captures must not hold the process open when the arm fails early:
+// the main finally aborts whatever is still pending.
+const b2SseControllers = new Set<AbortController>();
+
+// B2: read the public SSE view. One connection stays open across the Harness
+// crashes (the stream is control-plane-owned and reconciles from `after` on
+// connect, so a slightly late subscribe misses nothing). Frames are
+// id:/event:/data: lines terminated by a blank line; data is the PublicEvent
+// JSON. `fetch` is a free identifier so behavioural tests inject a stub.
+async function readPublicSse(
+  url: string,
+  options: {
+    headers: Record<string, string>;
+    after?: number;
+    lastEventId?: string;
+    until: (events: PublicEvent[]) => boolean;
+    timeoutMs: number;
+  },
+): Promise<B2SseCapture> {
+  const controller = new AbortController();
+  b2SseControllers.add(controller);
+  const timer = setTimeout(() => controller.abort(), options.timeoutMs);
+  timer.unref();
+  const headers: Record<string, string> = {
+    ...options.headers,
+    accept: 'text/event-stream',
+  };
+  if (options.lastEventId !== undefined)
+    headers['last-event-id'] = options.lastEventId;
+  const query = options.after !== undefined ? `?after=${options.after}` : '';
+  const events: PublicEvent[] = [];
+  let lastId = '';
+  try {
+    const response = await fetch(`${url}${query}`, {
+      headers,
+      signal: controller.signal,
+    });
+    if (!response.ok || !response.body)
+      throw new Error(`B2 live SSE returned ${response.status}`);
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let frame: { id?: string; data?: string } = {};
+    for await (const chunk of response.body) {
+      buffer += decoder.decode(chunk as BufferSource, { stream: true });
+      let newline: number;
+      while ((newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline).replace(/\r$/, '');
+        buffer = buffer.slice(newline + 1);
+        if (line === '') {
+          if (frame.data !== undefined) {
+            events.push(JSON.parse(frame.data) as PublicEvent);
+            if (frame.id !== undefined) lastId = frame.id;
+          }
+          frame = {};
+          if (options.until(events)) return { events, lastId };
+        } else if (line.startsWith('id:')) {
+          frame.id = line.slice(3).trim();
+        } else if (line.startsWith('data:')) {
+          frame.data =
+            (frame.data === undefined ? '' : frame.data + '\n') +
+            line.slice(5).trim();
+        }
+      }
+    }
+    throw new Error(
+      `B2 live SSE closed before the capture completed (${events.length} frames)`,
+    );
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+    b2SseControllers.delete(controller);
+  }
+}
+
 function assertPublicAnswer(events: PublicEvent[], expected: string): void {
   const terminal = events.filter((event) => event.terminal);
   const text = events
@@ -1552,6 +1707,8 @@ interface PublicEvent {
   sequence: number;
   terminal: boolean;
   type: string;
+  item_id?: string | null;
+  content_part_id?: string | null;
   data?: unknown;
 }
 
@@ -2294,6 +2451,11 @@ try {
     let firstTurnLastSequence = 0;
     let formerDispatchOwner = '';
     let firstPrefixSequence = 0;
+    // B2: the live SSE capture stays open across both Harness crashes; the
+    // second prefix's sequence is hoisted so the audit can check its blanking.
+    let b2LiveCapture: Promise<B2SseCapture> | undefined;
+    let b2SecondPrefixSequence = 0;
+    let b2AttemptIds: string[] = [];
     let heldExecutionStartPath: string | undefined;
     let originalExecutionCallId: string | undefined;
     let originalRuntimeSessionId: string | undefined;
@@ -2523,6 +2685,21 @@ try {
       // The crash point is the first model round of a Session with no
       // Workspace: the provider already streamed a prefix the public feed
       // shows, and nothing but the saved model request can continue it.
+      if (harnessOnly) {
+        // B2: subscribe to the live public view before the first prefix. The
+        // stream is control-plane-owned, so this one connection survives both
+        // Harness crashes; Spring reconciles from after=0 on connect, so a
+        // slightly late subscribe still sees every frame.
+        b2LiveCapture = readPublicSse(
+          `${springUrl}/v1/agents/sessions/${session.id}/events`,
+          {
+            headers: tenantHeaders(tenant),
+            after: 0,
+            until: (events) => events.some((event) => event.terminal),
+            timeoutMs: 240_000,
+          },
+        );
+      }
       await waitUntil(
         'First model round partial text',
         async () =>
@@ -4580,6 +4757,7 @@ try {
             secondPrefixSequence,
           );
         previousPrefixSequence = secondPrefixSequence;
+        b2SecondPrefixSequence = secondPrefixSequence;
         boots.push(currentBoot());
         heads.push(currentHead());
         await crashChild(
@@ -4675,6 +4853,24 @@ try {
           `SELECT COUNT(*) FROM qwen_managed_agent.ma_resource WHERE ${sessionFilter} AND kind='managed-admission'`,
         ),
       );
+      // B2: attempt identities are checked BEFORE the shared audit — a reused
+      // attemptId collides the journal command ids, dedups the later
+      // generations' attempts and breaks recovery routing itself; naming the
+      // identity root cause first keeps the diagnosis specific.
+      if (harnessOnly) {
+        const b2Attempts = b2ModelAttempts(
+          mysqlPort,
+          sessionFilter,
+          firstPromptId,
+        );
+        b2AttemptIds = [
+          ...new Set(b2Attempts.map((attempt) => attempt.attemptId)),
+        ];
+        if (b2AttemptIds.length !== modelRoundPartials.length + 1)
+          throw new Error(
+            `B2 attempt identities: expected ${modelRoundPartials.length + 1} distinct attempts, got ${b2AttemptIds.length}: ${b2Attempts.map((attempt) => `${attempt.attemptId}:${attempt.state}`).join(',')}`,
+          );
+      }
       if (
         recovered.terminals.length !== 1 ||
         recovered.terminals[0].type !== 'turn.completed' ||
@@ -4704,6 +4900,177 @@ try {
       ) {
         throw new Error(
           `Model-round failover audit failed: terminals=${JSON.stringify(recovered.terminals)} text=${JSON.stringify(recovered.text)} retractedBeforeNewDeltas=${retractedBeforeNewDeltas} terminalRows=${terminalRows()} roundRequests=${roundRequests.length} equalRequests=${roundRequests.every((request) => isDeepStrictEqual(request.body, roundRequests[0]?.body))} executions=${executionCount} turns=${turnCount} admissions=${admissionCount} admissionResources=${admissionResources} boots=${boots.join('->')} heads=${heads.map((head) => head.join(',')).join('->')}`,
+        );
+      }
+
+      if (harnessOnly) {
+        // B2: the live SSE view captured across both crashes. The dead
+        // generations' stream identities exist only here — the reload view
+        // blanks them — so the capture is load-bearing, not a convenience.
+        if (!b2LiveCapture)
+          throw new Error('B2 live SSE capture was not started');
+        const b2Live = await b2LiveCapture;
+        // The public stream.reconciled frame carries no payload: the contract
+        // is that a client seeing one reloads (the store already blanked the
+        // retracted deltas in place). The converged live view is therefore the
+        // deltas after the LAST retraction — everything earlier belongs to a
+        // dead generation. The raw capture still holds the dead prefixes'
+        // original identities, which is exactly what the identity check needs.
+        const b2LiveRetractions = b2Live.events.filter(
+          (event) => event.type === 'stream.reconciled',
+        );
+        const b2LastReconciled = b2LiveRetractions.length
+          ? Math.max(...b2LiveRetractions.map((event) => event.sequence))
+          : 0;
+        const b2LiveText = b2Live.events
+          .filter(
+            (event) =>
+              event.type === 'item.output_text.delta' &&
+              event.sequence > b2LastReconciled,
+          )
+          .map(eventText)
+          .join('');
+        const b2LiveTerminals = b2Live.events.filter((event) => event.terminal);
+        const b2LivePartial1 = b2DeltaIdentity(
+          b2Live.events,
+          modelRoundPartials[0],
+        );
+        const b2LivePartial2 = b2DeltaIdentity(
+          b2Live.events,
+          modelRoundPartials[1],
+        );
+        const b2LiveAnswer = b2DeltaIdentity(b2Live.events, modelRoundResponse);
+        if (
+          b2LiveText !== modelRoundResponse ||
+          b2LiveTerminals.length !== 1 ||
+          b2LiveTerminals[0].type !== 'turn.completed' ||
+          b2LivePartial1.sequences.length === 0 ||
+          b2LivePartial2.sequences.length === 0 ||
+          b2LiveAnswer.sequences.length === 0 ||
+          b2LiveRetractions.length < 2 ||
+          !reconciledBetween(
+            b2Live.events,
+            Math.min(...b2LivePartial1.sequences),
+            Math.min(...b2LivePartial2.sequences),
+          ) ||
+          !reconciledBetween(
+            b2Live.events,
+            Math.min(...b2LivePartial2.sequences),
+            Math.min(...b2LiveAnswer.sequences),
+          )
+        )
+          throw new Error(
+            `B2 live SSE: text=${JSON.stringify(b2LiveText)} terminals=${b2LiveTerminals.length} partial1=${b2LivePartial1.sequences.length} partial2=${b2LivePartial2.sequences.length} answer=${b2LiveAnswer.sequences.length} retractions=${b2LiveRetractions.length} frames=${b2Live.events.length}`,
+          );
+        // B2: stream identities. item_id is the Turn's ONE assistant item and
+        // stays stable across the repair (EventIdentity.assistantItemId). The
+        // stream identity is the content Part: a delta continues the previous
+        // delta's Part only while that delta keeps its identity, and retraction
+        // blanks the dead deltas' identities — so every replacement must start
+        // a NEW Part. Pairwise distinct Parts prove the continuation broke at
+        // each retraction; a shared Part means the view never moved on.
+        const b2ReloadAnswer = b2DeltaIdentity(
+          recovered.events,
+          modelRoundResponse,
+        );
+        const b2Groups = [b2LivePartial1, b2LivePartial2, b2ReloadAnswer];
+        const b2ItemIds = new Set(b2Groups.flatMap((group) => group.itemIds));
+        if (
+          b2Groups.some((group) => group.partIds.length === 0) ||
+          b2ItemIds.size !== 1
+        )
+          throw new Error(
+            `B2 stream identities: expected one shared assistant item and a Part per generation: ${JSON.stringify(b2Groups)}`,
+          );
+        for (let i = 0; i < b2Groups.length; i += 1) {
+          for (let j = i + 1; j < b2Groups.length; j += 1) {
+            if (
+              b2Groups[i].partIds.some((id) => b2Groups[j].partIds.includes(id))
+            )
+              throw new Error(
+                `B2 stream identities: generations ${i + 1} and ${j + 1} share a content Part (retraction did not break the continuation): ${JSON.stringify(b2Groups)}`,
+              );
+          }
+        }
+        // B2: the retracted prefixes are blanked in place — empty text and no
+        // item/part identity — at their recorded sequences, in reload AND replay.
+        const b2Blanked = (
+          events: PublicEvent[],
+          sequence: number,
+        ): boolean => {
+          const delta = events.find((event) => event.sequence === sequence);
+          return (
+            !!delta &&
+            delta.type === 'item.output_text.delta' &&
+            eventText(delta) === '' &&
+            delta.item_id == null &&
+            delta.content_part_id == null
+          );
+        };
+        if (
+          !b2Blanked(recovered.events, firstPrefixSequence) ||
+          !b2Blanked(recovered.events, b2SecondPrefixSequence)
+        )
+          throw new Error(
+            `B2 stream identities: retracted prefixes not blanked in reload at ${firstPrefixSequence}/${b2SecondPrefixSequence}`,
+          );
+        // B2: replay from the start (Last-Event-ID takes precedence over after)
+        // must expose the same surviving answer, one terminal, blanked prefixes
+        // and the surviving answer's identity.
+        const b2Replay = await readPublicSse(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events`,
+          {
+            headers: tenantHeaders(tenant),
+            lastEventId: '0',
+            until: (events) => events.some((event) => event.terminal),
+            timeoutMs: 60_000,
+          },
+        );
+        const b2ReplayText = b2Replay.events
+          .filter((event) => event.type === 'item.output_text.delta')
+          .map(eventText)
+          .join('');
+        const b2ReplayTerminals = b2Replay.events.filter(
+          (event) => event.terminal,
+        );
+        const b2ReplayAnswer = b2DeltaIdentity(
+          b2Replay.events,
+          modelRoundResponse,
+        );
+        if (
+          b2ReplayText !== modelRoundResponse ||
+          b2ReplayTerminals.length !== 1 ||
+          !b2Blanked(b2Replay.events, firstPrefixSequence) ||
+          !b2Blanked(b2Replay.events, b2SecondPrefixSequence) ||
+          b2ReplayAnswer.itemIds.join(',') !== b2ReloadAnswer.itemIds.join(',')
+        )
+          throw new Error(
+            `B2 replay view: text=${JSON.stringify(b2ReplayText)} terminals=${b2ReplayTerminals.length} answerIds=${b2ReplayAnswer.itemIds.join(',')} reloadIds=${b2ReloadAnswer.itemIds.join(',')} frames=${b2Replay.events.length}`,
+          );
+        // The model-round arm has no verificationMode, so saveEvidence would
+        // no-op; write the identity evidence directly to the report directory.
+        mkdirSync(verificationDirectory, { recursive: true });
+        writeFileSync(
+          path.join(verificationDirectory, 'b2-identities.json'),
+          JSON.stringify(
+            {
+              attemptIds: b2AttemptIds,
+              live: {
+                partial1: b2LivePartial1,
+                partial2: b2LivePartial2,
+                answer: b2LiveAnswer,
+                frames: b2Live.events.length,
+                lastId: b2Live.lastId,
+              },
+              reloadAnswer: b2ReloadAnswer,
+              replay: {
+                answer: b2ReplayAnswer,
+                frames: b2Replay.events.length,
+              },
+            },
+            null,
+            2,
+          ),
         );
       }
 
@@ -5571,6 +5938,9 @@ try {
     );
   }
 } finally {
+  // Abort any pending B2 SSE capture so an early arm failure exits promptly
+  // instead of waiting out the capture's budget on an open socket.
+  for (const controller of b2SseControllers) controller.abort();
   // A frozen Harness holds SIGTERM pending from stopChild; wake it before
   // teardown so teardown does not burn the 10-second stall on every path,
   // failure or success. `harness` is try-block scoped, so reach it through
