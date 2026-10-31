@@ -59,8 +59,9 @@ them rather than at the end of the document.
 
 - `scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>` resolves the
   coordinates: fetch the snapshot with the field list the lane uses, verify both
-  OIDs exist in this clone, create the artifact directory with its `evidence/`
-  subdirectory, and report the isolation signals the process can observe. It
+  OIDs exist in this clone, refuse a tree that is not a clean checkout of the
+  PR head, create the artifact directory with its `evidence/` subdirectory,
+  and report the isolation signals the process can observe. It
   does not gate on them: resolving metadata needs `gh`, and `gh` and the
   boundary are mutually exclusive, so this path always runs on the host. The
   gate is `--require-isolation`, meant to run inside the boundary before the
@@ -93,10 +94,17 @@ for is a file no round produces, and a check over an absent file is silent:
   `rows[].commit`. A listed commit with no row is an error naming the commits,
   and so is an empty list: a claim over no commits is vacuously true.
 
-Each prepared artifact directory keeps `context.json` containing only its
-`headRefOid`. The checker prefers that round's snapshot and names the source it
-uses. Older directories fall back to the shared per-PR snapshot; an unreadable
-or invalid round snapshot warns instead of using a later round's shared head.
+Each prepared artifact directory keeps `context.json` with the round's full
+coordinates — `repo`, `pr`, `baseRefOid` and `headRefOid` — so a local round
+reads both OIDs from one file instead of deriving them from `HEAD`. Prepare
+writes it only when the current tree is a clean checkout of `headRefOid`:
+the round reuses that tree as the head side of its A/B, so a wrong HEAD exits
+3 naming the `git checkout` to run, and a dirty tree exits 3 asking the
+maintainer to commit or stash — the script never stashes for them, and a
+refusal creates no artifact directory. The checker prefers that round's
+snapshot and names the source it uses. Older directories fall back to the
+shared per-PR snapshot; an unreadable or invalid round snapshot warns instead
+of using a later round's shared head.
 
 ## Attribution footer
 
@@ -146,18 +154,35 @@ A published verification comment ends with the same attribution shape
    failure the skill already warns about.
 2. **The scripts never touch the round, and the coordinate path does not gate on
    isolation.** Prepare fetches metadata and creates directories; it does not
-   checkout a worktree, build, or execute PR code. It also cannot decide whether
+   checkout a worktree, build, or execute PR code. It does gate on the tree,
+   because the round runs the head side of its A/B in the current tree: a HEAD
+   other than the PR head, or any uncommitted change, would measure code the
+   report does not name, so both are refused before anything is written. It
+   also cannot decide whether
    this process may run that code: it must reach `gh`, which the boundary
    excludes by design, so it always runs on the host. A gate there would fire on
    every round and turn the override into the normal path, so the check is a
    separate mode intended to run inside the boundary.
-3. **The local checker mirrors the publisher instead of replacing it.**
-   Extracting the publish job's assertions into shared code would touch the
-   workflow and its meta-tests; the rule set is four checks, stable, and stated
-   in one place. Divergence is the cost, recorded below.
-4. **Warnings, not errors, for report shape.** The publisher does not enforce
-   report structure either. A checker stricter than the publisher would reject
-   artifact the lane accepts, which teaches maintainers to ignore it.
+3. **The publisher runs the local checker.** The checker started as a mirror
+   of the publish job's inline rules, because the rule set was four stable
+   checks and sharing it would touch the workflow and its meta-tests. The
+   mirror did not hold: the failure ledger and the coverage claim were added
+   here only, so the lane published shapes every local round refuses. The
+   publish job now runs this script from its trusted checkout (the
+   default-branch commit, never PR code) and trusts an agent verdict only when
+   the script passes on the report's own directory. That directory is also
+   the only place the lane reads `verdict.txt`: the verify job used to read
+   its own copy from whichever round directory its search found first.
+   Tightening a rule here therefore tightens CI too.
+   Loosening one does not always loosen it: the publish step still validates
+   the count triple itself (the checker runs only on a valid one) and still
+   refuses `merge-ready` over failures on its own, so those two need the
+   workflow changed as well.
+4. **Warnings, not errors, for report shape.** Report structure, evidence
+   naming and head-OID citation stay warnings because a legitimate round can
+   lack them — a documentation-only round has no screenshot to offer — and the
+   checker cannot tell whether a harness ran. Since the publish job runs this
+   script, making one of them fatal would refuse those rounds in CI as well.
 5. **Attribution is a ledger, not a fifth verdict word.** The tempting fix for
    an environment red is a verdict like `merge-ready-with-caveats`, which would
    have to be added to the publisher, its case labels and their pin. The
@@ -188,9 +213,20 @@ A published verification comment ends with the same attribution shape
   marker is not credential-free readiness either: the CLI's own Docker/Podman
   launcher mounts the gcloud config and ADC file and copies model keys, so the
   gate also requires an explicit attestation and refuses on a visible signal.
-- Two implementations of the publish rules can drift. A workflow meta-test pins
-  the checker verdict vocabulary to the publisher case labels, so a fifth word
-  on one side fails the suite. The CI publisher remains authoritative.
+- The tree gate attests source identity only. `dist/` and `node_modules/` are
+  gitignored, so a clean checkout of the head can still carry a build from an
+  earlier commit — reproduced in review: prepare exited 0 while the ignored
+  build ran old code under the new head's label. Install/build reuse is
+  therefore conditional on the round establishing the artifacts were produced
+  for this head (otherwise it rebuilds per the local install strategy), and
+  the prepare success line says "verify or refresh its install/build first"
+  instead of advertising unconditional build reuse.
+- The checker is on the CI publish path. Tightening a rule refuses verdicts the
+  lane used to accept, and those rounds publish as inconclusive. The
+  publish-fidelity meta-tests run the real script, including from exactly the
+  paths the publish job checks out, so run them with any checker change. A
+  workflow meta-test still pins the checker verdict vocabulary to the
+  publisher case labels, so a fifth word on one side fails the suite.
 - The PR title is untrusted input reaching a maintainer terminal, so control
   characters are dropped before it is printed.
 - These are local helpers: the lane pins `.qwen` from the base branch, so the
@@ -322,10 +358,19 @@ A published verification comment ends with the same attribution shape
 ## Acceptance criteria
 
 - `prepare` on a clone holding both OIDs writes a snapshot whose
-  `baseRefOid`/`headRefOid` match the PR, creates the glob-matching directory,
+  `baseRefOid`/`headRefOid` match the PR, creates the glob-matching directory
+  with a `context.json` holding `repo`, `pr`, `baseRefOid` and `headRefOid`,
   and exits 0 on the host. `--require-isolation` passes only when a container
   marker is present, `QWEN_VERIFY_CREDENTIAL_FREE=1` attests to a clean
   boundary, and no known credential signal is visible; otherwise it exits 4.
+- `prepare` exits 3 when HEAD is not the PR head (naming the `git checkout` to
+  run), when the tree carries uncommitted changes, tracked or untracked
+  (naming the entries and a stash form that clears untracked files), or when
+  index flags hide tracked state (skip-worktree / assume-unchanged, as a
+  sparse checkout sets). No refusal writes an artifact directory, and the
+  script never stashes for the maintainer. A detached HEAD at the PR head
+  passes: the identity is the OID, not a branch, and a test pins that the
+  printed checkout remedy reaches exit 0.
 - A missing OID fails with a fetch naming the `--repo` repository, not `origin`.
 - `check` rejects `merge-ready` with a failed assertion, an inconsistent
   triple, and an unknown verdict word; it accepts `findings` with the same
