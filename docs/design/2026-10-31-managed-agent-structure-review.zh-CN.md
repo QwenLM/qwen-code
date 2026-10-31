@@ -166,9 +166,19 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
    `AgentStateStore` 保留为继承它们的组合接口，实现与测试继续使用完整
    表面，嵌套 record/常量经继承解析（嵌套类型的 import 必须写拥有它的
    角色）。角色组合 pin 保证组合接口自身为空、不拥有任何表面。消费方
-   审计：今天的服务都是跨角色编排者，因此继续使用组合接口；
-   `RenameEvidence` 收窄为 `SessionLifecycleStore`。更窄的注入会随 P1
-   沿同一条缝拆分实现而扩散。先接口隔离，后实现拆分（P1）。
+   审计（调用级，评审后更正）：17 个单角色消费方已直接注入其角色——
+   生命周期（`RenameEvidence`、`TurnInputEvidence`、
+   `ChildLifecycleAdmissions`、`ActionResponseCoordinator`、
+   `ContextCompressionCoordinator`、`ContextCompressionService`、
+   `ManagedTaskCancelService`）、查询（`ManagedRuntimeCoordinator`、
+   `SessionRecoveryService`、`ManagedExtensionCommandVerifier`、
+   `ManagedSessionStore`）、策略（`ManagedMcpManagementService`、
+   `ManagedExtensionManagementService`）、事件投影
+   （`MessageMaterializer`、`ReplayFloorAdvancer`、`ManagedToolResultStore`）、
+   Turn 执行（`SessionWorktreeService`）。其余消费方要么跨角色，要么把
+   store 透传给多角色依赖（证据 settle、Harness 与 broker 装配），继续
+   使用组合接口；更窄的注入会随 P1 沿同一条缝拆分实现而进一步扩散。
+   先接口隔离，后实现拆分（P1）。
 
 4. 在 `verification` 中按 `SurfaceRegistryGateTest` 的风格加 pin 测试：断言
    `AgentStateStore`（及其后继角色接口）中名为 `insertWorkspaceSessionCommand`

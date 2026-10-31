@@ -188,11 +188,22 @@ cross-cutting "how the system works today" tour.
    extends them, so implementations and tests keep the whole surface and
    nested records/constants resolve through inheritance (imports of nested
    types must name the owning role). A role-composition pin keeps the
-   composite empty and owns no surface of its own. Consumer audit: today's
-   services are cross-role orchestrators, so they keep the composite;
-   `RenameEvidence` narrows to `SessionLifecycleStore`. Narrower injection
-   spreads as P1 splits the implementation along the same seams. Interface
-   segregation first, implementation split later (P1).
+   composite empty and owns no surface of its own. Consumer audit
+   (call-level, corrected after review): 17 single-role consumers inject
+   their role directly — lifecycle (`RenameEvidence`, `TurnInputEvidence`,
+   `ChildLifecycleAdmissions`, `ActionResponseCoordinator`,
+   `ContextCompressionCoordinator`, `ContextCompressionService`,
+   `ManagedTaskCancelService`), query (`ManagedRuntimeCoordinator`,
+   `SessionRecoveryService`, `ManagedExtensionCommandVerifier`,
+   `ManagedSessionStore`), policy (`ManagedMcpManagementService`,
+   `ManagedExtensionManagementService`), event projection
+   (`MessageMaterializer`, `ReplayFloorAdvancer`, `ManagedToolResultStore`),
+   and turn execution (`SessionWorktreeService`). The remaining consumers
+   either span roles or pass the store into multi-role dependencies
+   (evidence settlement, Harness and broker wiring) and keep the composite;
+   narrower injection spreads further as P1 splits the implementation along
+   the same seams. Interface segregation first, implementation split later
+   (P1).
 
 4. Add a pin test in `verification`, in the style of `SurfaceRegistryGateTest`:
    assert that `AgentStateStore` (and its successor role interfaces) declare
