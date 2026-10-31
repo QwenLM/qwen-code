@@ -18,12 +18,20 @@ packaged arm that crashes a replacement inside a multi-call approval batch and
 proves the surviving siblings recover from MySQL alone.
 
 The four clauses do not live in one recoverable path. A native multi-call batch
-continuation can prove the first three clauses, but **input rewrite and Hook
-no-rerun only exist on the Hook/commandStep path**, and a native continuation
-explicitly refuses Hook/MCP sessions. Bundling all four into one arm is not
-possible without a production change to support mixed native+Hook continuations
-(maintainer-only core work, out of scope for a test-arm slice). This slice
-therefore packages the native mixed-sibling half and defers the rest.
+continuation proves the **first two clauses** (earlier decisions persist; pending
+sibling IDs/order survive), plus a related native observation: a pending sibling
+still requires its own Allow and is never auto-allowed by an earlier sibling's
+decision. Matrix clause 3 ("reapproved inputs never inherit an earlier Allow") is
+specifically about a _rewritten_ input being reapproved, and clause 4 about Hooks;
+**input rewrite and Hook no-rerun only exist on the Hook/commandStep path**, and a
+native continuation explicitly refuses Hook/MCP sessions. This arm never rewrites
+an input (`inputRevision` stays 1), so it does **not** cover clause 3's
+rewritten-input property — the pending-sibling observation above is narrower and
+must not be folded into the A3 coverage ledger as clause 3. Bundling all four into
+one arm is not possible without a production change to support mixed native+Hook
+continuations (maintainer-only core work, out of scope for a test-arm slice). This
+slice therefore packages the native mixed-sibling half and defers the
+rewritten-input/Hook half to a commandStep follow-up.
 
 ## Current state (verified on `main` at `0c1b42fa31`)
 
@@ -93,9 +101,13 @@ crashed generation's disk:
    plan; the pending Action ID is preserved across the replacement, deadline
    unchanged);
 3. the pending sibling is not auto-allowed by the earlier Allow (it still
-   requires its own decision);
-4. each call executes exactly once with its original execution identity, and the
-   Turn projects exactly one terminal with the recovered answer.
+   requires its own decision) — the native pending-sibling observation, narrower
+   than matrix clause 3's rewritten-input property, which stays out of scope;
+4. each call executes exactly once with its original execution identity, in plan
+   order, and the Turn projects exactly one terminal with the recovered answer.
+
+These are the arm's own acceptance observations; only items 1–2 map directly to
+matrix clauses 1–2. Item 3 must not be recorded as matrix clause 3 coverage.
 
 **Out of scope.** Rewritten-input + Hook-no-rerun coverage (a commandStep
 follow-up arm); mixed native+Hook recoverable continuations (would require a
@@ -155,17 +167,20 @@ allowlist entry pins the new key with its exact access count.
 All multi-call behavior is gated on the new fault name so the existing
 single-call arms are untouched:
 
-- the fake model returns **two** toolCalls (`write_file` then `read_file`, two
-  distinct file effects) for the continuation marker only when the A3 fault is
-  active;
+- the fake model returns **two `write_file` toolCalls to distinct paths** (two
+  distinct physical write effects) for the continuation marker only when the A3
+  fault is active;
 - evidence collection accepts a two-call plan for this fault and records both
   Action IDs and the saved plan;
 - the runner posts **two** decisions (Allow[0] to gen2, Allow[1] to gen3) at the
-  choreography points above;
+  choreography points above, and before answering Allow[1] it reads Action[0] and
+  requires it still `decided` with its original deadline (so a recovery that
+  re-asks the decided sibling reds before the terminal converges);
 - execution-identity assertions check **two** executions, each `SETTLED`,
   `dispatch_generation = 1`, with its own original `prepareKey` /
-  `requestDigest`; both file effects are asserted; exactly one terminal; the
-  recovered plan deep-equals the saved plan (order, `runtimeCallId`,
+  `requestDigest`, and require their `settled_at` non-decreasing in plan order (so
+  a reverse dispatch reds); both file effects are asserted; exactly one terminal;
+  the recovered plan deep-equals the saved plan (order, `runtimeCallId`,
   `partIndex`, Action IDs).
 
 ### Runner, CI and contract pins
@@ -220,21 +235,25 @@ rewritten-input / Hook half.
 ## Validation plan
 
 - **.75 real stack** (qwen-managed-e2e container, real Java/MySQL/Broker/Runtime,
-  fake model): head arm green — two executions each once with original identity,
-  one terminal, recovered plan deep-equal, Action IDs and deadline preserved,
-  sibling[0] not re-asked, recovery from MySQL alone after scrash.
-- **Demonstrated mutation reds** (green evidence requires a red): remove the hook
-  → barrier timeout; auto-allow sibling[1] from sibling[0] → no `requested`
-  Action[1] / wrong decision count; re-mint Action[1] on recovery → Action-ID
-  mismatch; drop a sibling from the recovered plan → deep-equal failure.
-- Contract suite + behavioural test green; targeted `packages/cli` unit tests
-  (hook matching/non-matching/abort) green; `npm run build && npm run typecheck
-&& npm run bundle`.
+  fake model): head arm green — two executions each once with original identity
+  and `settled_at` in plan order, one terminal, recovered plan deep-equal, Action
+  IDs and deadline preserved, sibling[0] still decided before Allow[1] and not
+  re-asked, recovery from MySQL alone after scrash.
+- **Demonstrated mutation reds** (green evidence requires a red). Real-stack:
+  M1 hook disabled → barrier timeout; M2 pending sibling's decision skipped →
+  terminal timeout; M3 recovered plan reversed → recovery blocked; R1-4 recovery
+  re-asks the decided sibling → the pre-answer decided-sibling check reds; R1-5
+  reverse dispatch → the `settled_at` plan-order check reds. Fast-tier: R1-6 a
+  first-match plan-link selection → the behavioural ascending-link case reds;
+  R1-7 a narrowed execution-count branch → the anchored contract pin reds.
+- Contract suite + behavioural test green; serve `process-env-guard` green;
+  `npm run build && npm run typecheck && npm run bundle`. A dedicated hook unit
+  test (matching/non-matching/abort) is deferred — see Open questions.
 
 ## Acceptance criteria
 
-- A packaged arm in `hosted-failover-e2e` whose runner asserts clauses 1–4 above
-  from MySQL alone after scrashing the crashed generation.
+- A packaged arm in `hosted-failover-e2e` whose runner asserts observations 1–4
+  above from MySQL alone after scrashing the crashed generation.
 - Each green signal has a demonstrated mutation red.
 - Bilingual design docs aligned; CI green; no production behavior change beyond
   the inert test-gated hook.

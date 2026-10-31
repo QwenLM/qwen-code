@@ -3251,6 +3251,24 @@ try {
         // it must not auto-allow sibling[1] from sibling[0]'s earlier Allow,
         // nor re-ask the already-decided sibling[0]. Assert the preserved
         // identity/deadline before answering, then decide the pending sibling.
+        // Read the decided sibling HERE, before answering the pending one: a
+        // recovery that resumes at the wrong ordinal and re-asks sibling[0]
+        // would flip it back to requested, and a post-terminal check could not
+        // tell "never touched" from "re-decided" once the state reconverges.
+        const decidedBefore = await fetchJson<Record<string, unknown>>(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${originalApprovalId}`,
+          { headers: tenantHeaders(tenant) },
+        );
+        if (
+          decidedBefore.id !== originalApprovalId ||
+          decidedBefore.state !== 'decided' ||
+          decidedBefore.created_at !== originalApprovalOptions!.createdAt ||
+          decidedBefore.expires_at !== originalApprovalOptions!.expiresAt
+        ) {
+          throw new Error(
+            `Recovery re-touched the decided sibling Action/deadline: ${JSON.stringify(decidedBefore)}`,
+          );
+        }
         const siblingBefore = await fetchJson<Record<string, unknown>>(
           `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${siblingApprovalId}`,
           { headers: tenantHeaders(tenant) },
@@ -3349,7 +3367,7 @@ try {
       }
       const rows = runMysql(
         mysqlPort,
-        `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id`,
+        `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest, settled_at FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id`,
       );
       const executions = rows
         ? rows.split('\n').map((row) => row.split('\t'))
@@ -3370,6 +3388,7 @@ try {
       // two siblings, every other allow arm has one.
       if (verificationMode === 'allow') {
         const plan = originalApprovalPlan!;
+        const settledAtByOrdinal: number[] = [];
         for (const [ordinal, call] of plan.calls.entries()) {
           const execution = executions.find(
             (row) => row[1] === call.prepareKey,
@@ -3385,6 +3404,25 @@ try {
           ) {
             throw new Error(
               `Replacement changed the original prepared execution identity for call ${ordinal}: ${(execution ?? []).join(',')}`,
+            );
+          }
+          settledAtByOrdinal.push(Number(execution[8]));
+        }
+        // The siblings must SETTLE in plan order, not merely exist with the
+        // right identities: a recovery that dispatches the batch in reverse
+        // keeps every identity assertion green. settled_at is epoch millis;
+        // require it non-decreasing along the plan so a reverse dispatch reds.
+        for (
+          let ordinal = 1;
+          ordinal < settledAtByOrdinal.length;
+          ordinal += 1
+        ) {
+          if (
+            !Number.isFinite(settledAtByOrdinal[ordinal]) ||
+            settledAtByOrdinal[ordinal] < settledAtByOrdinal[ordinal - 1]
+          ) {
+            throw new Error(
+              `Replacement settled the siblings out of plan order: settledAt=${settledAtByOrdinal.join(',')}`,
             );
           }
         }

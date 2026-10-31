@@ -589,8 +589,37 @@ describe('managed-agent-server e2e runner', () => {
     // Two siblings settle once each under their original identities: the
     // count, both Action rows, the pending sibling's own decision, the second
     // file effect and the order-sensitive final plan are all pinned.
+    // R1-7: anchor the count ternary to expectedExecutions specifically — the
+    // bare ternary also matches expectedOriginalPlanCalls, so narrowing one
+    // while dropping the other must not stay green.
     expect(source).toMatch(
-      /approvalFault === 'sibling-approval'\s*\?\s*2\s*:\s*1/,
+      /const expectedExecutions =[\s\S]*?approvalFault === 'sibling-approval'\s*\?\s*2\s*:\s*1/,
+    );
+    // R1-7: pin the per-call identity loop itself (match by prepare key, not
+    // the pre-PR single-execution shape), so reverting it reds here at unit
+    // speed rather than only on a full real-stack run.
+    expect(source).toContain(
+      'for (const [ordinal, call] of plan.calls.entries())',
+    );
+    expect(source).toContain('(row) => row[1] === call.prepareKey');
+    expect(source).toContain(
+      'Replacement changed the original prepared execution identity for call',
+    );
+    // R1-4: the decided sibling is read and asserted still decided with its
+    // original deadline BEFORE the pending sibling is answered.
+    expect(source).toContain('const decidedBefore = await fetchJson');
+    expect(source).toContain("decidedBefore.state !== 'decided'");
+    expect(source).toContain(
+      'Recovery re-touched the decided sibling Action/deadline',
+    );
+    // R1-5: execution order is gated on settled_at along the plan, not only
+    // the plan resource order, so a reverse dispatch reds.
+    expect(source).toContain(
+      'request_digest, settled_at FROM qwen_managed_agent.ma_tool_execution',
+    );
+    expect(source).toContain('settledAtByOrdinal.push(Number(execution[8]))');
+    expect(source).toContain(
+      'Replacement settled the siblings out of plan order',
     );
     expect(source).toContain('Sibling approval identities/states differ');
     expect(source).toContain('Stored sibling decision differs');
@@ -762,8 +791,19 @@ describe('managed-agent-server e2e runner', () => {
       stage: 'final',
       calls: [call(0, 'action_0'), call(1, 'action_new')],
     };
+    // Descending input kills a last-row-wins implementation.
     expect(
       run([planned(30, batchId, 'res_new'), planned(20, batchId, 'res_old')], {
+        res_new: newerPlan,
+        res_old: finalPlan,
+      }),
+    ).toEqual(newerPlan);
+    // Ascending input (the real query's ORDER BY first_sequence direction, so
+    // the newest link is the LAST row) kills a first-match implementation: a
+    // first-match guard would pick the stale res_old here. Both directions
+    // together force a genuine highest-sequence selection.
+    expect(
+      run([planned(20, batchId, 'res_old'), planned(30, batchId, 'res_new')], {
         res_new: newerPlan,
         res_old: finalPlan,
       }),

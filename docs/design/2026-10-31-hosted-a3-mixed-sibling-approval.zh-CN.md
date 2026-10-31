@@ -14,11 +14,16 @@
 证据——没有任何打包支路会在一个多调用审批批次内部崩溃替换进程，并证明存活的
 兄弟仅凭 MySQL 即可恢复。
 
-这四条子句并不落在同一条可恢复路径上。native 多调用批次 continuation 能证明前
-三条，但**输入改写与 Hook 不重跑只存在于 Hook/commandStep 路径**，而 native
-continuation 明确拒绝 Hook/MCP 会话。要把四条捆进一个支路，就必须改生产代码以
-支持混合 native+Hook continuation（maintainer-only 的核心改动，超出测试臂切片
-范围）。因此本切片打包 native 混合兄弟那一半，其余延后。
+这四条子句并不落在同一条可恢复路径上。native 多调用批次 continuation 能证明**前
+两条**（先前决定持久；pending 兄弟 ID/顺序存活），外加一个相关的 native 观察项：
+pending 兄弟仍需自己的 Allow，绝不被较早兄弟的决策自动放行。矩阵第 3 子句（「重新
+审批的输入绝不继承先前的 Allow」）特指被*改写*的输入重新审批，第 4 子句关乎 Hook；
+**输入改写与 Hook 不重跑只存在于 Hook/commandStep 路径**，而 native continuation
+明确拒绝 Hook/MCP 会话。本支路从不改写输入（`inputRevision` 恒为 1），因此**不**覆盖
+第 3 子句的改写输入性质——上述 pending 兄弟观察项更窄，绝不可作为第 3 子句折入 A3
+覆盖台账。要把四条捆进一个支路，就必须改生产代码以支持混合 native+Hook
+continuation（maintainer-only 的核心改动，超出测试臂切片范围）。因此本切片打包
+native 混合兄弟那一半，把改写输入/Hook 那一半延后到 commandStep 后续。
 
 ## 现状（在 `main` 的 `0c1b42fa31` 上实证）
 
@@ -78,9 +83,13 @@ scrash 崩溃代磁盘后仅凭 MySQL 证明：
 1. 先前决定持久（sibling[0] 不被重问或重决）；
 2. pending 兄弟 ID/顺序存活（恢复出的 plan 与 saved plan 深相等；pending Action
    ID 跨替换保留，deadline 不变）；
-3. pending 兄弟不被先前的 Allow 自动放行（它仍需自己的决策）；
-4. 每个调用以原执行身份恰好执行一次，Turn 恰好投影一个 terminal 并带恢复出的
-   答案。
+3. pending 兄弟不被先前的 Allow 自动放行（它仍需自己的决策）——这是 native
+   pending 兄弟观察项，比矩阵第 3 子句的改写输入性质更窄，后者仍在范围外；
+4. 每个调用以原执行身份、按 plan 顺序恰好执行一次，Turn 恰好投影一个 terminal
+   并带恢复出的答案。
+
+这些是本支路自身的验收观察项；只有项 1–2 直接对应矩阵子句 1–2。项 3 绝不可记录
+为矩阵第 3 子句的覆盖。
 
 **范围外。** 改写输入 + Hook 不重跑覆盖（一个 commandStep 后续支路）；混合
 native+Hook 可恢复 continuation（需核心生产改动）；real-provider 验收；
@@ -131,14 +140,16 @@ gen2（gen3 不传）。在 `commitDurableWait` 之后打日志
 
 所有多调用行为都 gated 在新故障名上，因此现有单调用支路不受影响：
 
-- fake 模型仅在 A3 故障激活时，对 continuation marker 返回**两个** toolCall
-  （先 `write_file` 后 `read_file`，两个不同的文件效果）；
+- fake 模型仅在 A3 故障激活时，对 continuation marker 返回**两个写到不同路径的
+  `write_file` toolCall**（两个不同的物理写效果）；
 - 取证对该故障接受两调用 plan，并记录两个 Action ID 与 saved plan；
-- runner 在上述编排点投递**两次**决策（Allow[0] 给 gen2，Allow[1] 给 gen3）；
+- runner 在上述编排点投递**两次**决策（Allow[0] 给 gen2，Allow[1] 给 gen3），
+  且在答复 Allow[1] 之前读取 Action[0] 并要求其仍 `decided`、deadline 原样（如此
+  重问已决兄弟的恢复会在终态收敛前变红）；
 - 执行身份断言检查**两个**执行，各 `SETTLED`、`dispatch_generation = 1`、各带
-  自己的原 `prepareKey` / `requestDigest`；断言两个文件效果；恰好一个 terminal；
-  恢复出的 plan 与 saved plan 深相等（顺序、`runtimeCallId`、`partIndex`、
-  Action ID）。
+  自己的原 `prepareKey` / `requestDigest`，并要求其 `settled_at` 按 plan 顺序
+  非递减（如此逆序派发会变红）；断言两个文件效果；恰好一个 terminal；恢复出的
+  plan 与 saved plan 深相等（顺序、`runtimeCallId`、`partIndex`、Action ID）。
 
 ### runner、CI 与契约钉
 
@@ -182,19 +193,22 @@ gen2（gen3 不传）。在 `commitDurableWait` 之后打日志
 ## 验证计划
 
 - **.75 真机**（qwen-managed-e2e 容器，真实 Java/MySQL/Broker/Runtime，fake
-  模型）：head 臂绿——两个执行各一次且身份原样、一个 terminal、恢复 plan 深
-  相等、Action ID 与 deadline 保留、sibling[0] 未被重问、scrash 后仅凭 MySQL
-  恢复。
-- **实测变异红**（绿色证据需要红）：删钩子 → barrier 超时；从 sibling[0] 自动
-  放行 sibling[1] → 无 `requested` 的 Action[1] / 决策计数错；恢复时重铸
-  Action[1] → Action ID 不符；从恢复 plan 丢一个兄弟 → 深相等失败。
-- 契约套件 + 行为化测试绿；定向 `packages/cli` 单测（钩子匹配/不匹配/abort）绿；
-  `npm run build && npm run typecheck && npm run bundle`。
+  模型）：head 臂绿——两个执行各一次且身份原样、`settled_at` 按 plan 顺序、一个
+  terminal、恢复 plan 深相等、Action ID 与 deadline 保留、Allow[1] 之前 sibling[0]
+  仍 decided 且未被重问、scrash 后仅凭 MySQL 恢复。
+- **实测变异红**（绿色证据需要红）。真机：M1 禁用钩子 → barrier 超时；M2 跳过
+  pending 兄弟决策 → terminal 超时；M3 反转恢复 plan → 恢复阻塞；R1-4 恢复重问
+  已决兄弟 → 答复前的已决兄弟检查变红；R1-5 逆序派发 → `settled_at` plan 顺序
+  检查变红。Fast-tier：R1-6 first-match 计划链接选择 → 行为化升序链接用例变红；
+  R1-7 收窄执行计数分支 → 锚定契约钉变红。
+- 契约套件 + 行为化测试绿；serve `process-env-guard` 绿；`npm run build &&
+npm run typecheck && npm run bundle`。专用钩子单测（匹配/不匹配/abort）延后
+  ——见开放问题。
 
 ## 验收标准
 
 - `hosted-failover-e2e` 中一个打包支路，其 runner 在 scrash 崩溃代后仅凭 MySQL
-  断言上述子句 1–4。
+  断言上述观察项 1–4。
 - 每个绿色信号都有一次实测变异红。
 - 双语设计文档对齐；CI 绿；除惰性测试 gated 钩子外无生产行为改动。
 
