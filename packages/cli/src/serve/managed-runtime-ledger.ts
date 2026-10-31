@@ -59,6 +59,7 @@ const POSIX_PS = '/bin/ps';
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 
 export interface ManagedRuntimeLedgerWorkerRecord {
+  readonly groupOwned?: boolean;
   readonly pid: number;
   /** The worker's own process group; its pid on Windows, which has none. */
   readonly pgid: number;
@@ -697,6 +698,33 @@ export class ManagedRuntimeLedger {
     return state;
   }
 
+  async stopWitnessedGroup(
+    pgid: number,
+    budgetMs: number,
+  ): Promise<ProcessLiveness> {
+    const record = this.groups.get(pgid);
+    if (record === undefined) return 'gone';
+    const identity = judgeGroupIdentity(
+      record,
+      queryTableQuietly(),
+      Date.now(),
+    );
+    if (identity === 'gone' || identity === 'recycled')
+      return this.waitForGroupExit(pgid, 0);
+    if (identity !== 'ours') return 'denied';
+    signalProcessGroup(pgid, 'SIGTERM');
+    if ((await this.waitForGroupExit(pgid, 1000)) === 'gone') return 'gone';
+    const remainingIdentity = judgeGroupIdentity(
+      record,
+      queryTableQuietly(),
+      Date.now(),
+    );
+    if (remainingIdentity === 'gone' || remainingIdentity === 'recycled')
+      return this.waitForGroupExit(pgid, 0);
+    if (remainingIdentity !== 'ours') return 'denied';
+    return this.stopGroup(pgid, budgetMs);
+  }
+
   async stopGroup(pgid: number, budgetMs: number): Promise<ProcessLiveness> {
     const record = this.groups.get(pgid);
     if (record === undefined) return 'gone';
@@ -910,6 +938,13 @@ export async function sweepWorkerLedger(
     );
   }
   const document = parseLedgerDocument(raw);
+  if (document?.worker.groupOwned === false) {
+    throw new LedgerSweepUnprovenError(
+      workFile,
+      [document.worker.pgid],
+      'Worker process group belongs to its host; only explicit extension-owner reconciliation may stop its registered groups.',
+    );
+  }
   if (!document) {
     // A ledger nobody can read is an operator's evidence, not a retryable
     // stop: a reaper would re-read the same immutable bytes forever and

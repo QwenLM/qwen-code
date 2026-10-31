@@ -40,6 +40,7 @@ import {
   MAX_PUSHES,
   autofixPrPaths,
   readState,
+  writeAnchor,
   writeState,
   type AutofixPrState,
 } from './state.js';
@@ -122,6 +123,7 @@ describe('runPush (real git, bare remote)', () => {
       postedCommentIds: [],
     };
     writeState(paths.statePath, initial);
+    writeAnchor({ host: 'github.com', owner: 'o', repo: 'r' }, 7, repo);
 
     live = {
       state: 'OPEN',
@@ -349,6 +351,22 @@ describe('runPush (real git, bare remote)', () => {
     expect(() => runPush(7)).toThrow(/invalid pushTarget/);
   });
 
+  it('pushes nothing for a round its task no longer drives', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      watch: { every: 2, reply: true, instructions: '', task: 'bbbbbbbbbbbb' },
+    });
+    expect(() => runPush(7, 'aaaaaaaaaaaa')).toThrow(/no longer drives/);
+  });
+
+  it('pushes nothing for a watch cleanup ended, whose work it kept', () => {
+    writeState(paths.statePath, {
+      ...state(),
+      ended: { at: '2026-10-25T00:00:00.000Z', reason: 'kept' },
+    });
+    expect(() => runPush(7)).toThrow(/watch was stopped/);
+  });
+
   it('refuses a worktree on another branch, or a symlink in its place', () => {
     run(repo, 'branch', 'mine', featSha);
     run(paths.worktreePath, 'switch', '-q', 'mine');
@@ -513,6 +531,49 @@ describe('runPush (real git, bare remote)', () => {
     process.env['QWEN_CODE_SESSION_ID'] = 'session-b';
     expect(() => runPush(7)).toThrow(/watched by another session/);
     expect(remoteFeat()).toBe(featSha);
+  });
+
+  describe('in place', () => {
+    beforeEach(() => {
+      // Turn the fixture's watch into an in-place one on repo itself.
+      run(repo, 'worktree', 'remove', '--force', paths.worktreePath);
+      run(repo, 'branch', '-D', paths.branch);
+      run(repo, 'switch', '-q', 'feat');
+      writeState(paths.statePath, {
+        ...state(),
+        inPlace: true,
+        worktreePath: repo,
+        branch: 'feat',
+      });
+    });
+
+    it("pushes the user's commits along, under the lease", () => {
+      // The watch's own files under .qwen/tmp are not uncommitted work.
+      const mine = commitIn(repo, 'mine.txt');
+      expect(runPush(7)).toMatchObject({ pushed: true, sha: mine, pushes: 1 });
+      expect(remoteFeat()).toBe(mine);
+      expect(state().lastKnownHeadSha).toBe(mine);
+    });
+
+    it('refuses uncommitted changes of the user', () => {
+      commitIn(repo, 'mine.txt');
+      writeFileSync(join(repo, 'dirty.txt'), 'x');
+      expect(() => runPush(7)).toThrow(/uncommitted changes/);
+      expect(remoteFeat()).toBe(featSha);
+    });
+
+    it('answers resync when someone else pushed', () => {
+      const other = join(base, 'other');
+      run(base, 'clone', '-q', remote, other);
+      run(other, 'config', 'user.email', 't@example.com');
+      run(other, 'config', 'user.name', 't');
+      run(other, 'checkout', '-q', 'feat');
+      const theirs = commitIn(other, 'theirs.txt');
+      run(other, 'push', '-q', 'origin', 'feat');
+      commitIn(repo, 'mine.txt');
+      expect(runPush(7)).toMatchObject({ pushed: false, action: 'resync' });
+      expect(remoteFeat()).toBe(theirs);
+    });
   });
 });
 

@@ -6,6 +6,7 @@
 
 import {
   parsePublicChildModelRoute,
+  type PublicChildExtensionAgent,
   type PublicChildModelRoute,
 } from '@qwen-code/qwen-code-core/managed-runtime/managed-child-operations.js';
 
@@ -13,6 +14,7 @@ import {
   HostedContextCompression,
   HostedCompressionRefusal,
 } from './hosted-context-compression.js';
+import { extensionInstructionText } from './hosted-extension-tool-context.js';
 
 import {
   parseHostedApprovalSelection,
@@ -92,6 +94,25 @@ import {
   readHostedMcpSettings,
   validateHostedMcpHistory,
 } from './hosted-mcp-settings.js';
+import { isManagedExtensionConfig } from '@qwen-code/qwen-code-core/managed-runtime/managed-config-install.js';
+import {
+  parseManagedExtensionApplyCommand,
+  type ManagedExtensionApplyCommand,
+  parseManagedExtensionEffectiveBundle,
+  type ManagedExtensionEffectiveBundle,
+} from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-package.js';
+import { readManagedExtensionContributions } from '@qwen-code/qwen-code-core/managed-runtime/managed-extension-contributions.js';
+import {
+  parseHostedChildExtensionAgent,
+  hostedChildExtensionApplyCommand,
+  type HostedChildExtensionAgent,
+} from './hosted-extension-agent.js';
+import {
+  HostedExtensionSession,
+  HostedExtensionRecoveryRequired,
+  HostedExtensionRevisionConflict,
+  type HostedExtensionPackage,
+} from './hosted-extension-session.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { Part } from '@google/genai';
@@ -377,6 +398,9 @@ const RESTORE_CONTAINER_KINDS = new Set([
   'managed-definition',
   'managed-session_metadata',
   'managed-config_install',
+  'managed-extension-config-bundle',
+  'managed-extension-contributions',
+  'managed-extension-root',
   'managed-file_history',
   'managed-tool-outcome',
   'managed-tool-result-manifest',
@@ -490,6 +514,102 @@ function describeManagedError(cause: unknown): string {
  * Lifts a Session's recovery block. The named reason belongs to the block,
  * so it is cleared with it here rather than by hand at each lift site.
  */
+function selectExtensionCatalog(
+  session: HostedSession,
+  bundle: ManagedExtensionEffectiveBundle,
+  packages: readonly HostedExtensionPackage[],
+): void {
+  session.baseSkills ??= session.skills ?? new HostedSkillCatalog([]);
+  session.skills = extensionSkillCatalog(session.baseSkills, packages);
+  session.extensionBundle = bundle;
+  session.extensionPackages = packages;
+  session.extensionContext = packages
+    .flatMap((entry) =>
+      entry.contributions.context.map(
+        (context) =>
+          `<extension_context source="extension://${entry.extensionId}/${context.path}">\n${extensionInstructionText(context.body, entry.extensionId)}\n</extension_context>`,
+      ),
+    )
+    .join('\n\n');
+}
+
+function extensionSkillCatalog(
+  base: HostedSkillCatalog | undefined,
+  packages: readonly HostedExtensionPackage[],
+): HostedSkillCatalog {
+  const agents = packages.flatMap((entry) =>
+    entry.contributions.agents.map((agent) => agent.name),
+  );
+  if (new Set(agents).size !== agents.length)
+    throw new Error('Extension agent names conflict.');
+  return new HostedSkillCatalog(
+    [
+      ...(base?.entries() ?? []),
+      ...packages.flatMap((entry) =>
+        entry.contributions.skills.map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+          body: extensionInstructionText(skill.body, entry.extensionId),
+          model_invocable: skill.model_invocable,
+          user_invocable: skill.user_invocable,
+          asset_directory: `extension://${entry.extensionId}/${skill.assetDirectory.replace(/\/$/u, '')}/`,
+        })),
+      ),
+    ],
+    packages.flatMap((entry) =>
+      entry.contributions.commands.map((command) => ({
+        ...command,
+        extensionId: entry.extensionId,
+      })),
+    ),
+  );
+}
+
+function extensionAgentsOf(session: HostedSession) {
+  const bundleRef = session.extensions?.activeBundleRef;
+  if (!bundleRef || !session.extensionBundle) return [];
+  return (session.extensionPackages ?? []).flatMap((entry) => {
+    const member = session.extensionBundle!.packages.find(
+      (member) => member.pin.extensionId === entry.extensionId,
+    )!;
+    return entry.contributions.agents.map((agent) => ({
+      name: agent.name,
+      ...(agent.model ? { model: agent.model } : {}),
+      ...(agent.tools ? { tools: agent.tools } : {}),
+      ...(agent.disallowedTools
+        ? { disallowedTools: agent.disallowedTools }
+        : {}),
+      descriptor: {
+        configRevision: session.extensionBundle!.configRevision,
+        bundleRef,
+        pin: member.pin,
+        contributionsRef: member.contributionsRef,
+        agentName: agent.name,
+        toolNames: [],
+      },
+    }));
+  });
+}
+
+async function extensionBootstrapIncomplete(
+  session: HostedSession,
+  manager: HostedExtensionSession,
+): Promise<boolean> {
+  if (!session.initialSelection && !session.publicChildExtensionAgent)
+    return false;
+  const active = await manager.active();
+  return (
+    !manager.activeBundleRef ||
+    !active ||
+    active.configRevision < 1 ||
+    (!!session.publicChildExtensionAgent &&
+      !isDeepStrictEqual(
+        active.packages.map((entry) => entry.pin),
+        session.extensionAgentPins,
+      ))
+  );
+}
+
 function liftRecoveryBlock(session: HostedSession): void {
   session.blocked = false;
   session.recoveryReason = undefined;
@@ -533,6 +653,17 @@ interface HostedSession {
   agentDefinition?: HostedAgentDefinition;
   sessionSkillsRef?: ManagedSessionDurableRef;
   skills?: HostedSkillCatalog;
+  baseSkills?: HostedSkillCatalog;
+  extensions?: HostedExtensionSession;
+  extensionBundle?: ManagedExtensionEffectiveBundle;
+  extensionPackages?: readonly HostedExtensionPackage[];
+  extensionContext?: string;
+  publicChildExtensionAgent?: HostedChildExtensionAgent;
+  initialSelection?: ManagedExtensionApplyCommand;
+  extensionBootstrapPending?: boolean;
+  extensionAgentPins?: ManagedExtensionApplyCommand['extensions'];
+  extensionAgentTools?: readonly string[];
+  extensionAgentPrompt?: string;
   clientId: string;
   cwd: string;
   streams: Set<() => void>;
@@ -1127,6 +1258,7 @@ function childAgentsOf(session: HostedSession) {
         promptId: string,
         model: string,
         route: PublicChildModelRoute,
+        extensionAgent?: PublicChildExtensionAgent,
       ) => {
         const selection = parseHostedApprovalSelection(
           await session.stores!.approvalSelection(),
@@ -1150,7 +1282,8 @@ function childAgentsOf(session: HostedSession) {
           promptId,
         );
         return {
-          version: 1 as const,
+          version: extensionAgent ? (2 as const) : (1 as const),
+          ...(extensionAgent ? { extensionAgent } : {}),
           sourcePromptId: promptId,
           approvalMode:
             selection.mode === 'auto' ? ('default' as const) : selection.mode,
@@ -3091,6 +3224,38 @@ async function eventEnvelope(
   }
   if (
     event.kind === 'message.committed' &&
+    event.payload['role'] === 'user' &&
+    String(event.payload['messageId']).startsWith('umsg_')
+  ) {
+    const message = JSON.parse(
+      (
+        await readManagedMessageBody(
+          (ref) => session.managed.resources.read(ref),
+          event.payload['contentRef'] as unknown as ManagedSessionDurableRef,
+        )
+      ).toString('utf8'),
+    ) as ChatRecord;
+    if (message.subtype !== 'mid_turn_user_message')
+      return {
+        v: 1,
+        id: event.sequence,
+        type: 'managed_journal_event',
+        data: { sessionId },
+      };
+    return {
+      v: 1,
+      id: event.sequence,
+      type: 'user_message_consumed',
+      promptId: message.daemonPromptId,
+      data: {
+        sessionId,
+        messageId: message.uuid,
+        parts: message.message?.parts ?? [],
+      },
+    };
+  }
+  if (
+    event.kind === 'message.committed' &&
     (event.payload['role'] === 'assistant' ||
       event.payload['role'] === 'tool_result')
   ) {
@@ -3330,6 +3495,16 @@ async function startHostedRecoveredTurn(
   await ready;
   liftRecoveryBlock(session);
 }
+
+// E2E fault injection only (QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT=<sessionId>, set
+// by the packaged finished-before-commit arm on the generation that must crash):
+// once the main model stream's Finished marker is durable but before the assistant
+// output commits, hold the turn so the runner can SIGKILL this generation inside
+// that window. The next generation must reissue the saved request rather than
+// compensate an already-committed terminal. The flag is never set in production.
+const crashBeforeCommitSession =
+  process.env['QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT'];
+let crashBeforeCommitFired = false;
 
 async function executeHostedTurn(
   session: HostedSession,
@@ -3581,6 +3756,12 @@ async function executeHostedTurn(
                 : { message: { role: 'user', parts: promptInput.parts } }),
             },
           );
+          const initialQueued = await session.stores?.claimUserMessages(
+            promptId,
+            true,
+          );
+          if (initialQueued?.length)
+            inputRecord.uuid = `${initialQueued[0].id}:${initialQueued[0].revision}`;
           await session.managed.sink.write(inputRecord);
           parentUuid = inputRecord.uuid;
         }
@@ -3650,6 +3831,14 @@ async function executeHostedTurn(
                   mcp: session.mcp,
                   hooks: session.hooks,
                   skills: session.skills,
+                  extensionConfig: session.extensionBundle
+                    ? {
+                        revision: session.extensionBundle.configRevision,
+                        packages: session.extensionBundle.packages,
+                      }
+                    : undefined,
+                  extensionAgents: extensionAgentsOf(session),
+                  allowedToolNames: session.extensionAgentTools,
                   profile: session.toolProfile,
                   foregroundOnly: session.foregroundOnly,
                   context: workspaceContext,
@@ -3735,6 +3924,41 @@ async function executeHostedTurn(
                   prompt: text,
                   attachmentParts: promptInput.attachments,
                   promptId,
+                  ...(session.stores
+                    ? {
+                        userMessages: {
+                          claim: async () =>
+                            (
+                              await session.stores!.claimUserMessages(promptId)
+                            ).map((message) => ({
+                              id: `${message.id}:${message.revision}`,
+                              ...parseHostedInput(message.input),
+                            })),
+                          commit: async (id: string, parts: Part[]) => {
+                            const message = record(
+                              session,
+                              sessionId,
+                              'user',
+                              parentUuid,
+                              {
+                                uuid: id,
+                                daemonPromptId: promptId,
+                                subtype: 'mid_turn_user_message',
+                                message: { role: 'user', parts },
+                              },
+                            );
+                            await session.managed.sink.write(message);
+                            parentUuid = message.uuid;
+                          },
+                          commitAssistant: async (
+                            parts: Part[],
+                            model: string,
+                          ) => {
+                            await commit('assistant', parts, model);
+                          },
+                        },
+                      }
+                    : {}),
                   signal: abort.signal,
                   modelScope,
                   workspaceContext,
@@ -3744,6 +3968,7 @@ async function executeHostedTurn(
                     session.managed,
                     promptId,
                   ),
+                  extensionInstructions: session.extensionContext,
                   agentInstructions: await readHostedAgentInstructions(
                     session.agentDefinition,
                     session.managed.resources,
@@ -3786,6 +4011,29 @@ async function executeHostedTurn(
                     : {}),
                   ...(deltas ? { textDeltas: deltas } : {}),
                 });
+          if (
+            crashBeforeCommitSession === sessionId &&
+            !crashBeforeCommitFired
+          ) {
+            // The stream's Finished marker is already durable (the model layer's
+            // finally committed a usage-only output_committed); the assistant
+            // message.committed below is not. Hold here so the runner crashes this
+            // generation inside the B3a window and the next one must reissue. The
+            // hold still observes the Turn's abort signal: a leaked flag must not
+            // park a real Session uncancellably, so a cancel/deadline/daemon abort
+            // rejects into the enclosing catch and settles the Turn instead.
+            crashBeforeCommitFired = true;
+            writeStderrLineSafe(
+              `qwen serve: E2E holding finished turn before assistant commit for Session ${sessionId} prompt ${promptId}`,
+            );
+            await new Promise<never>((_resolve, reject) => {
+              const release = (): void =>
+                reject(abort.signal.reason ?? new Error('aborted'));
+              if (abort.signal.aborted) release();
+              else
+                abort.signal.addEventListener('abort', release, { once: true });
+            });
+          }
           await commit(
             'assistant',
             result.parts ?? [{ text: result.text }],
@@ -3958,6 +4206,13 @@ export function registerHostedHarnessSessionRoutes(
   const unresolvedOpenings = new Set<string>();
   let initialReconciliations = 0;
   const epoch = contract.bootId.replaceAll('-', '_');
+  // E2E fault injection only (QWEN_E2E_DROP_LOAD_REPLY=<sessionId>, set by the
+  // packaged load-reply-lost arm on the replacement Harness): lose exactly the
+  // first load attach reply for that Session, after its driver has started, so
+  // the control plane must redrive the same load into the now-active driver.
+  // The flag is never set in production.
+  const dropLoadReplySession = process.env['QWEN_E2E_DROP_LOAD_REPLY'];
+  let loadReplyDropped = false;
   const released = new Map<
     string,
     { clientId: string; receipt: HostedHarnessReleaseReceipt }
@@ -4182,6 +4437,14 @@ export function registerHostedHarnessSessionRoutes(
     session: HostedSession,
     recovery?: HostedRuntimeRecoveryReport,
   ): void => {
+    if (dropLoadReplySession === sessionId && !loadReplyDropped) {
+      loadReplyDropped = true;
+      writeStderrLineSafe(
+        `qwen serve: E2E dropping first load reply for Session ${sessionId}`,
+      );
+      res.destroy();
+      return;
+    }
     res.status(200).json({
       sessionId,
       clientId: session.clientId,
@@ -4380,7 +4643,24 @@ export function registerHostedHarnessSessionRoutes(
     let captureBytes = body?.['captureBytes'];
     const publicChildAgentsVersion = body?.['publicChildAgentsVersion'] ?? 0;
     let publicChildModelRoute: PublicChildModelRoute | undefined;
+    let publicChildExtensionAgent: HostedChildExtensionAgent | undefined;
+    let initialSelection: ManagedExtensionApplyCommand | undefined;
     try {
+      if (body?.['initialSelection'] !== undefined) {
+        initialSelection = parseManagedExtensionApplyCommand(
+          body['initialSelection'],
+        );
+        if (
+          initialSelection.expectedRevision !== 0 ||
+          initialSelection.mcpChange
+        )
+          throw new Error('Invalid initial extension selection.');
+      }
+      publicChildExtensionAgent = parseHostedChildExtensionAgent(
+        body?.['publicChildExtensionAgent'],
+      );
+      if (publicChildExtensionAgent && initialSelection)
+        throw new Error('Child and creation extension bindings conflict.');
       publicChildModelRoute =
         body?.['publicChildModelRoute'] === undefined
           ? undefined
@@ -4390,6 +4670,11 @@ export function registerHostedHarnessSessionRoutes(
         (publicChildAgentsVersion !== 1 || (!body?.['lineage'] && create))
       )
         throw new Error('A model route belongs only to a public child.');
+      if (
+        publicChildExtensionAgent &&
+        (!publicChildModelRoute || (create && !body?.['lineage']))
+      )
+        throw new Error('An extension agent belongs only to a public child.');
     } catch {
       return error(res, 400, 'invalid_public_child_model_route');
     }
@@ -4397,13 +4682,17 @@ export function registerHostedHarnessSessionRoutes(
       error(res, 400, 'invalid_public_child_agents_version');
       return;
     }
+    const extensionChildProfile =
+      contract.features?.includes('session-extension-packages/1') === true &&
+      contract.lifecycleV2Profiles?.includes('hosted-workspace-shell/1');
     if (
       publicChildAgentsVersion === 1 &&
       (toolProfile !== 'hosted-workspace-shell/1' ||
         body?.['foregroundOnly'] === true ||
-        body?.['mcpServers'] !== undefined ||
-        body?.['hookCatalog'] !== undefined ||
-        agentDefinition !== undefined ||
+        (!extensionChildProfile &&
+          (body?.['mcpServers'] !== undefined ||
+            body?.['hookCatalog'] !== undefined ||
+            agentDefinition !== undefined)) ||
         body?.['childWorkspaces'] === true ||
         body?.['childSnapshots'] === true)
     ) {
@@ -4937,6 +5226,19 @@ export function registerHostedHarnessSessionRoutes(
           publicChildModelRoute,
         )
       ) {
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
+      if (
+        !isDeepStrictEqual(
+          resident.publicChildExtensionAgent,
+          publicChildExtensionAgent,
+        )
+      ) {
+        error(res, 409, 'hosted_tool_profile_conflict');
+        return;
+      }
+      if (!isDeepStrictEqual(resident.initialSelection, initialSelection)) {
         error(res, 409, 'hosted_tool_profile_conflict');
         return;
       }
@@ -5492,6 +5794,10 @@ export function registerHostedHarnessSessionRoutes(
                     ? { publicChildAgentsVersion }
                     : {}),
                   ...(publicChildModelRoute ? { publicChildModelRoute } : {}),
+                  ...(publicChildExtensionAgent
+                    ? { publicChildExtensionAgent }
+                    : {}),
+                  ...(initialSelection ? { initialSelection } : {}),
                   ...(sessionSkillsRef ? { sessionSkillsRef } : {}),
                   ...(toolProfile ? { toolProfile } : {}),
                   ...(foregroundOnly ? { foregroundOnly: true } : {}),
@@ -5612,6 +5918,17 @@ export function registerHostedHarnessSessionRoutes(
       )
         throw new Error('Public child model route changed.');
       if (
+        !isDeepStrictEqual(
+          definition?.['publicChildExtensionAgent'],
+          publicChildExtensionAgent,
+        )
+      )
+        throw new Error('Public child extension binding changed.');
+      if (
+        !isDeepStrictEqual(definition?.['initialSelection'], initialSelection)
+      )
+        throw new Error('Initial extension selection changed.');
+      if (
         (definition?.['publicChildAgentsVersion'] ?? 0) !==
         publicChildAgentsVersion
       ) {
@@ -5703,6 +6020,8 @@ export function registerHostedHarnessSessionRoutes(
           ? { publicChildAgentsVersion: 1 as const }
           : {}),
         ...(publicChildModelRoute ? { publicChildModelRoute } : {}),
+        ...(publicChildExtensionAgent ? { publicChildExtensionAgent } : {}),
+        ...(initialSelection ? { initialSelection } : {}),
         publicChildLaunchEnabled: body?.['suppressChildAgents'] !== true,
         ...(savedSessionSkillsRef
           ? { sessionSkillsRef: savedSessionSkillsRef }
@@ -5778,7 +6097,20 @@ export function registerHostedHarnessSessionRoutes(
         error(res, 409, 'hosted_tool_profile_conflict');
         return;
       }
-      const mcpSettings = await readHostedMcpSettings(managed);
+      const configurationHead =
+        managed.authority.domainRecord('config_install');
+      const hasExtensionConfiguration =
+        configurationHead &&
+        isManagedExtensionConfig(
+          JSON.parse(
+            (
+              await managed.resources.read(configurationHead.recordRef)
+            ).toString('utf8'),
+          ),
+        );
+      const mcpSettings = hasExtensionConfiguration
+        ? []
+        : await readHostedMcpSettings(managed);
       validateHostedMcpHistory(mcpServers ?? [], mcpSettings);
       if (
         mcpSettings.length &&
@@ -5827,21 +6159,109 @@ export function registerHostedHarnessSessionRoutes(
         sendAttachment(res, sessionId, session);
         return;
       }
-      if ((mcpServers || mcpSettings.length) && brokerOptions)
+      const extensionManagement =
+        hasExtensionConfiguration ||
+        publicChildExtensionAgent ||
+        initialSelection
+          ? await extensionsManager(session, !!publicChildExtensionAgent)
+          : undefined;
+      if (initialSelection && extensionManagement && !passiveRecovery)
+        await extensionManagement.bootstrap(initialSelection);
+      if (publicChildExtensionAgent && extensionManagement) {
+        const source = parseManagedExtensionEffectiveBundle(
+          JSON.parse(
+            (
+              await managed.resources.read(
+                publicChildExtensionAgent.effectiveConfigRef,
+              )
+            ).toString('utf8'),
+          ),
+        );
+        const descriptor = publicChildExtensionAgent.extensionAgent;
+        const member = source.packages.find(
+          (entry) =>
+            isDeepStrictEqual(entry.pin, descriptor.pin) &&
+            isDeepStrictEqual(
+              entry.contributionsRef,
+              descriptor.contributionsRef,
+            ),
+        );
+        if (!member || source.configRevision !== descriptor.configRevision)
+          throw new Error('Child extension source membership changed.');
+        const contributions = await readManagedExtensionContributions(
+          managed.resources,
+          member.contributionsRef,
+        );
+        const agent = contributions.agents.find(
+          (entry) => entry.name === descriptor.agentName,
+        );
+        if (
+          !agent ||
+          descriptor.toolNames.some(
+            (name) =>
+              (agent.tools && !agent.tools.includes(name)) ||
+              agent.disallowedTools?.includes(name),
+          )
+        )
+          throw new Error('Child extension descriptor changed.');
+        session.extensionAgentTools = descriptor.toolNames;
+        session.extensionAgentPrompt = extensionInstructionText(
+          agent.systemPrompt,
+          descriptor.pin.extensionId,
+        );
+        session.extensionAgentPins = source.packages.map((entry) => entry.pin);
+        if (!passiveRecovery)
+          await extensionManagement.bootstrap(
+            hostedChildExtensionApplyCommand(
+              sessionId,
+              publicChildExtensionAgent.effectiveConfigRef.digest,
+              session.extensionAgentPins,
+            ),
+          );
+      }
+      const extensionBundle = await extensionManagement?.active();
+      if (
+        extensionManagement &&
+        (await extensionBootstrapIncomplete(session, extensionManagement))
+      ) {
+        if (!passiveRecovery) throw new HostedExtensionRecoveryRequired();
+        session.extensionBootstrapPending = true;
+        session.blocked = true;
+      }
+      const effectiveMcpServers = extensionBundle?.mcpServers ?? mcpServers;
+      const effectiveHookCatalog = extensionBundle
+        ? extensionBundle.hookCatalog
+        : hookCatalog;
+      if (
+        (effectiveMcpServers?.length || mcpSettings.length) &&
+        brokerOptions &&
+        !session.mcp
+      )
         session.mcp = new HostedMcpSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
           managed,
-          mcpServers ?? [],
+          effectiveMcpServers ?? [],
           mcpSettings.at(-1),
+          undefined,
+          extensionBundle !== undefined,
         );
-      if (hookCatalog && brokerOptions)
+      if (effectiveHookCatalog && brokerOptions && !session.hooks)
         session.hooks = new HostedHookSession(
           { ...brokerOptions, lifecycleAuthority: () => session.lifecycle },
           managed,
-          hookCatalog,
+          effectiveHookCatalog,
           session.mcp?.broker,
           () => session.lifecycleProtocolVersion === 2,
         );
+      if (extensionBundle && extensionManagement)
+        selectExtensionCatalog(
+          session,
+          extensionBundle,
+          await extensionManagement.packages(extensionBundle),
+        );
+      if (session.extensionAgentPrompt)
+        session.extensionContext = `${session.extensionContext ?? ''}\n\n${session.extensionAgentPrompt}`;
+      if (extensionManagement?.pending) session.blocked = true;
       if (!foregroundOnly && session.toolProfile && brokerOptions) {
         session.childRuns = new HostedChildRunSession(
           {
@@ -6466,6 +6886,11 @@ export function registerHostedHarnessSessionRoutes(
             session.monitorWake?.kick();
       }
       if (pinned) session.approval = pinned;
+      if (session.extensionBootstrapPending) {
+        sessions.set(sessionId, session);
+        sendAttachment(res, sessionId, session);
+        return;
+      }
       // A takeover recovers exactly the parked Turn, including the file
       // history it left pending; only refuse a stranger's pending state.
       // A bare load of a parked Session keeps refusing with 409 so it never
@@ -6700,8 +7125,7 @@ export function registerHostedHarnessSessionRoutes(
         takeover &&
         unsettled &&
         session.toolProfile &&
-        !session.hooks &&
-        !session.mcp &&
+        ((!session.hooks && !session.mcp) || session.extensions?.enabled) &&
         brokerOptions
       ) {
         const verdict = await managed.authority.harnessRunAuthorization();
@@ -7393,8 +7817,26 @@ export function registerHostedHarnessSessionRoutes(
       if (!identity(req, sessions, legacyClose))
         return error(res, 404, 'hosted_session_not_found');
       try {
+        const extensionBody = object(req.body);
+        const extensionCommand =
+          object(extensionBody?.['command']) ?? extensionBody;
+        const extensionOperation =
+          req.method === 'POST' &&
+          (req.path === '/extensions/management' ||
+            (req.path === '/mcp/management' && session.extensions?.enabled))
+            ? extensionCommand?.['operationId']
+            : req.method === 'POST'
+              ? /^\/extensions\/management\/operations\/([^/]+)\/(?:continue|recover-previous)$/u.exec(
+                  req.path,
+                )?.[1]
+              : undefined;
         await session.stores!.authorizeOrdinary(
-          legacyClose ? 'legacy-close' : undefined,
+          legacyClose
+            ? 'legacy-close'
+            : typeof extensionOperation === 'string' &&
+                HOSTED_UUID.test(extensionOperation)
+              ? `configuration:${extensionOperation}`
+              : undefined,
         );
         if (session.lifecycle)
           return error(res, 409, 'hosted_lifecycle_operation_active');
@@ -8443,6 +8885,8 @@ export function registerHostedHarnessSessionRoutes(
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (!session.hooks) return error(res, 409, 'hosted_hooks_unavailable');
+    if (session.extensions?.enabled)
+      return error(res, 409, 'hosted_extension_configuration_required');
     if (
       session.active ||
       session.hooksBusy ||
@@ -8501,12 +8945,295 @@ export function registerHostedHarnessSessionRoutes(
     );
   };
 
+  async function extensionsManager(
+    session: HostedSession,
+    childBootstrap = false,
+  ): Promise<HostedExtensionSession> {
+    if (
+      !brokerOptions ||
+      session.foregroundOnly ||
+      ((session.childDepth ?? 0) !== 0 &&
+        !(childBootstrap && session.publicChildExtensionAgent)) ||
+      !['hosted-workspace-shell/1', HOSTED_MCP_PROFILE].includes(
+        session.toolProfile ?? '',
+      ) ||
+      !contract.lifecycleV2Profiles?.includes(session.toolProfile!)
+    )
+      throw new Error('Hosted extension management is unavailable.');
+    if (session.extensions) return session.extensions;
+    const head = session.managed.authority.domainRecord('config_install');
+    const unified =
+      head &&
+      isManagedExtensionConfig(
+        JSON.parse(
+          (await session.managed.resources.read(head.recordRef)).toString(
+            'utf8',
+          ),
+        ),
+      );
+    const legacy = unified ? [] : await readHostedMcpSettings(session.managed);
+    const baseMcp = session.definition?.['mcpServers'];
+    const options = {
+      ...brokerOptions,
+      lifecycleAuthority: () => session.lifecycle,
+    };
+    const manager = new HostedExtensionSession(
+      session.managed,
+      options,
+      {
+        mcpRevision: legacy.at(-1)?.revision ?? 0,
+        mcpServers:
+          legacy.at(-1)?.servers ??
+          (baseMcp === undefined
+            ? []
+            : parseHostedMcpServers(baseMcp).map((pin) => ({
+                ...pin,
+                state: 'enabled' as const,
+              }))),
+        hookCatalog:
+          session.hooks?.selectedPin ??
+          (session.definition?.['hookCatalog'] === undefined
+            ? null
+            : parseHostedHookPin(session.definition['hookCatalog'])),
+      },
+      {
+        validate: (packages) => {
+          extensionSkillCatalog(session.baseSkills ?? session.skills, packages);
+          if (
+            (session.childDepth ?? 0) === 0 &&
+            session.publicChildAgentsVersion !== 1 &&
+            packages.some((entry) => entry.contributions.agents.length > 0)
+          )
+            throw new Error(
+              'Extension agents require the public child Session profile.',
+            );
+        },
+        drain: async (bundle, forceMcpServerId) => {
+          if (
+            session.hooks &&
+            !isDeepStrictEqual(session.hooks.selectedPin, bundle.hookCatalog)
+          ) {
+            await session.hooks.close();
+            session.hooks = undefined;
+          }
+          if (bundle.mcpServers.length || session.hooks)
+            await session.mcp?.drainForExtensionConfiguration(
+              bundle.mcpServers,
+              forceMcpServerId,
+            );
+          else if (session.mcp) {
+            await session.mcp.close();
+            session.mcp = undefined;
+          }
+        },
+        enable: async (bundle, packages, operationId) => {
+          const ownerId = `extensions-components-${createHash('sha256')
+            .update(
+              JSON.stringify([
+                session.managed.authority.sessionHeader.sessionKey,
+                bundle.configRevision,
+              ]),
+            )
+            .digest('hex')}`;
+          if (bundle.mcpServers.length && !session.mcp) {
+            const broker =
+              session.hooks?.broker ??
+              new HostedWorkspaceBroker(
+                options,
+                session.managed.authority.sessionHeader.sessionKey,
+                ownerId,
+              );
+            session.mcp = new HostedMcpSession(
+              options,
+              session.managed,
+              bundle.mcpServers,
+              undefined,
+              broker,
+              true,
+            );
+            if (session.hooks?.broker === broker)
+              session.hooks.delegateBrokerToMcp();
+          }
+          if (bundle.hookCatalog && !session.hooks) {
+            session.hooks = new HostedHookSession(
+              options,
+              session.managed,
+              bundle.hookCatalog,
+              session.mcp?.broker,
+              () => session.lifecycleProtocolVersion === 2,
+              ownerId,
+            );
+          }
+          if (
+            bundle.hookCatalog &&
+            session.hooks &&
+            (!isDeepStrictEqual(
+              session.hooks.selectedPin,
+              bundle.hookCatalog,
+            ) ||
+              session.managed.authority.extensionRecordsInDomain(
+                'hook_registration',
+              ).length === 0)
+          )
+            await session.hooks.configure(
+              `extension-catalog-${operationId}-${bundle.configRevision}`,
+              bundle.hookCatalog,
+              session.managed.authority.extensionRecordsInDomain(
+                'hook_registration',
+              ).length,
+            );
+          await session.mcp?.enableExtensionConfiguration(
+            bundle.mcpServers,
+            operationId,
+          );
+          await session.hooks?.ensureReady();
+          selectExtensionCatalog(session, bundle, packages);
+        },
+      },
+    );
+    await manager.open();
+    session.extensions = manager;
+    return manager;
+  }
+
+  app.get('/session/:id/extensions/management', (req, res) => {
+    const session = identity(req, sessions);
+    if (!session) return error(res, 404, 'hosted_session_not_found');
+    void extensionsManager(session, !!session.publicChildExtensionAgent)
+      .then(async (manager) => res.json(await manager.snapshot()))
+      .catch(() => error(res, 409, 'hosted_extension_management_unavailable'));
+  });
+
+  app.get(
+    '/session/:id/extensions/management/operations/:operationId',
+    (req, res) => {
+      const session = identity(req, sessions);
+      if (!session) return error(res, 404, 'hosted_session_not_found');
+      void extensionsManager(session, !!session.publicChildExtensionAgent)
+        .then(async (manager) =>
+          res.json(await manager.snapshot(req.params['operationId'])),
+        )
+        .catch(() => error(res, 404, 'hosted_extension_operation_not_found'));
+    },
+  );
+
+  for (const action of ['apply', 'continue', 'recover-previous'] as const) {
+    const path =
+      action === 'apply'
+        ? '/session/:id/extensions/management'
+        : `/session/:id/extensions/management/operations/:operationId/${action}`;
+    app.post(path, (req, res) => {
+      const session = identity(req, sessions);
+      if (!session) return error(res, 404, 'hosted_session_not_found');
+      if (
+        session.active ||
+        session.hooksBusy ||
+        session.mcpBusy ||
+        session.mcpRecovering ||
+        session.mcpClosing ||
+        session.lifecycle ||
+        session.recoveryCleanupOnly ||
+        (action === 'apply' &&
+          session.blocked &&
+          !session.extensionBootstrapPending)
+      )
+        return error(res, 409, 'hosted_turn_active');
+      let operationId: string;
+      let command:
+        | ReturnType<typeof parseManagedExtensionApplyCommand>
+        | undefined;
+      try {
+        if (action === 'apply') {
+          command = parseManagedExtensionApplyCommand(
+            object(req.body)?.['command'] ?? req.body,
+          );
+          operationId = command.operationId;
+        } else {
+          operationId = req.params['operationId'];
+          if (!HOSTED_UUID.test(operationId))
+            throw new Error('Invalid operation.');
+        }
+      } catch {
+        return error(res, 400, 'invalid_extension_command');
+      }
+      session.mcpBusy = true;
+      void (async () => {
+        const manager = await extensionsManager(
+          session,
+          !!session.publicChildExtensionAgent,
+        );
+        try {
+          if (command && session.publicChildExtensionAgent) {
+            const binding = session.publicChildExtensionAgent;
+            const source = parseManagedExtensionEffectiveBundle(
+              JSON.parse(
+                (
+                  await session.managed.resources.read(
+                    binding.effectiveConfigRef,
+                  )
+                ).toString('utf8'),
+              ),
+            );
+            if (
+              !isDeepStrictEqual(
+                command,
+                hostedChildExtensionApplyCommand(
+                  session.managed.authority.sessionHeader.sessionKey.sessionId,
+                  binding.effectiveConfigRef.digest,
+                  source.packages.map((entry) => entry.pin),
+                ),
+              )
+            )
+              throw new HostedMcpConflictError(
+                'Child extension configuration is immutable.',
+              );
+          }
+          if (command) await manager.submit(command);
+          else if (action === 'continue') await manager.continue(operationId);
+          else await manager.recoverPrevious(operationId);
+          session.extensionBootstrapPending =
+            await extensionBootstrapIncomplete(session, manager);
+          session.blocked =
+            manager.pending || session.extensionBootstrapPending;
+          res.status(202).json(await manager.snapshot(operationId));
+        } catch (cause) {
+          session.extensionBootstrapPending =
+            await extensionBootstrapIncomplete(session, manager);
+          session.blocked =
+            manager.pending || session.extensionBootstrapPending;
+          if (cause instanceof HostedExtensionRevisionConflict)
+            error(res, 409, 'extension_config_revision_conflict');
+          else if (
+            cause instanceof HostedMcpConflictError ||
+            cause instanceof ManagedSessionConflictError ||
+            cause instanceof ManagedSessionCommitRejectedError
+          )
+            error(res, 409, 'hosted_extension_configuration_conflict');
+          else if (manager.enabled)
+            res.status(202).json(await manager.snapshot(operationId));
+          else error(res, 503, 'hosted_extension_recovery_required');
+        }
+      })()
+        .catch(() => {
+          if (!res.headersSent)
+            error(res, 503, 'hosted_extension_recovery_required');
+        })
+        .finally(() => {
+          session.mcpBusy = false;
+        });
+    });
+  }
+
   app.get('/session/:id/mcp/management', (req, res) => {
     const session = identity(req, sessions);
     if (!session) return error(res, 404, 'hosted_session_not_found');
     if (session.recoveryCleanupOnly)
       return error(res, 409, 'hosted_mcp_session_load_required');
     void (async () => {
+      if (session.extensions?.enabled) {
+        res.json(await session.extensions.mcpSnapshot());
+        return;
+      }
       const manager = mcpManager(session);
       await manager.open();
       res.json(await manager.snapshot());
@@ -8519,6 +9246,15 @@ export function registerHostedHarnessSessionRoutes(
     if (session.recoveryCleanupOnly)
       return error(res, 409, 'hosted_mcp_session_load_required');
     void (async () => {
+      if (session.extensions?.enabled) {
+        res.json(
+          await session.extensions.mcpSnapshot(
+            req.params['operationId'],
+            false,
+          ),
+        );
+        return;
+      }
       const manager = mcpManager(session);
       await manager.open();
       if (!manager.status(req.params['operationId']))
@@ -8544,16 +9280,26 @@ export function registerHostedHarnessSessionRoutes(
     )
       return error(res, 409, 'hosted_turn_active');
     let command;
-    let manager: HostedMcpManager;
+    let manager: HostedMcpManager | undefined;
     try {
       command = parseHostedMcpCommand(req.body);
-      manager = mcpManager(session);
+      if (!session.extensions?.enabled) manager = mcpManager(session);
     } catch {
       return error(res, 400, 'invalid_mcp_command');
     }
     session.mcpBusy = true;
     void (async () => {
       try {
+        if (session.extensions?.enabled) {
+          await session.extensions.submitMcp(command);
+          res
+            .status(202)
+            .json(
+              await session.extensions.mcpSnapshot(command.operationId, false),
+            );
+          return;
+        }
+        if (!manager) throw new Error('MCP manager is unavailable.');
         await manager.open();
         await manager.submit(command);
         res
@@ -8566,13 +9312,21 @@ export function registerHostedHarnessSessionRoutes(
           cause instanceof ManagedSessionCommitRejectedError
         )
           error(res, 409, 'hosted_mcp_configuration_conflict');
-        else if (manager.status(command.operationId))
+        else if (session.extensions?.enabled)
+          res
+            .status(202)
+            .json(
+              await session.extensions.mcpSnapshot(command.operationId, false),
+            );
+        else if (manager?.status(command.operationId))
           res
             .status(202)
             .json(await manager.snapshot(false, command.operationId));
         else error(res, 503, 'hosted_mcp_recovery_required');
       } finally {
-        session.mcp = manager.mcp;
+        if (manager) session.mcp = manager.mcp;
+        if (session.extensions?.enabled)
+          session.blocked = session.extensions.pending;
         if (session.mcp && session.hooks?.broker === session.mcp.broker)
           session.hooks.delegateBrokerToMcp();
         session.mcpBusy = false;
@@ -10172,6 +10926,14 @@ export function registerHostedHarnessSessionRoutes(
           {
             mcp: session.mcp,
             skills: session.skills,
+            extensionConfig: session.extensionBundle
+              ? {
+                  revision: session.extensionBundle.configRevision,
+                  packages: session.extensionBundle.packages,
+                }
+              : undefined,
+            extensionAgents: extensionAgentsOf(session),
+            allowedToolNames: session.extensionAgentTools,
             profile: session.toolProfile,
             foregroundOnly: session.foregroundOnly,
             context: workspaceContext,
@@ -10412,6 +11174,38 @@ export function registerHostedHarnessSessionRoutes(
             },
             prompt: '',
             promptId,
+            ...(session.stores
+              ? {
+                  userMessages: {
+                    claim: async () =>
+                      (await session.stores!.claimUserMessages(promptId)).map(
+                        (message) => ({
+                          id: `${message.id}:${message.revision}`,
+                          ...parseHostedInput(message.input),
+                        }),
+                      ),
+                    commit: async (id: string, parts: Part[]) => {
+                      const message = record(
+                        session,
+                        sessionId,
+                        'user',
+                        parentUuid,
+                        {
+                          uuid: id,
+                          daemonPromptId: promptId,
+                          subtype: 'mid_turn_user_message',
+                          message: { role: 'user', parts },
+                        },
+                      );
+                      await session.managed.sink.write(message);
+                      parentUuid = message.uuid;
+                    },
+                    commitAssistant: async (parts: Part[], model: string) => {
+                      await commit('assistant', parts, model);
+                    },
+                  },
+                }
+              : {}),
             signal: abort.signal,
             workspaceContext,
             agentDefinition: session.agentDefinition,
@@ -10420,6 +11214,7 @@ export function registerHostedHarnessSessionRoutes(
               session.managed,
               promptId,
             ),
+            extensionInstructions: session.extensionContext,
             agentInstructions: await readHostedAgentInstructions(
               session.agentDefinition,
               session.managed.resources,

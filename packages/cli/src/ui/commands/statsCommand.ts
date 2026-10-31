@@ -17,7 +17,10 @@ import {
   CommandKind,
 } from './types.js';
 import { getCurrentLanguage, t } from '../../i18n/index.js';
-import { calculateCost } from '../../utils/costCalculator.js';
+import {
+  billableOutputTokens,
+  calculateCost,
+} from '../../utils/costCalculator.js';
 import {
   formatTokenUsageSummaryAsCsv,
   formatTokenUsageSummaryAsJson,
@@ -779,10 +782,19 @@ export const statsCommand: SlashCommand = {
             lines.push(
               `${modelName}: ${t('prompt')}=${modelMetrics.tokens.prompt}, ${t('output')}=${modelMetrics.tokens.candidates}, ${t('cached')}=${modelMetrics.tokens.cached}`,
             );
+            // billableOutputTokens clamps per record and is not additive, so
+            // bill the same per-source buckets the stats panel renders; the
+            // model aggregate can fall out of band and re-bill reasoning.
+            const buckets = Object.values(modelMetrics.bySource);
+            if (buckets.length === 0) buckets.push(modelMetrics);
             const cost = calculateCost({
               inputTokens: modelMetrics.tokens.prompt,
               outputTokens:
-                modelMetrics.tokens.candidates + modelMetrics.tokens.thoughts,
+                metrics.billableOutputTokens?.[modelName]?.total ??
+                buckets.reduce(
+                  (sum, bucket) => sum + billableOutputTokens(bucket.tokens),
+                  0,
+                ),
               pricing: pricing?.[modelName],
             });
             if (cost != null) {

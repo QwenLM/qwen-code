@@ -16,7 +16,6 @@ import { basename, dirname, isAbsolute, join } from 'node:path';
 import type { JsInterpreterCommand } from '@qwen-code/qwen-code-core/utils/runtime-info.js';
 import { NPM_RUNTIME_CONTEXT } from './env-provenance.js';
 import {
-  isOpenTuiRuntimeSupported,
   OPEN_TUI_RENDERER_VALUE,
   TUI_RENDERER_ENV_VAR,
   TUI_RENDERER_STRICT_ENV_VAR,
@@ -127,8 +126,7 @@ export function selectNpmBunHandoff({
     protocolMode ||
     sandbox ||
     env['SANDBOX'] ||
-    versions.bun ||
-    isOpenTuiRuntimeSupported(versions)
+    versions.bun
   ) {
     return undefined;
   }
@@ -161,9 +159,10 @@ export function selectNpmBunHandoff({
   }
   if (
     execArgv.some((arg) => arg !== '--expose-gc') ||
-    env['NODE_OPTIONS']?.trim()
+    env['NODE_OPTIONS']?.trim() ||
+    env['BUN_OPTIONS']?.trim()
   ) {
-    return unavailable('inherited Node runtime flags require the Node runtime');
+    return unavailable('inherited runtime flags prevent Bun handoff');
   }
   if (!script) return undefined;
   let root: string;

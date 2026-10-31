@@ -11,6 +11,12 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import {
+  UiTelemetryService,
+  EVENT_API_RESPONSE,
+  type UiEvent,
+} from '@qwen-code/qwen-code-core/telemetry/uiTelemetry.js';
+import { ApiResponseEvent } from '@qwen-code/qwen-code-core/telemetry/types.js';
+import {
   CompressionStatus,
   ToolDisplayNames,
   type Config,
@@ -207,6 +213,7 @@ function expectCoherentBreakdown(item: {
     (breakdown.systemPrompt ?? 0) +
     (breakdown.builtinTools ?? 0) +
     (breakdown.mcpTools ?? 0) +
+    (breakdown.instructionFiles ?? 0) +
     (breakdown.memoryFiles ?? 0) +
     (breakdown.skills ?? 0) +
     (breakdown.startupContext ?? 0) +
@@ -228,6 +235,35 @@ function expectCoherentBreakdown(item: {
 }
 
 describe('projectContextUsage', () => {
+  it('shows a million-token context window in millions', () => {
+    const withWindow = (contextWindowSize: number) => {
+      const item = {
+        modelName: 'coder-model',
+        totalTokens: 5000,
+        contextWindowSize,
+        breakdown: {
+          systemPrompt: 1000,
+          builtinTools: 800,
+          mcpTools: 0,
+          memoryFiles: 200,
+          skills: 0,
+          messages: 3000,
+          freeSpace: contextWindowSize - 5000 - 1000,
+          autocompactBuffer: 1000,
+        },
+        isEstimated: false,
+        showDetails: false,
+      };
+      expectCoherentBreakdown(item);
+      return projectContextUsage(item);
+    };
+
+    expect(withWindow(2_000_000)).toContain('Context window: 2.0m tokens');
+    expect(withWindow(1_000_000)).toContain('Context window: 1.0m tokens');
+    expect(withWindow(999_950)).toContain('Context window: 1.0m tokens');
+    expect(withWindow(999_949)).toContain('Context window: 999.9k tokens');
+  });
+
   it('prints the usage table with categories', () => {
     const item = {
       modelName: 'qwen3-max',
@@ -414,7 +450,54 @@ describe('projectContextUsage', () => {
     expect(text).toContain('Current tier warn');
   });
 
+  it.each([false, true])(
+    'preserves the combined memory category in legacy OpenTUI snapshots (details: %s)',
+    (showDetails) => {
+      const item = {
+        modelName: 'legacy-model',
+        totalTokens: 200,
+        contextWindowSize: 1000,
+        breakdown: {
+          memoryFiles: 200,
+          freeSpace: 800,
+          autocompactBuffer: 0,
+        },
+        memoryFiles: [{ path: 'QWEN.md', tokens: 200 }],
+        showDetails,
+      };
+      expectCoherentBreakdown(item);
+      const text = projectContextUsage(item);
+      expect(text).toContain('█ Memory files 200 tokens (20.0%)');
+      expect(text).not.toContain('Instruction files');
+      expect(text).not.toContain('Auto memory');
+      expect(text.includes('QWEN.md')).toBe(showDetails);
+    },
+  );
+
   it('renders per-item detail sections when showDetails is on (ytahdn-3)', () => {
+    const item = {
+      modelName: 'm',
+      totalTokens: 30,
+      contextWindowSize: 100,
+      breakdown: {
+        instructionFiles: 20,
+        memoryFiles: 10,
+        freeSpace: 70,
+        autocompactBuffer: 0,
+      },
+      showDetails: true,
+      instructionFiles: [{ path: 'QWEN.md', tokens: 20 }],
+      memoryFiles: [{ path: 'auto memory', tokens: 10 }],
+    };
+    expectCoherentBreakdown(item);
+    const split = projectContextUsage(item);
+    expect(split).toContain('█ Instruction files 20 tokens (20.0%)');
+    expect(split).toContain('█ Auto memory 10 tokens (10.0%)');
+    const summary = projectContextUsage({ ...item, showDetails: false });
+    expect(summary).toContain('█ Instruction files 20 tokens (20.0%)');
+    expect(summary).toContain('█ Auto memory 10 tokens (10.0%)');
+    expect(split).toContain('QWEN.md');
+    expect(split).not.toContain('Memory files');
     const text = projectContextUsage({
       modelName: 'm',
       totalTokens: 5000,
@@ -1322,5 +1405,176 @@ describe('canonical resumed tool projection', () => {
       historyId: 41,
     });
     expect(items.find((item) => item.kind === 'info')?.historyId).toBe(41);
+  });
+});
+
+describe('cost does not double-count included reasoning tokens (#15444)', () => {
+  // Priced so the rendered dollar figure isolates the OUTPUT term: input at
+  // $0/M and output at $1/M makes `$X` exactly outputTokens / 1_000_000.
+  const PRICING = {
+    'qwen3-max-001': { inputPerMillionTokens: 0, outputPerMillionTokens: 1 },
+  };
+
+  const metricsWith = (tokens: {
+    prompt: number;
+    candidates: number;
+    thoughts: number;
+    total: number;
+  }): SessionMetrics =>
+    ({
+      models: {
+        'qwen3-max-001': {
+          api: { totalRequests: 1, totalErrors: 0, totalLatencyMs: 100 },
+          tokens: { ...tokens, cached: 0 },
+          bySource: Object.create(null),
+        },
+      },
+    }) as unknown as SessionMetrics;
+
+  it('renders accumulated event costs for mixed completeness and missing OpenAI totals', () => {
+    const telemetry = new UiTelemetryService();
+    const add = (
+      auth: string,
+      usage: ConstructorParameters<typeof ApiResponseEvent>[5],
+    ) =>
+      telemetry.addEvent({
+        ...new ApiResponseEvent('r', 'qwen3-max-001', 1, 'p', auth, usage),
+        'event.name': EVENT_API_RESPONSE,
+      } as UiEvent);
+    add('gemini', {
+      promptTokenCount: 100_000,
+      candidatesTokenCount: 50_000,
+      thoughtsTokenCount: 120_000,
+      totalTokenCount: 270_000,
+    });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1700',
+    );
+    add('gemini', { promptTokenCount: 20_000, candidatesTokenCount: 10_000 });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1800',
+    );
+    // Legacy history cannot recover the missing total; its estimate stays unchanged.
+    const legacy = structuredClone(telemetry.getMetrics());
+    delete legacy.billableOutputTokens;
+    expect(projectModelStats(legacy, PRICING)).toContain('Estimated $0.1500');
+    telemetry.reset();
+    add('openai', {
+      promptTokenCount: 100_000,
+      candidatesTokenCount: 150_000,
+      thoughtsTokenCount: 120_000,
+    });
+    expect(projectModelStats(telemetry.getMetrics(), PRICING)).toContain(
+      'Estimated $0.1500',
+    );
+  });
+
+  it('honors an authoritative zero instead of falling back to raw thoughts', () => {
+    const metrics = metricsWith({
+      prompt: 100,
+      candidates: 0,
+      thoughts: 1000,
+      total: 0,
+    });
+    metrics.billableOutputTokens = {
+      'qwen3-max-001': { total: 0, bySource: {} },
+    };
+    expect(projectModelStats(metrics, PRICING)).toContain('Estimated $0.0000');
+  });
+
+  it('bills total − prompt when reasoning is already inside candidates', () => {
+    // OpenAI-style usage: the provider's `total` already counts the reasoning
+    // tokens that sit inside `candidates`, so `candidates + thoughts` bills
+    // the reasoning twice — 150000 + 120000 = 270000 ($0.2700) instead of the
+    // 150000 output the provider actually reported ($0.1500).
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 150_000,
+        thoughts: 120_000,
+        total: 250_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1500');
+    expect(text).not.toContain('$0.2700');
+  });
+
+  it('is unchanged when thoughts are disjoint from candidates', () => {
+    // Gemini-style usage: total = prompt + candidates + thoughts, so
+    // total − prompt (170000) already equals candidates + thoughts (170000).
+    // The fix must be a no-op here — without this leg an implementation that
+    // drops thinking entirely would still pass the OpenAI assertion above.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 50_000,
+        thoughts: 120_000,
+        total: 270_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1700');
+  });
+
+  it('falls back to candidates + thoughts when no usable total is reported', () => {
+    // Mirrors the cost-ledger guard: derive only when the subtraction is
+    // meaningful, so an absent total keeps today's behaviour instead of
+    // billing a negative output.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 100_000,
+        candidates: 50_000,
+        thoughts: 120_000,
+        total: 0,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1700');
+  });
+
+  it('does not bill a total-only record as output', () => {
+    // A provider that reports only `total_tokens` leaves prompt and candidates
+    // at 0. Deriving anyway would bill the entire total -- almost all input --
+    // at the output rate, where the old sum reported no cost at all.
+    const text = projectModelStats(
+      metricsWith({ prompt: 0, candidates: 0, thoughts: 0, total: 250_000 }),
+      PRICING,
+    );
+    expect(text).not.toContain('$0.2500');
+    expect(text).not.toContain('Estimated');
+  });
+
+  it('does not bill a cached-only prompt as output', () => {
+    // Cached input coerces prompt to 0 while total keeps the cache, so
+    // derived 52_000 sits far above the band [10_000, 12_000]; the over-bill
+    // would be exactly the cached count, i.e. input tokens at the output rate.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 0,
+        candidates: 10_000,
+        thoughts: 2_000,
+        total: 52_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.0120');
+    expect(text).not.toContain('$0.0520');
+  });
+
+  it('does not under-bill when a short total lands below candidates', () => {
+    // One total-less event among complete ones subtracts an unreported prompt
+    // from the other events' output: derived 180_000 < candidates 190_000.
+    const text = projectModelStats(
+      metricsWith({
+        prompt: 110_000,
+        candidates: 190_000,
+        thoughts: 0,
+        total: 290_000,
+      }),
+      PRICING,
+    );
+    expect(text).toContain('Estimated $0.1900');
+    expect(text).not.toContain('$0.1800');
   });
 });

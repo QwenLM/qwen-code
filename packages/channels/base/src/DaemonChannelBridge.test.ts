@@ -549,6 +549,39 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it("does not register another channel's owned tools on a loop-opted-out session", async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn(async () => {}),
+      unregister: vi.fn(async () => {}),
+    };
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+      channelLoopMcpHost: host,
+    });
+    bridge.registerChannelTool({
+      name: 'qq_recall_message',
+      description: 'Recall a QQ message.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: vi.fn(async () => 'Message recalled.'),
+      owner: 'qq-main',
+    });
+
+    await bridge.start();
+    await bridge.newSession('/repo', {
+      enableChannelLoops: false,
+      sourceId: 'feishu-main',
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(host.register).not.toHaveBeenCalled();
+
+    events.close();
+    bridge.stop();
+  });
+
   it('ignores duplicate and reserved adapter tool names', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
@@ -1197,6 +1230,42 @@ describe('DaemonChannelBridge', () => {
       sourceId: 'feishu-main',
     });
 
+    events.close();
+    bridge.stop();
+  });
+
+  it('records the owning channel for new, loaded and worktree-reset sessions', async () => {
+    const events = new EventQueue();
+    const factory = vi
+      .fn()
+      .mockResolvedValueOnce(createFakeSession(events, 's-new'))
+      .mockResolvedValueOnce(createFakeSession(events, 's-load'))
+      .mockResolvedValueOnce({
+        ...createFakeSession(events, 's-reset'),
+        worktree: { slug: 'task', path: '/repo-wt', branch: 'task' },
+        worktreeState: 'persisted-v1' as const,
+      });
+    const host: DaemonChannelLoopMcpHost = {
+      register: vi.fn().mockResolvedValue(undefined),
+      unregister: vi.fn().mockResolvedValue(undefined),
+    };
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: factory,
+      sessionWorktreeReset: true,
+      channelLoopMcpHost: host,
+    });
+    const owners = (bridge as unknown as { sessionOwners: Map<string, string> })
+      .sessionOwners;
+
+    await bridge.start();
+    await bridge.newSession('/repo', { sourceId: 'bot-a' });
+    await bridge.loadSession('s-load', '/repo', { sourceId: 'bot-b' });
+    await bridge.resetWorktreeSession('s-new', '/repo', { sourceId: 'bot-c' });
+
+    expect(owners.get('s-new')).toBe('bot-a');
+    expect(owners.get('s-load')).toBe('bot-b');
+    expect(owners.get('s-reset')).toBe('bot-c');
     events.close();
     bridge.stop();
   });

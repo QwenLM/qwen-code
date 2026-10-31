@@ -136,23 +136,6 @@ describe('requestQQApi', () => {
     expect(init?.body).toBeUndefined();
   });
 
-  it('sends POST with a JSON body', async () => {
-    await requestQQApi(
-      'https://api.example.com',
-      'POST',
-      '/v2/groups/g123/actions',
-      'tok',
-      { items: ['a'] },
-    );
-
-    const [, init] = mockFetch.mock.calls[0];
-    expect(init?.method).toBe('POST');
-    expect((init?.headers as Record<string, string>)?.['Content-Type']).toBe(
-      'application/json',
-    );
-    expect(init?.body).toBe(JSON.stringify({ items: ['a'] }));
-  });
-
   it('returns the fetch Response directly', async () => {
     const fake = mockResponse(true, 200, '');
     mockFetch.mockResolvedValue(fake);

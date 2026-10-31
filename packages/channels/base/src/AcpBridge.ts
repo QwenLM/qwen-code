@@ -70,6 +70,14 @@ export interface AcpBridgeOptions {
 
 export const ACP_EVENT_LOOP_STALL_RESTART_MS = 5 * 60 * 1000;
 export const ACP_START_TIMEOUT_MS = 30 * 1000;
+/**
+ * Bound for the session-scoped channel_loop MCP runtime add/remove. The add is
+ * not a local write: the child discovers the server inside the call and drives
+ * `initialize`/`tools/list` back into this bridge, so a stalled child would
+ * otherwise hang session creation (and with it every later message for that
+ * chat) with no stderr line.
+ */
+export const CHANNEL_TOOL_BIND_TIMEOUT_MS = 30 * 1000;
 export const ACP_PERMISSION_RESPONSE_TIMEOUT_MS = 5 * 60 * 1000;
 const ACP_EVENT_LOOP_STALL_RE =
   /^\[perf\] acp agent event loop stall: max=(\d+(?:\.\d+)?)ms/m;
@@ -122,6 +130,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
    * only for a session in this ledger, never because the frame names one.
    */
   private readonly channelLoopMcpBoundSessions = new Set<string>();
+  /**
+   * Ownership token of the bind attempt that added each session to the bound
+   * ledger. A bind can outlive a discard/reload of its session, so a failed
+   * attempt must only release a claim it still owns.
+   */
+  private readonly channelLoopMcpBindClaims = new Map<string, object>();
   /** In-flight per-session bindings, so one session binds once. */
   private readonly channelLoopMcpBindings = new Map<string, Promise<boolean>>();
   private readonly pendingPermissions = new Map<
@@ -188,6 +202,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       this.sessionBindingTokens.clear();
       this.sessionOwners.clear();
       this.channelLoopMcpBoundSessions.clear();
+      this.channelLoopMcpBindClaims.clear();
       this.channelLoopMcpBindings.clear();
       this.toolCallKindsBySession.clear();
       this.connection = null;
@@ -428,6 +443,17 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     options?: ChannelAgentBridgePromptOptions,
   ): Promise<string> {
     const conn = this.ensureConnection();
+    // A binding skipped at session creation (MCP budget, one transient
+    // runtime-add failure) must not cost the session every channel tool for its
+    // lifetime. Retry it on the next turn, fire-and-forget so a slow or skipped
+    // bind never delays the prompt; registerChannelLoopMcpServer is idempotent
+    // and deduplicates concurrent attempts.
+    if (
+      this.knownSessionIds.has(sessionId) &&
+      !this.channelLoopMcpBoundSessions.has(sessionId)
+    ) {
+      void this.registerChannelLoopMcpServer(sessionId);
+    }
 
     const chunks: string[] = [];
     let slashCommandOutput = '';
@@ -552,6 +578,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.sessionOwners.delete(sessionId);
     this.toolCallKindsBySession.delete(sessionId);
     this.channelLoopMcpBindings.delete(sessionId);
+    this.channelLoopMcpBindClaims.delete(sessionId);
     const wasBound = this.channelLoopMcpBoundSessions.delete(sessionId);
     this.resolvePendingPermissions(sessionId);
 
@@ -587,6 +614,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.sessionBindingTokens.clear();
     this.sessionOwners.clear();
     this.channelLoopMcpBoundSessions.clear();
+    this.channelLoopMcpBindClaims.clear();
     this.channelLoopMcpBindings.clear();
     this.toolCallKindsBySession.clear();
     if (this.child) {
@@ -855,10 +883,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     // the newly added server inside that call, so its `tools/list` frame can
     // arrive before the add resolves, and it must already resolve here.
     this.channelLoopMcpBoundSessions.add(sessionId);
+    // The claim is ownership-checked: a discard can drop it and a reload can
+    // bind the same session again while this attempt is still in flight, so a
+    // late failure must not erase the newer attempt's claim.
+    const claim: object = {};
+    this.channelLoopMcpBindClaims.set(sessionId, claim);
     try {
-      const result = await this.connection!.extMethod(
-        SESSION_MCP_RUNTIME_ADD_METHOD,
-        {
+      const result = await withTimeout(
+        this.connection!.extMethod(SESSION_MCP_RUNTIME_ADD_METHOD, {
           sessionId,
           name: CHANNEL_LOOP_MCP_SERVER_NAME,
           originatorClientId: 'channel',
@@ -866,10 +898,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
             type: 'sdk',
             [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
           },
-        },
+        }),
+        CHANNEL_TOOL_BIND_TIMEOUT_MS,
+        `channel loop MCP bind timed out after ${CHANNEL_TOOL_BIND_TIMEOUT_MS}ms`,
       );
       if (isSkippedMcpRegistration(result)) {
-        this.channelLoopMcpBoundSessions.delete(sessionId);
+        this.releaseChannelLoopMcpBindClaim(sessionId, claim);
         process.stderr.write(
           `[AcpBridge] Channel loop MCP server binding for session ${sanitizeLogText(sessionId, 128)} skipped${formatSkippedRegistrationReason(result)}\n`,
         );
@@ -877,7 +911,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       }
       return true;
     } catch (error) {
-      this.channelLoopMcpBoundSessions.delete(sessionId);
+      this.releaseChannelLoopMcpBindClaim(sessionId, claim);
       process.stderr.write(
         `[AcpBridge] Failed to bind channel loop MCP server to session ${sanitizeLogText(sessionId, 128)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 512)}\n`,
       );
@@ -885,16 +919,33 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     }
   }
 
+  /**
+   * Release a failed bind's optimistic claim, but only while this attempt
+   * still owns it: a newer bind for the same session may have claimed it.
+   */
+  private releaseChannelLoopMcpBindClaim(
+    sessionId: string,
+    claim: object,
+  ): void {
+    if (this.channelLoopMcpBindClaims.get(sessionId) !== claim) return;
+    this.channelLoopMcpBindClaims.delete(sessionId);
+    this.channelLoopMcpBoundSessions.delete(sessionId);
+  }
+
   private async removeChannelLoopMcpServer(
     conn: ClientSideConnection,
     sessionId: string,
   ): Promise<void> {
     try {
-      await conn.extMethod(SESSION_MCP_RUNTIME_REMOVE_METHOD, {
-        sessionId,
-        name: CHANNEL_LOOP_MCP_SERVER_NAME,
-        originatorClientId: 'channel',
-      });
+      await withTimeout(
+        conn.extMethod(SESSION_MCP_RUNTIME_REMOVE_METHOD, {
+          sessionId,
+          name: CHANNEL_LOOP_MCP_SERVER_NAME,
+          originatorClientId: 'channel',
+        }),
+        CHANNEL_TOOL_BIND_TIMEOUT_MS,
+        `channel loop MCP unbind timed out after ${CHANNEL_TOOL_BIND_TIMEOUT_MS}ms`,
+      );
     } catch (error) {
       process.stderr.write(
         `[AcpBridge] Failed to remove channel loop MCP server from session ${sanitizeLogText(sessionId, 128)}: ${sanitizeLogText(error instanceof Error ? error.message : String(error), 512)}\n`,
@@ -938,9 +989,16 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       throw new Error('Invalid client MCP payload.');
     }
     const sessionId = this.boundSessionId(params);
+    const rawSessionId = params['sessionId'];
+    const carriedSessionId =
+      sessionId === undefined &&
+      typeof rawSessionId === 'string' &&
+      rawSessionId.length > 0
+        ? rawSessionId
+        : undefined;
     const response = await this.channelLoopMcpServer.handleMessage(
       payload as JsonRpcMessage,
-      { sessionId },
+      { sessionId, carriedSessionId },
     );
     this.logChannelToolDiagnostic(params, sessionId, response);
     if (!response) {
@@ -976,18 +1034,36 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       typeof rawSessionId === 'string' && rawSessionId.length > 0
         ? rawSessionId
         : undefined;
+    // A known-but-unbound session is exactly the state this switch exists to
+    // explain, so resolve the owner from the id the frame carried too. An id
+    // in neither ledger acquires nothing (fail closed).
+    const ownerId =
+      sessionId ??
+      (carried !== undefined && this.knownSessionIds.has(carried)
+        ? carried
+        : undefined);
     const owner =
-      sessionId === undefined ? undefined : this.sessionOwners.get(sessionId);
+      ownerId === undefined ? undefined : this.sessionOwners.get(ownerId);
     const result = response?.['result'];
     const resultRecord =
       typeof result === 'object' && result !== null
         ? (result as Record<string, unknown>)
         : undefined;
     const listed = resultRecord?.['tools'];
-    const detail =
-      method === 'tools/list'
-        ? `tools=${Array.isArray(listed) ? listed.length : '?'}`
-        : `isError=${resultRecord?.['isError'] === true}`;
+    const rpcError = response?.['error'];
+    let detail: string;
+    if (method === 'tools/list') {
+      detail = `tools=${Array.isArray(listed) ? listed.length : '?'}`;
+    } else {
+      // The tool name is what separates a loop-handler failure from a platform
+      // failure; the JSON-RPC error arm never carries a result, so read it
+      // alongside the result arm or a failed call looks like a success.
+      const toolName = readToolCallName(message);
+      detail =
+        `tool=${toolName === undefined ? '<none>' : sanitizeLogText(toolName, 64)}` +
+        ` isError=${resultRecord?.['isError'] === true || rpcError !== undefined}` +
+        ` rpcError=${rpcError === undefined ? 'none' : sanitizeLogText(describeRpcError(rpcError), 256)}`;
+    }
     process.stderr.write(
       `[AcpBridge] channel-tool-diag method=${method} sessionId=${
         carried === undefined ? '<absent>' : sanitizeLogText(carried, 128)
@@ -1057,6 +1133,25 @@ function createAbortError(): Error {
   const error = new Error('BTW request aborted');
   error.name = 'AbortError';
   return error;
+}
+
+/** Tool name a `tools/call` payload names, for the diagnostic trace. */
+function readToolCallName(
+  message: Record<string, unknown> | undefined,
+): string | undefined {
+  const callParams = message?.['params'];
+  if (typeof callParams !== 'object' || callParams === null) return undefined;
+  const name = (callParams as Record<string, unknown>)['name'];
+  return typeof name === 'string' && name.length > 0 ? name : undefined;
+}
+
+/** Stringify a JSON-RPC error reply for the diagnostic trace. */
+function describeRpcError(error: unknown): string {
+  try {
+    return JSON.stringify(error) ?? String(error);
+  } catch {
+    return String(error);
+  }
 }
 
 function isSkippedMcpRegistration(result: unknown): boolean {

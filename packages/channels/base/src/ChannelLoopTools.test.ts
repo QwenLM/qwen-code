@@ -241,6 +241,41 @@ describe('ChannelLoopMcpServer', () => {
     expect(create).not.toHaveBeenCalled();
   });
 
+  it('names the failed binding when the frame carried an unbound session id', async () => {
+    const create = vi.fn();
+    const server = new ChannelLoopMcpServer({
+      create,
+      list: vi.fn(),
+      cancel: vi.fn(),
+    });
+
+    const response = await server.handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'tools/call',
+        params: { name: 'channel_loop_list' },
+      },
+      { carriedSessionId: 's-skip' },
+    );
+
+    expect(response).toMatchObject({
+      jsonrpc: '2.0',
+      id: 7,
+      result: {
+        content: [
+          {
+            type: 'text',
+            text: 'No channel tool binding is active for this session.',
+          },
+        ],
+        isError: true,
+      },
+    });
+    expect(response).not.toHaveProperty('error');
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it('does not respond to JSON-RPC notifications', async () => {
     const server = new ChannelLoopMcpServer({
       create: vi.fn(),

@@ -569,13 +569,14 @@ export class DaemonChannelBridge
 
   /**
    * A session needs the client MCP server while it still exists and either
-   * wants loops or has adapter tools to serve.
+   * wants loops or has adapter tools to serve it (owned by its channel, or
+   * ownerless). Another channel's owned tools are not this session's tools.
    */
   private needsChannelToolServer(sessionId: string): boolean {
     return (
       this.sessions.has(sessionId) &&
       (!this.channelLoopDisabledSessions.has(sessionId) ||
-        this.channelTools.length > 0)
+        this.channelToolsForSession(sessionId).length > 0)
     );
   }
 

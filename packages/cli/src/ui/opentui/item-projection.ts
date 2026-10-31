@@ -43,7 +43,10 @@ import {
   toolResultEvent,
 } from './event-adapter.js';
 import { flattenModelsBySource } from '../utils/modelsBySource.js';
-import { calculateCost } from '../../utils/costCalculator.js';
+import {
+  billableOutputTokens,
+  calculateCost,
+} from '../../utils/costCalculator.js';
 import { computeSessionStats } from '../utils/computeStats.js';
 import { formatDuration } from '../utils/formatters.js';
 import { levelLabel } from '../utils/skill-level-label.js';
@@ -64,6 +67,8 @@ export interface ItemProjectionContext {
 }
 
 function fmtTokensShort(n: number): string {
+  // 999,950 rounds to 1000.0k, so it belongs in the next unit.
+  if (n >= 999_950) return `${(n / 1_000_000).toFixed(1)}m`;
   return n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(n);
 }
 
@@ -211,6 +216,7 @@ export function projectSkillsList(
 }
 
 interface FlatModelEntry {
+  billableOutputTokens?: number;
   /** Structured key (raw model name + optional `::source` suffix). */
   key: string;
   label: string;
@@ -228,7 +234,11 @@ interface FlatModelEntry {
 
 /** Active-model rows; `flattenModelsBySource` already labels + filters. */
 function flattenActiveModels(metrics: SessionMetrics): FlatModelEntry[] {
-  return flattenModelsBySource(metrics.models).map((entry) => ({
+  return flattenModelsBySource(
+    metrics.models,
+    metrics.billableOutputTokens,
+  ).map((entry) => ({
+    billableOutputTokens: entry.billableOutputTokens,
     key: entry.key,
     label: entry.label,
     metrics: entry.metrics as FlatModelEntry['metrics'],
@@ -245,7 +255,7 @@ function entryCost(
   return calculateCost({
     inputTokens: entry.metrics.tokens.prompt,
     outputTokens:
-      entry.metrics.tokens.candidates + entry.metrics.tokens.thoughts,
+      entry.billableOutputTokens ?? billableOutputTokens(entry.metrics.tokens),
     pricing: (modelPricing ?? {})[entry.key.split('::')[0]] as Parameters<
       typeof calculateCost
     >[0]['pricing'],
@@ -478,7 +488,17 @@ export function projectContextUsage(item: Record<string, unknown>): string {
     ['System prompt', 'systemPrompt'],
     ['Built-in tools', 'builtinTools'],
     ['MCP tools', 'mcpTools'],
-    ['Memory files', 'memoryFiles'],
+    ...(breakdown['instructionFiles'] === undefined
+      ? []
+      : ([['Instruction files', 'instructionFiles']] as Array<
+          [string, string]
+        >)),
+    [
+      breakdown['instructionFiles'] === undefined
+        ? 'Memory files'
+        : 'Auto memory',
+      'memoryFiles',
+    ],
     ['Skills', 'skills'],
     ['Startup context', 'startupContext'],
   ];
@@ -561,7 +581,20 @@ export function projectContextUsage(item: Record<string, unknown>): string {
       ].sort(byTokens),
     );
     detail(
-      'Memory files',
+      'Instruction files',
+      (
+        (item['instructionFiles'] ?? []) as Array<{
+          path: string;
+          tokens: number;
+        }>
+      )
+        .map((file) => ({ name: file.path, tokens: file.tokens }))
+        .sort(byTokens),
+    );
+    detail(
+      breakdown['instructionFiles'] === undefined
+        ? 'Memory files'
+        : 'Auto memory',
       // The producer emits ContextMemoryDetail ({ path, tokens }); map to
       // the name field detail() renders.
       [

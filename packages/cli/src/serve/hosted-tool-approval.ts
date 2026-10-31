@@ -251,7 +251,15 @@ export function parseHostedActionOptions(bytes: Buffer): HostedActionOptions {
   ]) {
     if (!Object.hasOwn(options, field)) continue;
     const ref = assertManagedSessionDurableRef(options[field], field);
-    if (ref.kind !== kind || ref.schemaVersion !== 1)
+    if (
+      (ref.kind !== kind &&
+        !(
+          field === 'inputRef' &&
+          options['v'] === 3 &&
+          ref.kind === 'managed-extension-command-input'
+        )) ||
+      ref.schemaVersion !== 1
+    )
       throw new Error('Invalid Hosted Action reference.');
   }
   return options as unknown as HostedActionOptions;

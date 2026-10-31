@@ -98,10 +98,20 @@ export interface QQChannelConfig {
    * sessions. Default false: the tools are destructive and run with the bot's
    * own token, so an existing deployment keeps them off until an operator sets
    * `true`. The platform's own rules still apply once enabled: recalling a
-   * member's message needs the bot to be a group admin and the message to be
-   * under 2 minutes old.
+   * member's message needs the bot to be a group admin.
    */
   moderationTools?: boolean;
+  /**
+   * How long, in milliseconds, the channel keeps an inbound message in the
+   * per-chat history the recall tool resolves a member's last message from.
+   * - `-1` (default): no time limit; entries are bounded only by the per-chat
+   *   count cap.
+   * - `0`: disable member-targeted recall. The history is not recorded and
+   *   `member_openid` is rejected; an explicit `message_id` still works.
+   * - `N > 0`: keep an entry for N milliseconds.
+   * A non-integer or a value below -1 warns on stderr and falls back to `-1`.
+   */
+  moderationRecallWindowMs?: number;
   /**
    * Expose the outbound file tool (`qq_send_file`) to the agent in this
    * channel's sessions. Default false: the tool lets the model hand a local
@@ -110,6 +120,7 @@ export interface QQChannelConfig {
    * directory, non-empty and at most 20 MB, can be sent.
    */
   fileTools?: boolean;
+
   /** Max buffer chars before forcing an immediate flush (stream+cron). Default 4096. */
   bufferFlushLength?: number;
   /** Max reconnect attempts before giving up. Default 20. 0 = unlimited. */

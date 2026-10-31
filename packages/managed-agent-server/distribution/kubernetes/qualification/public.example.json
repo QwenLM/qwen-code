@@ -1,0 +1,33 @@
+{
+  "baseUrl": "http://127.0.0.1:18080",
+  "runId": "qualification-replace-me",
+  "sourceSha": "REPLACE_WITH_FULL_COMMIT_SHA",
+  "signingKeyFile": "private/signing-key",
+  "timeoutSeconds": 90,
+  "actors": [
+    {
+      "tenantId": "qualification-tenant-a",
+      "actorId": "owner-a",
+      "filesAgentId": "REPLACE_FILES_AGENT_A",
+      "shellAgentId": "REPLACE_SHELL_AGENT_A"
+    },
+    {
+      "tenantId": "qualification-tenant-a",
+      "actorId": "owner-b",
+      "filesAgentId": "REPLACE_FILES_AGENT_A",
+      "shellAgentId": "REPLACE_SHELL_AGENT_A"
+    },
+    {
+      "tenantId": "qualification-tenant-b",
+      "actorId": "owner-a",
+      "filesAgentId": "REPLACE_FILES_AGENT_B",
+      "shellAgentId": "REPLACE_SHELL_AGENT_B"
+    },
+    {
+      "tenantId": "qualification-tenant-b",
+      "actorId": "owner-b",
+      "filesAgentId": "REPLACE_FILES_AGENT_B",
+      "shellAgentId": "REPLACE_SHELL_AGENT_B"
+    }
+  ]
+}

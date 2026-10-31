@@ -435,8 +435,8 @@ export class QQChannel extends ChannelBase {
   /**
    * Recent inbound messages per chat, newest last, used by the moderation
    * tools to resolve "that member's last message" into a message id the
-   * platform can recall. Entries older than the platform's 2-minute recall
-   * window are useless, so the ring is TTL- and length-bounded.
+   * platform can recall. The ring is bounded by the per-chat count cap and,
+   * when `moderationRecallWindowMs` is positive, by that age.
    */
   private recentInbound = new Map<
     string,
@@ -457,8 +457,12 @@ export class QQChannel extends ChannelBase {
   private replyMsgIdCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** 5-minute TTL for replyMsgId entries and seenMessages dedup. */
   private static readonly REPLY_MSG_ID_TTL_MS = 300_000;
-  /** Platform recall window: a message older than this cannot be recalled. */
-  private static readonly RECALL_WINDOW_MS = 120_000;
+  /**
+   * How long the ring keeps an entry, from `moderationRecallWindowMs`: a
+   * positive value is an age in ms, -1 keeps entries until the count cap
+   * evicts them, and 0 disables the ring (and member-targeted recall).
+   */
+  private moderationRecallWindowMs: number;
   /** Per-chat cap for the recent-inbound ring. */
   private static readonly MAX_RECENT_INBOUND = 50;
   /** Sweep idle chats out of the ring once it holds this many. */
@@ -548,6 +552,15 @@ export class QQChannel extends ChannelBase {
    * chunks onto its own msg_id (see PR #6457 review).
    */
   private sessionReplyMsgId: Map<string, { msgId: string; timestamp: number }> =
+    new Map();
+  /**
+   * Chat the turn in progress is about, per session, recorded by
+   * onPromptStart. Under a shared `sessionScope` a session serves many chats,
+   * so the router target frozen at session creation is whichever chat created
+   * it — not the chat a tool call belongs to. The moderation tools resolve
+   * their chat from here instead. Cleared on prompt end and session teardown.
+   */
+  private sessionTurnChat: Map<string, { chatId: string; isGroup: boolean }> =
     new Map();
   /**
    * Monotonic turn counter per session, bumped on every onPromptStart.
@@ -737,6 +750,18 @@ export class QQChannel extends ChannelBase {
         `[QQ:${this.name}] WARNING: invalid bufferFlushLength=${raw}, using default ${QQChannel.MAX_BUFFER_LENGTH}\n`,
       );
       this.qqConfig.bufferFlushLength = QQChannel.MAX_BUFFER_LENGTH;
+    }
+    const recallWindow = this.qqConfig.moderationRecallWindowMs;
+    if (
+      recallWindow !== undefined &&
+      (!Number.isInteger(recallWindow) || recallWindow < -1)
+    ) {
+      process.stderr.write(
+        `[QQ:${this.name}] WARNING: invalid moderationRecallWindowMs=${recallWindow}, using -1 (no time limit)\n`,
+      );
+      this.moderationRecallWindowMs = -1;
+    } else {
+      this.moderationRecallWindowMs = recallWindow ?? -1;
     }
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     // In standalone mode (no external router), use the per-channel
@@ -1702,6 +1727,7 @@ export class QQChannel extends ChannelBase {
     }
     this.streamState.clear();
     this.sessionReplyMsgId.clear();
+    this.sessionTurnChat.clear();
     this.turnCounter.clear();
     this.flushingSessions.clear();
     this.pendingStreamDelete.clear();
@@ -1746,10 +1772,16 @@ export class QQChannel extends ChannelBase {
    * replies must go out as active messages, so clear any stale anchor.
    */
   protected override onPromptStart(
-    _chatId: string,
+    chatId: string,
     sessionId: string,
     messageId?: string,
   ): void {
+    // A shared sessionScope maps many chats onto one session, so the chat a
+    // tool call belongs to is this turn's, not the session's routed target.
+    this.sessionTurnChat.set(sessionId, {
+      chatId,
+      isGroup: this.chatTypeFor(chatId) === 'group',
+    });
     this.activePromptSessions.add(sessionId);
     // Bump the turn generation: streamState entries created by a previous
     // turn on this session (e.g. one left behind by a deferred send) are now
@@ -1808,6 +1840,7 @@ export class QQChannel extends ChannelBase {
     sessionId: string,
     _messageId?: string,
   ): void {
+    this.sessionTurnChat.delete(sessionId);
     // Always clear the prompt-in-flight marker first: the PR #8241 teardown
     // below has early returns (deferred flush chains) that must not leave
     // this session marked as an active prompt for the cron discriminator.
@@ -3963,6 +3996,7 @@ export class QQChannel extends ChannelBase {
   }
 
   override onSessionDied(sessionId: string): void {
+    this.sessionTurnChat.delete(sessionId);
     const state = this.streamState.get(sessionId);
     if (state?.timer) {
       clearTimeout(state.timer);
@@ -4971,21 +5005,28 @@ export class QQChannel extends ChannelBase {
 
   /**
    * Track an inbound message for the moderation tools. Kept in memory only:
-   * the platform forgets a message's recallability after 2 minutes, so the
-   * ring is useless across a restart.
+   * the ring does not survive a restart, so member-targeted recall only
+   * reaches messages received since the process started.
    */
   private recordRecentInbound(
     chatId: string,
     senderId: string | undefined,
     messageId: string,
   ): void {
+    // Nothing can resolve a member's message when the tools are off or the
+    // window is 0, so do not spend memory recording one.
+    const window = this.moderationRecallWindowMs;
+    if (this.qqConfig.moderationTools !== true || window === 0) return;
     if (!senderId || !messageId) return;
+    const prior = this.recentInbound.get(chatId) ?? [];
+    // First write wins for one message id. The same platform id is redelivered
+    // on reconnect replay and arrives twice when a message is both
+    // GROUP_AT_MESSAGE_CREATE and GROUP_MESSAGE_CREATE; re-stamping it would
+    // make an older message outrank a newer one and extend its lifetime.
+    if (prior.some((entry) => entry.messageId === messageId)) return;
     const now = Date.now();
-    const entries = (this.recentInbound.get(chatId) ?? []).filter(
-      (entry) =>
-        now - entry.at < QQChannel.RECALL_WINDOW_MS &&
-        entry.messageId !== messageId,
-    );
+    const entries =
+      window > 0 ? prior.filter((entry) => now - entry.at < window) : prior;
     entries.push({ messageId, senderId, at: now });
     if (entries.length > QQChannel.MAX_RECENT_INBOUND) {
       entries.splice(0, entries.length - QQChannel.MAX_RECENT_INBOUND);
@@ -4996,13 +5037,29 @@ export class QQChannel extends ChannelBase {
     }
   }
 
+  /**
+   * Drop one recalled message from the ring so the next member-targeted recall
+   * resolves the previous message instead of re-targeting the destroyed one.
+   * Splices in place: `recentMemberMessage`'s backward scan relies on the ring
+   * staying ascending by `at`.
+   */
+  private dropRecentMessage(chatId: string, messageId: string): void {
+    const entries = this.recentInbound.get(chatId);
+    if (!entries) return;
+    const index = entries.findIndex((entry) => entry.messageId === messageId);
+    if (index === -1) return;
+    entries.splice(index, 1);
+    if (entries.length === 0) this.recentInbound.delete(chatId);
+  }
+
   /** Keep the ring's chat keys bounded: stale chats first, then LRU. */
   private sweepRecentInbound(now: number): void {
-    for (const [chatId, entries] of this.recentInbound) {
-      if (
-        entries.every((entry) => now - entry.at >= QQChannel.RECALL_WINDOW_MS)
-      ) {
-        this.recentInbound.delete(chatId);
+    const window = this.moderationRecallWindowMs;
+    if (window > 0) {
+      for (const [chatId, entries] of this.recentInbound) {
+        if (entries.every((entry) => now - entry.at >= window)) {
+          this.recentInbound.delete(chatId);
+        }
       }
     }
     while (this.recentInbound.size > QQChannel.MAX_RECENT_INBOUND_CHATS) {
@@ -5020,19 +5077,44 @@ export class QQChannel extends ChannelBase {
     }
   }
 
-  /** Newest still-recallable message id from `senderId` in `chatId`. */
+  /** Newest tracked message id from `senderId` in `chatId`. */
   private recentMemberMessage(
     chatId: string,
     senderId: string,
   ): string | undefined {
     const now = Date.now();
+    const window = this.moderationRecallWindowMs;
     const entries = this.recentInbound.get(chatId) ?? [];
     for (let i = entries.length - 1; i >= 0; i--) {
       const entry = entries[i]!;
-      if (now - entry.at >= QQChannel.RECALL_WINDOW_MS) break;
+      if (window > 0 && now - entry.at >= window) break;
       if (entry.senderId === senderId) return entry.messageId;
     }
     return undefined;
+  }
+
+  /**
+   * The chat a moderation call may touch, resolved from the turn in progress.
+   * Under a shared `sessionScope` one session serves every group and DM, and
+   * the router target frozen at session creation is whichever chat happened to
+   * create it — using it would recall a message in a chat nobody asked about.
+   * ChannelBase calls `onPromptStart` for every turn with that turn's envelope
+   * chat, which is the only chat the turn is about.
+   */
+  private resolveModerationChat(
+    sessionId: string,
+  ): { chatId: string; isGroup: boolean } | undefined {
+    const turn = this.sessionTurnChat.get(sessionId);
+    if (turn) return turn;
+    // No turn in progress. A per-chat scope still maps the session to one
+    // chat, so its routed target is that chat — keep the channel-name guard so
+    // this instance's token cannot act on another channel's chat when several
+    // channels share one router. 'single' maps every chat onto one session, so
+    // its frozen target cannot say which chat this is: fail closed.
+    if (this.config.sessionScope === 'single') return undefined;
+    const target = this.router.getTarget(sessionId);
+    if (!target || target.channelName !== this.name) return undefined;
+    return { chatId: target.chatId, isGroup: target.isGroup === true };
   }
 
   /**
@@ -5047,22 +5129,18 @@ export class QQChannel extends ChannelBase {
     const register = this.bridge.registerChannelTool?.bind(this.bridge);
     if (!register) return;
     for (const tool of buildModerationTools({
-      resolveChat: (sessionId) => {
-        const target = this.router.getTarget(sessionId);
-        // A router shared by several channels resolves every channel's
-        // sessions, so the channel name is the guard that keeps this
-        // instance's token off another channel's chat.
-        if (!target || target.channelName !== this.name) return undefined;
-        return {
-          chatId: target.chatId,
-          isGroup: target.isGroup === true,
-        };
-      },
-      currentMessageId: (sessionId) => this.getResponseMessageId(sessionId),
+      resolveChat: (sessionId) => this.resolveModerationChat(sessionId),
+      memberRecallDisabled: this.moderationRecallWindowMs === 0,
+      currentSenderId: (sessionId) => this.getResponseSenderId(sessionId),
       recentMemberMessage: (chatId, senderId) =>
         this.recentMemberMessage(chatId, senderId),
+      dropRecentMessage: (chatId, messageId) =>
+        this.dropRecentMessage(chatId, messageId),
       request: (input) => this.requestModerationApi(input),
-      log: (message) => process.stderr.write(`[QQ:${this.name}] ${message}\n`),
+      log: (message) =>
+        process.stderr.write(
+          `[QQ:${this.name}] ${sanitizeLogText(message, 200)}\n`,
+        ),
     })) {
       register({ ...tool, owner: this.name });
     }
@@ -5270,6 +5348,9 @@ export class QQChannel extends ChannelBase {
     path: string;
     body?: Record<string, unknown>;
   }): Promise<ModerationApiResult> {
+    if (this.disposed) {
+      return { ok: false, status: 0, message: 'channel disposed' };
+    }
     if (!this.accessToken || Date.now() >= this.tokenExpiresAt) {
       try {
         await this.fetchToken();
@@ -6324,7 +6405,9 @@ export class QQChannel extends ChannelBase {
     }
     this.chatTypeMap.set(chatId, 'c2c');
     this.setReplyMsgId(chatId, event.id);
-    this.recordRecentInbound(chatId, chatId, event.id);
+    // Not recorded in the recent-inbound ring: it is read only by the
+    // group-only member-targeted recall, so a DM entry could never be
+    // resolved and would consume the ring's shared 256-chat budget.
     const senderName = event.author.username || event.author.id || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
     const cleanText = rawContent.trim();
@@ -6691,6 +6774,7 @@ export class QQChannel extends ChannelBase {
     }
     this.botOpenIdByGroup.delete(groupId);
     this._lastKeywordNoMatchLog.delete(groupId);
+    this.recentInbound.delete(groupId);
     // Clean up cron buffers targeting this group (always, regardless of config flag)
     let cleanedCron = 0;
     for (const [sid, entry] of this.cronBuffer) {
