@@ -782,7 +782,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
 
       const fileName = path.basename(this.params.file_path);
       const originallyProposedContent =
-        this.params.ai_proposed_content || editData.newContent;
+        this.params.ai_proposed_content || newContent;
       const diffStat = getDiffStat(
         fileName,
         editData.currentContent ?? '',

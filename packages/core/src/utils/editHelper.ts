@@ -629,10 +629,10 @@ function normalizedToRawOffsets(
  * A whole-file span keeps the previous writer's file-wide CRLF
  * conversion because there are no outside bytes to preserve. Uniformly
  * terminated files remain byte-identical to the previous path, with one
- * exception: where the matched span is followed by a CRLF or by nothing, a
- * `newString` ending in a bare `\r` loses that `\r` here, and the previous path
- * kept it as a stray character mid-line. A tail opening with a bare `\n` is not
- * that case: there the caller's `\r` completes the pair and is kept.
+ * exception on the splice path: a `newString` ending in a bare `\r` loses that
+ * `\r` unless the tail opens with a bare `\n`, which completes the pair. A CRLF
+ * tail absorbs the `\r` into the same pair in both paths; a mid-line tail or end
+ * of file drops a `\r` that the previous path kept.
  *
  * Two paths, and which one runs is decided by whether the file contains a CRLF
  * at all. A file with none takes the plain literal replace, so the replacement's

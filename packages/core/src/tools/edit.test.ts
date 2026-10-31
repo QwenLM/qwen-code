@@ -628,10 +628,10 @@ describe('EditTool', () => {
       });
 
       it('records and displays the bytes written rather than the literal proposal', async () => {
-        // A new_string ending in a bare CR can be absorbed by the CRLF that
-        // follows the span, so `newContent` and `contentForWrite` differ by
-        // exactly that byte. The attribution hash must describe the file on
-        // disk, or the next read resets the AI contribution.
+        // The bare CR at the end of new_string is dropped before the untouched
+        // mid-line tail, so the literal proposal differs from the written bytes.
+        // Attribution must describe the file on disk, and the diff must not
+        // count this normalization as a user modification.
         const original = 'const a = 1;\r\nconst b = 2;\r\n';
         seedFile(filePath, original);
         const recordEdit = vi.spyOn(
@@ -658,6 +658,12 @@ describe('EditTool', () => {
         const display = result.returnDisplay as FileDiff;
         expect.soft(display.newContent).toBe(preview);
         expect.soft(display.fileDiff).toContain('+A = 1;');
+        expect.soft(display.diffStat).toMatchObject({
+          user_added_lines: 0,
+          user_removed_lines: 0,
+          user_added_chars: 0,
+          user_removed_chars: 0,
+        });
         expect.soft(result.llmContent).toContain('A = 1;');
         expect.soft(result.llmContent).not.toContain('\r');
       });
