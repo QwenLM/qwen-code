@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.contracts.session;
 
-import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalChangeResult;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellApprovalSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellLifecycleOperation;
@@ -150,125 +149,26 @@ public interface AgentStateStore {
         return null;
     }
 
-    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId,
-            String requestedRevision, String title,
-            List<Map<String, Object>> input, String payloadDigest,
-            WorkspaceSelection selection);
+    /**
+     * Creates a Workspace-bound Session from one named command. The
+     * default fails closed: an implementation that has not opted into
+     * workspace creation refuses it wholesale rather than silently
+     * accepting a capability it cannot honor.
+     */
+    public default Admission insertWorkspaceSessionCommand(SessionCreationCommand command) {
+        throw new UnsupportedOperationException("Workspace session creation is unavailable");
+    }
 
     public Optional<Admission> findWorkspaceCreateReplay(String tenantId,
             String actorId, String idempotencyKey, String requestDigest);
-
-    public default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId,
-            String requestedRevision, String title,
-            List<Map<String, Object>> input, String payloadDigest,
-            WorkspaceSelection selection, String approvalMode) {
-        if (approvalMode != null) {
-            throw new UnsupportedOperationException("Approval mode selection is unavailable");
-        }
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey,
-                requestDigest, agentId, requestedRevision, title, input, payloadDigest, selection);
-    }
-
-    public default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId,
-            String requestedRevision, String title, List<Map<String, Object>> input,
-            String payloadDigest, WorkspaceSelection selection, String approvalMode,
-            boolean approvalSelectionSupported) {
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey,
-                requestDigest, agentId, requestedRevision, title, input, payloadDigest,
-                selection, approvalMode);
-    }
 
     public default WebShellSessionOptions workspaceSessionOptions(
             String tenantId, String agentId) {
         throw new UnsupportedOperationException("Approval mode selection is unavailable");
     }
 
-    public default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
-            String title, List<Map<String, Object>> input, String payloadDigest,
-            WorkspaceSelection selection, String approvalMode, boolean approvalSelectionSupported,
-            Boolean planMode, boolean planModeSupported) {
-        if (Boolean.TRUE.equals(planMode)) {
-            throw new UnsupportedOperationException("Plan mode is unavailable");
-        }
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
-                agentId, requestedRevision, title, input, payloadDigest, selection,
-                approvalMode, approvalSelectionSupported);
-    }
-
-    public default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
-            String title, List<Map<String, Object>> input, String payloadDigest,
-            WorkspaceSelection selection, String approvalMode, boolean approvalSelectionSupported,
-            Boolean planMode, boolean planModeSupported, List<Map<String, Object>> skills) {
-        if (!skills.isEmpty()) {
-            throw new UnsupportedOperationException("Session Skills are unavailable");
-        }
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
-                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
-                approvalSelectionSupported, planMode, planModeSupported);
-    }
-
-    public default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
-            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
-            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
-            List<Map<String, Object>> skills, boolean publicChildrenSupported) {
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
-                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
-                approvalSelectionSupported, planMode, planModeSupported, skills);
-    }
-
-    public default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
-            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
-            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
-            List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId) {
-        if (modelId != null) {
-            throw new UnsupportedOperationException("Initial model selection is unavailable");
-        }
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
-                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
-                approvalSelectionSupported, planMode, planModeSupported, skills, publicChildrenSupported);
-    }
-
-    public default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
-            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
-            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
-            List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
-            List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins,
-            Set<String> extensionLifecycleProfiles) {
-        if (extensionPins != null) {
-            throw new UnsupportedOperationException("Initial extension selection is unavailable");
-        }
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
-                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
-                approvalSelectionSupported, planMode, planModeSupported, skills, publicChildrenSupported, modelId);
-    }
-
     public Admission replayWorkspaceSessionCommand(String tenantId, String actorId,
             String idempotencyKey, String requestDigest);
-
-    public default Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
-            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
-            String approvalMode, boolean approvalSelectionSupported, Boolean planMode, boolean planModeSupported,
-            List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
-            List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins,
-            Set<String> extensionLifecycleProfiles,
-            com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Plan worktree) {
-        if (worktree != null) {
-            throw new UnsupportedOperationException("Session worktrees are unavailable");
-        }
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
-                agentId, requestedRevision, title, input, payloadDigest, selection, approvalMode,
-                approvalSelectionSupported, planMode, planModeSupported, skills, publicChildrenSupported,
-                modelId, extensionPins, extensionLifecycleProfiles);
-    }
 
     public default com.alibaba.qwen.code.managedagent.repository.SessionWorktreeStore.Descriptor findSessionWorktree(
             String tenantId, String sessionId) {

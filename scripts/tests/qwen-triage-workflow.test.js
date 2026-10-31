@@ -7,6 +7,7 @@
 import { execFileSync, spawn, spawnSync } from 'node:child_process';
 import {
   chmodSync,
+  cpSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -74,6 +75,14 @@ function stepIn(jobName, stepName) {
     ),
   );
   return match?.[0] ?? '';
+}
+
+// The paths publish-verify checks out at the trusted ref.
+function publisherSparseCheckout() {
+  const checkout = parse(workflow).jobs['publish-verify'].steps.find(
+    (s) => s.name === 'Checkout the OSS publisher scripts',
+  );
+  return checkout.with['sparse-checkout'].split('\n');
 }
 
 function job(name) {
@@ -4392,13 +4401,16 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(checkout).toContain("ref: '${{ github.sha }}'");
     expect(checkout).toContain('persist-credentials: false');
     expect(checkout).toContain('sparse-checkout-cone-mode: false');
-    for (const entry of [
+    // Whether this set is a complete closure for the checker is proven by
+    // running the checker from exactly these paths (see "resolves the
+    // checker at its production path"), not by reading its imports.
+    expect(publisherSparseCheckout()).toEqual([
       '/package.json',
       'scripts/upload-aliyun-oss-assets.js',
       'scripts/release-script-utils.js',
-    ]) {
-      expect(checkout).toContain(`\n            ${entry}\n`);
-    }
+      'scripts/verify-pr-check.mjs',
+      'scripts/lib/',
+    ]);
   });
 
   // A CDN retry loop whose worst case exceeds the 10-minute job cap turns
@@ -5489,18 +5501,24 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(publishStep).toContain('all(type == "number" and . >= 0');
   });
 
-  // The local artifact checker mirrors this step instead of sharing code with
-  // it (design decision 3), so the mirror needs a pin. The numeric rule is
-  // already asserted on both sides; the verdict vocabulary was the axis with
-  // nothing holding the two implementations together, so a fifth word added to
-  // the publisher would leave the local path silently accepting four.
+  // This step runs the checker itself (design decision 3), but still spells
+  // out the verdict vocabulary twice: the allowlist that reads verdict.txt and
+  // the headline labels. Both must stay the checker's four words, so a fifth
+  // word on either side fails here.
   it('keeps the local checker aligned with the publisher verdicts', () => {
     const publishStep = step('Post verification report comment');
-    const agentCase = publishStep
-      .slice(publishStep.indexOf('case "$AGENT_VERDICT"'))
+    const marker = 'case "$AGENT_VERDICT" in';
+    const allowlist = publishStep
+      .slice(publishStep.indexOf(marker) + marker.length)
+      .trim()
+      .split(')')[0]
+      .split('|');
+    expect(new Set(allowlist)).toEqual(new Set(VERDICTS));
+    const headlineCase = publishStep
+      .slice(publishStep.lastIndexOf(marker))
       .split('esac')[0];
     const labels = new Set(
-      [...agentCase.matchAll(/^\s+([a-z][a-z-]*)\)/gm)].map(
+      [...headlineCase.matchAll(/^\s+([a-z][a-z-]*)\)/gm)].map(
         (match) => match[1],
       ),
     );
@@ -5514,11 +5532,23 @@ describe('qwen-triage verify publish fidelity', () => {
       .match(/run: \|-\n([\s\S]*)$/)?.[1]
       .replace(/^ {10}/gm, '');
 
-  // Render the publisher for a given outcome with a stubbed gh, and return
-  // the comment body it would post.
-  const render = (dir, env) => {
+  // Render the publisher for a given outcome with a stubbed gh and the real
+  // artifact checker, and return the comment body it would post plus the
+  // step log. The publisher reads the agent's word only from verdict.txt
+  // beside the report, so AGENT_VERDICT names what the fixture writes there
+  // unless VERDICT_TXT says otherwise.
+  const publish = (dir, env) => {
     const out = join(dir, `body-${env.NAME}.md`);
     const work = join(dir, 'work');
+    const verdictFile = join(
+      work,
+      'verify-results',
+      'prA-verify-1',
+      'verdict.txt',
+    );
+    rmSync(verdictFile, { force: true });
+    const word = env.VERDICT_TXT ?? env.AGENT_VERDICT;
+    if (word) writeFileSync(verdictFile, `${word}\n`);
     const res = spawnSync('bash', ['-c', publishScript()], {
       cwd: work,
       encoding: 'utf8',
@@ -5540,12 +5570,14 @@ describe('qwen-triage verify publish fidelity', () => {
         AGENT_VERDICT: '',
         SKIP_REASON: '',
         PREPARE_FAILURE_PHASE: '',
+        VERIFY_PR_CHECK: join(process.cwd(), 'scripts', 'verify-pr-check.mjs'),
         ...env,
       },
     });
     expect(res.status).toBe(0);
-    return readFileSync(out, 'utf8');
+    return { body: readFileSync(out, 'utf8'), log: res.stdout };
   };
+  const render = (dir, env) => publish(dir, env).body;
 
   const fixture = () => {
     const dir = mkdtempSync(join(tmpdir(), 'verify-publish2-'));
@@ -5758,6 +5790,10 @@ describe('qwen-triage verify publish fidelity', () => {
     // verdict-less run says nothing about the PR and must render as
     // incomplete/inconclusive, never as a pass or a fail.
     const dir = fixture();
+    // A failed assertion the PR caused is what may fail the PR; findings
+    // over an all-green ledger are advisory.
+    const PR_RED =
+      '{"pass":9,"fail":1,"total":10,"failures":[{"id":"head-regression","attribution":"pr"}]}';
     try {
       const ARMS = [
         [
@@ -5767,9 +5803,18 @@ describe('qwen-triage verify publish fidelity', () => {
         ],
         [
           { VERDICT: 'pass', AGENT_VERDICT: 'findings' },
+          '\u2705 passed with findings \u2014 non-blocking findings, every scripted assertion passed (agent verdict)',
+          '\u2705 \u901a\u8fc7\uff08\u6709\u53d1\u73b0\uff09 \u00b7 \u975e\u963b\u585e\u53d1\u73b0\uff0c\u811a\u672c\u65ad\u8a00\u5168\u90e8\u901a\u8fc7\uff08agent \u5224\u5b9a\uff09',
+        ],
+        [
+          { VERDICT: 'pass', AGENT_VERDICT: 'findings' },
           '\u274c not passed \u2014 findings reported (agent verdict)',
           '\u274c \u4e0d\u901a\u8fc7 \u00b7 \u62a5\u544a\u4e86\u53d1\u73b0\uff08agent \u5224\u5b9a\uff09',
+          PR_RED,
         ],
+        // Unlike findings, blocked stays not-passed over an all-green
+        // ledger on purpose: the measured blocked-at-zero round (SKILL.md)
+        // was a real regression counted as a pass.
         [
           { VERDICT: 'pass', AGENT_VERDICT: 'blocked' },
           '\u274c not passed \u2014 blocked (agent verdict)',
@@ -5808,7 +5853,17 @@ describe('qwen-triage verify publish fidelity', () => {
       ];
       const seenEn = new Set();
       const seenZh = new Set();
-      ARMS.forEach(([env, en, zh], i) => {
+      ARMS.forEach(([env, en, zh, assertions], i) => {
+        writeFileSync(
+          join(
+            dir,
+            'work',
+            'verify-results',
+            'prA-verify-1',
+            'assertions.json',
+          ),
+          assertions ?? '{"pass":10,"fail":0,"total":10}',
+        );
         const body = render(dir, { NAME: `hl${i}`, AGENT_VERDICT: '', ...env });
         expect(body).toContain(`**Sandboxed verification: ${en}**`);
         expect(body).toContain(
@@ -5830,6 +5885,204 @@ describe('qwen-triage verify publish fidelity', () => {
       // pairing is pinned as a bijection.
       expect(seenEn.size).toBe(ARMS.length);
       expect(seenZh.size).toBe(ARMS.length);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The publisher used to check only the count triple, so CI published the
+  // shapes every local round refuses: findings over environment-only reds,
+  // and blocked over a harness fault.
+  it('does not trust a verdict the artifact checker refuses', () => {
+    const dir = fixture();
+    const assertionsFile = join(
+      dir,
+      'work',
+      'verify-results',
+      'prA-verify-1',
+      'assertions.json',
+    );
+    const UNTRUSTED =
+      '⚠️ inconclusive — completed without a usable structured verdict';
+    try {
+      writeFileSync(
+        assertionsFile,
+        '{"pass":8,"fail":2,"total":10,"failures":[{"id":"head","attribution":"environment"},{"id":"base-aa","attribution":"environment"}]}',
+      );
+      const envOnly = publish(dir, { NAME: 'env', AGENT_VERDICT: 'findings' });
+      expect(envOnly.body).toContain(UNTRUSTED);
+      expect(envOnly.body).not.toContain('❌');
+      expect(envOnly.body).toContain(
+        'The agent reported `findings`, but its artifacts fail the consistency check (`verify-pr-check.mjs`), so that verdict was not trusted — the workflow run log lists the errors.',
+      );
+      expect(envOnly.body).toContain(
+        'agent 报告了 `findings`，但其产物未通过一致性检查（`verify-pr-check.mjs`），因此该判定未被采信——检查的错误见工作流运行日志。',
+      );
+      expect(envOnly.log).toContain(
+        '  error findings with 2 failed assertions and none attributed to the PR',
+      );
+      expect(envOnly.log).toContain('(artifact check: refused)');
+      // This round's checker also warned (no PNG, verdict word not in the
+      // report); warnings can name agent-chosen files and stay unprinted.
+      expect(envOnly.log).not.toContain(' warn ');
+
+      writeFileSync(
+        assertionsFile,
+        '{"pass":9,"fail":1,"total":10,"failures":[{"id":"probe","attribution":"harness"}]}',
+      );
+      const blocked = render(dir, { NAME: 'blk', AGENT_VERDICT: 'blocked' });
+      expect(blocked).toContain(UNTRUSTED);
+      expect(blocked).toContain('The agent reported `blocked`');
+
+      // A checker that cannot load is not a clean check.
+      const missing = publish(dir, {
+        NAME: 'nochk',
+        AGENT_VERDICT: 'findings',
+        VERIFY_PR_CHECK: join(dir, 'absent.mjs'),
+      });
+      expect(missing.body).toContain(UNTRUSTED);
+      expect(missing.body).toContain(
+        'but the consistency check (`verify-pr-check.mjs`) could not run on its artifacts, so that verdict was not trusted — the workflow run log shows why.',
+      );
+      expect(missing.body).toContain(
+        'agent 报告了 `findings`，但一致性检查（`verify-pr-check.mjs`）无法在其产物上运行，因此该判定未被采信——原因见工作流运行日志。',
+      );
+      expect(missing.body).not.toContain('lists the errors');
+      expect(missing.log).toContain('The artifact check could not run');
+      expect(missing.log).toContain('Cannot find module');
+
+      // merge-ready over failures keeps its own explanation, not both.
+      writeFileSync(
+        assertionsFile,
+        '{"pass":9,"fail":1,"total":10,"failures":[{"id":"x","attribution":"pr"}]}',
+      );
+      const mr = render(dir, { NAME: 'mr', AGENT_VERDICT: 'merge-ready' });
+      expect(mr).toContain(
+        'recorded 1 failures, so that claim was not trusted',
+      );
+      expect(mr).not.toContain('verify-pr-check.mjs');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // REPORT, the counts and the verdict were picked by independent searches
+  // (the verdict in another job), so a run that left an earlier round
+  // directory behind could headline the later report with that directory's
+  // zero or verdict word.
+  it("binds the headline to the report's own directory", () => {
+    const dir = fixture();
+    const results = join(dir, 'work', 'verify-results');
+    const round = join(results, 'prA-verify-1');
+    try {
+      // The leftover sorts first and holds a complete green round's files.
+      mkdirSync(join(results, 'prA-verify-0'));
+      writeFileSync(
+        join(results, 'prA-verify-0', 'assertions.json'),
+        '{"pass":10,"fail":0,"total":10}',
+      );
+      writeFileSync(
+        join(results, 'prA-verify-0', 'verdict.txt'),
+        'merge-ready\n',
+      );
+      writeFileSync(
+        join(round, 'assertions.json'),
+        '{"pass":9,"fail":1,"total":10,"failures":[{"id":"x","attribution":"pr"}]}',
+      );
+      const mixed = render(dir, { NAME: 'mix', AGENT_VERDICT: 'findings' });
+      expect(mixed).toContain(
+        '❌ not passed — findings reported (agent verdict)',
+      );
+      expect(mixed).toContain(
+        'Scripted assertions: 9 passed · 1 failed · 10 total',
+      );
+      expect(mixed).not.toContain('merge-ready (agent verdict)');
+      expect(mixed).not.toContain('verify-pr-check.mjs');
+
+      // A round holding only its report has no counts and no word, and the
+      // leftover must lend it neither.
+      rmSync(join(round, 'assertions.json'));
+      const bare = publish(dir, { NAME: 'bare', AGENT_VERDICT: '' });
+      expect(bare.body).toContain(
+        '⚠️ inconclusive — completed without a usable structured verdict',
+      );
+      expect(bare.body).not.toContain('Scripted assertions:');
+      expect(bare.log).toContain(
+        '::warning::No usable verdict.txt beside the published report.md',
+      );
+
+      // A report.md nested inside the round sorts ahead of the round's own.
+      writeFileSync(
+        join(round, 'assertions.json'),
+        '{"pass":10,"fail":0,"total":10}',
+      );
+      mkdirSync(join(round, 'evidence'));
+      writeFileSync(join(round, 'evidence', 'report.md'), '## nested\n');
+      const nested = render(dir, {
+        NAME: 'nested',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(nested).toContain('✅ passed — merge-ready (agent verdict)');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // verdict.txt has one reader. The verify job used to read its own copy
+  // from whichever round directory its search found first and hand the
+  // publisher that word.
+  it('reads verdict.txt only beside the published report', () => {
+    const doc = parse(workflow);
+    const code = (s) =>
+      (s.run ?? '')
+        .split('\n')
+        .filter((line) => !/^\s*#/.test(line))
+        .join('\n');
+    const readers = Object.entries(doc.jobs).flatMap(([name, job]) =>
+      (job.steps ?? [])
+        .filter((s) => code(s).includes('verdict.txt'))
+        .map((s) => `${name}/${s.name}`),
+    );
+    expect(readers).toEqual([
+      'publish-verify/Post verification report comment',
+    ]);
+    expect(doc.jobs.verify.outputs).not.toHaveProperty('agent_verdict');
+    const post = doc.jobs['publish-verify'].steps.find(
+      (s) => s.name === 'Post verification report comment',
+    );
+    expect(post.env).not.toHaveProperty('AGENT_VERDICT');
+  });
+
+  // Every other case injects an absolute checker path. The production value
+  // is relative to the job's checkout, so pin the layout it relies on and run
+  // it from exactly the paths that checkout fetches: an import of anything
+  // outside them fails here, whatever form the import takes.
+  it('resolves the checker at its production path', () => {
+    const wf = parse(workflow);
+    const steps = wf.jobs['publish-verify'].steps;
+    const checkout = steps.find(
+      (s) => s.name === 'Checkout the OSS publisher scripts',
+    );
+    const post = steps.find(
+      (s) => s.name === 'Post verification report comment',
+    );
+    expect(checkout.with.path).toBeUndefined();
+    expect(post['working-directory']).toBeUndefined();
+    expect(wf.jobs['publish-verify'].defaults).toBeUndefined();
+
+    const dir = fixture();
+    const work = join(dir, 'work');
+    try {
+      for (const entry of publisherSparseCheckout()) {
+        const rel = entry.replace(/^\//, '');
+        cpSync(rel, join(work, rel), { recursive: true });
+      }
+      const body = render(dir, {
+        NAME: 'rel',
+        AGENT_VERDICT: 'findings',
+        VERIFY_PR_CHECK: '',
+      });
+      expect(body).toContain('✅ passed with findings');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
