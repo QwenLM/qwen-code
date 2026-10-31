@@ -69,16 +69,16 @@ exclusion; zero `TODO`/`FIXME` markers in production code.
 
 **D1. God classes.** The largest production classes:
 
-| Class                              | Module         | Lines | Notes                                                              |
-| ---------------------------------- | -------------- | ----- | ------------------------------------------------------------------ |
-| `ManagedAgentStore`                | persistence    | 7,751 | 300+ methods, 7 public setters                                     |
-| `RuntimeBrokerService`             | runtime-broker | 6,417 | 230+ methods; cooldown extracted to `ExecutionObservationCooldown` |
-| `ManagedSessionStore`              | persistence    | 3,931 |                                                                    |
-| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                    |
-| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                                    |
-| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                                    |
-| `ManagedAgentService`              | control-plane  | 2,120 |                                                                    |
-| `HarnessCoordinator`               | control-plane  | 1,770 |                                                                    |
+| Class                              | Module         | Lines | Notes                                                                                                        |
+| ---------------------------------- | -------------- | ----- | ------------------------------------------------------------------------------------------------------------ |
+| `ManagedAgentStore`                | persistence    | 7,751 | 300+ methods, 7 public setters                                                                               |
+| `RuntimeBrokerService`             | runtime-broker | 6,329 | 230+ methods; cooldown and hold inventory extracted (`ExecutionObservationCooldown`, `RuntimeHoldInventory`) |
+| `ManagedSessionStore`              | persistence    | 3,931 |                                                                                                              |
+| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                                                              |
+| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                                                                              |
+| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                                                                              |
+| `ManagedAgentService`              | control-plane  | 2,120 |                                                                                                              |
+| `HarnessCoordinator`               | control-plane  | 1,770 |                                                                                                              |
 
 `ManagedAgentStore` mixes session admission, turns, events, item/message
 projection, worktrees, MCP management, definition pins, skills, and extension

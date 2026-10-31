@@ -60,16 +60,16 @@ Managed Agent 服务端从首篇设计（2026-09-19）起，约两个月内长�
 
 **D1. 上帝类。** 最大的生产类：
 
-| 类                                 | 模块           | 行数  | 备注                                                   |
-| ---------------------------------- | -------------- | ----- | ------------------------------------------------------ |
-| `ManagedAgentStore`                | persistence    | 7,751 | 300+ 方法，7 个公开 setter                             |
-| `RuntimeBrokerService`             | runtime-broker | 6,417 | 230+ 方法；冷却已提取至 `ExecutionObservationCooldown` |
-| `ManagedSessionStore`              | persistence    | 3,931 |                                                        |
-| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                        |
-| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                        |
-| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                        |
-| `ManagedAgentService`              | control-plane  | 2,120 |                                                        |
-| `HarnessCoordinator`               | control-plane  | 1,770 |                                                        |
+| 类                                 | 模块           | 行数  | 备注                                                                                        |
+| ---------------------------------- | -------------- | ----- | ------------------------------------------------------------------------------------------- |
+| `ManagedAgentStore`                | persistence    | 7,751 | 300+ 方法，7 个公开 setter                                                                  |
+| `RuntimeBrokerService`             | runtime-broker | 6,329 | 230+ 方法；冷却与 hold 清单已提取（`ExecutionObservationCooldown`、`RuntimeHoldInventory`） |
+| `ManagedSessionStore`              | persistence    | 3,931 |                                                                                             |
+| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                                             |
+| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                                                             |
+| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                                                             |
+| `ManagedAgentService`              | control-plane  | 2,120 |                                                                                             |
+| `HarnessCoordinator`               | control-plane  | 1,770 |                                                                                             |
 
 `ManagedAgentStore` 混合了会话准入、turn、event、item/message 投影、worktree、
 MCP 管理、definition pin、skills 与 extension 投影。它的 7 个公开

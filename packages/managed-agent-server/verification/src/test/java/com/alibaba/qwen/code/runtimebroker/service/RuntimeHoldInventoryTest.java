@@ -83,6 +83,19 @@ class RuntimeHoldInventoryTest {
     }
 
     @Test
+    void aReleasingSessionStillHoldsUntilDurablyReleased() {
+        when(executionRepository.findHoldRowsByHarnessSession(eq("hs"), isNull(), eq(100)))
+                .thenReturn(List.of(row("e1", "sA")));
+        // RELEASING is not a durable release: only RELEASED discharges the
+        // drain obligation, so a widened discharge filter must fail here.
+        RuntimeSessionRecord releasing = session("sA", RuntimeSessionRecord.State.RELEASING);
+        when(sessionRepository.findHistoricalByIds(eq("tenant"), eq("hs"), anyList()))
+                .thenReturn(List.of(releasing));
+        assertThat(inventory.activeRuntimeSessionIds("hs", "tenant"))
+                .containsExactly("sA");
+    }
+
+    @Test
     void paginationFollowsTheLastCallIdCursor() {
         List<ToolHoldRow> first = new ArrayList<>();
         for (int i = 0; i < 100; i++) {
