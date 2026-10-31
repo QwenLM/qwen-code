@@ -274,5 +274,35 @@ describe('registerTodosRoutes', () => {
       );
       expect(overlay['session-abc:plan-1:1']).toBe('2026-12-25');
     });
+
+    it('fails the whole update without persisting when an overlay is corrupt', async () => {
+      const todoDir = path.join(tmpDir, 'todos');
+      fs.mkdirSync(todoDir, { recursive: true });
+      const filePath = path.join(todoDir, 'session-abc.json');
+      fs.writeFileSync(
+        filePath,
+        JSON.stringify({
+          planId: 'plan-1',
+          todos: [{ id: '1', content: 'Task', status: 'pending' }],
+          sessionId: 'session-abc',
+        }),
+      );
+      fs.writeFileSync(path.join(todoDir, 'due-dates.json'), '{ not json');
+      const route = app.routes['POST /todos/update'];
+      const mockReq = {
+        body: {
+          sessionId: 'session-abc',
+          todoId: '1',
+          status: 'completed',
+          dueDate: '2026-12-25',
+        },
+      };
+      await route.handler(mockReq, res);
+      // The strict overlay read must fail the request BEFORE the native
+      // write: the status stays pending on disk, never half-applied.
+      expect(res.statusCode).toBe(500);
+      const written = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+      expect(written.todos[0].status).toBe('pending');
+    });
   });
 });

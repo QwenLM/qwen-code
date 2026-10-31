@@ -289,13 +289,18 @@ export function TodosDialog() {
    * `/session/<id>` route. The pathname goes through `buildSessionPathname`
    * so any deployment base path is preserved, and the daemon token is
    * re-attached from the client's token store (it is stripped from the URL
-   * at boot) so the new tab authenticates on token-auth deployments.
+   * at boot) so the new tab authenticates on token-auth deployments. The
+   * token rides in the URL *hash* — like `buildSplitUrl` — because a query
+   * parameter is sent to the server on the document GET and can land in
+   * proxy/ingress request-URI logs; the fragment never leaves the browser.
+   * `readTokenFromLocation()` reads the hash first, and
+   * `removeDaemonTokenFromUrl()` scrubs both transports at boot.
    */
   const openConversation = (sessionId: string) => {
     const url = new URL(window.location.href);
     url.pathname = buildSessionPathname(window.location.pathname, sessionId);
     const token = getDaemonToken();
-    if (token) url.searchParams.set('token', token);
+    if (token) url.hash = new URLSearchParams({ token }).toString();
     window.open(url.toString(), '_blank', 'noopener');
   };
 

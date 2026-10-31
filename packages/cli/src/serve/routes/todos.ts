@@ -644,6 +644,22 @@ export function registerTodosRoutes(
         }
         const planId = typeof data['planId'] === 'string' ? data['planId'] : '';
 
+        // Read both overlays strictly BEFORE any write: a corrupt or
+        // unreadable overlay must fail the whole request with nothing
+        // persisted. The status flip used to be committed first, so a
+        // request carrying status + dueDate (or tags) answered 500 with
+        // the flip already on disk. The reads stay inside the lock —
+        // hoisting them above it would reopen the lost-update window the
+        // lock exists to close.
+        const dueDateMap =
+          validatedDueDate === undefined
+            ? undefined
+            : await readDueDates({ strict: true });
+        const tagOverlay =
+          validatedTags === undefined && tagDefinition === undefined
+            ? undefined
+            : await readTodoTags({ strict: true });
+
         let before: string | null = null;
         if (validatedStatus !== undefined) {
           before = typeof todo['status'] === 'string' ? todo['status'] : null;
@@ -652,45 +668,43 @@ export function registerTodosRoutes(
           await atomicWriteJson(filePath, JSON.stringify(data, null, 2));
         }
 
-        // The overlay update runs under the same lock as the native file
+        // The overlay writes run under the same lock as the native file
         // write — no inner lock needed, the outer withTodoWriteLock already
         // serializes the entire read-modify-write cycle.
         let appliedDueDate: string | null = null;
-        if (validatedDueDate !== undefined) {
-          const map = await readDueDates({ strict: true });
+        if (validatedDueDate !== undefined && dueDateMap !== undefined) {
           const key = `${sessionId}:${planId}:${todoId}`;
           if (validatedDueDate === null) {
-            delete map[key];
+            delete dueDateMap[key];
           } else {
-            map[key] = validatedDueDate;
+            dueDateMap[key] = validatedDueDate;
           }
-          await writeDueDates(map);
+          await writeDueDates(dueDateMap);
           appliedDueDate = validatedDueDate;
         }
 
         // Tag assignment update — same lock, same overlay pattern as due dates.
         let appliedTags: string[] | undefined;
-        if (validatedTags !== undefined || tagDefinition !== undefined) {
-          const overlay = await readTodoTags({ strict: true });
+        if (tagOverlay !== undefined) {
           if (
             tagDefinition !== undefined &&
             typeof tagDefinition.name === 'string' &&
             typeof tagDefinition.color === 'string'
           ) {
-            overlay.definitions[tagDefinition.name] = {
+            tagOverlay.definitions[tagDefinition.name] = {
               color: tagDefinition.color,
             };
           }
           if (validatedTags !== undefined) {
             const tagKey = `${sessionId}:${planId}:${todoId}`;
             if (validatedTags.length === 0) {
-              delete overlay.assignments[tagKey];
+              delete tagOverlay.assignments[tagKey];
             } else {
-              overlay.assignments[tagKey] = validatedTags;
+              tagOverlay.assignments[tagKey] = validatedTags;
             }
             appliedTags = validatedTags;
           }
-          await writeTodoTags(overlay);
+          await writeTodoTags(tagOverlay);
         }
 
         res.status(200).json({

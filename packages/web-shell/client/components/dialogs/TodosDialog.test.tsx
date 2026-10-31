@@ -7,8 +7,15 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { render, screen, waitFor, cleanup } from '@testing-library/react';
+import {
+  render,
+  screen,
+  waitFor,
+  cleanup,
+  fireEvent,
+} from '@testing-library/react';
 import { TodosDialog } from './TodosDialog';
+import { getDaemonToken } from '../../config/daemon';
 
 // This package has no RTL auto-cleanup (vitest.config.ts sets no globals,
 // client/test/setup.ts registers no afterEach), so renders accumulate in
@@ -65,7 +72,7 @@ vi.mock('../../i18n', () => ({
 }));
 
 vi.mock('../../config/daemon', () => ({
-  getDaemonToken: () => undefined,
+  getDaemonToken: vi.fn(),
 }));
 
 vi.mock('../../utils/sessionPath', () => ({
@@ -94,5 +101,24 @@ describe('TodosDialog', () => {
     });
     const buttons = screen.getAllByTitle('todos.viewConversation');
     expect(buttons.length).toBeGreaterThan(0);
+  });
+
+  it('passes the daemon token in the URL hash, never the query string', async () => {
+    vi.mocked(getDaemonToken).mockReturnValue('sekrit');
+    const openSpy = vi.fn();
+    vi.stubGlobal('open', openSpy);
+    render(<TodosDialog />);
+    await waitFor(() => {
+      expect(screen.getByText('Write the deployment guide')).toBeDefined();
+    });
+    fireEvent.click(screen.getAllByTitle('todos.viewConversation')[0]);
+    expect(openSpy).toHaveBeenCalledTimes(1);
+    const url = new URL(openSpy.mock.calls[0][0] as string);
+    // A query token would hit the server (and proxy/ingress request-URI
+    // logs) on the document GET; the hash never leaves the browser.
+    expect(url.searchParams.get('token')).toBeNull();
+    expect(new URLSearchParams(url.hash.slice(1)).get('token')).toBe('sekrit');
+    vi.unstubAllGlobals();
+    vi.mocked(getDaemonToken).mockReset();
   });
 });
