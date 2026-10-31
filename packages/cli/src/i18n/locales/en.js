@@ -1697,6 +1697,8 @@ export default {
     'Could not compress chat history because the compression summary was truncated.',
   'Could not compress chat history due to an API error.':
     'Could not compress chat history due to an API error.',
+  'Could not compress chat history because it is too large for the context window.':
+    'Could not compress chat history because it is too large for the context window.',
   // ============================================================================
   // Commands - Directory
   // ============================================================================

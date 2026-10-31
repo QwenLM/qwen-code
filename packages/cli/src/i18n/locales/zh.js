@@ -1620,6 +1620,8 @@ export default {
     '由于压缩摘要被截断，无法压缩聊天历史。',
   'Could not compress chat history due to an API error.':
     '由于 API 错误，无法压缩聊天历史。',
+  'Could not compress chat history because it is too large for the context window.':
+    '聊天历史过大，超出上下文窗口，无法压缩。',
   // ============================================================================
   // Commands - Directory
   // ============================================================================

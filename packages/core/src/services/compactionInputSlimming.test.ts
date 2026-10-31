@@ -626,6 +626,26 @@ describe('compactionInputSlimming', () => {
       expect(stats.textPartsTruncated).toBe(0);
     });
 
+    it.each([500, 4_000])(
+      'cuts a long reminder at a %i-character cap and closes it again',
+      (maxTextChars) => {
+        const prompt = { text: 'please fix the parser bug' };
+        const original = `<system-reminder>\nproject notes ${'r'.repeat(8_000)}\n</system-reminder>`;
+        const [reminder, kept] = slimCompactionInput(
+          [{ role: 'user', parts: [{ text: original }, prompt] }],
+          undefined,
+          { maxTextChars },
+        ).slimmedHistory[0]!.parts!;
+
+        expect(reminder!.text).toBe(
+          original.slice(0, maxTextChars) +
+            SLIM_TEXT_TRUNCATION_MARKER +
+            '\n</system-reminder>',
+        );
+        expect(kept).toBe(prompt);
+      },
+    );
+
     it('truncates oversized text parts and tool-result outputs with maxTextChars', () => {
       const history: Content[] = [
         { role: 'user', parts: [{ text: bigText }] },
