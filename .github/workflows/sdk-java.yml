@@ -1171,10 +1171,15 @@ jobs:
     # pending CI measurement: fork 11444 s, Verify 201 minutes, and 12044 s
     # of fork plus wrap with the same 16 s left;
     # the Broker fault gates use 20,
-    # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
+    # and admission plus O4 keep per-fork ceilings) plus ~33 minutes for the
     # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 291 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 304
+    # checks): 291 + 33. The allowance sits above the ~13-minute floor
+    # because admission now runs on red-verify nights too: the worst case
+    # sums all four capped steps, and a slow setup (the CLI install retries
+    # three times) must not cancel the job before the O4 gates, whose
+    # !cancelled() condition would then record them skipped. The failover
+    # arms run in hosted-failover-e2e.
+    timeout-minutes: 324
     services:
       mysql:
         image: 'mysql:8.4.6'

@@ -663,7 +663,10 @@ describe('Hosted real-process gates', () => {
   it.each([
     // Step ceilings today (201 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
-    ['hosted-harness-mysql', 291, 304],
+    // The MySQL job's ceiling carries 33 minutes of setup allowance, above
+    // the 13-minute floor: admission runs on red-verify nights too, so a
+    // slow setup must not cancel the job before the O4 gates.
+    ['hosted-harness-mysql', 291, 324],
     // Twenty-seven failover arms at 10 each.
     ['hosted-failover-e2e', 270, 285],
   ])(
@@ -676,7 +679,8 @@ describe('Hosted real-process gates', () => {
       );
       // The uncapped setup steps need their own allowance — the job
       // comment estimates it at ~13, so the enforced floor moves with that
-      // estimate, not the older 10.
+      // estimate, not the older 10. A ceiling may grant more (the MySQL
+      // job does, for the red-verify worst case).
       expect(summed).toBe(steps);
       expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
       expect(job['timeout-minutes']).toBe(ceiling);
@@ -931,10 +935,9 @@ describe('Hosted real-process gates', () => {
     // Without a condition a red Hosted verify skipped them on 10 of the 14
     // nights to 10-27, though they need neither its build nor MySQL.
     'Run Runtime Broker fault gates',
-    // The same held for these, which rebuild the module and use the MySQL
-    // service under their own random tenants.
+    // The same held for these, which rebuild the module and boot on a
+    // database of their own, and for the O4 gates.
     'Verify Hosted admission gates',
-    // O4 already carried the condition, with nothing pinning it.
     'Verify O4 filesystem process and capacity gates',
   ])('runs the %s step even when the Hosted verify fails', (name) => {
     const steps = java.jobs['hosted-harness-mysql'].steps;
@@ -995,8 +998,9 @@ describe('Hosted real-process gates', () => {
     expect(check.if).toBe(
       "${{ !cancelled() && steps.hosted_admission.outcome == 'success' }}",
     );
-    // continue-on-error, an `|| true` on the command or a custom shell
-    // would let a red check leave the job green.
+    // The check must still be able to fail the job: continue-on-error, an
+    // `|| true` on the command or a custom shell would turn a dropped gate
+    // class into a pass, the silent drift it exists to catch.
     expect(check.run).toBe(
       'node scripts/check-failsafe-reports.js hosted-gates packages/managed-agent-server',
     );
