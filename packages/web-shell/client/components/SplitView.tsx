@@ -20,6 +20,7 @@ import {
   type DaemonSessionActions,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import {
+  setSseBudgetFocus,
   STANDALONE_SESSIONS_CAPABILITY,
   DaemonHttpError,
   isStandaloneSessionNotFoundError,
@@ -935,6 +936,10 @@ export function SplitView({
                 onFocusCapture={(event) => {
                   if (event.currentTarget.contains(event.target as Node)) {
                     setActivePaneId(sessionId);
+                    // The focused pane gets live-stream priority in the
+                    // SDK's SSE budget; background panes do catch-up
+                    // cycles until a slot frees up.
+                    setSseBudgetFocus(sessionId);
                   }
                 }}
                 // Include the resolved workspace in the key on a multi-workspace
