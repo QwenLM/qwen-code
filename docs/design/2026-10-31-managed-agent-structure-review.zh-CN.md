@@ -198,13 +198,15 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
   管理器。模块 README 已允许共享连接的 SQL helper 留在同一包。用构造
   注入替换 7 个公开 setter；真实循环依赖用 `ObjectProvider` 或 `@Lazy`
   显式表达，而不是可变装配。镜像的测试文件在同一批切片中拆开。setter
-  调研（2026-10-31）：这些 setter 是 Spring `@Autowired(required = false)`
-  可选依赖注入——4 个可选（`lifecycle`、`definitions`、`sessionWorktrees`、
-  `journalEventTransport`）、2 个必需（`extensionPackages`、`creationSkills`），
-  `worktreeFiles` 手动配置。改为构造 `ObjectProvider` 注入是对这个 7,700 行
-  中心类的大改动，涉及约 30 处测试装配点，且其正确性依赖 Spring 运行时
-  装配——手动 setter 的单测无法完全覆盖；应在实现前单独设计并做完整集成
-  验证，而非作为增量切片。
+  调研（2026-10-31）：7 个 setter 中 4 个是 Spring
+  `@Autowired(required = false)` 可选依赖注入（`lifecycle`、`definitions`、
+  `sessionWorktrees`、`journalEventTransport`），3 个是必需的普通
+  `@Autowired` 注入（`extensionPackages`、`creationSkills`、`worktreeFiles`
+  ——后者的 bean 由 `ManagedAgentConfiguration.managedWorktreeFiles()`
+  供给；`VerificationFixtures` 里的直接调用是测试装配，不是生产接线）。
+  改为构造 `ObjectProvider` 注入是对这个 7,700 行中心类的大改动，涉及约
+  30 处测试装配点，且其正确性依赖 Spring 运行时装配——手动 setter 的单测
+  无法完全覆盖；应在实现前单独设计并做完整集成验证，而非作为增量切片。
 - `RuntimeBrokerService`：为恢复扫描、取消、tool hold、observation 冷却
   提取模块内协作者；服务本体退为门面。模块已经存在，不需要动任何跨模块
   契约。这是风险最低、可读性收益最高的拆分。observation 冷却是第一条
