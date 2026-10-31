@@ -57,6 +57,14 @@ interface MarkdownDisplayProps {
    * respects the same viewport budget the outer wrapper enforces. See #6867.
    */
   enforceHeightBudget?: boolean;
+  /**
+   * Give plain paragraph blocks an explicit width instead of relying on yoga
+   * to measure the wrapping `<Text>` implicitly. Required on the Static
+   * transcript path, where implicit measurement can let a full line consume the
+   * right margin and leave zero slack at the terminal edge (#14075). Only pass
+   * this where `contentWidth` is the exact width available to the paragraph.
+   */
+  constrainParagraphWidth?: boolean;
 }
 
 export interface MarkdownSourceCopyIndexOffsets {
@@ -138,11 +146,15 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   textColor = theme.text.primary,
   sourceCopyIndexOffsets,
   enforceHeightBudget = false,
+  constrainParagraphWidth = false,
 }) => {
   const { renderMode } = useRenderMode();
   if (!text) return <></>;
 
   const renderVisualBlocks = renderMode === 'render';
+  const paragraphWidth = constrainParagraphWidth
+    ? Math.max(0, contentWidth)
+    : undefined;
   // Some models stream long runs of trailing newlines after useful content.
   // Trim them from the live preview so blank rows do not push stable streaming
   // text into scrollback on every repaint. The committed transcript still
@@ -513,7 +525,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       } else {
         // Not a table, treat as regular text
         addContentBlock(
-          <Box key={key}>
+          <Box key={key} width={paragraphWidth}>
             <Text wrap="wrap">
               <RenderInline
                 text={line}
@@ -590,7 +602,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       // Process current line as normal
       if (line.trim().length > 0) {
         addContentBlock(
-          <Box key={key}>
+          <Box key={key} width={paragraphWidth}>
             <Text wrap="wrap">
               <RenderInline
                 text={line}
@@ -718,7 +730,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         }
       } else {
         addContentBlock(
-          <Box key={key}>
+          <Box key={key} width={paragraphWidth}>
             <Text wrap="wrap" color={textColor}>
               <RenderInline
                 text={line}
