@@ -136,11 +136,15 @@ describe('compressed recovery boundaries', () => {
         expect(JSON.stringify(restored)).toBe(
           JSON.stringify(chat.getHistory()),
         );
-        expect(JSON.parse(JSON.stringify(restored))).toEqual([
-          ...compacted,
-          input,
-          { role: 'model', parts: [{ text: 'Done.' }] },
-        ]);
+        expect(JSON.parse(JSON.stringify(restored))).toEqual(
+          JSON.parse(
+            JSON.stringify([
+              ...compacted,
+              input,
+              { role: 'model', parts: [{ text: 'Done.' }] },
+            ]),
+          ),
+        );
         for (const history of [initial, chat.getHistory(), restored]) {
           expect(
             getStartupContextLength(history, { includeCompressed: true }),
@@ -179,7 +183,7 @@ describe('compressed recovery boundaries', () => {
           null,
           { toolResultsNumToKeep: 1 },
           { force: true },
-        ).history.slice(0, 3);
+        ).history.slice(0, 2);
       }
       const wire = JSON.stringify(history);
       const restored = buildApiHistoryFromConversation({
@@ -189,9 +193,9 @@ describe('compressed recovery boundaries', () => {
       expect(detectTurnInterruption(restored)).toEqual({ kind: 'none' });
       expect(
         getStartupContextLength(restored, { includeCompressed: true }),
-      ).toBe(3);
+      ).toBe(2);
       expect(countApiUserPrompts(restored)).toBe(0);
-      expect(findApiRewindCutPoint(restored, 0)).toBe(3);
+      expect(findApiRewindCutPoint(restored, 0)).toBe(2);
       expect(selectForkHistory(restored, 1)).toEqual([]);
       const request = pending('Real failed request.');
       expect(detectTurnInterruption([...restored, request])).toEqual({

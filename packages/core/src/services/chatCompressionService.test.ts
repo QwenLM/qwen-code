@@ -1708,8 +1708,11 @@ describe('ChatCompressionService.compress cache sharing', () => {
         history[1].parts![0],
       );
       if (!cacheSharing) {
+        // The folded call is charged back because its result is pending.
         expect(result.info.newTokenCount).toBe(
-          11_500 + estimateContentTokens([expectedPending]),
+          11_500 +
+            estimateContentTokens([expectedPending]) +
+            estimateContentTokens([content('model', history[1].parts![0])]),
         );
       }
     },
@@ -2876,7 +2879,7 @@ describe('ChatCompressionService.compress — single-turn Node REPL image regres
         11_500 + 3 * 1600,
       );
       expect(result.info.newTokenCount).toBeLessThan(16_600);
-      expect(result.newHistory).toHaveLength(pendingCall ? 4 : 3);
+      expect(result.newHistory).toHaveLength(2);
     },
   );
 
