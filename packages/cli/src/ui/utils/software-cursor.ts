@@ -104,6 +104,26 @@ export function compositionOverlaysSoftwareCursor(
   );
 }
 
+/**
+ * Whether the software cursor should be drawn for this render.
+ *
+ * In underline-cursor environments (see `compositionOverlaysSoftwareCursor`)
+ * the patched ink runtime also positions the native terminal cursor on the
+ * same cell, so a software cursor reads as a stray `_` next to the blinking
+ * native one. When `physicalCursorActive` reports that the hardware cursor
+ * will be positioned for this flush, skip the software cursor and let the
+ * native cursor mark the caret alone.
+ */
+export function shouldRenderSoftwareCursor(
+  physicalCursorActive: boolean,
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  return !(
+    compositionOverlaysSoftwareCursor(env, platform) && physicalCursorActive
+  );
+}
+
 export function renderSoftwareCursor(text: string): string {
   const cursorText = text || ' ';
   return compositionOverlaysSoftwareCursor()

@@ -30,7 +30,10 @@ import { keyMatchers, Command } from '../keyMatchers.js';
 import stringWidth from 'string-width';
 import { cpSlice, cpLen, truncateToWidth } from '../utils/textUtils.js';
 import { theme } from '../semantic-colors.js';
-import { renderSoftwareCursor } from '../utils/software-cursor.js';
+import {
+  renderSoftwareCursor,
+  shouldRenderSoftwareCursor,
+} from '../utils/software-cursor.js';
 
 const TOP_BORDER_LABEL_DECORATION_WIDTH = 4;
 const TOP_BORDER_MIN_LEADING_DASHES = 1;
@@ -46,6 +49,12 @@ export interface RenderLineOptions {
   cursorCol: number;
   /** Whether the cursor should be rendered. */
   showCursor: boolean;
+  /**
+   * Whether the software cursor styling should be drawn at all. False when
+   * the native terminal cursor will be positioned on the cursor cell (see
+   * `shouldRenderSoftwareCursor`), so drawing both reads as a duplicate.
+   */
+  drawSoftwareCursor: boolean;
   /** Index of this line within the rendered viewport (0-based). */
   visualLineIndex: number;
   /** Absolute visual line index (scrollVisualRow + visualLineIndex). */
@@ -100,6 +109,7 @@ export function defaultRenderLine({
   isOnCursorLine,
   cursorCol,
   showCursor,
+  drawSoftwareCursor,
 }: RenderLineOptions): ReactNode {
   if (!isOnCursorLine || !showCursor) {
     return <Text>{lineText || ' '}</Text>;
@@ -107,14 +117,20 @@ export function defaultRenderLine({
 
   const len = cpLen(lineText);
 
-  // Cursor past end of line — append cursor space
+  // Cursor past end of line — append cursor space. When the software cursor
+  // is suppressed the trailing cell keeps a plain space so Ink still has an
+  // untrimmed cell for the native cursor to rest on.
   if (cursorCol >= len) {
     return (
       <Text>
         {lineText}
-        {renderSoftwareCursor(' ') + '\u200B'}
+        {drawSoftwareCursor ? renderSoftwareCursor(' ') + '\u200B' : ' \u200B'}
       </Text>
     );
+  }
+
+  if (!drawSoftwareCursor) {
+    return <Text>{lineText}</Text>;
   }
 
   const before = cpSlice(lineText, 0, cursorCol);
@@ -340,6 +356,11 @@ export const BaseTextInput = ({
   // Ink snapshots this value in its insertion effect, so it must be set
   // during render rather than from another effect.
   setCursorPosition(cursorPosition);
+  // When the native terminal cursor will be positioned on the cursor cell,
+  // skip the software cursor so it does not read as a duplicate caret.
+  const drawSoftwareCursor = shouldRenderSoftwareCursor(
+    cursorPosition !== undefined,
+  );
 
   const resolvedBorderColor = borderColor ?? theme.border.focused;
   const resolvedPrefix = prefix ?? (
@@ -387,7 +408,7 @@ export const BaseTextInput = ({
             background so it stays consistent across terminals and themes. */}
         <Box flexGrow={1} flexDirection="column" ref={linesRef}>
           {buffer.text.length === 0 && placeholder ? (
-            showCursor ? (
+            showCursor && drawSoftwareCursor ? (
               <Text>
                 {renderSoftwareCursor(placeholder.slice(0, 1))}
                 <Text color={theme.text.secondary}>{placeholder.slice(1)}</Text>
@@ -407,6 +428,7 @@ export const BaseTextInput = ({
                     isOnCursorLine,
                     cursorCol: cursorVisualCol,
                     showCursor,
+                    drawSoftwareCursor,
                     visualLineIndex: idx,
                     absoluteVisualIndex,
                     buffer,
