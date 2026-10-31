@@ -7,7 +7,7 @@
 import { getEventListeners } from 'node:events';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { GenerateContentParameters } from '@google/genai';
-import { FinishReason, GenerateContentResponse } from '@google/genai';
+import { FinishReason, GenerateContentResponse, Type } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
 import { isRateLimitError } from '../../utils/rateLimit.js';
 import {
@@ -3309,6 +3309,201 @@ describe('AnthropicContentGenerator', () => {
     ])('%s', async (_title, mode, hasTools, expected) => {
       const req = await sendWithToolConfig(mode, hasTools);
       expect(req['tool_choice']).toEqual(expected);
+    });
+
+    const schemaTools = (
+      names: string[] = ['respond_in_schema'],
+    ): NonNullable<GenerateContentParameters['config']>['tools'] => [
+      {
+        functionDeclarations: names.map((name) => ({
+          name,
+          description: 'test',
+          parameters: {
+            type: Type.OBJECT,
+            properties: { title: { type: Type.STRING } },
+            required: ['title'],
+          },
+        })),
+      },
+    ];
+
+    const sendToolMode = async (
+      model: string,
+      mode: string | undefined,
+      options: {
+        tools?: NonNullable<GenerateContentParameters['config']>['tools'];
+        allowedFunctionNames?: string[];
+      } = {},
+    ) => {
+      const { req } = await send(nativeCfg(model), {
+        contents: [userText('Provide the title Local result.')],
+        config: {
+          ...(options.tools !== undefined
+            ? { tools: options.tools }
+            : { tools: schemaTools() }),
+          ...(mode !== undefined && {
+            toolConfig: {
+              functionCallingConfig: {
+                mode,
+                ...(options.allowedFunctionNames
+                  ? { allowedFunctionNames: options.allowedFunctionNames }
+                  : {}),
+              },
+            },
+          }),
+        },
+      });
+      return req;
+    };
+
+    const messageText = (req: SentRequest) =>
+      req.messages
+        .flatMap((message) => message.content)
+        .map((block) => block.text ?? '')
+        .join('\n');
+
+    const SCHEMA_INSTRUCTION = "matching that tool's input schema";
+
+    it.each([
+      'claude-opus-5-5',
+      'claude-sonnet-5-5',
+      'claude-fable-5-1',
+      'claude-mythos-5-1',
+      'claude-opus-5.5',
+      'claude-sonnet-5.5',
+      'claude-fable-5.1',
+      'claude-mythos-5.1',
+      'bedrock/claude-opus-5-5',
+      'vertex_ai/claude-sonnet-5.5',
+      'idealab:claude-fable-5-1',
+      'anthropic.claude-mythos-5-1',
+      'claude-opus-5-5-20260101',
+    ])(
+      'uses tool_choice=auto and names the schema tool for %s',
+      async (model) => {
+        const req = await sendToolMode(model, 'ANY');
+        expect(req['tool_choice']).toEqual({ type: 'auto' });
+        expect(messageText(req)).toContain('respond_in_schema');
+        expect(messageText(req)).toContain(SCHEMA_INSTRUCTION);
+        expect(messageText(req)).toContain('JSON object');
+        expect(messageText(req)).toContain('no Markdown fences or prose');
+        expect(req['tools']).toHaveLength(1);
+      },
+    );
+
+    it.each([
+      'claude-haiku-5-5',
+      'claude-haiku-5.5',
+      'claude-opus-5',
+      'claude-sonnet-5',
+      'claude-opus-4-6',
+      'claude-sonnet-4-5',
+      'claude-opus-4-5',
+      'vertex_ai/claude-sonnet-4.5',
+      'claude-fable-5',
+      'claude-mythos-5',
+      'claude-opus-5-6',
+      'claude-sonnet-5-6',
+      'claude-fable-5-2',
+      'claude-mythos-5-0',
+      'custom-schema-model',
+      'bedrock/claude-haiku-5-5',
+    ])('keeps tool_choice=any for %s', async (model) => {
+      const req = await sendToolMode(model, 'ANY');
+      expect(req['tool_choice']).toEqual({ type: 'any' });
+      expect(messageText(req)).not.toContain(SCHEMA_INSTRUCTION);
+    });
+
+    it.each(['AUTO', 'NONE', undefined])(
+      'does not add a schema instruction when mode is %s on Sonnet 5.5',
+      async (mode) => {
+        const req = await sendToolMode('claude-sonnet-5-5', mode);
+        expect(req['tool_choice']).toBeUndefined();
+        expect(messageText(req)).not.toContain(SCHEMA_INSTRUCTION);
+      },
+    );
+
+    it('omits tool_choice and the instruction when there are no tools', async () => {
+      const req = await sendToolMode('claude-sonnet-5-5', 'ANY', {
+        tools: [],
+      });
+      expect(req['tool_choice']).toBeUndefined();
+      expect(messageText(req)).not.toContain(SCHEMA_INSTRUCTION);
+    });
+
+    it('appends the instruction only to the last turn and preserves user text', async () => {
+      const contents = [
+        userText('older turn'),
+        modelText('earlier answer'),
+        userText('Provide the title Local result.'),
+      ];
+      const originalContents = structuredClone(contents);
+      const { req } = await send(nativeCfg('claude-opus-5-5'), {
+        contents,
+        config: {
+          tools: schemaTools(),
+          toolConfig: { functionCallingConfig: { mode: 'ANY' } },
+        },
+      });
+      expect(req.messages).toHaveLength(3);
+      const texts = req.messages.map((message) =>
+        message.content.map((block) => block.text ?? '').join('\n'),
+      );
+      expect(texts[0]).toBe('older turn');
+      expect(texts[1]).toBe('earlier answer');
+      expect(texts[2]).toContain('Provide the title Local result.');
+      expect(texts[2]).toContain(SCHEMA_INSTRUCTION);
+      expect(contents).toEqual(originalContents);
+    });
+
+    it('includes the schema instruction in streaming requests', async () => {
+      createImpl.mockResolvedValue(streamOf(messageDelta('end_turn', 1)));
+      const stream = await openStream(nativeCfg('claude-opus-5-5'), {
+        contents: [userText('Provide the title Local result.')],
+        config: {
+          tools: schemaTools(),
+          toolConfig: { functionCallingConfig: { mode: 'ANY' } },
+        },
+      });
+      const { req } = lastCall();
+      expect(req['tool_choice']).toEqual({ type: 'auto' });
+      expect(messageText(req)).toContain('Provide the title Local result.');
+      expect(messageText(req)).toContain(SCHEMA_INSTRUCTION);
+      await drain(stream);
+    });
+
+    it('does not offer JSON text instead of calling an ordinary tool', async () => {
+      const req = await sendToolMode('claude-opus-5-5', 'ANY', {
+        tools: schemaTools(['run_action']),
+      });
+      expect(req['tool_choice']).toEqual({ type: 'auto' });
+      expect(messageText(req)).toContain('run_action');
+      expect(messageText(req)).not.toContain('If you do not call a tool');
+    });
+
+    it('does not instruct the model to call an undeclared allowed tool', async () => {
+      const req = await sendToolMode('claude-opus-5-5', 'ANY', {
+        tools: schemaTools(['respond_in_schema']),
+        allowedFunctionNames: ['missing_tool'],
+      });
+      expect(req['tool_choice']).toEqual({ type: 'auto' });
+      expect(messageText(req)).toBe('Provide the title Local result.');
+    });
+
+    it('names only allowedFunctionNames in the fallback instruction', async () => {
+      const req = await sendToolMode('claude-opus-5-5', 'ANY', {
+        tools: schemaTools(['respond_in_schema', 'other_tool']),
+        allowedFunctionNames: ['respond_in_schema'],
+      });
+      expect(req['tool_choice']).toEqual({ type: 'auto' });
+      const text = messageText(req);
+      expect(text).toContain('respond_in_schema');
+      expect(text).not.toContain('other_tool');
+      const tools = req['tools'] as Array<{ name?: string }>;
+      expect(tools.map((tool) => tool.name)).toEqual([
+        'respond_in_schema',
+        'other_tool',
+      ]);
     });
   });
 });

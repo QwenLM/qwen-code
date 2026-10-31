@@ -891,7 +891,21 @@ export class AnthropicContentGenerator implements ContentGenerator {
     // the model must emit a tool call. Adaptive-thinking models (Claude
     // 4.6+) compound this by consuming output budget on server-driven
     // thinking before any tool_use, making forced tool_choice essential.
+    // Opus 5.5, Sonnet 5.5, Fable 5.1 and Mythos 5.1 reject type "any" and
+    // "tool" with a 400, so those ids fall back to auto plus an explicit
+    // instruction. Callers already read either the tool arguments or JSON
+    // text (BaseLlmClient.generateJson).
     const toolChoice = this.resolveToolChoice(request, tools);
+    if (
+      toolChoice?.type === 'auto' &&
+      request.config?.toolConfig?.functionCallingConfig?.mode === 'ANY' &&
+      tools
+    ) {
+      this.appendSchemaToolInstruction(
+        messages,
+        this.schemaToolNames(request, tools),
+      );
+    }
 
     const modelVersion = parseClaudeModelVersion(
       this.contentGeneratorConfig.model,
@@ -1266,7 +1280,9 @@ export class AnthropicContentGenerator implements ContentGenerator {
    * the request into an Anthropic `tool_choice` value.
    *
    * Mapping:
-   *   mode 'ANY'  → `{ type: 'any' }`   (model must call at least one tool)
+   *   mode 'ANY' on a model that accepts forced tool use → `{ type: 'any' }`
+   *   mode 'ANY' on Opus 5.5 / Sonnet 5.5 / Fable 5.1 / Mythos 5.1 →
+   *     `{ type: 'auto' }` (those ids 400 on "any" and "tool")
    *   mode 'NONE' or 'AUTO' or absent → undefined (Anthropic has no
    *     `tool_choice: { type: 'none' }`; to prevent tool calls the caller
    *     should omit `tools` entirely)
@@ -1281,9 +1297,74 @@ export class AnthropicContentGenerator implements ContentGenerator {
     if (!tools || tools.length === 0) return undefined;
     const mode = request.config?.toolConfig?.functionCallingConfig?.mode;
     if (mode === 'ANY') {
+      if (this.modelRejectsForcedToolChoice()) {
+        return { type: 'auto' };
+      }
       return { type: 'any' };
     }
     return undefined;
+  }
+
+  /**
+   * Exact ids that reject `tool_choice` type "any" and "tool". Haiku 5.5,
+   * Opus 5, Sonnet 5, Fable 5 and Mythos 5 stay on the historical mapping.
+   * Unknown ids do too. Reseller prefixes and dotted aliases parse through
+   * `parseClaudeModelVersion`.
+   */
+  private modelRejectsForcedToolChoice(): boolean {
+    const parsed = parseClaudeModelVersion(
+      this.contentGeneratorConfig.model || '',
+    );
+    if (!parsed || parsed.major !== 5) return false;
+    const { family, minor } = parsed;
+    if ((family === 'opus' || family === 'sonnet') && minor === 5) return true;
+    if ((family === 'fable' || family === 'mythos') && minor === 1) {
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * Names declared tools permitted by the caller. Without an allowlist, every
+   * declared tool is in scope.
+   */
+  private schemaToolNames(
+    request: GenerateContentParameters,
+    tools: Anthropic.Tool[],
+  ): string[] {
+    const declared = tools
+      .map((tool) => tool.name)
+      .filter((name) => name.length > 0);
+    const allowed =
+      request.config?.toolConfig?.functionCallingConfig?.allowedFunctionNames;
+    if (!allowed || allowed.length === 0) return declared;
+    const allowedSet = new Set(allowed);
+    return declared.filter((name) => allowedSet.has(name));
+  }
+
+  private appendSchemaToolInstruction(
+    messages: Anthropic.MessageParam[],
+    names: string[],
+  ): void {
+    if (names.length === 0) return;
+    const text =
+      'Answer by calling one of these tools and placing the structured ' +
+      `result in its arguments, matching that tool's input schema: ${names.join(
+        ', ',
+      )}.` +
+      (names.length === 1 && names[0] === 'respond_in_schema'
+        ? ' If you do not call a tool, reply with only a raw JSON object of that same shape, with no Markdown fences or prose.'
+        : '');
+    const last = messages.at(-1);
+    if (!last || last.role !== 'user') {
+      messages.push({ role: 'user', content: [{ type: 'text', text }] });
+      return;
+    }
+    if (typeof last.content === 'string') {
+      last.content = last.content ? `${last.content}\n\n${text}` : text;
+      return;
+    }
+    last.content = [...last.content, { type: 'text', text }];
   }
 
   private async *redactStreamErrors(
