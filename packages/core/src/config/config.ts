@@ -5842,8 +5842,10 @@ export class Config {
     ];
     const advice: string[] = [];
     if (actions.length > 0) {
+      const onDemand =
+        contextFileTokens > 0 ? ' or moving details into on-demand files' : '';
       advice.push(
-        `Consider ${actions.join(' or ')}${actions.length > 1 ? ',' : ''} or moving details into on-demand files.`,
+        `Consider ${actions.join(' or ')}${actions.length > 1 ? ',' : ''}${onDemand}.`,
       );
     }
     const fixedTokens =

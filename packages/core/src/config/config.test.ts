@@ -8782,6 +8782,7 @@ describe('Server Config (config.ts)', () => {
       'Consider trimming context files or moving details into on-demand files.',
     );
     expect(warning).not.toContain('pruning stale memories');
+    expect(warning).not.toContain('disabling managed auto-memory');
   });
 
   it.each(['safe', 'bare'] as const)(
@@ -8934,6 +8935,7 @@ describe('Server Config (config.ts)', () => {
         .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
       expect(warning).toContain('pruning stale memories');
       expect(warning).not.toContain('trimming context files');
+      expect(warning).not.toContain('moving details into on-demand files');
 
       vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce(
         memoryLoad(),
@@ -9006,6 +9008,7 @@ describe('Server Config (config.ts)', () => {
         '100 tokens of auto-memory policy, and 5,000 tokens of auto-memory catalog.',
     );
     expect(warning).toContain('pruning stale memories');
+    expect(warning).not.toContain('disabling managed auto-memory');
   });
 
   it('refreshHierarchicalMemory should not warn for small always-loaded context', async () => {
