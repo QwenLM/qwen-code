@@ -31,7 +31,7 @@ test('click opens Home and functional pages while collapse retains the draft @sm
   await page.screenshot({ path: info.outputPath('expanded-dark.png') });
   await page
     .locator(homeColumn)
-    .getByRole('button', { name: 'New task', exact: true })
+    .getByRole('button', { name: 'New session', exact: true })
     .focus();
   await page.keyboard.press('ControlOrMeta+b');
   await expect(
@@ -39,14 +39,42 @@ test('click opens Home and functional pages while collapse retains the draft @sm
   ).toBeFocused();
   await expect(page.locator(homeColumn)).toBeHidden();
   await home.hover();
-  await page.waitForTimeout(350);
-  await expect(page.locator(homeColumn)).toBeHidden();
+  const preview = page.locator('[data-web-shell-home-popover]');
+  await expect(preview).toBeVisible();
+  await expect(preview.getByText('Qwen Code', { exact: true })).toBeVisible();
+  await expect(
+    preview.getByRole('button', { name: 'New session', exact: true }),
+  ).toBeVisible();
+  await expect(
+    rail.getByRole('button', { name: 'Expand', exact: true }),
+  ).toBeFocused();
+  const homeBounds = (await home.boundingBox())!;
+  const previewBounds = (await preview.boundingBox())!;
+  expect(previewBounds.x).toBeGreaterThan(homeBounds.x + homeBounds.width);
+  await expect
+    .poll(async () => {
+      const bounds = (await preview.boundingBox())!;
+      const railBounds = (await rail.boundingBox())!;
+      return bounds.x - railBounds.x - railBounds.width;
+    })
+    .toBeCloseTo(8);
+  await expect(preview).toHaveCSS('border-left-width', '0px');
+  await preview.hover();
+  await page.waitForTimeout(200);
+  await expect(preview).toBeVisible();
+  await expect(
+    rail.getByRole('button', { name: 'Expand', exact: true }),
+  ).toBeVisible();
   await expect(
     page.locator('[data-web-shell-collapsed-session-switcher]'),
   ).toHaveCount(0);
   await page.screenshot({ path: info.outputPath('collapsed-dark.png') });
   await home.click();
   await expect(page.locator(homeColumn)).toBeVisible();
+  await expect(preview).toHaveCount(0);
+  await page.mouse.move(1000, 500);
+  await home.hover();
+  await expect(page.getByRole('tooltip')).toHaveText('Home');
   await expect(editor).toHaveText('Keep this unsent draft');
   await rail.getByRole('button', { name: 'Plugins', exact: true }).click();
   await expect(page.locator(homeColumn)).toBeHidden();
@@ -92,6 +120,91 @@ test('click opens Home and functional pages while collapse retains the draft @sm
     daemon.requests.filter((r) => r.method === 'POST' && r.path === '/session'),
   ).toHaveLength(0);
 });
+
+test('Home hover supports search and dismissal without persisting expansion', async ({
+  page,
+  baseURL,
+}) => {
+  const scenario = createWebShellDaemonScenario();
+  await installMockDaemon(page, scenario, { baseURL });
+  await page.goto('/?language=en-US');
+  const rail = page.locator(railSelector);
+  const home = rail.locator('[data-web-shell-home-trigger]');
+  const preview = page.locator('[data-web-shell-home-popover]');
+  await rail.getByRole('button', { name: 'Collapse', exact: true }).click();
+  await home.hover();
+  await expect(preview).toBeVisible();
+  await page.mouse.move(1000, 500);
+  await expect(preview).toHaveCount(0);
+  await home.hover();
+  await expect(preview).toBeVisible();
+  await preview.getByText('Workspaces', { exact: true }).hover();
+  await preview
+    .getByRole('button', { name: 'Search sessions', exact: true })
+    .click();
+  const search = preview.getByRole('textbox', {
+    name: 'Search sessions',
+    exact: true,
+  });
+  await search.fill('e2e');
+  await page.mouse.move(1000, 500);
+  await page.waitForTimeout(200);
+  await expect(preview).toBeVisible();
+  await expect(search).toBeFocused();
+  await page.keyboard.press('Escape');
+  await expect(preview).toHaveCount(0);
+  await expect(home).toBeFocused();
+  await home.hover();
+  await expect(preview).toBeVisible();
+  await expect(
+    preview.getByRole('textbox', { name: 'Search sessions', exact: true }),
+  ).toHaveCount(0);
+  const editor = page.locator('[data-web-shell-composer-editor] .cm-content');
+  await editor.click();
+  await expect(preview).toHaveCount(0);
+  await expect(editor).toBeFocused();
+  await page.reload();
+  await expect(page.locator(homeColumn)).toBeHidden();
+  await expect(
+    rail.getByRole('button', { name: 'Expand', exact: true }),
+  ).toBeVisible();
+});
+
+for (const theme of ['dark', 'light']) {
+  test(`collapsed Home shows custom content in ${theme} and leaves functional pages selected`, async ({
+    page,
+    baseURL,
+  }, info) => {
+    await page.setViewportSize({ width: 1400, height: 900 });
+    await installMockDaemon(page, createWebShellDaemonScenario(), { baseURL });
+    await page.goto(`/e2e/navigation-rail-harness.html?custom&${theme}`);
+    const rail = page.locator(railSelector);
+    const home = rail.locator('[data-web-shell-home-trigger]');
+    await rail.getByRole('button', { name: 'Plugins', exact: true }).click();
+    await home.hover();
+    await expect(page.getByRole('tooltip')).toHaveText('Home');
+    await expect(page.locator('[data-web-shell-home-popover]')).toHaveCount(0);
+    await rail.getByRole('button', { name: 'Collapse', exact: true }).click();
+    await home.hover();
+    const preview = page.locator('[data-web-shell-home-popover]');
+    await expect(
+      preview.getByText('Host brand', { exact: true }),
+    ).toBeVisible();
+    await expect(
+      preview.getByRole('button', { name: 'Host navigation' }),
+    ).toBeVisible();
+    await expect(
+      preview.getByRole('button', { name: 'Host footer' }),
+    ).toBeVisible();
+    await expect(
+      rail.getByRole('button', { name: 'Plugins', exact: true }),
+    ).toHaveAttribute('aria-current', 'page');
+    await expect
+      .poll(async () => (await preview.boundingBox())?.width)
+      .toBe(300);
+    await page.screenshot({ path: info.outputPath(`home-hover-${theme}.png`) });
+  });
+}
 
 test('narrow embedded container uses a contained drawer on a wide viewport @smoke', async ({
   page,
@@ -190,7 +303,7 @@ test('Home-only hosts retain secondary collapse and hosts with another item show
   await page.goto('/e2e/navigation-rail-harness.html?default');
   await expect(page.locator(railSelector)).toHaveCount(0);
   await expect(
-    page.getByRole('button', { name: 'New task', exact: true }),
+    page.getByRole('button', { name: 'New session', exact: true }),
   ).toBeVisible();
   await expect.poll(async () => (await sidebar.boundingBox())!.width).toBe(300);
   await page.goto('/e2e/navigation-rail-harness.html?plugin-only');
@@ -233,7 +346,7 @@ test('Home-only hosts retain secondary collapse and hosts with another item show
   await page.setViewportSize({ width: 1400, height: 900 });
   await page.goto('/e2e/navigation-rail-harness.html?split-only');
   await expect(
-    sidebar.getByRole('button', { name: 'New task', exact: true }),
+    sidebar.getByRole('button', { name: 'New session', exact: true }),
   ).toBeVisible();
   await expect(page.locator(railSelector)).toHaveCount(0);
   await page.setViewportSize({ width: 1000, height: 900 });

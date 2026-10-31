@@ -171,7 +171,7 @@ unsupported；HTTP 强制 `Redirect.NEVER`、原认证 headers、16 KiB response
 runtime guard 转发。不引入 acquire/renew/replacement 或新任务 admission。通用 V3
 `settled`、`unknown`、外层 `acknowledged` 或 drain response 不能通过专用协议校验器。
 
-专用严格 reader 将 `packages/sdk-java/runtime-broker/pom.xml` 中已有
+专用严格 reader 将 `packages/managed-agent-server/pom.xml` 中已有
 `jackson-databind` 2.20.0 依赖从 test scope 改为 production scope，仅删除一行 scope。
 保持现有版本 pin 和全局 legacy parser 不变。分别验证独立 Broker 实际解析出的 2.20.0
 classpath 和 managed application 实际解析出的 2.21.4 classpath；一方通过不能证明另一方。
@@ -284,7 +284,7 @@ checkpoint 和物理状态的重新检查。不能从历史 REFERENCED publicati
 | ---------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | ACK-1 worker 协议                  | `packages/cli/src/serve/managed-csi-envelope.ts`、`managed-csi-worker.ts`、`managed-runtime-tool-executor.ts`、`managed-runtime-attestation-worker.ts`，及其 focused collocated tests                   |
 | ACK-1 Java transport               | Runtime-broker 的 `ManagedCsiProtocol.java`、`RuntimeTransport.java`、`HttpRuntimeTransport.java` 与 focused protocol/transport tests；managed-agent-server 的 `service/WorkspaceRuntimeTransport.java` |
-| ACK-1 strict-reader 依赖           | `packages/sdk-java/runtime-broker/pom.xml`：已有 `jackson-databind` 依赖从 test scope 改为 production scope；分别验证独立 2.20.0 与 managed-application 2.21.4                                          |
+| ACK-1 strict-reader 依赖           | `packages/managed-agent-server/pom.xml`：已有 `jackson-databind` 依赖从 test scope 改为 production scope；分别验证独立 2.20.0 与 managed-application 2.21.4                                             |
 | ACK-2 私有 coordinator 与 evidence | 新增 managed-agent-server `store/WorkspaceCsiWorkerAckStore.java`、`store/WorkspaceCsiWorkerAckMain.java`；仅按需在现有 CSI reservation/publication stores 加入 package-private authority 连接点        |
 | ACK-2 持久化                       | 一条新 migration 及其实际 schema/migration test 入口；新增 `WorkspaceCsiWorkerAckStoreTest.java`                                                                                                        |
 | ACK-1 共享契约                     | 在现有 CSI fixtures 旁新增有界 ACK fixture，由 Java/TypeScript 独立消费；不改通用 Tool v3 schema                                                                                                        |

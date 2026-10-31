@@ -19,6 +19,7 @@ import {
   HTTP_MANAGED_SESSION_STORE_CONTRACT,
 } from '@qwen-code/qwen-code-core/managed-runtime/http-managed-session-store.js';
 import { HostedWorkspaceBroker } from './hosted-workspace-broker.js';
+import { WORKSPACE_CAPABILITY_DIGEST } from './managed-workspace-activation.js';
 import { HostedWorkspaceToolTurn } from './hosted-workspace-tool-turn.js';
 import { findHostedApprovalContinuation } from './hosted-approval-continuation.js';
 import {
@@ -125,6 +126,15 @@ it.each([
           return localPublish(kind, bytes);
         },
       );
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'capabilityDigest',
+        'get',
+      ).mockReturnValue(WORKSPACE_CAPABILITY_DIGEST);
+      vi.spyOn(
+        HostedWorkspaceBroker.prototype,
+        'resolveCapabilities',
+      ).mockResolvedValue();
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockImplementation(
         async function (this: HostedWorkspaceBroker) {
           this.runtime = {
@@ -208,6 +218,9 @@ it.each([
         )
         .catch((cause) => cause);
       let requestId = '';
+      // Same family as #14084: the observed chain is a serial run of
+      // fsync-backed publishes and journal commits; 5s flaked on the
+      // loaded deterministic-verification runner.
       await vi.waitFor(
         async () => {
           const authorization =
@@ -221,7 +234,7 @@ it.each([
           requestId = authorization.checkpoint.approval!.requestId;
           expect(session.authority.action(requestId)?.state).toBe('requested');
         },
-        { timeout: 5_000 },
+        { timeout: 10_000 },
       );
       const action = session.authority.action(requestId)!;
       const options = JSON.parse(
@@ -246,7 +259,7 @@ it.each([
         }),
       ).resolves.toMatchObject({ status: 200 });
       await vi.waitFor(() => expect(prepare).toHaveBeenCalledTimes(1), {
-        timeout: 5_000,
+        timeout: 10_000,
       });
       expect(execute).not.toHaveBeenCalled();
       const plans = published.filter(
@@ -276,7 +289,7 @@ it.each([
       await rm(root, { recursive: true, force: true });
     }
   },
-  15_000,
+  30_000,
 );
 
 function approvalSelectionFixture(

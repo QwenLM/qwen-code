@@ -55,9 +55,11 @@ vi.mock('node:fs', async (importOriginal) => {
   };
 });
 
-vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
+vi.mock('@qwen-code/qwen-code-core/utils/editor.js', async (importOriginal) => {
   const actual =
-    await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
+    await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/utils/editor.js')
+    >();
   return {
     ...actual,
     getExternalEditorCommand: mockGetExternalEditorCommand,

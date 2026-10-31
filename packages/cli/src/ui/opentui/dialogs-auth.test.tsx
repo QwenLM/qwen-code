@@ -12,7 +12,7 @@
  * hooks/jsx runtime are replaced with fakes (same harness as
  * input-prompt.test.tsx) so the tests verify what the dialog guarantees:
  *
- *  - the main menu renders the three top-level entries (ink AuthDialog
+ *  - the main menu renders the four top-level entries (ink AuthDialog
  *    parity) and Esc is blocked while unauthenticated;
  *  - main → sub-menu navigation and back follow the ink view stack;
  *  - the custom-provider wizard walks the full seven-step flow
@@ -123,6 +123,7 @@ import { AuthType } from '@qwen-code/qwen-code-core';
 import * as coreRuntime from '@qwen-code/qwen-code-core';
 import { ICON } from '../constants.js';
 import { OpenTuiAuthDialog } from './dialogs-auth.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
   return {
@@ -286,6 +287,7 @@ async function runCustomProviderFlow(): Promise<{
   const { onClose, notify } = renderDialog();
   await press('down');
   await press('down');
+  await press('down');
   await press('return'); // main: CUSTOM_PROVIDER → provider-setup (protocol)
   await press('return'); // protocol: OpenAI-compatible → API selection
   await press('return'); // API: Chat Completions → baseUrl input
@@ -306,6 +308,7 @@ async function runCustomProviderFlow(): Promise<{
  */
 async function runPresetFlowToTerminalModels(): Promise<void> {
   renderDialog();
+  await press('down');
   await press('down'); // main: THIRD_PARTY_PROVIDERS
   await press('return'); // → thirdparty-select, DeepSeek on top
   await press('return'); // DeepSeek → apiKey
@@ -324,9 +327,10 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     core.logAuth.mockReset();
   });
 
-  it('renders the main menu with the three top-level options', () => {
+  it('renders the main menu with the four top-level options', () => {
     renderDialog();
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(screen.getByText('QwenCloud')).toBeTruthy();
     expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
     expect(screen.getByText('Third-party Providers')).toBeTruthy();
     expect(screen.getByText('Custom Provider')).toBeTruthy();
@@ -372,6 +376,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
 
   it('navigates main → sub-menu and back with Esc', async () => {
     const { onClose } = renderDialog();
+    await press('down');
     await press('return'); // main: Alibaba ModelStudio → alibaba-select
     expect(
       screen.getByText('Alibaba ModelStudio · Access Method'),
@@ -387,11 +392,12 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await act(async () => {
       handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
       handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
+      handler(baseKeyEvent({ name: 'down', sequence: '\x1b[B' }));
       handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
     });
-    // Two downs land on Custom Provider. The cursor the handler was registered
-    // with still pointed at Alibaba ModelStudio, whose Enter opens the
-    // access-method sub-menu instead.
+    // Three downs land on Custom Provider. The cursor the handler was registered
+    // with still pointed at QwenCloud, whose Enter opens the access-method
+    // sub-menu instead.
     expect(screen.getByText('OpenAI-compatible')).toBeTruthy();
     expect(screen.queryByText(/Access Method/)).toBeNull();
   });
@@ -399,7 +405,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
   it('wraps the main-menu cursor from the first row to the last (#160)', async () => {
     renderDialog();
     // ink builds this list on DescriptiveRadioButtonSelect, whose useSelectionList
-    // steps modulo the row count; a clamp would stay on Alibaba ModelStudio and
+    // steps modulo the row count; a clamp would stay on QwenCloud and
     // Enter would open the access-method sub-menu instead.
     await press('up');
     await press('return');
@@ -412,10 +418,9 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     await press('down');
     await press('down');
     await press('down');
+    await press('down');
     await press('return');
-    expect(
-      screen.getByText('Alibaba ModelStudio · Access Method'),
-    ).toBeTruthy();
+    expect(screen.getByText('QwenCloud · Access Method')).toBeTruthy();
   });
 
   it('keeps authentication open when only service models were saved', async () => {
@@ -471,6 +476,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     const { onClose } = renderDialog();
     await press('down');
     await press('down');
+    await press('down');
     await press('return');
     expect(screen.getByText('OpenAI-compatible')).toBeTruthy();
     expect(screen.queryByText('OpenAI Responses')).toBeNull();
@@ -519,6 +525,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     });
     await press('down');
     await press('down');
+    await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
     await press('return'); // protocol: OpenAI-compatible → API
     // The parity RadioList gives the marker its own cell, so read it off the row.
@@ -549,6 +556,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
     renderDialog();
     await press('down');
     await press('down');
+    await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
     await press('return'); // protocol: OpenAI-compatible → API selection
     await press('return'); // API: Chat Completions → baseUrl input
@@ -566,6 +574,7 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
 
   it("renders ink's no-recommendations branch for a provider without models", async () => {
     renderDialog();
+    await press('down');
     await press('down');
     await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
@@ -654,6 +663,30 @@ describe('OpenTuiAuthDialog (#57 onboarding flow)', () => {
       build.mockRestore();
     }
   });
+
+  it('renders QwenCloud flow title in Chinese when locale is zh (T1)', async () => {
+    await setLanguageAsync('zh');
+    try {
+      renderDialog();
+      await press('return'); // main: QwenCloud → qwencloud-select
+      expect(screen.getByText('千问AI平台 · 接入方式')).toBeTruthy();
+      await press('return'); // Token Plan → provider-setup
+      await vi.waitFor(() => {
+        expect(document.body.textContent).toContain('千问AI平台');
+      });
+      expect(document.body.textContent).not.toContain('QwenCloud · Step');
+    } finally {
+      await setLanguageAsync('en');
+    }
+  });
+
+  it('shows Token Plan and Standard API Key in QwenCloud sub-menu but not Coding Plan (T3+T4)', async () => {
+    renderDialog();
+    await press('return'); // main: QwenCloud → qwencloud-select
+    expect(screen.getByText('Token Plan')).toBeTruthy();
+    expect(screen.getByText('Standard API Key')).toBeTruthy();
+    expect(screen.queryByText('Coding Plan')).toBeNull();
+  });
 });
 
 describe('bracketed-paste into dialog inputs (#57)', () => {
@@ -670,6 +703,7 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
     renderDialog();
     await press('down');
     await press('down');
+    await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
     await press('return'); // protocol: OpenAI-compatible → API selection
     await press('return'); // API: Chat Completions → baseUrl input
@@ -680,6 +714,7 @@ describe('bracketed-paste into dialog inputs (#57)', () => {
   /** Walk the wizard up to the base-URL input step. */
   async function runToBaseUrlInput(): Promise<void> {
     renderDialog();
+    await press('down');
     await press('down');
     await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
@@ -964,6 +999,7 @@ describe('caret editing in dialog text fields (#107)', () => {
     renderDialog();
     await press('down');
     await press('down');
+    await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol
     await press('return'); // protocol: OpenAI-compatible → API selection
     await press('return'); // API: Chat Completions → baseUrl input
@@ -1213,6 +1249,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
    */
   async function runToModelsStep(availableTerminalHeight?: number) {
     const dialog = renderDialog({ availableTerminalHeight });
+    await press('down');
     await press('down'); // main: THIRD_PARTY_PROVIDERS
     await press('return'); // → thirdparty-select, DeepSeek on top
     await press('return'); // DeepSeek → apiKey
@@ -1238,7 +1275,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
 
   it('refuses the recommended rows a short region cannot paint', async () => {
     // At region 21 the step's measured chrome pays for exactly one model row,
-    // so `deepseek-v4-flash` sits below the clip. A held ↓ walks `focus` on
+    // so `deepseek-flash` sits below the clip. A held ↓ walks `focus` on
     // to it and Space would toggle a model the user never saw — which the
     // Enter of the same read then writes into the install plan.
     const dialog = await runToModelsStep();
@@ -1246,16 +1283,16 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     await press('tab'); // custom-ID input → search field
     await press('tab'); // search field → the one painted row
     expect(screen.getByText(/^deepseek-v4-pro(\s|$)/)).not.toBeNull();
-    expect(screen.queryByText(/^deepseek-v4-flash(\s|$)/)).toBeNull();
+    expect(screen.queryByText(/^deepseek-flash(\s|$)/)).toBeNull();
 
     const build = vi.spyOn(coreRuntime, 'buildInstallPlan');
     try {
       await pressBatched([DOWN, SPACE, ENTER]);
       await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
       // Only the painted row's tick was undone. Without the window the ↓
-      // reaches `deepseek-v4-flash` below the clip and the Space unticks it,
+      // reaches `deepseek-flash` below the clip and the Space unticks it,
       // so the plan ships `deepseek-v4-pro` alone.
-      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-v4-flash']);
+      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-flash']);
     } finally {
       build.mockRestore();
     }
@@ -1296,7 +1333,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     try {
       await pressBatched([SPACE, ENTER]);
       await vi.waitFor(() => expect(build).toHaveBeenCalledTimes(1));
-      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-v4-flash']);
+      expect(build.mock.calls[0]?.[1]?.modelIds).toEqual(['deepseek-flash']);
     } finally {
       build.mockRestore();
     }
@@ -1315,7 +1352,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     await runToRecommendedList();
     await pressBatched([DOWN, SPACE]);
     expect(recommendedRow('deepseek-v4-pro')).toContain(ICON.RADIO_FILLED);
-    expect(recommendedRow('deepseek-v4-flash')).toContain(ICON.CIRCLE_EMPTY);
+    expect(recommendedRow('deepseek-flash')).toContain(ICON.CIRCLE_EMPTY);
   });
 
   it('filters the recommended list from the search field one Tab away', async () => {
@@ -1323,7 +1360,7 @@ describe('recommended-model checkboxes out of one read (#113)', () => {
     await press('tab'); // custom-ID input → search field
     await typeText('flash');
     expect(screen.queryByText(/^deepseek-v4-pro(\s|$)/)).toBeNull();
-    expect(recommendedRow('deepseek-v4-flash')).toContain(ICON.RADIO_FILLED);
+    expect(recommendedRow('deepseek-flash')).toContain(ICON.RADIO_FILLED);
   });
 });
 
@@ -1373,6 +1410,7 @@ describe('the wizard frame keeps its natural height', () => {
     // nine paint into a region that clips them, and Enter commits whichever
     // row the cursor names.
     renderDialog({ availableTerminalHeight: 13 });
+    await press('down');
     await press('down'); // main: THIRD_PARTY_PROVIDERS
     await press('return'); // → thirdparty-select
     expect(screen.getByText('DeepSeek API Key')).toBeTruthy();
@@ -1399,13 +1437,14 @@ describe('the wizard frame keeps its natural height', () => {
     // wizard stays usable.
     const { rerenderAt } = renderDialog({ availableTerminalHeight: 13 });
     expect(screen.getByText(/Terms of Services/)).toBeTruthy();
-    expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
+    expect(screen.getByText('QwenCloud')).toBeTruthy();
 
     rerenderAt(12);
     expect(screen.queryByText(/Terms of Services/)).toBeNull();
+    expect(screen.getByText('QwenCloud')).toBeTruthy();
     expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
-    expect(screen.getByText('Third-party Providers')).toBeTruthy();
 
+    await press('down');
     await press('down'); // main: THIRD_PARTY_PROVIDERS — a painted row
     await press('return');
     expect(screen.getByText('Third-party Providers · Provider')).toBeTruthy();
@@ -1419,13 +1458,11 @@ describe('the wizard frame keeps its natural height', () => {
     // the painted row.
     const { onClose } = renderDialog({ availableTerminalHeight: 7 });
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
-    expect(screen.getByText('Alibaba ModelStudio')).toBeTruthy();
-    expect(screen.queryByText('Third-party Providers')).toBeNull();
+    expect(screen.getByText('QwenCloud')).toBeTruthy();
+    expect(screen.queryByText('Alibaba ModelStudio')).toBeNull();
 
     await press('return');
-    expect(
-      screen.getByText('Alibaba ModelStudio · Access Method'),
-    ).toBeTruthy();
+    expect(screen.getByText('QwenCloud · Access Method')).toBeTruthy();
 
     await pressEsc(); // a sub-view's Esc is goBack, unchanged
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
@@ -1442,6 +1479,7 @@ describe('the wizard frame keeps its natural height', () => {
     // later Esc.
     const { onClose } = renderDialog({ availableTerminalHeight: 6 });
     expect(screen.getByText('Connect a Provider')).toBeTruthy();
+    expect(screen.queryByText('QwenCloud')).toBeNull();
     expect(screen.queryByText('Alibaba ModelStudio')).toBeNull();
     expect(screen.queryByText('Third-party Providers')).toBeNull();
 
@@ -1464,6 +1502,7 @@ describe('the wizard frame keeps its natural height', () => {
     // past the region.
     mocks.state.width = 38;
     renderDialog({ availableTerminalHeight: 14 });
+    await press('down');
     await press('down'); // main: THIRD_PARTY_PROVIDERS
     await press('return'); // → thirdparty-select
     expect(screen.getByText('Third-party Providers · Provider')).toBeTruthy();
@@ -1476,6 +1515,7 @@ describe('the wizard frame keeps its natural height', () => {
     // region 9 leaves one row — less than a provider row's three — so
     // nothing paints, and the arrows and Enter address nothing.
     const { rerenderAt } = renderDialog({ availableTerminalHeight: 13 });
+    await press('down');
     await press('down');
     await press('return'); // → thirdparty-select
     expect(screen.getByText('DeepSeek API Key')).toBeTruthy();
@@ -1501,6 +1541,7 @@ describe('wire-API step cursor out of one read (#207)', () => {
 
   it('saves the wire API the arrow of the same read moved to', async () => {
     renderDialog();
+    await press('down');
     await press('down');
     await press('down');
     await press('return'); // main: CUSTOM_PROVIDER → protocol

@@ -7,16 +7,11 @@
 import { isTerminalEditor } from '@qwen-code/qwen-code-core/utils/editor.js';
 import { isTerminalEditorCommand } from '../../../utils/terminal-editor.js';
 import { appEvents, AppEvent } from '../../../utils/events.js';
-import { spawnSync } from 'node:child_process';
-import fs from 'node:fs';
-import os from 'node:os';
-import pathMod from 'node:path';
 import { useState, useCallback, useEffect, useMemo, useRef } from 'react';
 import {
   createDebugLogger,
   unescapePath,
   escapePath,
-  getExternalEditorCommand,
   type EditorType,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -26,6 +21,7 @@ import {
   stripUnsafeCharacters,
   getCachedStringWidth,
 } from '../../utils/textUtils.js';
+import { editTextInExternalEditor } from '../../utils/external-editor.js';
 import type { VimAction } from './vim-buffer-actions.js';
 import { handleVimAction } from './vim-buffer-actions.js';
 
@@ -720,14 +716,14 @@ export const getLineRangeOffsets = (
   return { startOffset, endOffset };
 };
 
-export const replaceRangeInternal = (
-  state: TextBufferState,
+export const replaceRangeInternal = <T extends TextBufferGeometry>(
+  state: T,
   startRow: number,
   startCol: number,
   endRow: number,
   endCol: number,
   text: string,
-): TextBufferState => {
+): T => {
   const currentLine = (row: number) => state.lines[row] || '';
   const currentLineLen = (row: number) => cpLen(currentLine(row));
   const clamp = (value: number, min: number, max: number) =>
@@ -814,9 +810,14 @@ interface UseTextBufferProps {
   isValidPath: (path: string) => boolean;
   shellModeActive?: boolean; // Whether the text buffer is in shell mode
   preferredEditor?: EditorType;
+  pasteHistory?: {
+    capture: () => ReadonlyMap<string, string>;
+    restore: (snapshot: ReadonlyMap<string, string>) => void;
+  };
 }
 
 interface UndoHistoryEntry {
+  pasteHistory?: ReadonlyMap<string, string>;
   lines: string[];
   cursorRow: number;
   cursorCol: number;
@@ -1141,7 +1142,13 @@ function calculateVisualCursorFromLayout(
 
 // --- Start of reducer logic ---
 
+export type TextBufferGeometry = Pick<
+  TextBufferState,
+  'lines' | 'cursorRow' | 'cursorCol' | 'preferredCol'
+>;
+
 export interface TextBufferState {
+  pasteHistory?: ReadonlyMap<string, string>;
   lines: string[];
   cursorRow: number;
   cursorCol: number;
@@ -1162,6 +1169,9 @@ export const pushUndo = (currentState: TextBufferState): TextBufferState => {
     lines: [...currentState.lines],
     cursorRow: currentState.cursorRow,
     cursorCol: currentState.cursorCol,
+    ...(currentState.pasteHistory
+      ? { pasteHistory: currentState.pasteHistory }
+      : {}),
   };
   const newStack = [...currentState.undoStack, snapshot];
   if (newStack.length > historyLimit) {
@@ -1253,6 +1263,244 @@ export type TextBufferAction =
   | { type: 'vim_move_to_last_line' }
   | { type: 'vim_move_to_line'; payload: { lineNumber: number } }
   | { type: 'vim_escape_insert_mode' };
+
+/** Shared logical word target; each renderer keeps its own buffer and undo. */
+export function getWordMovePosition(
+  lines: readonly string[],
+  cursorRow: number,
+  cursorCol: number,
+  direction: 'wordLeft' | 'wordRight',
+): { row: number; col: number } {
+  if (direction === 'wordLeft') {
+    if (cursorCol === 0 && cursorRow === 0)
+      return { row: cursorRow, col: cursorCol };
+
+    let newCursorRow = cursorRow;
+    let newCursorCol = cursorCol;
+
+    if (cursorCol === 0) {
+      // At start of line, move to end of previous line
+      newCursorRow--;
+      newCursorCol = cpLen(lines[newCursorRow] ?? '');
+    } else {
+      const lineContent = lines[cursorRow];
+      const arr = toCodePoints(lineContent);
+      let start = cursorCol;
+
+      // Try CJK segmentation first for lines containing CJK
+      const boundaries = getWordBoundaries(lineContent, arr);
+      const startBoundary = findPrevWordStart(boundaries, start);
+      if (startBoundary !== null) {
+        start = startBoundary;
+      } else {
+        // Fallback: word boundary detection
+        // Check if we're in a whitespace-only prefix before any word
+        let onlySpaces = true;
+        for (let i = 0; i < start; i++) {
+          if (isWordCharStrict(arr[i] ?? '')) {
+            onlySpaces = false;
+            break;
+          }
+        }
+
+        if (onlySpaces) {
+          // All characters before cursor are whitespace/special
+          // Jump to column 0 (start of line)
+          start = 0;
+        } else {
+          // First: skip backwards over non-word characters (punctuation)
+          while (start > 0 && !isWordCharStrict(arr[start - 1] ?? '')) start--;
+          // Then: move to the start of the current word
+          // For CJK text (same script), treat each character as a word
+          while (start > 0) {
+            const prevChar = arr[start - 1];
+            const currChar = arr[start];
+            if (
+              !isWordCharStrict(prevChar ?? '') ||
+              (isWordCharStrict(currChar ?? '') &&
+                isDifferentScript(currChar ?? '', prevChar ?? ''))
+            ) {
+              break;
+            }
+            // If current and previous are both CJK (same script), stop here
+            // so each CJK character becomes its own word
+            if (isCjkChar(currChar ?? '') && isCjkChar(prevChar ?? '')) {
+              break;
+            }
+            start--;
+          }
+        }
+      }
+      newCursorCol = start;
+    }
+    return {
+      row: newCursorRow,
+      col: newCursorCol,
+    };
+  } else {
+    if (
+      cursorRow === lines.length - 1 &&
+      cursorCol === cpLen(lines[cursorRow] ?? '')
+    ) {
+      return { row: cursorRow, col: cursorCol };
+    }
+
+    let newCursorRow = cursorRow;
+    let newCursorCol = cursorCol;
+    const lineContent = lines[cursorRow] ?? '';
+    const arr = toCodePoints(lineContent);
+
+    if (cursorCol >= arr.length) {
+      newCursorRow++;
+      newCursorCol = 0;
+    } else {
+      // Try segmentation first for lines containing CJK
+      const boundaries = getWordBoundaries(lineContent, arr);
+      const endBoundary = findNextWordEnd(boundaries, cursorCol);
+
+      let end: number;
+      if (endBoundary !== null) {
+        end = endBoundary;
+        // Modern editor behavior: skip whitespace to land on next word's start
+        while (end < arr.length && isWhitespace(arr[end] ?? '')) {
+          end++;
+        }
+      } else if (
+        cursorCol < arr.length &&
+        !isWordCharStrict(arr[cursorCol] ?? '')
+      ) {
+        // Cursor is on non-word character (space/punctuation)
+        // Skip over non-word characters first, then find next word end
+        end = cursorCol;
+        while (end < arr.length && !isWordCharStrict(arr[end] ?? '')) end++;
+        // Now find the end of the word we just reached
+        if (end < arr.length) {
+          // Check if boundaries cover this new position
+          const nextEnd = findNextWordEnd(boundaries, end);
+          if (nextEnd !== null) {
+            end = nextEnd;
+          } else {
+            end = findWordEndFallback(arr, end);
+          }
+        }
+      } else {
+        // Fallback: word boundary detection
+        end = cursorCol;
+        // Skip over non-word characters (punctuation/whitespace)
+        while (end < arr.length && !isWordCharStrict(arr[end] ?? '')) end++;
+        end = findWordEndFallback(arr, end);
+      }
+      newCursorCol = end;
+    }
+    return {
+      row: newCursorRow,
+      col: newCursorCol,
+    };
+  }
+}
+
+export function applyWordDeletion<T extends TextBufferGeometry>(
+  state: T,
+  direction: 'delete_word_left' | 'delete_word_right',
+  prepareEdit: (state: T) => T,
+): T {
+  const currentLine = (row: number) => state.lines[row] ?? '';
+  switch (direction) {
+    case 'delete_word_left': {
+      const { cursorRow, cursorCol } = state;
+      if (cursorCol === 0 && cursorRow === 0) return state;
+
+      const nextState = prepareEdit(state);
+      const newLines = [...nextState.lines];
+      let newCursorRow = cursorRow;
+      let newCursorCol = cursorCol;
+
+      if (newCursorCol > 0) {
+        const lineContent = currentLine(newCursorRow);
+        const arr = toCodePoints(lineContent);
+        // Try segmentation first
+        const boundaries = getWordBoundaries(lineContent, arr);
+        const startBoundary = findPrevWordStart(boundaries, newCursorCol);
+        let start: number;
+        if (startBoundary !== null) {
+          start = startBoundary;
+        } else {
+          const prevWordStart = findPrevWordStartInLine(
+            lineContent,
+            newCursorCol,
+          );
+          start = prevWordStart === null ? 0 : prevWordStart;
+        }
+        newLines[newCursorRow] =
+          cpSlice(lineContent, 0, start) + cpSlice(lineContent, newCursorCol);
+        newCursorCol = start;
+      } else {
+        // Act as a backspace
+        const prevLineContent = currentLine(cursorRow - 1);
+        const currentLineContentVal = currentLine(cursorRow);
+        const newCol = cpLen(prevLineContent);
+        newLines[cursorRow - 1] = prevLineContent + currentLineContentVal;
+        newLines.splice(cursorRow, 1);
+        newCursorRow--;
+        newCursorCol = newCol;
+      }
+
+      return {
+        ...nextState,
+        lines: newLines,
+        cursorRow: newCursorRow,
+        cursorCol: newCursorCol,
+        preferredCol: null,
+      };
+    }
+
+    case 'delete_word_right': {
+      const { cursorRow, cursorCol, lines } = state;
+      const lineContent = currentLine(cursorRow);
+      const lineLen = cpLen(lineContent);
+
+      if (cursorCol >= lineLen && cursorRow === lines.length - 1) {
+        return state;
+      }
+
+      const nextState = prepareEdit(state);
+      const newLines = [...nextState.lines];
+
+      if (cursorCol >= lineLen) {
+        // Act as a delete, joining with the next line
+        const nextLineContent = currentLine(cursorRow + 1);
+        newLines[cursorRow] = lineContent + nextLineContent;
+        newLines.splice(cursorRow + 1, 1);
+      } else {
+        const arr = toCodePoints(lineContent);
+        // Try segmentation first
+        const boundaries = getWordBoundaries(lineContent, arr);
+        const endBoundary = findNextWordEnd(boundaries, cursorCol);
+        let end: number;
+        if (endBoundary !== null) {
+          end = endBoundary;
+          // Skip over any whitespace after the word to reach next word's start
+          while (end < arr.length && isWhitespace(arr[end] ?? '')) {
+            end++;
+          }
+        } else {
+          const nextWordStart = findNextWordStartInLine(lineContent, cursorCol);
+          end = nextWordStart === null ? lineLen : nextWordStart;
+        }
+        newLines[cursorRow] =
+          cpSlice(lineContent, 0, cursorCol) + cpSlice(lineContent, end);
+      }
+
+      return {
+        ...nextState,
+        lines: newLines,
+        preferredCol: null,
+      };
+    }
+    default:
+      return state;
+  }
+}
 
 function textBufferReducerLogic(
   state: TextBufferState,
@@ -1495,136 +1743,15 @@ function textBufferReducerLogic(
 
       // Logical movements
       switch (dir) {
-        case 'wordLeft': {
-          if (cursorCol === 0 && cursorRow === 0) return state;
-
-          let newCursorRow = cursorRow;
-          let newCursorCol = cursorCol;
-
-          if (cursorCol === 0) {
-            // At start of line, move to end of previous line
-            newCursorRow--;
-            newCursorCol = cpLen(lines[newCursorRow] ?? '');
-          } else {
-            const lineContent = lines[cursorRow];
-            const arr = toCodePoints(lineContent);
-            let start = cursorCol;
-
-            // Try CJK segmentation first for lines containing CJK
-            const boundaries = getWordBoundaries(lineContent, arr);
-            const startBoundary = findPrevWordStart(boundaries, start);
-            if (startBoundary !== null) {
-              start = startBoundary;
-            } else {
-              // Fallback: word boundary detection
-              // Check if we're in a whitespace-only prefix before any word
-              let onlySpaces = true;
-              for (let i = 0; i < start; i++) {
-                if (isWordCharStrict(arr[i] ?? '')) {
-                  onlySpaces = false;
-                  break;
-                }
-              }
-
-              if (onlySpaces) {
-                // All characters before cursor are whitespace/special
-                // Jump to column 0 (start of line)
-                start = 0;
-              } else {
-                // First: skip backwards over non-word characters (punctuation)
-                while (start > 0 && !isWordCharStrict(arr[start - 1] ?? ''))
-                  start--;
-                // Then: move to the start of the current word
-                // For CJK text (same script), treat each character as a word
-                while (start > 0) {
-                  const prevChar = arr[start - 1];
-                  const currChar = arr[start];
-                  if (
-                    !isWordCharStrict(prevChar ?? '') ||
-                    (isWordCharStrict(currChar ?? '') &&
-                      isDifferentScript(currChar ?? '', prevChar ?? ''))
-                  ) {
-                    break;
-                  }
-                  // If current and previous are both CJK (same script), stop here
-                  // so each CJK character becomes its own word
-                  if (isCjkChar(currChar ?? '') && isCjkChar(prevChar ?? '')) {
-                    break;
-                  }
-                  start--;
-                }
-              }
-            }
-            newCursorCol = start;
-          }
-          return {
-            ...state,
-            cursorRow: newCursorRow,
-            cursorCol: newCursorCol,
-            preferredCol: null,
-          };
-        }
+        case 'wordLeft':
         case 'wordRight': {
-          if (
-            cursorRow === lines.length - 1 &&
-            cursorCol === cpLen(lines[cursorRow] ?? '')
-          ) {
+          const target = getWordMovePosition(lines, cursorRow, cursorCol, dir);
+          if (target.row === cursorRow && target.col === cursorCol)
             return state;
-          }
-
-          let newCursorRow = cursorRow;
-          let newCursorCol = cursorCol;
-          const lineContent = lines[cursorRow] ?? '';
-          const arr = toCodePoints(lineContent);
-
-          if (cursorCol >= arr.length) {
-            newCursorRow++;
-            newCursorCol = 0;
-          } else {
-            // Try segmentation first for lines containing CJK
-            const boundaries = getWordBoundaries(lineContent, arr);
-            const endBoundary = findNextWordEnd(boundaries, cursorCol);
-
-            let end: number;
-            if (endBoundary !== null) {
-              end = endBoundary;
-              // Modern editor behavior: skip whitespace to land on next word's start
-              while (end < arr.length && isWhitespace(arr[end] ?? '')) {
-                end++;
-              }
-            } else if (
-              cursorCol < arr.length &&
-              !isWordCharStrict(arr[cursorCol] ?? '')
-            ) {
-              // Cursor is on non-word character (space/punctuation)
-              // Skip over non-word characters first, then find next word end
-              end = cursorCol;
-              while (end < arr.length && !isWordCharStrict(arr[end] ?? ''))
-                end++;
-              // Now find the end of the word we just reached
-              if (end < arr.length) {
-                // Check if boundaries cover this new position
-                const nextEnd = findNextWordEnd(boundaries, end);
-                if (nextEnd !== null) {
-                  end = nextEnd;
-                } else {
-                  end = findWordEndFallback(arr, end);
-                }
-              }
-            } else {
-              // Fallback: word boundary detection
-              end = cursorCol;
-              // Skip over non-word characters (punctuation/whitespace)
-              while (end < arr.length && !isWordCharStrict(arr[end] ?? ''))
-                end++;
-              end = findWordEndFallback(arr, end);
-            }
-            newCursorCol = end;
-          }
           return {
             ...state,
-            cursorRow: newCursorRow,
-            cursorCol: newCursorCol,
+            cursorRow: target.row,
+            cursorCol: target.col,
             preferredCol: null,
           };
         }
@@ -1669,97 +1796,9 @@ function textBufferReducerLogic(
       return state;
     }
 
-    case 'delete_word_left': {
-      const { cursorRow, cursorCol } = state;
-      if (cursorCol === 0 && cursorRow === 0) return state;
-
-      const nextState = pushUndoLocal(state);
-      const newLines = [...nextState.lines];
-      let newCursorRow = cursorRow;
-      let newCursorCol = cursorCol;
-
-      if (newCursorCol > 0) {
-        const lineContent = currentLine(newCursorRow);
-        const arr = toCodePoints(lineContent);
-        // Try segmentation first
-        const boundaries = getWordBoundaries(lineContent, arr);
-        const startBoundary = findPrevWordStart(boundaries, newCursorCol);
-        let start: number;
-        if (startBoundary !== null) {
-          start = startBoundary;
-        } else {
-          const prevWordStart = findPrevWordStartInLine(
-            lineContent,
-            newCursorCol,
-          );
-          start = prevWordStart === null ? 0 : prevWordStart;
-        }
-        newLines[newCursorRow] =
-          cpSlice(lineContent, 0, start) + cpSlice(lineContent, newCursorCol);
-        newCursorCol = start;
-      } else {
-        // Act as a backspace
-        const prevLineContent = currentLine(cursorRow - 1);
-        const currentLineContentVal = currentLine(cursorRow);
-        const newCol = cpLen(prevLineContent);
-        newLines[cursorRow - 1] = prevLineContent + currentLineContentVal;
-        newLines.splice(cursorRow, 1);
-        newCursorRow--;
-        newCursorCol = newCol;
-      }
-
-      return {
-        ...nextState,
-        lines: newLines,
-        cursorRow: newCursorRow,
-        cursorCol: newCursorCol,
-        preferredCol: null,
-      };
-    }
-
-    case 'delete_word_right': {
-      const { cursorRow, cursorCol, lines } = state;
-      const lineContent = currentLine(cursorRow);
-      const lineLen = cpLen(lineContent);
-
-      if (cursorCol >= lineLen && cursorRow === lines.length - 1) {
-        return state;
-      }
-
-      const nextState = pushUndoLocal(state);
-      const newLines = [...nextState.lines];
-
-      if (cursorCol >= lineLen) {
-        // Act as a delete, joining with the next line
-        const nextLineContent = currentLine(cursorRow + 1);
-        newLines[cursorRow] = lineContent + nextLineContent;
-        newLines.splice(cursorRow + 1, 1);
-      } else {
-        const arr = toCodePoints(lineContent);
-        // Try segmentation first
-        const boundaries = getWordBoundaries(lineContent, arr);
-        const endBoundary = findNextWordEnd(boundaries, cursorCol);
-        let end: number;
-        if (endBoundary !== null) {
-          end = endBoundary;
-          // Skip over any whitespace after the word to reach next word's start
-          while (end < arr.length && isWhitespace(arr[end] ?? '')) {
-            end++;
-          }
-        } else {
-          const nextWordStart = findNextWordStartInLine(lineContent, cursorCol);
-          end = nextWordStart === null ? lineLen : nextWordStart;
-        }
-        newLines[cursorRow] =
-          cpSlice(lineContent, 0, cursorCol) + cpSlice(lineContent, end);
-      }
-
-      return {
-        ...nextState,
-        lines: newLines,
-        preferredCol: null,
-      };
-    }
+    case 'delete_word_left':
+    case 'delete_word_right':
+      return applyWordDeletion(state, action.type, pushUndoLocal);
 
     case 'kill_line_right': {
       const { cursorRow, cursorCol, lines } = state;
@@ -1828,6 +1867,7 @@ function textBufferReducerLogic(
         lines: [...state.lines],
         cursorRow: state.cursorRow,
         cursorCol: state.cursorCol,
+        ...(state.pasteHistory ? { pasteHistory: state.pasteHistory } : {}),
       };
       return {
         ...state,
@@ -1845,6 +1885,7 @@ function textBufferReducerLogic(
         lines: [...state.lines],
         cursorRow: state.cursorRow,
         cursorCol: state.cursorCol,
+        ...(state.pasteHistory ? { pasteHistory: state.pasteHistory } : {}),
       };
       return {
         ...state,
@@ -2110,6 +2151,91 @@ function extractPathsFromSegment(
   return paths;
 }
 
+export type TextInputActions = Pick<
+  TextBuffer,
+  | 'insert'
+  | 'newline'
+  | 'move'
+  | 'deleteWordLeft'
+  | 'deleteWordRight'
+  | 'backspace'
+  | 'del'
+  | 'undo'
+  | 'redo'
+>;
+
+export function handleTextBufferInput(
+  key: Parameters<TextBuffer['handleInput']>[0],
+  {
+    insert,
+    newline,
+    move,
+    deleteWordLeft,
+    deleteWordRight,
+    backspace,
+    del,
+    undo,
+    redo,
+  }: TextInputActions,
+): void {
+  const { sequence: input } = key;
+
+  if (key.paste) {
+    // Do not do any other processing on pastes so ensure we handle them
+    // before all other cases.
+    insert(input, { paste: key.paste });
+    return;
+  }
+
+  if (
+    key.name === 'return' ||
+    input === '\r' ||
+    input === '\n' ||
+    input === '\\\r' // VSCode terminal represents shift + enter this way
+  )
+    newline();
+  else if (key.name === 'left' && !key.meta && !key.ctrl) move('left');
+  else if (key.ctrl && key.name === 'b') move('left');
+  else if (key.name === 'right' && !key.meta && !key.ctrl) move('right');
+  else if (key.ctrl && key.name === 'f') move('right');
+  else if (key.name === 'up' && !key.shift) move('up');
+  else if (key.name === 'down' && !key.shift) move('down');
+  else if ((key.ctrl || key.meta) && key.name === 'left') move('wordLeft');
+  else if (key.meta && key.name === 'b') move('wordLeft');
+  else if ((key.ctrl || key.meta) && key.name === 'right') move('wordRight');
+  else if (key.meta && key.name === 'd') deleteWordRight();
+  else if (key.meta && key.name === 'f') move('wordRight');
+  else if (key.name === 'home') move('home');
+  else if (key.ctrl && key.name === 'a') move('home');
+  else if (key.name === 'end') move('end');
+  else if (key.ctrl && key.name === 'e') move('end');
+  else if (key.ctrl && key.name === 'w') deleteWordLeft();
+  else if (
+    (key.meta || key.ctrl) &&
+    (key.name === 'backspace' || input === '\x7f')
+  )
+    deleteWordLeft();
+  else if ((key.meta || key.ctrl) && key.name === 'delete') deleteWordRight();
+  else if (
+    key.name === 'backspace' ||
+    input === '\x7f' ||
+    (key.ctrl && key.name === 'h')
+  )
+    backspace();
+  else if (key.name === 'delete' || (key.ctrl && key.name === 'd')) del();
+  else if (key.ctrl && !key.shift && key.name === 'z') undo();
+  else if (key.ctrl && key.shift && key.name === 'z') redo();
+  else if (
+    input &&
+    !key.ctrl &&
+    !key.meta &&
+    key.name !== 'tab' &&
+    input !== '\t'
+  ) {
+    insert(input, { paste: key.paste });
+  }
+}
+
 export function useTextBuffer({
   initialText = '',
   initialCursorOffset = 0,
@@ -2120,6 +2246,7 @@ export function useTextBuffer({
   isValidPath,
   shellModeActive = false,
   preferredEditor,
+  pasteHistory,
 }: UseTextBufferProps): TextBuffer {
   const initialState = useMemo((): TextBufferState => {
     const lines = initialText.split('\n');
@@ -2149,8 +2276,21 @@ export function useTextBuffer({
   const stateRef = useRef(initialState);
   const [state, setState] = useState(initialState);
 
+  const pasteHistoryRef = useRef(pasteHistory);
+  pasteHistoryRef.current = pasteHistory;
   const dispatch = useCallback((action: TextBufferAction) => {
-    stateRef.current = textBufferReducer(stateRef.current, action);
+    const history = pasteHistoryRef.current;
+    let before = stateRef.current;
+    if (history) {
+      before = { ...before, pasteHistory: new Map(history.capture()) };
+    }
+    const restoring =
+      (action.type === 'undo' && before.undoStack.length > 0) ||
+      (action.type === 'redo' && before.redoStack.length > 0);
+    stateRef.current = textBufferReducer(before, action);
+    if (restoring && history && stateRef.current.pasteHistory) {
+      history.restore(new Map(stateRef.current.pasteHistory));
+    }
     setState(stateRef.current);
   }, []);
 
@@ -2508,133 +2648,36 @@ export function useTextBuffer({
 
   const openInExternalEditor = useCallback(
     async (opts: { editor?: string } = {}): Promise<void> => {
-      let tmpDir: string;
-      let filePath: string;
-      try {
-        tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'qwen-edit-'));
-        filePath = pathMod.join(tmpDir, 'buffer.txt');
-      } catch (err) {
-        debugLogger.error(
-          '[useTextBuffer] failed to create temp directory',
-          err,
-        );
-        return;
-      }
-
-      let editorCmd: string;
-      let editorArgs: string[];
-      let useShell = false;
-      let editorSource: 'opts' | 'preferred' | 'env/default' = 'env/default';
-
-      if (opts.editor) {
-        // Explicit programmatic override takes highest priority
-        editorCmd = opts.editor;
-        editorArgs = [filePath];
-        editorSource = 'opts';
-        if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
-          if (/["|%!]/.test(editorCmd)) {
-            debugLogger.error(
-              `[useTextBuffer] opts.editor command contains unsafe characters: ${editorCmd}`,
-            );
-            try {
-              fs.rmSync(tmpDir, { recursive: true, force: true });
-            } catch {
-              /* ignore */
-            }
-            return;
-          }
-          useShell = true;
-        }
-      } else {
-        const resolved = preferredEditor
-          ? getExternalEditorCommand(preferredEditor, filePath)
-          : null;
-
-        if (resolved) {
-          editorCmd = resolved.command;
-          editorArgs = resolved.args;
-          useShell = resolved.needsShell;
-          editorSource = 'preferred';
-        } else {
-          if (preferredEditor) {
-            debugLogger.warn(
-              `[useTextBuffer] preferred editor "${preferredEditor}" not found, falling back to env/default`,
-            );
-          }
-          editorCmd =
-            process.env['VISUAL'] ??
-            process.env['EDITOR'] ??
-            (process.platform === 'win32' ? 'notepad' : 'vi');
-          editorArgs = [filePath];
-          if (process.platform === 'win32' && /\.(cmd|bat)$/i.test(editorCmd)) {
-            if (/["|%!]/.test(editorCmd)) {
-              debugLogger.error(
-                `[useTextBuffer] Editor command from environment contains unsafe characters: ${editorCmd}`,
-              );
-              try {
-                fs.rmSync(tmpDir, { recursive: true, force: true });
-              } catch {
-                /* ignore */
-              }
-              return;
-            }
-            useShell = true;
-          }
-        }
-      }
-
       const terminalEditor =
-        editorSource === 'preferred' && preferredEditor
+        !opts.editor && preferredEditor
           ? isTerminalEditor(preferredEditor)
-          : isTerminalEditorCommand(editorCmd);
+          : isTerminalEditorCommand(
+              opts.editor ??
+                process.env['VISUAL'] ??
+                process.env['EDITOR'] ??
+                (process.platform === 'win32' ? 'notepad' : 'vi'),
+            );
       let terminalReleased = false;
-      if (useShell) {
-        // .cmd/.bat launch through cmd.exe on Windows. Quote both the
-        // command and args so paths with spaces survive cmd.exe parsing.
-        // These are process-generated paths; do not reuse for
-        // user-controlled arguments.
-        editorCmd = `"${editorCmd}"`;
-        editorArgs = editorArgs.map((a) => `"${a}"`);
-      }
-
       const wasRaw = stdin?.isRaw ?? false;
       try {
         const currentText = stateRef.current.lines.join('\n');
-        fs.writeFileSync(filePath, currentText, {
-          encoding: 'utf8',
-          mode: 0o600,
+        const newText = editTextInExternalEditor(currentText, {
+          editor: opts.editor,
+          preferredEditor,
+          beforeLaunch: () => {
+            if (terminalEditor) {
+              appEvents.emit(AppEvent.TerminalReleased);
+              terminalReleased = true;
+            }
+            setRawMode?.(false);
+          },
         });
-        if (terminalEditor) {
-          appEvents.emit(AppEvent.TerminalReleased);
-          terminalReleased = true;
-        }
-        setRawMode?.(false);
-
-        debugLogger.warn(
-          `[useTextBuffer] launching external editor (cmd=${editorCmd}, shell=${useShell}, source=${editorSource}, file=${filePath})`,
-        );
-        const { status, error, signal } = spawnSync(editorCmd, editorArgs, {
-          stdio: 'inherit',
-          shell: useShell,
-          timeout: 30 * 60 * 1000,
-        });
-        if (error) throw error;
-        if (signal)
-          throw new Error(`External editor was killed by signal ${signal}`);
-        if (typeof status === 'number' && status !== 0)
-          throw new Error(`External editor exited with status ${status}`);
-
-        let newText = fs.readFileSync(filePath, 'utf8');
-        newText = newText.replace(/\r\n?/g, '\n');
         if (newText !== currentText) {
           dispatch({ type: 'create_undo_snapshot' });
           dispatch({ type: 'set_text', payload: newText, pushToUndo: false });
         }
       } catch (err) {
-        debugLogger.error(
-          `[useTextBuffer] external editor error (cmd=${editorCmd}, shell=${useShell}, source=${editorSource}, file=${filePath})`,
-          err,
-        );
+        debugLogger.error('[useTextBuffer] external editor error', err);
       } finally {
         try {
           if (wasRaw) setRawMode?.(true);
@@ -2645,95 +2688,33 @@ export function useTextBuffer({
           );
         }
         if (terminalReleased) appEvents.emit(AppEvent.TerminalAcquired);
-        try {
-          // recursive+force handles leftover swap files (.swp) from vim/neovim.
-          // On Windows, EPERM/EBUSY from locked files may still cause a partial
-          // delete — the catch below keeps it non-fatal.
-          fs.rmSync(tmpDir, { recursive: true, force: true });
-        } catch {
-          /* best-effort cleanup */
-        }
       }
     },
     [dispatch, stdin, setRawMode, preferredEditor],
   );
 
   const handleInput = useCallback(
-    (key: {
-      name: string;
-      ctrl: boolean;
-      meta: boolean;
-      shift: boolean;
-      paste: boolean;
-      sequence: string;
-    }): void => {
-      const { sequence: input } = key;
-
-      if (key.paste) {
-        // Do not do any other processing on pastes so ensure we handle them
-        // before all other cases.
-        insert(input, { paste: key.paste });
-        return;
-      }
-
-      if (
-        key.name === 'return' ||
-        input === '\r' ||
-        input === '\n' ||
-        input === '\\\r' // VSCode terminal represents shift + enter this way
-      )
-        newline();
-      else if (key.name === 'left' && !key.meta && !key.ctrl) move('left');
-      else if (key.ctrl && key.name === 'b') move('left');
-      else if (key.name === 'right' && !key.meta && !key.ctrl) move('right');
-      else if (key.ctrl && key.name === 'f') move('right');
-      else if (key.name === 'up' && !key.shift) move('up');
-      else if (key.name === 'down' && !key.shift) move('down');
-      else if ((key.ctrl || key.meta) && key.name === 'left') move('wordLeft');
-      else if (key.meta && key.name === 'b') move('wordLeft');
-      else if ((key.ctrl || key.meta) && key.name === 'right')
-        move('wordRight');
-      else if (key.meta && key.name === 'd') deleteWordRight();
-      else if (key.meta && key.name === 'f') move('wordRight');
-      else if (key.name === 'home') move('home');
-      else if (key.ctrl && key.name === 'a') move('home');
-      else if (key.name === 'end') move('end');
-      else if (key.ctrl && key.name === 'e') move('end');
-      else if (key.ctrl && key.name === 'w') deleteWordLeft();
-      else if (
-        (key.meta || key.ctrl) &&
-        (key.name === 'backspace' || input === '\x7f')
-      )
-        deleteWordLeft();
-      else if ((key.meta || key.ctrl) && key.name === 'delete')
-        deleteWordRight();
-      else if (
-        key.name === 'backspace' ||
-        input === '\x7f' ||
-        (key.ctrl && key.name === 'h')
-      )
-        backspace();
-      else if (key.name === 'delete' || (key.ctrl && key.name === 'd')) del();
-      else if (key.ctrl && !key.shift && key.name === 'z') undo();
-      else if (key.ctrl && key.shift && key.name === 'z') redo();
-      else if (
-        input &&
-        !key.ctrl &&
-        !key.meta &&
-        key.name !== 'tab' &&
-        input !== '\t'
-      ) {
-        insert(input, { paste: key.paste });
-      }
+    (key: Parameters<TextBuffer['handleInput']>[0]): void => {
+      handleTextBufferInput(key, {
+        insert,
+        newline,
+        move,
+        deleteWordLeft,
+        deleteWordRight,
+        backspace,
+        del,
+        undo,
+        redo,
+      });
     },
     [
+      insert,
       newline,
       move,
       deleteWordLeft,
       deleteWordRight,
       backspace,
       del,
-      insert,
       undo,
       redo,
     ],

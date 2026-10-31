@@ -11,11 +11,15 @@ const {
   buildWakeRepaintSpy,
   readCronTasksMock,
   restoreWorktreeContextMock,
+  generatePromptSuggestionMock,
+  startSpeculationMock,
 } = vi.hoisted(() => ({
   writeTerminalTitleSpy: vi.fn(),
   useWakeRepaintMock: vi.fn(),
   readCronTasksMock: vi.fn(),
   restoreWorktreeContextMock: vi.fn(),
+  generatePromptSuggestionMock: vi.fn(),
+  startSpeculationMock: vi.fn(),
   buildWakeRepaintSpy: vi.fn((deps: Record<string, unknown>) =>
     vi.fn(() => deps),
   ),
@@ -41,6 +45,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     // Control the resume-time worktree restore so tests can pin how the
     // container surfaces its outcomes without a real sidecar on disk.
     restoreWorktreeContext: restoreWorktreeContextMock,
+    generatePromptSuggestion: generatePromptSuggestionMock,
+    startSpeculation: startSpeculationMock,
   };
 });
 
@@ -74,6 +80,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { render, cleanup } from 'ink-testing-library';
 import { renderHook } from '@testing-library/react';
+import * as interactiveMods from '../services/interactive-mod-session.js';
+import { ModSession } from '../services/mod-session.js';
+import { CommandService } from '../services/CommandService.js';
+import { registerCleanup } from '../utils/cleanup.js';
 import { useContext, useState, useReducer, useEffect, act } from 'react';
 import {
   AppContainer,
@@ -142,6 +152,8 @@ import {
   ToolCallStatus,
 } from './types.js';
 import { CommandKind } from './commands/types.js';
+import { helpCommand } from './commands/helpCommand.js';
+import { quitCommand } from './commands/quitCommand.js';
 import {
   CONTEXT_FILES_ANNOUNCEMENT_PREFIX,
   isContextFilesAnnouncement,
@@ -272,7 +284,6 @@ vi.mock('./hooks/useWorktreeSession.js');
 vi.mock('./hooks/useProviderUpdates.js', () => ({
   useProviderUpdates: vi.fn(() => ({
     providerUpdateRequest: undefined,
-    dismissProviderUpdate: vi.fn(),
   })),
 }));
 vi.mock('./contexts/VimModeContext.js');
@@ -545,7 +556,10 @@ describe('AppContainer State Management', () => {
       isReceivingContent: false,
       clearPendingState: mockClearPendingState,
     });
-    mockedUseVim.mockReturnValue({ handleInput: vi.fn() });
+    mockedUseVim.mockReturnValue({
+      handleInput: vi.fn(),
+      ownsEscape: vi.fn().mockReturnValue(false),
+    });
     mockedUseFolderTrust.mockReturnValue({
       isFolderTrustDialogOpen: false,
       handleFolderTrustSelect: vi.fn(),
@@ -634,6 +648,10 @@ describe('AppContainer State Management', () => {
       contextMessage: null,
       session: null,
     });
+    generatePromptSuggestionMock.mockReset();
+    generatePromptSuggestionMock.mockResolvedValue({ suggestion: null });
+    startSpeculationMock.mockReset();
+    startSpeculationMock.mockResolvedValue({ status: 'idle' });
 
     // Mock config's getTargetDir to return consistent workspace directory
     vi.spyOn(mockConfig, 'getTargetDir').mockReturnValue('/test/workspace');
@@ -684,6 +702,46 @@ describe('AppContainer State Management', () => {
       shouldOpenAuthDialog: false,
       memoryFileCount: 0,
     } as InitializationResult;
+  });
+
+  it('applies live workflow keyword opt-out changes to the current Config', () => {
+    const apply = vi.spyOn(mockConfig, 'setWorkflowKeywordTriggerEnabled');
+    const settings = {
+      ...mockSettings,
+      merged: {
+        ...mockSettings.merged,
+        ui: { ...mockSettings.merged.ui, disableWorkflowKeywordTrigger: true },
+      },
+    } as LoadedSettings;
+    const view = render(
+      <AppContainer
+        config={mockConfig}
+        settings={settings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    expect(apply).toHaveBeenLastCalledWith(false);
+    view.rerender(
+      <AppContainer
+        config={mockConfig}
+        settings={
+          {
+            ...settings,
+            merged: {
+              ...settings.merged,
+              ui: {
+                ...settings.merged.ui,
+                disableWorkflowKeywordTrigger: false,
+              },
+            },
+          } as LoadedSettings
+        }
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    expect(apply).toHaveBeenLastCalledWith(true);
   });
 
   it('gives the Agent tool the full SubagentManager surface during initialization', async () => {
@@ -934,6 +992,301 @@ describe('AppContainer State Management', () => {
     }
   });
 
+  it.each(['failed', 'ready', 'cancelled'] as const)(
+    'gates follow-up suggestions and speculation on Mod startup: %s',
+    async (outcome) => {
+      let release!: () => void;
+      let reject!: (error: Error) => void;
+      const ready = new Promise<void>((resolve, rejectStartup) => {
+        release = resolve;
+        reject = rejectStartup;
+      });
+      void ready.catch(() => {});
+      const initialize = vi.fn().mockResolvedValue(undefined);
+      const readReady = vi.fn(() => ready);
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockReturnValue({
+          get ready() {
+            return readReady();
+          },
+          initialize,
+          subscribe: () => () => {},
+          setPresentation: vi.fn(),
+          setRenderInput: vi.fn(),
+        } as unknown as interactiveMods.InteractiveModSession);
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'getSdkMode').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+        getMcpClientManager: () => ({
+          getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+        }),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      const getHistoryTail = vi.fn(() => []);
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: () => false,
+        getHistoryTail,
+      } as unknown as LlmClient);
+      mockSettings.merged.ui!.enableSpeculation = true;
+      generatePromptSuggestionMock.mockResolvedValue({
+        suggestion: 'Run the tests',
+      });
+      const stream = {
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+        clearPendingState: vi.fn(),
+      };
+      let setStreaming!: (state: StreamingState) => void;
+      let streamMounted = false;
+      mockedUseLlmStream.mockImplementation(() => {
+        const [streamingState, setStreamingState] = useState(
+          StreamingState.Responding,
+        );
+        useEffect(() => {
+          streamMounted = true;
+          return () => {
+            streamMounted = false;
+          };
+        }, []);
+        setStreaming = setStreamingState;
+        return { ...stream, streamingState };
+      });
+      const view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      try {
+        await flushConfigInitialization();
+        expect(streamMounted).toBe(true);
+        expect(capturedUIState.streamingState).toBe(StreamingState.Responding);
+        await act(async () => {
+          setStreaming(StreamingState.Idle);
+        });
+        await vi.waitFor(() =>
+          expect(capturedUIState.streamingState).toBe(StreamingState.Idle),
+        );
+        await vi.waitFor(() => expect(readReady).toHaveBeenCalled());
+        expect(generatePromptSuggestionMock).not.toHaveBeenCalled();
+        expect(startSpeculationMock).not.toHaveBeenCalled();
+        expect(getHistoryTail).not.toHaveBeenCalled();
+        if (outcome === 'cancelled') view.unmount();
+        await act(async () => {
+          if (outcome === 'failed') reject(new Error('Mod rejected startup'));
+          else release();
+        });
+        if (outcome === 'ready') {
+          await vi.waitFor(() => {
+            expect(generatePromptSuggestionMock).toHaveBeenCalledOnce();
+            expect(startSpeculationMock).toHaveBeenCalledOnce();
+          });
+        } else {
+          expect(generatePromptSuggestionMock).not.toHaveBeenCalled();
+          expect(startSpeculationMock).not.toHaveBeenCalled();
+        }
+      } finally {
+        release();
+        cleanup();
+        owner.mockRestore();
+      }
+    },
+  );
+
+  it.each([
+    ['workflow', 'Please use a workflow.', true, false, true, false],
+    ['ultracode', 'ultracode: audit', true, false, true, false],
+    ['ordinary', 'Run the tests', true, false, true, true],
+    ['unknown', 'workflow inspect', false, false, true, true],
+    ['opt-out', 'workflow inspect', true, true, true, true],
+    ['missing tool', 'workflow inspect', true, false, false, true],
+    ['mode', 'Run the tests', false, false, true, false],
+    ['mode running', 'Run the tests', false, false, true, false],
+    ['pending exit', 'Run the tests', false, false, true, false],
+    ['late mode transition', 'Run the tests', false, false, true, false],
+  ] as const)(
+    'accepts completed speculation only without a current workflow intent: %s',
+    async (_label, text, human, optOut, reachable, acceptCached) => {
+      vi.spyOn(interactiveMods, 'getInteractiveModSession').mockReturnValue(
+        undefined,
+      );
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'getSdkMode').mockReturnValue(false);
+      vi.spyOn(mockConfig, 'isWorkflowsEnabled').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'isWorkflowNameOnly').mockReturnValue(true);
+      vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+        getAllToolNames: () => (reachable ? [ToolNames.WORKFLOW] : []),
+        getTool: () => undefined,
+        getMcpClientManager: () => ({
+          getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+        }),
+      } as unknown as ReturnType<Config['getToolRegistry']>);
+      const addHistory = vi.fn().mockResolvedValue(undefined);
+      const markToolResultsInjected = vi.fn();
+      vi.spyOn(mockConfig, 'getLlmClient').mockReturnValue({
+        initialize: vi.fn().mockResolvedValue(undefined),
+        setTools: vi.fn().mockResolvedValue(undefined),
+        isInitialized: () => false,
+        getHistoryTail: () => [],
+        addHistory,
+        markToolResultsInjected,
+      } as unknown as LlmClient);
+      mockSettings.merged.ui!.enableSpeculation = true;
+      mockSettings.merged.ui!.disableWorkflowKeywordTrigger = optOut;
+      generatePromptSuggestionMock.mockResolvedValue({ suggestion: text });
+      const controller = new AbortController();
+      const cleanupOverlay = vi.fn().mockResolvedValue(undefined);
+      const speculation = {
+        status: _label === 'mode running' ? 'running' : 'completed',
+        suggestion: text,
+        messages: [{ role: 'model', parts: [{ text: 'cached result' }] }],
+        overlayFs: acceptCached ? null : { cleanup: cleanupOverlay },
+        abortController: controller,
+        startTime: Date.now(),
+        toolUseCount: 0,
+      };
+      let resolveSpeculation!: (state: typeof speculation) => void;
+      if (_label === 'late mode transition') {
+        startSpeculationMock.mockReturnValue(
+          new Promise((resolve) => {
+            resolveSpeculation = resolve;
+          }),
+        );
+      } else {
+        startSpeculationMock.mockResolvedValue(speculation);
+      }
+      let modeChanged: (() => void) | undefined;
+      vi.spyOn(mockConfig, 'onWorkflowModeChange').mockImplementation(
+        (listener) => {
+          modeChanged = () => listener(mockConfig.getWorkflowMode());
+          return () => {};
+        },
+      );
+      const queue = vi.fn();
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      let setStreaming!: (state: StreamingState) => void;
+      mockedUseLlmStream.mockImplementation(() => {
+        const [streamingState, setState] = useState(StreamingState.Responding);
+        setStreaming = setState;
+        return {
+          streamingState,
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+          streamingResponseLengthRef: { current: 0 },
+          isReceivingContent: false,
+        };
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      await flushConfigInitialization();
+      await act(async () => setStreaming(StreamingState.Idle));
+      await vi.waitFor(() =>
+        expect(startSpeculationMock).toHaveBeenCalledOnce(),
+      );
+      if (
+        _label === 'mode' ||
+        _label === 'mode running' ||
+        _label === 'pending exit' ||
+        _label === 'late mode transition'
+      ) {
+        const modeContext = vi
+          .spyOn(mockConfig, 'hasWorkflowModeContext')
+          .mockReturnValue(true);
+        if (_label !== 'mode') {
+          await act(async () => modeChanged?.());
+          if (_label === 'late mode transition') {
+            modeContext.mockReturnValue(false);
+            await act(async () => {
+              modeChanged?.();
+              resolveSpeculation(speculation);
+            });
+          }
+          expect(controller.signal.aborted).toBe(true);
+          expect(cleanupOverlay).toHaveBeenCalledOnce();
+        }
+      }
+      await act(async () => {
+        capturedUIActions.handleFinalSubmit(text, {
+          submittedPrompt: text,
+          displayText: text,
+          ...(human ? { humanInput: { text } } : {}),
+        });
+      });
+      if (acceptCached) {
+        expect(markToolResultsInjected).toHaveBeenCalledOnce();
+        expect(addHistory).toHaveBeenCalledOnce();
+        expect(queue).not.toHaveBeenCalled();
+        expect(controller.signal.aborted).toBe(false);
+      } else {
+        expect(markToolResultsInjected).not.toHaveBeenCalled();
+        expect(addHistory).not.toHaveBeenCalled();
+        expect(queue).toHaveBeenCalledWith(text, false, text, false, {
+          displayText: text,
+          humanInput: human ? { text } : undefined,
+        });
+        expect(controller.signal.aborted).toBe(true);
+        expect(cleanupOverlay).toHaveBeenCalledOnce();
+      }
+    },
+  );
+
+  it('does not forward composer human intent when dispatching a slash command', () => {
+    vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+    const submitQuery = vi.fn();
+    mockedUseLlmStream.mockReturnValue({
+      ...mockedUseLlmStream(),
+      streamingState: StreamingState.Idle,
+      submitQuery,
+    });
+    render(
+      <AppContainer
+        config={mockConfig}
+        settings={mockSettings}
+        version="1.0.0"
+        initializationResult={mockInitResult}
+      />,
+    );
+    const text = '/skills workflow';
+    act(() => {
+      capturedUIActions.handleFinalSubmit(text, {
+        submittedPrompt: text,
+        displayText: text,
+        humanInput: { text },
+      });
+    });
+    expect(submitQuery).toHaveBeenCalledWith(
+      text,
+      SendMessageType.UserQuery,
+      undefined,
+      { submittedPrompt: text, displayText: text },
+    );
+  });
+
   describe('speculative tool results', () => {
     it('renders error envelopes as failed tools', () => {
       expect(
@@ -981,19 +1334,26 @@ describe('AppContainer State Management', () => {
     });
   });
 
-  afterEach(() => {
-    if (originalStdoutIsTTY === undefined) {
-      delete (process.stdout as { isTTY?: unknown }).isTTY;
-    } else {
-      Object.defineProperty(process.stdout, 'isTTY', {
-        value: originalStdoutIsTTY,
-        configurable: true,
-      });
+  afterEach(async () => {
+    try {
+      try {
+        cleanup();
+      } finally {
+        vi.useRealTimers();
+        await mockConfig.shutdown({ strictResourceCleanup: true });
+      }
+    } finally {
+      if (originalStdoutIsTTY === undefined) {
+        delete (process.stdout as { isTTY?: unknown }).isTTY;
+      } else {
+        Object.defineProperty(process.stdout, 'isTTY', {
+          value: originalStdoutIsTTY,
+          configurable: true,
+        });
+      }
+      vi.unstubAllEnvs();
+      restoreCiEnv();
     }
-    vi.unstubAllEnvs();
-    restoreCiEnv();
-    cleanup();
-    vi.useRealTimers();
   });
 
   const rewindUserItem = (
@@ -1031,6 +1391,9 @@ describe('AppContainer State Management', () => {
     noLlmClient?: boolean;
     history?: HistoryItem[];
     contextFilePaths?: string[];
+    recordedTurnIndex?: number;
+    recordedTurnIndices?: Record<string, number>;
+    snapshots?: Array<{ promptId: string }>;
   };
 
   const renderRewindHarness = (options: RewindHarnessOptions = {}) => {
@@ -1100,7 +1463,7 @@ describe('AppContainer State Management', () => {
         },
       );
     }
-    const snapshots = [
+    const snapshots = options.snapshots ?? [
       { promptId: 'prompt-1' },
       { promptId: 'prompt-2' },
       { promptId: 'prompt-3' },
@@ -1112,8 +1475,22 @@ describe('AppContainer State Management', () => {
     } as unknown as ReturnType<Config['getFileHistoryService']>);
 
     const rewindRecording = vi.fn();
+    const getRewindTurnIndex = vi.fn((promptId: string) => {
+      if (options.recordedTurnIndices) {
+        return options.recordedTurnIndices[promptId] ?? -1;
+      }
+      const targetId =
+        target.type === 'user'
+          ? (target.promptId ?? target.rewindId)
+          : undefined;
+      if (options.recordedTurnIndex !== undefined && promptId === targetId) {
+        return options.recordedTurnIndex;
+      }
+      return ['prompt-1', 'prompt-2', 'prompt-3'].indexOf(promptId);
+    });
     vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
       rewindRecording,
+      getRewindTurnIndex,
     } as unknown as NonNullable<ReturnType<Config['getChatRecordingService']>>);
 
     if (options.contextFilePaths) {
@@ -1141,6 +1518,7 @@ describe('AppContainer State Management', () => {
       getHistoryShallow,
       truncateHistory,
       rewindRecording,
+      getRewindTurnIndex,
       snapshots,
     };
   };
@@ -1563,20 +1941,28 @@ describe('AppContainer State Management', () => {
       }).not.toThrow();
     });
 
-    it('handles debug mode state', () => {
+    it('handles debug mode state', async () => {
       const debugConfig = makeFakeConfig();
       vi.spyOn(debugConfig, 'getDebugMode').mockReturnValue(true);
 
-      expect(() => {
-        render(
-          <AppContainer
-            config={debugConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-      }).not.toThrow();
+      try {
+        expect(() => {
+          render(
+            <AppContainer
+              config={debugConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
+        }).not.toThrow();
+      } finally {
+        try {
+          cleanup();
+        } finally {
+          await debugConfig.shutdown({ strictResourceCleanup: true });
+        }
+      }
     });
   });
 
@@ -3418,6 +3804,8 @@ describe('AppContainer State Management', () => {
         '<system-reminder>\nUse list_agents to inspect restored agents.\n' +
           '</system-reminder>\n\ncontinue the review',
         false,
+        // #11553: no composer provenance on this submit, so the history row
+        // must still show the user's text without the injected envelope.
         'continue the review',
         false,
       );
@@ -3430,19 +3818,12 @@ describe('AppContainer State Management', () => {
       );
     });
 
-    // The workflow reminder's shell-mode gate is load-bearing through this
-    // call site: a shell-mode submission goes to bash, where a leading
-    // `<system-reminder>` is a syntax error, and is recorded as the command
-    // the user ran. Both arms go through the real handleFinalSubmit and the
-    // real shellModeActive state, so dropping `shellMode: shellModeActive`
-    // from the call turns the shell arm red while the ordinary arm keeps the
-    // assertion from passing vacuously.
     it.each([
       ['a shell-mode submission', true, false],
       ['an ordinary prompt', false, true],
     ])(
-      'adds the workflow keyword reminder only outside shell mode: %s',
-      (_case, shellMode, expectReminder) => {
+      'captures human workflow input without prefixing model text: %s',
+      (_case, shellMode, expectHuman) => {
         const mockQueueMessage = vi.fn();
         // The mount effect's un-awaited config.initialize() runs the real
         // initialization against this partial registry mock and rejects
@@ -3500,20 +3881,289 @@ describe('AppContainer State Management', () => {
         }
         capturedUIActions.handleFinalSubmit('gh workflow list', {
           submittedPrompt: 'gh workflow list',
+          displayText: 'gh workflow list',
+          humanInput: { text: 'gh workflow list' },
         });
 
         expect(mockQueueMessage).toHaveBeenCalledTimes(1);
-        const submitted = mockQueueMessage.mock.calls[0][0] as string;
-        expect(submitted).toContain('gh workflow list');
-        // Asserted on the workflow reminder's own text: this call site gates
-        // only that reminder. The other notices the handler prepends gate
-        // shell mode at their own call sites (see the #11626 cases below).
-        const workflowReminder = 'includes the "workflow" keyword';
-        if (expectReminder) {
-          expect(submitted).toContain(workflowReminder);
-        } else {
-          expect(submitted).not.toContain(workflowReminder);
+        expect(mockQueueMessage.mock.calls[0][0]).toBe('gh workflow list');
+        expect(mockQueueMessage.mock.calls[0][4]).toEqual({
+          displayText: 'gh workflow list',
+          humanInput: expectHuman ? { text: 'gh workflow list' } : undefined,
+        });
+      },
+    );
+
+    it('captures a literal leading envelope from the actual Vim submit without inventing hook provenance', () => {
+      const queue = vi.fn();
+      const raw =
+        '<system-reminder>literal user text</system-reminder>\nworkflow inspect';
+      mockedUseTextBuffer.mockReturnValue({ text: raw, setText: vi.fn() });
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      const submitVim = mockedUseVim.mock.calls.at(-1)?.[1] as (
+        text: string,
+      ) => void;
+      act(() => submitVim(raw));
+      expect(queue).toHaveBeenCalledWith(raw, false, undefined, false, {
+        displayText: raw,
+        humanInput: { text: raw },
+      });
+    });
+
+    it.each([true, false])(
+      'keeps a Vim register paste unknown when Vim remains enabled: %s',
+      (keepVimEnabled) => {
+        const queue = vi.fn();
+        const raw = 'workflow recalled through a register';
+        mockedUseTextBuffer.mockReturnValue({ text: raw, setText: vi.fn() });
+        mockedUseVimModeState.mockReturnValue({
+          vimEnabled: true,
+          vimMode: 'NORMAL',
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          ...mockedUseMessageQueue(),
+          addMessage: queue,
+        });
+        const view = render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        const onPaste = mockedUseVim.mock.calls.at(-1)?.[2] as () => void;
+        expect(onPaste).toBeTypeOf('function');
+        act(() => onPaste());
+        if (!keepVimEnabled) {
+          mockedUseVimModeState.mockReturnValue({
+            vimEnabled: false,
+            vimMode: 'NORMAL',
+          });
+          view.rerender(
+            <AppContainer
+              config={mockConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
         }
+        const submit = mockedUseVim.mock.calls.at(-1)?.[1] as (
+          text: string,
+        ) => void;
+        act(() => submit(raw));
+        expect(queue).toHaveBeenCalledWith(raw, false, undefined, false, {
+          displayText: raw,
+          humanInput: undefined,
+        });
+      },
+    );
+
+    it('captures expanded fresh Vim paste text as human input', () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'workflow pasted body'.padEnd(1200, 'x');
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const queue = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: placeholder,
+        setText: vi.fn(),
+      });
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'NORMAL',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      act(() => capturedUIActions.setPendingPastes?.(pasteExpansions));
+      act(() => {
+        const submit = mockedUseVim.mock.calls.at(-1)?.[1] as (
+          text: string,
+        ) => void;
+        submit(placeholder);
+      });
+      expect(queue).toHaveBeenCalledWith(body, false, undefined, false, {
+        displayText: placeholder,
+        humanInput: { text: body },
+        pasteExpansions,
+      });
+    });
+
+    it('preserves an unsubmitted pasted draft across a session change', () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'workflow pasted body'.padEnd(1200, 'x');
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const queue = vi.fn();
+      const session = mockedUseSessionStats();
+      mockedUseSessionStats.mockReturnValue({
+        ...session,
+        stats: { ...session.stats, sessionId: 'before-clear' },
+      });
+      mockedUseTextBuffer.mockReturnValue({
+        text: placeholder,
+        setText: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      const view = render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      act(() => capturedUIActions.setPendingPastes?.(pasteExpansions));
+      mockedUseSessionStats.mockReturnValue({
+        ...session,
+        stats: { ...session.stats, sessionId: 'after-clear' },
+      });
+      act(() => {
+        view.rerender(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+      });
+      expect(capturedUIState.sessionStats.sessionId).toBe('after-clear');
+      act(() => {
+        capturedUIActions.handleFinalSubmit(placeholder, {
+          displayText: placeholder,
+          humanInput: { text: body },
+        });
+      });
+      expect(queue).toHaveBeenCalledWith(body, false, undefined, false, {
+        displayText: placeholder,
+        humanInput: { text: body },
+        pasteExpansions,
+      });
+    });
+
+    it('preserves paste bodies across an empty Vim buffer and a register paste', () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'workflow pasted body'.padEnd(1200, 'x');
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const queue = vi.fn();
+      let onBufferChange: ((text: string) => void) | undefined;
+      let bufferText = placeholder;
+      mockedUseTextBuffer.mockImplementation((options) => {
+        onBufferChange = options.onChange;
+        return {
+          get text() {
+            return bufferText;
+          },
+          setText: vi.fn(),
+        };
+      });
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'NORMAL',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      act(() => capturedUIActions.setPendingPastes?.(pasteExpansions));
+      act(() => {
+        bufferText = '';
+        onBufferChange?.('');
+      });
+      act(() => {
+        const onPaste = mockedUseVim.mock.calls.at(-1)?.[2] as () => void;
+        onPaste();
+        bufferText = placeholder;
+        onBufferChange?.(placeholder);
+      });
+      act(() => {
+        const submit = mockedUseVim.mock.calls.at(-1)?.[1] as (
+          text: string,
+        ) => void;
+        submit(placeholder);
+      });
+      expect(queue).toHaveBeenCalledWith(body, false, undefined, false, {
+        displayText: placeholder,
+        humanInput: undefined,
+        pasteExpansions,
+      });
+      expect(capturedUIState.pendingPastes?.size).toBe(0);
+    });
+
+    it.each(['stash', 'reverse-search'])(
+      'does not upgrade unknown %s text from composer metadata',
+      (source) => {
+        const raw =
+          '<system-reminder>unknown history</system-reminder>\nworkflow inspect';
+        const queue = vi.fn();
+        mockedUseTextBuffer.mockReturnValue({ text: '', setText: vi.fn() });
+        if (source === 'stash') {
+          mockedRestorePromptStash.mockImplementation(
+            (_targetDir, _currentText, restore) => {
+              restore(raw);
+              return true;
+            },
+          );
+        }
+        mockedUseMessageQueue.mockReturnValue({
+          ...mockedUseMessageQueue(),
+          addMessage: queue,
+        });
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        if (source === 'reverse-search')
+          capturedUIActions.invalidateSubmittedPromptProvenance();
+        capturedUIActions.handleFinalSubmit(raw, {
+          submittedPrompt: raw,
+          displayText: raw,
+          humanInput: { text: raw },
+        });
+        expect(queue).toHaveBeenCalledWith(raw, false, undefined, false, {
+          displayText: raw,
+          humanInput: undefined,
+        });
       },
     );
 
@@ -3640,9 +4290,8 @@ describe('AppContainer State Management', () => {
       );
       // The startup effect arms pendingWorktreeNoticeRef from the consumed
       // one-shot Config notice; wait for it before submitting.
-      await vi.waitFor(() => {
-        expect(startupNoticeSpy).toHaveBeenCalled();
-      });
+      await flushConfigInitialization();
+      expect(startupNoticeSpy).toHaveBeenCalled();
 
       act(() => {
         capturedUIActions.setShellModeActive(true);
@@ -4156,6 +4805,91 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it('routes the vim submit through the composer-registered submit path', () => {
+      const mockQueueMessage = vi.fn();
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: [],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue(''),
+        popAllMessages: vi.fn().mockReturnValue(null),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      // The composer registers the path that expands large-paste placeholders
+      // and bumps the submit epoch; vim's Enter must use it, not submit the
+      // raw buffer it just cleared.
+      const composerSubmit = vi.fn();
+      const registerSubmit = capturedUIActions.registerPromptSubmit;
+      expect(registerSubmit).toBeDefined();
+      registerSubmit!(composerSubmit);
+      const vimSubmit = mockedUseVim.mock.calls.at(-1)?.[1] as (
+        value: string,
+      ) => void;
+      vimSubmit('[Pasted Content 1200 chars]');
+
+      expect(composerSubmit).toHaveBeenCalledWith(
+        '[Pasted Content 1200 chars]',
+      );
+      expect(mockQueueMessage).not.toHaveBeenCalled();
+    });
+
+    it('keeps a vim composer submit displayed as typed while the model reads the framed paste', () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'pasted body'.padEnd(1200, 'x');
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const framed = `<clipboard-paste>\n${body}\n</clipboard-paste>\nattribution`;
+      const queue = vi.fn();
+      mockedUseVimModeState.mockReturnValue({
+        vimEnabled: true,
+        vimMode: 'INSERT',
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        ...mockedUseMessageQueue(),
+        addMessage: queue,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      // What the composer's submit path hands over for a collapsed paste.
+      // Vim drops the submittedPrompt projection, so the transcript, the
+      // session log and a cancel-restore read the display text instead.
+      act(() => {
+        capturedUIActions.handleFinalSubmit(framed, {
+          deferUntilIdle: false,
+          submittedPrompt: placeholder,
+          displayText: placeholder,
+          humanInput: { text: body },
+          pasteExpansions,
+        });
+      });
+      expect(queue).toHaveBeenCalledWith(framed, false, undefined, false, {
+        displayText: placeholder,
+        humanInput: { text: body },
+        pasteExpansions,
+      });
+    });
+
     it('keeps Vim-modified composer text ineligible after Vim is disabled', () => {
       const mockQueueMessage = vi.fn();
       let setVimEnabled: ((enabled: boolean) => void) | undefined;
@@ -4327,6 +5061,10 @@ describe('AppContainer State Management', () => {
         id: number;
         text: string;
         submittedPrompt?: string;
+        humanInput?: { text: string };
+        pasteExpansions?: ReadonlyMap<string, string>;
+        hasUnknownInput?: boolean;
+        modelText?: string;
       } | null;
       canUndoLastLoggedUserMessage: boolean;
       turnProducedMeaningfulContent: boolean;
@@ -4381,56 +5119,63 @@ describe('AppContainer State Management', () => {
       capturedOnCancelSubmit(info);
     };
 
-    it('does not fire outer cancel handler on Esc when vim is enabled in INSERT mode', async () => {
-      mockedUseVimModeState.mockReturnValue({
-        vimEnabled: true,
-        vimMode: 'INSERT',
-      });
-      const cancelSpy = vi.fn();
-      installCancelCapture({
-        streamingState: 'responding',
-        submitQuery: vi.fn(),
-        initError: null,
-        pendingHistoryItems: [],
-        thought: null,
-        cancelOngoingRequest: cancelSpy,
-        retryLastPrompt: vi.fn(),
-      });
-      mockedUseTextBuffer.mockReturnValue({
-        text: '',
-        setText: vi.fn(),
-      });
-      mockedUseMessageQueue.mockReturnValue({
-        removeGoalTurns: vi.fn().mockReturnValue([]),
-        messageQueue: [],
-        addMessage: vi.fn(),
-        clearQueue: vi.fn(),
-        getQueuedMessagesText: vi.fn().mockReturnValue(''),
-        popAllMessages: vi.fn().mockReturnValue(null),
-        drainQueue: vi.fn().mockReturnValue([]),
-        popNextTurn: vi.fn().mockReturnValue(null),
-      });
+    it.each(['INSERT', 'NORMAL'])(
+      'does not fire outer cancel when Vim owns Esc in %s mode',
+      async (mode) => {
+        mockedUseVimModeState.mockReturnValue({
+          vimEnabled: true,
+          vimMode: mode,
+        });
+        const ownsEscape = vi.fn().mockReturnValue(true);
+        mockedUseVim.mockReturnValue({ handleInput: vi.fn(), ownsEscape });
+        const cancelSpy = vi.fn();
+        installCancelCapture({
+          streamingState: 'responding',
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: cancelSpy,
+          retryLastPrompt: vi.fn(),
+        });
+        mockedUseTextBuffer.mockReturnValue({
+          text: '',
+          setText: vi.fn(),
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          removeGoalTurns: vi.fn().mockReturnValue([]),
+          messageQueue: [],
+          addMessage: vi.fn(),
+          clearQueue: vi.fn(),
+          getQueuedMessagesText: vi.fn().mockReturnValue(''),
+          popAllMessages: vi.fn().mockReturnValue(null),
+          drainQueue: vi.fn().mockReturnValue([]),
+          popNextTurn: vi.fn().mockReturnValue(null),
+        });
 
-      render(
-        <AppContainer
-          config={mockConfig}
-          settings={mockSettings}
-          version="1.0.0"
-          initializationResult={mockInitResult}
-        />,
-      );
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
 
-      await Promise.resolve();
-      await Promise.resolve();
+        await Promise.resolve();
+        await Promise.resolve();
 
-      const handleKeypress = getGlobalKeypress();
-      expect(handleKeypress).toBeDefined();
+        const handleKeypress = getGlobalKeypress();
+        expect(handleKeypress).toBeDefined();
 
-      handleKeypress!(escKey);
+        handleKeypress!(escKey);
 
-      // In vim INSERT mode, Esc must NOT trigger the outer cancel handler.
-      expect(cancelSpy).not.toHaveBeenCalled();
-    });
+        expect(ownsEscape).toHaveBeenCalledOnce();
+        expect(ownsEscape.mock.calls[0][0]).toBe(escKey);
+        // A Vim-owned Esc must not also trigger the outer cancel handler.
+        expect(cancelSpy).not.toHaveBeenCalled();
+      },
+    );
 
     it('cancels the ongoing request on a single Esc with an empty buffer and queued follow-ups', async () => {
       // Positive counterpart to the vim-INSERT guard above: while the agent
@@ -4743,7 +5488,7 @@ describe('AppContainer State Management', () => {
       // Third cleanup leg: in-memory chat history is stripped so the
       // cancelled prompt doesn't ride along on the next request as an
       // orphan user turn.
-      expect(mockStripOrphans).toHaveBeenCalled();
+      expect(mockStripOrphans).toHaveBeenCalledWith(true);
       // Fourth cleanup leg: Ink's static-rendered transcript region
       // is append-only — shrinking the underlying array doesn't unprint
       // already-flushed lines. `refreshStatic` writes the clear-terminal
@@ -4894,9 +5639,264 @@ describe('AppContainer State Management', () => {
         wasGoalTurn: true,
       });
 
-      expect(mockStripOrphans).toHaveBeenCalled();
+      expect(mockStripOrphans).toHaveBeenCalledWith(true);
       // Auto-restore itself bailed: there was no user item to rewind.
       expect(mockTruncateToItem).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['queue', false, true, false, false],
+      ['cancel', false, true, false, false],
+      ['queue', true, true, false, false],
+      ['cancel', true, true, false, false],
+      ['queue', true, false, false, false],
+      ['cancel', true, false, false, false],
+      ['queue', false, true, true, false],
+      ['cancel', false, true, true, false],
+      ['queue', false, false, true, false],
+      ['cancel', false, false, true, false],
+      ['queue', false, false, true, true],
+      ['cancel', false, false, true, true],
+      ['queue', false, true, 'current', false],
+      ['cancel', false, true, 'current', false],
+    ] as const)(
+      'preserves restored source constraints (%s, paste: %s, edited: %s, mixed: %s, cleared: %s)',
+      async (source, pasted, editedDraft, mixed, cleared) => {
+        const placeholder = '[Pasted Content 1200 chars]';
+        const body = 'ultracode workflow payload'.padEnd(1200, 'x');
+        const literal = '<system-reminder>user literal</system-reminder>';
+        const currentUnknown = mixed === 'current';
+        const currentDraft = 'unknown workflow history draft';
+        const original = pasted
+          ? `${literal}\n${placeholder}`
+          : mixed === true
+            ? 'unknown workflow text\n\nknown human'
+            : 'workflow inspect';
+        const originalHuman = {
+          text: mixed === true ? 'known human' : original,
+        };
+        const expandedOriginal = pasted ? `${literal}\n${body}` : original;
+        const originalModel =
+          mixed === true
+            ? `<system-reminder>managed notice</system-reminder>\n${expandedOriginal}`
+            : expandedOriginal;
+        const edited = currentUnknown
+          ? `${original}\n${currentDraft}\nappend instruction`
+          : editedDraft
+            ? pasted || mixed
+              ? `${original}\nappend instruction`
+              : 'ultracode inspect the edited draft'
+            : original;
+        const editedModel =
+          !editedDraft && !cleared
+            ? originalModel
+            : pasted
+              ? `${expandedOriginal}\nappend instruction`
+              : edited;
+        const pasteExpansions = pasted
+          ? new Map([[placeholder, body]])
+          : undefined;
+        const queue = vi.fn();
+        let onBufferChange: ((text: string) => void) | undefined;
+        let bufferText = '';
+        mockedUseTextBuffer.mockImplementation((options) => {
+          onBufferChange = options.onChange;
+          return {
+            get text() {
+              return bufferText;
+            },
+            setText: vi.fn(),
+          };
+        });
+        mockedUseHistory.mockReturnValue({
+          history: [
+            { id: 1, type: 'user', text: original },
+            { id: 2, type: 'info', text: 'Request cancelled.' },
+          ],
+          addItem: vi.fn(),
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(),
+          truncateToItem: vi.fn(),
+        });
+        installCancelCapture({
+          streamingState: 'responding',
+          submitQuery: vi.fn(),
+          initError: null,
+          pendingHistoryItems: [],
+          thought: null,
+          cancelOngoingRequest: vi.fn(),
+          retryLastPrompt: vi.fn(),
+        });
+        mockedUseMessageQueue.mockReturnValue({
+          ...mockedUseMessageQueue(),
+          addMessage: queue,
+          popAllMessages: vi.fn().mockReturnValue(
+            source === 'queue'
+              ? {
+                  kind: 'user',
+                  modelText: originalModel,
+                  displayText: original,
+                  submittedPrompt: original,
+                  humanInput: originalHuman,
+                  ...(mixed === true ? { hasUnknownInput: true } : {}),
+                  ...(pasteExpansions ? { pasteExpansions } : {}),
+                  turnKey: 'known-human',
+                }
+              : null,
+          ),
+        });
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        await Promise.resolve();
+        if (currentUnknown) {
+          act(() => {
+            capturedUIActions.invalidateSubmittedPromptProvenance();
+            bufferText = currentDraft;
+            onBufferChange?.(currentDraft);
+          });
+        }
+        act(() => {
+          if (source === 'queue') {
+            expect(capturedUIActions.popAllQueuedMessages()).toBe(original);
+          } else {
+            const info = cancelInfoFor(original, 1, original);
+            triggerCancel({
+              ...info,
+              lastTurnUserItem: {
+                ...info.lastTurnUserItem,
+                humanInput: originalHuman,
+                ...(mixed === true ? { hasUnknownInput: true } : {}),
+                modelText: originalModel,
+                ...(pasteExpansions ? { pasteExpansions } : {}),
+              },
+            });
+          }
+        });
+        if (pasteExpansions) {
+          expect(capturedUIState.pendingPastes).toEqual(pasteExpansions);
+        }
+        if (cleared) act(() => onBufferChange?.(''));
+        if (editedDraft || cleared) act(() => onBufferChange?.(edited));
+        act(() => {
+          capturedUIActions.handleFinalSubmit(
+            !editedDraft && pasted ? expandedOriginal : edited,
+            {
+              submittedPrompt: edited,
+              displayText: edited,
+              humanInput: { text: edited },
+              ...(!editedDraft && pasteExpansions ? { pasteExpansions } : {}),
+            },
+          );
+        });
+        // text-buffer reports the submit-time empty buffer after the synchronous callback consumes provenance.
+        act(() => onBufferChange?.(''));
+        expect(queue).toHaveBeenCalledWith(
+          editedModel,
+          false,
+          !editedDraft || cleared ? original : undefined,
+          false,
+          {
+            displayText: edited,
+            humanInput:
+              mixed && !cleared
+                ? editedDraft
+                  ? undefined
+                  : originalHuman
+                : { text: edited },
+            ...(mixed && !editedDraft && !cleared
+              ? { hasUnknownInput: true }
+              : {}),
+            ...(pasteExpansions ? { pasteExpansions } : {}),
+          },
+        );
+        expect(capturedUIState.pendingPastes?.size).toBe(0);
+      },
+    );
+
+    it('keeps paste bodies when an idle slash command is cancelled, edited and resubmitted', () => {
+      const placeholder = '[Pasted Content 1200 chars]';
+      const body = 'goal specification'.padEnd(1200, 'x');
+      const raw = `/goal ${placeholder}`;
+      const modelText = `/goal ${body}`;
+      const pasteExpansions = new Map([[placeholder, body]]);
+      const submitQuery = vi.fn();
+      let onBufferChange: ((text: string) => void) | undefined;
+      let bufferText = '';
+      mockedUseTextBuffer.mockImplementation((options) => {
+        onBufferChange = options.onChange;
+        return {
+          get text() {
+            return bufferText;
+          },
+          setText: vi.fn((text: string) => {
+            bufferText = text;
+          }),
+        };
+      });
+      mockedUseHistory.mockReturnValue({
+        ...mockedUseHistory(),
+        history: [{ id: 1, type: 'user', text: raw }],
+      });
+      installCancelCapture({
+        streamingState: 'idle',
+        submitQuery,
+        pendingHistoryItems: [],
+        thought: null,
+      });
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      act(() => {
+        capturedUIActions.handleFinalSubmit(modelText, {
+          submittedPrompt: raw,
+          displayText: raw,
+          pasteExpansions,
+        });
+      });
+      const metadata = submitQuery.mock.calls[0]?.[3] as {
+        displayText?: string;
+        submittedPrompt?: string;
+        pasteExpansions?: ReadonlyMap<string, string>;
+      };
+      act(() => {
+        triggerCancel({
+          ...cancelInfoFor(raw, 1, raw),
+          lastTurnUserItem: {
+            id: 1,
+            text: metadata.displayText ?? raw,
+            submittedPrompt: metadata.submittedPrompt,
+            modelText,
+            pasteExpansions: metadata.pasteExpansions,
+          },
+        });
+      });
+      const edited = `${raw} and keep it concise`;
+      act(() => {
+        bufferText = edited;
+        onBufferChange?.(edited);
+      });
+      act(() => {
+        capturedUIActions.handleFinalSubmit(edited, {
+          submittedPrompt: edited,
+          displayText: edited,
+        });
+      });
+      expect(submitQuery).toHaveBeenCalledTimes(2);
+      expect(submitQuery.mock.calls[1]?.[0]).toBe(
+        `${modelText} and keep it concise`,
+      );
     });
 
     it('reuses the cancelled turn provenance on an unchanged resubmit', async () => {
@@ -4961,6 +5961,84 @@ describe('AppContainer State Management', () => {
       });
 
       expect(mockSetText).toHaveBeenCalledWith(modelText);
+      expect(mockQueueMessage).toHaveBeenCalledWith(
+        modelText,
+        false,
+        'review this',
+        false,
+      );
+    });
+
+    it('restores a queued prompt as the user wrote it and keeps the model text for resubmit', async () => {
+      // The queue-pop restore is the twin of the auto-restore path above: ESC
+      // must hand the composer the same text on both, while an unchanged
+      // resubmit still sends the notice the queued entry consumed.
+      const modelText =
+        '<system-reminder>\nmanaged context\n</system-reminder>\n\nreview this';
+      const mockSetText = vi.fn();
+      const mockQueueMessage = vi.fn();
+      mockedUseTextBuffer.mockReturnValue({
+        text: '',
+        setText: mockSetText,
+      });
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'info', text: 'Request cancelled.' }],
+        addItem: vi.fn(),
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseLogger.mockReturnValue({
+        getPreviousUserMessages: vi.fn().mockResolvedValue([]),
+        removeLastUserMessage: vi.fn().mockResolvedValue(true),
+      });
+      installCancelCapture({
+        streamingState: 'responding',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+      });
+      mockedUseMessageQueue.mockReturnValue({
+        removeGoalTurns: vi.fn().mockReturnValue([]),
+        messageQueue: ['review this'],
+        addMessage: mockQueueMessage,
+        clearQueue: vi.fn(),
+        getQueuedMessagesText: vi.fn().mockReturnValue('review this'),
+        popAllMessages: vi
+          .fn()
+          .mockReturnValue({ modelText, submittedPrompt: 'review this' }),
+        drainQueue: vi.fn().mockReturnValue([]),
+        popNextTurn: vi.fn().mockReturnValue(null),
+      });
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+
+      triggerCancel({
+        pendingItem: null,
+        lastTurnUserItem: null,
+        canUndoLastLoggedUserMessage: false,
+        turnProducedMeaningfulContent: false,
+      });
+
+      expect(mockSetText).toHaveBeenCalledWith('review this');
+
+      capturedUIActions.handleFinalSubmit('review this', {
+        submittedPrompt: 'review this',
+      });
       expect(mockQueueMessage).toHaveBeenCalledWith(
         modelText,
         false,
@@ -5871,23 +6949,31 @@ describe('AppContainer State Management', () => {
   });
 
   describe('Error Handling', () => {
-    it('handles config methods that might throw', () => {
+    it('handles config methods that might throw', async () => {
       const errorConfig = makeFakeConfig();
       vi.spyOn(errorConfig, 'getModel').mockImplementation(() => {
         throw new Error('Config error');
       });
 
       // Should still render without crashing - errors should be handled internally
-      expect(() => {
-        render(
-          <AppContainer
-            config={errorConfig}
-            settings={mockSettings}
-            version="1.0.0"
-            initializationResult={mockInitResult}
-          />,
-        );
-      }).not.toThrow();
+      try {
+        expect(() => {
+          render(
+            <AppContainer
+              config={errorConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
+        }).not.toThrow();
+      } finally {
+        try {
+          cleanup();
+        } finally {
+          await errorConfig.shutdown({ strictResourceCleanup: true });
+        }
+      }
     });
 
     it('handles undefined settings gracefully', () => {
@@ -6645,6 +7731,70 @@ describe('AppContainer State Management', () => {
       expect(lastCall[2]).toBe(1);
     });
 
+    it('reports the Mod band input and measures the controls again for a new tree', () => {
+      mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 30 });
+      mockedMeasureElement.mockReturnValue({ width: 100, height: 5 });
+      let band: interactiveMods.ModBand | undefined;
+      let notify = () => {};
+      const setRenderInput = vi.fn();
+      const modSession = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        subscribe: () => () => {},
+        setPresentation: vi.fn(),
+        setRenderInput,
+        subscribeBand: (listener: () => void) => {
+          notify = listener;
+          return () => {};
+        },
+        getBand: () => band,
+      } as unknown as interactiveMods.InteractiveModSession;
+      const getModSession = interactiveMods.getInteractiveModSession;
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockImplementation((config) =>
+          config === mockConfig ? modSession : getModSession(config),
+        );
+      try {
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        expect(setRenderInput).toHaveBeenLastCalledWith({
+          surface: 'terminal',
+          component: 'AbovePrompt',
+          requestId: 'above-prompt',
+          viewport: { columns: 100, rows: 30, isFullscreen: false },
+          props: {
+            hasSurvey: false,
+            isWorking: false,
+            maxRows: 10,
+            bodyColumns: 95,
+            scroll: { offset: 0, bodyRows: 9 },
+            view: {},
+          },
+        });
+        const measured = mockedMeasureElement.mock.calls.length;
+        act(() => {
+          band = {
+            tree: { type: 'Text', children: ['☀'] },
+            owner: 'token-weather',
+            revision: 1,
+          };
+          notify();
+        });
+        expect(mockedMeasureElement.mock.calls.length).toBeGreaterThan(
+          measured,
+        );
+      } finally {
+        owner.mockRestore();
+        mockedMeasureElement.mockReset();
+      }
+    });
+
     it('hands ink the shared STATIC_EXTRA_HEIGHT for its dialog budget', () => {
       render(
         <AppContainer
@@ -6825,6 +7975,251 @@ describe('AppContainer State Management', () => {
         }),
         expect.any(Number),
       );
+    });
+
+    it.each(['config', 'restore'] as const)(
+      'releases command discovery when Ink %s fails before Mod startup',
+      async (failure) => {
+        const errorText =
+          failure === 'config'
+            ? 'Config initialization failed'
+            : 'outputs is not iterable';
+        vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
+        const initializeConfig = vi.spyOn(mockConfig, 'initialize');
+        if (failure === 'config') {
+          initializeConfig.mockRejectedValue(new Error(errorText));
+        } else {
+          initializeConfig.mockResolvedValue(undefined);
+        }
+        vi.spyOn(mockConfig, 'getToolRegistry').mockReturnValue({
+          getMcpClientManager: () => ({
+            getDiscoveryState: () => MCPDiscoveryState.COMPLETED,
+          }),
+        } as unknown as ReturnType<Config['getToolRegistry']>);
+        vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+          conversation: {
+            sessionId: 'session-1',
+            projectHash: 'test-project-hash',
+            startTime: '2024-01-01T00:00:00Z',
+            lastUpdated: '2024-01-01T00:00:01Z',
+            messages: [
+              {
+                uuid: 'bad-result',
+                parentUuid: null,
+                sessionId: 'session-1',
+                timestamp: '2024-01-01T00:00:00Z',
+                type: 'system',
+                subtype: 'slash_command',
+                systemPayload: {
+                  phase: 'result',
+                  rawCommand: '/about',
+                  outputHistoryItems: {},
+                },
+                cwd: '/test/workspace',
+                version: '1.0.0',
+              },
+            ],
+          },
+          filePath: '/tmp/session.jsonl',
+          lastCompletedUuid: 'bad-result',
+        } as unknown as ReturnType<Config['getResumedSessionData']>);
+        const runtime = {
+          initialize: vi.fn().mockResolvedValue(undefined),
+          loadCommands: vi.fn().mockResolvedValue([]),
+          setRenderInput: vi.fn(),
+          close: vi.fn().mockResolvedValue(undefined),
+        };
+        const create = vi
+          .spyOn(ModSession, 'create')
+          .mockReturnValue(runtime as unknown as ModSession);
+        vi.mocked(registerCleanup).mockReturnValue(() => {});
+        mockSettings.merged.experimental = { mods: true };
+        const owner = interactiveMods.createInteractiveModSession(
+          mockConfig,
+          mockSettings,
+        )!;
+        const startupFailure = vi.fn();
+        void owner.ready.catch(startupFailure);
+        const loaded = vi.fn();
+        const commands = CommandService.create(
+          [{ loadCommands: async () => [helpCommand, quitCommand] }, owner],
+          new AbortController().signal,
+        ).then(loaded);
+        try {
+          render(
+            <AppContainer
+              config={mockConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
+          await vi.waitFor(() => expect(loaded).toHaveBeenCalledOnce());
+          expect(loaded.mock.calls[0][0].getCommands()).toEqual([
+            helpCommand,
+            quitCommand,
+          ]);
+          expect(startupFailure).toHaveBeenCalledWith(
+            expect.objectContaining({ message: errorText }),
+          );
+          expect(runtime.initialize).not.toHaveBeenCalled();
+          expect(runtime.loadCommands).not.toHaveBeenCalled();
+          expect(interactiveMods.getInteractiveModSession(mockConfig)).toBe(
+            owner,
+          );
+          expect(
+            mockedUseHistory.mock.results.at(-1)!.value.addItem,
+          ).toHaveBeenCalledWith(
+            expect.objectContaining({
+              type: MessageType.ERROR,
+              text: expect.stringContaining(errorText),
+            }),
+            expect.any(Number),
+          );
+          if (failure === 'restore') {
+            expect(capturedUIState.isInputActive).toBe(true);
+          }
+        } finally {
+          cleanup();
+          await owner.close();
+          await commands;
+          create.mockRestore();
+        }
+      },
+    );
+
+    it.each([false, true])(
+      'keeps restored Mod diagnostics and input available when startup fails=%s',
+      async (fails) => {
+        const calls: string[] = [];
+        const historyManager = {
+          history: [] as HistoryItem[],
+          addItem: vi.fn((item: HistoryItemWithoutId) => {
+            calls.push(`add:${item.text}`);
+          }),
+          updateItem: vi.fn(),
+          clearItems: vi.fn(),
+          loadHistory: vi.fn(() => calls.push('load')),
+          truncateToItem: vi.fn(),
+        };
+        mockedUseHistory.mockReturnValue(historyManager);
+        vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+        vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+          conversation: {
+            sessionId: 'session-1',
+            projectHash: 'test-project-hash',
+            startTime: '2024-01-01T00:00:00Z',
+            lastUpdated: '2024-01-01T00:00:01Z',
+            messages: [],
+          },
+          filePath: '/tmp/session.jsonl',
+          lastCompletedUuid: null,
+        } as ReturnType<typeof mockConfig.getResumedSessionData>);
+        let releaseRecovery!: () => void;
+        vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockImplementation(
+          () =>
+            new Promise((resolve) => {
+              releaseRecovery = () => resolve([]);
+            }),
+        );
+        let release!: () => void;
+        const ready = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        let emit!: (text: string) => void;
+        const initialize = vi.fn(async () => {
+          emit('Mod tool hooks are unavailable in terminal sessions.');
+          await ready;
+          if (fails) throw new Error('tool.call is unsupported');
+        });
+        const getModSession = interactiveMods.getInteractiveModSession;
+        const modSession = {
+          initialize,
+          subscribe: (listener: (text: string) => void) => {
+            emit = listener;
+            return () => {};
+          },
+          setPresentation: vi.fn(),
+          setRenderInput: vi.fn(),
+        } as unknown as interactiveMods.InteractiveModSession;
+        // Scope the mock to this test's own Config: mount effects from
+        // earlier tests can still be in flight (they run the real
+        // config.initialize()), and an unscoped mockReturnValue lets those
+        // stale effects call this test's initialize(), inflating the
+        // exact-once assertion below.
+        const owner = vi
+          .spyOn(interactiveMods, 'getInteractiveModSession')
+          .mockImplementation((config) =>
+            config === mockConfig ? modSession : getModSession(config),
+          );
+        try {
+          render(
+            <AppContainer
+              config={mockConfig}
+              settings={mockSettings}
+              version="1.0.0"
+              initializationResult={mockInitResult}
+            />,
+          );
+          await vi.waitFor(() => expect(initialize).toHaveBeenCalledOnce());
+          expect(calls).toEqual([
+            'load',
+            'add:Mod tool hooks are unavailable in terminal sessions.',
+          ]);
+          expect(mockConfig.loadPausedBackgroundAgents).toHaveBeenCalledOnce();
+          expect(capturedUIState.isConfigInitialized).toBe(true);
+          expect(capturedUIState.isInputActive).toBe(true);
+          release();
+          releaseRecovery();
+          await flushConfigInitialization();
+          expect(capturedUIState.isInputActive).toBe(true);
+        } finally {
+          release();
+          releaseRecovery?.();
+          cleanup();
+          owner.mockRestore();
+        }
+      },
+    );
+
+    it('enables input before asynchronous resume recovery when Mods are disabled', async () => {
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      vi.spyOn(mockConfig, 'getResumedSessionData').mockReturnValue({
+        conversation: {
+          sessionId: 'session-1',
+          projectHash: 'test-project-hash',
+          startTime: '2024-01-01T00:00:00Z',
+          lastUpdated: '2024-01-01T00:00:01Z',
+          messages: [],
+        },
+        filePath: '/tmp/session.jsonl',
+        lastCompletedUuid: null,
+      } as ReturnType<typeof mockConfig.getResumedSessionData>);
+      let release!: () => void;
+      vi.spyOn(mockConfig, 'loadPausedBackgroundAgents').mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            release = () => resolve([]);
+          }),
+      );
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+      try {
+        await vi.waitFor(() => {
+          expect(mockConfig.loadPausedBackgroundAgents).toHaveBeenCalledOnce();
+          expect(capturedUIState.isConfigInitialized).toBe(true);
+          expect(capturedUIState.isInputActive).toBe(true);
+        });
+      } finally {
+        release();
+        await flushConfigInitialization();
+      }
     });
 
     it('announces active scheduled tasks after restoring resumed history', async () => {
@@ -7809,6 +9204,196 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it.each(['promptId', 'rewindId'] as const)(
+      'resolves the recorded boundary independently through %s',
+      async (field) => {
+        const key = field === 'promptId' ? 'prompt-2' : 'legacy-record:target';
+        const target: HistoryItem = {
+          id: 3,
+          type: 'user',
+          text: 'second prompt',
+          [field]: key,
+        };
+        const harness = renderRewindHarness({
+          history: [
+            rewindUserItem(1, 'first prompt', 'prompt-1'),
+            { id: 2, type: 'gemini', text: 'first response' },
+            target,
+          ],
+          apiHistory: [
+            apiUser('first prompt', 'prompt-1'),
+            apiModel('first response'),
+            apiUser('second prompt', key),
+          ],
+          recordedTurnIndex: 3,
+          ...(field === 'rewindId' ? { snapshots: [] } : {}),
+        });
+        await runRewind(target, 'conversation');
+        expect(harness.getRewindTurnIndex).toHaveBeenCalledWith(key);
+        expect(harness.truncateHistory).toHaveBeenCalledWith(2);
+        expect(harness.rewindRecording).toHaveBeenCalledWith(
+          3,
+          expect.any(Object),
+          field === 'rewindId' ? [] : harness.snapshots.slice(0, 2),
+        );
+        expect(harness.rewind).not.toHaveBeenCalled();
+      },
+    );
+
+    it('preserves checkpoint snapshots through hidden recorded turns', async () => {
+      const snapshots = [
+        { promptId: 'prompt-1' },
+        { promptId: 'older-unmapped' },
+        { promptId: 'hidden-image' },
+        { promptId: 'prompt-2' },
+        { promptId: 'prompt-3' },
+      ];
+      const harness = renderRewindHarness({
+        snapshots,
+        recordedTurnIndices: {
+          'prompt-1': 0,
+          'hidden-image': 1,
+          'prompt-2': 3,
+          'prompt-3': 4,
+        },
+      });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).toHaveBeenCalledWith('prompt-2', true);
+      expect(harness.rewindRecording).toHaveBeenCalledWith(
+        3,
+        { truncatedCount: 2 },
+        [snapshots[0], snapshots[1], snapshots[2], snapshots[3]],
+      );
+    });
+
+    it('excludes future snapshots after earlier checkpoints have been evicted', async () => {
+      const target = rewindUserItem(7, 'target', 'prompt-102');
+      const snapshots = [
+        { promptId: 'prompt-101' },
+        { promptId: 'prompt-102' },
+        { promptId: 'prompt-103' },
+      ];
+      const harness = renderRewindHarness({
+        history: [
+          rewindUserItem(1, 'first prompt', 'prompt-1'),
+          { id: 2, type: 'gemini', text: 'first response' },
+          rewindUserItem(3, 'second prompt', 'prompt-2'),
+          { id: 4, type: 'gemini', text: 'second response' },
+          rewindUserItem(5, 'retained checkpoint', 'prompt-101'),
+          { id: 6, type: 'gemini', text: 'prior response' },
+          target,
+          { id: 8, type: 'gemini', text: 'target response' },
+        ],
+        apiHistory: [
+          apiUser('retained checkpoint', 'prompt-101'),
+          apiModel('prior response'),
+          apiUser('target', 'prompt-102'),
+        ],
+        snapshots,
+        recordedTurnIndices: {
+          'prompt-101': 100,
+          'prompt-102': 101,
+          'prompt-103': 102,
+        },
+      });
+
+      await runRewind(target, 'conversation');
+
+      expect(harness.rewindRecording).toHaveBeenCalledWith(
+        101,
+        { truncatedCount: 2 },
+        [snapshots[0], snapshots[1]],
+      );
+    });
+
+    it('refuses duplicate target checkpoints before changing files or conversation', async () => {
+      const harness = renderRewindHarness({
+        snapshots: [{ promptId: 'prompt-2' }, { promptId: 'prompt-2' }],
+      });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.setText).not.toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Rewind failed: This turn has no unique checkpoint association.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('refuses an unlinked checkpoint when a legacy target has no checkpoint', async () => {
+      const key = 'legacy-record:target';
+      const target: HistoryItem = {
+        id: 3,
+        type: 'user',
+        text: 'legacy target',
+        rewindId: key,
+      };
+      const harness = renderRewindHarness({
+        history: [
+          rewindUserItem(1, 'first prompt', 'prompt-1'),
+          { id: 2, type: 'gemini', text: 'first response' },
+          target,
+        ],
+        apiHistory: [
+          apiUser('first prompt', 'prompt-1'),
+          apiModel('first response'),
+          apiUser('legacy target', key),
+        ],
+        snapshots: [{ promptId: 'prompt-1' }, { promptId: 'unlinked' }],
+        recordedTurnIndices: { 'prompt-1': 0, [key]: 2 },
+      });
+
+      await runRewind(target, 'conversation');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.setText).not.toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Rewind failed: This turn has no unique checkpoint association.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('refuses an unlinked recorded boundary before changing files or conversation', async () => {
+      const harness = renderRewindHarness({ recordedTurnIndex: -1 });
+      await runRewind(harness.target, 'both');
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.setText).not.toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Rewind failed: This turn has no unique recorded boundary.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('keeps conversation rewind available when recording is disabled', async () => {
+      const harness = renderRewindHarness();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      await runRewind(harness.target, 'conversation');
+      expect(harness.truncateHistory).toHaveBeenCalledWith(2);
+      expect(harness.loadHistory).toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+    });
+
     it('truncates conversation when both-mode file restore succeeds', async () => {
       const harness = renderRewindHarness();
 
@@ -8152,6 +9737,94 @@ describe('AppContainer State Management', () => {
     });
   });
 
+  describe('rewind command origin admission', () => {
+    it('opens the admitted builtin slash rewind during its own artificial responding state', () => {
+      mockedUseLlmStream.mockReturnValue({
+        ...mockedUseLlmStream(),
+        streamingState: StreamingState.Responding,
+      });
+      renderRewindHarness();
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+        -1,
+      )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+      act(() => actions.openRewindSelector('slash-command'));
+      expect(capturedUIState.isRewindSelectorOpen).toBe(true);
+    });
+
+    it.each([StreamingState.Responding, StreamingState.WaitingForConfirmation])(
+      'keeps keyboard double-Escape and default UI rewind closed while the owner is %s',
+      (streamingState) => {
+        mockedUseLlmStream.mockReturnValue({
+          ...mockedUseLlmStream(),
+          streamingState,
+        });
+        renderRewindHarness();
+        act(() => capturedUIActions.openRewindSelector());
+        expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+        const keypress = getGlobalKeypress();
+        expect(keypress).toBeDefined();
+        const escape: Key = {
+          name: 'escape',
+          sequence: '\x1b',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+        };
+        act(() => {
+          keypress!(escape);
+          keypress!(escape);
+        });
+        expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+      },
+    );
+
+    it('does not bypass tool confirmation with slash rewind origin', () => {
+      mockedUseLlmStream.mockReturnValue({
+        ...mockedUseLlmStream(),
+        streamingState: StreamingState.WaitingForConfirmation,
+      });
+      renderRewindHarness();
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+        -1,
+      )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+      act(() => actions.openRewindSelector('slash-command'));
+      expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+    });
+
+    it.each(['ide', 'dialog', 'no-user'] as const)(
+      'preserves the %s guard for admitted slash rewind',
+      (blockedBy) => {
+        mockedUseLlmStream.mockReturnValue({
+          ...mockedUseLlmStream(),
+          streamingState: StreamingState.Responding,
+        });
+        if (blockedBy === 'ide')
+          vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(true);
+        if (blockedBy === 'dialog')
+          mockedUseThemeCommand.mockReturnValue({
+            ...mockedUseThemeCommand(),
+            isThemeDialogOpen: true,
+          });
+        const harness = renderRewindHarness(
+          blockedBy === 'no-user' ? { history: [] } : {},
+        );
+        const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+          -1,
+        )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+        act(() => actions.openRewindSelector('slash-command'));
+        expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+        if (blockedBy === 'ide')
+          expect(harness.addItem).toHaveBeenCalledWith(
+            expect.objectContaining({
+              text: 'Rewind is disabled in IDE mode.',
+            }),
+            expect.any(Number),
+          );
+      },
+    );
+  });
+
   describe('IDE mode rewind guard', () => {
     it('shows info message instead of opening rewind selector when IDE mode is enabled', () => {
       const mockAddItem = vi.fn();
@@ -8204,7 +9877,7 @@ describe('AppContainer State Management', () => {
     it('opens rewind selector normally when IDE mode is disabled', () => {
       const mockAddItemDisabled = vi.fn();
       mockedUseHistory.mockReturnValue({
-        history: [{ id: 1, type: 'user', text: 'hello' }],
+        history: [{ id: 1, type: 'user', text: 'hello', promptId: 'prompt-1' }],
         addItem: mockAddItemDisabled,
         updateItem: vi.fn(),
         clearItems: vi.fn(),
@@ -8237,9 +9910,48 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      capturedUIActions.openRewindSelector();
+      act(() => capturedUIActions.openRewindSelector());
 
       expect(mockAddItemDisabled).not.toHaveBeenCalled();
+      expect(capturedUIState.isRewindSelectorOpen).toBe(true);
+    });
+
+    it('does not open the selector when no turn carries a rewind identity', () => {
+      const mockAddItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'user', text: 'hello' }],
+        addItem: mockAddItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(false);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      act(() => capturedUIActions.openRewindSelector());
+
+      expect(mockAddItem).not.toHaveBeenCalled();
+      expect(capturedUIState.isRewindSelectorOpen).toBeFalsy();
     });
   });
 

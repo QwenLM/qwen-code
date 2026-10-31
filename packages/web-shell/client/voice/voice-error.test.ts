@@ -10,6 +10,7 @@ import { describeMicError } from './capture-utils';
 import { formatVoiceError } from './voice-error';
 
 const errors = [
+  ['Cannot reach the service.', '无法连接服务。'],
   [
     'No voice model is configured for this workspace.',
     '当前工作区未配置语音模型。',

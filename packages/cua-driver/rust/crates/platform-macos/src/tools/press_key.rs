@@ -285,12 +285,14 @@ impl Tool for PressKeyTool {
             Ok(r) => r,
             Err(e) => return e,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let (element_index, window_id) = match resolved {
             cua_driver_core::element_token::ResolvedElement::None => (None, window_id_arg),
             cua_driver_core::element_token::ResolvedElement::Element {
                 window_id: wid,
                 element_index: idx,
                 via_token: _,
+                ..
             } => (Some(idx), wid),
         };
 
@@ -332,7 +334,7 @@ impl Tool for PressKeyTool {
         // the element before the suppressed focus below dereferences it
         // (use-after-free → daemon crash). Guard lives to method end.
         let pre_focus_guard = if let (Some(idx), Some(wid)) = (element_index, window_id) {
-            match self.state.element_cache.get_element_retained(pid, wid, idx) {
+            match element_cache.get_element_retained(pid, wid, idx) {
                 Some(guard) => Some(guard),
                 None => {
                     return ToolResult::error(format!(
@@ -485,7 +487,19 @@ impl Tool for PressKeyTool {
                                 crate::input::skylight::prepare_background_keyboard(pid, wid)?;
                             }
                         }
-                        crate::input::keyboard::press_key(pid, &key, &m)
+                        let recipient =
+                            if crate::input::keyboard::uses_application_keyboard_target(fg, &m) {
+                                pid
+                            } else {
+                                unsafe {
+                                    crate::ax::exact_target::keyboard_recipient_pid(
+                                        pid,
+                                        window_id,
+                                        pre_focus_ptr,
+                                    )
+                                }?
+                            };
+                        crate::input::keyboard::press_key(recipient, &key, &m)
                     })
                 })
                 .await

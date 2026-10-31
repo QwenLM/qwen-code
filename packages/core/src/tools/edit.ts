@@ -64,9 +64,16 @@ import { safeLiteralReplace } from '../utils/textUtils.js';
 import {
   countOccurrences,
   extractEditSnippet,
+  findLineBasedMatchOffsets,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from '../utils/editHelper.js';
+import {
+  buildWorkspaceArtifactCandidate,
+  formatRecordArtifactReminder,
+} from './artifact/workspace-auto-record.js';
+import { backgroundFixHolding } from './autofix-pr-grants.js';
+import { getCurrentAgentId } from '../agents/runtime/agent-context.js';
 
 const debugLogger = createDebugLogger('EDIT_PRIOR_READ');
 
@@ -75,6 +82,7 @@ export function applyReplacement(
   oldString: string,
   newString: string,
   isNewFile: boolean,
+  matchOffsets?: readonly number[],
 ): string {
   if (isNewFile) {
     return newString;
@@ -86,6 +94,17 @@ export function applyReplacement(
   // If oldString is empty and it's not a new file, do not modify the content.
   if (oldString === '' && !isNewFile) {
     return currentContent;
+  }
+
+  if (matchOffsets !== undefined) {
+    const pieces: string[] = [];
+    let cursor = 0;
+    for (const offset of matchOffsets) {
+      pieces.push(currentContent.slice(cursor, offset), newString);
+      cursor = offset + oldString.length;
+    }
+    pieces.push(currentContent.slice(cursor));
+    return pieces.join('');
   }
 
   // Use intelligent replacement that handles $ sequences safely
@@ -125,6 +144,12 @@ export interface EditToolParams {
    * Initially proposed content.
    */
   ai_proposed_content?: string;
+
+  /**
+   * When false, do not create a session artifact for this edit. An artifact
+   * the session already has for this path is still refreshed.
+   */
+  record_as_artifact?: boolean;
 }
 
 interface CalculatedEdit {
@@ -302,6 +327,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     );
     finalOldString = normalizedStrings.oldString;
     finalNewString = normalizedStrings.newString;
+    let matchOffsets: number[] | undefined;
 
     if (finalOldString === '' && !fileExists) {
       // Creating a new file
@@ -318,9 +344,18 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         currentContent,
         finalOldString,
         finalNewString,
+        normalizedStrings.lineBasedMatch,
       );
 
-      occurrences = countOccurrences(currentContent, finalOldString);
+      if (normalizedStrings.lineBasedMatch) {
+        matchOffsets = findLineBasedMatchOffsets(
+          currentContent,
+          finalOldString,
+        );
+      }
+      occurrences =
+        matchOffsets?.length ??
+        countOccurrences(currentContent, finalOldString);
       if (params.old_string === '') {
         // Error: Trying to create a file that already exists
         error = {
@@ -362,6 +397,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           finalOldString,
           finalNewString,
           isNewFile,
+          matchOffsets,
         )
       : (currentContent ?? '');
 
@@ -416,6 +452,19 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       encoding: detectedEncoding,
       lineEnding: detectedLineEnding,
     };
+  }
+
+  /**
+   * A write into the worktree of a fix of /autofix-pr running in the
+   * background, by anyone but its own agent, is the user's to approve: that
+   * agent builds and runs what is there without asking.
+   */
+  requiresUserInteraction(): boolean {
+    return (
+      // As written: resolved as the kernel will.
+      backgroundFixHolding(this.params.file_path, getCurrentAgentId()) !==
+      undefined
+    );
   }
 
   /**
@@ -713,12 +762,14 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       // pre-edit placeholder. Best-effort: a stat failure here does
       // not undo the successful write — the next Read will simply
       // re-stat and treat the cache entry as stale.
+      let postWriteSizeBytes: number | undefined;
       try {
         if (mutation && !committedStats)
           throw new Error('Scoped file write returned no committed stats.');
         const postWriteStats = mutation
           ? committedStats!
           : fs.statSync(this.params.file_path);
+        postWriteSizeBytes = postWriteStats.size;
         this.config
           .getFileReadCache()
           .recordWrite(this.params.file_path, postWriteStats);
@@ -785,6 +836,20 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
           : `The file: ${this.params.file_path} has been updated.`,
       ];
 
+      const artifact = buildWorkspaceArtifactCandidate(
+        this.config,
+        this.params.file_path,
+        {
+          recordAsArtifact: this.params.record_as_artifact,
+          sizeBytes: postWriteSizeBytes,
+        },
+      );
+      if (artifact && !artifact.updateOnly) {
+        llmSuccessMessageParts.push(
+          formatRecordArtifactReminder(artifact.workspacePath),
+        );
+      }
+
       const snippetResult = extractEditSnippet(
         editData.currentContent,
         editData.newContent,
@@ -797,6 +862,7 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       return {
         llmContent: llmSuccessMessageParts.join(' '),
         returnDisplay: displayResult,
+        ...(artifact ? { artifacts: [artifact] } : {}),
       };
     } catch (error) {
       return this.writeFailure(error);
@@ -877,6 +943,10 @@ Expectation for required parameters:
             type: 'boolean',
             description:
               'Replace all occurrences of old_string (default false).',
+          },
+          record_as_artifact: {
+            type: 'boolean',
+            description: 'Refresh existing only.',
           },
         },
         required: ['file_path', 'old_string', 'new_string'],

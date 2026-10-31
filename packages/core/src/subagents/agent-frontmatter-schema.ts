@@ -194,7 +194,7 @@ export function parseAgentHooks(
  *
  * Unlike `mcpServers` and `hooks`, this field is NOT part of the mirrored
  * Claude Code schema — it is a qwen-code extension (see
- * `docs/design/claude-code-web-shell-backend.md` §9.3). Because it names an
+ * `docs/design/claude-code-web-shell-backend.md` §2). Because it names an
  * external process, it is validated strictly enough that a typo cannot
  * silently change what runs:
  *

@@ -153,7 +153,7 @@ Issue #13745 提出了三项:E1(团队记录 domain)、E2(detach 到独立的持
 - `packages/core/src/managed-runtime/contracts/managed-team-record-v1.fixtures.json`(新增):共享用例。`managed-extension-projection-v1.fixtures.json` 新增四个 domain,task kind 为空。
 - `packages/core/src/managed-runtime/managed-extension-projection.ts`:记录体登记。
 - `packages/core/src/managed-runtime/managed-session-authority.ts`:资源闭包与决策 8 的规则。
-- `packages/sdk-java/managed-agent-server`:
+- `packages/managed-agent-server`:
   - `ManagedTeamRecords`(新增):校验器。
   - `ManagedExtensionProjection`:记录体登记。
   - `ManagedExtensionRecordStore`:资源闭包与决策 8 的规则。

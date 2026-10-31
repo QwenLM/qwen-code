@@ -2,6 +2,16 @@
 
 [English](2026-10-12-managed-agent-event-transport-mq2.md) | [简体中文](2026-10-12-managed-agent-event-transport-mq2.zh-CN.md)
 
+> **Wake recovery update (2026-10-19):** The earlier source-ledger-only
+> fallback described here is superseded by the
+> [Hosted SQL wake scan](2026-10-18-hosted-wake-recovery.md). It discovers
+> committed, unconsumed monitor/background Shell, channel, child/workflow,
+> automation and Session-message inputs after writer loss. Public foreground
+> Turns still belong to their dispatcher; private CSI and other sources retain
+> their existing recovery paths. Real MQ-on and deployed/cross-platform scan
+> acceptance remain unverified. The historical MQ gates below do not prove this
+> new scan; its fault acceptance is specified in the linked design.
+
 > **Status:** Proposed phase plan. This is phase **MQ2** of the cross-node
 > EventTransport design
 > ([2026-10-04-managed-agent-event-transport](2026-10-04-managed-agent-event-transport.md),
@@ -111,7 +121,9 @@ an owner handoff a stale subscription can coexist briefly (lease expiry
 without a clean unsubscribe); the stale subscriber's fenced no-op ACK still
 advances the group offset, so the new owner can miss that notification and
 must recover the pending item by SQL reconciliation — never by assuming the
-MQ delivered it.
+MQ delivered it. (The original MQ2d ledger fallback is superseded for eligible
+wakes by the Hosted SQL scan; see
+"Where a missed or burned wake recovers" under MQ2d.)
 
 **As built.** The contract extension is recorded in
 [2026-10-06-managed-event-envelope](2026-10-06-managed-event-envelope.md)
@@ -145,7 +157,8 @@ binding, or for an unbound Session its journal's workspace). The wiring:
   journal `ACTIVE` or `SEALED`, and no writer holds it — an `ACTIVE` journal
   under an unexpired lease (database time), as `hasLiveWriter` decides, so a
   sealed journal's leftover lease does not count. The wake is then claimed
-  on a consumer-progress watermark (`journal_wake`) — a redelivered,
+  on the Session event stream's wake watermark
+  (`ma_event_stream.wake_covered_sequence`) — a redelivered,
   duplicated or older wake is refused even when two nodes race. Those checks
   and the claim run on the listener; the load runs on a small bounded pool,
   so one slow load never holds the ordered bootstrap lane. The load takes the
@@ -180,7 +193,112 @@ is the owner-handoff window: with a stale subscription and a new owner
 coexisting, the old owner does no side effect and ACKs, and the new owner
 still discovers and processes the pending item via SQL reconciliation without
 receiving the MQ notification. The local machine has no container runtime, so
-this slice is CI/cloud only by construction.
+this slice is CI/cloud only by construction. (As built below: the broker
+runs natively, so the gates run locally too, and the handoff row proves the
+stale acknowledgement consumed nothing in SQL — what then recovers the wake
+is named under "Where a missed or burned wake recovers".)
+
+**As built.** No service container: `scripts/rocketmq-lite-broker.sh` runs
+the 5.5.1 binary release natively (NameServer, a broker with `enableLmq`,
+`enableMultiDispatch` and the RocksDB store, and the gRPC proxy), checks the
+download against a pinned SHA-512, and creates the LITE topic and every LITE
+group the server and the gates subscribe in — the same script on a laptop
+(Linux or macOS) and on CI, so the gates are reproducible locally after all.
+The `event-transport-broker-gates` profile runs only `EventTransportBrokerGate`
+(the `*IT` families stay with their own jobs), and the SDK Java job
+`EventTransport broker gates / RocketMQ 5.5.1 / Java 21` boots the broker,
+runs the profile, checks the failsafe reports (`event-transport` family) and
+uploads them with the broker's logs and the latency record. On a workstation
+the proxy and the broker's HA port listen on every interface (RocketMQ has
+no bind option for them), so the script says to run it only on a trusted
+network. The application
+runs whole — both producers, both lanes, the owner reconciliation — on H2,
+with only the Harness stood in for. The rows:
+
+- **Round trip.** Journal and public envelopes reach the Session's
+  LiteTopic as the contract's canonical bytes, and the wake rides the
+  bootstrap lane too.
+- **Duplicate and reorder injection.** A wake sent twice, or an older wake
+  after a newer one, activates once; the watermark holds the higher
+  sequence. On the owner lane, a duplicated or older public notice reaches
+  the consumer and runs no materialization batch.
+- **Owner lane.** Of two Sessions this node holds an attachment for, only
+  the one whose journal this node's Harness writes gets subscribed.
+- **Owner handoff.** A stale subscriber in the owner group (its writer
+  lapsed, another writer holds the journal) receives the wake, loads
+  nothing, claims nothing and acknowledges. Once it unsubscribes, the new
+  owner subscribes and never receives that notice — the acknowledgement
+  advanced the group's offset — while an unacknowledged notice sent to the
+  same lite topic before it subscribed reaches it as backlog, and so does a
+  later notice, so the
+  absence is the acknowledgement's doing. The wake stays unclaimed in SQL,
+  so once the journal is free a later notice still activates it. On a
+  Session the new owner holds, its Harness runs the wake input from the
+  journal — the notice was never the carrier.
+- **Post-commit latency.** The deployed composite (hub, then the public
+  transport) and a flag-off composite (hub only) publish the same batches,
+  interleaved: the committing thread's publish time and the hub
+  subscriber's delivery time are compared per round, and the median of the
+  per-round growth may not exceed a millisecond — a runner stall inside one
+  arm's window moves one round, not the median — with no more than a tenth
+  of the retained rounds over budget and no single round beyond the
+  twenty-millisecond stall bound the journal hand-off already sets for this
+  path: a stalled minority is scheduler noise, one round tens of
+  milliseconds over budget a regression however rare. The growth bound is
+  one millisecond in every environment: the median is the scheduler-noise
+  mitigation, so CI takes no widened allowance (green CI runs measure
+  medians in the tens of microseconds). The journal wire's after-commit
+  hand-off keeps its own 20 ms p95 bound. The record keeps both arm levels
+  (p50/p95/p99/max), the growth's median, p95 and max, the count of rounds
+  over budget, and the budget the count was taken against. In three local
+  runs (macOS, 300 rounds each) the transport added 13–186 µs at p95 and
+  the journal hand-off measured 0.35–1.5 ms; CI writes its own figures to
+  `target/event-transport-latency.json`. The recorded #14197 failure (run 38534586743) predates this statistic: it failed under the pre-#14178
+  unconditional 1 ms p95-of-levels bound, and #14178's 20 ms CI allowance
+  already tolerated its recorded magnitudes — this row's statistic change
+  is a sensitivity and noise-robustness improvement, not the change that
+  tolerates the recorded run, and the incident's arm asymmetry (hub
+  delivery on/off ≈ 28× at p95 with both arms far above local levels) is
+  not reproduced here and stays unexplained.
+  Diagnostics run in a separate 300-round burst after the uninstrumented
+  latency gate, including when that gate fails. They retain the original
+  on-before-off order without per-round broker drains.
+  `event-transport-latency-diagnostics.json` contains the instrumented
+  aggregate; `event-transport-latency-samples.json` retains publish, hub-read
+  and journal wall/CPU samples, including warm-up sequences 1–75.
+  `event-transport-latency-stages.json` contains hub and transport timings
+  inside the production publisher, correlated by session, sequence, thread
+  and transport count. `event-transport-latency.jfr` records those events,
+  execution samples, lock waits and GC pauses. Production events are disabled
+  by default. Instrumented figures describe a diagnostic run and are never
+  used for the latency assertions; subscriber delivery includes the whole
+  publish call and subsequent read, not the instant the hub became ready.
+  Separate percentiles must not be subtracted to attribute individual stages.
+  Evidence is saved even when assertions fail, and diagnostic errors do not
+  replace the original gate failure. The workflow runs daily or by manual
+  dispatch against the selected branch; opening a PR does not run this suite.
+- **Misconfiguration fails startup.** A NORMAL (not LITE) topic, which the
+  subscription probe alone passes, is refused by a new send probe — one
+  synchronous message to the probe's own lite topic — before any envelope
+  is dropped; a probe group nobody pre-created fails the subscription probe.
+  The probe group is now a property (`capability-probe-group`), and every
+  `mqadmin` command the code prints names the cluster; without a cluster or
+  broker, mqadmin creates nothing.
+- **Flag off.** Pinned structurally rather than through the broker:
+  `EventTransportConfigurationTest` proves a flag-off context holds no
+  producer, consumer, transport or consumer store, and the rest of the
+  module's suites run flag-off.
+
+**Where a missed or burned wake recovers.** The original MQ2d implementation
+relied on each input source's ledger or a later Session load, leaving gaps for
+channel, Monitor/background Shell and inputs whose source relay had finished.
+The [Hosted SQL wake scan](2026-10-18-hosted-wake-recovery.md) supersedes that
+fallback for its six admitted sources after writer loss, independently of the
+MQ claim watermark. It does not re-admit an input that never committed, extend
+source-delivery retry limits, or recover private CSI and public foreground
+Turns. Those retain their source ledger/dispatcher recovery. The existing MQ2d
+handoff gate proves the notification can be missed; automatic scan recovery
+without a later notification needs the linked design's real-MQ fault acceptance.
 
 ## Key decisions
 
@@ -204,7 +322,8 @@ this slice is CI/cloud only by construction.
 
 - No enablement by default anywhere; the flag is off in every shipped
   configuration.
-- No multi-node fault matrix (that is MQ3).
+- No multi-node fault matrix (that is MQ3:
+  [2026-10-14-managed-agent-event-transport-mq3](2026-10-14-managed-agent-event-transport-mq3.md)).
 - No change to the commit path's transaction shape; the publication point is
   after-commit only, and publication failure never blocks the local
   post-commit SSE (#12380 constraint).
@@ -222,4 +341,8 @@ this slice is CI/cloud only by construction.
   including the owner-handoff recovery row — the old owner's fenced no-op
   ACK advances the group offset, and the new owner still discovers and
   processes the pending item via SQL reconciliation without the MQ
-  notification.
+  notification. As built, the row proves the new owner never receives that
+  notice and the wake stays unclaimed in SQL, where a later notice still
+  activates it. Extend acceptance to prove the independent Hosted SQL scan
+  recovers an eligible committed wake after writer expiry without another
+  notice; this extension remains unverified with real MQ (see MQ2d).

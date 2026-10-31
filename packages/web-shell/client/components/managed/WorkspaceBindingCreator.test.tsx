@@ -1,25 +1,36 @@
 // @vitest-environment jsdom
 
-import { act } from 'react';
+import { act, StrictMode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ComponentProps } from 'react';
 import type { EditorHandle } from '../../hooks/useComposerCore';
 import { I18nProvider } from '../../i18n';
+import { WebShellPortalRootContext } from '../../portalRoot';
 import { JavaManagedAgentHttpError } from './java-managed-agent-client';
-import type { ManagedAgentProvider } from './managed-agent-provider';
+import type {
+  ManagedAgentProvider,
+  ManagedSessionOptions,
+  ManagedSessionWorktree,
+  ManagedSessionWorktreeOptions,
+} from './managed-agent-provider';
 import { WorkspaceBindingCreator } from './WorkspaceBindingCreator';
+import * as pendingStorage from './managed-pending-storage';
+import type { ManagedCreationSkillsSource } from './managed-creation-skills';
+import { getSlashCommandCompletionResult } from '../../completions/slashCompletion';
 
 const editorMocks = vi.hoisted(() => ({
   props: undefined as
     | ComponentProps<(typeof import('../ChatEditor'))['ChatEditor']>
     | undefined,
-  clearText: vi.fn(),
+  clear: vi.fn(),
   setText: vi.fn(),
+  getText: vi.fn(() => ''),
 }));
 
 vi.mock('../ChatEditor', async () => {
   const { forwardRef, useImperativeHandle } = await import('react');
+  const { WorkspaceSelector } = await import('../WorkspaceSelector');
   return {
     ChatEditor: forwardRef<
       EditorHandle,
@@ -30,11 +41,31 @@ vi.mock('../ChatEditor', async () => {
         ref,
         () =>
           ({
-            clearText: editorMocks.clearText,
+            clear: editorMocks.clear,
             setText: editorMocks.setText,
+            getText: editorMocks.getText,
           }) as EditorHandle,
       );
-      return <div data-testid="shared-editor" />;
+      return (
+        <div data-testid="shared-editor">
+          <WorkspaceSelector
+            workspaces={props.workspaces ?? []}
+            selectedWorkspaceCwd={props.selectedWorkspaceCwd}
+            alwaysVisible={props.workspaceSelectorAlwaysVisible}
+            disabled={props.workspaceSelectionDisabled}
+            busy={props.workspaceMutationBusy}
+            scratchSupported={props.scratchWorkspaceSupported ?? false}
+            existingFolderSupported={
+              props.existingFolderWorkspaceSupported ?? false
+            }
+            onSelectWorkspace={props.onSelectWorkspace ?? (() => {})}
+            onCreateScratch={props.onCreateScratchWorkspace ?? (() => {})}
+            onOpenExistingFolder={props.onOpenExistingWorkspace ?? (() => {})}
+            menuItems={props.workspaceMenuItems}
+          />
+          {props.gitContextControl}
+        </div>
+      );
     }),
   };
 });
@@ -53,24 +84,39 @@ describe('WorkspaceBindingCreator', () => {
   let getSession: ReturnType<typeof vi.fn>;
   let onCreated: ReturnType<typeof vi.fn>;
   let onAbandoned: ReturnType<typeof vi.fn>;
+  let onSelectWorkspace: ReturnType<typeof vi.fn>;
+  let onWorkspaceCreated: ReturnType<typeof vi.fn>;
   let provider: ManagedAgentProvider;
+  let creationSkills: ManagedCreationSkillsSource | undefined;
 
   async function flush() {
     for (let index = 0; index < 8; index++) await Promise.resolve();
   }
 
-  async function render() {
+  async function render(
+    interactive = true,
+    strict = false,
+    workspaceId?: string,
+    extra: Partial<ComponentProps<typeof WorkspaceBindingCreator>> = {},
+  ) {
     await act(async () => {
-      root.render(
+      const content = (
         <I18nProvider language="en">
           <WorkspaceBindingCreator
             provider={provider}
             clientId="client-a"
             onCreated={onCreated}
             onAbandoned={onAbandoned}
+            workspaceId={workspaceId}
+            onSelectWorkspace={onSelectWorkspace}
+            onWorkspaceCreated={onWorkspaceCreated}
+            interactive={interactive}
+            creationSkills={creationSkills}
+            {...extra}
           />
-        </I18nProvider>,
+        </I18nProvider>
       );
+      root.render(strict ? <StrictMode>{content}</StrictMode> : content);
       await flush();
     });
     await act(flush);
@@ -100,19 +146,47 @@ describe('WorkspaceBindingCreator', () => {
     await act(async () => option!.click());
   }
 
+  async function workspaceAction(label: string) {
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>('button[aria-label="Workspace"]')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    const item = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((entry) => entry.textContent === label);
+    expect(item).toBeDefined();
+    await act(async () => {
+      item!.click();
+      await flush();
+    });
+  }
+
+  async function expectWorkingDirectory(value: string) {
+    await workspaceAction('Working directory');
+    expect(
+      document.querySelector<HTMLInputElement>('#managed-workspace-cwd')?.value,
+    ).toBe(value);
+    await click('cancel');
+  }
+
   beforeEach(() => {
+    creationSkills = undefined;
     vi.clearAllMocks();
     editorMocks.props = undefined;
+    editorMocks.getText.mockReturnValue('');
     sessionStorage.clear();
     createEmpty = vi.fn();
     getSession = vi.fn();
     onCreated = vi.fn();
     onAbandoned = vi.fn();
+    onSelectWorkspace = vi.fn();
+    onWorkspaceCreated = vi.fn();
     provider = {
-      kind: 'java',
       storageKey: 'host:scope-a:agent-a:workspace-v1',
       canCancel: false,
-      acceptsWorkspaceCwd: false,
       workspaceBinding: {
         agentId: 'agent-a',
         list: vi.fn().mockResolvedValue({
@@ -129,6 +203,7 @@ describe('WorkspaceBindingCreator', () => {
       createSession: vi.fn(),
       submitPrompt: vi.fn(),
       cancel: vi.fn(),
+      queryCancelOperation: vi.fn(),
       async *subscribeEvents() {
         yield* [];
       },
@@ -141,6 +216,485 @@ describe('WorkspaceBindingCreator', () => {
   afterEach(async () => {
     await act(async () => root.unmount());
     container.remove();
+    vi.useRealTimers();
+  });
+
+  const remoteWorkspace = {
+    ...workspace,
+    workspaceId: 'ws-remote',
+    displayName: 'Remote project',
+  };
+
+  it.each([
+    { handoffAgent: 'agent-b', presetAgents: ['agent-a', 'agent-b'] },
+    { handoffAgent: 'agent-a', presetAgents: ['agent-b'] },
+  ])(
+    'prepares an editable handoff with the permitted Workspace, cwd and Agent $handoffAgent without creating or sending',
+    async ({ handoffAgent, presetAgents }) => {
+      const createSession = directCreation();
+      provider.workspaceBinding!.modelPresets = presetAgents.map((agentId) => ({
+        agentId,
+        label: agentId,
+      }));
+      await render(true, true, undefined, {
+        handoff: {
+          sourceSessionId: 'original',
+          workspaceId: 'ws-a',
+          cwdRelative: 'project',
+          agentId: handoffAgent,
+          text: 'Historical reference',
+          truncated: true,
+        },
+      });
+      expect(editorMocks.setText).toHaveBeenCalledTimes(1);
+      expect(editorMocks.setText).toHaveBeenCalledWith('Historical reference');
+      expect(editorMocks.props?.composerScopeKey).toContain(
+        ':new:handoff:original',
+      );
+      expect(editorMocks.props?.currentModel).toBe(handoffAgent);
+      expect(provider.workspaceBinding!.get).toHaveBeenCalledWith(
+        'ws-a',
+        expect.anything(),
+      );
+      expect(container.textContent).toContain('Review and edit this handoff');
+      expect(container.textContent).toContain('32 KiB');
+      await expectWorkingDirectory('project');
+      expect(createSession).not.toHaveBeenCalled();
+      expect(createEmpty).not.toHaveBeenCalled();
+      expect(onCreated).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps a lost Workspace grant behind the existing admission controls for handoff drafts', async () => {
+    const createSession = directCreation();
+    vi.mocked(provider.workspaceBinding!.get).mockRejectedValue(
+      new Error('access denied'),
+    );
+    await render(true, false, 'ws-private', {
+      handoff: {
+        sourceSessionId: 'original',
+        workspaceId: 'ws-private',
+        cwdRelative: '.',
+        text: 'Review this',
+        truncated: false,
+      },
+    });
+    expect(container.textContent).toContain('access denied');
+    await act(async () => {
+      editorMocks.props!.onSubmit(
+        'Attempt after lost grant',
+        undefined,
+        undefined,
+        vi.fn(),
+      );
+      await flush();
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(createEmpty).not.toHaveBeenCalled();
+  });
+
+  function enableRegistration() {
+    const registration = {
+      listNodes: vi.fn().mockResolvedValue({
+        supported: true,
+        data: [{ nodeId: 'mac', displayName: 'Remote Mac' }],
+      }),
+      checkDirectory: vi.fn().mockResolvedValue({
+        nodeId: 'mac',
+        canonicalPath: '/projects/example',
+        platform: 'darwin',
+      }),
+      create: vi.fn().mockResolvedValue({
+        operationId: 'registration-a',
+        type: 'workspace_create',
+        status: 'completed',
+        workspaceId: 'ws-remote',
+        replayed: false,
+      }),
+      query: vi.fn().mockResolvedValue({
+        operationId: 'registration-a',
+        type: 'workspace_create',
+        status: 'completed',
+        workspaceId: 'ws-remote',
+        replayed: false,
+      }),
+    };
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      registration,
+    };
+    vi.mocked(provider.workspaceBinding.get).mockResolvedValue(remoteWorkspace);
+    return registration;
+  }
+
+  async function typeInput(id: string, value: string) {
+    await act(async () => {
+      const input = document.getElementById(id) as HTMLInputElement;
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  async function openRegistration(direct = false) {
+    if (direct)
+      await act(async () => editorMocks.props!.onOpenExistingWorkspace!());
+    else await click('Add Workspace');
+    await act(async () =>
+      document.getElementById('managed-runtime-node')!.click(),
+    );
+    const machine = [...document.querySelectorAll('[role="option"]')].find(
+      (item) => item.textContent === 'Remote Mac',
+    );
+    expect(machine).toBeDefined();
+    await act(async () => (machine as HTMLElement).click());
+    await typeInput('managed-runtime-directory', '/projects/link');
+    await typeInput('managed-runtime-name', 'Remote project');
+    await click('Check directory');
+  }
+
+  it.each([401, 403, 404])(
+    'hides remote registration when node discovery returns %s',
+    async (status) => {
+      const registration = enableRegistration();
+      registration.listNodes.mockRejectedValue(
+        new JavaManagedAgentHttpError(status, 'unavailable', 'Unavailable'),
+      );
+      directCreation();
+      await render();
+      expect(editorMocks.props!.existingFolderWorkspaceSupported).toBe(false);
+      expect(document.querySelector('[role="dialog"]')).toBeNull();
+      expect(registration.create).not.toHaveBeenCalled();
+    },
+  );
+
+  it('keeps the registration entry hidden when disabled or no nodes are authorized', async () => {
+    const registration = enableRegistration();
+    registration.listNodes.mockResolvedValue({ supported: false, data: [] });
+    await render();
+    expect(container.textContent).not.toContain('Add Workspace');
+    expect(registration.create).not.toHaveBeenCalled();
+  });
+
+  it('registers and selects a remote Workspace without creating a Session', async () => {
+    const registration = enableRegistration();
+    const createSession = directCreation();
+    vi.mocked(provider.workspaceBinding!.get).mockResolvedValue({
+      ...remoteWorkspace,
+      defaultCwdRelative: 'remote-project',
+    });
+    await render();
+    await workspaceAction('Working directory');
+    await typeInput('managed-workspace-cwd', 'local-project');
+    await click('save');
+    expect(editorMocks.props!.existingFolderWorkspaceSupported).toBe(true);
+    await openRegistration(true);
+    expect(registration.checkDirectory).toHaveBeenCalledWith(
+      { nodeId: 'mac', path: '/projects/link' },
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    await click('Register Workspace');
+    expect(registration.create).toHaveBeenCalledWith(
+      {
+        nodeId: 'mac',
+        path: '/projects/example',
+        displayName: 'Remote project',
+      },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(provider.workspaceBinding!.get).toHaveBeenCalledWith(
+      'ws-remote',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-remote');
+    await expectWorkingDirectory('remote-project');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(createEmpty).not.toHaveBeenCalled();
+    expect(onSelectWorkspace).toHaveBeenCalledWith('ws-remote');
+    expect(onWorkspaceCreated).toHaveBeenCalledOnce();
+  });
+
+  it('requires a new directory check after changing the machine path', async () => {
+    const registration = enableRegistration();
+    await render();
+    await openRegistration();
+    await typeInput('managed-runtime-directory', '/different/path');
+    const register = [...document.querySelectorAll('button')].find(
+      (item) => item.textContent === 'Register Workspace',
+    );
+    expect(register!.disabled).toBe(true);
+    await click('Register Workspace');
+    expect(registration.create).not.toHaveBeenCalled();
+  });
+
+  it('does not register a directory rejected by server authorization', async () => {
+    const registration = enableRegistration();
+    registration.checkDirectory.mockRejectedValue(
+      new JavaManagedAgentHttpError(403, 'forbidden', 'Forbidden'),
+    );
+    await render();
+    await openRegistration();
+    expect(
+      document.querySelector('[role="dialog"] [role="alert"]')?.textContent,
+    ).toContain('does not have permission');
+    await click('Register Workspace');
+    expect(registration.create).not.toHaveBeenCalled();
+  });
+
+  it('replays a lost registration response using the frozen key after a refresh', async () => {
+    const registration = enableRegistration();
+    registration.create.mockRejectedValueOnce(new TypeError('Lost response'));
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    const original = registration.create.mock.calls[0];
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(
+      (document.getElementById('managed-runtime-directory') as HTMLInputElement)
+        .disabled,
+    ).toBe(true);
+    await click('Continue confirming registration');
+    expect(registration.create).toHaveBeenCalledTimes(2);
+    expect(registration.create.mock.calls[1][0]).toEqual(original[0]);
+    expect(registration.create.mock.calls[1][1].idempotencyKey).toBe(
+      original[1].idempotencyKey,
+    );
+    expect(provider.workspaceBinding!.get).toHaveBeenCalledWith(
+      'ws-remote',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+  });
+
+  it('polls only the accepted operation after a lost read, including when new registrations are disabled', async () => {
+    vi.useFakeTimers();
+    const registration = enableRegistration();
+    registration.create.mockResolvedValue({
+      operationId: 'registration-a',
+      type: 'workspace_create',
+      status: 'running',
+      replayed: false,
+    });
+    registration.query.mockRejectedValueOnce(new TypeError('Lost read'));
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'unconfirmed',
+    );
+    await act(async () => root.unmount());
+    registration.listNodes.mockResolvedValue({ supported: false, data: [] });
+    root = createRoot(container);
+    await render();
+    expect(registration.create).toHaveBeenCalledOnce();
+    expect(registration.query).toHaveBeenCalledTimes(2);
+    expect(registration.query.mock.calls[1][0]).toBe('registration-a');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('keeps the original operation when completed Workspace read-back denies access', async () => {
+    const registration = enableRegistration();
+    vi.mocked(provider.workspaceBinding!.get).mockResolvedValue({
+      ...remoteWorkspace,
+      canCreateSession: false,
+    });
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(
+      document.querySelector('[role="dialog"] [role="alert"]')?.textContent,
+    ).toContain('does not have permission');
+    vi.mocked(provider.workspaceBinding!.get).mockResolvedValue(
+      remoteWorkspace,
+    );
+    await click('Continue confirming registration');
+    expect(registration.create).toHaveBeenCalledOnce();
+    expect(registration.query).toHaveBeenCalledWith(
+      'registration-a',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+  });
+
+  // The server reconciles a blocked registration from its machine (D7-2),
+  // so the dialog keeps querying it: a button while it stays open, and a
+  // fresh query each time it opens, without remounting or a discarded draft.
+  it('completes a blocked registration from a later query without remounting', async () => {
+    const registration = enableRegistration();
+    const blocked = {
+      operationId: 'registration-blocked',
+      type: 'workspace_create',
+      status: 'recovery_blocked',
+      failureCode: 'workspace_registration_failed',
+      replayed: false,
+    };
+    registration.create.mockResolvedValueOnce(blocked);
+    registration.query.mockResolvedValueOnce({
+      ...blocked,
+      status: 'completed',
+      workspaceId: 'ws-remote',
+    });
+    const storageKey = `qwen-managed-ssh-workspace-registration:${provider.storageKey}`;
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'has not confirmed',
+    );
+    await click('Continue confirming registration');
+    expect(registration.query).toHaveBeenCalledWith(
+      'registration-blocked',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(provider.workspaceBinding!.get).toHaveBeenCalledWith(
+      'ws-remote',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(sessionStorage.getItem(storageKey)).toBeNull();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('queries a blocked registration again when the dialog reopens', async () => {
+    const registration = enableRegistration();
+    const blocked = {
+      operationId: 'registration-blocked',
+      type: 'workspace_create',
+      status: 'recovery_blocked',
+      failureCode: 'workspace_registration_failed',
+      replayed: false,
+    };
+    registration.create.mockResolvedValueOnce(blocked);
+    registration.query.mockResolvedValueOnce({ ...blocked, status: 'failed' });
+    const storageKey = `qwen-managed-ssh-workspace-registration:${provider.storageKey}`;
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    await click('Close');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(registration.query).not.toHaveBeenCalled();
+    await click('Add Workspace');
+    expect(registration.query).toHaveBeenCalledOnce();
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'Registration failed',
+    );
+    expect(sessionStorage.getItem(storageKey)).toBeNull();
+    expect(
+      (document.getElementById('managed-runtime-directory') as HTMLInputElement)
+        .disabled,
+    ).toBe(false);
+  });
+
+  it('clears only a confirmed blocked browser draft before starting another registration', async () => {
+    const registration = enableRegistration();
+    const blocked = {
+      operationId: 'registration-blocked',
+      type: 'workspace_create',
+      status: 'recovery_blocked',
+      failureCode: 'ssh_runtime_version_conflict',
+      replayed: false,
+    };
+    registration.create.mockResolvedValueOnce(blocked);
+    registration.query.mockResolvedValueOnce(blocked);
+    const storageKey = `qwen-managed-ssh-workspace-registration:${provider.storageKey}`;
+    await render();
+    await openRegistration();
+    await click('Register Workspace');
+    const originalKey = registration.create.mock.calls[0][1].idempotencyKey;
+    expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+      'administrator review',
+    );
+    expect(JSON.parse(sessionStorage.getItem(storageKey)!)).toMatchObject({
+      operationId: 'registration-blocked',
+      idempotencyKey: originalKey,
+    });
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(registration.query).toHaveBeenCalledWith(
+      'registration-blocked',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(
+      (document.getElementById('managed-runtime-directory') as HTMLInputElement)
+        .disabled,
+    ).toBe(true);
+    await click('Start another registration');
+    expect(sessionStorage.getItem(storageKey)).toBeNull();
+    expect(registration.create).toHaveBeenCalledOnce();
+    expect(registration.query).toHaveBeenCalledOnce();
+    expect(provider.workspaceBinding!.get).not.toHaveBeenCalledWith(
+      'ws-remote',
+      expect.anything(),
+    );
+    expect(
+      (document.getElementById('managed-runtime-directory') as HTMLInputElement)
+        .disabled,
+    ).toBe(false);
+    await typeInput('managed-runtime-directory', '/projects/another');
+    registration.checkDirectory.mockResolvedValue({
+      nodeId: 'mac',
+      canonicalPath: '/projects/another',
+      platform: 'darwin',
+    });
+    await click('Check directory');
+    await click('Register Workspace');
+    expect(registration.create).toHaveBeenCalledTimes(2);
+    expect(registration.create.mock.calls[1][0].path).toBe('/projects/another');
+    expect(registration.create.mock.calls[1][1].idempotencyKey).not.toBe(
+      originalKey,
+    );
+    expect(registration.query).toHaveBeenCalledOnce();
+    expect(sessionStorage.getItem(storageKey)).toBeNull();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('recovers the original registration under React StrictMode effect replay', async () => {
+    const registration = enableRegistration();
+    sessionStorage.setItem(
+      `qwen-managed-ssh-workspace-registration:${provider.storageKey}`,
+      JSON.stringify({
+        nodeId: 'mac',
+        path: '/projects/example',
+        displayName: 'Remote project',
+        idempotencyKey: 'original',
+        operationId: 'registration-a',
+      }),
+    );
+    directCreation();
+    await render(true, true);
+    expect(registration.create).not.toHaveBeenCalled();
+    expect(registration.query).toHaveBeenCalled();
+    expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-remote');
+    expect(editorMocks.props!.existingFolderWorkspaceSupported).toBe(true);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('does not send a registration when its recovery record cannot be persisted', async () => {
+    const registration = enableRegistration();
+    await render();
+    await openRegistration();
+    const storage = vi
+      .spyOn(Object.getPrototypeOf(sessionStorage) as Storage, 'setItem')
+      .mockImplementation(() => {
+        throw new Error('Storage unavailable');
+      });
+    try {
+      await click('Register Workspace');
+      expect(registration.create).not.toHaveBeenCalled();
+      expect(
+        document.querySelector('[role="dialog"] [role="alert"]')?.textContent,
+      ).toContain('session storage is unavailable');
+    } finally {
+      storage.mockRestore();
+    }
   });
 
   function directCreation() {
@@ -161,8 +715,469 @@ describe('WorkspaceBindingCreator', () => {
     return createSession;
   }
 
+  const createdWorktree: ManagedSessionWorktree = {
+    id: 'worktree-a',
+    sessionId: 'session-a',
+    workspaceId: 'ws-a',
+    state: 'preparing',
+    branch: 'worktree-managed-a',
+    baseCommit: 'a'.repeat(40),
+    cwdRelative: '.qwen-managed-session-worktrees/a',
+    operationId: 'operation-a',
+    revision: 1,
+  };
+
+  function worktreeCreation() {
+    const createSession = directCreation();
+    provider.workspaceBinding!.list = vi.fn().mockResolvedValue({
+      data: [workspace],
+      defaultWorkspace: workspace,
+      supported: true,
+      supportsApprovalModeSelection: true,
+    });
+    provider.workspaceBinding!.getSessionOptions = vi.fn().mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      inputAttachments: true,
+    });
+    const options = vi.fn().mockResolvedValue({
+      supported: true,
+      baseCommit: 'a'.repeat(40),
+      branches: ['main', 'topic'],
+      currentBranch: 'main',
+    });
+    provider.sessionWorktrees = {
+      options,
+      list: vi.fn().mockResolvedValue({ data: [] }),
+      inspect: vi.fn(),
+      cleanup: vi.fn(),
+    };
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'agent-a',
+      initialApprovalMode: 'default',
+      workspace: {
+        workspaceId: 'ws-a',
+        cwdRelative: createdWorktree.cwdRelative,
+      },
+      worktree: createdWorktree,
+    });
+    return { createSession, options };
+  }
+
+  async function selectWorktree() {
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="managed-worktree-chip"]',
+        )!
+        .click();
+    });
+    const option = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="radio"]'),
+    ].find((button) => button.textContent?.startsWith('Worktree'));
+    expect(option).toBeDefined();
+    await act(async () => option!.click());
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+  }
+
+  it('puts Managed worktree selection in the shared composer instead of a top-level fieldset', async () => {
+    vi.useFakeTimers();
+    const { options } = worktreeCreation();
+    options.mockResolvedValue({
+      supported: true,
+      baseCommit: 'a'.repeat(40),
+      branches: ['topic', 'main'],
+      currentBranch: 'main',
+    });
+    await render();
+    await act(async () => vi.advanceTimersByTimeAsync(200));
+    const editor = container.querySelector('[data-testid="shared-editor"]');
+    expect(
+      editor?.querySelector('[data-testid="managed-worktree-chip"]')
+        ?.textContent,
+    ).toContain('main');
+    expect(
+      container.querySelector('input[name="managed-worktree-mode"]'),
+    ).toBeNull();
+    expect(container.querySelector('legend')).toBeNull();
+    expect(options).toHaveBeenLastCalledWith(
+      { workspaceId: 'ws-a', cwdRelative: '.' },
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+  });
+
+  it('refreshes the actual branch when opening the picker without selecting worktree', async () => {
+    vi.useFakeTimers();
+    const { options } = worktreeCreation();
+    await render();
+    await act(async () => vi.advanceTimersByTimeAsync(200));
+    options.mockResolvedValue({
+      supported: true,
+      branches: ['main'],
+      currentBranch: 'renamed',
+    });
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="managed-worktree-chip"]',
+        )!
+        .click(),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(200));
+    expect(
+      container.querySelector('[data-testid="managed-worktree-chip"]')
+        ?.textContent,
+    ).toContain('renamed');
+    expect(document.querySelector('[role="radio"]')?.textContent).toContain(
+      'renamed',
+    );
+    expect(options.mock.calls.at(-1)?.[0]).not.toHaveProperty('baseRef');
+  });
+
+  it('does not block current-directory use when only worktree preparation is unsupported', async () => {
+    vi.useFakeTimers();
+    const { options } = worktreeCreation();
+    options.mockResolvedValue({
+      supported: false,
+      reason: 'worktree_submodule_unsupported',
+      branches: [],
+      currentBranch: 'main',
+    });
+    await render();
+    await act(async () => vi.advanceTimersByTimeAsync(200));
+    expect(
+      container.querySelector('[data-testid="managed-worktree-chip"]')
+        ?.textContent,
+    ).toContain('main');
+    expect(editorMocks.props!.disabled).toBe(false);
+    expect(container.textContent).not.toContain(
+      'worktree_submodule_unsupported',
+    );
+  });
+
+  it('ignores a previous workspace branch response after selecting another workspace', async () => {
+    vi.useFakeTimers();
+    const { options } = worktreeCreation();
+    const other = { ...workspace, workspaceId: 'ws-b', displayName: 'B' };
+    vi.mocked(provider.workspaceBinding!.list).mockResolvedValue({
+      data: [workspace, other],
+      defaultWorkspace: workspace,
+      supported: true,
+      supportsApprovalModeSelection: true,
+    });
+    provider.workspaceBinding!.get = vi
+      .fn()
+      .mockImplementation(async (id) => (id === 'ws-b' ? other : workspace));
+    let resolveFirst!: (value: ManagedSessionWorktreeOptions) => void;
+    options.mockImplementation(({ workspaceId }) =>
+      workspaceId === 'ws-a'
+        ? new Promise<ManagedSessionWorktreeOptions>((resolve) => {
+            resolveFirst = resolve;
+          })
+        : Promise.resolve({
+            supported: true,
+            branches: [],
+            currentBranch: 'feature/b',
+          }),
+    );
+    await render();
+    await act(async () => vi.advanceTimersByTimeAsync(200));
+    await act(async () => {
+      editorMocks.props!.onSelectWorkspace!('ws-b');
+      await flush();
+    });
+    await act(async () => vi.advanceTimersByTimeAsync(200));
+    await act(async () => {
+      resolveFirst({
+        supported: true,
+        branches: ['main'],
+        currentBranch: 'main',
+      });
+      await flush();
+    });
+    const label = container.querySelector(
+      '[data-testid="managed-worktree-chip"]',
+    )?.textContent;
+    expect(label).toContain('feature/b');
+    expect(label).not.toContain('main');
+  });
+
+  it('creates a worktree from HEAD and reads back the allocated target without accessing source files', async () => {
+    vi.useFakeTimers();
+    const { createSession, options } = worktreeCreation();
+    provider.workspaceFiles = { query: vi.fn(), read: vi.fn() };
+    await render();
+    vi.mocked(provider.workspaceFiles.query).mockClear();
+    await selectWorktree();
+    expect(options).toHaveBeenLastCalledWith(
+      { workspaceId: 'ws-a', cwdRelative: '.' },
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(editorMocks.props!.dialogOpen).toBe(false);
+    expect(editorMocks.props!.disabled).toBe(false);
+    expect(document.querySelector('[data-slot="popover-content"]')).toBeNull();
+    expect(document.getElementById('managed-worktree-base')).toBeNull();
+    expect(createSession).not.toHaveBeenCalled();
+    expect(createEmpty).not.toHaveBeenCalled();
+    expect(editorMocks.props!.fileReferenceActions).toBeUndefined();
+    expect(editorMocks.props!.fileUploadTarget).toBeUndefined();
+    expect(editorMocks.props!.attachmentsEnabled).toBe(true);
+    await sendInitial('Work independently');
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: 'ws-a',
+        cwdRelative: '.',
+        worktree: {},
+      }),
+      expect.anything(),
+    );
+    expect(provider.workspaceFiles.query).not.toHaveBeenCalled();
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
+  });
+
+  it('keeps ordinary message attachments available before worktree preparation', async () => {
+    vi.useFakeTimers();
+    const { createSession } = worktreeCreation();
+    await render();
+    await selectWorktree();
+    await act(async () => {
+      editorMocks.props!.onSubmit(
+        'Read the attachment',
+        undefined,
+        [
+          {
+            name: 'notes.txt',
+            media_type: 'text/plain',
+            text: 'Message context',
+          },
+        ],
+        vi.fn(),
+      );
+      await flush();
+    });
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        worktree: {},
+        input: expect.arrayContaining([
+          {
+            type: 'input_file',
+            name: 'notes.txt',
+            mime_type: 'text/plain',
+            text: 'Message context',
+          },
+        ]),
+      }),
+      expect.anything(),
+    );
+  });
+
+  it('clears worktree isolation back to the current branch without creating a session', async () => {
+    vi.useFakeTimers();
+    const { createSession } = worktreeCreation();
+    await render();
+    await selectWorktree();
+    expect(
+      container.querySelector('[data-testid="managed-worktree-chip"]')
+        ?.textContent,
+    ).toContain('Worktree');
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="managed-worktree-clear"]',
+        )!
+        .click(),
+    );
+    await act(async () => vi.advanceTimersByTimeAsync(200));
+    expect(
+      container.querySelector('[data-testid="managed-worktree-chip"]')
+        ?.textContent,
+    ).toContain('main');
+    expect(
+      container.querySelector('[data-testid="managed-worktree-clear"]'),
+    ).toBeNull();
+    expect(createSession).not.toHaveBeenCalled();
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'agent-a',
+      initialApprovalMode: 'default',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await sendInitial('Use the current branch');
+    expect(createSession.mock.calls[0]![0]).not.toHaveProperty('worktree');
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
+  });
+
+  it('keeps the simple picker and retained-worktree manager without creation fields', async () => {
+    vi.useFakeTimers();
+    const { createSession } = worktreeCreation();
+    await render();
+    await selectWorktree();
+    await act(async () =>
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="managed-worktree-chip"]',
+        )!
+        .click(),
+    );
+    const popup = document.querySelector('[data-slot="popover-content"]')!;
+    expect(popup.querySelectorAll('[role="radio"]')).toHaveLength(2);
+    expect(popup.textContent).toContain(
+      'Creates an isolated copy when you send your first message',
+    );
+    expect(popup.textContent).toContain('Develop directly on main');
+    expect(popup.querySelector('input, fieldset, datalist')).toBeNull();
+    expect(popup.textContent).not.toContain('Base commit');
+    expect(editorMocks.props!.dialogOpen).toBe(true);
+    expect(editorMocks.props!.disabled).toBe(true);
+    await click('Session worktrees');
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain(
+      'No session worktrees',
+    );
+    expect(provider.sessionWorktrees!.list).toHaveBeenCalledWith(
+      'ws-a',
+      expect.anything(),
+    );
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it('freezes the HEAD worktree request and idempotency key across a restored creation retry', async () => {
+    vi.useFakeTimers();
+    const { createSession } = worktreeCreation();
+    createSession.mockRejectedValueOnce(new TypeError('Lost response'));
+    await render();
+    await selectWorktree();
+    await sendInitial('Frozen worktree input');
+    const first = createSession.mock.calls[0]!;
+    expect(first[0].worktree).toEqual({});
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-testid="managed-worktree-chip"]',
+    )!;
+    expect(chip.textContent).toContain('Worktree');
+    expect(chip.disabled).toBe(true);
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="managed-worktree-clear"]',
+      )!.disabled,
+    ).toBe(true);
+    await click('Retry the same request');
+    expect(createSession.mock.calls[1]![0]).toEqual(first[0]);
+    expect(createSession.mock.calls[1]![1].idempotencyKey).toBe(
+      first[1].idempotencyKey,
+    );
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
+  });
+
+  it('replays a legacy pending explicit base ref unchanged after simplifying the picker', async () => {
+    const { createSession } = worktreeCreation();
+    sessionStorage.setItem(
+      `qwen-managed-workspace-create:${provider.storageKey}`,
+      JSON.stringify({
+        agentId: 'agent-a',
+        workspaceId: 'ws-a',
+        cwdRelative: '.',
+        worktree: { baseRef: 'topic' },
+        input: [{ type: 'input_text', text: 'Original input' }],
+        clientId: 'client-a',
+        idempotencyKey: 'legacy-worktree-key',
+      }),
+    );
+    await render();
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="managed-worktree-clear"]',
+      )!.disabled,
+    ).toBe(true);
+    expect(createSession).not.toHaveBeenCalled();
+    await click('Retry the same request');
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        worktree: { baseRef: 'topic' },
+        text: 'Original input',
+      }),
+      expect.objectContaining({ idempotencyKey: 'legacy-worktree-key' }),
+    );
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
+  });
+
+  it('keeps unsupported worktree creation blocked and does not silently use the current directory', async () => {
+    vi.useFakeTimers();
+    const { createSession, options } = worktreeCreation();
+    options.mockResolvedValue({
+      supported: false,
+      reason: 'worktree_layout_unsupported',
+      branches: [],
+    });
+    await render();
+    await selectWorktree();
+    expect(container.textContent).toContain('worktree_layout_unsupported');
+    expect(editorMocks.props!.disabled).toBe(true);
+    await sendInitial('Do not fall back');
+    expect(createSession).not.toHaveBeenCalled();
+    expect(createEmpty).not.toHaveBeenCalled();
+    const chip = container.querySelector<HTMLButtonElement>(
+      '[data-testid="managed-worktree-chip"]',
+    )!;
+    expect(chip.disabled).toBe(false);
+    expect(document.querySelector('[data-slot="popover-content"]')).toBeNull();
+    expect(editorMocks.props!.dialogOpen).toBe(false);
+    expect(container.textContent).toContain('worktree_layout_unsupported');
+    await act(async () => chip.click());
+    const current = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="radio"]'),
+    ].find((button) => button.textContent?.startsWith('Current directory'));
+    await act(async () => current!.click());
+    expect(editorMocks.props!.disabled).toBe(false);
+    expect(container.textContent).not.toContain('worktree_layout_unsupported');
+  });
+
+  it('rejects source workspace file annotations after switching to an independent worktree', async () => {
+    vi.useFakeTimers();
+    const { createSession } = worktreeCreation();
+    await render();
+    await selectWorktree();
+    await act(async () => {
+      editorMocks.props!.onSubmit(
+        'Read @source.ts',
+        undefined,
+        undefined,
+        vi.fn(),
+        {
+          inputAnnotations: [
+            {
+              type: 'reference',
+              start: 5,
+              end: 15,
+              text: '@source.ts',
+              reference: {
+                id: 'source',
+                kind: 'file',
+                label: 'source.ts',
+                metadata: {
+                  managedFile: { version: 1, source: 'previous-workspace' },
+                },
+              },
+            },
+          ],
+        },
+      );
+      await flush();
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('select the file again');
+  });
+
   async function sendInitial(text: string) {
     const commit = vi.fn();
+    const worktreeChip = container.querySelector<HTMLButtonElement>(
+      '[data-testid="managed-worktree-chip"][aria-expanded="true"]',
+    );
+    if (worktreeChip) await act(async () => worktreeChip.click());
     await act(async () => {
       expect(
         editorMocks.props!.onSubmit(text, undefined, undefined, commit),
@@ -171,6 +1186,1662 @@ describe('WorkspaceBindingCreator', () => {
     });
     return commit;
   }
+
+  function workspaceCreation() {
+    directCreation();
+    const createWorkspace = vi.fn().mockResolvedValue({
+      ...workspace,
+      workspaceId: 'ws-created',
+      displayName: 'Created',
+    });
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      createWorkspace,
+      list: vi.fn().mockResolvedValue({
+        data: [workspace],
+        defaultWorkspace: workspace,
+        supported: true,
+        canCreateWorkspace: true,
+      }),
+    };
+    return createWorkspace;
+  }
+
+  async function selectExecution(label: string) {
+    const trigger = [
+      ...document.querySelectorAll<HTMLElement>('[role="combobox"]'),
+    ].find(
+      (item) =>
+        item.getAttribute('aria-labelledby') !== 'managed-workspace-label',
+    );
+    expect(trigger).toBeDefined();
+    await act(async () => trigger!.click());
+    const option = [
+      ...document.querySelectorAll<HTMLElement>('[role="option"]'),
+    ].find((item) => item.textContent === label);
+    expect(option).toBeDefined();
+    await act(async () => option!.click());
+  }
+
+  it('opens workspace creation over a hidden conversation and switches to Local without creating a workspace', async () => {
+    const createWorkspace = workspaceCreation();
+    const onOpenLocalWorkspace = vi.fn();
+    const onWorkspaceCreationOpenChange = vi.fn();
+    await render(false, false, undefined, {
+      creationOnly: true,
+      workspaceCreationOpen: true,
+      onOpenLocalWorkspace,
+      onWorkspaceCreationOpenChange,
+    });
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(document.body.textContent).toContain('Managed (Managed Agent)');
+    await selectExecution('Local (daemon)');
+    expect(onOpenLocalWorkspace).toHaveBeenCalledOnce();
+    expect(onWorkspaceCreationOpenChange).toHaveBeenCalledWith(false);
+    expect(createWorkspace).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(onSelectWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('creates a workspace from the shared dialog while the Managed conversation is hidden', async () => {
+    const createWorkspace = workspaceCreation();
+    const onWorkspaceCreationOpenChange = vi.fn();
+    await render(false, false, undefined, {
+      creationOnly: true,
+      workspaceCreationOpen: true,
+      onWorkspaceCreationOpenChange,
+    });
+    await nameWorkspace('Created');
+    await click('Create workspace');
+    expect(createWorkspace).toHaveBeenCalledOnce();
+    expect(onWorkspaceCreated).toHaveBeenCalledWith('ws-created');
+    expect(onWorkspaceCreationOpenChange).toHaveBeenCalledWith(false);
+    expect(provider.workspaceBinding!.createSession).not.toHaveBeenCalled();
+  });
+
+  it('locks the execution mode for an uncertain Managed workspace operation', async () => {
+    const createWorkspace = workspaceCreation().mockRejectedValue(
+      new TypeError('Lost response'),
+    );
+    await render(true, false, undefined, { onOpenLocalWorkspace: vi.fn() });
+    await openWorkspaceCreation();
+    await nameWorkspace('Frozen');
+    await click('Create workspace');
+    const execution = [
+      ...document.querySelectorAll<HTMLButtonElement>('[role="combobox"]'),
+    ].find((item) => item.textContent?.includes('Managed (Managed Agent)'));
+    expect(execution?.disabled).toBe(true);
+    expect(createWorkspace).toHaveBeenCalledOnce();
+    expect(
+      sessionStorage.getItem(
+        `qwen-managed-workspace-registration:${provider.storageKey}`,
+      ),
+    ).toContain('Frozen');
+  });
+
+  async function openWorkspaceCreation() {
+    await act(async () => {
+      editorMocks.props!.onCreateScratchWorkspace!();
+    });
+  }
+
+  async function nameWorkspace(name: string) {
+    await act(async () => {
+      const input = document.querySelector<HTMLInputElement>(
+        '#managed-new-workspace-name',
+      )!;
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, name);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  async function submitDirectory(path: string) {
+    await click('Choose existing directory');
+    await act(async () => {
+      const input = document.querySelector<HTMLInputElement>(
+        '#add-workspace-path',
+      )!;
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, path);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      document
+        .querySelector('[role="dialog"] form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+      await flush();
+    });
+  }
+
+  function approvalSelection() {
+    const createSession = directCreation();
+    const getSessionOptions = vi.fn().mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default', 'auto-edit'],
+    });
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      getSessionOptions,
+      list: vi.fn().mockResolvedValue({
+        data: [workspace],
+        defaultWorkspace: workspace,
+        supported: true,
+        supportsApprovalModeSelection: true,
+      }),
+    };
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'agent-a',
+      approvalMode: 'default',
+      initialApprovalMode: 'default',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    return { createSession, getSessionOptions };
+  }
+
+  it.each(['default', 'auto-edit', 'yolo'] as const)(
+    'selects a catalog model independently of the %s approval policy',
+    async (approvalMode) => {
+      const { createSession, getSessionOptions } = approvalSelection();
+      provider.workspaceBinding = {
+        ...provider.workspaceBinding!,
+        agentId: 'qwen-code',
+        modelPresets: [
+          { agentId: 'qwen-code', modelId: 'model-a', label: 'A' },
+          { agentId: 'qwen-code', modelId: 'model-b', label: 'B' },
+        ],
+      };
+      getSessionOptions.mockResolvedValue({
+        approvalMode: 'default',
+        availableApprovalModes: ['default', 'auto-edit', 'yolo'],
+        modelSelectionSupported: true,
+      });
+      getSession.mockResolvedValue({
+        sessionId: 'session-a',
+        agentId: 'qwen-code',
+        approvalMode,
+        initialApprovalMode: approvalMode,
+        modelSelection: { modelId: 'model-b', revision: 1 },
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      });
+      await render();
+      expect(editorMocks.props?.availableModes).toEqual([
+        'default',
+        'auto-edit',
+        'yolo',
+      ]);
+      await act(async () => editorMocks.props!.onSelectMode!(approvalMode));
+      await act(async () => editorMocks.props!.onSelectModel!('model-b'));
+      expect(editorMocks.props?.currentMode).toBe(approvalMode);
+      expect(editorMocks.props?.currentModel).toBe('model-b');
+      const commit = await sendInitial('Use chosen model and policy');
+      expect(createSession).toHaveBeenCalledWith(
+        expect.objectContaining({
+          agentId: 'qwen-code',
+          modelId: 'model-b',
+          approvalMode,
+        }),
+        expect.any(Object),
+      );
+      expect(commit).toHaveBeenCalledOnce();
+      expect(onCreated).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('freezes the model and permission after an unknown creation across remount', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      agentId: 'qwen-code',
+      modelPresets: [{ agentId: 'qwen-code', modelId: 'model-a', label: 'A' }],
+    };
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default', 'yolo'],
+      modelSelectionSupported: true,
+    });
+    createSession.mockRejectedValueOnce(new Error('Unknown delivery'));
+    await render();
+    await act(async () => editorMocks.props!.onSelectMode!('yolo'));
+    await sendInitial('Frozen first prompt');
+    const [request, command] = createSession.mock.calls[0];
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'qwen-code',
+      approvalMode: 'yolo',
+      initialApprovalMode: 'yolo',
+      modelSelection: { modelId: 'model-a', revision: 1 },
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await render();
+    await sendInitial('Changed draft');
+    expect(createSession).toHaveBeenLastCalledWith(
+      request,
+      expect.objectContaining({ idempotencyKey: command.idempotencyKey }),
+    );
+    expect(request).toMatchObject({
+      modelId: 'model-a',
+      approvalMode: 'yolo',
+      text: 'Frozen first prompt',
+    });
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
+  });
+
+  it('refuses catalog creation when the host lacks the initial-model capability', async () => {
+    const { createSession } = approvalSelection();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      modelPresets: [{ agentId: 'agent-a', modelId: 'model-a', label: 'A' }],
+    };
+    await render();
+    await sendInitial('Do not silently use the default model');
+    expect(createSession).not.toHaveBeenCalled();
+  });
+
+  it('loads actual policy options and selects a mode without changing model, Workspace or draft', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    await render();
+    const scope = editorMocks.props?.composerScopeKey;
+    expect(getSessionOptions).toHaveBeenCalledWith(
+      'agent-a',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(editorMocks.props?.availableModes).toEqual(['default', 'auto-edit']);
+    expect(editorMocks.props?.currentMode).toBe('default');
+    expect(editorMocks.props?.modeControlsDisabled).toBe(false);
+    await act(async () => editorMocks.props!.onSelectMode!('auto-edit'));
+    expect(editorMocks.props?.currentModel).toBe('agent-a');
+    expect(editorMocks.props?.selectedWorkspaceCwd).toBe('ws-a');
+    expect(editorMocks.props?.composerScopeKey).toBe(scope);
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'agent-a',
+      approvalMode: 'auto-edit',
+      initialApprovalMode: 'auto-edit',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    const commit = await sendInitial('Write a file');
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        approvalMode: 'auto-edit',
+        text: 'Write a file',
+      }),
+      expect.any(Object),
+    );
+    expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it.each([
+    JSON.stringify({ storage: 'indexeddb', pendingId: 'missing' }),
+    '{',
+  ])(
+    'requires explicit discard before creating after a pending record cannot be restored (%s)',
+    async (stored) => {
+      const { createSession } = approvalSelection();
+      const key = `qwen-managed-workspace-create:${provider.storageKey}`;
+      sessionStorage.setItem(key, stored);
+      await render();
+      expect(container.textContent).toContain(
+        'may already have been submitted',
+      );
+      expect(createSession).not.toHaveBeenCalled();
+      vi.spyOn(pendingStorage, 'saveManagedPending').mockResolvedValueOnce(
+        false,
+      );
+      await act(async () => {
+        const discard = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Discard this request',
+        );
+        discard!.click();
+        await flush();
+      });
+      expect(container.textContent).toContain(
+        'Could not discard this request.',
+      );
+      expect(sessionStorage.getItem(key)).toBe(stored);
+      await sendInitial('blocked request');
+      expect(createSession).not.toHaveBeenCalled();
+      await act(async () => {
+        const discard = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Discard this request',
+        );
+        discard!.click();
+        await flush();
+      });
+      expect(sessionStorage.getItem(key)).toBeNull();
+      expect(container.textContent).not.toContain(
+        'Could not discard this request.',
+      );
+      expect(container.textContent).not.toContain(
+        'may already have been submitted',
+      );
+      expect(createSession).not.toHaveBeenCalled();
+      await sendInitial('new explicit request');
+      expect(createSession).toHaveBeenCalledOnce();
+    },
+  );
+
+  it('keeps initial submissions serialized while the frozen request is being persisted', async () => {
+    const { createSession } = approvalSelection();
+    await render();
+    let acknowledge!: (saved: boolean) => void;
+    const save = vi
+      .spyOn(pendingStorage, 'saveManagedPending')
+      .mockImplementationOnce(
+        () =>
+          new Promise<boolean>((resolve) => {
+            acknowledge = resolve;
+          }),
+      );
+    const send = editorMocks.props!.onSubmit;
+    await act(async () => {
+      send('first draft', undefined, undefined, vi.fn());
+      await flush();
+      send('second draft', undefined, undefined, vi.fn());
+      await flush();
+    });
+    expect(save).toHaveBeenCalledOnce();
+    expect(createSession).not.toHaveBeenCalled();
+    await act(async () => {
+      acknowledge(true);
+      await flush();
+    });
+    expect(createSession).toHaveBeenCalledOnce();
+    expect(createSession.mock.calls[0]?.[0]).toMatchObject({
+      text: 'first draft',
+    });
+    save.mockRestore();
+  });
+
+  it('freezes attachment-only input and Plan before asynchronous file reading', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default', 'auto-edit'],
+      planModeSupported: true,
+      inputAttachments: true,
+    });
+    let finishReading!: (value: ArrayBuffer) => void;
+    const arrayBuffer = vi.fn(
+      () =>
+        new Promise<ArrayBuffer>((resolve) => {
+          finishReading = resolve;
+        }),
+    );
+    await render();
+    expect(editorMocks.props?.attachmentsEnabled).toBe(true);
+    expect(editorMocks.props?.visibleToolbarActions).toContain('plan');
+    await act(async () => editorMocks.props!.onTogglePlan!());
+    const commit = vi.fn();
+    await act(async () => {
+      editorMocks.props!.onSubmit(
+        '',
+        undefined,
+        [
+          {
+            name: 'notes.md',
+            media_type: 'text/markdown',
+            data: { size: 12, arrayBuffer } as Blob,
+          },
+        ],
+        commit,
+      );
+      editorMocks.props!.onSelectModel!('agent-b');
+      editorMocks.props!.onSelectMode!('auto-edit');
+      editorMocks.props!.onTogglePlan!();
+      await flush();
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(editorMocks.props?.currentModel).toBe('agent-a');
+    expect(editorMocks.props?.planMode).toBe(true);
+    await act(async () => {
+      finishReading(new TextEncoder().encode('你好\nnotes').buffer);
+      await flush();
+    });
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentId: 'agent-a',
+        approvalMode: 'default',
+        planMode: true,
+        text: '',
+        input: [
+          {
+            type: 'input_file',
+            name: 'notes.md',
+            mime_type: 'text/markdown',
+            text: '你好\nnotes',
+          },
+        ],
+      }),
+      expect.any(Object),
+    );
+    expect(arrayBuffer).toHaveBeenCalledOnce();
+    expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it('reuses every attachment byte and the request key after an unknown creation and remount', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      inputAttachments: true,
+    });
+    createSession.mockRejectedValueOnce(new Error('Delivery unknown'));
+    await render();
+    await act(async () => {
+      editorMocks.props!.onSubmit(
+        'Review',
+        undefined,
+        [{ name: 'notes.txt', media_type: 'text/plain', text: '原始内容' }],
+        vi.fn(),
+      );
+      await flush();
+    });
+    const [request, options] = createSession.mock.calls[0];
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    await act(async () => {
+      editorMocks.props!.onSubmit(
+        'Changed draft',
+        undefined,
+        [{ name: 'other.txt', media_type: 'text/plain', text: 'different' }],
+        vi.fn(),
+      );
+      await flush();
+    });
+    expect(createSession).toHaveBeenLastCalledWith(
+      request,
+      expect.objectContaining({ idempotencyKey: options.idempotencyKey }),
+    );
+    expect(createSession).toHaveBeenCalledTimes(2);
+    expect(request.input).toEqual([
+      { type: 'input_text', text: 'Review' },
+      {
+        type: 'input_file',
+        name: 'notes.txt',
+        mime_type: 'text/plain',
+        text: '原始内容',
+      },
+    ]);
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
+    expect(editorMocks.clear).toHaveBeenCalledOnce();
+  });
+
+  it('blocks creation until supported policy options are loaded and ignores stale Agent replies', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    let resolveA!: (options: ManagedSessionOptions) => void;
+    let resolveB!: (options: ManagedSessionOptions) => void;
+    getSessionOptions.mockImplementation(
+      (id) =>
+        new Promise<ManagedSessionOptions>((resolve) => {
+          if (id === 'agent-a') resolveA = resolve;
+          else resolveB = resolve;
+        }),
+    );
+    await render();
+    expect(editorMocks.props?.disabled).toBe(true);
+    await sendInitial('keep draft');
+    expect(createSession).not.toHaveBeenCalled();
+    await act(async () => editorMocks.props!.onSelectModel!('agent-b'));
+    await act(async () => {
+      resolveB({
+        approvalMode: 'auto-edit',
+        availableApprovalModes: ['auto-edit'],
+      });
+      await flush();
+    });
+    await act(async () => {
+      resolveA({
+        approvalMode: 'default',
+        availableApprovalModes: ['default', 'auto-edit'],
+      });
+      await flush();
+    });
+    expect(editorMocks.props?.currentModel).toBe('agent-b');
+    expect(editorMocks.props?.currentMode).toBe('auto-edit');
+    expect(editorMocks.props?.availableModes).toEqual(['auto-edit']);
+    expect(editorMocks.props?.modeControlsDisabled).toBe(true);
+    expect(editorMocks.props?.disabled).toBe(false);
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { approvalMode: 'auto', availableApprovalModes: ['auto'] },
+    { approvalMode: 'default', availableApprovalModes: ['default', 'plan'] },
+    { approvalMode: 'auto-edit', availableApprovalModes: ['default'] },
+    { approvalMode: 'default', availableApprovalModes: [] },
+  ])('blocks invalid server policy options (%j)', async (options) => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    getSessionOptions.mockResolvedValue(options);
+    await render();
+    expect(editorMocks.props?.disabled).toBe(true);
+    expect(editorMocks.props?.visibleToolbarActions).not.toContain(
+      'approvalMode',
+    );
+    await sendInitial('must not send');
+    expect(createSession).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('unsupported approval modes');
+  });
+
+  it('refreshes changed policy options after a definite rejection without resubmitting the prompt', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    createSession.mockRejectedValueOnce(
+      new JavaManagedAgentHttpError(
+        400,
+        'unsupported_approval_mode',
+        'Policy changed',
+      ),
+    );
+    await render();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'auto-edit',
+      availableApprovalModes: ['auto-edit'],
+    });
+    const commit = await sendInitial('Keep this prompt');
+    expect(createSession).toHaveBeenCalledOnce();
+    expect(commit).not.toHaveBeenCalled();
+    expect(getSessionOptions).toHaveBeenCalledTimes(2);
+    expect(editorMocks.props?.currentMode).toBe('auto-edit');
+    expect(editorMocks.props?.modeControlsDisabled).toBe(true);
+    expect(editorMocks.props?.disabled).toBe(false);
+    expect(
+      sessionStorage.getItem(
+        `qwen-managed-workspace-create:${provider.storageKey}`,
+      ),
+    ).toBeNull();
+  });
+
+  it('hides the selector and omits explicit policy on older servers', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    vi.mocked(provider.workspaceBinding!.list).mockResolvedValue({
+      data: [workspace],
+      defaultWorkspace: workspace,
+      supported: true,
+    });
+    await render();
+    expect(getSessionOptions).not.toHaveBeenCalled();
+    expect(editorMocks.props?.visibleToolbarActions).not.toContain(
+      'approvalMode',
+    );
+    await sendInitial('Legacy request');
+    expect(createSession.mock.calls[0][0]).not.toHaveProperty('approvalMode');
+  });
+
+  it('offers Skills before creating a Session when other add-menu capabilities are absent', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      skillsSupported: true,
+    });
+    const list = vi
+      .fn()
+      .mockResolvedValue([
+        { name: 'manual-review', description: 'Enabled manual Skill.' },
+      ]);
+    const load = vi.fn();
+    creationSkills = { workspaceCwd: '/explicit-source', list, load };
+    await render();
+    expect(editorMocks.props?.visibleToolbarActions).toContain('addMenu');
+    expect(editorMocks.props?.onSkillsOpenChange).toBeTypeOf('function');
+    expect(list).not.toHaveBeenCalled();
+    await act(async () => editorMocks.props!.onSkillsOpenChange!(true));
+    expect(editorMocks.props?.skills).toEqual([
+      { name: 'manual-review', description: 'Enabled manual Skill.' },
+    ]);
+    expect(editorMocks.props?.skillsLoaded).toBe(true);
+    expect(editorMocks.props?.skillsLoadError).toBe(false);
+    const completion = getSlashCommandCompletionResult(
+      '/manual',
+      7,
+      editorMocks.props?.commands ?? [],
+    );
+    expect(completion?.items).toMatchObject([
+      { label: '/manual-review', apply: '/manual-review ' },
+    ]);
+    expect(completion?.items[0]?.autoSubmit).not.toBe(true);
+    expect(load).not.toHaveBeenCalled();
+    expect(createSession).not.toHaveBeenCalled();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+    });
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(editorMocks.props?.onSkillsOpenChange).toBeUndefined();
+    expect(editorMocks.props?.visibleToolbarActions).not.toContain('addMenu');
+  });
+
+  it.each([undefined, false, true])(
+    'imports creation Skills only when supported (%s)',
+    async (skillsSupported) => {
+      const { createSession, getSessionOptions } = approvalSelection();
+      getSessionOptions.mockResolvedValue({
+        approvalMode: 'default',
+        availableApprovalModes: ['default'],
+        ...(skillsSupported === undefined ? {} : { skillsSupported }),
+      });
+      const catalog = [
+        { name: 'review', description: 'Review', body: 'Review changes.' },
+      ];
+      const load = vi.fn().mockResolvedValue(catalog);
+      creationSkills = {
+        workspaceCwd: '/source',
+        list: vi.fn().mockResolvedValue([]),
+        load,
+      };
+      await render();
+      expect(Boolean(editorMocks.props?.onSkillsOpenChange)).toBe(
+        Boolean(skillsSupported),
+      );
+      await sendInitial('Compatible creation');
+      expect(createSession).toHaveBeenCalledOnce();
+      expect(load).toHaveBeenCalledTimes(skillsSupported ? 1 : 0);
+      if (skillsSupported)
+        expect(createSession.mock.calls[0]![0].skills).toEqual(catalog);
+      else expect(createSession.mock.calls[0]![0]).not.toHaveProperty('skills');
+    },
+  );
+
+  it('imports all enabled Skills and keeps the exact snapshot when retrying after reload', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      skillsSupported: true,
+    });
+    const skills = Array.from({ length: 42 }, (_, i) => ({
+      name: `skill-${i}`,
+      description: 'Enabled',
+      body: 'FROZEN_SESSION_SKILL',
+      ...(i === 1 ? { model_invocable: false } : {}),
+    }));
+    const load = vi.fn().mockResolvedValue(skills);
+    creationSkills = {
+      workspaceCwd: '/explicit-source',
+      list: vi.fn().mockResolvedValue([]),
+      load,
+    };
+    createSession.mockRejectedValue(new Error('lost response'));
+    await render();
+    expect(container.textContent).not.toContain('Add Skill');
+    await act(async () => {
+      await editorMocks.props!.onSubmit!('hello');
+      await flush();
+    });
+    expect(createSession).toHaveBeenCalledOnce();
+    const first = createSession.mock.calls[0]!;
+    expect(first[0].skills).toEqual(skills);
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    load.mockResolvedValue([]);
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      skillsSupported: false,
+    });
+    await render();
+    await click('Retry the same request');
+    expect(load).toHaveBeenCalledTimes(1);
+    expect(createSession.mock.calls[1]![0].skills).toEqual(first[0].skills);
+    expect(createSession.mock.calls[1]![1].idempotencyKey).toBe(
+      first[1].idempotencyKey,
+    );
+  });
+
+  it('does not admit stale or unavailable Skill sources', async () => {
+    const { createSession, getSessionOptions } = approvalSelection();
+    getSessionOptions.mockResolvedValue({
+      approvalMode: 'default',
+      availableApprovalModes: ['default'],
+      skillsSupported: true,
+    });
+    let finish!: (skills: never[]) => void;
+    creationSkills = {
+      workspaceCwd: '/old-source',
+      list: vi.fn().mockResolvedValue([]),
+      load: vi.fn(
+        () =>
+          new Promise<never[]>((resolve) => {
+            finish = resolve;
+          }),
+      ),
+    };
+    await render();
+    let submitted!: Promise<unknown>;
+    await act(async () => {
+      submitted = editorMocks.props!.onSubmit!('hello');
+      await flush();
+    });
+    creationSkills = {
+      workspaceCwd: '/new-source',
+      list: vi.fn().mockResolvedValue([]),
+      load: vi.fn().mockRejectedValue(new Error('source unavailable')),
+    };
+    await render();
+    await act(async () => {
+      finish([]);
+      await submitted;
+      await flush();
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('Skills source changed');
+    await act(async () => {
+      await editorMocks.props!.onSubmit!('hello');
+      await flush();
+    });
+    expect(createSession).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('source unavailable');
+  });
+
+  it('freezes selected policy on lost response and restores the exact mode after refresh', async () => {
+    const { createSession } = approvalSelection();
+    createSession.mockRejectedValueOnce(new Error('lost response'));
+    await render();
+    await act(async () => editorMocks.props!.onSelectMode!('auto-edit'));
+    await sendInitial('Frozen prompt');
+    const saved = JSON.parse(
+      sessionStorage.getItem(
+        `qwen-managed-workspace-create:${provider.storageKey}`,
+      )!,
+    );
+    expect(saved.approvalMode).toBe('auto-edit');
+    await act(async () => root.unmount());
+    root = createRoot(container);
+    await render();
+    expect(editorMocks.props?.currentMode).toBe('auto-edit');
+    expect(editorMocks.props?.availableModes).toEqual(['auto-edit']);
+    expect(editorMocks.props?.modeControlsDisabled).toBe(true);
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'agent-a',
+      approvalMode: 'auto-edit',
+      initialApprovalMode: 'auto-edit',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await click('Retry the same request');
+    expect(createSession.mock.calls[1][0]).toEqual(
+      createSession.mock.calls[0][0],
+    );
+    expect(createSession.mock.calls[1][1].idempotencyKey).toBe(
+      saved.idempotencyKey,
+    );
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
+  });
+
+  it('keeps legacy pending policy unknown and omits it on retry even with the new capability', async () => {
+    const { createSession } = approvalSelection();
+    sessionStorage.setItem(
+      `qwen-managed-workspace-create:${provider.storageKey}`,
+      JSON.stringify({
+        agentId: 'agent-a',
+        workspaceId: 'ws-a',
+        cwdRelative: '.',
+        input: [{ type: 'input_text', text: 'Legacy prompt' }],
+        clientId: 'client-a',
+        idempotencyKey: 'legacy-key',
+      }),
+    );
+    await render();
+    expect(editorMocks.props?.visibleToolbarActions).not.toContain(
+      'approvalMode',
+    );
+    expect(editorMocks.props?.currentMode).toBe('');
+    await click('Retry the same request');
+    expect(createSession.mock.calls[0][0]).not.toHaveProperty('approvalMode');
+    expect(createSession.mock.calls[0][1].idempotencyKey).toBe('legacy-key');
+  });
+
+  it.each([undefined, 'session-a'])(
+    'refuses explicit pending resubmission without capability but allows known Session read-back (%s)',
+    async (sessionId) => {
+      const { createSession } = approvalSelection();
+      vi.mocked(provider.workspaceBinding!.list).mockResolvedValue({
+        data: [workspace],
+        defaultWorkspace: workspace,
+        supported: true,
+      });
+      sessionStorage.setItem(
+        `qwen-managed-workspace-create:${provider.storageKey}`,
+        JSON.stringify({
+          agentId: 'agent-a',
+          workspaceId: 'ws-a',
+          cwdRelative: '.',
+          input: [{ type: 'input_text', text: 'Frozen prompt' }],
+          approvalMode: 'default',
+          clientId: 'client-a',
+          idempotencyKey: 'frozen-key',
+          ...(sessionId ? { sessionId } : {}),
+        }),
+      );
+      await render();
+      if (sessionId) {
+        await click('Retry reading session');
+        expect(getSession).toHaveBeenCalledWith(sessionId, expect.any(Object));
+        expect(onCreated).toHaveBeenCalledWith(sessionId, 'ws-a');
+      } else {
+        const retry = [...container.querySelectorAll('button')].find(
+          (item) => item.textContent === 'Retry the same request',
+        )!;
+        expect(retry.disabled).toBe(true);
+        await sendInitial('must not create another Session');
+        expect(onCreated).not.toHaveBeenCalled();
+        expect(getSession).not.toHaveBeenCalled();
+      }
+      expect(createSession).not.toHaveBeenCalled();
+    },
+  );
+
+  it('hides Managed policy controls during a Local switch while preserving the selection', async () => {
+    approvalSelection();
+    await render();
+    await act(async () => editorMocks.props!.onSelectMode!('auto-edit'));
+    await render(false);
+    expect(editorMocks.props?.visibleToolbarActions).toEqual([]);
+    expect(editorMocks.props?.disabled).toBe(true);
+    await render();
+    expect(editorMocks.props?.currentMode).toBe('auto-edit');
+    expect(editorMocks.props?.visibleToolbarActions).toContain('approvalMode');
+  });
+
+  it('confirms creation against the immutable initial policy after a later switch', async () => {
+    approvalSelection();
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'agent-a',
+      approvalMode: 'yolo',
+      initialApprovalMode: 'default',
+      approvalRevision: 2,
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await render();
+    const commit = await sendInitial('Preserve the initial selection');
+    expect(onCreated).toHaveBeenCalled();
+    expect(commit).toHaveBeenCalledOnce();
+  });
+
+  it('does not substitute current policy when creation policy is absent', async () => {
+    approvalSelection();
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'agent-a',
+      approvalMode: 'default',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await render();
+    const commit = await sendInitial('Confirm the original creation policy');
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('could not be confirmed');
+  });
+
+  it('keeps explicit policy frozen when Session read-back reports another mode', async () => {
+    const { createSession } = approvalSelection();
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      agentId: 'agent-a',
+      approvalMode: 'auto-edit',
+      initialApprovalMode: 'auto-edit',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await render();
+    const commit = await sendInitial('Do not silently change policy');
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(commit).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('could not be confirmed');
+    expect(createSession).toHaveBeenCalledOnce();
+    const saved = JSON.parse(
+      sessionStorage.getItem(
+        `qwen-managed-workspace-create:${provider.storageKey}`,
+      )!,
+    );
+    expect(saved.approvalMode).toBe('default');
+    expect(saved.sessionId).toBe('session-a');
+  });
+
+  it('sends the selected policy for an empty creation and hides its controls in Local mode', async () => {
+    approvalSelection();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      createSession: undefined,
+    };
+    createEmpty.mockResolvedValue({ sessionId: 'session-a' });
+    await render(false);
+    expect(container.querySelector('#managed-approval-select')).toBeNull();
+    await render();
+    expect(container.querySelector('#managed-approval-select')).not.toBeNull();
+    await click('Create session');
+    expect(createEmpty).toHaveBeenCalledWith(
+      expect.objectContaining({ approvalMode: 'default' }),
+      expect.any(Object),
+    );
+  });
+
+  it.each([undefined, 'registration-a'])(
+    'keeps an SSH draft out of local creation when its operation is %s',
+    async (operationId) => {
+      const createWorkspace = workspaceCreation();
+      const registration = enableRegistration();
+      registration.query.mockImplementation(() => new Promise(() => {}));
+      const key = `qwen-managed-ssh-workspace-registration:${provider.storageKey}`;
+      const saved = JSON.stringify({
+        nodeId: 'mac',
+        path: '/projects/example',
+        displayName: 'Remote project',
+        idempotencyKey: 'remote-original',
+        operationId,
+      });
+      sessionStorage.setItem(key, saved);
+      await render();
+      expect(document.getElementById('managed-new-workspace-name')).toBeNull();
+      expect(createWorkspace).not.toHaveBeenCalled();
+      expect(sessionStorage.getItem(key)).toBe(saved);
+      expect(
+        sessionStorage.getItem(
+          `qwen-managed-workspace-registration:${provider.storageKey}`,
+        ),
+      ).toBeNull();
+    },
+  );
+
+  it('does not consume a remote preview receipt from the local draft key', async () => {
+    const createWorkspace = workspaceCreation();
+    enableRegistration();
+    const key = `qwen-managed-workspace-registration:${provider.storageKey}`;
+    const saved = JSON.stringify({
+      nodeId: 'mac',
+      path: '/projects/example',
+      displayName: 'Remote project',
+      idempotencyKey: 'remote-original',
+      operationId: 'registration-a',
+    });
+    sessionStorage.setItem(key, saved);
+    await render();
+    expect(document.getElementById('managed-new-workspace-name')).toBeNull();
+    expect(createWorkspace).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(saved);
+  });
+
+  it('retains a hidden SSH operation until Managed mode becomes interactive', async () => {
+    workspaceCreation();
+    const registration = enableRegistration();
+    registration.query.mockImplementation(() => new Promise(() => {}));
+    const key = `qwen-managed-ssh-workspace-registration:${provider.storageKey}`;
+    const saved = JSON.stringify({
+      nodeId: 'mac',
+      path: '/projects/example',
+      displayName: 'Remote project',
+      idempotencyKey: 'remote-original',
+      operationId: 'registration-a',
+    });
+    sessionStorage.setItem(key, saved);
+    await render(false);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(registration.query).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(saved);
+    await render();
+    expect(registration.query).toHaveBeenCalledWith(
+      'registration-a',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(document.getElementById('managed-new-workspace-name')).toBeNull();
+    expect(sessionStorage.getItem(key)).toBe(saved);
+  });
+
+  it('offers empty Workspace creation only with server capability and a provider method', async () => {
+    workspaceCreation();
+    vi.mocked(provider.workspaceBinding!.list).mockResolvedValue({
+      data: [workspace],
+      supported: true,
+    });
+    await render();
+    expect(editorMocks.props?.scratchWorkspaceSupported).toBe(false);
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      createWorkspace: undefined,
+      list: vi.fn().mockResolvedValue({
+        data: [workspace],
+        supported: true,
+        canCreateWorkspace: true,
+      }),
+    };
+    await render();
+    expect(editorMocks.props?.scratchWorkspaceSupported).toBe(false);
+  });
+
+  it('selects the created Workspace while retaining the composer draft and model', async () => {
+    const createWorkspace = workspaceCreation();
+    await render();
+    const composerScope = editorMocks.props?.composerScopeKey;
+    await act(async () => editorMocks.props!.onSelectModel!('agent-b'));
+    await openWorkspaceCreation();
+    await nameWorkspace('  Created  ');
+    await click('Create workspace');
+    expect(createWorkspace).toHaveBeenCalledWith(
+      { displayName: 'Created' },
+      expect.objectContaining({
+        clientId: 'client-a',
+        idempotencyKey: expect.any(String),
+      }),
+    );
+    expect(editorMocks.props?.selectedWorkspaceCwd).toBe('ws-created');
+    expect(onSelectWorkspace).toHaveBeenCalledWith('ws-created');
+    expect(onWorkspaceCreated).toHaveBeenCalledOnce();
+    expect(editorMocks.props?.currentModel).toBe('agent-b');
+    expect(editorMocks.props?.composerScopeKey).toBe(composerScope);
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+    expect(editorMocks.setText).not.toHaveBeenCalled();
+    expect(provider.workspaceBinding?.createEmpty).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(
+      sessionStorage.getItem(
+        `qwen-managed-workspace-registration:${provider.storageKey}`,
+      ),
+    ).toBeNull();
+  });
+
+  it.each([true, false])(
+    'keeps directory results visible across background renders (local import %s)',
+    async (localImport) => {
+      vi.useFakeTimers();
+      workspaceCreation();
+      const directories = vi.fn().mockResolvedValue({
+        root: '/projects',
+        cwdRelative: '.',
+        directories: [{ name: 'project', cwdRelative: 'project' }],
+        truncated: false,
+      });
+      provider.workspaceBinding = {
+        ...provider.workspaceBinding!,
+        directories,
+        list: vi.fn().mockResolvedValue({
+          data: [{ ...workspace, canSelectDirectory: true }],
+          defaultWorkspace: { ...workspace, canSelectDirectory: true },
+          supported: true,
+          canCreateWorkspace: true,
+          canSelectDirectory: true,
+          canImportLocalDirectory: localImport,
+        }),
+      };
+      await render();
+      await openWorkspaceCreation();
+      await click('Choose existing directory');
+      await act(async () => vi.advanceTimersByTimeAsync(150));
+      const list = document.querySelector('[role="listbox"]');
+      expect(list?.textContent).toContain('project');
+      const queries = directories.mock.calls.length;
+
+      await render();
+      expect(document.querySelector('[role="listbox"]')).toBe(list);
+      await act(async () => vi.advanceTimersByTimeAsync(1_000));
+      expect(directories).toHaveBeenCalledTimes(queries);
+
+      await typeInput('add-workspace-path', '/projects/project/');
+      await act(async () => vi.advanceTimersByTimeAsync(150));
+      expect(directories).toHaveBeenLastCalledWith(
+        localImport
+          ? { localPath: '/projects/project' }
+          : { workspaceId: 'ws-a', cwdRelative: 'project' },
+        expect.objectContaining({ clientId: 'client-a' }),
+      );
+    },
+  );
+
+  it('imports a local project without an authorized parent Workspace', async () => {
+    const createWorkspace = workspaceCreation().mockResolvedValue({
+      ...workspace,
+      workspaceId: 'ws-imported',
+      displayName: 'project',
+      defaultCwdRelative: 'project',
+    });
+    const directories = vi.fn().mockResolvedValue({
+      root: '/Users/local',
+      cwdRelative: '.',
+      directories: [{ name: 'project', cwdRelative: 'project' }],
+      truncated: false,
+    });
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      directories,
+      list: vi.fn().mockResolvedValue({
+        data: [],
+        supported: true,
+        canImportLocalDirectory: true,
+      }),
+    };
+    await render();
+    await openWorkspaceCreation();
+    expect(document.querySelector('#managed-directory-root-label')).toBeNull();
+    await submitDirectory('/Users/local/project');
+    expect(directories).toHaveBeenCalledWith(
+      { localPath: '' },
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(createWorkspace).toHaveBeenCalledWith(
+      { displayName: 'project', localPath: '/Users/local/project' },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(editorMocks.props?.selectedWorkspaceCwd).toBe('ws-imported');
+    await expectWorkingDirectory('project');
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+  });
+
+  it('retries a frozen local import after reload with the same path and key', async () => {
+    const createWorkspace = workspaceCreation();
+    vi.mocked(provider.workspaceBinding!.list).mockResolvedValue({
+      data: [],
+      supported: true,
+      canImportLocalDirectory: true,
+    });
+    sessionStorage.setItem(
+      `qwen-managed-workspace-registration:${provider.storageKey}`,
+      JSON.stringify({
+        displayName: 'Project',
+        localPath: '/Users/local/project',
+        idempotencyKey: 'frozen-local-import',
+      }),
+    );
+    await render();
+    expect(document.body.textContent).toContain('/Users/local/project');
+    await click('Retry the same request');
+    expect(createWorkspace).toHaveBeenCalledWith(
+      { displayName: 'Project', localPath: '/Users/local/project' },
+      expect.objectContaining({ idempotencyKey: 'frozen-local-import' }),
+    );
+  });
+
+  it('does not retry a local import when the host no longer advertises it', async () => {
+    const createWorkspace = workspaceCreation();
+    sessionStorage.setItem(
+      `qwen-managed-workspace-registration:${provider.storageKey}`,
+      JSON.stringify({
+        displayName: 'Project',
+        localPath: '/Users/local/project',
+        idempotencyKey: 'local-import-disabled',
+      }),
+    );
+    await render();
+    await click('Retry the same request');
+    expect(createWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('shows a local browsing failure from the Workspace menu', async () => {
+    workspaceCreation();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      directories: vi
+        .fn()
+        .mockRejectedValue(new Error('Local browsing unavailable')),
+      list: vi.fn().mockResolvedValue({
+        data: [],
+        supported: true,
+        canImportLocalDirectory: true,
+      }),
+    };
+    await render();
+    await workspaceAction('Choose existing directory');
+    expect(
+      document.querySelector('[role="dialog"] [role="alert"]')?.textContent,
+    ).toBe('Local browsing unavailable');
+  });
+
+  it('keeps an uncertain local import frozen when its confirmation dialog is closed', async () => {
+    workspaceCreation();
+    const directories = vi.fn();
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      directories,
+      list: vi.fn().mockResolvedValue({
+        data: [],
+        supported: true,
+        canImportLocalDirectory: true,
+      }),
+    };
+    sessionStorage.setItem(
+      `qwen-managed-workspace-registration:${provider.storageKey}`,
+      JSON.stringify({
+        displayName: 'Project',
+        localPath: '/Users/local/project',
+        idempotencyKey: 'local-import-pending',
+      }),
+    );
+    await render();
+    await click('Close');
+    await workspaceAction('Choose existing directory');
+    const entry = [...document.querySelectorAll('[role="menuitem"]')].find(
+      (item) => item.textContent === 'Choose existing directory',
+    );
+    expect(entry?.getAttribute('aria-disabled')).toBe('true');
+    expect(directories).not.toHaveBeenCalled();
+    expect(
+      JSON.parse(
+        sessionStorage.getItem(
+          `qwen-managed-workspace-registration:${provider.storageKey}`,
+        )!,
+      ),
+    ).toMatchObject({
+      localPath: '/Users/local/project',
+      idempotencyKey: 'local-import-pending',
+    });
+  });
+
+  it('selects an existing Linux project and restores its directory after reload', async () => {
+    const created = {
+      ...workspace,
+      workspaceId: 'ws-project',
+      displayName: 'Project',
+      defaultCwdRelative: 'project',
+    };
+    const createWorkspace = workspaceCreation().mockResolvedValue(created);
+    provider.workspaceBinding = {
+      ...provider.workspaceBinding!,
+      directories: vi.fn().mockResolvedValue({
+        root: '/linux/projects',
+        cwdRelative: '.',
+        directories: [{ name: 'project', cwdRelative: 'project' }],
+        truncated: false,
+      }),
+      list: vi.fn().mockResolvedValue({
+        data: [{ ...workspace, canSelectDirectory: true }],
+        defaultWorkspace: { ...workspace, canSelectDirectory: true },
+        supported: true,
+        canCreateWorkspace: true,
+        canSelectDirectory: true,
+      }),
+      get: vi.fn().mockResolvedValue(created),
+    };
+    await render();
+    await openWorkspaceCreation();
+    await click('Choose existing directory');
+    await act(async () => {
+      const input = document.querySelector<HTMLInputElement>(
+        '#add-workspace-path',
+      )!;
+      expect(input).not.toBeNull();
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, '/linux/projects/project');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      document
+        .querySelector('[role="dialog"] form')!
+        .dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+      await flush();
+    });
+    expect(createWorkspace).toHaveBeenCalledWith(
+      {
+        displayName: 'project',
+        sourceWorkspaceId: 'ws-a',
+        cwdRelative: 'project',
+      },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    await expectWorkingDirectory('project');
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+    await act(async () => root.render(null));
+    await render();
+    expect(provider.workspaceBinding.get).toHaveBeenCalledWith(
+      'ws-project',
+      expect.any(Object),
+    );
+    await expectWorkingDirectory('project');
+  });
+
+  it('retries a persisted existing-directory creation without changing source or path', async () => {
+    const createWorkspace = workspaceCreation().mockResolvedValue({
+      ...workspace,
+      workspaceId: 'ws-project',
+      defaultCwdRelative: 'old/project',
+    });
+    vi.mocked(provider.workspaceBinding!.list).mockResolvedValue({
+      data: [workspace],
+      supported: true,
+      canSelectDirectory: true,
+    });
+    sessionStorage.setItem(
+      `qwen-managed-workspace-registration:${provider.storageKey}`,
+      JSON.stringify({
+        displayName: 'Project',
+        sourceWorkspaceId: 'ws-a',
+        cwdRelative: 'old/project',
+        idempotencyKey: 'frozen-directory-key',
+      }),
+    );
+    await render();
+    await click('Retry the same request');
+    expect(createWorkspace).toHaveBeenCalledWith(
+      {
+        displayName: 'Project',
+        sourceWorkspaceId: 'ws-a',
+        cwdRelative: 'old/project',
+      },
+      expect.objectContaining({ idempotencyKey: 'frozen-directory-key' }),
+    );
+    await expectWorkingDirectory('old/project');
+  });
+
+  it.each([false, true])(
+    'allows correcting a refused directory after abandoning local confirmation (refresh %s)',
+    async (refresh) => {
+      const createWorkspace = workspaceCreation()
+        .mockRejectedValueOnce(
+          new JavaManagedAgentHttpError(
+            409,
+            'workspace_unavailable',
+            'Missing directory',
+          ),
+        )
+        .mockResolvedValueOnce({
+          ...workspace,
+          workspaceId: 'ws-project',
+          defaultCwdRelative: 'project',
+        });
+      provider.workspaceBinding = {
+        ...provider.workspaceBinding!,
+        directories: vi.fn().mockResolvedValue({
+          root: '/linux/projects',
+          cwdRelative: '.',
+          directories: [{ name: 'project', cwdRelative: 'project' }],
+          truncated: false,
+        }),
+        list: vi.fn().mockResolvedValue({
+          data: [{ ...workspace, canSelectDirectory: true }],
+          supported: true,
+          canCreateWorkspace: true,
+          canSelectDirectory: true,
+        }),
+      };
+      await render();
+      await openWorkspaceCreation();
+      await submitDirectory('/linux/projects/missing');
+      const key = `qwen-managed-workspace-registration:${provider.storageKey}`;
+      const original = JSON.parse(sessionStorage.getItem(key)!);
+      if (refresh) {
+        await act(async () => root.render(null));
+        await render();
+      }
+      expect(
+        document.querySelector<HTMLInputElement>('#managed-new-workspace-name')
+          ?.disabled,
+      ).toBe(true);
+      await click('Abandon local confirmation');
+      expect(sessionStorage.getItem(key)).toBeNull();
+      expect(
+        document.querySelector<HTMLInputElement>('#managed-new-workspace-name')
+          ?.disabled,
+      ).toBe(false);
+      await submitDirectory('/linux/projects/project');
+      expect(createWorkspace).toHaveBeenCalledTimes(2);
+      expect(createWorkspace.mock.calls[1][0]).toMatchObject({
+        sourceWorkspaceId: 'ws-a',
+        cwdRelative: 'project',
+      });
+      expect(createWorkspace.mock.calls[1][1].idempotencyKey).not.toBe(
+        original.idempotencyKey,
+      );
+      expect(editorMocks.clear).not.toHaveBeenCalled();
+    },
+  );
+
+  it('allows empty Workspace creation after abandoning a persisted directory selection', async () => {
+    const createWorkspace = workspaceCreation();
+    sessionStorage.setItem(
+      `qwen-managed-workspace-registration:${provider.storageKey}`,
+      JSON.stringify({
+        displayName: 'Missing',
+        sourceWorkspaceId: 'ws-a',
+        cwdRelative: 'missing',
+        idempotencyKey: 'refused-directory',
+      }),
+    );
+    await render();
+    await click('Abandon local confirmation');
+    expect(createWorkspace).not.toHaveBeenCalled();
+    await nameWorkspace('New empty');
+    await click('Create workspace');
+    expect(createWorkspace).toHaveBeenCalledWith(
+      { displayName: 'New empty' },
+      expect.objectContaining({ idempotencyKey: expect.any(String) }),
+    );
+    expect(createWorkspace.mock.calls[0][1].idempotencyKey).not.toBe(
+      'refused-directory',
+    );
+  });
+
+  it('freezes an uncertain creation across close and retry without issuing another operation', async () => {
+    const createWorkspace = workspaceCreation()
+      .mockRejectedValueOnce(new Error('response lost'))
+      .mockResolvedValueOnce({ ...workspace, workspaceId: 'ws-created' });
+    await render();
+    await openWorkspaceCreation();
+    await nameWorkspace('Created');
+    await click('Create workspace');
+    const saved = sessionStorage.getItem(
+      `qwen-managed-workspace-registration:${provider.storageKey}`,
+    );
+    expect(JSON.parse(saved!)).toEqual({
+      displayName: 'Created',
+      idempotencyKey: expect.any(String),
+    });
+    expect(
+      document.querySelector<HTMLInputElement>('#managed-new-workspace-name')
+        ?.disabled,
+    ).toBe(true);
+    await click('Close');
+    expect(createWorkspace).toHaveBeenCalledOnce();
+    await click('Resume workspace creation');
+    await click('Retry the same request');
+    expect(createWorkspace).toHaveBeenCalledTimes(2);
+    expect(createWorkspace.mock.calls[1][0]).toEqual(
+      createWorkspace.mock.calls[0][0],
+    );
+    expect(createWorkspace.mock.calls[1][1].idempotencyKey).toBe(
+      createWorkspace.mock.calls[0][1].idempotencyKey,
+    );
+    expect(editorMocks.props?.selectedWorkspaceCwd).toBe('ws-created');
+  });
+
+  it('resumes a persisted creation after refresh and hides its portal in Local mode', async () => {
+    const createWorkspace = workspaceCreation();
+    sessionStorage.setItem(
+      `qwen-managed-workspace-registration:${provider.storageKey}`,
+      JSON.stringify({ displayName: 'Saved', idempotencyKey: 'saved-key' }),
+    );
+    await render(false);
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(createWorkspace).not.toHaveBeenCalled();
+    await render();
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull();
+    expect(
+      document.querySelector<HTMLInputElement>('#managed-new-workspace-name')
+        ?.value,
+    ).toBe('Saved');
+    await click('Retry the same request');
+    expect(createWorkspace).toHaveBeenCalledWith(
+      { displayName: 'Saved' },
+      expect.objectContaining({ idempotencyKey: 'saved-key' }),
+    );
+  });
+
+  it.each(['workspace_unavailable', 'idempotency_conflict'])(
+    'retains the same pending operation after a %s conflict',
+    async (code) => {
+      const createWorkspace = workspaceCreation().mockRejectedValueOnce(
+        new JavaManagedAgentHttpError(409, code, 'Not yet confirmed'),
+      );
+      await render();
+      await openWorkspaceCreation();
+      await nameWorkspace('Created');
+      await click('Create workspace');
+      const saved = sessionStorage.getItem(
+        `qwen-managed-workspace-registration:${provider.storageKey}`,
+      );
+      expect(saved).not.toBeNull();
+      await click('Retry the same request');
+      expect(createWorkspace.mock.calls[1][1].idempotencyKey).toBe(
+        JSON.parse(saved!).idempotencyKey,
+      );
+    },
+  );
+
+  it('uses the WebShell portal root for the creation dialog', async () => {
+    workspaceCreation();
+    const portal = document.createElement('div');
+    document.body.appendChild(portal);
+    try {
+      await act(async () => {
+        root.render(
+          <WebShellPortalRootContext.Provider value={portal}>
+            <I18nProvider language="en">
+              <WorkspaceBindingCreator
+                provider={provider}
+                clientId="client-a"
+                onCreated={onCreated}
+              />
+            </I18nProvider>
+          </WebShellPortalRootContext.Provider>,
+        );
+        await flush();
+      });
+      await openWorkspaceCreation();
+      expect(portal.querySelector('[role="dialog"]')).not.toBeNull();
+      expect(container.querySelector('[role="dialog"]')).toBeNull();
+    } finally {
+      await act(async () => root.render(null));
+      portal.remove();
+    }
+  });
+
+  it.each(['   ', 'control\u0001name', 'a'.repeat(129)])(
+    'rejects an invalid Workspace name before sending (%j)',
+    async (name) => {
+      const createWorkspace = workspaceCreation();
+      await render();
+      await openWorkspaceCreation();
+      await nameWorkspace(name);
+      const form = document.querySelector('[role="dialog"] form')!;
+      await act(async () => {
+        form.dispatchEvent(
+          new Event('submit', { bubbles: true, cancelable: true }),
+        );
+        await flush();
+      });
+      expect(createWorkspace).not.toHaveBeenCalled();
+      expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+        '1–128 characters',
+      );
+    },
+  );
+
+  it('serializes creation while keeping the composer blocked until read-back', async () => {
+    let complete!: (value: typeof workspace) => void;
+    const createWorkspace = workspaceCreation().mockReturnValue(
+      new Promise<typeof workspace>((resolve) => {
+        complete = resolve;
+      }),
+    );
+    await render();
+    await openWorkspaceCreation();
+    await nameWorkspace('Created');
+    await click('Create workspace');
+    expect(editorMocks.props?.disabled).toBe(true);
+    await click('Close');
+    const sessionCommit = await sendInitial('keep my draft');
+    expect(sessionCommit).not.toHaveBeenCalled();
+    expect(provider.workspaceBinding?.createSession).not.toHaveBeenCalled();
+    await act(async () => {
+      complete({ ...workspace, workspaceId: 'ws-created' });
+      await flush();
+    });
+    expect(createWorkspace).toHaveBeenCalledOnce();
+    expect(editorMocks.props?.disabled).toBe(false);
+  });
+
+  it('allows correcting a definite initial rejection with a fresh key', async () => {
+    const createWorkspace = workspaceCreation().mockRejectedValueOnce(
+      new JavaManagedAgentHttpError(
+        400,
+        'invalid_workspace_name',
+        'Name refused',
+      ),
+    );
+    await render();
+    await openWorkspaceCreation();
+    await nameWorkspace('Refused');
+    await click('Create workspace');
+    expect(document.querySelector('[role="alert"]')?.textContent).toBe(
+      'Name refused',
+    );
+    expect(
+      document.querySelector<HTMLInputElement>('#managed-new-workspace-name')
+        ?.disabled,
+    ).toBe(false);
+    await nameWorkspace('Corrected');
+    await click('Create workspace');
+    expect(createWorkspace.mock.calls[1][0]).toEqual({
+      displayName: 'Corrected',
+    });
+    expect(createWorkspace.mock.calls[1][1].idempotencyKey).not.toBe(
+      createWorkspace.mock.calls[0][1].idempotencyKey,
+    );
+  });
+
+  it('does not send a creation unless the frozen request can be persisted', async () => {
+    const createWorkspace = workspaceCreation();
+    await render();
+    await openWorkspaceCreation();
+    await nameWorkspace('Created');
+    const write = vi
+      .spyOn(Object.getPrototypeOf(sessionStorage) as Storage, 'setItem')
+      .mockImplementation(() => {
+        throw new Error('unavailable');
+      });
+    try {
+      await click('Create workspace');
+      expect(createWorkspace).not.toHaveBeenCalled();
+      expect(document.querySelector('[role="alert"]')?.textContent).toContain(
+        'Browser session storage',
+      );
+    } finally {
+      write.mockRestore();
+    }
+  });
+
+  it('blocks a hidden composer while keeping its Workspace selection and owner', async () => {
+    directCreation();
+    await render();
+    await act(async () => editorMocks.props!.onSelectWorkspace!('ws-a'));
+    const editorNode = container.querySelector('[data-testid="shared-editor"]');
+    await render(false);
+    expect(editorMocks.props?.disabled).toBe(true);
+    expect(editorMocks.props?.dialogOpen).toBe(true);
+    expect(editorMocks.props?.visibleToolbarActions).toEqual([]);
+    expect(container.querySelector('[data-testid="shared-editor"]')).toBe(
+      editorNode,
+    );
+    await render();
+    expect(editorMocks.props?.disabled).toBe(false);
+    expect(editorMocks.props?.dialogOpen).toBe(false);
+    expect(editorMocks.props?.selectedWorkspaceCwd).toBe('ws-a');
+    expect(provider.workspaceBinding?.list).toHaveBeenCalledOnce();
+  });
 
   it('asks for a Workspace instead of sending a first input without one', async () => {
     const createSession = directCreation();
@@ -224,7 +2895,236 @@ describe('WorkspaceBindingCreator', () => {
     expect(createEmpty).not.toHaveBeenCalled();
     expect(provider.submitPrompt).not.toHaveBeenCalled();
     expect(commit).toHaveBeenCalledOnce();
-    expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a');
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a', 'ws-a');
+  });
+
+  it('uses the Workspace default without showing separate directory controls', async () => {
+    const createSession = directCreation();
+    const project = { ...workspace, defaultCwdRelative: 'qwen-code' };
+    vi.mocked(provider.workspaceBinding!.list).mockResolvedValue({
+      data: [project],
+      defaultWorkspace: project,
+      supported: true,
+    });
+    await render();
+    expect(container.querySelector('details')).toBeNull();
+    expect(document.getElementById('managed-workspace-cwd')).toBeNull();
+    expect(container.textContent).not.toContain('Relative directory');
+    expect(container.textContent).not.toContain(
+      'Sessions in the same Workspace',
+    );
+    expect(container.textContent).not.toContain('Refresh');
+    await sendInitial('Read README');
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workspaceId: 'ws-a',
+        cwdRelative: 'qwen-code',
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it('selects trusted daemon targets with their original host and cwd without creating resources', async () => {
+    const createSession = directCreation();
+    const onSelectDaemonWorkspace = vi.fn();
+    const daemonWorkspaces = [
+      {
+        id: 'primary',
+        cwd: '/qwen-code',
+        label: 'qwen-code · Local',
+        primary: true,
+        trusted: true,
+      },
+      {
+        id: 'secondary',
+        cwd: '/other',
+        label: 'Other · Local',
+        primary: false,
+        trusted: true,
+      },
+      {
+        id: 'remote',
+        cwd: '/qwen-code',
+        label: 'Remote · Local',
+        primary: true,
+        trusted: true,
+        hostOrigin: 'https://remote.example',
+      },
+      {
+        id: 'untrusted',
+        cwd: '/untrusted',
+        label: 'Untrusted · Local',
+        primary: false,
+        trusted: false,
+      },
+    ];
+    await render(true, false, undefined, {
+      daemonWorkspaces,
+      onSelectDaemonWorkspace,
+    });
+    for (const target of daemonWorkspaces.slice(0, 2)) {
+      await workspaceAction(target.label);
+      expect(onSelectDaemonWorkspace).toHaveBeenLastCalledWith(target);
+    }
+    await workspaceAction('Remote · Localremote.example');
+    expect(onSelectDaemonWorkspace).toHaveBeenLastCalledWith(
+      daemonWorkspaces[2],
+    );
+    await workspaceAction('Untrusted · Local');
+    expect(onSelectDaemonWorkspace).toHaveBeenCalledTimes(3);
+    expect(createSession).not.toHaveBeenCalled();
+    expect(createEmpty).not.toHaveBeenCalled();
+    expect(onCreated).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+    expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-a');
+  });
+
+  it('blocks a daemon choice already open when Managed creation becomes uncertain', async () => {
+    const createSession = directCreation();
+    createSession.mockRejectedValue(new TypeError('Lost response'));
+    const onSelectDaemonWorkspace = vi.fn();
+    await render(true, false, undefined, {
+      daemonWorkspaces: [
+        {
+          id: 'daemon',
+          cwd: '/qwen-code',
+          label: 'qwen-code · Local',
+          primary: true,
+          trusted: true,
+        },
+      ],
+      onSelectDaemonWorkspace,
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLElement>('button[aria-label="Workspace"]')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    const choice = [
+      ...document.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ].find((item) => item.textContent === 'qwen-code · Local')!;
+    expect(choice).toBeDefined();
+    await sendInitial('Keep this Managed request');
+    await act(async () => choice.click());
+    expect(onSelectDaemonWorkspace).not.toHaveBeenCalled();
+    expect(editorMocks.props!.workspaceSelectionDisabled).toBe(true);
+    expect(
+      sessionStorage.getItem(
+        `qwen-managed-workspace-create:${provider.storageKey}`,
+      ),
+    ).toContain('Keep this Managed request');
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+  });
+
+  it('keeps daemon selection disabled while a workspace registration is uncertain', async () => {
+    directCreation();
+    const key = `qwen-managed-workspace-registration:${provider.storageKey}`;
+    const receipt = JSON.stringify({
+      displayName: 'Project',
+      localPath: '/project',
+      idempotencyKey: 'pending-registration',
+    });
+    sessionStorage.setItem(key, receipt);
+    const onSelectDaemonWorkspace = vi.fn();
+    await render(true, false, undefined, {
+      daemonWorkspaces: [
+        {
+          id: 'daemon',
+          cwd: '/qwen-code',
+          label: 'qwen-code · Local',
+          primary: true,
+          trusted: true,
+        },
+      ],
+      onSelectDaemonWorkspace,
+    });
+    await click('Close');
+    await workspaceAction('qwen-code · Local');
+    expect(onSelectDaemonWorkspace).not.toHaveBeenCalled();
+    expect(sessionStorage.getItem(key)).toBe(receipt);
+  });
+
+  it('cancels directory edits and saves an override without resetting the composer', async () => {
+    const createSession = directCreation();
+    await render();
+    const scope = editorMocks.props!.composerScopeKey;
+    await workspaceAction('Working directory');
+    expect(editorMocks.props!.dialogOpen).toBe(true);
+    await typeInput('managed-workspace-cwd', 'discarded');
+    await click('cancel');
+    await workspaceAction('Working directory');
+    expect(
+      document.querySelector<HTMLInputElement>('#managed-workspace-cwd')!.value,
+    ).toBe('.');
+    await typeInput('managed-workspace-cwd', 'services/api');
+    await click('save');
+    expect(document.querySelector('[role="dialog"]')).toBeNull();
+    expect(editorMocks.props!.dialogOpen).toBe(false);
+    expect(editorMocks.props!.composerScopeKey).toBe(scope);
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+    expect(editorMocks.setText).not.toHaveBeenCalled();
+    await sendInitial('Keep this draft');
+    expect(createSession).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwdRelative: 'services/api',
+        text: 'Keep this draft',
+      }),
+      expect.any(Object),
+    );
+  });
+
+  it('keeps Refresh in the Workspace menu after discovery fails', async () => {
+    const createSession = directCreation();
+    vi.mocked(provider.workspaceBinding!.list)
+      .mockRejectedValueOnce(new Error('Discovery failed'))
+      .mockResolvedValue({
+        data: [workspace],
+        defaultWorkspace: workspace,
+        supported: true,
+      });
+    await render();
+    expect(container.textContent).toContain('Discovery failed');
+    expect(editorMocks.props!.workspaceSelectionDisabled).toBe(false);
+    await workspaceAction('Refresh');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    await sendInitial('Read');
+    expect(createSession).toHaveBeenCalledOnce();
+  });
+
+  it('loads another Workspace page from the menu and confirms a directory override before switching', async () => {
+    directCreation();
+    const other = {
+      ...workspace,
+      workspaceId: 'ws-b',
+      displayName: 'B',
+      defaultCwdRelative: 'other-project',
+    };
+    vi.mocked(provider.workspaceBinding!.list)
+      .mockResolvedValueOnce({
+        data: [workspace],
+        defaultWorkspace: workspace,
+        nextCursor: 'next-page',
+        supported: true,
+      })
+      .mockResolvedValueOnce({ data: [other], supported: true });
+    await render();
+    await workspaceAction('Load more');
+    expect(provider.workspaceBinding!.list).toHaveBeenLastCalledWith(
+      expect.objectContaining({ cursor: 'next-page' }),
+    );
+    await workspaceAction('Working directory');
+    await typeInput('managed-workspace-cwd', 'services/api');
+    await click('save');
+    await act(async () => editorMocks.props!.onSelectWorkspace!('ws-b'));
+    expect(document.querySelector('[role="alertdialog"]')).not.toBeNull();
+    await click('Keep selection');
+    await expectWorkingDirectory('services/api');
+    await act(async () => editorMocks.props!.onSelectWorkspace!('ws-b'));
+    await click('Switch');
+    expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-b');
+    await expectWorkingDirectory('other-project');
   });
 
   it('freezes the initial prompt and choices, then retries only read-back after creation', async () => {
@@ -248,7 +3148,7 @@ describe('WorkspaceBindingCreator', () => {
     expect(getSession).toHaveBeenCalledTimes(2);
     expect(provider.submitPrompt).not.toHaveBeenCalled();
     expect(commit).toHaveBeenCalledOnce();
-    expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a');
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a', 'ws-a');
   });
 
   it('does not silently pick a sole Workspace when the server has no default', async () => {
@@ -269,20 +3169,19 @@ describe('WorkspaceBindingCreator', () => {
     expect(createSession).toHaveBeenCalledOnce();
   });
 
-  it('shows a rejected directory above the collapsed controls without committing the draft', async () => {
+  it('shows a rejected directory without committing the draft', async () => {
     const createSession = directCreation();
     createSession.mockRejectedValue(
       new JavaManagedAgentHttpError(400, 'invalid_cwd', 'Invalid directory'),
     );
     await render();
     const commit = await sendInitial('Keep this input');
-    expect(container.querySelector('details')?.open).toBe(false);
+    expect(container.querySelector('details')).toBeNull();
     expect(container.querySelector('[role="alert"]')?.textContent).toBe(
       'Invalid directory',
     );
-    expect(container.querySelector('details [role="alert"]')).toBeNull();
     expect(commit).not.toHaveBeenCalled();
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
   });
 
   it('recovers frozen initial input and restores it after abandoning an uncertain request', async () => {
@@ -303,7 +3202,7 @@ describe('WorkspaceBindingCreator', () => {
     expect(editorMocks.setText).toHaveBeenCalledExactlyOnceWith(
       'Keep my draft',
     );
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
+    expect(editorMocks.clear).not.toHaveBeenCalled();
     expect(createSession).toHaveBeenCalledOnce();
   });
 
@@ -331,9 +3230,47 @@ describe('WorkspaceBindingCreator', () => {
         idempotencyKey: 'old-key',
       }),
     );
-    expect(editorMocks.clearText).not.toHaveBeenCalled();
-    expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a');
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+    expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a', 'ws-a');
   });
+
+  it.each([
+    { configuredAgent: 'agent-a', selectedAgent: 'agent-a' },
+    { configuredAgent: 'server-default', selectedAgent: 'agent-b' },
+  ])(
+    'creates with a named model when the configured default is $configuredAgent',
+    async ({ configuredAgent, selectedAgent }) => {
+      const createSession = directCreation();
+      provider.workspaceBinding = {
+        ...provider.workspaceBinding!,
+        agentId: configuredAgent,
+        modelPresets: [
+          { agentId: 'agent-b', label: 'Model B' },
+          { agentId: 'agent-a', label: 'Model A' },
+        ],
+      };
+      getSession.mockResolvedValue({
+        sessionId: 'session-a',
+        agentId: selectedAgent,
+        workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+      });
+      await render();
+      expect(editorMocks.props!.availableModels).toEqual([
+        { id: 'agent-b', label: 'Model B' },
+        { id: 'agent-a', label: 'Model A' },
+      ]);
+      expect(editorMocks.props!.currentModel).toBe(selectedAgent);
+      await sendInitial('Read README');
+      expect(createSession).toHaveBeenCalledExactlyOnceWith(
+        expect.objectContaining({
+          agentId: selectedAgent,
+          text: 'Read README',
+        }),
+        expect.any(Object),
+      );
+      expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a', 'ws-a');
+    },
+  );
 
   it('freezes the selected model across an unconfirmed create and checks the returned Agent identity', async () => {
     provider = {
@@ -384,7 +3321,7 @@ describe('WorkspaceBindingCreator', () => {
     });
     await click('Retry reading session');
     expect(createEmpty).toHaveBeenCalledTimes(2);
-    expect(onCreated).toHaveBeenCalledWith('session-b');
+    expect(onCreated).toHaveBeenCalledWith('session-b', 'ws-a');
   });
 
   it.each(['create', 'read'])(
@@ -429,10 +3366,112 @@ describe('WorkspaceBindingCreator', () => {
       });
       expect(createEmpty).toHaveBeenCalledTimes(1);
       expect(getSession).toHaveBeenCalledTimes(1);
-      expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a');
-      expect(sessionStorage.length).toBe(0);
+      expect(onCreated).toHaveBeenCalledExactlyOnceWith('session-a', 'ws-a');
+      expect(
+        sessionStorage.getItem(
+          `qwen-managed-workspace-create:${provider.storageKey}`,
+        ),
+      ).toBeNull();
     },
   );
+
+  it.each([32, 33, 256])(
+    'displays a valid %i-package catalog and caps the Session selection at 32',
+    async (count) => {
+      provider = {
+        ...provider,
+        extensions: {
+          list: vi.fn().mockResolvedValue({
+            supported: true,
+            extensions: Array.from({ length: count }, (_, index) => ({
+              pin: {
+                extensionId: `ext_00000000-0000-4000-8000-${String(index + 1).padStart(12, '0')}`,
+                packageRevision: 1,
+                packageDigest: 'a'.repeat(64),
+              },
+              manifest: { name: `Review package ${index + 1}`, version: '1' },
+            })),
+          }),
+        } as unknown as ManagedAgentProvider['extensions'],
+      };
+      await render();
+      const choices = [
+        ...container.querySelectorAll<HTMLInputElement>(
+          'input[type="checkbox"]',
+        ),
+      ].filter((input) =>
+        input.closest('label')?.textContent?.includes('Review package'),
+      );
+      expect(choices).toHaveLength(count);
+      for (const choice of choices.slice(0, 32))
+        await act(async () => choice.click());
+      expect(choices.filter((choice) => choice.checked)).toHaveLength(32);
+      if (count > 32) {
+        expect(choices[32]!.disabled).toBe(true);
+        await act(async () => choices[32]!.click());
+        expect(choices[32]!.checked).toBe(false);
+        await act(async () => choices[0]!.click());
+        expect(choices[32]!.disabled).toBe(false);
+        await act(async () => choices[32]!.click());
+        expect(choices.filter((choice) => choice.checked)).toHaveLength(32);
+      }
+    },
+  );
+
+  it('freezes selected package and settings revisions across creation retries', async () => {
+    const pin = {
+      extensionId: 'ext_00000000-0000-4000-8000-000000000001',
+      packageRevision: 2,
+      packageDigest: 'a'.repeat(64),
+    };
+    provider = {
+      ...provider,
+      extensions: {
+        list: vi.fn().mockResolvedValue({
+          supported: true,
+          extensions: [
+            { pin, manifest: { name: 'Frozen package', version: '2' } },
+          ],
+        }),
+      } as unknown as ManagedAgentProvider['extensions'],
+    };
+    createEmpty
+      .mockRejectedValueOnce(new TypeError('response lost'))
+      .mockResolvedValueOnce({ sessionId: 'session-a' });
+    getSession.mockResolvedValue({
+      sessionId: 'session-a',
+      workspace: { workspaceId: 'ws-a', cwdRelative: '.' },
+    });
+    await render();
+    const checkbox = [
+      ...container.querySelectorAll<HTMLInputElement>('input[type="checkbox"]'),
+    ].find((input) =>
+      input.closest('label')?.textContent?.includes('Frozen package'),
+    )!;
+    expect(checkbox).toBeDefined();
+    await act(async () => checkbox.click());
+    const revision = container.querySelector<HTMLInputElement>(
+      '[aria-label="Settings revision (optional): Frozen package"]',
+    )!;
+    await act(async () => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(revision, '7');
+      revision.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await click('Create session');
+    expect(createEmpty.mock.calls[0]?.[0].extensionPins).toEqual([
+      { ...pin, settingsRevision: 7 },
+    ]);
+    await click('Retry the same request');
+    expect(createEmpty.mock.calls[1]?.[0]).toEqual(
+      createEmpty.mock.calls[0]?.[0],
+    );
+    expect(createEmpty.mock.calls[1]?.[1].idempotencyKey).toEqual(
+      createEmpty.mock.calls[0]?.[1].idempotencyKey,
+    );
+  });
 
   it('retries the frozen request after a lost response and confirms binding', async () => {
     createEmpty
@@ -460,8 +3499,12 @@ describe('WorkspaceBindingCreator', () => {
     expect(createEmpty.mock.calls[1][1].idempotencyKey).toBe(
       createEmpty.mock.calls[0][1].idempotencyKey,
     );
-    expect(onCreated).toHaveBeenCalledWith('session-a');
-    expect(sessionStorage.length).toBe(0);
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
+    expect(
+      sessionStorage.getItem(
+        `qwen-managed-workspace-create:${provider.storageKey}`,
+      ),
+    ).toBeNull();
   });
 
   it.each([
@@ -479,7 +3522,7 @@ describe('WorkspaceBindingCreator', () => {
     await click('Retry reading session');
     expect(createEmpty).toHaveBeenCalledTimes(1);
     expect(getSession).toHaveBeenCalledTimes(2);
-    expect(onCreated).toHaveBeenCalledWith('session-a');
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
   });
 
   it('keeps the recovery record when an aborted create is later denied', async () => {
@@ -533,11 +3576,15 @@ describe('WorkspaceBindingCreator', () => {
       });
       await render();
       await click('Create session');
-      expect(sessionStorage.length).toBe(1);
+      expect(
+        sessionStorage.getItem(
+          `qwen-managed-workspace-create:${provider.storageKey}`,
+        ),
+      ).not.toBeNull();
       await click('Retry the same request');
       expect(createEmpty).toHaveBeenCalledTimes(2);
       expect(createEmpty.mock.calls[1]).toEqual(createEmpty.mock.calls[0]);
-      expect(onCreated).toHaveBeenCalledWith('session-a');
+      expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
     },
   );
 
@@ -584,7 +3631,7 @@ describe('WorkspaceBindingCreator', () => {
     });
     await click('Create session');
     expect(createEmpty.mock.calls[0][0].workspaceId).toBe('ws-a');
-    expect(onCreated).toHaveBeenCalledWith('session-a');
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
   });
 
   it('requires confirmation before switching an edited directory', async () => {
@@ -624,6 +3671,172 @@ describe('WorkspaceBindingCreator', () => {
     expect(createEmpty).not.toHaveBeenCalled();
   });
 
+  it('validates an explicit workspace outside the first page and creates only in that workspace', async () => {
+    const target = {
+      ...workspace,
+      workspaceId: 'ws-b',
+      displayName: 'B',
+      defaultCwdRelative: 'docs',
+    };
+    vi.mocked(provider.workspaceBinding!.get).mockResolvedValue(target);
+    createEmpty.mockResolvedValue({ sessionId: 'session-b' });
+    getSession.mockResolvedValue({
+      sessionId: 'session-b',
+      workspace: { workspaceId: 'ws-b', cwdRelative: 'docs' },
+    });
+    await render(true, false, 'ws-b');
+    expect(provider.workspaceBinding!.get).toHaveBeenCalledWith(
+      'ws-b',
+      expect.objectContaining({ clientId: 'client-a' }),
+    );
+    expect(container.querySelector('[role="combobox"]')?.textContent).toBe(
+      'B (ws-b)',
+    );
+    await click('Create session');
+    expect(createEmpty).toHaveBeenCalledWith(
+      expect.objectContaining({ workspaceId: 'ws-b', cwdRelative: 'docs' }),
+      expect.any(Object),
+    );
+    expect(onCreated).toHaveBeenCalledWith('session-b', 'ws-b');
+  });
+
+  it.each([401, 403, 404])(
+    'does not replace an explicit workspace with the default after HTTP %s',
+    async (status) => {
+      directCreation();
+      vi.mocked(provider.workspaceBinding!.get).mockRejectedValue(
+        new JavaManagedAgentHttpError(
+          status,
+          'unavailable',
+          'Requested workspace unavailable',
+        ),
+      );
+      await render(true, false, 'ws-missing');
+      expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-missing');
+      expect(container.querySelector('[role="alert"]')?.textContent).toContain(
+        'Requested workspace unavailable',
+      );
+      await act(async () =>
+        editorMocks.props!.onSubmit(
+          'Do not use default',
+          undefined,
+          undefined,
+          vi.fn(),
+        ),
+      );
+      expect(provider.workspaceBinding!.createSession).not.toHaveBeenCalled();
+      expect(createEmpty).not.toHaveBeenCalled();
+    },
+  );
+
+  it('refuses an explicit non-creatable workspace even when another workspace is the default', async () => {
+    directCreation();
+    vi.mocked(provider.workspaceBinding!.get).mockResolvedValue({
+      ...workspace,
+      workspaceId: 'ws-b',
+      canCreateSession: false,
+    });
+    await render(true, false, 'ws-b');
+    expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-b');
+    await act(async () =>
+      editorMocks.props!.onSubmit(
+        'Do not use default',
+        undefined,
+        undefined,
+        vi.fn(),
+      ),
+    );
+    expect(provider.workspaceBinding!.createSession).not.toHaveBeenCalled();
+    expect(createEmpty).not.toHaveBeenCalled();
+  });
+
+  it('blocks old-workspace submission while a new external target is being checked and preserves the draft', async () => {
+    directCreation();
+    await render();
+    const submit = editorMocks.props!.onSubmit;
+    const scope = editorMocks.props!.composerScopeKey;
+    let resolveTarget!: (value: typeof workspace) => void;
+    vi.mocked(provider.workspaceBinding!.get).mockReturnValue(
+      new Promise((resolve) => {
+        resolveTarget = resolve;
+      }),
+    );
+    await render(true, false, 'ws-b');
+    await act(async () =>
+      submit('Keep old draft', undefined, undefined, vi.fn()),
+    );
+    expect(provider.workspaceBinding!.createSession).not.toHaveBeenCalled();
+    await act(async () => {
+      resolveTarget({ ...workspace, workspaceId: 'ws-b', displayName: 'B' });
+      await flush();
+    });
+    expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-b');
+    expect(editorMocks.props!.composerScopeKey).toBe(scope);
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+    expect(editorMocks.setText).not.toHaveBeenCalled();
+    expect(onSelectWorkspace).toHaveBeenCalledWith('ws-b');
+  });
+
+  it('confirms externally requested workspace changes with edited cwd and reports the retained selection on cancel', async () => {
+    directCreation();
+    vi.mocked(provider.workspaceBinding!.get).mockImplementation(
+      async (id) => ({
+        ...workspace,
+        workspaceId: id,
+        displayName: id,
+        defaultCwdRelative: id === 'ws-b' ? 'docs' : '.',
+      }),
+    );
+    await render();
+    await workspaceAction('Working directory');
+    await typeInput('managed-workspace-cwd', 'services/api');
+    await click('save');
+    const scope = editorMocks.props!.composerScopeKey;
+    await render(true, false, 'ws-b');
+    expect(document.querySelector('[role="alertdialog"]')).not.toBeNull();
+    expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-a');
+    await act(async () =>
+      editorMocks.props!.onSubmit('Keep draft', undefined, undefined, vi.fn()),
+    );
+    expect(provider.workspaceBinding!.createSession).not.toHaveBeenCalled();
+    await click('Keep selection');
+    expect(onSelectWorkspace).toHaveBeenLastCalledWith('ws-a');
+    await expectWorkingDirectory('services/api');
+    await render(true, false, 'ws-a');
+    await render(true, false, 'ws-b');
+    await click('Switch');
+    expect(onSelectWorkspace).toHaveBeenLastCalledWith('ws-b');
+    expect(editorMocks.props!.selectedWorkspaceCwd).toBe('ws-b');
+    await expectWorkingDirectory('docs');
+    expect(editorMocks.props!.composerScopeKey).toBe(scope);
+    expect(editorMocks.clear).not.toHaveBeenCalled();
+  });
+
+  it('keeps a pending request bound to its original workspace when navigation requests another one', async () => {
+    const createSession = directCreation();
+    createSession.mockRejectedValueOnce(new TypeError('Lost response'));
+    await render();
+    await act(async () =>
+      editorMocks.props!.onSubmit(
+        'Frozen input',
+        undefined,
+        undefined,
+        vi.fn(),
+      ),
+    );
+    const firstRequest = createSession.mock.calls[0];
+    await render(true, false, 'ws-b');
+    expect(provider.workspaceBinding!.get).not.toHaveBeenCalledWith(
+      'ws-b',
+      expect.anything(),
+    );
+    await click('Retry the same request');
+    expect(createSession).toHaveBeenCalledTimes(2);
+    expect(createSession.mock.calls[1]).toEqual(firstRequest);
+    expect(firstRequest[0].workspaceId).toBe('ws-a');
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
+  });
+
   it('does not allow a non-creatable workspace to be selected', async () => {
     vi.mocked(provider.workspaceBinding!.list).mockResolvedValue({
       data: [
@@ -656,7 +3869,11 @@ describe('WorkspaceBindingCreator', () => {
     );
     await render();
     await click('Create session');
-    expect(sessionStorage.length).toBe(0);
+    expect(
+      sessionStorage.getItem(
+        `qwen-managed-workspace-create:${provider.storageKey}`,
+      ),
+    ).toBeNull();
     expect(container.querySelector('#managed-workspace-cwd')).not.toBeNull();
     expect(container.textContent).toContain('invalid directory');
   });
@@ -691,7 +3908,7 @@ describe('WorkspaceBindingCreator', () => {
     expect(onCreated).not.toHaveBeenCalled();
     await click('Retry reading session');
     expect(createEmpty).toHaveBeenCalledTimes(1);
-    expect(onCreated).toHaveBeenCalledWith('session-a');
+    expect(onCreated).toHaveBeenCalledWith('session-a', 'ws-a');
   });
 
   it('ignores an old create response after the identity scope changes', async () => {

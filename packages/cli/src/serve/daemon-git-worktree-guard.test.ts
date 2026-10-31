@@ -2332,7 +2332,9 @@ it -C ${cmdPath(outsideRepo)} reset --hard`,
           }),
         ).resolves.toMatchObject({
           allowed: false,
-          reason: expect.stringContaining('execution directory'),
+          reason: expect.stringMatching(
+            /execution directory[\s\S]*a command runs only inside the session working directory/,
+          ),
         });
       },
     );

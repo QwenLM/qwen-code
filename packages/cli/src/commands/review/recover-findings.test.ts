@@ -34,6 +34,7 @@ import {
   recordPrompt,
 } from './lib/prompt-record.js';
 import { appendRunSession, recordResume } from './lib/run-ledger.js';
+import { arePermissionBitsEnforced } from '../../test-utils/permission-bits.js';
 
 let dir: string;
 let ENV: NodeJS.ProcessEnv;
@@ -943,11 +944,11 @@ describe('recover-findings — the guarantees, made falsifiable', () => {
     ).toBe(1);
   });
 
-  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+  it.skipIf(!arePermissionBitsEnforced())(
     'discloses an unreadable record dir instead of printing as empty',
     () => {
-      // Guarded like every sibling chmod fixture in this suite: as uid 0 the
-      // permission bits are bypassed and the directory stays readable, and on
+      // Guarded like every sibling chmod fixture in this suite: where root
+      // bypasses the permission bits the directory stays readable, and on
       // Windows chmod on a directory only toggles the read-only attribute —
       // in both cases `recordDirUnreadable` stays null and this fails on a
       // required merge-queue leg for a reason that has nothing to do with the
