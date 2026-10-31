@@ -9,6 +9,7 @@ import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedSessionStoreModels;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.InputBlock;
 import com.alibaba.qwen.code.managedagent.model.RequestDigests;
@@ -244,9 +245,18 @@ class ExternalWorkspaceMaterializationTest {
             jdbc.update("UPDATE ma_storage_owner SET maintenance_id=NULL, maintenance_generation=NULL");
             for (var input : List.of(List.<java.util.Map<String, Object>>of(),
                     List.of(java.util.Map.<String, Object>of("type", "input_text", "text", "Read README")))) {
-                var admitted = transaction.execute(status -> sessions.insertWorkspaceSessionCommand("tenant", "owner",
-                        "create-" + input.size(), "digest-" + input.size(), "qwen-code", null, "Files", input,
-                        input.isEmpty() ? null : "input-digest", new WorkspaceSelection("workspace", ".")));
+                var admitted = transaction.execute(status -> sessions.insertWorkspaceSessionCommand(
+                        SessionCreationCommand.builder()
+                                .tenantId("tenant")
+                                .actorId("owner")
+                                .idempotencyKey("create-" + input.size())
+                                .requestDigest("digest-" + input.size())
+                                .agentId("qwen-code")
+                                .title("Files")
+                                .input(input)
+                                .payloadDigest(input.isEmpty() ? null : "input-digest")
+                                .selection(new WorkspaceSelection("workspace", "."))
+                                .build()));
                 var saved = sessions.requireSession("tenant", admitted.sessionId());
                 assertThat(saved.toolProfile()).isEqualTo(profile);
                 var privateStore = new ManagedSessionStore(jdbc);
@@ -276,16 +286,26 @@ class ExternalWorkspaceMaterializationTest {
                 }
             }
             when(harness.supportsLifecycle(profile)).thenReturn(false);
-            assertThatThrownBy(() -> transaction.execute(status -> sessions.insertWorkspaceSessionCommand("tenant", "owner",
-                    "old-harness", "digest", "qwen-code", null, "Files", List.of(), null, new WorkspaceSelection("workspace", "."))))
+            assertThatThrownBy(() -> transaction.execute(status -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId("tenant").actorId("owner")
+                        .idempotencyKey("old-harness").requestDigest("digest")
+                        .agentId("qwen-code").title("Files")
+                        .input(List.of())
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build())))
                     .isInstanceOf(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class);
             when(harness.supportsLifecycle(profile)).thenReturn(true);
             when(warmer.supportsWorkspaceClose(profile)).thenReturn(false);
             assertThat(registry.findReadable("tenant", "owner", "workspace").canCreateSession()).isFalse();
             when(warmer.supportsWorkspaceClose(profile)).thenReturn(true);
             properties.getHarness().setWorkspaceFilesEnabled(false);
-            assertThatThrownBy(() -> transaction.execute(status -> sessions.insertWorkspaceSessionCommand("tenant", "owner",
-                    "disabled", "digest", "qwen-code", null, "Files", List.of(), null, new WorkspaceSelection("workspace", "."))))
+            assertThatThrownBy(() -> transaction.execute(status -> sessions.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId("tenant").actorId("owner")
+                        .idempotencyKey("disabled").requestDigest("digest")
+                        .agentId("qwen-code").title("Files")
+                        .input(List.of())
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build())))
                     .isInstanceOf(com.alibaba.qwen.code.managedagent.exception.ManagedAgentException.class);
             properties.getHarness().setWorkspaceFilesEnabled(true);
             jdbc.update("UPDATE ma_workspace_access SET role='READER'");
