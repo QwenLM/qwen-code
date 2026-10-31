@@ -33,7 +33,6 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeTransport;
 import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
-import com.alibaba.qwen.code.runtimebroker.ToolHoldRow;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
@@ -147,6 +146,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
             CompletableFuture<ExecutionReconciliation>> reconciliations =
                     new ConcurrentHashMap<>();
     private final ExecutionObservationCooldown observationCooldown;
+    private final RuntimeHoldInventory holdInventory;
 
     /**
      * H4b: the live physical Runtime binding of a Harness Session — how
@@ -330,6 +330,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         this.scheduler = scheduler;
         this.renewalScheduler = renewalScheduler;
         this.observationCooldown = new ExecutionObservationCooldown(clock, scheduler);
+        this.holdInventory = new RuntimeHoldInventory(executionRepository, sessionRepository);
     }
 
     public boolean supportsDrainedStop() {
@@ -1898,43 +1899,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         return mapFailure(safeStage(() -> sessionResolver.resolveTenant(id)),
                 "runtime_hold_inventory_scope_failed",
                 "Runtime hold inventory scope resolution failed")
-                .thenApply(tenant -> listActiveHoldIdsSync(id, tenant));
-    }
-
-    private List<String> listActiveHoldIdsSync(String harnessSessionId,
-            String tenantId) {
-        Set<String> candidates = new LinkedHashSet<>();
-        String after = null;
-        for (;;) {
-            List<ToolHoldRow> batch = executionRepository
-                    .findHoldRowsByHarnessSession(harnessSessionId, after, 100);
-            for (ToolHoldRow row : batch) {
-                candidates.add(row.runtimeSessionId());
-            }
-            if (batch.size() < 100) {
-                break;
-            }
-            after = batch.get(batch.size() - 1).executionCallId();
-        }
-        Set<String> released = new LinkedHashSet<>();
-        List<String> ids = List.copyOf(candidates);
-        for (int from = 0; from < ids.size(); from += 100) {
-            for (RuntimeSessionRecord session : sessionRepository.findHistoricalByIds(
-                    tenantId, harnessSessionId,
-                    ids.subList(from, Math.min(from + 100, ids.size())))) {
-                if (session.getState() == RuntimeSessionRecord.State.RELEASED) {
-                    released.add(session.getRuntimeSessionId());
-                }
-            }
-        }
-        List<String> held = new ArrayList<>();
-        for (String runtimeSessionId : candidates) {
-            // A missing record is not a durably recorded release either.
-            if (!released.contains(runtimeSessionId)) {
-                held.add(runtimeSessionId);
-            }
-        }
-        return List.copyOf(held);
+                .thenApply(tenant -> holdInventory.activeRuntimeSessionIds(id, tenant));
     }
 
     public CompletionStage<Map<String, Object>> installPublisher(String harnessSessionId,

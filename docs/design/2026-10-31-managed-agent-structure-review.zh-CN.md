@@ -60,16 +60,16 @@ Managed Agent 服务端从首篇设计（2026-09-19）起，约两个月内长�
 
 **D1. 上帝类。** 最大的生产类：
 
-| 类                                 | 模块           | 行数  | 备注                                                   |
-| ---------------------------------- | -------------- | ----- | ------------------------------------------------------ |
-| `ManagedAgentStore`                | persistence    | 7,751 | 300+ 方法，7 个公开 setter                             |
-| `RuntimeBrokerService`             | runtime-broker | 6,417 | 230+ 方法；冷却已提取至 `ExecutionObservationCooldown` |
-| `ManagedSessionStore`              | persistence    | 3,931 |                                                        |
-| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                        |
-| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                        |
-| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                        |
-| `ManagedAgentService`              | control-plane  | 2,120 |                                                        |
-| `HarnessCoordinator`               | control-plane  | 1,770 |                                                        |
+| 类                                 | 模块           | 行数  | 备注                                                                                        |
+| ---------------------------------- | -------------- | ----- | ------------------------------------------------------------------------------------------- |
+| `ManagedAgentStore`                | persistence    | 7,751 | 300+ 方法，7 个公开 setter                                                                  |
+| `RuntimeBrokerService`             | runtime-broker | 6,329 | 230+ 方法；冷却与 hold 清单已提取（`ExecutionObservationCooldown`、`RuntimeHoldInventory`） |
+| `ManagedSessionStore`              | persistence    | 3,931 |                                                                                             |
+| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                                             |
+| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                                                             |
+| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                                                             |
+| `ManagedAgentService`              | control-plane  | 2,120 |                                                                                             |
+| `HarnessCoordinator`               | control-plane  | 1,770 |                                                                                             |
 
 `ManagedAgentStore` 混合了会话准入、turn、event、item/message 投影、worktree、
 MCP 管理、definition pin、skills 与 extension 投影。它的 7 个公开
@@ -201,8 +201,14 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
   提取模块内协作者；服务本体退为门面。模块已经存在，不需要动任何跨模块
   契约。这是风险最低、可读性收益最高的拆分。observation 冷却是第一条
   提取的缝（2026-10-31，`ExecutionObservationCooldown`）：它只拥有自己
-  触及的状态、无独立生命周期；恢复扫描、取消与 tool hold 作为独立切片
-  跟进。带入下一切片的已知覆盖缺口：`lookupOnce` 中"先 stamp 后释放
+  触及的状态、无独立生命周期。tool hold 清单同日跟进
+  （`RuntimeHoldInventory`）：持久化分页与 RELEASED 过滤逐字迁移，服务
+  保留准入、租户解析与错误映射边界。恢复扫描随后调研，证实深度耦合——
+  `scanExecutions` 驱动 `reconcileInContext`，后台进程 settle 族拥有
+  `SessionContext` 内存索引与 CAS settle 循环——现在提取会造出注入十来个
+  回调的协作者而非干净的缝；它等待对账路径先成为独立协作者。取消遵循
+  同一原则：只在缝干净处提取。带入对账切片的已知覆盖缺口：`lookupOnce`
+  中"先 stamp 后释放
   在途槽位"的顺序没有测试钉住（base 上即存在的缺口）；待对账路径提取
   为独立协作者、该顺序成为缝级契约而非私有 lambda 内部时序时再钉。
 - 之后对 `ManagedSessionStore` 与 `QwenHostedHarnessConnector` 做同样处理，
