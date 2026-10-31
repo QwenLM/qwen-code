@@ -582,6 +582,64 @@ describe('LocalControlSettingsCard', () => {
     expect(enableBodies[2]).toMatchObject({ address: '10.8.0.2' });
   });
 
+  it('returns a latched fallback to unnamed when the candidates shrink to one (#14140)', async () => {
+    // Mounting active with two candidates names the auto-picked fallback,
+    // because an address-less enable would be ambiguous. When the list shrinks
+    // back to that one candidate the enable is unambiguous again, so the latch
+    // must be recomputed: posting the fallback by name would supersede the
+    // standing grant for the daemon's lifetime.
+    const enableBodies: Array<Record<string, unknown>> = [];
+    const fallback = { interfaceName: 'en0', address: '192.168.1.10' };
+    vi.mocked(fetch).mockImplementation(async (input, init) => {
+      const url = String(input);
+      if ((init?.method ?? 'GET') === 'GET') {
+        return localControlResponse({
+          active: true,
+          address: '192.168.1.10',
+          interfaceName: 'en0',
+          interfaces: [
+            fallback,
+            { interfaceName: 'en1', address: '192.168.1.20' },
+          ],
+          grantedAddress: '10.8.0.2',
+        });
+      }
+      if (url.includes('/workspace/local-control/disable')) {
+        return localControlResponse({
+          active: false,
+          interfaces: [fallback],
+          grantedAddress: '10.8.0.2',
+        });
+      }
+      enableBodies.push(
+        JSON.parse(String(init?.body)) as Record<string, unknown>,
+      );
+      return localControlResponse({
+        active: true,
+        address: '192.168.1.10',
+        interfaceName: 'en0',
+        interfaces: [fallback],
+        grantedAddress: '10.8.0.2',
+      });
+    });
+
+    const container = mount();
+    await flush();
+
+    act(() => {
+      buttonWithText(container, 'Disconnect phone access').click();
+    });
+    await flush();
+
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+
+    expect(enableBodies).toHaveLength(1);
+    expect(enableBodies[0]).not.toHaveProperty('address');
+  });
+
   it('does not name the auto-picked fallback on a cold mount while a grant stands (#14140)', async () => {
     // The daemon rebound to a fallback after losing the granted address; a
     // card mounted now sees only the fallback as a candidate. Disable→Enable

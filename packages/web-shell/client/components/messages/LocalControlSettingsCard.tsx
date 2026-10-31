@@ -46,10 +46,11 @@ interface SelectionState {
   /** The address shown as selected in the picker. */
   selected: string;
   /**
-   * Whether `selected` is a named choice — the operator's pick or a
-   * retained address an address-less enable would not resolve to — rather
-   * than a single-candidate auto-fill. Only a named choice is posted as
-   * `address`: the daemon reads a named address as the operator's later
+   * Whether `selected` must be posted as `address`: a retained address an
+   * address-less enable would not resolve to, or any selection while several
+   * candidates make an address-less enable ambiguous. Recomputed on every
+   * status update so a selection that becomes unambiguous goes out
+   * address-less — the daemon reads a named address as the operator's later
    * choice and revokes the daemon-start grant (#14140).
    */
   named: boolean;
@@ -106,12 +107,12 @@ function reconcileSelection(
       retained.candidate.address !== current.selected
     )
   ) {
-    // A second row makes an address-less enable ambiguous, so the displayed
-    // auto-fill must be posted by name — clicking the row already shown
-    // fires no change event, leaving that click as the only way out.
+    // Two or more candidates make an address-less enable ambiguous, so the
+    // displayed auto-fill must be posted by name — clicking the row already
+    // shown fires no change event, leaving that click as the only way out.
     return {
       ...current,
-      named: current.named || interfaces.length > 1,
+      named: interfaces.length > 1,
       retained,
     };
   }
