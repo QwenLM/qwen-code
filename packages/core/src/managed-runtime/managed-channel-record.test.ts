@@ -59,15 +59,19 @@ function merge(
 }
 
 describe('managed-channel-record/1 shared contract', () => {
-  it('registers both bodies as enabled, adapter-scoped domains that project no tasks', () => {
+  it('registers both bodies as enabled, adapter-scoped domains, and projects only a delivery as a task', () => {
     // H5b/H5c: both domains are submittable, and the route policy's adapter
-    // is the gate — only the email reference adapter is admitted.
+    // is the gate — only the email reference adapter is admitted. A
+    // delivery is a task of its route Session (#13746 F3); a route is not.
     for (const domain of ['channel_route', 'channel_delivery'] as const) {
       expect(MANAGED_SESSION_ENABLED_DOMAINS).toContain(domain);
-      expect(
-        MANAGED_EXTENSION_RECORD_BODIES[domain]!.taskKindOf({}),
-      ).toBeNull();
     }
+    expect(
+      MANAGED_EXTENSION_RECORD_BODIES.channel_route!.taskKindOf({}),
+    ).toBeNull();
+    expect(
+      MANAGED_EXTENSION_RECORD_BODIES.channel_delivery!.taskKindOf({}),
+    ).toBe('channel_delivery');
     expect(MANAGED_SESSION_ENABLED_CHANNEL_ADAPTERS).toEqual(['email']);
   });
 

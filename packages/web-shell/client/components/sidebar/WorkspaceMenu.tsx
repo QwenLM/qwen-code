@@ -13,6 +13,8 @@ import {
 } from 'react';
 import type { DaemonWorkspaceCapability } from '@qwen-code/sdk/daemon';
 import {
+  ArrowDownIcon,
+  ArrowUpIcon,
   BlocksIcon,
   CopyIcon,
   EllipsisVerticalIcon,
@@ -21,6 +23,7 @@ import {
   PencilIcon,
   PinIcon,
   PinOffIcon,
+  PlusIcon,
   PlugIcon,
   RadioTowerIcon,
   RefreshCwIcon,
@@ -58,6 +61,9 @@ export interface WorkspaceMenuActions {
   openTerminal?: () => void;
   newSession?: () => void;
   newWorktreeSession?: () => void;
+  createGroup?: () => void;
+  moveUp?: () => void;
+  moveDown?: () => void;
   openManagement?: (target: WorkspaceManagementTarget) => void;
   reload?: () => void;
   remove?: () => void;
@@ -178,6 +184,30 @@ export function WorkspaceMenu({
       <DropdownMenuItem key="worktree" onSelect={actions.newWorktreeSession}>
         <GitForkIcon />
         {t('sidebar.newWorktreeTask')}
+      </DropdownMenuItem>,
+    );
+  }
+  if (actions.createGroup) {
+    primary.push(
+      <DropdownMenuItem key="create-group" onSelect={actions.createGroup}>
+        <PlusIcon />
+        {t('sidebar.groupCreate')}
+      </DropdownMenuItem>,
+    );
+  }
+  if (actions.moveUp) {
+    primary.push(
+      <DropdownMenuItem key="move-up" onSelect={actions.moveUp}>
+        <ArrowUpIcon />
+        {t('sidebar.moveWorkspaceUp')}
+      </DropdownMenuItem>,
+    );
+  }
+  if (actions.moveDown) {
+    primary.push(
+      <DropdownMenuItem key="move-down" onSelect={actions.moveDown}>
+        <ArrowDownIcon />
+        {t('sidebar.moveWorkspaceDown')}
       </DropdownMenuItem>,
     );
   }

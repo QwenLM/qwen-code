@@ -91,16 +91,20 @@ plus a pointer:
 # Full rationale → qwen-autofix.md#af-030
 ```
 
-Each section below is the **verbatim** text of the block that pointer replaced,
-titled with the job and step it belongs to. Editing rules: keep the pointer and
-the section id in sync, put new long-form reasoning here rather than in the
-YAML, and never delete a section without deleting its pointer.
+Each section below carries the text of the block that pointer replaced, titled
+with the job and step it belongs to. A summary line may be rewritten after the
+block was compressed (the section is then authoritative, not the comment), and
+af-160 marks the entries whose text is new rather than moved. Editing rules:
+keep the pointer and the section id in sync, put new long-form reasoning here
+rather than in the YAML, and never delete a section without deleting its
+pointer.
 
 This file records _why the code is the way it is_, indexed by code site. For
 task-oriented guides — what a maintainer types and what happens next — see:
 
-- [`qwen-autofix-round-seed.md`](./qwen-autofix-round-seed.md) — seeding the
-  round counter with `@qwen-code /takeover from N`.
+- [`qwen-autofix-round-seed.md`](./qwen-autofix-round-seed.md) — the two
+  parameterized commands: seeding the round counter with `@qwen-code /takeover
+from N`, and bounding an engagement with `@qwen-code /takeover for N`.
 
 ## Contents
 
@@ -110,7 +114,7 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [4. route — The issue_comment clause is a cheap expression-level prefilter: the overwhelming…](#af-004)
 - [5. route — Concurrency is keyed by TARGET, not shared and not fully unique:](#af-005)
 - [6. route · Decide phases — Fork PR — decline, and say so. This event carries NO repository secrets: GitHub…](#af-006)
-- [7. route · Decide phases — '<cmd> from N' — the ONE parameterized form, and the only place this workflow reads a…](#af-007)
+- [7. route · Decide phases — '<cmd> from N' and '<cmd> for N' — the two parameterized forms, and the only places this…](#af-007)
 - [8. issue-autofix — Secret-bearing and executes agent-driven code, but the agent runs inside the docker…](#af-008)
 - [9. issue-autofix — route.issue_number is only set for forced dispatches; label events carry the issue in…](#af-009)
 - [10. issue-autofix · Sanitize workspace git config — The runner USER's global config is the same exec surface as the workspace config below:…](#af-010)
@@ -259,6 +263,8 @@ task-oriented guides — what a maintainer types and what happens next — see:
 - [156. review-address · Triage and address — In-round self-review A/B: one bounded delta review before the round's commit,…](#af-156)
 - [157. review-address · Prepare branch and feedback — Classify the live head: a round that pushes onto a fully GREEN head and leaves…](#af-157)
 - [158. review-address · Stage trusted test-surface instrument — The test-weakening gate's instrument: the counter from the same trusted…](#af-158)
+- [159. route · Takeover round budget — '<cmd> for N' bounds a window's rounds and releases the PR when the budget is spent…](#af-159)
+- [160. (top level) · Env constant commentary — Moved out of the workflow verbatim to keep the file under GitHub's start-runs gate…](#af-160)
 
 ---
 
@@ -487,13 +493,14 @@ which already declines forks for exactly this reason.
 
 <a id="af-007"></a>
 
-### 7. route · Decide phases — '<cmd> from N' — the ONE parameterized form, and the only place this workflow reads a…
+### 7. route · Decide phases — '<cmd> from N' and '<cmd> for N' — the two parameterized forms, and the only places this…
 
 In `route` · `Decide phases`.
 
 ```text
-'<cmd> from N' — the ONE parameterized form, and the only
-place this workflow reads a value out of a comment body.
+'<cmd> from N' and '<cmd> for N' — the two parameterized
+forms, and the only places this workflow reads a value out
+of a comment body.
 Kept inside the constants discipline above: the literal
 prefix must still match TAKEOVER_COMMAND byte-for-byte, the
 tail is a bounded integer, and the captured value only ever
@@ -1399,8 +1406,8 @@ Why 20: 37 PRs carried the label on 2026-08-08, so 5 slots served
 at a larger scale. The ecs-qwen fleet is 84 runners, so 20 concurrent
 legs occupy under a quarter of it, and the executed legs sampled that
 day finished in 3-28 minutes.
-The 300-minute job cap puts the worst case at 5 runner-hours per slot
-(100 across the fleet at 20) and holds the per-PR head-write
+The 345-minute job cap puts the worst case at 5.75 runner-hours per
+slot (115 across the fleet at 20) and holds the per-PR head-write
 concurrency group for the same window. Different PRs never share that
 group, so raising this does not add push contention.
 RAISE BOTH TOGETHER: this must stay strictly below
@@ -1640,11 +1647,11 @@ for this cap. Worst-case budget:
   setup                    7
   Triage and address     130  (120 budget + 10 margin)
   Verification gate       60  (2.6x the measured 22m48s)
-  Repair                  20
+  Repair                  70  (60 budget + the same 10 margin)
   Repair verification     60
   report                   3
   -------------------------------
-  worst case             280  => job timeout 300, and the job runs
+  worst case             330  => job timeout 345, and the job runs
                                  on ubuntu-latest, whose own ceiling
                                  is 360.
 ```
@@ -2355,7 +2362,9 @@ the PR and clears on a re-run (observed: #7490's E2E "runner lost
 communication"; #6506's checkout "RPC failed; curl 92" / "fetch-pack:
 invalid index-pack output" — both green on the rerun; #13622's Classify
 PR, "repeatedly failed to be acquired" — the hosted pool never assigned a
-runner, so zero steps executed). The scan
+runner, so zero steps executed; #14550's SDK Java lane, "sdk-java host
+lock not acquired within 40 minutes" — the per-host test lock starved
+behind cross-run pool traffic and no test ran). The scan
 auto-reruns those failed jobs ONCE, guarded by run_attempt so a persistent
 infra problem cannot loop. Deliberately conservative — only unambiguous
 machine/transport failures, never a bare test-level timeout, which could be
@@ -4398,6 +4407,10 @@ failed or incomplete pass as review-failed and pushes regardless.
 
 In `review-address` · `Prepare branch and feedback`.
 
+The lane names in `LOOP_OWNED_LANES` are pinned against the workflows' own
+`name:` lines by a test, so adding a lane means adding the workflow — not just
+the JSON entry.
+
 ```text
 Classify the live head: a round that pushes onto a fully
 GREEN head and leaves it red introduced the red. Until this
@@ -4564,4 +4577,251 @@ tolerated: the parser copy is a bare `cp` inside the
 presence branch, so a tree that has the counter but no
 installed typescript fails the step loudly instead of
 producing a round that quietly measures nothing.
+```
+
+<a id="af-159"></a>
+
+### 159. route · Takeover round budget — '<cmd> for N' bounds a window's rounds and releases the PR when the budget is spent…
+
+In `route` · `Decide phases`, `takeover-command` · `Toggle takeover label`,
+`review-scan` · `Scan for PRs with new feedback`, `review-address` · `Prepare
+branch and feedback`, and the fleet shepherd's resume detector
+(`compute_resume_ts`), which has to recognise the same two command forms.
+
+```text
+'@qwen-code /takeover' engages a persistent engagement capped at
+TAKEOVER_MAX_ROUNDS. Two workarounds existed for "handle this once":
+'from 99' (spends the cap in one change-producing round, but that round
+is Critical-only and the stop applies needs-human plus a "reached its
+round cap" notice, which reads as a failure — and a no-op round leaves
+the counter untouched, so it does not even bound a PR that keeps finding
+nothing) and a manual 'stop' (needs a human watching the run). Neither
+states "N rounds".
+
+'for N' is the second parameterized form, and it is a separate marker
+rather than a field on the ack literal for the same reason the seed is
+(af-016): the ack is matched by substring everywhere. The re-arm invariants
+this relies on are recorded in docs/design/autofix-growth-audit.md — read
+that before changing how the audit re-arms.
+
+The budget is enforced in two steps, and the second is why spend is
+counted in eval markers rather than in ROUND:
+
+- The scan lowers EFF_MAX_ROUNDS to N for the ENGAGEMENT that carries
+  the marker, so the existing cap gate bounds DISPATCH exactly as it
+  always did. The effective cap's other reader is prepare's attempt
+  recount.
+- Spend is the number of eval markers in the engagement, not ROUND. A
+  no-op round writes its marker with the round UNCHANGED — that is why
+  a no-op never advanced the cap — but it is still an attempt, and a
+  budget counted in ROUND would never end for a PR whose rounds keep
+  finding nothing. The census keys on `run=` (the run id, the dedup
+  identity the growth marker already carries), falling back to
+  `ts|round` for markers written before it existed: two executions
+  that report the same watermark and round — the conflict no-op, which
+  re-dispatches every tick — are two attempts, while a re-run of one
+  run still charges once. A run that is cancelled or dies in setup is
+  NOT free: the report step runs on always() and writes its marker with
+  a sentinel timestamp, so the census charges it.
+- A breaker stop is NOT a spent budget. Three shapes reach the cap gate
+  with the budget spent anyway: the consecutive-failure breaker jumps
+  the round to MAX_ROUNDS with a real timestamp (no trailing sentinel),
+  the cumulative timeout breaker counts timeouts across the window with
+  pushes between them (so the trailing run stays short), and the
+  convergence breaker only pushes. The release is gated on
+  BUDGET_HALTED — TIMEOUT_WINDOW_CAP (3) sentinel-stamped rounds in the
+  engagement with idle (silent-sandbox) rounds subtracted (af-073), a
+  round past ROUND_START + attempts, or a convergence-break notice newer
+  than the window key — so all three park on the paused path instead of
+  releasing. ONE crash or timeout does not halt anything: it only spends
+  its attempt.
+- A SPENT budget outlives the label's AUTOMATIC removal: the shepherd
+  auto-releases a paused bot PR after three days, and if the budget died
+  with that label the effective cap would fall back to 10 and rounds
+  N+1..10 would run on a PR the dashboard still shows as awaiting a
+  human. A spent budget therefore survives for a bot-authored
+  engagement. An UNSPENT one still dies with the label, and a human
+  release keeps no cap at all (af-160). An explicit 'stop' DOES end a
+  spent budget: its 'takeover-ack released' marker is a floor boundary,
+  so the engagement closes and standard management resumes — the one
+  release the loop can tell apart from a silent label removal.
+- It is ENGAGEMENT-scoped, and that is not the same key as the window.
+  The budget is read from every ack/re-arm at or after the anchor whose
+  comment carries it — BUDGET_FLOOR: a 'takeover-ack engaged', a
+  'takeover-ack released' (which CLOSES the engagement), or an
+  'autofix-rearm' that does NOT also carry an 'autofix-eval ' marker.
+  Round accounting (af-105) stays window-keyed instead: equality with
+  the ack comment's created_at. So /retry or a bare /takeover opens an
+  unbudgeted engagement (af-104), and re-arming with a budget starts a
+  fresh one at round 0 — but an automatic growth-audit re-arm, whose
+  comment carries the round's eval marker, does not. Collapsing this
+  read into the window-key equality would drop the budget and the spend
+  census on every automatic re-arm.
+
+A budgeted window supersedes queued work INCLUDING a conflict round.
+Conflicts are normally exempt from the superseded-window check because
+they stay actionable, but a queued job runs on the OLD cap and would
+cross the new engagement limit, so the live window's budget makes it
+stale too and the next scan re-selects the conflict under the new
+window.
+
+Two automatic paths need the same care. A growth audit appends
+`<!-- autofix-rearm -->` to rebase the round window for its own account-
+ing, and suppressing it would pin the growth baseline so every later
+round went Critical-only — so it stays unconditional. It is NOT the only
+thing that re-anchors that baseline: a base-branch update (which filters
+the earlier growth-base markers out of the baseline read, af-119/af-120)
+and the scan's first-pickup heal ack move it too. What keeps a budget
+honest is not the re-arm's exclusivity but its key — budget and spend are
+read per ENGAGEMENT — so no rebase can unbound a bounded engagement. And
+a queued round can outlive the sibling that spent the last attempt: a
+no-op leaves ROUND UNCHANGED and the window key unchanged, so neither
+the superseded-window check nor the round cap sees it — prepare and the
+scan both recount the engagement's eval markers.
+
+What happens at the boundary differs by authorship, and that difference
+is the point. A HUMAN-authored PR is simply released: nothing is stuck,
+so the escalation label and the paused notice would both be false — the
+branch posts one bilingual note (dedup'd per window by its own marker)
+and DELETEs the label. A BOT-authored PR is managed without the label,
+so releasing it would hand the PR back to standard ten-round management
+and the budget would be a lie; it keeps the existing paused path
+(needs-human, shepherd auto-release) and is stopped at N for as long as
+the engagement is live. A spent budget outlives every removal that leaves
+no 'takeover-ack released' marker — the shepherd's three-day auto-release
+and a hand-removal alike — so the PR stays parked at N/N until a new
+command moves the engagement. Only an explicit 'stop' carries that
+marker, and that is what the ack promises.
+
+The release re-reads live labels and fails closed on an unreadable
+snapshot, honors autofix/skip, and verifies the PAT identity before any
+write — the same consent and identity doctrine as the cap notice
+(af-106). The note posts BEFORE the DELETE, and a failed note SKIPS the
+DELETE: once the label is gone the PR is in neither selection pool, so
+nothing would ever re-post it, and "retry next scan" would be a promise
+no branch can keep.
+
+A FORCED dispatch defers that release to the next non-forced scan. The
+shepherd's conflict dispatch has to be answered out loud (af-031), so the
+pass that meets a spent budget takes the paused path instead — cap-refused
+note, paused notice, needs-human — and the next passive scan releases. Two
+consequences are load-bearing. The release DELETEs needs-human as well
+(404-tolerant, and only after the takeover DELETE landed): the note says
+nothing is waiting on a human, so the escalation its own deferral applied
+must not outlive it. And the notices on that deferred pass quote the
+ATTEMPTS, not ROUND: a no-op-only engagement reaches this gate at round 0,
+and '0/N' would name a cap the PR never reached — the same reason the log
+line and the fleet row already speak of the budget rather than the cap.
+
+'for 0' is rejected rather than aliased to the bare command: a
+zero-round engagement is what 'stop' already means (af-007).
+```
+
+<a id="af-160"></a>
+
+### 160. (top level) — Env constant commentary, moved out of the workflow…
+
+In the workflow `env:` block.
+
+The workflow file sits against this repository's own 470 KB gate
+(`.github/scripts/check-workflow-size.sh`, env-overridable, ~42 KB below
+GitHub's 512 KB start-runs limit), so the long-form commentary on the constants
+below lives here verbatim — with TWO exceptions, each marked at its entry: the
+`TAKEOVER_COMMAND` entry was updated to name the second parameterized form, and
+the `TRUSTED_ASSOC` entry gained the note on where the constant is read and what
+widening it would do. Neither is a byte-for-byte copy of the base block. Each
+entry names the constant it documents; the workflow keeps a one-line summary
+plus a pointer.
+
+```text
+# FIXED_RULING_FILTER — The review bot's thread lifecycle replies
+  # The review bot's thread lifecycle replies `R<id> fixed by <what>` into a
+  # thread — a NOTE, never a finding: it carries its own marker
+  # (FIXED_RULING_MARKER in lib/review-footer.ts) at the end of its first
+  # line, and counting it selected a just-approved PR for a round with
+  # nothing to address (#9940 review, round 28). Matched by its posted SHAPE,
+  # anchored at the start, so a real Critical that QUOTES the marker (a
+  # review of the file defining it) leads with its severity marker and keeps
+  # counting — and so does one whose first line QUOTES a whole ruling and
+  # then carries on, which the start anchor alone let through under
+  # attribution off, where no severity marker leads the post (#9940
+  # review, round 30). The anchor spans the WHOLE body: a comment that
+  # quotes the note in full and then states its own finding underneath was
+  # dropped from the census wholesale, the live Critical with it — a real
+  # note is the note and, under attribution on, its footer, and anything
+  # carrying further prose fails closed toward COUNTING (#9940 review,
+  # round 31). `lib/review-footer.ts` exports the same shape as
+  # FIXED_RULING_SHAPE_RE for the TypeScript readers. Defined ONCE and handed to every jq site as `--arg frf`: an
+  # `--arg` value is the regex verbatim, so the class is spelled `[^\n]` with
+  # ONE backslash here — the `[^\\n]` a jq string literal needs compiled, as a
+  # shell value, to "neither backslash nor n" and let a `by` clause with an
+  # `n` in it count (#9940 review, round 29).
+
+# NON_BLOCKING_CHECKS — Checks the "wait for checks to settle" gate does NOT wait for.
+  # Checks the "wait for checks to settle" gate does NOT wait for. The gate
+  # exists so a FAILED check can be read as feedback, which is why build/test/
+  # lint are still waited for. `review-pr` is the LLM code review: its output
+  # is a REVIEW, delivered by its own real-time pull_request_review trigger and
+  # counted by the review path — the check conclusion carries nothing the loop
+  # acts on. Blocking on it bought nothing and cost a median 49 minutes per
+  # round (p90 123, max 158, over 32 completed runs), during which the PR was
+  # invisible to the scan even when it already had unaddressed feedback.
+  # Names must match job ids in qwen-code-pr-review.yml; a test pins that.
+
+# MAX_ROUNDS — Hard cap on automated review-address rounds per PR.
+  # Hard cap on automated review-address rounds per PR. After this the bot stops
+  # and leaves the PR for a human. Raised from 5: across the last 40 bot PRs
+  # only 3 ever reached the cap and all 3 merged AT it (one having spent two of
+  # its five rounds on the verify-gate ENOENT that #7330 fixed), so the ceiling
+  # was near enough to bind on a bad day without any headroom for one. The cap
+  # exists to stop an unproductive LOOP, not to ration ordinary iteration —
+  # a genuinely stuck PR still stops, just later.
+
+# TAKEOVER_COMMAND — Comment-command sugar over TAKEOVER_LABEL
+  # Comment-command sugar over TAKEOVER_LABEL ('<cmd>' applies it, '<cmd>
+  # stop' removes it). Matched EXACTLY against the trimmed comment body —
+  # with TWO parameterized forms: '<cmd> from N' seeds this window's round
+  # counter at N (af-002), and '<cmd> for N' records a round budget which the
+  # scan reads back as a ceiling (af-159). The literal prefix still has to
+  # match this constant byte-for-byte; only a bounded 1-2 digit integer is
+  # read out of the body, and it reaches nothing but an integer comparison.
+
+# TAKEOVER_MAX_ROUNDS — Round cap while TAKEOVER_LABEL is present.
+  # Round cap while TAKEOVER_LABEL is present. Large managed PRs routinely
+  # need dozens of feedback rounds — that is the point of takeover — so the
+  # unattended cap (MAX_ROUNDS) would strangle it. The circuit breaker stays
+  # (a bot↔review-bot ping-pong is still bounded), it is just sized for
+  # explicitly delegated work; removing the label restores the strict cap —
+  # EXCEPT while a 'for N' budget is still live (af-159: a spent one on a
+  # bot-authored PR outlives a silent removal and keeps clamping) — and
+  # re-engaging opens a fresh counting window (see REARM_KEY below).
+
+# RETRY_COMMAND — Re-arm sugar. Recovering a stranded PR
+  # Re-arm sugar. Recovering a stranded PR previously meant DELETING the
+  # bot's autofix-eval marker comment by hand (undiscoverable, destructive,
+  # and it erases the audit trail). This command instead posts an
+  # 'autofix-rearm' marker that supersedes the earlier evaluation markers:
+  # the scan re-reads the feedback from scratch and the round counter resets.
+
+# NEEDS_HUMAN_LABEL — Escalation label: applied when the loop STOPS
+  # Escalation label: applied when the loop STOPS on a PR (round cap,
+  # consecutive-failure or time-budget breaker) and a human must act —
+  # re-arm, split, merge, or close. It makes paused PRs filterable and lets
+  # the fleet shepherd age out unanswered stops. Removed wherever management
+  # resumes (engage/re-arm) or a human releases the PR.
+
+# TAKEOVER_LABEL / SKIP_LABEL — Maintainer-facing engagement labels
+  # Maintainer-facing engagement labels (applying labels requires GitHub
+  # triage+, so the permission gate is GitHub's own): TAKEOVER opts a PR —
+  # including a human-authored one — into the loop; SKIP opts any PR out
+  # everywhere, and wins when both are present.
+
+# TRUSTED_ASSOC — Human feedback: maintainers only (prompt-injection gate)
+  # Human reviews/comments only count when the author is a real maintainer. This
+  # is the prompt-injection trust gate: feedback from anyone else is ignored so a
+  # hostile commenter cannot steer the agent.
+  # NOT moved verbatim: the two sentences below are new in this change (af-160).
+  # It is matched against `author_association` at every census site; widening it
+  # (NONE, FIRST_TIME_CONTRIBUTOR) hands untrusted text to an agent that runs
+  # with a write PAT.
 ```

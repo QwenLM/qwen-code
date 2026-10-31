@@ -91,6 +91,7 @@ resources:
 | `taskId`             | `id`                  | `taskId`             | As `PublicSession` and `PublicAction`. |
 | (none)               | `object`              | (none)               | Added, `agent.task`.                   |
 | `sessionId`          | `session_id`          | `sessionId`          |                                        |
+| (none)               | `child_session_id`    | `childSessionId`     | Child kinds only (F2 of #13746).       |
 | `kind`               | `kind`                | `kind`               | `TaskKind`, same five values.          |
 | `state`              | `state`               | `state`              | `TaskState`, same eight values.        |
 | `definitionRevision` | `definition_revision` | `definitionRevision` | `int64`, at least 1.                   |

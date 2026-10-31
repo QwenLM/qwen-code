@@ -8,33 +8,47 @@ import java.util.stream.Collectors;
 /** Input for creating a Hosted Harness session with a caller-owned UUID. */
 public final class CreateHarnessSession {
     private final String harnessSessionId;
+    private final HostedHarnessPlacement harnessPlacement;
     private final String approvalMode;
     private final ManagedSessionStoreConnection managedSessionStore;
     private final String toolProfile;
     private final Long approvalTimeoutMs;
     private final Long captureBytes;
     private final Map<String, Object> agentDefinition;
+    private final Map<String, Object> sessionSkillsRef;
+    private final Map<String, Object> initialSelection;
     private final List<Map<String, Object>> mcpServers;
     private final Map<String, Object> hookCatalog;
     private final Map<String, Object> lineage;
     private final boolean suppressChildAgents;
+    private final int publicChildAgentsVersion;
+    private final Map<String, Object> publicChildModelRoute;
+    private final Map<String, Object> publicChildExtensionAgent;
     private final boolean childWorkspaces;
+    private final boolean foregroundOnly;
     private final boolean childSnapshots;
 
     private CreateHarnessSession(Builder builder) {
         this.harnessSessionId = HostedHarnessClient.requireUuid(
                 builder.harnessSessionId, "harnessSessionId");
         this.approvalMode = builder.approvalMode;
+        this.harnessPlacement = builder.harnessPlacement;
         this.managedSessionStore = builder.managedSessionStore;
         this.toolProfile = builder.toolProfile;
         this.approvalTimeoutMs = builder.approvalTimeoutMs;
         this.captureBytes = builder.captureBytes;
         this.agentDefinition = builder.agentDefinition;
+        this.sessionSkillsRef = builder.sessionSkillsRef;
+        this.initialSelection = builder.initialSelection;
         this.mcpServers = builder.mcpServers;
         this.hookCatalog = builder.hookCatalog;
         this.lineage = builder.lineage;
         this.suppressChildAgents = builder.suppressChildAgents;
+        this.publicChildAgentsVersion = builder.publicChildAgentsVersion;
+        this.publicChildModelRoute = builder.publicChildModelRoute;
+        this.publicChildExtensionAgent = builder.publicChildExtensionAgent;
         this.childWorkspaces = builder.childWorkspaces;
+        this.foregroundOnly = builder.foregroundOnly;
         this.childSnapshots = builder.childWorkspaces && builder.childSnapshots;
     }
 
@@ -50,6 +64,9 @@ public final class CreateHarnessSession {
         Map<String, Object> result = new LinkedHashMap<>();
         result.put("sessionId", harnessSessionId);
         result.put("sessionScope", "thread");
+        if (harnessPlacement != null) {
+            result.put("harnessPlacement", harnessPlacement.toJson());
+        }
         if (approvalMode != null) {
             result.put("approvalMode", approvalMode);
         }
@@ -58,6 +75,15 @@ public final class CreateHarnessSession {
         }
         if (toolProfile != null) {
             result.put("toolProfile", toolProfile);
+        }
+        if (publicChildExtensionAgent != null) {
+            result.put("publicChildExtensionAgent", publicChildExtensionAgent);
+        }
+        if (publicChildModelRoute != null) {
+            result.put("publicChildModelRoute", publicChildModelRoute);
+        }
+        if (publicChildAgentsVersion != 0) {
+            result.put("publicChildAgentsVersion", publicChildAgentsVersion);
         }
         if (suppressChildAgents) {
             result.put("suppressChildAgents", true);
@@ -71,6 +97,12 @@ public final class CreateHarnessSession {
         if (agentDefinition != null) {
             result.put("agentDefinition", agentDefinition);
         }
+        if (initialSelection != null) {
+            result.put("initialSelection", initialSelection);
+        }
+        if (sessionSkillsRef != null) {
+            result.put("sessionSkillsRef", sessionSkillsRef);
+        }
         if (mcpServers != null) {
             result.put("mcpServers", mcpServers);
         }
@@ -83,6 +115,9 @@ public final class CreateHarnessSession {
         if (childWorkspaces) {
             result.put("childWorkspaces", true);
         }
+        if (foregroundOnly) {
+            result.put("foregroundOnly", true);
+        }
         if (childSnapshots) {
             result.put("childSnapshots", true);
         }
@@ -91,18 +126,31 @@ public final class CreateHarnessSession {
 
     public static final class Builder {
         private String harnessSessionId;
+        private HostedHarnessPlacement harnessPlacement;
         private String approvalMode;
         private ManagedSessionStoreConnection managedSessionStore;
         private String toolProfile;
         private Long approvalTimeoutMs;
         private Long captureBytes;
         private Map<String, Object> agentDefinition;
+        private Map<String, Object> sessionSkillsRef;
+        private Map<String, Object> initialSelection;
         private List<Map<String, Object>> mcpServers;
         private Map<String, Object> hookCatalog;
         private Map<String, Object> lineage;
         private boolean suppressChildAgents;
+        private int publicChildAgentsVersion;
+        private Map<String, Object> publicChildModelRoute;
+        private Map<String, Object> publicChildExtensionAgent;
         private boolean childWorkspaces;
+        private boolean foregroundOnly;
         private boolean childSnapshots;
+
+        /** Restricts the saved Session to files and foreground Shell on an SSH Runtime. */
+        public Builder foregroundOnly(boolean value) {
+            this.foregroundOnly = value;
+            return this;
+        }
 
         /**
          * #13753 I2: whether this control plane serves child Workspaces, so
@@ -161,6 +209,11 @@ public final class CreateHarnessSession {
         private Builder() {
         }
 
+        public Builder harnessPlacement(HostedHarnessPlacement value) {
+            this.harnessPlacement = value;
+            return this;
+        }
+
         public Builder harnessSessionId(String harnessSessionId) {
             this.harnessSessionId = harnessSessionId;
             return this;
@@ -189,8 +242,36 @@ public final class CreateHarnessSession {
             return new CreateHarnessSession(this);
         }
 
+        public Builder initialSelection(Map<String, Object> value) {
+            this.initialSelection = value == null ? null : Map.copyOf(value);
+            return this;
+        }
+
+        public Builder sessionSkillsRef(Map<String, Object> value) {
+            this.sessionSkillsRef = value == null ? null : Map.copyOf(value);
+            return this;
+        }
+
         public Builder toolProfile(String toolProfile) {
             this.toolProfile = toolProfile;
+            return this;
+        }
+
+        public Builder publicChildExtensionAgent(Map<String, Object> value) {
+            this.publicChildExtensionAgent = value == null ? null : Map.copyOf(value);
+            return this;
+        }
+
+        public Builder publicChildModelRoute(Map<String, Object> value) {
+            this.publicChildModelRoute = value == null ? null : Map.copyOf(value);
+            return this;
+        }
+
+        public Builder publicChildAgentsVersion(int value) {
+            if (value != 0 && value != 1) {
+                throw new IllegalArgumentException("Invalid public child agents version");
+            }
+            this.publicChildAgentsVersion = value;
             return this;
         }
 

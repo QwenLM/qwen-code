@@ -60,6 +60,151 @@
   padding: 10px;
 }
 
+.inputRow {
+  display: contents;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .container {
+  border-radius: 28px;
+  --chat-editor-min-height: 54px;
+  --chat-editor-input-min-height: 28px;
+  --chat-editor-input-max-height: 200px;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .content {
+  padding: 4px 8px;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow {
+  display: grid;
+  flex: 1 1 auto;
+  min-height: 44px;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-rows: minmax(0, 1fr);
+  align-items: end;
+  column-gap: 6px;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow > button {
+  grid-column: 1;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .editorArea {
+  grid-column: 2;
+  align-self: stretch;
+  min-width: 0;
+  min-height: 0;
+  padding: 9px 0;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  .editorArea
+  > :last-child {
+  min-height: 0;
+  max-height: min(100%, var(--chat-editor-input-max-height, 300px));
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  :global(.cm-placeholder) {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  .mobileTextarea::placeholder {
+  white-space: nowrap;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .toolbar {
+  display: contents;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .toolbarRight {
+  grid-column: 3;
+  flex: 0 0 auto;
+  gap: 4px;
+  margin: 0;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow > button,
+.editorShell[data-web-shell-composer-variant='simple'] .toolbarRight > button,
+.editorShell[data-web-shell-composer-variant='simple']
+  [data-web-shell-simple-voice]
+  button:has(> svg) {
+  width: 44px;
+  min-width: 44px;
+  height: 44px;
+  border-radius: 50%;
+}
+
+.editorShell[data-web-shell-composer-variant='simple'] .inputRow > button svg {
+  width: 28px;
+  height: 28px;
+  flex-shrink: 0;
+  color: color-mix(in srgb, var(--foreground) 50%, var(--background));
+}
+
+.editorShell [data-web-shell-simple-voice]:not([hidden]) {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+}
+
+.editorShell
+  [data-web-shell-simple-idle]:has([data-web-shell-simple-voice] button)
+  [data-web-shell-composer-submit] {
+  display: none;
+}
+
+.editorShell[data-web-shell-simple-voice-active] .inputRow {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.editorShell[data-web-shell-simple-voice-active] .editorArea,
+.editorShell[data-web-shell-simple-voice-active] .inputRow > button,
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-composer-submit],
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-composer-stop] {
+  display: none;
+}
+
+.editorShell[data-web-shell-simple-voice-active] .toolbarRight {
+  grid-column: 1 / -1;
+  width: 100%;
+}
+
+.editorShell[data-web-shell-simple-voice-active] [data-web-shell-simple-voice],
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-simple-voice]
+  > span,
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-simple-voice]
+  > span
+  > :first-child {
+  width: 100%;
+  min-width: 0;
+}
+
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-simple-voice]
+  > span
+  > :first-child {
+  height: 44px;
+  border-radius: 22px;
+  justify-content: center;
+}
+
+.editorShell[data-web-shell-simple-voice-active]
+  [data-web-shell-voice-waveform] {
+  flex: 1;
+  justify-content: center;
+}
+
 .container:focus-within .content,
 .container[data-at-panel-open] .content {
   border-color: var(--chat-editor-accent-color);
@@ -953,6 +1098,13 @@
   opacity: 1;
 }
 
+/* The label and value carry no right padding of their own; the remove button
+   supplies that edge when it is present. A chip without one ends on the
+   content box, so it needs the inset itself. */
+.tagContent:last-child {
+  padding-right: 7px;
+}
+
 .tagRemove {
   flex: 0 0 auto;
   width: 22px;
@@ -1392,6 +1544,58 @@
   height: 16px;
 }
 
+.editorShell .toolbarRight [data-web-shell-simple-voice] button > svg {
+  width: 28px;
+  height: 28px;
+}
+
+.editorShell
+  .toolbarRight
+  button:is(
+    [data-web-shell-composer-expand],
+    [data-web-shell-composer-collapse]
+  ) {
+  justify-content: center;
+}
+
+.editorShell
+  .toolbarRight
+  button:is(
+    [data-web-shell-composer-expand],
+    [data-web-shell-composer-collapse]
+  )
+  > svg {
+  width: 14px;
+  height: 14px;
+  color: color-mix(in srgb, var(--muted-foreground) 85%, var(--background));
+  transform: translateX(4px);
+}
+
+.editorShell
+  .toolbarRight
+  button:is(
+    [data-web-shell-composer-expand],
+    [data-web-shell-composer-collapse]
+  ):not(:disabled):hover {
+  background: radial-gradient(closest-side, var(--muted) 99%, transparent)
+    calc(50% + 4px) center / 24px 24px no-repeat;
+}
+
+.editorShell[data-web-shell-composer-variant='simple']
+  .inputRow
+  > button:not(:disabled):hover {
+  background: radial-gradient(closest-side, var(--muted) 99%, transparent)
+    center / 32px 32px no-repeat;
+}
+
+.editorShell
+  .toolbarRight
+  [data-web-shell-simple-voice]
+  button:has(> svg):not(:disabled):hover {
+  background: radial-gradient(closest-side, var(--secondary) 99%, transparent)
+    center / 32px 32px no-repeat;
+}
+
 .toolbarRightCustom {
   display: inline-flex;
   min-width: 0;
@@ -1416,6 +1620,23 @@
 .dropdownWrapperCompact {
   width: 28px;
   flex: 0 0 28px;
+}
+
+.dropdownSearch {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dropdownSearchRow {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.dropdownSearchRow > :first-child {
+  min-width: 0;
+  flex: 1 1 auto;
 }
 
 .dropdownList {
@@ -1473,8 +1694,26 @@
   padding: 6px 9px;
 }
 
+.dropdownItem[data-disabled] {
+  color: var(--muted-foreground);
+  cursor: default;
+  opacity: 0.5;
+}
+
+.dropdownItem[data-disabled] .dropdownItemLabel,
+.dropdownItem[data-disabled] .dropdownItemCheck {
+  color: var(--muted-foreground);
+}
+
 .dropdownItem:hover {
   background: var(--accent);
+}
+
+.dropdownItem[data-disabled]:hover,
+.dropdownItem[data-disabled]:focus-visible,
+.dropdownItem[data-disabled][aria-expanded='true'] {
+  background: var(--accent);
+  opacity: 0.7;
 }
 
 .dropdownItemActive {

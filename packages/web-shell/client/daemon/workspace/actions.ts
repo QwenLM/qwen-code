@@ -12,7 +12,9 @@ import {
   type GoalStateResponse,
 } from '@qwen-code/sdk/daemon';
 import { withActionTimeout } from '../timing.js';
+import { createDaemonRestRequest } from '../rest-request.js';
 import type {
+  DaemonAutofixPrWatchList,
   DaemonDirectoryListing,
   DaemonFileStat,
   DaemonGoal,
@@ -53,6 +55,12 @@ export function createDaemonWorkspaceActions({
   baseUrl,
   token,
 }: CreateDaemonWorkspaceActionsArgs): DaemonWorkspaceActions {
+  const requestRest = (url: URL, init: RequestInit) =>
+    createDaemonRestRequest(
+      baseUrl,
+      token,
+      getClient(),
+    )(daemonRoutePath(url, baseUrl), init);
   return {
     async listSessions(options) {
       const client = requireClient(getClient, 'List sessions failed');
@@ -708,13 +716,7 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    // TODO(transport-parity): globWorkspace, stat, and listDirectory
-    // bypass the DaemonClient transport layer by calling global fetch()
-    // directly. This means ACP transports (WS, HTTP+JSON-RPC) never
-    // see these requests. DaemonClient exposes client.glob(),
-    // client.fileStat(), and client.dirList() that go through the
-    // transport — migrate to those once the route table covers
-    // /glob, /stat, /list (see acpRouteTable.ts).
+    // These routes stay native REST until the ACP route table supports them.
     async globWorkspace(pattern, opts) {
       requireClient(getClient, 'Glob workspace failed');
       const url = createDaemonRequestUrl(baseUrl, '/glob');
@@ -729,7 +731,7 @@ export function createDaemonWorkspaceActions({
         url.searchParams.set('cwd', opts.cwd);
       }
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           headers: createDaemonHeaders(token),
         }),
         'Glob workspace timed out',
@@ -787,7 +789,7 @@ export function createDaemonWorkspaceActions({
       const url = createDaemonRequestUrl(baseUrl, '/stat');
       url.searchParams.set('path', filePath);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           headers: createDaemonHeaders(token),
         }),
         'Stat file timed out',
@@ -803,7 +805,7 @@ export function createDaemonWorkspaceActions({
       const url = createDaemonRequestUrl(baseUrl, '/list');
       url.searchParams.set('path', dirPath);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           headers: createDaemonHeaders(token),
         }),
         'List directory timed out',
@@ -814,18 +816,14 @@ export function createDaemonWorkspaceActions({
       return (await res.json()) as DaemonDirectoryListing;
     },
 
-    // Scheduled tasks (durable cron). Raw fetch like glob/stat/list — the
-    // /scheduled-tasks routes are REST-only and not yet on the DaemonClient
-    // transport, so this path only reaches the daemon over plain HTTP (the
-    // web-shell's own origin), which is exactly where the page runs. A
-    // `workspaceId` selects a non-primary workspace's own cron file via the
-    // workspace-qualified route; omitting it hits the primary surface.
+    // A workspaceId selects that workspace's cron file; omitting it selects
+    // the primary workspace. These routes require native REST.
     async listScheduledTasks(workspaceId) {
       requireClient(getClient, 'List scheduled tasks failed');
       const path = scheduledTasksPath(workspaceId);
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           headers: createDaemonHeaders(token),
         }),
         'List scheduled tasks timed out',
@@ -842,7 +840,7 @@ export function createDaemonWorkspaceActions({
       const path = scheduledTasksPath(workspaceId);
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           method: 'POST',
           headers: createDaemonJsonHeaders(token),
           body: JSON.stringify(req),
@@ -863,7 +861,7 @@ export function createDaemonWorkspaceActions({
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           method: 'PATCH',
           headers: createDaemonJsonHeaders(token),
           body: JSON.stringify(patch),
@@ -884,7 +882,7 @@ export function createDaemonWorkspaceActions({
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           method: 'POST',
           headers: createDaemonJsonHeaders(token),
         }),
@@ -904,7 +902,7 @@ export function createDaemonWorkspaceActions({
       );
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           method: 'DELETE',
           headers: createDaemonHeaders(token),
         }),
@@ -915,6 +913,35 @@ export function createDaemonWorkspaceActions({
       }
     },
 
+    // `/autofix-pr` watches: REST-only and read-only, routed like the
+    // scheduled tasks (primary unqualified, others by workspace id).
+    async listAutofixPrWatches(workspaceId) {
+      requireClient(getClient, 'List autofix-pr watches failed');
+      const path = workspaceId
+        ? `/workspaces/${encodeURIComponent(workspaceId)}/autofix-pr/watches`
+        : '/autofix-pr/watches';
+      const url = createDaemonRequestUrl(baseUrl, path);
+      const res = await withActionTimeout(
+        requestRest(url, {
+          headers: createDaemonHeaders(token),
+        }),
+        'List autofix-pr watches timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, `GET ${path}`));
+      }
+      const data = (await res.json()) as Partial<DaemonAutofixPrWatchList>;
+      return {
+        available: data.available === true,
+        ...(typeof data.root === 'string' ? { root: data.root } : {}),
+        ...(typeof data.now === 'string' ? { now: data.now } : {}),
+        watches: Array.isArray(data.watches) ? data.watches : [],
+        ...(Array.isArray(data.unreadable)
+          ? { unreadable: data.unreadable }
+          : {}),
+      };
+    },
+
     // Goals. `GET /goals` is REST-only (like /scheduled-tasks) and not on the
     // DaemonClient transport; the clear path reuses the existing per-session
     // route so a page-level clear and a `/goal clear` in chat take the same
@@ -923,7 +950,7 @@ export function createDaemonWorkspaceActions({
       requireClient(getClient, 'List goals failed');
       const url = createDaemonRequestUrl(baseUrl, '/goals');
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           headers: createDaemonHeaders(token),
         }),
         'List goals timed out',
@@ -954,7 +981,7 @@ export function createDaemonWorkspaceActions({
         `/session/${encodeURIComponent(sessionId)}/goal/clear`,
       );
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           method: 'POST',
           headers: createDaemonJsonHeaders(token),
           body: '{}',
@@ -974,7 +1001,7 @@ export function createDaemonWorkspaceActions({
       const path = `/session/${encodeURIComponent(sessionId)}/goal`;
       const url = createDaemonRequestUrl(baseUrl, path);
       const res = await withActionTimeout(
-        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+        requestRest(url, {
           method: 'POST',
           headers: createDaemonJsonHeaders(token),
           body: JSON.stringify(request),
@@ -1191,6 +1218,39 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async startGitWorkspaceClone(input) {
+      const client = requireClient(
+        getClient,
+        'Start git workspace clone failed',
+      );
+      return withActionTimeout(
+        client.startGitWorkspaceClone(input),
+        'Start git workspace clone timed out',
+      );
+    },
+
+    async getGitWorkspaceCloneJob(jobId) {
+      const client = requireClient(
+        getClient,
+        'Read git workspace clone failed',
+      );
+      return withActionTimeout(
+        client.getGitWorkspaceCloneJob(jobId),
+        'Read git workspace clone timed out',
+      );
+    },
+
+    async cancelGitWorkspaceClone(jobId) {
+      const client = requireClient(
+        getClient,
+        'Cancel git workspace clone failed',
+      );
+      return withActionTimeout(
+        client.cancelGitWorkspaceClone(jobId),
+        'Cancel git workspace clone timed out',
+      );
+    },
+
     async suggestWorkspacePaths(prefix) {
       const client = requireClient(getClient, 'Suggest workspace paths failed');
       const result = await withActionTimeout(
@@ -1208,6 +1268,36 @@ export function createDaemonWorkspaceActions({
         320_000,
       );
       return result as DaemonWorkspaceDirectoryPickerResult;
+    },
+
+    async listWorkspaceDirectories(workspaceSelector) {
+      const client = requireClient(
+        getClient,
+        'List workspace directories failed',
+      );
+      return withActionTimeout(
+        client.workspaceByCwd(workspaceSelector).directories(),
+        'List workspace directories timed out',
+      );
+    },
+
+    async addWorkspaceDirectory(workspaceSelector, path) {
+      const client = requireClient(getClient, 'Add workspace directory failed');
+      return withActionTimeout(
+        client.workspaceByCwd(workspaceSelector).addDirectory(path),
+        'Add workspace directory timed out',
+      );
+    },
+
+    async removeWorkspaceDirectory(workspaceSelector, path) {
+      const client = requireClient(
+        getClient,
+        'Remove workspace directory failed',
+      );
+      return withActionTimeout(
+        client.workspaceByCwd(workspaceSelector).removeDirectory(path),
+        'Remove workspace directory timed out',
+      );
     },
 
     async updateWorkspace(workspaceSelector, update) {
@@ -1298,10 +1388,16 @@ function createDaemonRequestUrl(baseUrl: string, path: string): URL {
   return new URL(`${normalizedBaseUrl}${path}`, fallbackBase);
 }
 
-function serializeDaemonRequestUrl(url: URL, baseUrl: string): string {
-  return stripTrailingSlashes(baseUrl)
-    ? url.toString()
-    : `${url.pathname}${url.search}`;
+function daemonRoutePath(url: URL, baseUrl: string): string {
+  const fallbackBase =
+    typeof window === 'undefined' ? 'http://localhost' : window.location.origin;
+  const prefix = baseUrl
+    ? new URL(stripTrailingSlashes(baseUrl), fallbackBase).pathname.replace(
+        /\/+$/,
+        '',
+      )
+    : '';
+  return `${url.pathname.slice(prefix.length)}${url.search}`;
 }
 
 function stripTrailingSlashes(value: string): string {

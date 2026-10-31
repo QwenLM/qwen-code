@@ -199,6 +199,26 @@ export interface DaemonWorkspaceUpdate {
   displayName: string | null;
 }
 
+export type DaemonGitCloneJobStatus =
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled';
+
+export interface DaemonGitCloneJob {
+  jobId: string;
+  status: DaemonGitCloneJobStatus;
+  startedAt: number;
+  finishedAt?: number;
+  /** Latest reported completion percentage, when the clone reports one. */
+  percent?: number;
+  /** Latest sanitized progress or failure line. */
+  message?: string;
+  /** Canonical clone directory, present when `status` is `succeeded`. */
+  cwd?: string;
+  error?: { code: string; message: string };
+}
+
 export interface DaemonWorkspaceRemovalActivity {
   sessions: number;
   activePrompts: number;
@@ -1444,8 +1464,16 @@ export function parseDaemonBackgroundTurn(
   return value as DaemonBackgroundTurn;
 }
 
+/** Effective built-in Generated UI state of the owning runtime session. */
+export interface DaemonGeneratedUiStatus {
+  version: 1;
+  enabled: boolean;
+  reason?: string;
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
+  generatedUi?: DaemonGeneratedUiStatus;
   startupConfigApplied?: SessionStartupConfigApplied;
   sessionId: string;
   /** Immutable runtime ownership root used for daemon routing. */
@@ -2386,6 +2414,20 @@ export interface DaemonMcpBudgetStatusCell extends DaemonStatusCell {
   refusedCount: number;
 }
 
+/** Extra workspace directories persisted at workspace scope. */
+export interface DaemonWorkspaceDirectories {
+  v: 1;
+  primaryDirectory: string;
+  directories: string[];
+}
+
+/** Result of adding or removing one extra workspace directory. */
+export interface DaemonWorkspaceDirectoriesMutation
+  extends DaemonWorkspaceDirectories {
+  changed: boolean;
+  warnings: string[];
+}
+
 export interface DaemonWorkspaceMcpStatus {
   v: 1;
   workspaceCwd: string;
@@ -2514,6 +2556,17 @@ export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
   extensionDisplayName?: string;
 }
 
+export interface DaemonWorkspaceSkillsSnapshot {
+  workspaceCwd: string;
+  skills: Array<{
+    name: string;
+    description: string;
+    body: string;
+    model_invocable?: boolean;
+    user_invocable?: boolean;
+  }>;
+}
+
 export interface DaemonWorkspaceSkillsStatus {
   v: 1;
   workspaceCwd: string;
@@ -2521,6 +2574,13 @@ export interface DaemonWorkspaceSkillsStatus {
   runtimeEpoch?: number;
   skills: DaemonWorkspaceSkillStatus[];
   errors?: DaemonStatusCell[];
+  /** Daemon observation metadata; omitted by direct runtime/config reads. */
+  snapshot?: {
+    observedAt: number;
+    ageMs: number;
+    stale: boolean;
+    refreshing: boolean;
+  };
 }
 
 /** Sanitized Skill and MCP snapshots built from one live session's Config. */
@@ -3161,6 +3221,8 @@ export interface DaemonContextCategoryBreakdown {
   systemPrompt: number;
   builtinTools: number;
   mcpTools: number;
+  /** Instructions are separate when present; older producers combine them with memory. */
+  instructionFiles?: number;
   memoryFiles: number;
   skills: number;
   /** Startup prelude outside the skill listing. Absent from older daemons. */
@@ -3188,6 +3250,13 @@ export interface DaemonContextToolDetail {
 export interface DaemonContextMemoryDetail {
   path: string;
   tokens: number;
+  /**
+   * Absolute on-disk path when the row maps to a file the context preview
+   * can open: inside the session workspace, or a global memory file. Absent
+   * for synthetic aggregates and instruction files outside that readable
+   * scope (parent-directory or extension files). Absent from older daemons.
+   */
+  absolutePath?: string;
 }
 
 export interface DaemonContextSkillDetail {
@@ -3204,6 +3273,7 @@ export interface DaemonSessionContextUsage {
   breakdown: DaemonContextCategoryBreakdown;
   builtinTools: DaemonContextToolDetail[];
   mcpTools: DaemonContextToolDetail[];
+  instructionFiles?: DaemonContextMemoryDetail[];
   memoryFiles: DaemonContextMemoryDetail[];
   skills: DaemonContextSkillDetail[];
   isEstimated?: boolean;
@@ -3214,6 +3284,14 @@ export interface DaemonSessionContextUsageStatus {
   v: 1;
   sessionId: string;
   workspaceCwd: string;
+  /**
+   * Stable workspace root the session was admitted under. Unlike
+   * `workspaceCwd` (the live target dir, which moves when a session enters a
+   * worktree or `cd`s into a subdirectory), this stays at the registered
+   * workspace root, so a client can resolve the owning workspace for file
+   * reads. Absent from older daemons.
+   */
+  workspaceRoot?: string;
   usage: DaemonSessionContextUsage;
   formattedText: string;
 }
@@ -3582,6 +3660,28 @@ export interface DaemonSessionTasksStatus {
   tasks: DaemonSessionTaskStatus[];
 }
 
+/**
+ * On-demand detail for one shell task. `memoryBytes` is the resident memory
+ * of the shell's process tree (shared pages counted once per process);
+ * `outputTail` is the last few KB of the captured stdout/stderr.
+ */
+export interface DaemonSessionShellTaskRuntime {
+  memoryBytes?: number;
+  outputBytes?: number;
+  outputModifiedAt?: number;
+  outputTail?: string;
+  outputTailTruncated?: boolean;
+  outputError?: string;
+}
+
+export interface DaemonSessionTaskRuntimeStatus {
+  v: 1;
+  sessionId: string;
+  taskId: string;
+  /** Null when the task is unknown/evicted or is not a shell task. */
+  runtime: DaemonSessionShellTaskRuntime | null;
+}
+
 export interface DaemonSessionAgentsStatus {
   v: 1;
   sessionId: string;
@@ -3659,6 +3759,19 @@ export interface DaemonSessionStatsModelMetrics {
     cached: number;
     /** Reasoning tokens, shown as a subset of generated output. */
     thoughts: number;
+  };
+  /** Streaming timing; absent until a streamed request records its TTFT. */
+  generation?: {
+    /** Streamed requests with a recorded time to first token. */
+    timedRequests: number;
+    totalTtftMs: number;
+    /**
+     * Time from the first to the last visible output, summed over requests
+     * whose window is at least 100 ms; shorter bursts cannot measure a rate.
+     */
+    totalGenerationDurationMs: number;
+    /** Output tokens of the requests in `totalGenerationDurationMs`. */
+    totalThroughputOutputTokens: number;
   };
 }
 
@@ -3839,6 +3952,7 @@ export type ReasoningSelection = (typeof DAEMON_REASONING_SELECTIONS)[number];
 
 export interface DaemonSessionConfigOptionResult {
   configOptions: unknown[];
+  /** For workflow_mode, confirms session persistence; reasoning_effort retains settings persistence semantics. */
   persisted: boolean;
 }
 
@@ -3937,6 +4051,14 @@ export interface DaemonSkillToggleResult {
   activation: DaemonSkillToggleActivation;
   sessionsRefreshed: number;
   sessionsFailed: number;
+}
+
+export interface DaemonSkillRefreshResult {
+  sessionsRefreshed: number;
+  sessionsFailed: number;
+  configsRefreshed: number;
+  configsFailed: number;
+  reason: 'all';
 }
 
 /** Per-target error codes returned by older daemon versions. */
@@ -4448,6 +4570,10 @@ export interface DaemonSessionRecapResult {
   sessionId: string;
   recap: string | null;
 }
+
+export type DaemonSessionBtwStreamEvent =
+  | { v: 1; type: 'answer' | 'done'; requestId: string; answer: string }
+  | { v: 1; type: 'error'; requestId: string; code: string; message: string };
 
 export type DaemonSessionGenerationEvent =
   | {
@@ -5300,8 +5426,24 @@ export interface PermissionResponse {
   [key: string]: unknown;
 }
 
+export interface DaemonMessageGroupsSnapshot {
+  snapshot: string;
+  groups: Array<{
+    id: string;
+    promptId?: string;
+    promptIds?: string[];
+    recordIds: string[];
+  }>;
+}
+
+export interface DaemonDeleteMessageGroupsResult {
+  deletedGroupIds: string[];
+  deletedPromptIds: string[];
+}
+
 export interface DaemonRewindSnapshotInfo {
   promptId: string;
+  daemonPromptId?: string;
   turnIndex: number;
   timestamp: string;
   diffStats: { filesChanged: number; insertions: number; deletions: number };
