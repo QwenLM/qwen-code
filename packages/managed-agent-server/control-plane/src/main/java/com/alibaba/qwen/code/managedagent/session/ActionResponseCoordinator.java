@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessCapabilityFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 @Component
 public class ActionResponseCoordinator {
     private static final Logger LOG = LoggerFactory.getLogger(ActionResponseCoordinator.class);
-    private final AgentStateStore sessions;
+    private final SessionLifecycleStore sessions;
     private final ManagedActionStore actions;
     private final HarnessConnector harness;
     private final ExecutorService executor;
@@ -50,7 +50,7 @@ public class ActionResponseCoordinator {
     }
 
     public ActionResponseCoordinator(
-            AgentStateStore sessions,
+            SessionLifecycleStore sessions,
             ManagedActionStore actions,
             HarnessConnector harness,
             @Qualifier("managedAgentExecutor") ExecutorService executor,

@@ -290,12 +290,14 @@ describe('CUA release workflow', () => {
 // The canonical workspace restoration script shared by all nine
 // 'Restore workspace ownership' action calls in release.yml. The full wipe (vs
 // serve-ab.yml's keep-and-scrub) is deliberate on this lane: release
-// checkouts persist credentials and the publish job can mint the npm OIDC
-// id-token, so no pre-existing repo state may survive into them. Pin the
-// WHOLE body by equality, the way review-worktree-cleanup-workflow.test.js
-// pins its sweep copies: a commented-out find, an inserted early exit, or a
-// uniformly dropped ownership ladder all ship green under substring pins,
-// and each of those mutants reopens the incident class this step exists for.
+// checkouts persist credentials by default (only the publish, build-release,
+// and trusted-scripts checkouts opt out), and the publish job holds CI_BOT_PAT
+// and can mint the npm OIDC id-token, so no pre-existing repo state may
+// survive into them. Pin the WHOLE body by equality, the way
+// review-worktree-cleanup-workflow.test.js pins its sweep copies: a
+// commented-out find, an inserted early exit, or a uniformly dropped
+// ownership ladder all ship green under substring pins, and each of those
+// mutants reopens the incident class this step exists for.
 const canonicalWipe = `#!/usr/bin/env bash
 set -euo pipefail
 umask 077
@@ -3517,7 +3519,7 @@ exit 0`,
     // Checkout (#15726). The PAT stays exported to the steps that write.
     const steps = releaseYaml.jobs.publish.steps;
     const checkout = steps.find((step) => step.name === 'Checkout');
-    expect(checkout.with.token).toBeUndefined();
+    expect(checkout.with.token).toBe('${{ github.token }}');
     expect(checkout.with['persist-credentials']).toBe(false);
     expect(
       steps.find((step) => step.id === 'push_release_branch').env.CI_BOT_PAT,
