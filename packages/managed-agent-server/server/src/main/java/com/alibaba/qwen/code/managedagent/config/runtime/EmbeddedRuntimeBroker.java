@@ -254,7 +254,8 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
                     }, ssh.connections()::forget);
         }
         RuntimeProvisioner provisioner = workspaces == null || resident ? baseProvisioner
-                : new WorkspaceRuntimeProvisioner(baseProvisioner, workspaces, workspaceExecutionStore);
+                : new WorkspaceRuntimeProvisioner(
+                        baseProvisioner, workspaces, workspaceExecutionStore, bindingRepository);
         HarnessSessionResolver resolver = com.alibaba.qwen.code.managedagent.workspace.runtime.ManagedRuntimeCoordinator.resolver(
                 store, workspaces, properties, workspaceId, workspaceCwd, workspaceExecutionStore);
         ObjectMapper mapper = new ObjectMapper();

@@ -92,7 +92,7 @@ public final class WorkspaceMigrationMain {
                     });
                     try (var broker = new RuntimeBrokerService(session -> CompletableFuture.failedFuture(
                             new IllegalStateException("Maintenance never resolves active Sessions")),
-                            new WorkspaceRuntimeProvisioner(local, null, ownership), transport,
+                            new WorkspaceRuntimeProvisioner(local, null, ownership, bindings), transport,
                             bindings, sessions, executions, UUID.randomUUID().toString(), Duration.ofSeconds(30),
                             Duration.ofSeconds(30))) {
                         store.retire(broker);

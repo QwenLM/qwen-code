@@ -25,7 +25,7 @@ public final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
         this(delegate, resolver, executionStore, null);
     }
 
-    WorkspaceRuntimeProvisioner(RuntimeProvisioner delegate, WorkspaceRuntimeResolver resolver,
+    public WorkspaceRuntimeProvisioner(RuntimeProvisioner delegate, WorkspaceRuntimeResolver resolver,
             WorkspaceExecutionStore executionStore, com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository bindings) {
         this.bindings = bindings;
         this.delegate = delegate;
