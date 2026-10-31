@@ -14218,7 +14218,14 @@ export class Session implements SessionContext {
     if (updateFailed) throw updateError;
   }
 
-  reloadSkillSettings(): void {
+  reloadSkillSettings(options: { includeUser?: boolean } = {}): void {
+    if (options.includeUser) {
+      this.settings.reloadScopesFromDiskAtomically([
+        SettingScope.Workspace,
+        SettingScope.User,
+      ]);
+      return;
+    }
     this.settings.reloadScopeFromDisk(SettingScope.Workspace);
   }
 

@@ -81,6 +81,7 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
     'workspace_voice_transcription',
     (t) => t.voiceTranscriptionAvailable === true,
   ],
+  ['user_skill_activation', (t) => t.userSkillActivationAvailable === true],
   ['session_shell_command', (t) => t.sessionShellCommandEnabled === true],
   [
     'multi_workspace_session_rewind',
@@ -144,6 +145,8 @@ Prompt control: **`prompt_absolute_deadline`** (conditional), **`writer_idle_tim
 Auth: `auth_provider_install`, `auth_device_flow`, **`require_auth`** (conditional), **`allow_origin`** (conditional).
 
 Voice: **`workspace_voice`** (conditional), **`workspace_voice_transcription`** (conditional, `modes: ['batch']`), **`voice_transcribe`** (conditional, `modes: ['streaming', 'batch']`).
+
+User Skill settings: **`user_skill_activation`** (conditional).
 
 Rate limiting: **`rate_limit`** (conditional).
 
@@ -218,6 +221,7 @@ sequenceDiagram
 | CLI flag / env             | `--rate-limit` / `QWEN_SERVE_RATE_LIMIT=1`                      | Advertises `rate_limit`.                                                                                                                                               |
 | Embedded option            | `persistSettingAvailable`                                       | Advertises `workspace_settings`, `user_language_sync`, and `workspace_voice`.                                                                                          |
 | Embedded option            | `voiceTranscriptionAvailable`                                   | Advertises `workspace_voice_transcription`.                                                                                                                            |
+| Embedded option            | `userSkillActivationAvailable`                                  | Advertises `user_skill_activation`.                                                                                                                                    |
 | CLI flag / embedded option | `--enable-session-shell` / `sessionShellCommandEnabled`         | Advertises `session_shell_command`.                                                                                                                                    |
 | Runtime state              | More than one registered workspace runtime                      | Advertises `multi_workspace_sessions` and `multi_workspace_session_rewind`; also advertises `multi_workspace_session_shell` when session shell is effectively enabled. |
 | Embedded option            | `reloadAvailable`                                               | Advertises `workspace_reload`.                                                                                                                                         |

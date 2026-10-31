@@ -5283,13 +5283,18 @@ describe('workspace change propagation', () => {
     await expect(
       p.bridge.invokeWorkspaceCommand(
         SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-        { cwd: WS_A, reason: 'content' },
+        {
+          cwd: WS_A,
+          reason: 'content',
+          settingsScopes: ['workspace', 'user'],
+        },
       ),
     ).rejects.toMatchObject({ kind: 'skills', revision: 1 });
     expect(p.managed.agent.extMethodCalls.at(-1)?.params).toMatchObject({
       kind: 'skills',
       tightening: false,
       reason: 'content',
+      settingsScopes: ['workspace', 'user'],
     });
     expect(promptRefusal(p.bridge, managed.sessionId, 'x')).toMatchObject({
       reason: 'workspace_change_unacknowledged',

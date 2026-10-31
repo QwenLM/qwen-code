@@ -360,6 +360,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_voice_transcription: NO_MANAGED_EQUIVALENT(
     'no Managed voice route',
   ),
+  user_skill_activation: NO_MANAGED_EQUIVALENT(
+    'no Managed skill settings mutation',
+  ),
   workspace_trust: NO_MANAGED_EQUIVALENT(
     'Managed Workspace admission is grants and actors, not folder trust',
   ),

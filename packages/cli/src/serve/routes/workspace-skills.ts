@@ -24,7 +24,12 @@ import type {
   WorkspaceRuntime,
 } from '../workspace-registry.js';
 import { getWorkspaceRuntimeCoordinatorIfSupported } from '../workspace-runtime-coordinator.js';
-import { WorkspaceSkillNotFoundError } from '../workspace-service/types.js';
+import { createSkillToggleMutation } from '../workspace-service/index.js';
+import {
+  WorkspaceSkillNotFoundError,
+  type PersistUserSkillActivationResult,
+} from '../workspace-service/types.js';
+import type { SkillDisableMode } from '../../config/skill-settings.js';
 import {
   MAX_WORKSPACE_SKILL_NAME_LENGTH,
   WorkspaceSkillManagementError,
@@ -57,6 +62,15 @@ interface RegisterWorkspaceSkillsRoutesDeps {
     req: Request,
     res: Response,
   ) => string | undefined | null;
+  /**
+   * Validates `X-Qwen-Client-Id` against every managed runtime. The user
+   * activation routes are process-global, so a client known to any
+   * workspace may call them.
+   */
+  parseAndValidateProcessGlobalClientId: (
+    req: Request,
+    res: Response,
+  ) => string | undefined | null;
   getSkillsSnapshot?: (workspaceCwd: string) => Promise<unknown>;
   getSkillsConfigStatus: (
     workspaceCwd: string,
@@ -73,19 +87,29 @@ interface RegisterWorkspaceSkillsRoutesDeps {
     skillName: string,
     installedPath: string,
   ) => Promise<WorkspaceSkillMutationResult>;
+  /**
+   * Persist activation changes to the user settings scope. Absent on hosts
+   * without settings persistence; the user activation routes answer 501.
+   */
+  persistUserSkillActivation?: (
+    skillNames: readonly string[],
+    enabled: boolean,
+    mode: SkillDisableMode,
+  ) => Promise<PersistUserSkillActivationResult>;
 }
 
 type WorkspaceSkillActivation = 'deferred' | 'reconciling';
 
 function reconcileSkills(
   runtimes: readonly WorkspaceRuntime[],
+  options: { userSettings?: boolean } = {},
 ): WorkspaceSkillActivation {
   let reconciling = false;
   for (const runtime of runtimes) {
     runtime.workspaceService.invalidateWorkspaceSkillsStatus();
-    if (!runtime.trusted) continue;
+    if (!runtime.trusted && !options.userSettings) continue;
     const coordinator = getWorkspaceRuntimeCoordinatorIfSupported(runtime);
-    if (coordinator?.reconcileSkillsConfiguration() === 'reconciling') {
+    if (coordinator?.reconcileSkillsConfiguration(options) === 'reconciling') {
       reconciling = true;
     }
   }
@@ -181,6 +205,16 @@ function parseSkillBatchToggleRequest(
   safeBody: (req: Request) => Record<string, unknown>,
 ): { skillNames: string[]; enabled: boolean } | undefined {
   const body = safeBody(req);
+  const skillNames = parseSkillNames(body, res);
+  if (!skillNames) return undefined;
+  const flag = parseEnabledFlag(body, res);
+  return flag ? { skillNames, enabled: flag.enabled } : undefined;
+}
+
+function parseSkillNames(
+  body: Record<string, unknown>,
+  res: Response,
+): string[] | undefined {
   const rawSkillNames = body['skillNames'];
   if (
     !Array.isArray(rawSkillNames) ||
@@ -212,9 +246,50 @@ function parseSkillBatchToggleRequest(
     seen.add(normalizedName);
     skillNames.push(skillName);
   }
+  return skillNames;
+}
 
-  const flag = parseEnabledFlag(body, res);
-  return flag ? { skillNames, enabled: flag.enabled } : undefined;
+interface UserSkillActivationInput {
+  state: 'enabled' | 'disabled';
+  mode: SkillDisableMode;
+}
+
+function parseUserSkillActivation(
+  body: Record<string, unknown>,
+  res: Response,
+): UserSkillActivationInput | undefined {
+  const state = body['state'];
+  if (state !== 'enabled' && state !== 'disabled') {
+    res.status(400).json({
+      error: '`state` must be "enabled" or "disabled"',
+      code: 'invalid_skill_activation_state',
+    });
+    return undefined;
+  }
+  const mode = body['mode'] ?? 'hard';
+  if (mode !== 'hard' && mode !== 'default') {
+    res.status(400).json({
+      error: '`mode` must be "hard" or "default"',
+      code: 'invalid_skill_activation_mode',
+    });
+    return undefined;
+  }
+  return { state, mode };
+}
+
+function parseSkillNameParam(req: Request, res: Response): string | undefined {
+  const rawSkillName = req.params['name'];
+  const skillName =
+    typeof rawSkillName === 'string' ? rawSkillName.trim() : undefined;
+  if (!skillName) {
+    res.status(400).json({
+      error: 'Skill name path parameter is required',
+      code: 'invalid_skill_name',
+    });
+    return undefined;
+  }
+  if (rejectSkillNameTooLong(skillName, res)) return undefined;
+  return skillName;
 }
 
 function parseSkillScope(
@@ -631,6 +706,129 @@ export function registerWorkspaceSkillsRoutes(
       } catch (err) {
         invalidateGlobalConfigStatus(deps.workspaceRuntime.workspaceCwd);
         deps.sendBridgeError(res, err, { route });
+      }
+    },
+  );
+
+  // User-scope activation: writes the user settings file, which every
+  // workspace merges, so it is owned by no workspace selector — like
+  // `/extensions/activation` — and every runtime reconciles afterwards.
+  const applyUserSkillActivation = async (
+    skillNames: readonly string[],
+    input: UserSkillActivationInput,
+    clientId: string | undefined,
+  ) => {
+    const persist = deps.persistUserSkillActivation!;
+    const enabled = input.state === 'enabled';
+    const persisted = await persist(skillNames, enabled, input.mode);
+    const owner = globalConfigOwner();
+    invalidateGlobalConfigStatus(owner.workspaceCwd);
+    const changedSkills = persisted.outcomes.filter(
+      (outcome) => outcome.changed,
+    );
+    if (changedSkills.length === 0) {
+      return { persisted, activation: 'applied' as const };
+    }
+    const runtimes = deps.workspaceRegistry?.listManaged() ?? [
+      deps.workspaceRuntime,
+    ];
+    const activation = reconcileSkills(runtimes, { userSettings: true });
+    const mutation = createSkillToggleMutation({
+      skills: changedSkills.map((outcome) => ({
+        name: outcome.skillName,
+        enabled,
+      })),
+      activation,
+      sessionsRefreshed: 0,
+      sessionsFailed: 0,
+    });
+    for (const runtime of runtimes) {
+      for (const change of persisted.settingsChanges) {
+        try {
+          runtime.bridge.publishWorkspaceEvent({
+            type: 'settings_changed',
+            data: { ...change, scope: 'user', mutation },
+            ...(clientId ? { originatorClientId: clientId } : {}),
+          });
+        } catch {
+          // Durable configuration is already committed.
+        }
+      }
+    }
+    return { persisted, activation };
+  };
+  const rejectUserSkillActivationUnsupported = (res: Response): boolean => {
+    if (deps.persistUserSkillActivation) return false;
+    res.status(501).json({
+      error: 'User Skill settings persistence is not available',
+      code: 'user_skill_activation_unsupported',
+    });
+    return true;
+  };
+  const userActivationRoute = 'PUT /skills/:name/activation';
+  const userBatchActivationRoute = 'PUT /skills/activation';
+  app.put(
+    '/skills/activation',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      if (rejectUserSkillActivationUnsupported(res)) return;
+      const body = deps.safeBody(req);
+      const skillNames = parseSkillNames(body, res);
+      if (!skillNames) return;
+      const input = parseUserSkillActivation(body, res);
+      if (!input) return;
+      const clientId = deps.parseAndValidateProcessGlobalClientId(req, res);
+      if (clientId === null) return;
+      try {
+        const { persisted, activation } = await applyUserSkillActivation(
+          skillNames,
+          input,
+          clientId,
+        );
+        res.status(200).json({
+          scope: 'user',
+          state: input.state,
+          ...(input.state === 'disabled' ? { mode: input.mode } : {}),
+          activation,
+          results: persisted.outcomes,
+        });
+      } catch (err) {
+        invalidateGlobalConfigStatus(globalConfigOwner().workspaceCwd);
+        deps.sendBridgeError(res, err, { route: userBatchActivationRoute });
+      }
+    },
+  );
+  app.put(
+    '/skills/:name/activation',
+    deps.mutate({ strict: true }),
+    async (req, res) => {
+      if (rejectUserSkillActivationUnsupported(res)) return;
+      const skillName = parseSkillNameParam(req, res);
+      if (!skillName) return;
+      const input = parseUserSkillActivation(deps.safeBody(req), res);
+      if (!input) return;
+      const clientId = deps.parseAndValidateProcessGlobalClientId(req, res);
+      if (clientId === null) return;
+      try {
+        const { persisted, activation } = await applyUserSkillActivation(
+          [skillName],
+          input,
+          clientId,
+        );
+        const outcome = persisted.outcomes[0] ?? {
+          skillName,
+          changed: false,
+        };
+        res.status(200).json({
+          scope: 'user',
+          state: input.state,
+          ...(input.state === 'disabled' ? { mode: input.mode } : {}),
+          activation,
+          ...outcome,
+        });
+      } catch (err) {
+        invalidateGlobalConfigStatus(globalConfigOwner().workspaceCwd);
+        deps.sendBridgeError(res, err, { route: userActivationRoute });
       }
     },
   );

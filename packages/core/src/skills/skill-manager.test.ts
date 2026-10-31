@@ -1055,6 +1055,33 @@ describe('SkillManager', () => {
       expect(await manager.listSkills({ force: true })).toEqual([]);
     });
 
+    it('should publish the levels a scan omitted', async () => {
+      const disabledManager = managerWith({
+        disabledSkillLevels: ['bundled'],
+      });
+      setupLevels('project', 'bundled');
+
+      await disabledManager.listSkills({ force: true });
+      expect(disabledManager.getOmittedSkillLevels()).toEqual(['bundled']);
+
+      vi.spyOn(mockConfig, 'isSafeMode').mockReturnValue(true);
+      await manager.listSkills({ force: true });
+      expect(manager.getOmittedSkillLevels()).toEqual([
+        'project',
+        'user',
+        'extension',
+      ]);
+
+      vi.spyOn(mockConfig, 'getBareMode').mockReturnValue(true);
+      await manager.listSkills({ force: true });
+      expect(manager.getOmittedSkillLevels()).toEqual([
+        'project',
+        'user',
+        'extension',
+        'bundled',
+      ]);
+    });
+
     it('should fall back to bundled level in loadSkill', async () => {
       // Project, user, extension all empty; bundled has the skill
       setupLevels('bundled');

@@ -131,6 +131,38 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     expect(review?.argumentHint).toBeTruthy();
   });
 
+  it('marks a catalog that skipped a level as incomplete', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-complete-'),
+    );
+    try {
+      const skillDir = path.join(workspace, '.qwen', 'skills', 'pdf');
+      await fsp.mkdir(skillDir, { recursive: true });
+      await fsp.writeFile(
+        path.join(skillDir, 'SKILL.md'),
+        '---\nname: pdf\ndescription: Project pdf\n---\nBODY',
+      );
+
+      const complete = await createWorkspaceSkillsStatusProvider()(workspace);
+      expect(complete.complete).toBeUndefined();
+      expect(complete.skills.map((skill) => skill.name)).toContain('pdf');
+
+      await fsp.writeFile(
+        path.join(workspace, '.qwen', 'settings.json'),
+        JSON.stringify({ skills: { disabledLevels: ['project'] } }),
+      );
+      const incomplete = await createWorkspaceSkillsStatusProvider()(workspace);
+      expect(incomplete.complete).toBe(false);
+      expect(incomplete.skills.map((skill) => skill.name)).not.toContain('pdf');
+
+      vi.stubEnv('QWEN_CODE_SAFE_MODE', 'true');
+      const safe = await createWorkspaceSkillsStatusProvider()(workspace);
+      expect(safe.complete).toBe(false);
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('reports the queried workspace path', async () => {
     const provider = createWorkspaceSkillsStatusProvider();
 
@@ -391,6 +423,8 @@ describe('createWorkspaceSkillsStatusProvider', () => {
         expect.objectContaining({ name: 'local-skill', level: 'project' }),
       ]),
     );
+    // The Extension level is never inventoried for an untrusted workspace.
+    expect(status.complete).toBe(false);
     await fsp.rm(workspace, { recursive: true, force: true });
   });
 
@@ -531,6 +565,49 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     }
     return directory;
   }
+
+  it.skipIf(process.platform === 'win32')(
+    'reports partial discovery errors while preserving readable skills',
+    async () => {
+      const workspace = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-partial-skills-'),
+      );
+      try {
+        const directory = path.join(workspace, '.qwen', 'skills', 'readable');
+        await fsp.mkdir(directory, { recursive: true });
+        await fsp.writeFile(
+          path.join(directory, 'SKILL.md'),
+          '---\nname: readable\ndescription: readable\n---\nInstructions',
+        );
+        // A symlink loop reliably makes discovery fail even when permission
+        // bits are not enforced. The sibling remains genuinely readable.
+        const unreadable = path.join(
+          workspace,
+          '.qwen',
+          'skills',
+          'unreadable',
+        );
+        await fsp.symlink(unreadable, unreadable, 'dir');
+        const provider = createWorkspaceSkillsStatusProvider();
+        const status = await provider(workspace);
+        expect(status.initialized).toBe(true);
+        expect(status.skills.map((skill) => skill.name)).toContain('readable');
+        expect(status.skills.map((skill) => skill.name)).not.toContain(
+          'unreadable',
+        );
+        // Exercise the actual manager's discovery signal, not a mocked flag.
+        await expect(provider.snapshot(workspace)).rejects.toThrow(
+          'completely discovered',
+        );
+        // A partial observation is still a successful status: `complete`
+        // marks it, so consumers keep serving the readable skills.
+        expect(status.complete).toBe(false);
+        expect(status.errors).toBeUndefined();
+      } finally {
+        await fsp.rm(workspace, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('lists active and inactive extension Skills without a runtime Config', async () => {
     const active = await writeExtension('active', ['active-skill']);

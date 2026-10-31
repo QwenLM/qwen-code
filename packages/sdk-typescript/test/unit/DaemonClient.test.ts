@@ -7966,6 +7966,69 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('user Skill activation', () => {
+    it('PUTs one Skill state and mode to the unscoped route', async () => {
+      const response = {
+        scope: 'user',
+        state: 'disabled',
+        mode: 'default',
+        activation: 'reconciling',
+        skillName: 'rust:pdf',
+        changed: true,
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setUserSkillActivation('rust:pdf', 'disabled', {
+          mode: 'default',
+          clientId: 'client-1',
+        }),
+      ).resolves.toEqual(response);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/skills/rust%3Apdf/activation',
+        method: 'PUT',
+        body: JSON.stringify({ state: 'disabled', mode: 'default' }),
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('PUTs a batch and omits mode when not given', async () => {
+      const response = {
+        scope: 'user',
+        state: 'enabled',
+        activation: 'applied',
+        results: [{ skillName: 'review', changed: false }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, response),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setUserSkillsActivation(['review'], 'enabled'),
+      ).resolves.toEqual(response);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/skills/activation',
+        method: 'PUT',
+        body: JSON.stringify({ skillNames: ['review'], state: 'enabled' }),
+      });
+    });
+
+    it('throws DaemonHttpError on a rejected request', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, { code: 'invalid_skill_activation_mode' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setUserSkillActivation('pdf', 'disabled'),
+      ).rejects.toMatchObject({ status: 400 });
+    });
+  });
+
   describe('setWorkspaceSkillsEnabled', () => {
     const response = {
       enabled: false,

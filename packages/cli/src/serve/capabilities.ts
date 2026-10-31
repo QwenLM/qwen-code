@@ -278,6 +278,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   workspace_permissions: { since: 'v1' },
   workspace_voice: { since: 'v1' },
   workspace_voice_transcription: { since: 'v1', modes: ['batch'] },
+  // `PUT /skills/:name/activation` and `PUT /skills/activation` write the
+  // user settings scope's `skills.disabled` / `skills.defaultDisabled` /
+  // `skills.enabled` lists and reconcile every workspace runtime.
+  user_skill_activation: { since: 'v1' },
   // Inspect bound workspace trust and request local operator action.
   // Recording the decision itself is the separate grant tag below.
   workspace_trust: { since: 'v1' },
@@ -656,6 +660,7 @@ export interface AdvertiseFeatureToggles {
   promptDeadlineMs?: number;
   writerIdleTimeoutMs?: number;
   persistSettingAvailable?: boolean;
+  userSkillActivationAvailable?: boolean;
   voiceTranscriptionAvailable?: boolean;
   sessionShellCommandEnabled?: boolean;
   sessionArtifactsPersistenceAvailable?: boolean;
@@ -788,6 +793,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
   ['user_language_sync', (toggles) => toggles.persistSettingAvailable === true],
   ['workspace_voice', (toggles) => toggles.persistSettingAvailable === true],
+  [
+    'user_skill_activation',
+    (toggles) => toggles.userSkillActivationAvailable === true,
+  ],
   [
     'workspace_voice_transcription',
     (toggles) => toggles.voiceTranscriptionAvailable === true,

@@ -844,32 +844,58 @@ describe.skipIf(process.platform === 'win32')(
           ledgerDir,
           quarantine,
         });
-        await created.execute('read_file', { file_path: 'a.txt' }, signal);
-        const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
-        const sleeperPid = spawnSleeper();
-        testInternals.writeLedgerDocument(
-          workFile,
-          {
-            pid: 42424242,
-            pgid: 42424242,
-            incarnation: 'incarnation-1',
-            startedAt: Date.now(),
-          },
-          [{ pgid: sleeperPid, callId: 'call-1', startedAt: Date.now() }],
-        );
+        sweepWitnesses.records.length = 0;
+        let release: (() => void) | undefined;
+        // Park the exit sweep before it reads the ledger. The document this
+        // test writes stands for the worker's last write, which in production
+        // lands before the worker dies; without the hold that write races the
+        // worker's own 20 ms exit and the sweep may read a missing file.
+        sweepWitnesses.hold = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        try {
+          await created.execute('read_file', { file_path: 'a.txt' }, signal);
+          const workFile = path.join(ledgerDir, `${await incarnation()}.json`);
+          await vi.waitFor(
+            () => {
+              expect(
+                sweepWitnesses.records.some(
+                  (record) => record.workFile === workFile,
+                ),
+              ).toBe(true);
+            },
+            { timeout: 10_000 },
+          );
+          const sleeperPid = spawnSleeper();
+          testInternals.writeLedgerDocument(
+            workFile,
+            {
+              pid: 42424242,
+              pgid: 42424242,
+              incarnation: 'incarnation-1',
+              startedAt: Date.now(),
+            },
+            [{ pgid: sleeperPid, callId: 'call-1', startedAt: Date.now() }],
+          );
+          release?.();
 
-        const deadline = Date.now() + 10_000;
-        while (
-          processGroupLiveness(sleeperPid) !== 'gone' ||
-          existsSync(workFile)
-        ) {
-          if (Date.now() > deadline) {
-            throw new Error('the exit-between-calls sweep never landed');
+          const deadline = Date.now() + 10_000;
+          while (
+            processGroupLiveness(sleeperPid) !== 'gone' ||
+            existsSync(workFile)
+          ) {
+            if (Date.now() > deadline) {
+              throw new Error('the exit-between-calls sweep never landed');
+            }
+            await new Promise((resolve) => setTimeout(resolve, 50));
           }
-          await new Promise((resolve) => setTimeout(resolve, 50));
+          expect(quarantine.report).not.toHaveBeenCalled();
+          sleeperChildren.length = 0;
+        } finally {
+          release?.();
+          sweepWitnesses.hold = undefined;
+          sweepWitnesses.records.length = 0;
         }
-        expect(quarantine.report).not.toHaveBeenCalled();
-        sleeperChildren.length = 0;
       });
 
       it('sweeps the process groups a stopped worker left in its ledger', async () => {

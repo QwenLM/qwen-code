@@ -141,7 +141,7 @@ const WORKSPACE_SKILLS_REVALIDATE_INTERVAL_MS = 1_000;
 const WORKSPACE_SKILLS_STALE_AFTER_MS = 1_000;
 const WORKSPACE_SKILLS_REVALIDATE_TIMEOUT_MS = 5_000;
 
-function createSkillToggleMutation(input: {
+export function createSkillToggleMutation(input: {
   skills: ReadonlyArray<{ name: string; enabled: boolean }>;
   activation: WorkspaceSkillToggleActivation;
   sessionsRefreshed: number;
@@ -348,11 +348,17 @@ export function createDaemonWorkspaceService(
     ],
   });
 
-  const skillsSnapshot = (): ServeWorkspaceSkillsStatus | undefined => {
+  const skillsSnapshot = (
+    retained: boolean,
+  ): ServeWorkspaceSkillsStatus | undefined => {
     if (!lastWorkspaceSkillsStatus) return undefined;
     const ageMs = Math.max(0, Date.now() - lastWorkspaceSkillsStatusAt);
     return {
       ...lastWorkspaceSkillsStatus,
+      // A retained answer was not observed for this request, so it cannot
+      // prove a name absent or a spelling unowned. A fresh answer already
+      // carries the producer's completeness.
+      ...(retained ? { complete: false } : {}),
       snapshot: {
         observedAt: lastWorkspaceSkillsStatusAt,
         ageMs,
@@ -429,7 +435,7 @@ export function createDaemonWorkspaceService(
       // ordinary read, but a mutation must decide from an enumerated catalog.
       return requireEnumerated
         ? unavailable
-        : (skillsSnapshot() ?? unavailable);
+        : (skillsSnapshot(true) ?? unavailable);
     }
     return status;
   };
@@ -504,7 +510,7 @@ export function createDaemonWorkspaceService(
         return Promise.resolve(unavailableWorkspaceSkillsStatus());
       }
       return revalidateWorkspaceSkillsStatus().then(
-        (status) => skillsSnapshot() ?? status,
+        (status) => skillsSnapshot(false) ?? status,
       );
     }
     if (!inFlightWorkspaceSkillsStatus && canStart) {
@@ -514,7 +520,7 @@ export function createDaemonWorkspaceService(
         );
       });
     }
-    return Promise.resolve(skillsSnapshot()!);
+    return Promise.resolve(skillsSnapshot(true)!);
   };
 
   const refreshWorkspaceSkillsAfterMutation = async (): Promise<void> => {

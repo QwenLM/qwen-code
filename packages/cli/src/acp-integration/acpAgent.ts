@@ -8625,6 +8625,10 @@ class QwenAgent implements Agent {
         skills: Array.from(skillsByKey.values()).sort((a, b) =>
           a.name.localeCompare(b.name),
         ),
+        ...(skillManager.getOmittedSkillLevels().length > 0 ||
+        skillManager.hasDiscoveryErrors()
+          ? { complete: false }
+          : {}),
       };
     } catch (error) {
       return {
@@ -11075,7 +11079,13 @@ class QwenAgent implements Agent {
             case 'skills':
               await this.extMethodInternal(
                 SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh,
-                { cwd: changeCwd, reason: params['reason'] ?? 'all' },
+                {
+                  cwd: changeCwd,
+                  reason: params['reason'] ?? 'all',
+                  ...(params['settingsScopes'] !== undefined
+                    ? { settingsScopes: params['settingsScopes'] }
+                    : {}),
+                },
               );
               break;
             default:
@@ -15701,6 +15711,25 @@ class QwenAgent implements Agent {
             'reason must be settings, content, or all',
           );
         }
+        // Only the workspace file is re-read by default: reloading the user
+        // file behind live sessions also picks up unrelated user settings.
+        // A user-scope Skill write opts in explicitly.
+        const rawSettingsScopes = params['settingsScopes'];
+        if (
+          rawSettingsScopes !== undefined &&
+          (!Array.isArray(rawSettingsScopes) ||
+            !rawSettingsScopes.every(
+              (scope) => scope === 'workspace' || scope === 'user',
+            ))
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'settingsScopes must be an array of workspace or user',
+          );
+        }
+        const includeUserSettings =
+          Array.isArray(rawSettingsScopes) &&
+          rawSettingsScopes.includes('user');
         const reason = rawReason ?? 'all';
         const selectedSessions =
           rawSessionIds === undefined
@@ -15722,17 +15751,31 @@ class QwenAgent implements Agent {
         const refreshSettings = reason !== 'content';
         const refreshContent = reason !== 'settings';
         if (refreshSettings) {
-          if (
-            !this.workspaceSettings.reloadScopeFromDisk(SettingScope.Workspace)
-          ) {
-            throw new Error('Failed to reload workspace skill settings');
+          const reloaded = includeUserSettings
+            ? this.workspaceSettings.reloadScopesFromDiskAtomically([
+                SettingScope.Workspace,
+                SettingScope.User,
+              ])
+            : this.workspaceSettings.reloadScopeFromDisk(
+                SettingScope.Workspace,
+              );
+          if (!reloaded) {
+            const scopes = includeUserSettings
+              ? 'workspace and user'
+              : 'workspace';
+            debugLogger.warn(`Failed to reload ${scopes} skill settings`);
+            throw new Error(`Failed to reload ${scopes} skill settings`);
           }
         }
         const sessions = selectedSessions ?? this.getActiveSessions();
         const settingsReloadResults = refreshSettings
           ? await Promise.allSettled(
               sessions.map((session) =>
-                Promise.resolve().then(() => session.reloadSkillSettings()),
+                Promise.resolve().then(() =>
+                  session.reloadSkillSettings({
+                    includeUser: includeUserSettings,
+                  }),
+                ),
               ),
             )
           : undefined;

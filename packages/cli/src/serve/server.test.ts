@@ -904,6 +904,7 @@ const EXPECTED_REGISTERED_FEATURES = [
   'workspace_permissions',
   'workspace_voice',
   'workspace_voice_transcription',
+  'user_skill_activation',
   'workspace_trust',
   'workspace_trust_grant',
   'workspace_trust_hot_reload',
@@ -3701,6 +3702,22 @@ describe('createServeApp', () => {
           expect(
             getAdvertisedServeFeatures(undefined, {
               persistSettingAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'user_skill_activation') {
+          expect(predicate({ userSkillActivationAvailable: true })).toBe(true);
+          expect(predicate({ userSkillActivationAvailable: false })).toBe(
+            false,
+          );
+          expect(predicate({ persistSettingAvailable: true })).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              userSkillActivationAvailable: true,
             }),
           ).toContain(feature);
           expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
@@ -29704,6 +29721,81 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(404);
     });
+  });
+
+  describe('PUT /skills/activation', () => {
+    it.each(['/skills/activation', '/skills/pdf/activation'])(
+      '%s accepts a secondary client until its runtime is removed',
+      async (route) => {
+        const primaryBridge = fakeBridge();
+        const secondaryBridge = fakeBridge({
+          knownClientIds: ['secondary-client'],
+        });
+        const workspaceService = {
+          invalidateWorkspaceSkillsStatus: vi.fn(),
+        } as unknown as DaemonWorkspaceService;
+        const workspaceRegistry = createWorkspaceRegistry([
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'primary-id',
+            workspaceCwd: WS_BOUND,
+            primary: true,
+            bridge: primaryBridge,
+            workspaceService,
+          }),
+          makeWorkspaceRuntimeForTest({
+            workspaceId: 'secondary-id',
+            workspaceCwd: '/workspace/secondary',
+            primary: false,
+            bridge: secondaryBridge,
+            workspaceService,
+          }),
+        ]);
+        const persistUserSkillActivation = vi.fn().mockResolvedValue({
+          outcomes: [{ skillName: 'pdf', changed: true }],
+          settingsChanges: [{ key: 'skills.disabled', value: ['pdf'] }],
+        });
+        const app = createServeApp(baseOpts, undefined, {
+          bridge: primaryBridge,
+          workspaceRegistry,
+          persistUserSkillActivation,
+        });
+
+        const sendActivation = (clientId = 'secondary-client') =>
+          request(app)
+            .put(route)
+            .set('Host', `127.0.0.1:${baseOpts.port}`)
+            .set('X-Qwen-Client-Id', clientId)
+            .send({ skillNames: ['pdf'], state: 'disabled' });
+
+        const res = await sendActivation();
+        expect(res.status).toBe(200);
+        expect(persistUserSkillActivation).toHaveBeenCalledWith(
+          expect.any(String),
+          ['pdf'],
+          false,
+          'hard',
+          expect.any(Function),
+        );
+        const secondary = workspaceRegistry.getByWorkspaceId('secondary-id')!;
+        expect(workspaceRegistry.beginDrain(secondary)).toBe(true);
+        expect((await sendActivation()).status).toBe(200);
+        workspaceRegistry.cancelDrain(secondary);
+        expect((await sendActivation()).status).toBe(200);
+        expect(workspaceRegistry.beginDrain(secondary)).toBe(true);
+        workspaceRegistry.commitDrain(secondary);
+        expect((await sendActivation()).status).toBe(200);
+        expect(persistUserSkillActivation).toHaveBeenCalledTimes(4);
+
+        const unknown = await sendActivation('unknown-client');
+        expect(unknown.status).toBe(400);
+        expect(unknown.body.code).toBe('invalid_client_id');
+        workspaceRegistry.completeDrain(secondary);
+        const removed = await sendActivation();
+        expect(removed.status).toBe(400);
+        expect(removed.body.code).toBe('invalid_client_id');
+        expect(persistUserSkillActivation).toHaveBeenCalledTimes(4);
+      },
+    );
   });
 
   describe('POST /workspace/init (#4175 Wave 4 PR 17)', () => {

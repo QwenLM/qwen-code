@@ -10774,6 +10774,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ),
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: skillRefreshCache,
+        hasDiscoveryErrors: vi.fn().mockReturnValue(false),
+        getOmittedSkillLevels: vi.fn().mockReturnValue([]),
         getCachedSkills,
       }),
       getExtensions: vi.fn().mockReturnValue([
@@ -10905,6 +10907,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       isSkillEnabled: vi.fn().mockReturnValue(false),
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: vi.fn().mockResolvedValue(undefined),
+        hasDiscoveryErrors: vi.fn().mockReturnValue(false),
+        getOmittedSkillLevels: vi.fn().mockReturnValue([]),
         getCachedSkills: vi.fn().mockReturnValue([
           {
             name: 'session-skill',
@@ -11574,6 +11578,130 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it.each([false, true])(
+    'preserves known skills and marks partial discovery in live ACP status (discoveryErrors: %s)',
+    async (hasDiscoveryErrors) => {
+      mockConfig = {
+        ...mockConfig,
+        getTargetDir: vi.fn().mockReturnValue('/work/status'),
+        getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+        isSafeMode: vi.fn().mockReturnValue(false),
+        getBareMode: vi.fn().mockReturnValue(false),
+        getExtensionManager: vi.fn().mockReturnValue({
+          refreshCacheIfSourcesChanged: vi.fn().mockResolvedValue(false),
+        }),
+        getSkillManager: vi.fn().mockReturnValue({
+          hasDiscoveryErrors: vi.fn().mockReturnValue(hasDiscoveryErrors),
+          getOmittedSkillLevels: vi.fn().mockReturnValue([]),
+          getCachedSkills: vi.fn().mockReturnValue([
+            {
+              name: 'rust:pdf',
+              authoredName: 'pdf',
+              description: 'Known extension skill',
+              level: 'extension',
+              extensionName: 'rust',
+              filePath: '/ext/rust/skills/pdf/SKILL.md',
+            },
+          ]),
+        }),
+        getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
+        isSkillEnabled: vi.fn().mockReturnValue(true),
+        getExtensions: vi.fn().mockReturnValue([]),
+      } as unknown as Config;
+
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+
+      try {
+        const status = await agent.extMethod(
+          SERVE_STATUS_EXT_METHODS.workspaceSkills,
+          {},
+        );
+        expect(status).toMatchObject({
+          v: 1,
+          workspaceCwd: '/work/status',
+          initialized: true,
+          skills: [{ name: 'rust:pdf', extensionName: 'rust' }],
+        });
+        expect(status).not.toHaveProperty('errors');
+        if (hasDiscoveryErrors) {
+          expect(status).toMatchObject({ complete: false });
+        } else {
+          expect(status).not.toHaveProperty('complete');
+        }
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
+  it('marks a live ACP skills status incomplete when the scan omitted a level', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getWorkingDir: vi.fn().mockReturnValue('/work/status'),
+      isSafeMode: vi.fn().mockReturnValue(false),
+      getBareMode: vi.fn().mockReturnValue(false),
+      getExtensionManager: vi.fn().mockReturnValue({
+        refreshCacheIfSourcesChanged: vi.fn().mockResolvedValue(false),
+      }),
+      getSkillManager: vi.fn().mockReturnValue({
+        hasDiscoveryErrors: vi.fn().mockReturnValue(false),
+        getOmittedSkillLevels: vi.fn().mockReturnValue(['project']),
+        getCachedSkills: vi.fn().mockReturnValue([
+          {
+            name: 'rust:pdf',
+            authoredName: 'pdf',
+            description: 'Known extension skill',
+            level: 'extension',
+            extensionName: 'rust',
+            filePath: '/ext/rust/skills/pdf/SKILL.md',
+          },
+        ]),
+      }),
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set()),
+      isSkillEnabled: vi.fn().mockReturnValue(true),
+      getExtensions: vi.fn().mockReturnValue([]),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_STATUS_EXT_METHODS.workspaceSkills, {}),
+      ).resolves.toMatchObject({
+        v: 1,
+        workspaceCwd: '/work/status',
+        initialized: true,
+        complete: false,
+        skills: [{ name: 'rust:pdf', extensionName: 'rust' }],
+      });
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('reports an uninitialized snapshot when catalog enumeration throws', async () => {
     // A partial build failure must not look like a valid empty catalog: the
     // daemon latches `initialized: true` and then prefers it over its own
@@ -11643,6 +11771,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: skillRefreshCache,
+        hasDiscoveryErrors: vi.fn().mockReturnValue(false),
+        getOmittedSkillLevels: vi.fn().mockReturnValue([]),
         getCachedSkills: vi.fn().mockReturnValue([]),
       }),
     } as unknown as Config;
@@ -11692,6 +11822,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
       getSkillManager: vi.fn().mockReturnValue({
         refreshCache: skillRefreshCache,
+        hasDiscoveryErrors: vi.fn().mockReturnValue(false),
+        getOmittedSkillLevels: vi.fn().mockReturnValue([]),
         getCachedSkills: vi.fn().mockReturnValue([]),
       }),
     } as unknown as Config;
@@ -37629,6 +37761,8 @@ describe('sessionLanguage multi-session propagation', () => {
         getExtensions: () => [],
         getSkillManager: () => ({
           refreshCache,
+          hasDiscoveryErrors: () => false,
+          getOmittedSkillLevels: () => [],
           getCachedSkills: () => [
             {
               name: skillName,
@@ -37770,6 +37904,123 @@ describe('sessionLanguage multi-session propagation', () => {
       }
     },
   );
+
+  it('re-reads the user settings file only when the refresh asks for it', async () => {
+    const settings = {
+      merged: {},
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    try {
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {
+        reason: 'settings',
+        settingsScopes: ['workspace', 'user'],
+      });
+      expect(
+        settings.reloadScopesFromDiskAtomically,
+      ).toHaveBeenCalledExactlyOnceWith([
+        SettingScope.Workspace,
+        SettingScope.User,
+      ]);
+      expect(settings.reloadScopeFromDisk).not.toHaveBeenCalled();
+
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {
+        reason: 'settings',
+        settingsScopes: ['workspace'],
+      });
+      expect(settings.reloadScopeFromDisk).toHaveBeenCalledExactlyOnceWith(
+        SettingScope.Workspace,
+      );
+
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {
+          settingsScopes: ['system'],
+        }),
+      ).rejects.toThrow('settingsScopes must be an array of workspace or user');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('names both scopes when an atomic workspace and user reload fails', async () => {
+    const settings = {
+      merged: {},
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(false),
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceSkillsRefresh, {
+          reason: 'settings',
+          settingsScopes: ['workspace', 'user'],
+        }),
+      ).rejects.toThrow('Failed to reload workspace and user skill settings');
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('forwards settingsScopes from a paired-engine skills change', async () => {
+    const settings = {
+      merged: {},
+      reloadScopeFromDisk: vi.fn().mockReturnValue(true),
+      reloadScopesFromDiskAtomically: vi.fn().mockReturnValue(true),
+    } as unknown as LoadedSettings;
+    const agentPromise = runAcpAgent(
+      makeConfig() as unknown as Config,
+      settings,
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    });
+    try {
+      await agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceChange, {
+        v: 1,
+        revision: 1,
+        kind: 'skills',
+        tightening: false,
+        cwd: '/work/project',
+        reason: 'all',
+        settingsScopes: ['workspace', 'user'],
+      });
+
+      expect(settings.reloadScopesFromDiskAtomically).toHaveBeenCalledWith([
+        SettingScope.Workspace,
+        SettingScope.User,
+      ]);
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
 
   it('refreshes busy skill sessions and reports per-session failures', async () => {
     const bootstrapSettings = {

@@ -13,6 +13,7 @@ import {
   resolveSkillSettings,
   type SkillDisablement,
   skillToggleBlockForName,
+  updateSkillActivationLists,
   updateWorkspaceSkillSettingLists,
 } from './skill-settings.js';
 
@@ -476,5 +477,224 @@ describe('skillToggleBlockForName', () => {
         { name: 'pdf' },
       ),
     ).toBeNull();
+  });
+});
+
+describe('buildHigherDisabled for the User scope', () => {
+  const prefixed = { name: 'demo:pdf', authoredName: 'pdf' };
+  const user = (scopes: Parameters<typeof fakeSettings>[0]) =>
+    buildHigherDisabled(fakeSettings(scopes), SettingScope.User);
+
+  it('never blocks on Workspace entries, which gate only their workspace', () => {
+    const higher = user({
+      merged: {},
+      workspace: {
+        disabled: ['pdf', 'demo:pdf'],
+        defaultDisabled: ['pdf'],
+      },
+    });
+
+    expect(higher.blockIn(prefixed)).toBeNull();
+  });
+
+  it('lets the toggle remove an exact-spelling user entry', () => {
+    const higher = user({ merged: {}, user: { disabled: ['demo:pdf'] } });
+
+    expect(higher.blockIn(prefixed)).toBeNull();
+  });
+
+  it('keeps blocking on a user entry in the other spelling', () => {
+    const higher = user({ merged: {}, user: { disabled: ['pdf'] } });
+
+    expect(higher.blockIn(prefixed)).toEqual({
+      reason: 'hard',
+      list: 'disabled',
+      entry: 'pdf',
+      scope: 'User',
+    });
+    expect(higher.lockedIn(prefixed)).toBe("skills.disabled 'pdf' (User)");
+  });
+
+  it.each([
+    ['System', 'system'],
+    ['SystemDefaults', 'systemDefaults'],
+  ] as const)('blames a %s hard entry as a lock', (label, key) => {
+    const higher = user({ merged: {}, [key]: { disabled: ['demo:pdf'] } });
+
+    expect(higher.blockIn(prefixed)).toEqual({
+      reason: 'hard',
+      list: 'disabled',
+      entry: 'demo:pdf',
+      scope: label,
+    });
+    expect(higher.lockedIn(prefixed)).toBe(label);
+  });
+
+  it('blocks a grant a bare defaultDisabled entry keeps gating', () => {
+    const higher = user({
+      merged: {},
+      systemDefaults: { defaultDisabled: ['pdf'] },
+    });
+
+    expect(higher.blockIn(prefixed)).toEqual({
+      reason: 'default',
+      list: 'defaultDisabled',
+      entry: 'pdf',
+      scope: 'SystemDefaults',
+    });
+  });
+
+  it('does not let a workspace grant cancel a defaultDisabled entry', () => {
+    const higher = user({
+      merged: {},
+      user: { defaultDisabled: ['pdf'] },
+      workspace: { enabled: ['pdf'] },
+    });
+
+    expect(higher.blockIn(prefixed)?.list).toBe('defaultDisabled');
+  });
+
+  it('lets an identical-spelling defaultDisabled entry be cancelled', () => {
+    const higher = user({
+      merged: {},
+      system: { defaultDisabled: ['demo:pdf'] },
+    });
+
+    expect(higher.blockIn(prefixed)).toBeNull();
+  });
+
+  it('applies regardless of workspace trust', () => {
+    expect(
+      skillToggleBlockForName(
+        fakeSettings({
+          merged: {},
+          system: { disabled: ['pdf'] },
+          trusted: false,
+        }),
+        { name: 'pdf' },
+        SettingScope.User,
+      )?.scope,
+    ).toBe('System');
+  });
+
+  it('lets a write remove a user entry under any spelling it records', () => {
+    const higher = user({ merged: {}, user: { disabled: ['pdf'] } });
+
+    expect(
+      higher.blockIn({ ...prefixed, writtenNames: ['demo:pdf', 'pdf'] }),
+    ).toBeNull();
+  });
+
+  it('keeps a higher default entry the target write cannot cancel', () => {
+    const higher = user({
+      merged: {},
+      user: { defaultDisabled: ['pdf'] },
+      systemDefaults: { defaultDisabled: ['pdf'] },
+    });
+
+    expect(
+      higher.blockIn({ ...prefixed, writtenNames: ['demo:pdf', 'pdf'] }),
+    ).toEqual({
+      reason: 'default',
+      list: 'defaultDisabled',
+      entry: 'pdf',
+      scope: 'SystemDefaults',
+    });
+  });
+
+  it('checks the surviving default after a removable hard entry', () => {
+    const higher = user({
+      merged: {},
+      user: { disabled: ['pdf'], defaultDisabled: ['pdf'] },
+      systemDefaults: { defaultDisabled: ['pdf'] },
+    });
+
+    expect(
+      higher.blockIn({ ...prefixed, writtenNames: ['demo:pdf', 'pdf'] }),
+    ).toEqual({
+      reason: 'default',
+      list: 'defaultDisabled',
+      entry: 'pdf',
+      scope: 'SystemDefaults',
+    });
+  });
+});
+
+describe('updateSkillActivationLists', () => {
+  const empty = { disabled: [], defaultDisabled: [], enabled: [] };
+
+  it('moves a skill into exactly one list per state and mode', () => {
+    const hard = updateSkillActivationLists(
+      { ...empty, defaultDisabled: ['pdf'], enabled: ['PDF'] },
+      'pdf',
+      false,
+    );
+    expect(hard).toEqual({
+      disabled: ['pdf'],
+      defaultDisabled: [],
+      enabled: [],
+    });
+
+    const soft = updateSkillActivationLists(hard, 'pdf', false, 'default');
+    expect(soft).toEqual({
+      disabled: [],
+      defaultDisabled: ['pdf'],
+      enabled: [],
+    });
+
+    const enabled = updateSkillActivationLists(soft, 'pdf', true, 'default');
+    expect(enabled).toEqual({
+      disabled: [],
+      defaultDisabled: [],
+      enabled: ['pdf'],
+    });
+  });
+
+  it('touches only the exact spelling and keeps unrelated entries', () => {
+    expect(
+      updateSkillActivationLists(
+        {
+          disabled: ['pdf', 'review'],
+          defaultDisabled: ['demo:pdf'],
+          enabled: [],
+        },
+        'demo:pdf',
+        false,
+      ),
+    ).toEqual({
+      disabled: ['pdf', 'review', 'demo:pdf'],
+      defaultDisabled: [],
+      enabled: [],
+    });
+  });
+
+  it('reports no change for a repeated write', () => {
+    const lists = { disabled: ['pdf'], defaultDisabled: [], enabled: [] };
+    expect(updateSkillActivationLists(lists, 'PDF', false)).toEqual({
+      disabled: ['PDF'],
+      defaultDisabled: [],
+      enabled: [],
+    });
+    expect(updateSkillActivationLists(lists, 'pdf', false)).toEqual(lists);
+  });
+
+  it('removes every spelling of an enabled skill from the disable lists', () => {
+    expect(
+      updateSkillActivationLists(
+        {
+          disabled: ['pdf'],
+          defaultDisabled: ['pdf'],
+          enabled: [],
+        },
+        'demo:pdf',
+        true,
+        'hard',
+        ['pdf'],
+      ),
+    ).toEqual({
+      disabled: [],
+      defaultDisabled: [],
+      enabled: ['demo:pdf'],
+    });
   });
 });

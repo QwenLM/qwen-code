@@ -4132,7 +4132,12 @@ export function createSessionControlPlane(
           kind: 'skills',
           tightening: false,
           persistedByControl: false,
-          payload: { reason: params?.['reason'] ?? 'all' },
+          payload: {
+            reason: params?.['reason'] ?? 'all',
+            ...(params?.['settingsScopes'] !== undefined
+              ? { settingsScopes: params['settingsScopes'] }
+              : {}),
+          },
         };
       default:
         return undefined;

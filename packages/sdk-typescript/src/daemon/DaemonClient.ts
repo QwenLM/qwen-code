@@ -231,6 +231,10 @@ import type {
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
   DaemonSkillBatchToggleResult,
+  DaemonSkillActivationState,
+  DaemonSkillDisableMode,
+  DaemonUserSkillActivationResult,
+  DaemonUserSkillsActivationResult,
   DaemonSkillToggleResult,
   DaemonSkillRefreshResult,
   DaemonSkillInstallRequest,
@@ -5612,6 +5616,77 @@ export class DaemonClient {
           throw await this.failOnError(res, 'POST /workspace/skills/enable');
         }
         return (await res.json()) as DaemonSkillBatchToggleResult;
+      },
+    );
+  }
+
+  /**
+   * Enable or disable a Skill in the user settings scope, which every
+   * workspace merges. `mode` applies to disables only: `hard` (default)
+   * writes `skills.disabled`, `default` writes `skills.defaultDisabled`.
+   * A refused enable resolves with `changed: false` and the blocking entry.
+   *
+   * Pre-flight `caps.features.includes('user_skill_activation')` before
+   * calling.
+   */
+  async setUserSkillActivation(
+    skillName: string,
+    state: DaemonSkillActivationState,
+    opts?: { mode?: DaemonSkillDisableMode; clientId?: string },
+  ): Promise<DaemonUserSkillActivationResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/skills/${urlEncode(skillName)}/activation`,
+      {
+        method: 'PUT',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({
+          state,
+          ...(opts?.mode ? { mode: opts.mode } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'PUT /skills/:name/activation');
+        }
+        return (await res.json()) as DaemonUserSkillActivationResult;
+      },
+    );
+  }
+
+  /**
+   * Batch form of {@link setUserSkillActivation} for up to 100 names in one
+   * user settings write.
+   *
+   * Pre-flight `caps.features.includes('user_skill_activation')` before
+   * calling.
+   */
+  async setUserSkillsActivation(
+    skillNames: readonly string[],
+    state: DaemonSkillActivationState,
+    opts?: { mode?: DaemonSkillDisableMode; clientId?: string },
+  ): Promise<DaemonUserSkillsActivationResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/skills/activation`,
+      {
+        method: 'PUT',
+        headers: this.headers(
+          { 'Content-Type': 'application/json' },
+          opts?.clientId,
+        ),
+        body: JSON.stringify({
+          skillNames,
+          state,
+          ...(opts?.mode ? { mode: opts.mode } : {}),
+        }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'PUT /skills/activation');
+        }
+        return (await res.json()) as DaemonUserSkillsActivationResult;
       },
     );
   }

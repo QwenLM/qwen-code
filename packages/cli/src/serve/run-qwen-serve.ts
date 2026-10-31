@@ -111,6 +111,7 @@ import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 // closure check doesn't trace create-sub-session's transitive deps through
 // the run-qwen-serve chunk. The launcher is only needed after listen().
 import { PathMutexRegistry } from './fs/path-mutex-registry.js';
+import { SkillCatalogUnavailableError } from './workspace-service/types.js';
 import { isDeepHealthQuery } from './health-query.js';
 import {
   hostAssignsIpv6Loopback,
@@ -511,6 +512,8 @@ const DEFAULT_SESSION_IDLE_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_SESSION_PROMPT_SETTLED_CLOSE_GRACE_MS = 0;
 const WORKSPACE_SETTING_SCOPE =
   'Workspace' as import('../config/settings.js').SettingScope;
+const USER_SETTING_SCOPE =
+  'User' as import('../config/settings.js').SettingScope.User;
 
 type RunQwenServeOptions = Omit<ServeOptions, 'token' | 'workspace'> & {
   token?: string;
@@ -521,6 +524,8 @@ type WorkspaceSettingsWrite =
   import('./workspace-service/types.js').WorkspaceSettingsWrite;
 type PersistDisabledSkillsBatchResult =
   import('./workspace-service/types.js').PersistDisabledSkillsBatchResult;
+type PersistUserSkillActivationResult =
+  import('./workspace-service/types.js').PersistUserSkillActivationResult;
 type ServeWorkspaceSkillStatus =
   import('@qwen-code/acp-bridge/status').ServeWorkspaceSkillStatus;
 type ChannelWebhookConfigRuntime = {
@@ -2480,6 +2485,7 @@ function currentServeFeaturesForRunQwenServe(
       ? { writerIdleTimeoutMs: opts.writerIdleTimeoutMs }
       : {}),
     persistSettingAvailable: true,
+    userSkillActivationAvailable: true,
     sessionShellCommandEnabled,
     sessionArtifactsPersistenceAvailable,
     sessionGenerationAvailable: true,
@@ -5945,6 +5951,8 @@ async function runQwenServeImpl(
       skillNames: readonly string[],
     ) => {
       let skills: ServeWorkspaceSkillStatus[] | undefined;
+      let catalogAvailable = false;
+      let catalogEnumerated = false;
       try {
         const workspaceRuntime =
           workspaceRegistryForPersistence.current?.getByWorkspaceCwd(workspace);
@@ -5956,33 +5964,103 @@ async function runQwenServeImpl(
             },
             { requireFresh: true },
           );
-        if (status?.initialized) skills = status.skills;
+        // Partial observations retain known identities even when the service
+        // marks the catalog unavailable. They cannot prove a name absent or
+        // an alias uniquely owned.
+        skills = status?.skills;
+        if (status?.initialized) {
+          // An untrusted workspace's catalog omits Extension Skills, so an
+          // unresolved name there is not evidence that the name is invalid.
+          catalogEnumerated =
+            isWorkspaceTrustedForPersistence(workspace) &&
+            !status.snapshot &&
+            !status.errors?.length &&
+            status.complete !== false;
+          catalogAvailable = catalogEnumerated;
+        }
       } catch {
         // Preserve the legacy name heuristic when the catalog is unavailable.
       }
       const skillsByName = new Map(
         skills?.map((skill) => [skill.name.trim().toLowerCase(), skill]),
       );
-      return skillNames.map((skillName) => {
-        const skill = skillsByName.get(skillName.trim().toLowerCase());
-        if (!skill) {
-          const prefixEnd = skillName.indexOf(':');
+      // A request may use the authored spelling (`pdf`) of an Extension Skill
+      // whose registry name carries the prefix (`rust:pdf`). Match it only
+      // when exactly one extension claims it: an ambiguous authored name must
+      // not toggle a different skill, and an exact registry match always wins.
+      const skillsByAuthoredName = new Map<
+        string,
+        ServeWorkspaceSkillStatus | undefined
+      >();
+      for (const skill of skills ?? []) {
+        if (skill.level !== 'extension' || !skill.extensionName) continue;
+        const authored = skill.name
+          .slice(skill.extensionName.length + 1)
+          .trim()
+          .toLowerCase();
+        skillsByAuthoredName.set(
+          authored,
+          skillsByAuthoredName.has(authored) ? undefined : skill,
+        );
+      }
+      const identities = skillNames.map((skillName) => {
+        const normalized = skillName.trim().toLowerCase();
+        const exact = skillsByName.get(normalized);
+        if (exact) {
+          if (exact.level !== 'extension' || !exact.extensionName) {
+            return {
+              name: skillName,
+              registryName: exact.name,
+              resolved: true,
+            };
+          }
           return {
             name: skillName,
-            ...(prefixEnd > 0
-              ? { authoredName: skillName.slice(prefixEnd + 1) }
-              : {}),
+            authoredName: exact.name.slice(exact.extensionName.length + 1),
+            registryName: exact.name,
+            resolved: true,
           };
         }
-        if (skill.level !== 'extension' || !skill.extensionName) {
-          return { name: skillName };
+        // An incomplete observation cannot prove which Extension owns a
+        // bare authored name: another claimant may be the one it missed.
+        const authoredMatch = catalogEnumerated
+          ? skillsByAuthoredName.get(normalized)
+          : undefined;
+        if (authoredMatch?.extensionName) {
+          return {
+            name: skillName,
+            authoredName: authoredMatch.name.slice(
+              authoredMatch.extensionName.length + 1,
+            ),
+            registryName: authoredMatch.name,
+            resolved: true,
+          };
         }
+        const prefixEnd = skillName.indexOf(':');
         return {
           name: skillName,
-          authoredName: skillName.slice(skill.extensionName.length + 1),
+          ...(prefixEnd > 0
+            ? { authoredName: skillName.slice(prefixEnd + 1) }
+            : {}),
+          resolved: false,
         };
       });
+      return { identities, catalogAvailable, catalogEnumerated, skills };
     };
+    // Which standing entries can block is a catalog question (both
+    // spellings), while which entry the write removes is a spelling
+    // question: the workspace routes write the request name and the user
+    // route the registry name, so `pdf` and `rust:pdf` can differ here.
+    const blockSkillIdentity = (
+      identity: { name: string; authoredName?: string; registryName?: string },
+      writtenName: string,
+      writtenNames?: readonly string[],
+    ) => ({
+      name: identity.registryName ?? identity.name,
+      ...(identity.authoredName ? { authoredName: identity.authoredName } : {}),
+      writtenName,
+      ...(writtenNames ? { writtenNames } : {}),
+    });
     const persistDisabledToolsFn = (
       workspace: string,
       toolName: string,
@@ -6019,7 +6097,8 @@ async function runQwenServeImpl(
         // the settings write lock so an enable does not serialize every other
         // settings write for this workspace behind a cold read.
         const [skillIdentity] = enabled
-          ? await resolveSkillToggleIdentities(workspace, [skillName])
+          ? (await resolveSkillToggleIdentities(workspace, [skillName]))
+              .identities
           : [{ name: skillName }];
         return withSettingsLock(workspace, async () => {
           assertGenerationOpen?.();
@@ -6043,7 +6122,10 @@ async function runQwenServeImpl(
           // locks such rows, and a route that persists anyway reports an
           // enable the merged config still denies.
           if (enabled) {
-            const block = skillToggleBlockForName(fresh, skillIdentity);
+            const block = skillToggleBlockForName(
+              fresh,
+              blockSkillIdentity(skillIdentity, skillName),
+            );
             if (block) {
               return { changed: false, disabled: workspaceDisabled, block };
             }
@@ -6103,7 +6185,8 @@ async function runQwenServeImpl(
         // Resolve catalog identities before the lock for the same reason as
         // the single toggle above.
         const skillIdentities = enabled
-          ? await resolveSkillToggleIdentities(workspace, skillNames)
+          ? (await resolveSkillToggleIdentities(workspace, skillNames))
+              .identities
           : skillNames.map((name) => ({ name }));
         return withSettingsLock(workspace, async () => {
           assertGenerationOpen?.();
@@ -6136,7 +6219,7 @@ async function runQwenServeImpl(
               if (enabled) {
                 const block = skillToggleBlockForName(
                   fresh,
-                  skillIdentities[index],
+                  blockSkillIdentity(skillIdentities[index], skillName),
                 );
                 if (
                   block &&
@@ -6191,6 +6274,270 @@ async function runQwenServeImpl(
             fresh.setValues(
               settingsChanges.map((change) => ({
                 scope: WORKSPACE_SETTING_SCOPE,
+                ...change,
+              })),
+              undefined,
+              assertGenerationOpen,
+            );
+          }
+          return { outcomes, settingsChanges };
+        });
+      });
+    // User-scope writes are keyed on the primary workspace: every other
+    // user-scope writer (`/workspace/settings`, `/workspace/config/mcp`)
+    // already serializes there, so this lock orders against them too.
+    const persistUserSkillActivationFn = (
+      workspace: string,
+      skillNames: readonly string[],
+      enabled: boolean,
+      mode: import('../config/skill-settings.js').SkillDisableMode,
+      assertGenerationOpen?: () => void,
+    ): Promise<PersistUserSkillActivationResult> =>
+      withSkillToggleOrder(workspace, async () => {
+        // Resolving a catalog identity can block on ACP. Do it before taking
+        // the settings write lock so an enable does not serialize every other
+        // settings write for this workspace behind a cold read.
+        const {
+          identities: skillIdentities,
+          catalogAvailable,
+          catalogEnumerated,
+          skills,
+        } = await resolveSkillToggleIdentities(workspace, skillNames);
+        // A User restriction also applies outside the primary workspace.
+        // Only remove an authored alias when every managed catalog establishes
+        // that no other registry identity depends on it.
+        let aliasesKnown = catalogEnumerated;
+        const catalogSkills = [...(skills ?? [])];
+        if (skillIdentities.some((identity) => identity.resolved)) {
+          for (const runtime of workspaceRegistryForPersistence.current?.listManaged() ??
+            []) {
+            if (runtime.workspaceCwd === workspace) continue;
+            if (!runtime.trusted) {
+              aliasesKnown = false;
+              continue;
+            }
+            try {
+              const status =
+                await runtime.workspaceService.getWorkspaceSkillsStatus(
+                  {
+                    route: 'user skill settings persistence',
+                    workspaceCwd: runtime.workspaceCwd,
+                  },
+                  { requireFresh: true },
+                );
+              catalogSkills.push(...status.skills);
+              if (
+                !status.initialized ||
+                status.snapshot ||
+                status.errors?.length ||
+                status.complete === false
+              ) {
+                aliasesKnown = false;
+              }
+            } catch {
+              aliasesKnown = false;
+            }
+          }
+        }
+        const aliasOwners = new Map<string, Set<string>>();
+        for (const skill of catalogSkills) {
+          const name = skill.name.trim().toLowerCase();
+          const authored =
+            skill.level === 'extension' && skill.extensionName
+              ? skill.name
+                  .slice(skill.extensionName.length + 1)
+                  .trim()
+                  .toLowerCase()
+              : name;
+          for (const spelling of new Set([name, authored])) {
+            const owners = aliasOwners.get(spelling) ?? new Set<string>();
+            owners.add(name);
+            aliasOwners.set(spelling, owners);
+          }
+        }
+        return withSettingsLock(workspace, async () => {
+          assertGenerationOpen?.();
+          const {
+            skillSettingStrings,
+            skillToggleBlockForName,
+            updateSkillActivationLists,
+          } = await import('../config/skill-settings.js');
+          const fresh = loadSettingsForPersistence(workspace);
+          const initial = {
+            disabled: skillSettingStrings(
+              fresh,
+              USER_SETTING_SCOPE,
+              'disabled',
+            ),
+            defaultDisabled: skillSettingStrings(
+              fresh,
+              USER_SETTING_SCOPE,
+              'defaultDisabled',
+            ),
+            enabled: skillSettingStrings(fresh, USER_SETTING_SCOPE, 'enabled'),
+          };
+          const writtenName = (index: number) =>
+            skillIdentities[index]!.registryName ??
+            skillIdentities[index]!.name;
+          const isProvenUniqueSpelling = (name: string) =>
+            aliasesKnown &&
+            aliasOwners.get(name.trim().toLowerCase())?.size === 1;
+          // Keep all identity spellings for block detection, but only exempt
+          // aliases this write can safely remove from the User lists.
+          const identityNames = (index: number): string[] => {
+            const written = writtenName(index);
+            const identity = skillIdentities[index]!;
+            const authoredName = identity.authoredName;
+            const owners = aliasOwners.get(
+              authoredName?.trim().toLowerCase() ?? '',
+            );
+            return identity.resolved &&
+              aliasesKnown &&
+              authoredName &&
+              owners?.size === 1 &&
+              owners.has(written.trim().toLowerCase()) &&
+              authoredName.trim().toLowerCase() !== written.trim().toLowerCase()
+              ? [written, authoredName]
+              : [written];
+          };
+          let next = initial;
+          const outcomes: PersistUserSkillActivationResult['outcomes'] =
+            skillNames.map((_, index) => ({
+              skillName: writtenName(index),
+              changed: false,
+            }));
+          // A grant a standing entry still forbids is not a write: the merged
+          // config would keep the skill disabled while the route reported an
+          // enable. A `defaultDisabled` entry a grant the batch records
+          // cancels no longer forbids it, so refused names are rechecked
+          // until the batch converges and the result does not depend on
+          // request order.
+          const stillBlocked = (index: number, removesEntries = true) => {
+            const block = skillToggleBlockForName(
+              fresh,
+              blockSkillIdentity(
+                skillIdentities[index]!,
+                writtenName(index),
+                removesEntries
+                  ? identityNames(index).filter(isProvenUniqueSpelling)
+                  : [],
+              ),
+              USER_SETTING_SCOPE,
+            );
+            if (
+              block &&
+              (block.reason === 'default' ||
+                (block.scope === 'User' &&
+                  !next.disabled.some(
+                    (name) => name.trim().toLowerCase() === block.entry,
+                  ))) &&
+              next.enabled.some(
+                (name) => name.trim().toLowerCase() === block.entry,
+              )
+            ) {
+              return null;
+            }
+            return block;
+          };
+          let pending = skillNames.map((_, index) => index);
+          for (let pass = 0; pass < skillNames.length; pass += 1) {
+            const refused: number[] = [];
+            let listChanged = false;
+            for (const index of pending) {
+              const skillName = writtenName(index);
+              if (enabled && !skillIdentities[index]!.resolved) {
+                if (!catalogAvailable) {
+                  throw new SkillCatalogUnavailableError();
+                }
+                outcomes[index] = {
+                  skillName,
+                  changed: false,
+                  reason: 'unresolved_skill_name',
+                };
+                continue;
+              }
+              // An existing grant may already cancel this default. Preserve
+              // its shared fallback instead of deleting it in a no-op enable.
+              const preservesDefault =
+                enabled &&
+                !isProvenUniqueSpelling(skillName) &&
+                next.defaultDisabled.some(
+                  (name) =>
+                    name.trim().toLowerCase() ===
+                    skillName.trim().toLowerCase(),
+                );
+              // A default-mode disable must not report a relaxation a
+              // surviving hard entry still forbids. The blocking spelling can
+              // be the authored alias, so consult the block check for every
+              // disable rather than only when the written spelling carries it.
+              const block =
+                enabled || mode === 'default'
+                  ? stillBlocked(index, !preservesDefault)
+                  : null;
+              if (block) {
+                outcomes[index] = { skillName, changed: false, block };
+                refused.push(index);
+                continue;
+              }
+              if (preservesDefault) {
+                outcomes[index] = { skillName, changed: false };
+                continue;
+              }
+              // A new grant cancels an identically spelled `defaultDisabled`
+              // entry in every scope and workspace for every identity that
+              // spelling names. Refuse unless the catalogs prove one owner.
+              if (
+                enabled &&
+                !isProvenUniqueSpelling(skillName) &&
+                !next.enabled.some(
+                  (name) =>
+                    name.trim().toLowerCase() ===
+                    skillName.trim().toLowerCase(),
+                )
+              ) {
+                outcomes[index] = {
+                  skillName,
+                  changed: false,
+                  reason: 'ambiguous_skill_name',
+                };
+                continue;
+              }
+              const updated = updateSkillActivationLists(
+                next,
+                skillName,
+                enabled,
+                mode,
+                identityNames(index).slice(1),
+              );
+              const changed = JSON.stringify(updated) !== JSON.stringify(next);
+              outcomes[index] = { skillName, changed };
+              next = updated;
+              listChanged ||= changed;
+            }
+            pending = refused;
+            if (pending.length === 0 || !listChanged) break;
+          }
+
+          const settingsChanges: PersistUserSkillActivationResult['settingsChanges'] =
+            [];
+          for (const [list, key] of [
+            ['disabled', 'skills.disabled'],
+            ['defaultDisabled', 'skills.defaultDisabled'],
+            ['enabled', 'skills.enabled'],
+          ] as const) {
+            if (JSON.stringify(next[list]) === JSON.stringify(initial[list])) {
+              continue;
+            }
+            settingsChanges.push({
+              key,
+              value: next[list].length > 0 ? next[list] : undefined,
+            });
+          }
+          if (settingsChanges.length > 0) {
+            assertGenerationOpen?.();
+            fresh.setValues(
+              settingsChanges.map((change) => ({
+                scope: USER_SETTING_SCOPE,
                 ...change,
               })),
               undefined,
@@ -8755,6 +9102,7 @@ async function runQwenServeImpl(
       persistDisabledTools: persistDisabledToolsFn,
       persistDisabledSkills: persistDisabledSkillsFn,
       persistDisabledSkillsBatch: persistDisabledSkillsBatchFn,
+      persistUserSkillActivation: persistUserSkillActivationFn,
       persistSetting: persistSettingFn,
       persistSettings: persistSettingsFn,
       sessionArtifactsPersistenceAvailable:

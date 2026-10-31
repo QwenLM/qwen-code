@@ -470,6 +470,44 @@ export interface PersistDisabledSkillsBatchResult {
   }>;
 }
 
+export type UserSkillActivationSettingKey =
+  | 'skills.disabled'
+  | 'skills.defaultDisabled'
+  | 'skills.enabled';
+
+export interface PersistUserSkillActivationOutcome {
+  skillName: string;
+  changed: boolean;
+  /** Set with `changed: false` when a standing entry refused an enable. */
+  block?: SkillToggleBlock;
+  /**
+   * Set with `changed: false` when the write could not name one catalog
+   * identity: the name is unresolved, or it is a shared spelling that would
+   * be written as a new grant.
+   */
+  reason?: 'unresolved_skill_name' | 'ambiguous_skill_name';
+}
+
+export interface PersistUserSkillActivationResult {
+  outcomes: PersistUserSkillActivationOutcome[];
+  settingsChanges: Array<{
+    key: UserSkillActivationSettingKey;
+    value: string[] | undefined;
+  }>;
+}
+
+/**
+ * The workspace Skill catalog could not be read, or omits Extension Skills
+ * because the workspace is untrusted. Enable requests that cannot resolve a
+ * name in that state are retryable rather than a permanent name defect.
+ */
+export class SkillCatalogUnavailableError extends Error {
+  constructor() {
+    super('The workspace Skill catalog is unavailable. Retry the request.');
+    this.name = 'SkillCatalogUnavailableError';
+  }
+}
+
 export class WorkspaceSkillNotFoundError extends Error {
   constructor(readonly skillName: string) {
     super(`Skill not found: ${skillName}`);
