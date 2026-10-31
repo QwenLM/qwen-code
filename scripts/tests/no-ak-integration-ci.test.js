@@ -353,6 +353,7 @@ describe('no-AK integration CI wiring', () => {
       'cli/telemetry.test.ts': 'Real model required',
       'cli/todo_write.test.ts': 'Real model required',
       'cli/tool-search.test.ts': 'Real model required',
+      'cli/update-target-version.test.ts': 'Runtime budget',
       'cli/utf-bom-encoding.test.ts': 'Runtime budget',
       'cli/write_file.test.ts': 'Real model required',
       'export-artifact-contract.test.ts': 'Runtime budget',
