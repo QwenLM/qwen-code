@@ -500,6 +500,44 @@ describe('atomicWriteFileSync', () => {
 });
 
 describe('forceMode option', () => {
+  describe.each([
+    { name: 'atomicWriteFile', write: atomicWriteFile },
+    { name: 'atomicWriteFileSync', write: atomicWriteFileSync },
+  ])('$name credential replacement', ({ write }) => {
+    it.skipIf(!arePermissionBitsEnforced())(
+      'heals a read-only credential to the forced mode',
+      async () => {
+        const target = existing('credential.json', 'old', 0o400);
+        try {
+          await write(target, 'new', {
+            mode: 0o600,
+            forceMode: true,
+            noFollow: true,
+          });
+          expect(read(target)).toBe('new');
+          expect(modeOf(target)).toBe(0o600);
+          expect(ls()).toEqual(['credential.json']);
+        } finally {
+          fsSync.chmodSync(target, 0o600);
+        }
+      },
+    );
+
+    it.skipIf(process.platform === 'win32' || !arePermissionBitsEnforced())(
+      'replaces a symlink to a read-only target without changing the target',
+      async () => {
+        const { real, link } = placeLink('target', 'credential', 'ORIGINAL');
+        fsSync.chmodSync(real, 0o444);
+        try {
+          await write(link, 'NEW', { noFollow: true, mode: 0o600 });
+          expectLinkReplaced(link, real);
+        } finally {
+          fsSync.chmodSync(real, 0o600);
+        }
+      },
+    );
+  });
+
   useTmpDir('force-mode-test-');
 
   itPosix(
