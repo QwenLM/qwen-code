@@ -21,6 +21,13 @@ import {
   type QQMediaKind,
 } from './file-tools.js';
 
+// A real file outside both the session workspace and the system temporary
+// directory. It must exist on the platform running these tests — the macOS and
+// Windows lanes would otherwise fail on a missing path before the boundary
+// check gets a chance to refuse it.
+const OUTSIDE_PATH =
+  process.platform === 'win32' ? 'C:\\Windows\\win.ini' : '/etc/hosts';
+
 // Two guards are only observable through the descriptor the module opens, so
 // node:fs is partially mocked: the wrappers delegate to the real functions
 // unless a test replaces them.
@@ -90,14 +97,14 @@ describe('readOutboundFile', () => {
   });
 
   it('rejects a path outside the workspace and the temporary directory', () => {
-    expect(() => readOutboundFile('/etc/hostname', workspace)).toThrow(
+    expect(() => readOutboundFile(OUTSIDE_PATH, workspace)).toThrow(
       /outside the session workspace/,
     );
   });
 
   it('rejects a symlink that escapes the workspace', () => {
     const link = join(workspace, 'escape.txt');
-    symlinkSync('/etc/hostname', link);
+    symlinkSync(OUTSIDE_PATH, link);
 
     // realpath resolves the link before the root check, so the escape is caught
     // even though the link itself sits inside the workspace.
@@ -340,7 +347,7 @@ describe('buildFileTools', () => {
   it('fails as a tool result when no chat is bound', async () => {
     const { call, sent } = harness({ resolveChat: () => undefined });
 
-    const result = await call({ path: '/etc/hostname' });
+    const result = await call({ path: OUTSIDE_PATH });
 
     expect(isError(result)).toBe(true);
     expect(textOf(result)).toContain('No QQ chat is bound');
@@ -360,7 +367,7 @@ describe('buildFileTools', () => {
   it('fails as a tool result when the path escapes the workspace', async () => {
     const { call, sent } = harness();
 
-    const result = await call({ path: '/etc/hostname' });
+    const result = await call({ path: OUTSIDE_PATH });
 
     expect(isError(result)).toBe(true);
     expect(textOf(result)).toContain('outside the session workspace');
