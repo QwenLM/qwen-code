@@ -125,6 +125,15 @@ export interface FailingCheck {
    * watch made after this one spends another, so a return to an earlier
    * push does not count twice. */
   lastPush?: string;
+  /** Heads the count asked GitHub about and got no result for, oldest
+   * first, each with the record's `pushes` once that read counted: a pass
+   * there found later leaves only the pushes counted since. */
+  unanswered?: UnansweredHead[];
+}
+
+export interface UnansweredHead {
+  sha: string;
+  pushes: number;
 }
 
 export interface AutofixPrWatchOptions {
@@ -963,7 +972,18 @@ function isFailingCheck(value: unknown): value is FailingCheck {
     Number.isInteger(check.pushes) &&
     check.pushes >= 0 &&
     SHA_RE.test(check.head) &&
-    (check.lastPush === undefined || SHA_RE.test(check.lastPush))
+    (check.lastPush === undefined || SHA_RE.test(check.lastPush)) &&
+    (check.unanswered === undefined ||
+      (Array.isArray(check.unanswered) &&
+        check.unanswered.every(
+          (entry: UnansweredHead | null) =>
+            typeof entry === 'object' &&
+            entry !== null &&
+            typeof entry.sha === 'string' &&
+            SHA_RE.test(entry.sha) &&
+            Number.isInteger(entry.pushes) &&
+            entry.pushes >= 0,
+        )))
   );
 }
 
@@ -1054,12 +1074,20 @@ export function readState(statePath: string): AutofixPrState | null {
     ...(failingChecks
       ? {
           failingChecks: failingChecks.map(
-            ({ identity, check, head, pushes, lastPush }) => ({
+            ({ identity, check, head, pushes, lastPush, unanswered }) => ({
               identity,
               check,
               head,
               pushes,
               ...(lastPush === undefined ? {} : { lastPush }),
+              ...(unanswered === undefined
+                ? {}
+                : {
+                    unanswered: unanswered.map(({ sha, pushes }) => ({
+                      sha,
+                      pushes,
+                    })),
+                  }),
             }),
           ),
         }

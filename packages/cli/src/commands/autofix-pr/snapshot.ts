@@ -63,6 +63,7 @@ import {
   type AutofixPrGateCursor,
   type AutofixPrState,
   type FailingCheck,
+  type UnansweredHead,
 } from './state.js';
 import { remoteRef } from './worktree.js';
 import {
@@ -695,20 +696,24 @@ function checkResults(
  * pushes per failing check (Section 10). A check is recorded on the first
  * head a round sees it fail on, and every later push of the watch it fails
  * on spends one of its pushes; a pass ends the record, and a head someone
- * else pushed gives every check its pushes back.
+ * else pushed gives every check its pushes back. A rollup cut at the page
+ * limit may hold a later run of a check on the pages not read: it changes
+ * nothing.
  *
  * The gate wakes no round for a pass, so a round may never read one: the
  * watch can push again (for a comment) before its fix's checks end, or a
  * re-run can pass after the round moved on. When a recorded check fails on
  * a later push of the watch, `resultsOn` therefore says what it ended in on
  * the watch's pushes in between that the record has not counted — and, when
- * a round re-ran it there, on the head it last failed on: a pass there
- * starts the count over, a failure on a push in between spends one (a
- * re-run that failed again on the last head spends nothing more), and no
- * result
- * (still running, cancelled, not listed, or GitHub not answering) spends
- * nothing. A return to a push of the watch older than the latest one the
- * record counted spends nothing.
+ * a round re-ran it there, on the head it last failed on. A pass there ends
+ * the record as a pass a round reads would, so this failure is a first one
+ * again; a failure on a push in between spends one (a re-run that failed
+ * again on the last head spends nothing more). A head with no result (still
+ * running, cancelled, not listed, or GitHub not answering) spends nothing
+ * and is asked about again on the record's next push: a pass found there
+ * then leaves only the pushes counted since, and a failure spends nothing.
+ * A return to a push of the watch older than the latest one the record
+ * counted spends nothing.
  */
 export function trackFailingChecks(
   pr: PrData,
@@ -717,7 +722,12 @@ export function trackFailingChecks(
 ): FailingCheck[] {
   const records = state.failingChecks ?? [];
   const commit = pr.commits.nodes[0]?.commit;
-  if (pr.state !== 'OPEN' || !commit || commit.oid !== pr.headRefOid) {
+  if (
+    pr.state !== 'OPEN' ||
+    !commit ||
+    commit.oid !== pr.headRefOid ||
+    commit.statusCheckRollup?.contexts.pageInfo.hasNextPage
+  ) {
     return records;
   }
   const head = pr.headRefOid;
@@ -741,6 +751,59 @@ export function trackFailingChecks(
     pushes: 0,
     ...(baseline === undefined ? {} : { lastPush: baseline }),
   });
+  // A recorded check failing on a later push of the watch. Asked newest
+  // first: a pass on a newer head makes the older ones moot.
+  const spend = (record: FailingCheck, check: string): FailingCheck => {
+    const result = (sha: string) => resultsOn(sha)?.get(record.identity);
+    const between = state.pushedShas.slice(pushOrder(record.lastPush) + 1, at);
+    const reranOn =
+      record.head !== head && reran.has(`${record.identity}@${record.head}`)
+        ? [record.head]
+        : [];
+    let failed = 0;
+    const open: string[] = [];
+    for (const sha of [...between].reverse()) {
+      const there = result(sha);
+      if (there === 'passed') return fresh(record.identity, check);
+      if (there === 'failed') failed += 1;
+      else open.unshift(sha);
+    }
+    for (const sha of reranOn) {
+      const there = result(sha);
+      if (there === 'passed') return fresh(record.identity, check);
+      if (there === undefined) open.unshift(sha);
+    }
+    // What earlier reads got no result for.
+    const earlier: UnansweredHead[] = [];
+    let since = 0;
+    for (const entry of [...(record.unanswered ?? [])].reverse()) {
+      const there = result(entry.sha);
+      if (there === 'passed') {
+        since = entry.pushes;
+        break;
+      }
+      if (there === undefined) earlier.unshift(entry);
+    }
+    const pushes = Math.max(record.pushes - since, 0) + failed + 1;
+    // Asked again on the next push: the newest, as many as a read asks about.
+    const unanswered = [
+      ...earlier.map((entry) => ({
+        sha: entry.sha,
+        pushes: Math.max(entry.pushes - since, 0),
+      })),
+      ...open
+        .filter((sha) => !earlier.some((entry) => entry.sha === sha))
+        .map((sha) => ({ sha, pushes })),
+    ].slice(-MAX_CHECK_LOOKUPS);
+    return {
+      identity: record.identity,
+      check,
+      head,
+      pushes,
+      lastPush: head,
+      ...(unanswered.length ? { unanswered } : {}),
+    };
+  };
   const names = new Map<string, string>();
   for (const ctx of latestContexts(
     commit.statusCheckRollup?.contexts.nodes ?? [],
@@ -764,37 +827,14 @@ export function trackFailingChecks(
         result === 'failed'
           ? fresh(record.identity, names.get(record.identity)!)
           : {
-              ...record,
+              identity: record.identity,
+              check: record.check,
+              head: record.head,
               pushes: 0,
               ...(baseline === undefined ? {} : { lastPush: baseline }),
             };
     } else if (result === 'failed' && at > pushOrder(record.lastPush)) {
-      let pushes = record.pushes;
-      // A re-run on the head it last failed on may have passed since.
-      if (
-        record.head !== head &&
-        reran.has(`${record.identity}@${record.head}`) &&
-        resultsOn(record.head)?.get(record.identity) === 'passed'
-      ) {
-        pushes = 0;
-      }
-      // The watch's pushes in between, oldest first: the newest of them
-      // are asked about, the rest count as no result.
-      const between = state.pushedShas
-        .slice(pushOrder(record.lastPush) + 1, at)
-        .slice(-(MAX_CHECK_LOOKUPS - 1));
-      for (const sha of between) {
-        const there = resultsOn(sha)?.get(record.identity);
-        if (there === 'passed') pushes = 0;
-        else if (there === 'failed') pushes += 1;
-      }
-      next = {
-        identity: record.identity,
-        check: names.get(record.identity)!,
-        head,
-        pushes: pushes + 1,
-        lastPush: head,
-      };
+      next = spend(record, names.get(record.identity)!);
     } else if (result === 'failed') {
       next = { ...record, check: names.get(record.identity)!, head };
     } else {

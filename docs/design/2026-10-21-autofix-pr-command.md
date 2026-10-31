@@ -378,13 +378,15 @@ Event rules:
   (`lastPush`). It counts pushes, not fixes: a push for a review comment
   that the check fails on counts too. A pass (`SUCCESS` or `NEUTRAL`; a
   status's `SUCCESS`) ends the entry. Someone else's push gives every entry
-  its pushes back, counted again from the watch's latest push: `sync` does
-  so when it adopts one, whether or not a round reads it, and so does a
-  read of such a head (the one `prepare` resumed at). A return to an
-  earlier push of the watch spends nothing. Only a read of the head the
-  watch knows (the one `sync` or `push` recorded) counts: any other is the
-  API lagging behind the branch, or a push the round syncs to and reads
-  again. The gate wakes no round for a pass, so a round may never read one:
+  its pushes back, counted again from the watch's latest push: `sync` and
+  `prepare` do so when they adopt one, whether or not a round reads it,
+  and so does a read of such a head. A return to an earlier push of the
+  watch spends nothing. Only a read of the head the watch knows (the one
+  `sync` or `push` recorded) counts: any other is the API lagging behind
+  the branch, or a push the round syncs to and reads again. A read whose
+  head rollup is cut at the page limit changes nothing either: a later run
+  of a check may be on the pages not read. The gate wakes no round for a
+  pass, so a round may never read one:
   the watch can push again (for a comment) before its fix's checks end, or
   a re-run can pass after the round moved on. So when a check fails on a
   later push of the watch, the snapshot asks GitHub what it ended in on the
@@ -392,11 +394,16 @@ Event rules:
   round re-ran it there — on the head it last failed on
   (`commitCheckResults`: one GraphQL read of a commit's rollup, paged like
   the PR's, a rollup cut at the page limit taken for no answer; at most 4
-  commits a read, each once; the three newest pushes in between). A pass
-  there starts the count over; a failure on a push in between spends one (a
-  re-run that failed again on the last head spends nothing more); no result
-  (still running, cancelled, not listed, or no answer from GitHub) spends
-  nothing. Only a read that changes an entry takes the watch's lock, to
+  commits a read, shared by every check, each asked once, newest first). A
+  pass there ends the entry as a pass a round reads would, so this failure
+  is a first one again; a failure on a push in between spends one (a
+  re-run that failed again on the last head spends nothing more). A head
+  with no result (still running, cancelled, not listed, or no answer from
+  GitHub) spends nothing and stays on the entry (`unanswered`, the newest
+  4), asked about again on its next push: a pass found there then leaves
+  only the pushes counted since a round next saw the check fail, and a
+  failure found there spends nothing — only a result known when a push is
+  counted spends. Only a read that changes an entry takes the watch's lock, to
   re-read the state and write it; the entries a read changed go last, and
   at most 100 are kept. Once 3 pushes left a check failing, its `ci_failed`
   carries `exhausted: true`, and the skill answers it as needing a human
