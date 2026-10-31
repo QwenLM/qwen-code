@@ -1468,6 +1468,64 @@ describe('managed-agent-server e2e runner', () => {
     const wrongText = views();
     wrongText.live[4] = delta(5, 'WRONG', 'partC');
     expect(() => audit(wrongText)).toThrow(/B2 live SSE/);
+    // F5: the LIVE answer's identity is load-bearing — a live stream that
+    // delivers the surviving answer under the dead generation's Part, with no
+    // identity, or under a foreign item must red even when reload/replay are
+    // correct (live-only counterexamples).
+    const liveDeadPart = views();
+    liveDeadPart.live[4] = delta(5, 'ANSWER', 'partA');
+    expect(() => audit(liveDeadPart)).toThrow(
+      /live answer identity differs from reload/,
+    );
+    const liveNoIdentity = views();
+    liveNoIdentity.live[4] = delta(5, 'ANSWER', null, null);
+    expect(() => audit(liveNoIdentity)).toThrow(
+      /live answer carries no identity/,
+    );
+    const liveForeignItem = views();
+    liveForeignItem.live[4] = delta(5, 'ANSWER', 'partZ', 'item_foreign');
+    expect(() => audit(liveForeignItem)).toThrow(
+      /live answer identity differs from reload/,
+    );
+    // F6: a replay failure terminal (same turn id, text and identities) must
+    // red — a reconnecting client shown a failure while live/reload show
+    // success is not a passing B2.
+    const replayFailed = views();
+    replayFailed.replay[3] = { ...terminal(6), type: 'turn.failed' };
+    expect(() => audit(replayFailed)).toThrow(/B2 replay view/);
+    const replayCancelled = views();
+    replayCancelled.replay[3] = { ...terminal(6), type: 'turn.cancelled' };
+    expect(() => audit(replayCancelled)).toThrow(/B2 replay view/);
+    // Adversarial completeness: every remaining clause has a counterexample.
+    // A live FAILURE terminal (count still one) must red.
+    const liveFailed = views();
+    liveFailed.live[5] = { ...terminal(6), type: 'turn.failed' };
+    expect(() => audit(liveFailed)).toThrow(/B2 live SSE/);
+    // A missing earlier prefix in the live capture must red.
+    const missingPartial = views();
+    missingPartial.live.splice(2, 1);
+    expect(() => audit(missingPartial)).toThrow(/B2 live SSE/);
+    // Only one retraction in the live capture must red.
+    const singleRetraction = views();
+    singleRetraction.live.splice(3, 1);
+    expect(() => audit(singleRetraction)).toThrow(/B2 live SSE/);
+    // A retraction AFTER the new prefix (wrong order) must red.
+    const lateRetraction = views();
+    lateRetraction.live = [
+      delta(1, 'P1', 'partA'),
+      delta(3, 'P2', 'partB'),
+      reconciled(4),
+      delta(5, 'ANSWER', 'partC'),
+      reconciled(6),
+      terminal(7),
+    ];
+    lateRetraction.firstPrefixSequence = 1;
+    lateRetraction.secondPrefixSequence = 3;
+    expect(() => audit(lateRetraction)).toThrow(/B2 live SSE/);
+    // An unblanked prefix in the REPLAY view must red.
+    const replayUnblanked = views();
+    replayUnblanked.replay[0] = delta(1, 'P1', 'partA');
+    expect(() => audit(replayUnblanked)).toThrow(/B2 replay view/);
   });
 
   // B2: pin the identity/live-SSE observations and their harness-only gate so a

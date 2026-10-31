@@ -142,10 +142,12 @@ window), the abort semantics, and the shared observer's split-frame/wire asserti
 `assertB2StreamViews({ live, reload, replay, partials, answer, firstPrefixSequence,
 secondPrefixSequence, originalTurnId })` is a top-level helper so behavioural tests
 execute every clause: converged live text (deltas after the last payload-less
-`stream.reconciled`), exactly one terminal of the original turn in live AND replay,
-retraction ordering, one shared assistant item with a pairwise-distinct content Part
-per generation (every group must actually carry the item), blanked prefix deltas in
-reload AND replay, and replay identity matching the reload answer's item AND Part.
+`stream.reconciled`), exactly one `turn.completed` terminal of the original turn in
+live AND replay, retraction ordering, one shared assistant item with a
+pairwise-distinct content Part per generation (every group must actually carry the
+item), the live answer carrying an identity equal to the reload answer's item AND
+Part, blanked prefix deltas in reload AND replay, and replay identity matching the
+reload answer's item AND Part.
 The model-round arm has no gate mode, so its evidence is written through the shared
 `writeEvidenceFile` into an explicitly named `model-round-<epoch>` directory (or
 `G3_VERIFY_REPORT_DIR`), never a borrowed `packaged-undefined-<epoch>` one.
@@ -212,9 +214,17 @@ observation, not the generic audit string.
 
 - The packaged model-round arm asserts new attempt/stream identities, blanked
   retracted prefixes, and a live SSE view that converges to the surviving answer and
-  one terminal, equal to reload and replay.
-- Each new signal has a demonstrated named mutation red (M1–M3); the live client's
-  non-vacuity is guarded per phase.
+  one `turn.completed` terminal, equal to reload and replay — including the live
+  answer's own identity (it must match the reload answer's item and Part) and the
+  replay terminal's type.
+- Mutation evidence is named per signal, not claimed uniformly: M1 (deterministic
+  attempt id) reds the attempt-identity assertion; M2 (retraction short-circuit) reds
+  the shared retraction-ordering observation, with the live/Part/blanking/replay
+  checks jointly witnessing the same mechanism; M3 (constant message id) reds an
+  upstream publication barrier and is recorded as an upstream-guard observation, not
+  a B2-specific witness. The view-audit clauses (live-answer identity, replay terminal
+  type, per-group item, shared Part, blanking, terminal count, drain) each have a
+  behavioural counterexample plus a verified delete-control.
 - Bilingual design docs aligned; CI green; no production behavior change.
 
 ## Open questions

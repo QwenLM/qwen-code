@@ -117,9 +117,10 @@ rejection；审计的 await 仍看到真实拒绝，abort/预算错误被重包�
 `assertB2StreamViews({ live, reload, replay, partials, answer, firstPrefixSequence,
 secondPrefixSequence, originalTurnId })` 是顶层 helper，使行为化测试执行每个子句：
 收敛 live 文本（最后一条无 payload 的 `stream.reconciled` 之后的 delta）、live 与
-replay 中原 Turn 恰好一个终态、撤回顺序、唯一共享 assistant item 加逐代互不相同的
-content Part（每组必须真的携带 item）、reload 与 replay 中被清空的前缀 delta、
-replay 身份与 reload 答案的 item 和 Part 都一致。model-round 臂无 gate 模式，其证据
+replay 中原 Turn 恰好一个 `turn.completed` 终态、撤回顺序、唯一共享 assistant item
+加逐代互不相同的 content Part（每组必须真的携带 item）、live 答案携带与 reload 答案
+item 和 Part 一致的身份、reload 与 replay 中被清空的前缀 delta、replay 身份与 reload
+答案的 item 和 Part 都一致。model-round 臂无 gate 模式，其证据
 经共享 `writeEvidenceFile` 写入显式命名的 `model-round-<epoch>` 目录（或
 `G3_VERIFY_REPORT_DIR`），绝不借用 `packaged-undefined-<epoch>` 目录。
 
@@ -170,8 +171,13 @@ typecheck && npm run bundle`。
 ## 验收标准
 
 - 打包 model-round 臂断言新 attempt/stream 身份、被撤回前缀清空、live SSE 视图收敛到
-  存活答案与一个终态，且等于 reload 与 replay。
-- 每个新信号有一次实测命名变异红（M1–M3）；live 客户端逐阶段非空过守卫。
+  存活答案与一个 `turn.completed` 终态，且等于 reload 与 replay——包括 live 答案自身
+  的身份（须与 reload 答案的 item 和 Part 一致）与 replay 终态的类型。
+- 变异证据按信号命名，不一刀切：M1（attemptId 确定性）红于 attempt 身份断言；
+  M2（撤回短路）红于共享撤回顺序观察，live/Part/清空/replay 检查共同见证同一机制；
+  M3（messageId 常量）红于上游发布屏障，记录为上游守卫观察而非 B2 专属见证。视图审计
+  各子句（live 答案身份、replay 终态类型、每组 item、共享 Part、清空、终态计数、drain）
+  各有行为化反例加已验证的删除对照。
 - 双语设计文档对齐；CI 绿；无生产行为改动。
 
 ## 开放问题

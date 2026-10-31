@@ -1632,11 +1632,13 @@ async function readPublicSse(
     const events = snapshot();
     return { events, lastId: String(observer.frames.at(-1)?.id ?? '') };
   } catch (error) {
-    if (observer.controller.signal.aborted && !observer.failure)
+    if (observer.failure)
+      throw new Error(`B2 live SSE failed: ${String(observer.failure)}`);
+    if (observer.controller.signal.aborted)
       throw new Error(
         `B2 live SSE aborted (budget or teardown): ${String(error)}`,
       );
-    throw error;
+    throw new Error(`B2 live SSE capture incomplete: ${String(error)}`);
   } finally {
     observer.controller.abort();
     await observer.task?.catch(() => undefined);
@@ -1722,6 +1724,20 @@ function assertB2StreamViews(input: {
       `B2 live SSE: text=${JSON.stringify(converged(input.live))} terminals=${liveTerminals.length} partial1=${livePartial1.sequences.length} partial2=${livePartial2.sequences.length} answer=${liveAnswer.sequences.length} retractions=${liveRetractions.length} frames=${input.live.length}`,
     );
   const reloadAnswer = b2DeltaIdentity(input.reload, input.answer);
+  // F5: the live answer's identity is load-bearing — the persisted views being
+  // correct does not excuse a live stream that delivers the surviving answer
+  // under a dead Part, no identity, or a foreign item.
+  if (liveAnswer.itemIds.length === 0 || liveAnswer.partIds.length === 0)
+    throw new Error(
+      `B2 live SSE: the live answer carries no identity: ${JSON.stringify(liveAnswer)}`,
+    );
+  if (
+    liveAnswer.itemIds.join(',') !== reloadAnswer.itemIds.join(',') ||
+    liveAnswer.partIds.join(',') !== reloadAnswer.partIds.join(',')
+  )
+    throw new Error(
+      `B2 live SSE: the live answer identity differs from reload: live=${JSON.stringify(liveAnswer)} reload=${JSON.stringify(reloadAnswer)}`,
+    );
   const groups = [livePartial1, livePartial2, reloadAnswer];
   const itemIds = new Set(groups.flatMap((group) => group.itemIds));
   if (
@@ -1763,6 +1779,9 @@ function assertB2StreamViews(input: {
   if (
     converged(input.replay) !== input.answer ||
     replayTerminals.length !== 1 ||
+    // F6: a reconnecting client shown a failure terminal while live/reload
+    // show success is not a passing B2.
+    replayTerminals[0].type !== 'turn.completed' ||
     !blanked(input.replay, input.firstPrefixSequence) ||
     !blanked(input.replay, input.secondPrefixSequence) ||
     replayAnswer.itemIds.join(',') !== reloadAnswer.itemIds.join(',') ||
