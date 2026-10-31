@@ -78,9 +78,10 @@ them rather than at the end of the document.
   when every call succeeded. `--compare --start <a> --now <b>` reports every
   reason the round is dirty and exits 1.
 
-The checker gains two rules over the artifacts the contract asks the round to
-write. The artifact contract names both, because a file no artifact list asks
-for is a file no round produces, and a check over an absent file is silent:
+The checker gains three rules over the artifacts the contract asks the round
+to write. The artifact contract names all three, because a file no artifact
+list asks for is a file no round produces, and a check over an absent file is
+silent:
 
 - `assertions.json` carries `failures: [{ id, attribution }]` whenever `fail` is
   nonzero, one entry per failed assertion, attributed `pr`, `harness` or
@@ -93,6 +94,13 @@ for is a file no round produces, and a check over an absent file is silent:
 <target>` and
   `rows[].commit`. A listed commit with no row is an error naming the commits,
   and so is an empty list: a claim over no commits is vacuously true.
+- `assertions.json` may carry `gates: [{ suite, pass, fail, skipped? }]`, one
+  entry per existing test suite the round ran as a targeted gate. Those counts
+  stay out of `pass`/`fail`/`total`, which count only the checks the round
+  wrote, and the publisher prints their totals on a line of their own. A
+  malformed list is an error. Over 1000 assertions with no `gates` is a
+  warning: the four such rounds among 18 recent CI artifacts had each counted
+  whole workspace suites.
 
 Each prepared artifact directory keeps `context.json` with the round's full
 coordinates — `repo`, `pr`, `baseRefOid` and `headRefOid` — so a local round
@@ -163,13 +171,26 @@ A published verification comment ends with the same attribution shape
    excludes by design, so it always runs on the host. A gate there would fire on
    every round and turn the override into the normal path, so the check is a
    separate mode intended to run inside the boundary.
-3. **The local checker mirrors the publisher instead of replacing it.**
-   Extracting the publish job's assertions into shared code would touch the
-   workflow and its meta-tests; the rule set is four checks, stable, and stated
-   in one place. Divergence is the cost, recorded below.
-4. **Warnings, not errors, for report shape.** The publisher does not enforce
-   report structure either. A checker stricter than the publisher would reject
-   artifact the lane accepts, which teaches maintainers to ignore it.
+3. **The publisher runs the local checker.** The checker started as a mirror
+   of the publish job's inline rules, because the rule set was four stable
+   checks and sharing it would touch the workflow and its meta-tests. The
+   mirror did not hold: the failure ledger and the coverage claim were added
+   here only, so the lane published shapes every local round refuses. The
+   publish job now runs this script from its trusted checkout (the
+   default-branch commit, never PR code) and trusts an agent verdict only when
+   the script passes on the report's own directory. That directory is also
+   the only place the lane reads `verdict.txt`: the verify job used to read
+   its own copy from whichever round directory its search found first.
+   Tightening a rule here therefore tightens CI too.
+   Loosening one does not always loosen it: the publish step still validates
+   the count triple itself (the checker runs only on a valid one) and still
+   refuses `merge-ready` over failures on its own, so those two need the
+   workflow changed as well.
+4. **Warnings, not errors, for report shape.** Report structure, evidence
+   naming and head-OID citation stay warnings because a legitimate round can
+   lack them — a documentation-only round has no screenshot to offer — and the
+   checker cannot tell whether a harness ran. Since the publish job runs this
+   script, making one of them fatal would refuse those rounds in CI as well.
 5. **Attribution is a ledger, not a fifth verdict word.** The tempting fix for
    an environment red is a verdict like `merge-ready-with-caveats`, which would
    have to be added to the publisher, its case labels and their pin. The
@@ -208,9 +229,12 @@ A published verification comment ends with the same attribution shape
   for this head (otherwise it rebuilds per the local install strategy), and
   the prepare success line says "verify or refresh its install/build first"
   instead of advertising unconditional build reuse.
-- Two implementations of the publish rules can drift. A workflow meta-test pins
-  the checker verdict vocabulary to the publisher case labels, so a fifth word
-  on one side fails the suite. The CI publisher remains authoritative.
+- The checker is on the CI publish path. Tightening a rule refuses verdicts the
+  lane used to accept, and those rounds publish as inconclusive. The
+  publish-fidelity meta-tests run the real script, including from exactly the
+  paths the publish job checks out, so run them with any checker change. A
+  workflow meta-test still pins the checker verdict vocabulary to the
+  publisher case labels, so a fifth word on one side fails the suite.
 - The PR title is untrusted input reaching a maintainer terminal, so control
   characters are dropped before it is printed.
 - These are local helpers: the lane pins `.qwen` from the base branch, so the

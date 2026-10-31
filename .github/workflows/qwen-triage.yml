@@ -2263,7 +2263,6 @@ jobs:
       # empty -> the job broke before deciding (publish reports infra).
       verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
       failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
-      agent_verdict: '${{ steps.run.outputs.agent_verdict }}'
       # Report-footer attribution: the configured model, the runner's CLI
       # version, and the content hash of the base-pinned skill that ran.
       # Empty when the run step never reached its output writes; the
@@ -2553,34 +2552,42 @@ jobs:
               exit 0
             fi
           fi
-          # Status comment with the live run link, upserted by marker so
-          # re-runs reuse one comment; publish-verify rewrites the same
-          # comment with the final report. Best-effort.
+          # Status comment with the live run link; publish-verify rewrites
+          # this same comment with the final report. Best-effort.
           MARKER='<!-- qwen-triage:verify -->'
           # A dedicated machine marker for the live status. Inferring the
           # lifecycle state from prose would misread a REPORT that merely
           # quotes the running sentence as a live status — and the next run
           # would then overwrite that report.
           STATUS_MARKER='<!-- qwen-triage:verify-state=running -->'
+          # Which run the live status belongs to. Verify jobs are serialized
+          # per PR, but their publishers queue on hosted runners, so the
+          # previous round's status is often still "running" here. Taking it
+          # over would put two rounds into one comment, and the later report
+          # would overwrite the earlier one. A run reuses only its own status
+          # (a re-run attempt keeps the run id).
+          RUN_MARKER="<!-- qwen-triage:verify-run=${GITHUB_RUN_ID} -->"
           # Bodies that carry findings mark themselves. Selecting "newest
           # comment without the running marker" would pick a cancelled or
           # infra notice, silently dropping the last real round's findings.
           SUBSTANTIVE_MARKER='<!-- qwen-triage:verify-substantive -->'
-          printf -v BODY '%s\n%s\n\n%s\n\n%s' \
+          printf -v BODY '%s\n%s\n%s\n\n%s\n\n%s' \
             "$MARKER" \
             "$STATUS_MARKER" \
+            "$RUN_MARKER" \
             "🔬 **Sandboxed verification is running** — [watch live progress]($RUN_URL). The report will be posted here when the run completes." \
             "🔬 **沙箱验证正在运行** —— [查看实时进度]($RUN_URL)。运行结束后验证报告会发布在这里。"
           # Marker lookup, shared with publish-verify: only BOT-OWNED
           # comments whose body STARTS with the marker count. Any user can
           # paste the marker into a comment of their own; matching on
           # `contains` anywhere would make the bot try to PATCH a stranger's
-          # comment (403) and strand the run. `stale` marks a marker comment
-          # that is a previous round's terminal report rather than a live
-          # status.
+          # comment (403) and strand the run.
           # Fail CLOSED on an identity lookup failure: an empty bot login
           # used to widen the filter to every user's comments, so one
           # transient API error could point the bot at an attacker's comment.
+          # Markers count only in the header, the lines before the first
+          # blank line, where they are written: a report or a notice can
+          # quote them further down.
           if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
             echo "::warning::Could not resolve the bot identity; posting a fresh status comment instead of reusing one."
             BOT_LOGIN=''
@@ -2590,41 +2597,38 @@ jobs:
             EXISTING_META="$(
               gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
                 --method GET --paginate -F per_page=100 |
-                jq -rs --arg m "$MARKER" --arg s "$STATUS_MARKER" --arg sub "$SUBSTANTIVE_MARKER" --arg bot "$BOT_LOGIN" \
+                jq -rs --arg m "$MARKER" --arg s "$STATUS_MARKER" --arg run "$RUN_MARKER" --arg sub "$SUBSTANTIVE_MARKER" --arg bot "$BOT_LOGIN" \
                   '[.[][] | select((.body | startswith($m)) and .user.login == $bot)] as $mine
-                   | ($mine | last) as $latest
-                   | ($mine | map(select(.body | contains($sub))) | last) as $report
-                   | if $latest == null then ""
-                     else "\($latest.id)\t\($latest.body | contains($s))\t\($report.id // "")" end'
+                   | ($mine | map(select(.body | split("\n\n")[0] | split("\n") | any(.[]; . == $s) and any(.[]; . == $run))) | last) as $own
+                   | ($mine | map(select(.body | split("\n\n")[0] | split("\n") | any(.[]; . == $sub))) | last) as $report
+                   | "\($own.id // "")\t\($report.id // "")"'
             )" || EXISTING_META=''
           fi
-          EXISTING_ID="${EXISTING_META%%$'\t'*}"
+          OWN_ID="${EXISTING_META%%$'\t'*}"
           # Snapshot the newest SUBSTANTIVE report, not simply the newest
           # marker comment: after a real report followed by a weak notice
           # (cancelled / infra), snapshotting the notice would drop the prior
           # round's unresolved findings from the follow-up table.
-          REPORT_ID="${EXISTING_META##*$'\t'}"
-          if [ -n "$REPORT_ID" ] && [ "$REPORT_ID" != "$EXISTING_META" ]; then
+          REPORT_ID="${EXISTING_META#*$'\t'}"
+          if [ -n "$REPORT_ID" ]; then
             gh api "repos/$GITHUB_REPOSITORY/issues/comments/$REPORT_ID" \
               --jq '.body' > "$RUNNER_TEMP/verify-context/previous-report.md" 2>/dev/null ||
               rm -f "$RUNNER_TEMP/verify-context/previous-report.md"
           fi
-          # Only reuse the marker comment when it is a live status: replacing
-          # a previous round's REPORT with "running" would destroy evidence
-          # that a cancelled or infra-failed re-run then never restores.
-          case "$EXISTING_META" in
-            *$'\t'true$'\t'*)
-              gh api --method PATCH \
-                "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING_ID" \
-                -f body="$BODY" >/dev/null ||
-                echo "::warning::Failed to update verify status comment; continuing." >&2
-              ;;
-            *)
-              gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
-                -f body="$BODY" >/dev/null ||
-                echo "::warning::Failed to post verify status comment; continuing." >&2
-              ;;
-          esac
+          # Anything that is not this run's own live status gets a fresh
+          # comment: replacing a previous round's REPORT with "running" would
+          # destroy evidence that a cancelled or infra-failed re-run then
+          # never restores.
+          if [ -n "$OWN_ID" ]; then
+            gh api --method PATCH \
+              "repos/$GITHUB_REPOSITORY/issues/comments/$OWN_ID" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to update verify status comment; continuing." >&2
+          else
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              -f body="$BODY" >/dev/null ||
+              echo "::warning::Failed to post verify status comment; continuing." >&2
+          fi
           echo "decision=run" >> "$GITHUB_OUTPUT"
 
       # Install before checkout so PR-controlled .npmrc cannot affect npm.
@@ -4248,10 +4252,11 @@ jobs:
           CLI_VERSION="$(timeout 30s qwen --version 2>/dev/null | head -1 | tr -d '[:space:]' | cut -c1-64 || true)"
           SKILL_HASH="$(timeout 30s git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md 2>/dev/null | cut -c1-12 || true)"
 
-          # 3. Fake artifact dirs planted during the build: a zeroed
-          #    timestamp sorts AHEAD of the agent's real dir at collection
-          #    time. (A steered agent can still forge its own artifacts —
-          #    that residual is why the report is advisory, never a review.)
+          # 3. Fake artifact dirs planted during the build: the publisher
+          #    takes the round that sorts last, so a plant dated after the
+          #    agent's real dir would headline the run. (A steered agent can
+          #    still forge its own artifacts — that residual is why the
+          #    report is advisory, never a review.)
           find tmp -maxdepth 2 -type d -name '*-verify-*' -exec rm -rf {} + 2>/dev/null || true
           # 4. A fresh agent home, created after the lifecycle processes are
           #    gone: qwen loads user-scope file commands from $HOME/.qwen, and
@@ -4695,23 +4700,9 @@ jobs:
             echo "::error::Failed to write the agent output stream (tee exit ${TEE_STATUS}); reporting an infrastructure failure rather than a pass."
           fi
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
-
-          # The skill writes its verdict as one word in verdict.txt. It is
-          # output of a run that executed untrusted PR code, so allowlist it
-          # instead of echoing it into workflow outputs.
-          AGENT_VERDICT=''
-          VERDICT_FILE="$(find tmp -maxdepth 2 -type f -path '*-verify-*/verdict.txt' 2>/dev/null | sort | head -1 || true)"
-          if [ -n "$VERDICT_FILE" ]; then
-            # Bound the read before the pipeline: with `head` closing early on
-            # an oversized file, the producer takes SIGPIPE and `pipefail`
-            # would abort the step instead of ignoring an unusable verdict.
-            CANDIDATE="$(head -c 4096 "$VERDICT_FILE" | tr -d '[:space:]' | cut -c1-32)"
-            case "$CANDIDATE" in
-              merge-ready|findings|blocked|inconclusive) AGENT_VERDICT="$CANDIDATE" ;;
-              *) echo "::warning::Unrecognized agent verdict in ${VERDICT_FILE}; ignoring." ;;
-            esac
-          fi
-          echo "agent_verdict=$AGENT_VERDICT" >> "$GITHUB_OUTPUT"
+          # verdict.txt is read only by the publisher, from the uploaded
+          # report's own directory: a second reader here picked its own
+          # round directory and could name a different word.
 
           # Emit the attribution collected before the agent started (see the
           # re-pin above) — the saved values, never re-derived here: the
@@ -4722,7 +4713,7 @@ jobs:
             echo "cli_version=$CLI_VERSION"
             echo "skill_hash=$SKILL_HASH"
           } >> "$GITHUB_OUTPUT"
-          echo "verify verdict: $VERDICT agent: ${AGENT_VERDICT:-none} (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
+          echo "verify verdict: $VERDICT (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
 
       # The gate log's authoritative copy lives root-owned inside the 0700
       # root-only home (/flake-gate/log), which no PR-controlled
@@ -5202,8 +5193,9 @@ jobs:
     # per-PR group here would let a second /verify cancel a completed run's
     # pending publisher and drop its report entirely. Overlap between
     # publishers is instead made safe by the marker discipline below
-    # (bot-owned + prefix match, live-status-only reuse, post-fresh
-    # fallback), which is a correctness property rather than a scheduling one.
+    # (bot-owned + prefix match, each run writes only into its own
+    # comment, post-fresh fallback), which is a correctness property rather
+    # than a scheduling one.
     concurrency:
       group: "${{ format('{0}-publish-verify-{1}', github.workflow, github.run_id) }}"
       cancel-in-progress: false
@@ -5218,10 +5210,10 @@ jobs:
       contents: 'read'
       pull-requests: 'write'
     steps:
-      # Sparse — the uploader, its helper dependency, and the root
-      # package.json that marks the uploader's `.js` as ESM (without it the
-      # uploader only parses on the Node versions that infer module syntax,
-      # and this job pins no Node).
+      # Sparse — the uploader, the artifact checker, their helpers, and the
+      # root package.json that marks the uploader's `.js` as ESM (without it
+      # the uploader only parses on the Node versions that infer module
+      # syntax, and this job pins no Node).
       - name: 'Checkout the OSS publisher scripts'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -5235,6 +5227,8 @@ jobs:
             /package.json
             scripts/upload-aliyun-oss-assets.js
             scripts/release-script-utils.js
+            scripts/verify-pr-check.mjs
+            scripts/lib/
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -5309,7 +5303,6 @@ jobs:
           # cancellations. Verified by executing this step with both values.
           PR_NUMBER: '${{ needs.verify.outputs.pr_number || github.event.issue.number }}'
           VERDICT: '${{ needs.verify.outputs.verdict }}'
-          AGENT_VERDICT: '${{ needs.verify.outputs.agent_verdict }}'
           VERIFY_MODEL: '${{ needs.verify.outputs.model }}'
           VERIFY_CLI_VERSION: '${{ needs.verify.outputs.cli_version }}'
           VERIFY_SKILL_HASH: '${{ needs.verify.outputs.skill_hash }}'
@@ -5347,6 +5340,13 @@ jobs:
             exit 0
           fi
           BODY_FILE="${RUNNER_TEMP:-/tmp}/verify-comment.md"
+          # Every body keeps the run marker the status step wrote, so this
+          # job, re-run after it published, finds its own comment again
+          # instead of posting the report twice.
+          RUN_MARKER="<!-- qwen-triage:verify-run=${GITHUB_RUN_ID} -->"
+          SUBSTANTIVE_MARKER='<!-- qwen-triage:verify-substantive -->'
+          # Set only from the published report's own verdict.txt below.
+          AGENT_VERDICT=''
 
           # Same embedding discipline as publish-tmux: the report is untrusted
           # PR-run output, so it goes inside <details><pre><code> with &, <, >
@@ -5650,23 +5650,26 @@ jobs:
           # find predicates enforce both), and any failure degrades to a
           # text-only comment rather than blocking the report. The
           # VERIFY_ASSETS_UPLOADER override exists as a test seam only.
+          # $1 is the round directory the comment publishes: its images
+          # illustrate its report, never another round's.
           EVIDENCE_SECTION=''
           collect_and_host_evidence() {
-            local imgs=() f base safe seen=' ' hosted=0 total=0 skipped=0
+            local round="${1:-}" imgs=() f base safe seen=' ' hosted=0 total=0 skipped=0
             local prefix="pr-assets/verify/pr${PR_NUMBER}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT:-1}"
             local stage_dir="${RUNNER_TEMP:-/tmp}/verify-assets-stage"
             local uploader="${VERIFY_ASSETS_UPLOADER:-scripts/upload-aliyun-oss-assets.js}"
+            [ -n "$round" ] || return 0
             # `|| true` on every find: the artifact download is
             # continue-on-error, so verify-results may not exist at all, and
             # a bare non-zero find under `pipefail` would abort the step
             # before the missing-report notice and the final upsert.
-            total="$(find verify-results -type f -path '*/evidence/*.png' 2>/dev/null | wc -l | tr -d ' ' || true)"
+            total="$(find "$round" -type f -path '*/evidence/*.png' 2>/dev/null | wc -l | tr -d ' ' || true)"
             [ -n "$total" ] && [ "$total" -gt 0 ] || return 0
             # Byte-exact size cap: find's -2M unit rounds file sizes UP to
             # whole MiB first, silently turning a documented 2 MB cap into a
             # 1 MiB one; the c (bytes) unit does not round.
             while IFS= read -r f; do imgs+=("$f"); done < <(
-              find verify-results -type f -path '*/evidence/*.png' -size -2097153c 2>/dev/null | sort | head -8
+              find "$round" -type f -path '*/evidence/*.png' -size -2097153c 2>/dev/null | sort | head -8
             )
             if [ "${#imgs[@]}" -eq 0 ]; then
               EVIDENCE_SECTION="_${total} evidence image(s) were produced but none passed the hosting caps (8 images, ≤2 MB each); see the run artifacts._"$'\n\n'
@@ -5683,8 +5686,10 @@ jobs:
                 *) continue ;;
               esac
               [ -n "${safe%.png}" ] || continue
-              # Two artifact dirs can sanitize to the same name; the second
-              # copy would silently overwrite the first and render twice.
+              # Two images can sanitize to the same name (nested evidence/
+              # dirs, or names that differ only in stripped characters); the
+              # second copy would silently overwrite the first and render
+              # twice.
               case "$seen" in *" $safe "*) continue ;; esac
               # Extension is attacker-choosable, and it is the enforcement
               # point for what OSS serves: ossutil derives the object's
@@ -5769,20 +5774,21 @@ jobs:
           PARTIAL_EN='The verification run did not complete, so the phases below may be partial or missing entirely. **Advisory evidence for human reviewers — not a review, an approval, or a CI check.**'
           PARTIAL_ZH='本次验证运行未正常结束，下列内容可能不完整甚至缺失。仅作为评审证据，**不构成评审、批准或 CI 检查**。'
 
-          # Weak terminal notices (cancelled / infra / skipped / n-a) carry no
-          # new evidence, so they must never overwrite a previous round's real
-          # report — they only replace this run's own "running" status (see
-          # the upsert below). Real outcomes (report, prepare-fail) upsert.
-          WEAK_BODY=false
+          # Every body opens with a header: the verify marker, this run's
+          # marker and, on a body that carries findings, the substantive
+          # marker, ended by a blank line. Every lookup reads markers only
+          # from a header, so it is started once, here, and each branch below
+          # appends to it.
+          printf '%s\n%s\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER" > "$BODY_FILE"
+
           # The gate verdict travels via job outputs: it survives a later
           # agent-step failure, a job timeout, and a cancellation. A
           # recorded `flaky` must demote the headline in EVERY terminal
           # branch — these two used to post the neutral notice and silently
           # drop the demotion the download-failure branch already honors.
           if [ "${VERIFY_RESULT:-}" = "cancelled" ]; then
-            WEAK_BODY=true
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '\n'
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); job cancelled before the report** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
@@ -5799,11 +5805,10 @@ jobs:
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           elif [ "${VERIFY_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
-            WEAK_BODY=true
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '\n'
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); the job then failed before the report** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
@@ -5820,14 +5825,13 @@ jobs:
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           elif [ "${VERDICT:-}" = "skipped" ] || [ "${VERDICT:-}" = "n/a" ]; then
             # These outcomes deliberately upload nothing, so their download
             # always "fails"; they must be answered before the
             # download-failure branch or their real reason is unreachable.
-            WEAK_BODY=true
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '\n'
               if [ "${VERDICT:-}" = "skipped" ]; then
                 printf '**Sandboxed verification: ⚠️ not run — skipped** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Skipped because %s.\n\n' "${SKIP_REASON:-the PR was not in a verifiable state}"
@@ -5842,21 +5846,20 @@ jobs:
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           elif [ "${DOWNLOAD_OUTCOME:-success}" != "success" ]; then
             # The verify job may have succeeded, but its artifact never
             # arrived (the download step is continue-on-error). Without this
             # branch the full-report path still runs and its scope paragraph
             # claims the A/B, the harnesses and the gates were delivered —
             # when nothing was.
-            WEAK_BODY=true
             # The flake verdict travels via job outputs, independent of the
             # artifact — the gate's demotion contract ("reported as not
             # passed regardless of the agent verdict") must fire even when
             # the download did not, or a flaky PR gets a neutral
             # "results unavailable" notice instead of its ❌.
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '\n'
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); result artifact unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
@@ -5873,11 +5876,8 @@ jobs:
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           elif [ -n "${PREPARE_FAILURE_PHASE:-}" ]; then
-            # An infra-classified prepare failure says nothing about the PR,
-            # so it must not overwrite a previous round's real report.
-            [ "${VERDICT:-}" = 'infra-error' ] && WEAK_BODY=true
             PREPARE_LOG="$(find verify-results -name 'prepare.log' 2>/dev/null | head -1 || true)"
             # Initialised, not merely defaulted at use: an inherited value
             # would otherwise tell a reader that a single-shot `npm run
@@ -5912,10 +5912,10 @@ jobs:
             # mis-attribution this commit set out to remove, pointed the
             # other way.
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
               # Reachable: the prepare step reports infra-error when the
               # registry was unreachable from the runner at failure time.
               if [ "${VERDICT:-}" = 'infra-error' ]; then
+                printf '\n'
                 printf '**Sandboxed verification: ⚠️ incomplete — infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf '`%s` failed before any verification started, and `registry.npmjs.org` was unreachable from the runner at that moment — so this looks like an infrastructure incident rather than a problem with this PR. Re-running `@qwen-code /verify` may well succeed; the install log below is the place to confirm.\n\n' "$PREPARE_COMMAND"
                 printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 基础设施故障</summary>\n\n'
@@ -5931,19 +5931,52 @@ jobs:
               fi
               emit_block 'Install/build log' "$PREPARE_LOG" 20000
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           else
-            collect_and_host_evidence
             # Pin the artifact-dir shape and sort: a bare -name search takes
-            # whatever directory find visits first, which is unordered.
-            REPORT="$(find verify-results -mindepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
-            ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
+            # whatever directory find visits first, which is unordered. Rounds
+            # are named pr<n>-verify-<YYYYMMDD>-<HHMMSS>, so the last in sort
+            # order is the newest; an earlier round left beside it must not
+            # headline the run. Depth 2 exactly: a report.md nested in a
+            # round (scratch/) sorts past the round's own and would stand in
+            # for it.
+            REPORT="$(find verify-results -mindepth 2 -maxdepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | tail -1 || true)"
+            # The report's own directory is the round: its counts, its
+            # verdict word and its images go with it, never another
+            # directory's. This is the only reader of verdict.txt, which
+            # untrusted PR code wrote.
+            if [ -n "$REPORT" ]; then
+              ROUND_DIR="$(dirname "$REPORT")"
+              ASSERTIONS_FILE="$ROUND_DIR/assertions.json"
+              [ -f "$ASSERTIONS_FILE" ] || ASSERTIONS_FILE=''
+              AGENT_VERDICT="$(head -c 4096 "$ROUND_DIR/verdict.txt" 2>/dev/null | tr -d '[:space:]' | cut -c1-32 || true)"
+              case "$AGENT_VERDICT" in
+                merge-ready|findings|blocked|inconclusive) ;;
+                *)
+                  echo "::warning::No usable verdict.txt beside the published report.md; the round has no agent verdict."
+                  AGENT_VERDICT=''
+                  ;;
+              esac
+            else
+              # No report, so no verdict to trust: the newest round's counts
+              # and images are shown only as partial evidence under the
+              # process outcome.
+              ASSERTIONS_FILE="$(find verify-results -mindepth 2 -maxdepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | tail -1 || true)"
+              if [ -n "$ASSERTIONS_FILE" ]; then
+                ROUND_DIR="$(dirname "$ASSERTIONS_FILE")"
+              else
+                ROUND_DIR="$(find verify-results -mindepth 1 -maxdepth 1 -type d -name '*-verify-*' 2>/dev/null | sort | tail -1 || true)"
+              fi
+            fi
+            collect_and_host_evidence "$ROUND_DIR"
             # Exact root-level path, never a find: the staging step writes
             # this name last as root, and a same-named file nested inside a
             # collected agent artifact dir must not shadow it.
             FLAKE_LOG='verify-results/flake-gate.log'
             ASSERT_LINE=''
             ASSERT_LINE_ZH=''
+            GATES_LINE=''
+            GATES_LINE_ZH=''
             if [ -n "$ASSERTIONS_FILE" ]; then
               # Numbers only — coerce anything non-numeric to 0 so untrusted
               # JSON cannot smuggle text into the comment body.
@@ -5970,9 +6003,64 @@ jobs:
                 read -r A_PASS A_FAIL A_TOTAL <<< "$ASSERT_META"
                 ASSERT_LINE="Scripted assertions: ${A_PASS} passed · ${A_FAIL} failed · ${A_TOTAL} total"
                 ASSERT_LINE_ZH="脚本断言：${A_PASS} 通过 · ${A_FAIL} 失败 · ${A_TOTAL} 总计"
+                # Existing test suites run as targeted gates are counted
+                # apart from the round's own assertions: folded in, a
+                # workspace's thousands of tests made "N scripted
+                # assertions" a measure of the repo, not of the round. Totals
+                # only, so no agent-chosen suite name reaches the body; a
+                # malformed list gets no line, and the checker refuses it.
+                # Shape rules mirror the checker's, and one shared fixture
+                # table pins the parity: a blank suite or a non-count skipped
+                # (false/null) is refused, not defaulted, and counts stop at
+                # 2^53-1, the last integer JSON literals parse to exactly.
+                GATES_META="$(
+                  jq -r 'def count: type == "number" and . >= 0 and . == floor and . <= 9007199254740991;
+                         if (.gates | type) == "array" and (.gates | length) > 0
+                            and (.gates | all(type == "object" and (.suite | type) == "string" and (.suite | test("\\S")) and (.pass | count) and (.fail | count) and ((has("skipped") | not) or (.skipped | count))))
+                         then "\(.gates | length) \(.gates | map(.pass) | add | floor) \(.gates | map(.fail) | add | floor) \(.gates | map(.skipped // 0) | add | floor) \(.gates | map(select(.skipped != null)) | length)"
+                         else empty end' "$ASSERTIONS_FILE" 2>/dev/null || true
+                )"
+                if [ -n "$GATES_META" ]; then
+                  read -r G_SUITES G_PASS G_FAIL G_SKIP G_RECORDED <<< "$GATES_META"
+                  # Absent skipped is "not recorded", not a measured zero,
+                  # and a partial sum is not the run's total: the clause
+                  # prints only when every entry carries the field.
+                  G_SKIP_CLAUSE=''
+                  G_SKIP_CLAUSE_ZH=''
+                  if [ "$G_RECORDED" = "$G_SUITES" ]; then
+                    G_SKIP_CLAUSE=" · ${G_SKIP} skipped"
+                    G_SKIP_CLAUSE_ZH=" · ${G_SKIP} 跳过"
+                  fi
+                  GATES_LINE="Targeted gates (existing tests, not counted above): ${G_PASS} passed · ${G_FAIL} failed${G_SKIP_CLAUSE} across ${G_SUITES} suite(s)"
+                  GATES_LINE_ZH="定向门禁（已有测试，不计入上面的断言）：${G_PASS} 通过 · ${G_FAIL} 失败${G_SKIP_CLAUSE_ZH}，共 ${G_SUITES} 个套件"
+                fi
               else
                 echo "::warning::assertions.json missing or inconsistent; not treating it as evidence."
               fi
+            fi
+            # The checker local rounds run before posting, from this trusted
+            # checkout, so both paths share one set of rules. It must pass on
+            # the report's directory and read the verdict taken from it above.
+            # Only its last stdout line is the summary: warnings above it can
+            # carry agent-chosen evidence filenames, so they are never echoed.
+            # node also exits 1 when the script cannot load; stderr says why.
+            ARTIFACT_CHECK=''
+            if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ] && [ -n "${AGENT_VERDICT:-}" ]; then
+              check_log="${RUNNER_TEMP:-/tmp}/verify-pr-check.log"
+              check_status=0
+              node "${VERIFY_PR_CHECK:-scripts/verify-pr-check.mjs}" "$(dirname "$REPORT")" > "$check_log" 2> "$check_log.err" || check_status=$?
+              case "${check_status}:$(tail -n 1 "$check_log")" in
+                "0:  ok: verdict=${AGENT_VERDICT} ("*) ARTIFACT_CHECK=ok ;;
+                '1:  failed: verdict='*)
+                  ARTIFACT_CHECK=refused
+                  grep '^  error ' "$check_log" | head -20 | cut -c1-300 || true
+                  ;;
+                *)
+                  ARTIFACT_CHECK=error
+                  echo "::warning::The artifact check could not run (exit ${check_status}); not trusting the agent verdict."
+                  head -n 8 "$check_log.err" | cut -c1-300 || true
+                  ;;
+              esac
             fi
             # The agent's own verdict is only honoured for a run that
             # actually completed AND left consistent evidence: an early
@@ -5980,7 +6068,7 @@ jobs:
             # crashed, or produced no report/assertions. Otherwise the
             # headline comes from the process outcome.
             TRUST_AGENT_VERDICT=false
-            if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ]; then
+            if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ] && [ "$ARTIFACT_CHECK" = ok ]; then
               case "${AGENT_VERDICT:-}" in
                 merge-ready) [ "$A_FAIL" = '0' ] && TRUST_AGENT_VERDICT=true ;;
                 findings|blocked|inconclusive) TRUST_AGENT_VERDICT=true ;;
@@ -5995,9 +6083,18 @@ jobs:
             # or produced no usable verdict says nothing about the PR and
             # gets incomplete/inconclusive, never a pass or a fail.
             if [ "$TRUST_AGENT_VERDICT" = true ]; then
+              # Verdicts come from harness exits: `findings` with no failed
+              # assertion is advisory, and the checker has already refused
+              # failures none of which the ledger attributes to the PR.
               case "$AGENT_VERDICT" in
                 merge-ready) QUAL='✅ passed'; QUAL_ZH='✅ 通过'; HEADLINE='merge-ready (agent verdict)'; HEADLINE_ZH='可合入（agent 判定）' ;;
-                findings) QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='findings reported (agent verdict)'; HEADLINE_ZH='报告了发现（agent 判定）' ;;
+                findings)
+                  if [ "$A_FAIL" = '0' ]; then
+                    QUAL='✅ passed with findings'; QUAL_ZH='✅ 通过（有发现）'; HEADLINE='non-blocking findings, every scripted assertion passed (agent verdict)'; HEADLINE_ZH='非阻塞发现，脚本断言全部通过（agent 判定）'
+                  else
+                    QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='findings reported (agent verdict)'; HEADLINE_ZH='报告了发现（agent 判定）'
+                  fi
+                  ;;
                 blocked) QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='blocked (agent verdict)'; HEADLINE_ZH='阻塞（agent 判定）' ;;
                 inconclusive) QUAL='⚠️ inconclusive'; QUAL_ZH='⚠️ 无法判定'; HEADLINE='the agent could not reach a conclusion'; HEADLINE_ZH='agent 未能得出结论' ;;
               esac
@@ -6011,12 +6108,14 @@ jobs:
               esac
               if [ -n "${AGENT_VERDICT:-}" ]; then
                 if [ "${VERDICT:-}" = 'pass' ]; then
-                  if [ -z "$REPORT" ]; then
-                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (report.md missing); reporting the process outcome instead."
-                  elif [ -z "$ASSERT_LINE" ]; then
+                  # A word is only ever read beside a report, so the report
+                  # is present here.
+                  if [ -z "$ASSERT_LINE" ]; then
                     echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions.json missing or inconsistent); reporting the process outcome instead."
-                  else
+                  elif [ "$AGENT_VERDICT" = 'merge-ready' ] && [ "${A_FAIL:-0}" != '0' ]; then
                     echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions recorded ${A_FAIL:-?} failures); reporting the process outcome instead."
+                  else
+                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (artifact check: ${ARTIFACT_CHECK}); reporting the process outcome instead."
                   fi
                 else
                   echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but the run did not complete cleanly (process verdict '${VERDICT:-}'); reporting the process outcome instead."
@@ -6067,19 +6166,27 @@ jobs:
                 FLAKE_LINE_ZH='抖动门：⚠️ error — 发布时门判定缺失或无法识别，按 error 处理'
                 ;;
             esac
+            # The merge-ready-with-failures case has its own paragraph below.
+            CHECK_NOTE=''
+            CHECK_NOTE_ZH=''
+            if [ "$TRUST_AGENT_VERDICT" != true ] &&
+               ! { [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "${A_FAIL:-0}" != '0' ]; }; then
+              case "$ARTIFACT_CHECK" in
+                refused)
+                  CHECK_NOTE='its artifacts fail the consistency check (`verify-pr-check.mjs`), so that verdict was not trusted — the workflow run log lists the errors'
+                  CHECK_NOTE_ZH='其产物未通过一致性检查（`verify-pr-check.mjs`），因此该判定未被采信——检查的错误见工作流运行日志'
+                  ;;
+                error)
+                  CHECK_NOTE='the consistency check (`verify-pr-check.mjs`) could not run on its artifacts, so that verdict was not trusted — the workflow run log shows why'
+                  CHECK_NOTE_ZH='一致性检查（`verify-pr-check.mjs`）无法在其产物上运行，因此该判定未被采信——原因见工作流运行日志'
+                  ;;
+              esac
+            fi
             if [ -z "$REPORT" ]; then
               MISSING_REPORT_NOTE='No report.md was found in the run artifacts, so the report section is omitted — see the workflow run output.'
               echo "::warning::${MISSING_REPORT_NOTE}"
             fi
-            # A run that timed out or crashed before writing report.md has
-            # no findings to preserve: marking it substantive would let a
-            # headline plus "no report found" overwrite the previous round's
-            # real evidence, which is the opposite of the rule.
-            if [ -z "$REPORT" ]; then
-              WEAK_BODY=true
-            fi
             {
-              printf '%s\n' '<!-- qwen-triage:verify -->'
               # Substantive marker: this body carries findings, so a later
               # weak notice must not displace it as the follow-up round's
               # previous-report snapshot.
@@ -6101,11 +6208,22 @@ jobs:
               if [ -n "$ASSERT_LINE" ]; then
                 printf '%s\n\n' "$ASSERT_LINE"
               fi
+              if [ -n "$GATES_LINE" ]; then
+                printf '%s\n\n' "$GATES_LINE"
+                # Advisory only: a gate can be red for a pre-existing main
+                # failure, so this never refuses or demotes the verdict.
+                if [ "$TRUST_AGENT_VERDICT" = true ] && [ "${G_FAIL:-0}" != '0' ]; then
+                  printf 'Gate totals do not decide the verdict: a gate red the PR causes belongs in the assertion ledger above — read that count before trusting the verdict.\n\n'
+                fi
+              fi
               if [ -n "$FLAKE_LINE" ]; then
                 printf '%s\n\n' "$FLAKE_LINE"
               fi
               if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
-                printf 'The agent reported `merge-ready`, but `assertions.json` recorded %s failures, so that claim was not trusted — see the report for whether these are expected A/B control cells.\n\n' "$A_FAIL"
+                printf 'The agent reported `merge-ready`, but `assertions.json` recorded %s failures, so that claim was not trusted: an expected A/B control red counts as a pass, so a recorded failure contradicts `merge-ready`.\n\n' "$A_FAIL"
+              fi
+              if [ -n "$CHECK_NOTE" ]; then
+                printf 'The agent reported `%s`, but %s.\n\n' "$AGENT_VERDICT" "$CHECK_NOTE"
               fi
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf 'The deterministic flakiness gate re-ran the test files this PR changes and got different outcomes from identical runs%s. A test that can fail with no code changing lands as intermittent red on unrelated PRs, so this run is reported as not passed regardless of the agent verdict — the per-round matrix is in the flakiness gate log below.\n\n' "${AGENT_VERDICT:+ (agent verdict: \`${AGENT_VERDICT}\`)}"
@@ -6126,11 +6244,20 @@ jobs:
               if [ -n "$ASSERT_LINE_ZH" ]; then
                 printf '%s\n\n' "$ASSERT_LINE_ZH"
               fi
+              if [ -n "$GATES_LINE_ZH" ]; then
+                printf '%s\n\n' "$GATES_LINE_ZH"
+                if [ "$TRUST_AGENT_VERDICT" = true ] && [ "${G_FAIL:-0}" != '0' ]; then
+                  printf '门禁合计不影响判定：PR 导致的门禁红灯应记入上面的断言账本——采信判定前请先看那个数。\n\n'
+                fi
+              fi
               if [ -n "$FLAKE_LINE_ZH" ]; then
                 printf '%s\n\n' "$FLAKE_LINE_ZH"
               fi
               if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
-                printf 'agent 报告了 `merge-ready`，但 `assertions.json` 记录了 %s 个失败，因此该判定未被采信——请参阅报告确认这些是否为预期的 A/B 对照单元。\n\n' "$A_FAIL"
+                printf 'agent 报告了 `merge-ready`，但 `assertions.json` 记录了 %s 个失败，因此该判定未被采信：预期中的 A/B 对照红灯应计为通过，所以记录在案的失败与 `merge-ready` 相矛盾。\n\n' "$A_FAIL"
+              fi
+              if [ -n "$CHECK_NOTE_ZH" ]; then
+                printf 'agent 报告了 `%s`，但%s。\n\n' "$AGENT_VERDICT" "$CHECK_NOTE_ZH"
               fi
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '确定性抖动门将本 PR 改动的测试文件原样重跑了多轮，得到了不一致的结果%s。一个在代码不变时也会失败的测试会以间歇性红灯落在无关的 PR 上，因此无论 agent 判定如何，本次运行按不通过报告——各轮结果矩阵见下方抖动门日志。\n\n' "${AGENT_VERDICT:+（agent 判定：\`${AGENT_VERDICT}\`）}"
@@ -6154,52 +6281,68 @@ jobs:
               # Attribution footer, the same shape /review posts: model, CLI
               # version, and the content hash of the skill that ran. Only on
               # a body that actually carries a report and only when all three
-              # workflow-owned values arrived — a missing report makes this
-              # a weak notice (WEAK_BODY above), and a half-known identity
-              # keeps the generic signature too.
+              # workflow-owned values arrived — without a report the body
+              # is only a notice, and a half-known identity keeps the
+              # generic signature too.
               if [ -n "$REPORT" ] && [ -n "${VERIFY_MODEL:-}" ] && [ -n "${VERIFY_CLI_VERSION:-}" ] && [ -n "${VERIFY_SKILL_HASH:-}" ]; then
                 printf '_— %s via Qwen Code /verify-pr (v%s; skill %s)_\n' "$VERIFY_MODEL" "$VERIFY_CLI_VERSION" "$VERIFY_SKILL_HASH"
               else
                 printf '%s\n' '— _Qwen Code · sandboxed verification_'
               fi
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           fi
 
-          # Upsert by marker: a real outcome (report / prepare-fail) replaces
-          # whatever carries the marker — the "running" status or an older
-          # report. A WEAK_BODY notice only replaces this run's own "running"
-          # status; if the marker comment is a previous round's real report,
-          # post fresh so that report survives.
+          # Write only into this run's own comment, found by its run marker:
+          # the live status its verify job posted, or the body this job
+          # already published if it is re-run. Anything else gets a fresh
+          # comment. The newest marker comment may belong to another round —
+          # a later round's live status, or an earlier round's report — and
+          # replacing either would make one round overwrite the other.
           # Same ownership discipline as the resolve step: only BOT-OWNED
           # comments STARTING with the marker are candidates, so a marker
           # pasted by any user cannot divert the bot into PATCHing (and
           # failing on) someone else's comment.
           # Fail CLOSED on identity failure (an empty login previously
-          # widened the filter to every user's comments), and match the
-          # live-status MARKER rather than prose a report could quote.
-          EXISTING='' EXISTING_RUNNING='false'
+          # widened the filter to every user's comments), and read the
+          # machine markers only from a header: a report, or a value a PR
+          # run produced, can quote one further down.
+          OWN_ID=''
+          OWN_SUBSTANTIVE=''
           if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
             echo "::warning::Could not resolve the bot identity; posting a fresh comment instead of reusing one."
             BOT_LOGIN=''
           fi
-          if [ -n "$BOT_LOGIN" ] && EXISTING_META="$(
+          if [ -n "$BOT_LOGIN" ] && OWN_META="$(
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
               --method GET \
               --paginate \
               -F per_page=100 \
-              | jq -sr --arg bot "$BOT_LOGIN" \
-                '[.[][] | select((.body | startswith("<!-- qwen-triage:verify -->")) and .user.login == $bot)] | last
-                 | if . == null then "" else "\(.id)\t\(.body | contains("<!-- qwen-triage:verify-state=running -->"))" end'
+              | jq -sr --arg bot "$BOT_LOGIN" --arg run "$RUN_MARKER" --arg sub "$SUBSTANTIVE_MARKER" \
+                'def header: split("\n\n")[0] | split("\n");
+                 [.[][] | select((.body | startswith("<!-- qwen-triage:verify -->")) and .user.login == $bot)
+                    | (.body | header) as $h | select(any($h[]; . == $run))
+                    | "\(.id)\t\(any($h[]; . == $sub))"]
+                 | last // empty'
           )"; then
-            EXISTING="${EXISTING_META%%$'\t'*}"
-            case "$EXISTING_META" in *$'\t'true) EXISTING_RUNNING='true' ;; esac
+            OWN_ID="${OWN_META%%$'\t'*}"
+            OWN_SUBSTANTIVE="${OWN_META#*$'\t'}"
           elif [ -n "$BOT_LOGIN" ]; then
-            echo "::warning::Failed to look up existing verify comments; will create a new one."
+            echo "::warning::Failed to look up this run's comment; will create a new one."
+          fi
+          # A notice never replaces a body that carries findings. Re-run on
+          # its own, this job cannot download results (the artifact name
+          # carries the attempt), so its "results unavailable" notice would
+          # otherwise replace the round's report; it is posted beside it.
+          BODY_SUBSTANTIVE="$(
+            jq -Rrs --arg sub "$SUBSTANTIVE_MARKER" 'split("\n\n")[0] | split("\n") | any(.[]; . == $sub)' "$BODY_FILE" || true
+          )"
+          if [ "$OWN_SUBSTANTIVE" = true ] && [ "$BODY_SUBSTANTIVE" != true ]; then
+            OWN_ID=''
           fi
           # A failed PATCH (comment deleted, or ownership changed under us)
           # must still leave a terminal report on the PR, never silence.
-          if [ -n "$EXISTING" ] && { [ "$WEAK_BODY" = false ] || [ "$EXISTING_RUNNING" = 'true' ]; }; then
-            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$EXISTING" -F body=@"$BODY_FILE" >/dev/null ||
+          if [ -n "$OWN_ID" ]; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$OWN_ID" -F body=@"$BODY_FILE" >/dev/null ||
               gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY_FILE" >/dev/null
           else
             gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" -F body=@"$BODY_FILE" >/dev/null

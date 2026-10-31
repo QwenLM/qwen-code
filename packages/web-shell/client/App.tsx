@@ -71,6 +71,7 @@ import {
   useWorkspace,
   useWorkspaceActions,
   useWorkspaceEventSignals,
+  type DaemonContextMemoryDetail,
   type DaemonSessionActions,
   type DaemonSessionNotice,
   type DaemonSessionOwnerSnapshot,
@@ -191,6 +192,7 @@ import {
 } from './components/ChatEditor';
 import { QuoteToComposerContext } from './components/messages/quoteToComposerContext';
 import { insertQuoteIntoComposer } from './utils/quoteReference';
+import { getWorkflowModeMessages } from './components/workflow-mode-messages';
 import {
   mapRestoredInputAnnotationsAfterTextChange,
   type ComposerSubmitCommit,
@@ -313,6 +315,10 @@ import {
   resolveArtifactWorkspaceOwner,
   useArtifactWorkspaceTarget,
 } from './components/artifacts/useArtifactWorkspaceTarget';
+import {
+  readContextInstructionFile,
+  type ContextInstructionFileContent,
+} from './components/artifacts/readContextInstructionFile';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -692,6 +698,7 @@ function getArtifactPanelTabStops(
 }
 const DEFAULT_COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'workflowMode',
   'contextUsage',
   'model',
   'widthMode',
@@ -8043,6 +8050,48 @@ export function App({
       setActiveArtifactPanelTabId(tab.id);
     },
     [],
+  );
+  const openMemoryFilePreview = useCallback(
+    async (file: DaemonContextMemoryDetail, fileWorkspaceCwd: string) => {
+      const absolutePath = file.absolutePath;
+      if (!absolutePath) return;
+      let result: ContextInstructionFileContent;
+      try {
+        const client = workspace.client;
+        if (!client) {
+          throw new Error('The workspace for this file is not available.');
+        }
+        result = await readContextInstructionFile(
+          client,
+          workspace.capabilities,
+          fileWorkspaceCwd,
+          absolutePath,
+        );
+      } catch (err) {
+        pushToast('error', err instanceof Error ? err.message : String(err));
+        return;
+      }
+      if (result.truncated) {
+        pushToast('warning', t('contextUsage.previewTruncated'));
+      }
+      const tab: ArtifactPanelTab = {
+        id: `memory-file:${absolutePath}`,
+        kind: 'file',
+        title: file.path,
+        workspacePath: absolutePath,
+        previewContent: result.content,
+        previewOnly: true,
+        ...(fileWorkspaceCwd ? { workspaceCwd: fileWorkspaceCwd } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelOpen(true);
+    },
+    [workspace, pushToast, t],
   );
   const closeArtifactPanel = useCallback(() => {
     setArtifactPanelOpen(false);
@@ -20372,6 +20421,23 @@ export function App({
     ],
   );
 
+  const handleWorkflowModeChange = useCallback(
+    (requested: boolean) => {
+      if (sessionWriteBlockedRef.current || !connectionRef.current.sessionId) {
+        return;
+      }
+      const owner = sessionOwnerGuard.capture();
+      void sessionActions.setWorkflowMode(requested).catch((error: unknown) => {
+        if (owner.isCurrent())
+          reportError(
+            error,
+            getWorkflowModeMessages(selectedLanguage).updateFailed,
+          );
+      });
+    },
+    [reportError, sessionActions, sessionOwnerGuard, selectedLanguage],
+  );
+
   const handleReasoningEffort = useCallback(
     (value: ReasoningSelection) => {
       if (sessionWriteBlocked || !connectionRef.current.sessionId) {
@@ -21744,6 +21810,7 @@ export function App({
     onSelectTab: selectArtifactPanelTab,
     onCloseTab: closeArtifactPanelTab,
     onOpenFilePreview: openFilePreview,
+    onOpenMemoryFile: openMemoryFilePreview,
     onOpenFiles: filesAvailable ? openFilesPanel : undefined,
     onReferenceFile:
       workspaceContextActive && !dialogOpen && mainView === 'chat'
@@ -23961,6 +24028,11 @@ export function App({
                                       ? openCurrentContextUsagePanel
                                       : undefined
                                   }
+                                  onOpenMemoryFile={
+                                    contextUsageAvailable
+                                      ? openMemoryFilePreview
+                                      : undefined
+                                  }
                                   loadingTranscript={connection.loadingTranscript}
                                   catchingUp={connection.catchingUp}
                                   hasOlderHistory={transcriptHistory.hasMore}
@@ -24757,6 +24829,20 @@ export function App({
                             }
                             onSelectMode={handleSetMode}
                             onSelectModel={handleModelSelect}
+                            workflowMode={connection.workflowMode}
+                            workflowModeStatus={
+                              managedMode
+                                ? undefined
+                                : !connection.sessionId
+                                  ? 'unbound'
+                                  : sessionWriteBlocked ||
+                                      connection.catchingUp ||
+                                      connection.status !== 'connected'
+                                    ? 'syncing'
+                                    : (connection.workflowModeStatus ?? 'unknown')
+                            }
+                            workflowModePending={connection.workflowModePending}
+                            onWorkflowModeChange={handleWorkflowModeChange}
                             reasoning={displayedReasoning}
                             onSelectReasoningEffort={
                               hasAuthoritativeReasoningContext

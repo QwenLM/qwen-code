@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { inspect } from 'node:util';
+import { inspect, isDeepStrictEqual } from 'node:util';
 import {
   createSourceFile,
   isArrayLiteralExpression,
@@ -25,7 +25,7 @@ import {
   ScriptTarget,
   transpileModule,
 } from 'typescript';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { QWEN_SERVER_TOKEN_ENV } from '../../packages/cli/src/serve/channel-worker-env.js';
 import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from '../../packages/cli/src/serve/hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from '../../packages/cli/src/serve/hosted-harness-profile.js';
@@ -470,12 +470,13 @@ describe('managed-agent-server e2e runner', () => {
     // identifiers (which appear at several runner sites): giving the recovery
     // generation the flag, or flipping the default to true, must red here.
     expect(source).toMatch(
-      /startReplacementHarness\(\s*'Replacement Hosted Harness',\s*approvalFault === 'finished-before-commit',?\s*\)/,
+      /startReplacementHarness\(\s*'Replacement Hosted Harness',\s*approvalFault === 'finished-before-commit',\s*approvalFault === 'sibling-approval',?\s*\)/,
     );
     expect(source).toMatch(
       /startReplacementHarness\(\s*'Post-fault recovery Harness',?\s*\)/,
     );
     expect(source).toContain('crashBeforeAssistantCommit = false');
+    expect(source).toContain('holdPendingSiblingApproval = false');
     // B3a asserts the durable crash precondition (the approved result settled)
     // from MySQL like the sibling crash arms, not only the hook's log line.
     expect(source).toContain(
@@ -520,7 +521,15 @@ describe('managed-agent-server e2e runner', () => {
       windowFn,
       source.indexOf('\n}', windowFn),
     );
-    expect(windowFnBody).toContain('qwen_managed_agent.ma_session_journal_tx');
+    // The journal HEX decode is shared (R1-7); the window reader rides it.
+    expect(windowFnBody).toContain('readJournalManagedEvents(');
+    const journalFn = source.indexOf('function readJournalManagedEvents(');
+    expect(journalFn).toBeGreaterThan(-1);
+    // A fixed window: the return-type annotation contains "\n}>" which would
+    // truncate a first-"\n}" slice before the body.
+    expect(source.slice(journalFn, journalFn + 1500)).toContain(
+      'qwen_managed_agent.ma_session_journal_tx',
+    );
     expect(windowFnBody).toContain(':main:');
     expect(windowFnBody).toContain(
       "latestAttempt.payload['state'] !== 'output_committed'",
@@ -539,6 +548,181 @@ describe('managed-agent-server e2e runner', () => {
     expect(harnessSource).toContain(
       'E2E holding finished turn before assistant commit',
     );
+    // A3 crashes the replacement inside a two-call approval batch — sibling[0]
+    // decided, sibling[1] still requested — via a test-gated hook on the first
+    // approval the replacement asks. The barrier proves the crash landed in
+    // the approval gap; the recovery assertions prove the decided sibling was
+    // not re-asked, the pending sibling kept its original Action/deadline and
+    // earned its own Allow, and both siblings recovered in order, once each.
+    const toolTurnSource = read(
+      'packages/cli/src/serve/hosted-workspace-tool-turn.ts',
+    );
+    expect(source).toContain("'sibling-approval'");
+    expect(source).toContain('call_managed_continuation_sibling');
+    expect(source).toContain(
+      'QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL: session.id',
+    );
+    // The flag rides only the crashing generation, gated on the parameter.
+    expect(source).toMatch(
+      /holdPendingSiblingApproval\s*\?\s*\{\s*QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL: session\.id\s*\}/,
+    );
+    expect(toolTurnSource).toContain(
+      "process.env['QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL']",
+    );
+    expect(toolTurnSource).toContain('E2E holding pending sibling approval');
+    // The barrier asserts the durable approval-gap shape, not the log alone,
+    // and the shape checks sit between the barrier and the SIGKILL.
+    expect(source).toContain("'Pending sibling approval held'");
+    expect(source).toContain(
+      'Sibling-approval crash did not land in the approval gap',
+    );
+    expect(source).toContain(
+      'Sibling-approval crash plan is not the pending second sibling',
+    );
+    const a3Barrier = source.indexOf("'Pending sibling approval held'");
+    const a3Crash = source.indexOf('await crashChild(', a3Barrier);
+    expect(a3Barrier).toBeGreaterThan(-1);
+    expect(a3Crash).toBeGreaterThan(a3Barrier);
+    const a3Window = source.slice(a3Barrier, a3Crash);
+    expect(a3Window).toContain('siblingPlan.approvalOrdinal !== 1');
+    expect(a3Window).toContain("decidedSibling?.[1] !== 'decided'");
+    expect(a3Window).toContain("pendingSibling?.[1] !== 'requested'");
+    // The recovery generation re-decides the ORIGINAL pending sibling and
+    // asserts its identity/deadline survived before answering.
+    expect(source).toContain('const siblingBefore = await fetchJson');
+    expect(source).toContain(
+      'Recovery did not preserve the pending sibling Action/deadline',
+    );
+    expect(source).toContain('actions/${siblingApprovalId}/responses');
+    // Two siblings settle once each under their original identities: the
+    // count, both Action rows, the pending sibling's own decision, the second
+    // file effect and the order-sensitive final plan are all pinned.
+    // R1-7 / F1: anchor each count ternary to its own site. The bare `? 2 : 1`
+    // matches both expectedExecutions and expectedOriginalPlanCalls, so each is
+    // pinned separately and narrowing either one (2 -> 1) reds here at unit
+    // speed, not only at the real-stack barrier.
+    expect(source).toMatch(
+      /const expectedExecutions =[\s\S]*?approvalFault === 'sibling-approval' \|\|\s*approvalFault === 'after-earlier-tools'\s*\?\s*2\s*:\s*1/,
+    );
+    // `\s*`, not `[\s\S]*?`: the gap here is whitespace-only, so a tight anchor
+    // cannot span past this site to the expectedExecutions ternary and mask a
+    // narrowed count (the spanning form stays green under `? 2` -> `? 1`).
+    expect(source).toMatch(
+      /const expectedOriginalPlanCalls =\s*approvalFault === 'sibling-approval'\s*\?\s*2\s*:\s*1/,
+    );
+    // R1-7: pin the per-call identity loop itself (match by prepare key, not
+    // the pre-PR single-execution shape), so reverting it reds here at unit
+    // speed rather than only on a full real-stack run.
+    expect(source).toContain(
+      'for (const [ordinal, call] of plan.calls.entries())',
+    );
+    expect(source).toContain('(row) => row[1] === call.prepareKey');
+    expect(source).toContain(
+      'Replacement changed the original prepared execution identity for call',
+    );
+    // R1-4: the decided sibling is read and asserted still decided with its
+    // original deadline BEFORE the pending sibling is answered.
+    expect(source).toContain('const decidedBefore = await fetchJson');
+    expect(source).toContain("decidedBefore.state !== 'decided'");
+    expect(source).toContain(
+      'Recovery re-touched the decided sibling Action/deadline',
+    );
+    // R1-5: execution order is gated on settled_at along the plan, not only
+    // the plan resource order, so a reverse dispatch reds.
+    expect(source).toContain(
+      'request_digest, settled_at FROM qwen_managed_agent.ma_tool_execution',
+    );
+    expect(source).toContain('settledAtByOrdinal.push(Number(execution[8]))');
+    expect(source).toContain(
+      'Replacement settled the siblings out of plan order',
+    );
+    expect(source).toContain('Sibling approval identities/states differ');
+    expect(source).toContain('Stored sibling decision differs');
+    expect(source).toContain('Sibling physical file assertion failed');
+    expect(source).toContain('Sibling recovery reordered or rewrote call');
+    expect(source).toContain(
+      'Sibling recovery changed the original Action IDs',
+    );
+    // The order assertion reads the recovered final plan the way recovery
+    // does (latest hosted.batch.planned link for the batch, stage final).
+    expect(source).toContain('siblingFinalPlan(');
+    const a3PlanFn = source.indexOf('function siblingFinalPlan(');
+    expect(a3PlanFn).toBeGreaterThan(-1);
+    const a3PlanFnBody = source.slice(
+      a3PlanFn,
+      source.indexOf('\n}', a3PlanFn),
+    );
+    expect(a3PlanFnBody).toContain('readJournalManagedEvents(');
+    expect(a3PlanFnBody).toContain("event.kind !== 'hosted.batch.planned'");
+    expect(a3PlanFnBody).toContain("payload['batchId'] !== batchId");
+    expect(a3PlanFnBody).toContain("plan.stage !== 'final'");
+    // B3 after-earlier-tools: the multi-round fixture, the second-Allow
+    // choreography, the round/budget continuity readers + assertions, and the
+    // later-round deep-equal parity are all pinned so a regression reds here.
+    expect(source).toContain("'after-earlier-tools'");
+    expect(source).toContain('call_managed_b3_second');
+    expect(source).toContain('b3BudgetDirective');
+    expect(source).toContain('Second earlier-tool approval requested');
+    expect(source).toContain('Earlier tools settled and the later round held');
+    expect(source).toContain('b3RoundAndBudget(');
+    expect(source).toContain('B3 recovery reset the logical round');
+    expect(source).toContain('B3 recovery reset the turn budget snapshot');
+    expect(source).toContain('B3 recovery wiped the per-model token ledger');
+    expect(source).toContain('B3 second physical file assertion failed');
+    expect(source).toContain(
+      'B3 recovery changed the saved later-round model request',
+    );
+    expect(source).toContain('B3 earlier execution');
+    expect(source).toContain('B3 approval identities/states differ');
+    // The hold armed for B3 must also be RELEASED after the crash: a release
+    // gated to after-result alone leaves the recovery generation's reissued
+    // request held forever (the .75 head run crash-looped on exactly that).
+    const releaseAt = source.indexOf('releaseApprovalResultHold();');
+    expect(releaseAt).toBeGreaterThan(-1);
+    expect(source.slice(releaseAt - 200, releaseAt)).toContain(
+      "approvalFault === 'after-earlier-tools'",
+    );
+    // B3 shares after-result's published-prefix capture and retraction proof.
+    expect(source).toMatch(
+      /approvalFault === 'after-result' \|\|\s*approvalFault === 'after-earlier-tools'\s*\) \{\s*\/\/ The reissue must retract the held prefix/,
+    );
+    // The fixture must charge non-zero usage (the fake default is all zeros,
+    // which makes the ledger continuity assertion vacuous) and the ledger
+    // check must compare per-model totals — an empty {} ledger is truthy.
+    expect(source).toContain('completion_tokens: 300');
+    expect(source).toContain(
+      'B3 crash-boundary per-model token ledger is empty',
+    );
+    expect(source).toContain('B3 crash-boundary turn budget was not exercised');
+    expect(source).toContain('afterTokens < beforeTokens');
+    expect(source).toContain('assertB3CostContinuity(');
+    // R1-3: the budget guard must test the NUMERIC field — a non-null snapshot
+    // with budget: null is a legal production state, so an object-truthy guard
+    // would let a lost +Nk directive pass as null == null.
+    const b3CostFn = source.indexOf('function assertB3CostContinuity(');
+    expect(b3CostFn).toBeGreaterThan(-1);
+    const b3CostFnBody = source.slice(
+      b3CostFn,
+      source.indexOf('\n}', b3CostFn),
+    );
+    expect(b3CostFnBody).toContain(
+      'b3Budget === null || b3Budget === undefined',
+    );
+    // R1-4: site-anchor the B3 post-tool request count like the neighbouring
+    // R1-7 / F1 pins — the identifier alone survives a conflict resolution
+    // back to the pre-PR ternary, which would only red in the real-stack lane.
+    // Deleting the after-earlier-tools ? 3 clause must red here.
+    expect(source).toMatch(
+      /const expectedModelsAfterResults =[\s\S]*?approvalFault === 'after-earlier-tools'\s*\?\s*3\s*:/,
+    );
+    const b3Fn = source.indexOf('function b3RoundAndBudget(');
+    expect(b3Fn).toBeGreaterThan(-1);
+    const b3FnBody = source.slice(b3Fn, source.indexOf('\n}', b3Fn));
+    expect(b3FnBody).toContain('readJournalManagedEvents(');
+    expect(b3FnBody).toContain("event.kind === 'model.attempt'");
+    expect(b3FnBody).toContain('SELECT HEX(inline_bytes)');
+    expect(b3FnBody).toContain("attempts[i].payload['recoveryRef']");
+    expect(b3FnBody).toContain("['usageRef', 'routeRef']");
   });
 
   // R4-2 (behavioural): the source pins above assert the window helper's
@@ -576,7 +760,7 @@ describe('managed-agent-server e2e runner', () => {
       ).toString('hex');
     const run = (events) =>
       load(
-        ['finishedBeforeCommitWindow'],
+        ['finishedBeforeCommitWindow', 'readJournalManagedEvents'],
         'finishedBeforeCommitWindow',
         'runMysql',
       )(() => rows(events)).finishedBeforeCommitWindow(0, 'filter', promptId);
@@ -627,6 +811,893 @@ describe('managed-agent-server e2e runner', () => {
     ).toThrow(
       /after the assistant commit: commitSequence=27 attemptSequence=25/,
     );
+  });
+
+  // A3 (behavioural): exercise siblingFinalPlan on injected journal rows and
+  // plan resources, so the latest-link selection, the batch filter and both
+  // throw branches are proven on data, not on text. runMysql is injected
+  // through load() and dispatches on the query (journal HEX rows vs the plan
+  // resource, keyed by resource_id); the helper stays a top-level declaration
+  // so extracted() can walk it.
+  it('behaves siblingFinalPlan on injected journal rows', () => {
+    const batchId = 'batch_a3';
+    const call = (ordinal, actionId) => ({
+      runtimeCallId: `rc_${ordinal}`,
+      partIndex: ordinal,
+      prepareKey: `rs:rc_${ordinal}`,
+      requestDigest: `sha256:digest_${ordinal}`,
+      actionId,
+    });
+    const finalPlan = {
+      stage: 'final',
+      calls: [call(0, 'action_0'), call(1, 'action_1')],
+    };
+    const planned = (sequence, batch = batchId, resourceId = 'res_final') => ({
+      kind: 'hosted.batch.planned',
+      sequence,
+      payload: { batchId: batch, planRevision: 1, planRef: { resourceId } },
+    });
+    const journalRows = (events) =>
+      Buffer.from(
+        events
+          .map((event) =>
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: event,
+            }),
+          )
+          .join('\n'),
+        'utf8',
+      ).toString('hex');
+    const run = (events, plans = { res_final: finalPlan }) =>
+      load(
+        ['siblingFinalPlan', 'sqlString', 'readJournalManagedEvents'],
+        'siblingFinalPlan',
+        'runMysql',
+      )((_port, query) => {
+        if (query.includes('ma_session_journal_tx')) return journalRows(events);
+        if (query.includes('ma_resource')) {
+          const resourceId = query.match(/resource_id='([^']+)'/)?.[1];
+          const plan = plans[resourceId];
+          if (!plan) throw new Error(`no plan for ${String(resourceId)}`);
+          return JSON.stringify(plan);
+        }
+        throw new Error(`unexpected query: ${query}`);
+      }).siblingFinalPlan(0, 'filter', batchId);
+
+    // The hosted.batch.planned link for the batch resolves the final plan.
+    expect(run([planned(10)])).toEqual(finalPlan);
+    // The highest-sequence link wins, even when rows arrive unsorted: each
+    // link points at a different resource, so selecting the older one reds.
+    const newerPlan = {
+      stage: 'final',
+      calls: [call(0, 'action_0'), call(1, 'action_new')],
+    };
+    // Descending input kills a last-row-wins implementation.
+    expect(
+      run([planned(30, batchId, 'res_new'), planned(20, batchId, 'res_old')], {
+        res_new: newerPlan,
+        res_old: finalPlan,
+      }),
+    ).toEqual(newerPlan);
+    // Ascending input (the real query's ORDER BY first_sequence direction, so
+    // the newest link is the LAST row) kills a first-match implementation: a
+    // first-match guard would pick the stale res_old here. Both directions
+    // together force a genuine highest-sequence selection.
+    expect(
+      run([planned(20, batchId, 'res_old'), planned(30, batchId, 'res_new')], {
+        res_new: newerPlan,
+        res_old: finalPlan,
+      }),
+    ).toEqual(newerPlan);
+    // Another batch's link is not this batch's plan.
+    expect(() => run([planned(10, 'other_batch')])).toThrow(
+      /no final batch plan link/,
+    );
+    // No link at all.
+    expect(() => run([])).toThrow(/no final batch plan link/);
+    // A non-final plan resource is refused: recovery must resume the final plan.
+    expect(() =>
+      run([planned(10)], { res_final: { stage: 'approval', calls: [] } }),
+    ).toThrow(/not a final batch plan/);
+    // Non-planned events are skipped, not parsed as the batch plan link.
+    expect(
+      run([
+        {
+          kind: 'message.committed',
+          sequence: 5,
+          payload: { role: 'assistant' },
+        },
+        planned(10),
+      ]),
+    ).toEqual(finalPlan);
+  });
+
+  // B3 (behavioural): exercise b3RoundAndBudget on injected journal rows and
+  // request/route/usage resources, so the latest-attempt round selection, the
+  // reverse-scan for budget/models, and both throw branches are proven on data.
+  // runMysql is injected through load() and dispatches on the query (journal
+  // HEX rows vs HEX resource bytes keyed by resource_id); sqlString is
+  // extracted too.
+  it('behaves b3RoundAndBudget on injected journal rows', () => {
+    const attempt = (sequence, refs) => ({
+      kind: 'model.attempt',
+      sequence,
+      payload: refs,
+    });
+    const journalRows = (events) =>
+      Buffer.from(
+        events
+          .map((event) =>
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: event,
+            }),
+          )
+          .join('\n'),
+        'utf8',
+      ).toString('hex');
+    const budgetSnapshot = { budget: 500000, outputTokensAtTurnStart: 100 };
+    const resources = {
+      // The saved request carries the full system prompt, so its JSON has \"
+      // and \\ sequences — the shape mysql --batch escaping corrupted when the
+      // helper read CONVERT(inline_bytes) instead of HEX.
+      req_round2: { round: 2, prompt: 'reply "exactly" then \\ stop' },
+      req_round0: { round: 0 },
+      usage1: { budget: budgetSnapshot, models: { m: { output: 150 } } },
+      route2: { budget: budgetSnapshot },
+      // R1-2: a discriminating pair — the older attempt carries a DIFFERENT
+      // budget and a smaller ledger, the newest its own. An oldest-first scan
+      // returns 900000/300 where the newest-first contract returns 500000/600,
+      // so the direction is proven on data, not only on the round selection.
+      usageOld: {
+        budget: { budget: 900000, outputTokensAtTurnStart: 0 },
+        models: { m: { tokens: { candidates: 300 } } },
+      },
+      usageNew: {
+        budget: budgetSnapshot,
+        models: { m: { tokens: { candidates: 600 } } },
+      },
+    };
+    const run = (events) =>
+      load(
+        ['b3RoundAndBudget', 'sqlString', 'readJournalManagedEvents'],
+        'b3RoundAndBudget',
+        'runMysql',
+      )((_port, query) => {
+        if (query.includes('ma_session_journal_tx')) return journalRows(events);
+        if (query.includes('ma_resource')) {
+          const resourceId = query.match(/resource_id='([^']+)'/)?.[1];
+          const res = resources[resourceId];
+          if (!res) throw new Error(`no resource ${String(resourceId)}`);
+          return Buffer.from(JSON.stringify(res), 'utf8').toString('hex');
+        }
+        throw new Error(`unexpected query: ${query}`);
+      }).b3RoundAndBudget(0, 'filter');
+
+    // The latest attempt's request gives the round; budget/models reverse-scan
+    // across the route/usage refs (budget from the newest, models from usage1).
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usage1' },
+        }),
+        attempt(20, {
+          recoveryRef: { resourceId: 'req_round2' },
+          routeRef: { resourceId: 'route2' },
+        }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { m: { output: 150 } },
+    });
+    // Models still resolve from an earlier attempt when the newest has no usage.
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usage1' },
+        }),
+        attempt(20, { recoveryRef: { resourceId: 'req_round2' } }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { m: { output: 150 } },
+    });
+    // R1-2: the newest attempt's own usage wins over an older, different one —
+    // an oldest-first budget/models scan reds here (900000/300 vs 500000/600).
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usageOld' },
+        }),
+        attempt(20, {
+          recoveryRef: { resourceId: 'req_round2' },
+          usageRef: { resourceId: 'usageNew' },
+        }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { m: { tokens: { candidates: 600 } } },
+    });
+    // No attempt at all.
+    expect(() => run([])).toThrow(/no model attempt/);
+    // An attempt with no saved request round.
+    expect(() => run([attempt(10, {})])).toThrow(
+      /no saved model-request round/,
+    );
+  });
+
+  // R1-2 / R1-3 (behavioural): the cost-continuity assertion on injected
+  // before/after states. isDeepStrictEqual is injected through load() because
+  // the extracted body's free identifiers resolve against the harness scope.
+  it('behaves assertB3CostContinuity on injected before/after states', () => {
+    const assertCost = load(
+      ['assertB3CostContinuity'],
+      'assertB3CostContinuity',
+      'isDeepStrictEqual',
+    )(isDeepStrictEqual).assertB3CostContinuity;
+    const snapshot = {
+      sessionId: 's',
+      promptId: 'p',
+      budget: 500000,
+      directiveText: '+500k',
+      outputTokensAtTurnStart: 0,
+    };
+    const ledger = (candidates) => ({
+      'fake-model': { tokens: { candidates } },
+    });
+    const before = { round: 2, budget: snapshot, models: ledger(600) };
+    // The healthy recovery: snapshot deep-equal, ledger grown by the final round.
+    expect(() =>
+      assertCost(before, { round: 2, budget: snapshot, models: ledger(700) }),
+    ).not.toThrow();
+    // R1-3: a non-null snapshot whose numeric budget is null (the +Nk directive
+    // stopped being parsed) must red — an object-truthy guard passes it and the
+    // deep-equal then compares null with null.
+    expect(() =>
+      assertCost(
+        { ...before, budget: { ...snapshot, budget: null } },
+        {
+          round: 2,
+          budget: { ...snapshot, budget: null },
+          models: ledger(700),
+        },
+      ),
+    ).toThrow(/turn budget was not exercised/);
+    // A missing snapshot reds the same guard.
+    expect(() =>
+      assertCost({ ...before, budget: null }, { ...before, budget: null }),
+    ).toThrow(/turn budget was not exercised/);
+    // A re-baselined snapshot (different turn-start baseline) reds deep-equal.
+    expect(() =>
+      assertCost(before, {
+        round: 2,
+        budget: { ...snapshot, outputTokensAtTurnStart: 600 },
+        models: ledger(700),
+      }),
+    ).toThrow(/reset the turn budget snapshot/);
+    // An empty crash-boundary ledger is vacuous and must red.
+    expect(() =>
+      assertCost({ ...before, models: {} }, { ...before, models: {} }),
+    ).toThrow(/token ledger is empty/);
+    // A zeroed ({}) after-ledger must red — {} is truthy, so a null check passes it.
+    expect(() =>
+      assertCost(before, { round: 2, budget: snapshot, models: {} }),
+    ).toThrow(/wiped the per-model token ledger/);
+    // A shrunk per-model total must red (the dropped-restore shape).
+    expect(() =>
+      assertCost(before, { round: 2, budget: snapshot, models: ledger(100) }),
+    ).toThrow(
+      /wiped the per-model token ledger: model=fake-model before=600 after=100/,
+    );
+  });
+
+  // B2 (behavioural): the stream-identity grouping on injected public events —
+  // distinct item/part ids per prefix text, sequences collected, and blanked
+  // (null-identity) deltas excluded from the identity sets.
+  it('behaves b2DeltaIdentity on injected public events', () => {
+    const group = load(
+      ['b2DeltaIdentity', 'eventText', 'textDeltas'],
+      'b2DeltaIdentity',
+    )().b2DeltaIdentity;
+    const delta = (sequence, text, itemId, partId) => ({
+      sequence,
+      terminal: false,
+      type: 'item.output_text.delta',
+      item_id: itemId,
+      content_part_id: partId,
+      data: { text },
+    });
+    const events = [
+      delta(1, 'PARTIAL_ONE', 'item-1', 'part-1'),
+      delta(2, 'PARTIAL_ONE more', 'item-1', 'part-1'),
+      delta(5, 'PARTIAL_TWO', 'item-2', 'part-2'),
+      delta(9, 'ANSWER', 'item-3', 'part-3'),
+      delta(1, '', null, null), // a retracted delta carries no identity
+    ];
+    expect(group(events, 'PARTIAL_ONE')).toEqual({
+      itemIds: ['item-1'],
+      partIds: ['part-1'],
+      sequences: [1, 2],
+    });
+    expect(group(events, 'PARTIAL_TWO')).toEqual({
+      itemIds: ['item-2'],
+      partIds: ['part-2'],
+      sequences: [5],
+    });
+    expect(group(events, 'ANSWER')).toEqual({
+      itemIds: ['item-3'],
+      partIds: ['part-3'],
+      sequences: [9],
+    });
+    expect(group(events, 'ABSENT')).toEqual({
+      itemIds: [],
+      partIds: [],
+      sequences: [],
+    });
+  });
+
+  // B2 (behavioural): the attempt-identity reader on injected journal HEX rows —
+  // prompt-scoped, oldest first, skipping foreign events (runMysql injected).
+  it('behaves b2ModelAttempts on injected journal rows', () => {
+    const journalRows = (events) =>
+      Buffer.from(
+        events
+          .map((event) =>
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: event,
+            }),
+          )
+          .join('\n'),
+        'utf8',
+      ).toString('hex');
+    const attempt = (sequence, attemptId, state) => ({
+      kind: 'model.attempt',
+      sequence,
+      payload: { attemptId, state },
+    });
+    const rows = journalRows([
+      attempt(30, 'turn_b2:main:c', 'started'),
+      { kind: 'message.committed', sequence: 20, payload: {} },
+      attempt(10, 'turn_b2:main:a', 'output_committed'),
+      attempt(20, 'turn_b2:main:b', 'abandoned'),
+      attempt(40, 'other_turn:main:z', 'started'),
+    ]);
+    const attempts = load(
+      ['b2ModelAttempts', 'readJournalManagedEvents'],
+      'b2ModelAttempts',
+      'runMysql',
+    )(() => rows).b2ModelAttempts(0, 'filter', 'turn_b2');
+    expect(attempts).toEqual([
+      { attemptId: 'turn_b2:main:a', state: 'output_committed', sequence: 10 },
+      { attemptId: 'turn_b2:main:b', state: 'abandoned', sequence: 20 },
+      { attemptId: 'turn_b2:main:c', state: 'started', sequence: 30 },
+    ]);
+  });
+
+  // B2 (behavioural): the SSE client on an injected observer — the drain window
+  // keeps reading past the first terminal (R1-2: a double projection must be
+  // observed), Last-Event-ID passthrough, and abort rejects with a B2 error
+  // (R1-1: the caller's .catch guard is what keeps teardown alive).
+  it('behaves readPublicSse on an injected observer', async () => {
+    // Wall-clock budget like the real waitUntil: the drain predicate reads
+    // Date.now(), so an iteration-count budget can expire before the drain
+    // window ends on a fast runner (10k setImmediate turns took ~136ms here
+    // but under 100ms on CI, reddening the 100ms drain deterministically).
+    const waitUntilStub = async (_name, predicate, timeoutMs) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
+        if (await predicate()) return;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      throw new Error('waitUntil stub budget expired');
+    };
+    const loadSse = (FakeObserver) =>
+      load(
+        ['readPublicSse', 'b2SseObservers'],
+        'readPublicSse',
+        'SseObserver',
+        'waitUntil',
+      )(FakeObserver, waitUntilStub).readPublicSse;
+    const terminal = (sequence) => ({
+      sequence,
+      terminal: true,
+      type: 'turn.completed',
+      data: {},
+    });
+    // The drain witness: the first terminal arrives at once, a SECOND terminal
+    // 20ms later — inside the 100ms drain. A client that returned on the first
+    // terminal would report one; the drained capture must report both.
+    class DrainingObserver {
+      frames = [];
+      controller = new AbortController();
+      failure = undefined;
+      task = Promise.resolve();
+      constructor(opts) {
+        this.opts = opts;
+        DrainingObserver.last = this;
+      }
+      async start(after) {
+        this.startedWith = after;
+        this.frames.push({ id: 1, event: 'turn.completed', data: terminal(1) });
+        // start resolves at connect (first frame); the second terminal arrives
+        // asynchronously on the task, like the real observer's stream.
+        this.task = new Promise((resolve) => {
+          setTimeout(() => {
+            this.frames.push({
+              id: 2,
+              event: 'turn.completed',
+              data: terminal(2),
+            });
+            resolve();
+          }, 20);
+        });
+      }
+    }
+    const capture = await loadSse(DrainingObserver)('http://spring', 'sess', {
+      tenantId: 't',
+      after: 0,
+      until: (events) => events.some((event) => event.terminal),
+      timeoutMs: 5_000,
+      drainMs: 100,
+    });
+    expect(DrainingObserver.last.startedWith).toBe(0);
+    expect(capture.events.filter((event) => event.terminal)).toHaveLength(2);
+    expect(capture.lastId).toBe('2');
+    // Last-Event-ID is converted to the observer's numeric after.
+    class ReplayObserver extends DrainingObserver {}
+    await loadSse(ReplayObserver)('http://spring', 'sess', {
+      tenantId: 't',
+      lastEventId: '0',
+      until: (events) => events.some((event) => event.terminal),
+      timeoutMs: 5_000,
+      drainMs: 0,
+    });
+    expect(ReplayObserver.last.startedWith).toBe(0);
+    // Abort semantics (R1-1): a pending capture rejects with a B2 error when
+    // the teardown aborts the registry; with the runner's .catch guard attached
+    // no unhandledRejection fires, and a later await still sees the rejection.
+    class PendingObserver {
+      frames = [];
+      controller = new AbortController();
+      failure = undefined;
+      task = Promise.resolve();
+      constructor(opts) {
+        this.opts = opts;
+        PendingObserver.last = this;
+      }
+      start() {
+        return new Promise((_resolve, reject) => {
+          this.controller.signal.addEventListener('abort', () =>
+            reject(new Error('This operation was aborted')),
+          );
+        });
+      }
+    }
+    const readSsePending = load(
+      ['readPublicSse', 'b2SseObservers'],
+      'readPublicSse',
+      'SseObserver',
+      'waitUntil',
+    )(PendingObserver, waitUntilStub).readPublicSse;
+    let unhandled = false;
+    const onUnhandled = () => {
+      unhandled = true;
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const pending = readSsePending('http://spring', 'sess', {
+        tenantId: 't',
+        until: () => false,
+        timeoutMs: 5_000,
+      });
+      pending.catch(() => undefined); // the runner's R1-1 guard
+      await new Promise((resolve) => setImmediate(resolve));
+      PendingObserver.last.controller.abort(); // what the main finally does
+      await expect(pending).rejects.toThrow(/B2 live SSE aborted/);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toBe(false);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+    // S1: the observer-failure catch branch — a wire failure observed mid
+    // capture must surface as the B2 failed error, not a generic one.
+    class FailingObserver {
+      frames = [];
+      controller = new AbortController();
+      failure = undefined;
+      task = Promise.resolve();
+      start() {
+        this.failure = new Error('wire violation');
+        return Promise.resolve();
+      }
+    }
+    await expect(
+      loadSse(FailingObserver)('http://spring', 'sess', {
+        tenantId: 't',
+        until: () => false,
+        timeoutMs: 1_000,
+      }),
+      // Anchored: without the failure branch the same error text resurfaces
+      // wrapped in the incomplete branch, which a substring match would pass.
+    ).rejects.toThrow(/^B2 live SSE failed: Error: wire violation/);
+    // S1: the capture-incomplete catch branch — a wait budget exhausted with
+    // no observer failure and no abort must surface as incomplete.
+    await expect(
+      loadSse(DrainingObserver)('http://spring', 'sess', {
+        tenantId: 't',
+        until: () => false,
+        timeoutMs: 20,
+      }),
+    ).rejects.toThrow(/B2 live SSE capture incomplete/);
+  });
+
+  // B2 (behavioural): the shared SseObserver parse loop — split frames, the
+  // wire-format assertions (id === sequence, event === type, SSE content-type)
+  // and early close. This is the tree's split-frame witness now that the
+  // runner drives the shared observer instead of a private loop (R1-5).
+  it('behaves SseObserver on split chunks and wire violations', async () => {
+    const { SseObserver } = await import(
+      '../../integration-tests/helpers/hosted-sse-observer.js'
+    );
+    const chunksOf = (text, size) => {
+      const chunks = [];
+      for (let i = 0; i < text.length; i += size)
+        chunks.push(text.slice(i, i + size));
+      return chunks;
+    };
+    const sseResponse = (chunks, contentType = 'text/event-stream') => ({
+      status: 200,
+      headers: {
+        get: (name) => (name === 'content-type' ? contentType : null),
+      },
+      body: new ReadableStream({
+        start(controller) {
+          for (const chunk of chunks)
+            controller.enqueue(new TextEncoder().encode(chunk));
+          controller.close();
+        },
+      }),
+    });
+    const opts = {
+      surface: 'public',
+      sessionId: 'sess',
+      storeUrl: 'http://spring',
+      tenantId: 't',
+      timeoutMs: 5_000,
+    };
+    const stream =
+      'id: 1\nevent: item.output_text.delta\ndata: {"sequence":1,"type":"item.output_text.delta","data":{"text":"A"}}\n\n' +
+      'id: 2\nevent: turn.completed\ndata: {"sequence":2,"type":"turn.completed","terminal":true}\n\n';
+    vi.stubGlobal('fetch', async () => sseResponse(chunksOf(stream, 1)));
+    const observer = new SseObserver(opts);
+    await observer.start(0);
+    await observer.task;
+    expect(observer.failure).toBeUndefined();
+    expect(observer.frames.map((frame) => frame.id)).toEqual([1, 2]);
+    expect(observer.frames[0].data.data.text).toBe('A');
+    // id disagreeing with the payload sequence is a wire failure, not a frame.
+    vi.stubGlobal('fetch', async () =>
+      sseResponse([
+        'id: 9\nevent: item.output_text.delta\ndata: {"sequence":1,"type":"item.output_text.delta"}\n\n',
+      ]),
+    );
+    const badId = new SseObserver(opts);
+    await badId.start();
+    await badId.task;
+    expect(badId.failure).toBeDefined();
+    expect(badId.frames).toHaveLength(0);
+    // A 200 that is not an SSE stream fails at start, not as zero frames.
+    vi.stubGlobal('fetch', async () => sseResponse([], 'text/html'));
+    const html = new SseObserver(opts);
+    await expect(html.start()).rejects.toThrow();
+    vi.unstubAllGlobals();
+  });
+
+  // B2 (behavioural): the lifted stream-view audit (R1-6) — every clause is
+  // executed on injected views, including the double-terminal, shared-Part,
+  // missing-item, blanking and replay-Part regressions (R1-2/R1-3/R1-4).
+  it('behaves assertB2StreamViews on injected views', () => {
+    const audit = load(
+      [
+        'assertB2StreamViews',
+        'b2DeltaIdentity',
+        'textDeltas',
+        'eventText',
+        'reconciledBetween',
+      ],
+      'assertB2StreamViews',
+    )().assertB2StreamViews;
+    const delta = (sequence, text, partId, itemId = 'item_turn_assistant') => ({
+      sequence,
+      terminal: false,
+      type: 'item.output_text.delta',
+      turn_id: 'turn_x',
+      item_id: itemId,
+      content_part_id: partId,
+      data: { text },
+    });
+    const blanked = (sequence) => ({
+      sequence,
+      terminal: false,
+      type: 'item.output_text.delta',
+      turn_id: 'turn_x',
+      item_id: null,
+      content_part_id: null,
+      data: { text: '' },
+    });
+    const reconciled = (sequence) => ({
+      sequence,
+      terminal: false,
+      type: 'stream.reconciled',
+      turn_id: 'turn_x',
+      data: {},
+    });
+    const terminal = (sequence) => ({
+      sequence,
+      terminal: true,
+      type: 'turn.completed',
+      turn_id: 'turn_x',
+      data: {},
+    });
+    const views = () => ({
+      live: [
+        delta(1, 'P1', 'partA'),
+        reconciled(2),
+        delta(3, 'P2', 'partB'),
+        reconciled(4),
+        delta(5, 'ANSWER', 'partC'),
+        terminal(6),
+      ],
+      reload: [
+        blanked(1),
+        blanked(3),
+        delta(5, 'ANSWER', 'partC'),
+        terminal(6),
+      ],
+      replay: [
+        blanked(1),
+        blanked(3),
+        delta(5, 'ANSWER', 'partC'),
+        terminal(6),
+      ],
+      partials: ['P1', 'P2'],
+      answer: 'ANSWER',
+      firstPrefixSequence: 1,
+      secondPrefixSequence: 3,
+      originalTurnId: 'turn_x',
+    });
+    const healthy = audit(views());
+    expect(healthy.livePartial1.partIds).toEqual(['partA']);
+    expect(healthy.reloadAnswer.partIds).toEqual(['partC']);
+    // R1-2: a second terminal in the drained live capture must red.
+    const doubleTerminal = views();
+    doubleTerminal.live.push(terminal(7));
+    expect(() => audit(doubleTerminal)).toThrow(/B2 live SSE: .*terminals=2/);
+    // A shared content Part means the retraction never broke the continuation.
+    const sharedPart = views();
+    sharedPart.live[2] = delta(3, 'P2', 'partA');
+    expect(() => audit(sharedPart)).toThrow(/share a content Part/);
+    // R1-3: a generation carrying no item_id must red, not pass via the union.
+    const missingItem = views();
+    missingItem.live[0] = delta(1, 'P1', 'partA', null);
+    expect(() => audit(missingItem)).toThrow(
+      /expected one shared assistant item/,
+    );
+    // An unblanked prefix in reload must red.
+    const unblanked = views();
+    unblanked.reload[0] = delta(1, 'P1', 'partA');
+    expect(() => audit(unblanked)).toThrow(/not blanked in reload/);
+    // R1-4: the replay must match the surviving answer's Part, not just item.
+    const replayPart = views();
+    replayPart.replay[2] = delta(5, 'ANSWER', 'partD');
+    expect(() => audit(replayPart)).toThrow(/B2 replay view/);
+    // A wrong converged live text must red.
+    const wrongText = views();
+    wrongText.live[4] = delta(5, 'WRONG', 'partC');
+    expect(() => audit(wrongText)).toThrow(/B2 live SSE/);
+    // F5: the LIVE answer's identity is load-bearing — a live stream that
+    // delivers the surviving answer under the dead generation's Part, with no
+    // identity, or under a foreign item must red even when reload/replay are
+    // correct (live-only counterexamples).
+    const liveDeadPart = views();
+    liveDeadPart.live[4] = delta(5, 'ANSWER', 'partA');
+    expect(() => audit(liveDeadPart)).toThrow(
+      /live answer identity differs from reload/,
+    );
+    const liveNoIdentity = views();
+    liveNoIdentity.live[4] = delta(5, 'ANSWER', null, null);
+    expect(() => audit(liveNoIdentity)).toThrow(
+      /live answer carries no identity/,
+    );
+    const liveForeignItem = views();
+    liveForeignItem.live[4] = delta(5, 'ANSWER', 'partZ', 'item_foreign');
+    expect(() => audit(liveForeignItem)).toThrow(
+      /live answer identity differs from reload/,
+    );
+    // F6: a replay failure terminal (same turn id, text and identities) must
+    // red — a reconnecting client shown a failure while live/reload show
+    // success is not a passing B2.
+    const replayFailed = views();
+    replayFailed.replay[3] = { ...terminal(6), type: 'turn.failed' };
+    expect(() => audit(replayFailed)).toThrow(/B2 replay view/);
+    const replayCancelled = views();
+    replayCancelled.replay[3] = { ...terminal(6), type: 'turn.cancelled' };
+    expect(() => audit(replayCancelled)).toThrow(/B2 replay view/);
+    // Adversarial completeness: every remaining clause has a counterexample.
+    // A live FAILURE terminal (count still one) must red.
+    const liveFailed = views();
+    liveFailed.live[5] = { ...terminal(6), type: 'turn.failed' };
+    expect(() => audit(liveFailed)).toThrow(/B2 live SSE/);
+    // A missing earlier prefix in the live capture must red.
+    const missingPartial = views();
+    missingPartial.live.splice(2, 1);
+    expect(() => audit(missingPartial)).toThrow(/B2 live SSE/);
+    // Only one retraction in the live capture must red.
+    const singleRetraction = views();
+    singleRetraction.live.splice(3, 1);
+    expect(() => audit(singleRetraction)).toThrow(/B2 live SSE/);
+    // A retraction AFTER the new prefix (wrong order) must red.
+    const lateRetraction = views();
+    lateRetraction.live = [
+      delta(1, 'P1', 'partA'),
+      delta(3, 'P2', 'partB'),
+      reconciled(4),
+      delta(5, 'ANSWER', 'partC'),
+      reconciled(6),
+      terminal(7),
+    ];
+    lateRetraction.firstPrefixSequence = 1;
+    lateRetraction.secondPrefixSequence = 3;
+    expect(() => audit(lateRetraction)).toThrow(/B2 live SSE/);
+    // An unblanked prefix in the REPLAY view must red.
+    const replayUnblanked = views();
+    replayUnblanked.replay[0] = delta(1, 'P1', 'partA');
+    expect(() => audit(replayUnblanked)).toThrow(/B2 replay view/);
+    // S1 (per-clause pinning): each case below isolates one audit clause that
+    // survived a single-clause deletion before the case existed; every case
+    // was delete-control verified against its named clause.
+    // An extra delta after the last retraction breaks the converged LIVE text
+    // while every identity, ordering and terminal check still holds.
+    const liveExtraDelta = views();
+    liveExtraDelta.live = [
+      delta(1, 'P1', 'partA'),
+      reconciled(2),
+      delta(3, 'P2', 'partB'),
+      reconciled(4),
+      delta(5, 'ANSWER', 'partC'),
+      delta(6, 'EXTRA', 'partC'),
+      terminal(7),
+    ];
+    expect(() => audit(liveExtraDelta)).toThrow(
+      /B2 live SSE: text="ANSWEREXTRA"/,
+    );
+    // No retraction strictly between the two prefixes (both sit between
+    // partial2 and the answer): the first ordering clause must red while the
+    // count, converged text and second ordering all hold.
+    const earlyOrdering = views();
+    earlyOrdering.live = [
+      delta(1, 'P1', 'partA'),
+      delta(3, 'P2', 'partB'),
+      reconciled(4),
+      reconciled(5),
+      delta(6, 'ANSWER', 'partC'),
+      terminal(7),
+    ];
+    expect(() => audit(earlyOrdering)).toThrow(
+      /B2 live SSE: text="ANSWER" terminals=1 partial1=1 partial2=1 answer=1 retractions=2/,
+    );
+    // A PREFIX group under a foreign item (every group still carries an item
+    // and the live/reload answer identities agree) must red the one-shared-
+    // item clause, not slip through the per-group presence check.
+    const foreignPrefixItem = views();
+    foreignPrefixItem.live[0] = delta(1, 'P1', 'partA', 'item_foreign');
+    expect(() => audit(foreignPrefixItem)).toThrow(
+      /expected one shared assistant item/,
+    );
+    // The SECOND reload prefix left unblanked (the first is blanked) must red.
+    const reloadSecondUnblanked = views();
+    reloadSecondUnblanked.reload[1] = delta(3, 'P2', 'partB');
+    expect(() => audit(reloadSecondUnblanked)).toThrow(/not blanked in reload/);
+    // An extra delta in the REPLAY's converged text must red.
+    const replayExtraDelta = views();
+    replayExtraDelta.replay = [
+      blanked(1),
+      blanked(3),
+      delta(5, 'ANSWER', 'partC'),
+      delta(6, 'EXTRA', 'partC'),
+      terminal(7),
+    ];
+    expect(() => audit(replayExtraDelta)).toThrow(
+      /B2 replay view: text="ANSWEREXTRA"/,
+    );
+    // A double-projected terminal in the REPLAY must red the count clause.
+    const replayDoubleTerminal = views();
+    replayDoubleTerminal.replay.push(terminal(7));
+    expect(() => audit(replayDoubleTerminal)).toThrow(
+      /B2 replay view: .*terminals=2/,
+    );
+    // A MISSING blanked prefix frame in replay (not an unblanked one) must
+    // red: dropping the frame leaves the converged text intact, so only the
+    // per-sequence blanking clauses catch it.
+    const replayMissingFirst = views();
+    replayMissingFirst.replay = replayMissingFirst.replay.filter(
+      (event) => event.sequence !== 1,
+    );
+    expect(() => audit(replayMissingFirst)).toThrow(/B2 replay view/);
+    const replayMissingSecond = views();
+    replayMissingSecond.replay = replayMissingSecond.replay.filter(
+      (event) => event.sequence !== 3,
+    );
+    expect(() => audit(replayMissingSecond)).toThrow(/B2 replay view/);
+    // The replay answer under a foreign ITEM (same Part) must red the item
+    // comparison independently of the Part comparison.
+    const replayForeignItem = views();
+    replayForeignItem.replay[2] = delta(5, 'ANSWER', 'partC', 'item_foreign');
+    expect(() => audit(replayForeignItem)).toThrow(/B2 replay view/);
+  });
+
+  // B2: pin the identity/live-SSE observations and their harness-only gate so a
+  // regression reds here at unit speed, not only in the real-stack lane.
+  it('pins the B2 stream-identity and live-SSE observations', () => {
+    const source = read('scripts/run-managed-agent-server-e2e.ts');
+    expect(source).toContain('function b2DeltaIdentity(');
+    expect(source).toContain('function b2ModelAttempts(');
+    expect(source).toContain('async function readPublicSse(');
+    expect(source).toContain('function assertB2StreamViews(');
+    expect(source).toContain('function readJournalManagedEvents(');
+    expect(source).toContain('function textDeltas(');
+    expect(source).toContain('item_id?: string | null;');
+    expect(source).toContain('content_part_id?: string | null;');
+    expect(source).toContain('turn_id?: string | null;');
+    expect(source).toContain('B2 attempt identities:');
+    expect(source).toContain('B2 live SSE:');
+    expect(source).toContain('B2 stream identities:');
+    expect(source).toContain('B2 replay view:');
+    expect(source).toContain('b2-identities.json');
+    // R1-5: the runner drives the shared observer, not a private parse loop.
+    expect(source).toContain(
+      "import { SseObserver } from '../integration-tests/helpers/hosted-sse-observer.js';",
+    );
+    // R1-2: the terminal is a progress signal; a bounded drain keeps reading.
+    expect(source).toContain('const drainMs = options.drainMs ?? 2_000;');
+    // R1-1: the capture promise is marked handled at creation, and the
+    // teardown aborts observers (not bare controllers).
+    expect(source).toContain('b2LiveCapture.catch(() => undefined);');
+    expect(source).toContain(
+      'for (const observer of b2SseObservers) observer.controller.abort();',
+    );
+    // R1-10: the model-round evidence is named explicitly, not borrowed from
+    // a packaged-undefined-<epoch> gate directory.
+    expect(source).toContain('const modelRoundEvidenceDirectory =');
+    expect(source).toContain('writeEvidenceFile(modelRoundEvidenceDirectory, ');
+    // The live capture starts before the first prefix and only in the
+    // harness-only model-round variant; the frozen control plane keeps scope.
+    const captureAt = source.indexOf('b2LiveCapture = readPublicSse(');
+    expect(captureAt).toBeGreaterThan(-1);
+    expect(source.slice(captureAt - 600, captureAt)).toContain(
+      'if (harnessOnly)',
+    );
+    // The converged live view is the deltas after the LAST retraction — the
+    // public stream.reconciled frame has no payload, so a raw concatenation of
+    // every delta frame would still include the dead prefixes.
+    const viewsAt = source.indexOf('function assertB2StreamViews(');
+    expect(viewsAt).toBeGreaterThan(-1);
+    expect(source.slice(viewsAt, viewsAt + 1600)).toContain(
+      'event.sequence > last',
+    );
+    // The attempt-identity check runs before the shared audit (root-cause
+    // diagnosis), gated on harnessOnly; the replay uses Last-Event-ID.
+    const auditAt = source.indexOf('B2 attempt identities:');
+    expect(source.slice(auditAt - 600, auditAt)).toContain('if (harnessOnly)');
+    expect(source).toContain("lastEventId: '0',");
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,

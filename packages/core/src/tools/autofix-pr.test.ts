@@ -55,7 +55,7 @@ if (mode === 'hang') setInterval(() => {}, 1000);
 else if (mode === 'refuse') { process.stderr.write('another session watches PR #12\\n'); process.exit(1); }
 else if (mode === 'lost' && command === 'fix-end') { process.stdout.write(JSON.stringify({ attempt: 'x', lostSnapshot: true }) + '\\n'); }
 else if (mode === 'refuse-stack') { process.stderr.write('Error: gh said something first\\nAn unexpected critical error occurred:\\nError: no round of PR #12 has a fix to start\\n    at runFixStart (fix.js:1:1)\\n    at handler (fix.js:2:2)\\n'); process.exit(1); }
-else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, host: process.env.FAKE_HOST || undefined, authorCanPush: process.env.FAKE_CAN_PUSH === '1', tookOver: process.env.FAKE_TOOK_OVER === '1' }) + '\\n');
+else if (command === 'prepare') process.stdout.write(JSON.stringify({ worktreePath: process.env.FAKE_WORKTREE, preparedAt: process.env.FAKE_PREPARED_AT, host: process.env.FAKE_HOST || undefined, authorCanPush: process.env.FAKE_CAN_PUSH === '1', tookOver: process.env.FAKE_TOOK_OVER === '1', inPlace: process.env.FAKE_IN_PLACE === '1' }) + '\\n');
 else if (command === 'status') process.stdout.write(process.env.FAKE_STATUS + '\\n');
 else if (command === 'fix-start') process.stdout.write(JSON.stringify({ attempt: (rest.find((a) => a.startsWith('--attempt=')) || '').slice(10), task: process.env.FAKE_TASK || 'feedc0ffee12' }) + '\\n');
 else if (command === 'fix-end') process.stdout.write(JSON.stringify({ attempt: (rest.find((a) => a.startsWith('--attempt=')) || '').slice(10), snapshot: 'snap.json', brief: 'brief.md', head: 'abc' }) + '\\n');
@@ -160,6 +160,7 @@ describe('validateAutofixPrParams', () => {
     [{ command: 'prepare', pr: 1, repo: 'a/b c' }, /not a valid value/],
     [{ command: 'sync', pr: 1, discard: 'yes' as never }, /must be a boolean/],
     [{ command: 'schedule', pr: 1, every: 2.5 }, /positive integer/],
+    [{ command: 'push', pr: 1, in_place: true }, /does not take "in_place"/],
     // The plan is the one the skill writes beside the worktree, never a file
     // of another PR, a relative path, or one the PR's own tree carries.
     [
@@ -207,6 +208,7 @@ describe('validateAutofixPrParams', () => {
   it('accepts what the skill runs', () => {
     for (const params of [
       { command: 'prepare', pr: 1, repo: 'o/r', host: 'github.com' },
+      { command: 'prepare', pr: 1, repo: 'o/r', in_place: true },
       { command: 'snapshot', pr: 1, task: '0123456789ab' },
       { command: 'reply', pr: 1, plan, task: 't1' },
       { command: 'status' },
@@ -223,6 +225,10 @@ describe('autofixPrArgs', () => {
     [
       { command: 'prepare', pr: 5, repo: 'o/r', host: 'h.io', take_over: true },
       ['prepare', '5', '--repo=o/r', '--host=h.io', '--take-over'],
+    ],
+    [
+      { command: 'prepare', pr: 5, repo: 'o/r', in_place: true },
+      ['prepare', '5', '--repo=o/r', '--in-place'],
     ],
     [
       { command: 'ci-log', pr: 5, run_id: '99', lines: 300, task: 't1' },
@@ -636,6 +642,18 @@ describe('permission rules', () => {
     ).toMatch(/Takes the watch of PR #12 over/);
   });
 
+  it('says what an in-place start does', async () => {
+    const details = await invocation({
+      command: 'prepare',
+      pr: 12,
+      repo: 'o/r',
+      in_place: true,
+    }).getConfirmationDetails(signal());
+    expect((details as { warnings?: string[] }).warnings?.join(' ')).toMatch(
+      /Starts an in-place watch of PR #12: the fix agent works in your own checkout/,
+    );
+  });
+
   it('asks for a start each time, saying what it lets through', async () => {
     const details = await invocation({
       command: 'prepare',
@@ -775,6 +793,22 @@ describe('running a helper', () => {
     );
   });
 
+  it('takes the reply plan of an in-place watch from inside its checkout', async () => {
+    // An in-place watch's worktree IS the checkout: its plan sits in
+    // <checkout>/.qwen/tmp, not beside the checkout (its parent).
+    vi.stubEnv('FAKE_IN_PLACE', '1');
+    vi.stubEnv('FAKE_WORKTREE', dir);
+    await prepare();
+    const plan = path.join(dir, '.qwen', 'tmp', 'autofix-pr-12-plan.json');
+    fs.mkdirSync(path.dirname(plan), { recursive: true });
+    fs.writeFileSync(plan, '{}');
+    const result = await invocation({ command: 'reply', pr: 12, plan }).execute(
+      signal(),
+    );
+    expect(result.error).toBeUndefined();
+    expect(JSON.parse(String(result.llmContent)).command).toBe('reply');
+  });
+
   it('takes a run id the model gives as a number', () => {
     const tool = new AutofixPrTool(makeConfig());
     expect(
@@ -842,6 +876,7 @@ describe('running a helper', () => {
       targetDir: dir,
       preparedAt: PREPARED_AT,
       worktree,
+      inPlace: false,
       authorCanPush: true,
     });
     expect(confirmedWatch('session-b', 12)).toBeUndefined();
@@ -1024,6 +1059,14 @@ describe('unattended', () => {
   it('refuses a watch this session did not prepare, whatever its state file says', async () => {
     const result = await confirmAndRun();
     expect(result.error?.message).toMatch(/did not start or resume/);
+    expect(await granted()).toBe(false);
+  });
+
+  it('refuses an in-place watch: its fixes always run attended', async () => {
+    await prepare();
+    vi.stubEnv('FAKE_STATUS', status({ inPlace: true }));
+    const result = await confirmAndRun();
+    expect(result.error?.message).toMatch(/in-place watch/);
     expect(await granted()).toBe(false);
   });
 

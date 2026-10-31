@@ -83,6 +83,7 @@ const cancel = vi.fn(async () => {});
 const setApprovalMode = vi.fn(async (mode: string) => ({ mode }));
 const setModel = vi.fn(async () => ({}) as any);
 const setReasoningEffort = vi.fn(async () => {});
+const setWorkflowMode = vi.fn(async (_requested: boolean) => {});
 const loadArtifacts = vi.fn(async () => ({ artifacts: [] }));
 const getTasks = vi.fn();
 const getWorkflowTasks = vi.fn();
@@ -100,6 +101,7 @@ const daemonActions = {
   setApprovalMode,
   setModel,
   setReasoningEffort,
+  setWorkflowMode,
   loadArtifacts,
   getTasks,
   getWorkflowTasks,
@@ -503,6 +505,7 @@ beforeEach(() => {
   setApprovalMode.mockClear();
   setModel.mockClear();
   setReasoningEffort.mockClear();
+  setWorkflowMode.mockReset().mockResolvedValue(undefined);
   enqueuePrompt.mockClear();
   enqueuePrompt.mockReturnValue(true);
   removeQueuedPrompt.mockClear();
@@ -2937,6 +2940,41 @@ describe('ChatPane', () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 
+  it('passes this pane owner mode and allows changing it while a turn is active', async () => {
+    connectionState.workflowMode = {
+      requested: true,
+      available: false,
+      effective: false,
+    };
+    connectionState.workflowModeStatus = 'ready';
+    streamingStateValue = 'responding';
+    sessionHasActivePromptValue = true;
+    render();
+    expect(latestChatEditorProps.workflowMode).toBe(
+      connectionState.workflowMode,
+    );
+    expect(latestChatEditorProps.workflowModeStatus).toBe('ready');
+    expect(latestChatEditorProps.visibleToolbarActions).toContain(
+      'workflowMode',
+    );
+    await act(async () => latestChatEditorProps.onWorkflowModeChange(false));
+    expect(setWorkflowMode).toHaveBeenCalledExactlyOnceWith(false);
+    expect(setReasoningEffort).not.toHaveBeenCalled();
+    expect(sendPrompt).not.toHaveBeenCalled();
+    expect(cancel).not.toHaveBeenCalled();
+  });
+
+  it('does not publish a failed mode action after the pane owner changes', async () => {
+    const failure = deferred<void>();
+    setWorkflowMode.mockReturnValueOnce(failure.promise);
+    const onError = vi.fn();
+    render({ onError });
+    act(() => latestChatEditorProps.onWorkflowModeChange(true));
+    ownerVersion += 1;
+    await act(async () => failure.reject(new Error('Old owner disconnected')));
+    expect(onError).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])(
     'keeps reasoning persistence scoped with standalone=%s',
     async (standalone) => {
@@ -3123,6 +3161,7 @@ describe('ChatPane', () => {
       JSON.stringify([
         'addMenu',
         'approvalMode',
+        'workflowMode',
         'contextUsage',
         'model',
         'voice',
