@@ -381,14 +381,22 @@ export function reviewWriteAuthorization(req: WriteAuthorizationRequest): {
     // implying typing one would fix it) misdirects.
     const commentRequested =
       verdict.comment.requested || req.defaultComment === true;
+    // A promoted bare number names a PR only by positional guess (review
+    // R2-1 on #15998): the parser withholds comment.effective for it, and
+    // the refusal names that cause instead of "names no pull request" —
+    // the record does carry a number, just not one the user typed as the
+    // target. Re-invoking with the number first authorises normally.
+    const why = !commentRequested
+      ? '`--comment` was not in the review arguments ' +
+        `(${JSON.stringify(raw.trim())})`
+      : verdict.promotedNumberTarget
+        ? `the PR number in the review arguments (${JSON.stringify(raw.trim())}) was promoted from prose, not typed as the target, so it cannot authorise posting — re-invoke with the number first`
+        : `the review arguments (${JSON.stringify(raw.trim())}) do not name a ` +
+          'pull request, so they cannot authorise posting to one';
     return {
       ok: false,
       cls: commentRequested ? 'unbound' : 'comment-not-requested',
-      why: commentRequested
-        ? `the review arguments (${JSON.stringify(raw.trim())}) do not name a ` +
-          'pull request, so they cannot authorise posting to one'
-        : '`--comment` was not in the review arguments ' +
-          `(${JSON.stringify(raw.trim())})`,
+      why,
     };
   }
   // A minimal record falls through to the binding checks below: the refusal

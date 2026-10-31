@@ -1051,8 +1051,15 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'Resolution is for requests to review a PULL REQUEST again',
     );
+    // Review R2-3: the guard keys on what the user SPELLED, not on the
+    // verdict's target type — prose parses to a file target, so a
+    // verdict-keyed guard excludes the only input the clause exists for.
+    expect(body).toContain('spells no target of its own');
     expect(body).toContain(
-      'holds no classifiable target — no PR number, no PR URL, no file path',
+      "Judge by what the user SPELLED, not by the verdict's target type",
+    );
+    expect(body).toContain(
+      'that fallback is exactly the shape this clause rescues',
     );
     expect(body).toContain(
       'a bare `/review` with no arguments is a local review',
@@ -1085,15 +1092,28 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'this paragraph must not be read as describing current behavior',
     );
-    // Review R1-5: a bare number promoted from inside a sentence may be a
-    // count wearing a PR id's shape, and the promoted target enables
-    // --comment. The warning is the ask-before-running signal.
-    expect(body).toContain('A promoted-number warning is ask-before-running');
+    // Review R2-1/R2-2: a promoted bare number never carries posting
+    // authority — the parser withholds comment.effective, and the clause
+    // confirms the target before running. The local-intent move must be
+    // executable (prose never parses to local), and the hash form has an
+    // operational resolution, not just a decoration note.
+    expect(body).toContain(
+      'a promoted bare number never carries posting authority',
+    );
+    expect(body).toContain(
+      'When the verdict marks the target as a promoted bare number (`promotedNumberTarget`), confirm the target with the user before running',
+    );
     expect(body).toContain('never post on it silently');
+    expect(body).toContain('prose never parses to a local target');
+    expect(body).toContain('resolve to the bare number (or ask for it)');
     // Review R1-2: the restart cost belongs to a SURVIVING interrupted
-    // attempt only; after a completed round the refusal costs nothing.
+    // attempt only; after a completed round the refusal costs nothing,
+    // and worktree-gone is its own shape (report survived, tree vanished).
     expect(body).toContain(
       'after a completed round the state is cleaned up and the refusal',
+    );
+    expect(body).toContain(
+      "worktree-gone` means the report survived but the attempt's worktree vanished",
     );
     // The resolved invocation keeps the flags the input already carries,
     // so the parser still sees them — but carrying a flag is NOT posting

@@ -861,6 +861,33 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
     expect(bySetting.ok).toBe(false);
     expect(bySetting.cls).toBe('unbound');
   });
+
+  it('a promoted count never authorises posting to the PR it names (R2-1 Critical)', () => {
+    // The exact witness from the review: the sentence names #15998, but the
+    // classifier promotes the count "2" to the target. Before the authority
+    // withdrawal the gate authorised posting to PR #2 — a PR the user never
+    // named. The parser now withholds comment.effective for a promoted bare
+    // number, and the gate refuses with the promotion-specific cause.
+    const count = authFor('--comment the 2 follow-ups to 15998', { pr: 2 });
+    expect(count.ok).toBe(false);
+    expect(count.cls).toBe('unbound');
+    expect(count.why).toContain('promoted from prose');
+    // The sentence-final count is the same hazard, and the setting-driven
+    // arm needs no flag at all — both refuse.
+    expect(authFor('review the last 3 --comment', { pr: 3 }).ok).toBe(false);
+    expect(
+      authFor('review the last 3', { pr: 3, defaultComment: true }).ok,
+    ).toBe(false);
+    // The explicit re-invocation — number typed first — authorises normally.
+    expect(authFor('2 --comment', { pr: 2 }).ok).toBe(true);
+    // A PR URL is an explicit target even beside prose: authority intact.
+    expect(
+      authFor('重新评审 https://github.com/o/r/pull/15998 --comment', {
+        pr: 15998,
+        repo: 'o/r',
+      }).ok,
+    ).toBe(true);
+  });
 });
 
 describe('the user-authorized fast path binds a recorded Aone target (round-6 witness)', () => {

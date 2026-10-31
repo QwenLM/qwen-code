@@ -163,6 +163,14 @@ export interface ParsedReviewArgs {
     /** `--resume` applies (the target is a PR). */
     effective: boolean;
   };
+  /**
+   * The PR target is a bare number the PR-shape preference PROMOTED over
+   * preceding prose — a positional guess, not a target the user typed
+   * first. Such a target never carries posting authority (`comment.effective`
+   * stays false), and the routing clause treats it as confirm-before-running.
+   * False for an explicitly typed number, a PR URL, and every non-PR target.
+   */
+  promotedNumberTarget: boolean;
   /** Non-flag tokens beyond the first target token, reported not guessed. */
   extraTokens: string[];
   /** Unrecognized `--flags`, reported not guessed. */
@@ -340,8 +348,14 @@ export { tokenizeArgs } from '../../utils/shell-args.js';
  */
 function classifyToken(token: string): ReviewTarget | 'invalid-url' | null {
   if (isFlag(token)) return null;
-  if (isPureInteger(token)) {
-    return { type: 'pr-number', number: Number(token) };
+  // A PR number carrying the sentence's own trailing punctuation is still
+  // a PR number ("有更新了，重新评审 6711。"): normalise the mark for the
+  // integer test only — callers keep the original spelling in extraTokens
+  // and warning text, and path-shaped tokens are untouched (review R2-4
+  // on #15998).
+  const integerForm = token.replace(/[.,，。!！?？;；、]+$/, '');
+  if (isPureInteger(integerForm)) {
+    return { type: 'pr-number', number: Number(integerForm) };
   }
   const urlMatch = PR_URL_RE.exec(token);
   if (urlMatch) {
@@ -892,25 +906,20 @@ export function parseReviewArgs(
   // no PR-shaped token is present; beside one, the PR wins and the path is
   // disclosed as an extra.
   const prIdx = targetTokens.findIndex(isPrShapedToken);
+  // Whether the PR target is a bare number PROMOTED over preceding prose —
+  // a positional guess, not a target the user typed first. The guess may
+  // aim the review, but it never grants a public write: comment.effective
+  // stays false for it (review R2-1 on #15998), so the write gate, which
+  // re-parses this same verbatim record, refuses posting. The warning is
+  // decided AFTER the URL preference below, from the token that actually
+  // became the target (review R2-2).
+  let promotedNumberTarget = false;
   if (prIdx > 0) {
-    // A bare number promoted from INSIDE a sentence may be a count, not a
-    // PR id — the classifier cannot tell them apart, and the promoted
-    // target also flips --comment from ignored to effective (review R1-5
-    // on #15998). Warn when non-PR tokens FOLLOW the number in the original
-    // order (the mid-sentence shape); the skill treats this warning as
-    // ask-before-running. A number at the end of the input is the canonical
-    // prose-rescue shape and stays silent.
     const promotedShape = classifyToken(targetTokens[prIdx]);
-    if (
+    promotedNumberTarget =
       promotedShape !== null &&
       promotedShape !== 'invalid-url' &&
-      promotedShape.type === 'pr-number' &&
-      targetTokens.slice(prIdx + 1).some((t) => !isPrShapedToken(t))
-    ) {
-      warnings.push(
-        `Bare number ${promotedShape.number} was promoted to the PR target from inside a sentence — a count is indistinguishable from a PR id, and the promoted target enables \`--comment\`; confirm the intended PR before running.`,
-      );
-    }
+      promotedShape.type === 'pr-number';
     const [prToken] = targetTokens.splice(prIdx, 1);
     targetTokens.unshift(prToken);
   }
@@ -985,7 +994,15 @@ export function parseReviewArgs(
   const isMinimal = topology === 'minimal';
 
   const commentRequested = commentRequestedByFlag || defaults.comment === true;
-  const commentEffective = commentRequested && isPr && !isMinimal;
+  // A promoted bare number never grants a public write (review R2-1 on
+  // #15998): the positional guess may aim the review, but posting authority
+  // requires a target the user typed, and the write gate re-parses this
+  // same verbatim record. A URL that superseded the promoted number is an
+  // explicit target and keeps its authority.
+  const promotedNumberFinal =
+    promotedNumberTarget && target.type === 'pr-number';
+  const commentEffective =
+    commentRequested && isPr && !isMinimal && !promotedNumberFinal;
   if (commentRequestedByFlag && !isPr) {
     warnings.push(
       'Warning: `--comment` flag is ignored because the review target is not a PR.',
@@ -1001,6 +1018,18 @@ export function parseReviewArgs(
       commentRequestedByFlag
         ? 'Warning: `--comment` is ignored because `--topology minimal` is terminal-only — the minimal arm posts nothing.'
         : 'Warning: the `review.comment` setting is ignored because `--topology minimal` is terminal-only — the minimal arm posts nothing.',
+    );
+  } else if (
+    commentRequested &&
+    promotedNumberFinal &&
+    target.type === 'pr-number'
+  ) {
+    // Decided after the URL preference, from the token that actually became
+    // the target, and fired exactly when the promotion withheld a requested
+    // posting authority (review R2-2): a demoted number never draws it, and
+    // a re-review nobody asked to post costs no confirmation turn.
+    warnings.push(
+      `Bare number ${target.number} was promoted to the PR target from prose, so \`--comment\` posting authority is withheld — a count is indistinguishable from a PR id; confirm the intended PR and re-invoke with its number typed first to post.`,
     );
   }
 
@@ -1263,6 +1292,7 @@ export function parseReviewArgs(
     topologySource,
     ...(recordedHostFlag !== undefined ? { host: recordedHostFlag } : {}),
     resume: { requested: resumeRequested, effective: resumeEffective },
+    promotedNumberTarget: promotedNumberFinal,
     extraTokens,
     unknownFlags,
     warnings,

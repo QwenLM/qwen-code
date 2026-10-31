@@ -5235,8 +5235,11 @@ describe('fetch-pr --resume', () => {
     );
     expect(headMovedStderr).toContain('new or rewritten commits');
     expect(headMovedStderr).toContain('when the recorded anchor survives');
+    // Review R1-3 on #15998: the cost is announced where recordRestart
+    // actually runs (after the plan write), in the past tense — never
+    // before the fact at the refusal.
     expect(headMovedStderr).toContain(
-      'this refusal spends the one head-movement restart',
+      "This refusal spent the run's one head-movement restart.",
     );
   });
 
@@ -5274,17 +5277,64 @@ describe('fetch-pr --resume', () => {
     const lines = await stdoutJsonLines();
     expect(lines).toEqual([{ resumed: false, resumeRefused: 'no-report' }]);
     // Review R1-2/R1-3 on #15998: this is the refusal a re-review after a
-    // COMPLETED round actually reaches (cleanup removed the report), so the
-    // guidance must print here — but without the restart-cost sentence,
-    // which belongs to head-moved alone.
+    // COMPLETED round actually reaches (cleanup removed the report) — and
+    // equally a first-ever --resume or an unreadable report, so the wording
+    // asserts no cause. The guidance prints, with the anchor condition and
+    // without the restart-cost sentence, which belongs to head-moved alone.
+    const stderr = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(stderr).toContain('No resumable state was found');
+    expect(stderr).toContain('IS the re-review');
+    expect(stderr).toContain('when the recorded anchor survives');
+    expect(stderr).toContain(
+      'After future updates use a plain `/review <n>` without --resume',
+    );
+    expect(stderr).toContain('This refusal costs nothing');
+    expect(stderr).not.toContain('completed round cleans up');
+    expect(stderr).not.toContain('head-movement restart');
+  });
+
+  it('falls through when the report survived but the worktree is gone', async () => {
+    // Review R1-3 on #15998: worktree-gone requires a SURVIVING report —
+    // it is an interrupted attempt that lost its tree, not a completed
+    // round's cleanup. The guidance must print its own cause-neutral
+    // sentence, never the completed-round claim.
+    producerMocks.readFileSync.mockImplementation((path?: unknown) => {
+      if (path === OUT) return prevReport();
+      if (String(path).endsWith('qwen-review-pr-42-diff.txt')) {
+        return Buffer.from(DIFF_BYTES) as unknown as string;
+      }
+      throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' });
+    });
+    const { gitOpt } = await import('./lib/git.js');
+    vi.mocked(gitOpt).mockImplementation((...args: string[]) => {
+      if (args.includes('-C') && args.includes('rev-parse')) return null;
+      if (args.includes('--others')) return '';
+      if (args.includes('ls-tree')) return '';
+      if (args.includes('config')) return '';
+      if (args.includes('merge-base')) return 'baseb45eb45e';
+      if (args.includes('status')) return '';
+      if (args.includes('ls-files')) return 'H f.txt';
+      if (args.includes('--git-common-dir')) return '/repo/.git';
+      if (args.includes('--git-dir')) {
+        return '/repo/.git/worktrees/review-pr-42';
+      }
+      return 'f00df00df00d';
+    });
+    await run();
+    expect(reportWritten()).toBe(true);
+    const lines = await stdoutJsonLines();
+    expect(lines).toEqual([{ resumed: false, resumeRefused: 'worktree-gone' }]);
     const stderr = producerMocks.writeStderrLine.mock.calls
       .map((c) => String(c[0]))
       .join('\n');
     expect(stderr).toContain('IS the re-review');
     expect(stderr).toContain(
-      'After future updates use a plain `/review <n>` without --resume',
+      "The interrupted attempt's worktree is gone while its report survived",
     );
-    expect(stderr).toContain('this refusal costs nothing');
+    expect(stderr).toContain('This refusal costs nothing');
+    expect(stderr).not.toContain('completed round cleans up');
     expect(stderr).not.toContain('head-movement restart');
   });
 

@@ -469,15 +469,51 @@ const CASES: Case[] = [
     },
   },
   {
-    name: '--comment beside prose and a number keeps posting authority (PR target, high)',
+    // Review R2-1 on #15998: a promoted bare number never grants a public
+    // write — comment.effective stays false and the withholding is warned.
+    name: '--comment beside prose and a promoted number withholds posting authority',
     raw: '--comment 重新评审 6711',
     expect: {
       targetType: 'pr-number',
-      comment: { requested: true, effective: true },
+      comment: { requested: true, effective: false },
+      promotedNumberTarget: true,
       effort: 'high',
       extraTokens: ['重新评审'],
-      // The PR default is already high, so the forced-high warning stays
-      // silent; the only warning is the disclosed prose extra.
+      // The promotion-withholding warning plus the disclosed prose extra.
+      warningCount: 2,
+    },
+  },
+  {
+    name: 'a number typed first keeps its posting authority (explicit target)',
+    raw: '6711 --comment',
+    expect: {
+      targetType: 'pr-number',
+      comment: { requested: true, effective: true },
+      promotedNumberTarget: false,
+      extraTokens: [],
+      warningCount: 0,
+    },
+  },
+  {
+    // Review R2-4 on #15998: the sentence's own trailing punctuation does
+    // not demote the number — the mark is normalised for classification
+    // only, and the original spelling stays in extraTokens.
+    name: 'a PR number carrying trailing sentence punctuation is still PR-shaped',
+    raw: '有更新了，重新评审 6711。',
+    expect: {
+      targetType: 'pr-number',
+      target: { type: 'pr-number', number: 6711 },
+      extraTokens: ['有更新了，重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'ASCII trailing punctuation normalises the same way',
+    raw: 're-review 6711.',
+    expect: {
+      targetType: 'pr-number',
+      target: { type: 'pr-number', number: 6711 },
+      extraTokens: ['re-review'],
       warningCount: 1,
     },
   },
@@ -625,34 +661,79 @@ describe('parseReviewArgs', () => {
       ),
     ).toBe(true);
     expect(got.warnings.some((w) => w.includes('Ignoring extra'))).toBe(false);
+    // The reverse order is what pins the HOIST: on the base (no preference)
+    // the number wins first and the malformed URL lands in trailingExtras
+    // with only the generic line — this assertion reds under a full revert,
+    // which the forward order alone does not (verification round-5 note).
+    const reversed = parseReviewArgs(
+      '6711 https://github.com/QwenLM/qwen-code/pull/42oops',
+    );
+    expect(reversed.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      reversed.warnings.some(
+        (w) => w.includes('Unrecognized URL') && w.includes('not a PR/CR URL'),
+      ),
+    ).toBe(true);
+    expect(reversed.warnings.some((w) => w.includes('Ignoring extra'))).toBe(
+      false,
+    );
   });
 
-  it('warns when a bare number is promoted from inside a sentence, not at its end', () => {
-    // Review R1-5 on #15998: a count inside a sentence is indistinguishable
-    // from a PR id, and the promoted target flips --comment from ignored to
-    // effective — the warning is the skill's ask-before-running signal.
+  it('withholds posting authority from a promoted number and warns exactly then', () => {
+    // Review R2-1 on #15998 (Critical): a positional guess never grants a
+    // public write. Both word orders — mid-sentence count AND sentence-final
+    // count — withhold comment.effective; deleting `!promotedNumberFinal`
+    // reds the effective assertions.
     const midSentence = parseReviewArgs('review the last 3 commits --comment');
     expect(midSentence.target).toEqual({ type: 'pr-number', number: 3 });
-    expect(midSentence.comment.effective).toBe(true);
+    expect(midSentence.comment.effective).toBe(false);
+    expect(midSentence.promotedNumberTarget).toBe(true);
     expect(
       midSentence.warnings.some((w) =>
         w.includes('Bare number 3 was promoted to the PR target'),
       ),
     ).toBe(true);
-    const chinese = parseReviewArgs('重新评审 3 个提交');
-    expect(chinese.target).toEqual({ type: 'pr-number', number: 3 });
+    const sentenceFinal = parseReviewArgs('review the last 3 --comment');
+    expect(sentenceFinal.target).toEqual({ type: 'pr-number', number: 3 });
+    expect(sentenceFinal.comment.effective).toBe(false);
     expect(
-      chinese.warnings.some((w) => w.includes('was promoted to the PR target')),
+      sentenceFinal.warnings.some((w) =>
+        w.includes('Bare number 3 was promoted to the PR target'),
+      ),
     ).toBe(true);
-    // The canonical prose-rescue shape (number at the end) stays silent —
-    // one extra warning there would tax every intended re-review.
+    // The setting-driven arm withholds the same way — no flag typed at all.
+    const bySetting = parseReviewArgs('review the last 3', { comment: true });
+    expect(bySetting.comment.effective).toBe(false);
+    // Review R2-2: the warning is decided AFTER the URL preference, from the
+    // token that actually became the target — a demoted number never draws
+    // it, and a courtesy particle after an unposted re-review costs nothing.
+    const urlSupersedes = parseReviewArgs(
+      '重新评审 6711 备注 https://github.com/o/r/pull/9000 --comment',
+    );
+    expect(urlSupersedes.target).toMatchObject({
+      type: 'pr-url',
+      number: 9000,
+    });
+    expect(urlSupersedes.comment.effective).toBe(true);
+    expect(
+      urlSupersedes.warnings.some((w) => w.includes('Bare number 6711')),
+    ).toBe(false);
+    const courtesy = parseReviewArgs('重新评审 6711 谢谢');
+    expect(courtesy.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      courtesy.warnings.some((w) =>
+        w.includes('was promoted to the PR target'),
+      ),
+    ).toBe(false);
+    // The canonical prose-rescue shape without posting intent stays silent.
     const canonical = parseReviewArgs('有更新了，重新评审 6711');
+    expect(canonical.promotedNumberTarget).toBe(true);
     expect(
       canonical.warnings.some((w) =>
         w.includes('was promoted to the PR target'),
       ),
     ).toBe(false);
-    // A PR URL after the number confirms the target; no warning either.
+    // A same-number URL confirms the target; no warning either.
     const urlConfirmed = parseReviewArgs(
       '重新评审 6711 https://github.com/QwenLM/qwen-code/pull/6711',
     );
