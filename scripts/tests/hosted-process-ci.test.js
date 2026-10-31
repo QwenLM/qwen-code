@@ -667,12 +667,13 @@ describe('Hosted real-process gates', () => {
     // the 13-minute floor: a Verify that timed out used to skip admission,
     // and now that path too can fill all four ceilings, so a slow setup
     // must still leave the O4 gates time to run.
-    ['hosted-harness-mysql', 291, 324],
-    // Twenty-seven failover arms at 10 each.
-    ['hosted-failover-e2e', 270, 285],
+    ['hosted-harness-mysql', 291, 324, 33],
+    // Twenty-seven failover arms at 10 each; the allowance is ~13 minutes of
+    // setup plus 2.
+    ['hosted-failover-e2e', 270, 285, 15],
   ])(
     'keeps the %s job ceiling above its summed step ceilings',
-    (name, steps, ceiling) => {
+    (name, steps, ceiling, allowance) => {
       const job = java.jobs[name];
       const summed = job.steps.reduce(
         (total, step) => total + (step['timeout-minutes'] ?? 0),
@@ -685,6 +686,9 @@ describe('Hosted real-process gates', () => {
       expect(summed).toBe(steps);
       expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
       expect(job['timeout-minutes']).toBe(ceiling);
+      // Raising a step ceiling must re-derive the allowance rather than
+      // quietly spend it.
+      expect(ceiling - steps).toBe(allowance);
     },
   );
 
@@ -984,6 +988,91 @@ describe('Hosted real-process gates', () => {
     );
     expect(verify).toBeGreaterThan(-1);
     expect(steps.indexOf(install)).toBeLessThan(verify);
+  });
+
+  it('keeps the steps after the Hosted verify off its outcome, bar its own checks', () => {
+    const steps = java.jobs['hosted-harness-mysql'].steps;
+    const verify = steps.findIndex(
+      (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
+    );
+    expect(verify, 'the Hosted verify step').toBeGreaterThan(-1);
+    const after = steps.slice(verify + 1);
+    const label = (step) => step.name ?? step.id ?? step.uses;
+    // A step with no `if:`, or one without a status function (GitHub
+    // prefixes it with `success() &&`), runs only on a green job, so a red
+    // verify skips it, as it skipped the admission gates on all 13 red
+    // nights from 10-14 to 10-30. Exactly the two checks that need the verify's output (its
+    // failsafe reports, its latency baseline) must do that. Every other
+    // step, however it runs (Maven, a script, an action), takes one of
+    // these spellings: `always()`, or `${{ … }}` around `always()`,
+    // `!cancelled()` or `failure()`, optionally narrowed by one step's
+    // outcome. A condition that still reads the job status (`success()`,
+    // `job.status`, a negated `failure()`) can't pass, and the narrowing
+    // step's outcome must not depend on the verify: it runs before the
+    // verify, or after it under one of these conditions other than
+    // `failure()`. Static checks can't see what that step reads, only when
+    // it runs. None carries continue-on-error.
+    const runsAfterRedVerify =
+      /^(always\(\)|\$\{\{ (always\(\)|!cancelled\(\)|failure\(\))( && steps\.([\w-]+)\.outcome [!=]= '\w+')? \}\})$/;
+    const riding = after
+      .filter((step) => !runsAfterRedVerify.test(String(step.if ?? '')))
+      .map(label);
+    expect(
+      riding,
+      `steps outside the accepted conditions: ${riding.join(', ')}`,
+    ).toEqual([
+      'Check that every Hosted integration test class ran',
+      'Check Hosted latency measurements',
+    ]);
+    const running = new Set(
+      steps
+        .slice(0, verify)
+        .map((step) => step.id)
+        .filter(Boolean),
+    );
+    for (const step of after) {
+      const match = runsAfterRedVerify.exec(String(step.if ?? ''));
+      if (!match) continue;
+      const narrowing = match[4];
+      if (narrowing) {
+        expect(
+          running.has(narrowing),
+          `${label(step)} narrows on ${narrowing}, whose outcome may depend on the verify`,
+        ).toBe(true);
+      }
+      // A failure() step runs only when something failed, so its outcome
+      // still follows the verify and can't anchor another step.
+      if (step.id && match[2] !== 'failure()') running.add(step.id);
+    }
+    const absorbing = after
+      .filter((step) => 'continue-on-error' in step)
+      .map(label);
+    expect(
+      absorbing,
+      `steps with continue-on-error: ${absorbing.join(', ')}`,
+    ).toEqual([]);
+    // The Maven gates, derived from the job rather than listed so a gate
+    // added later joins the contract, take this exact condition. Maven may
+    // sit anywhere in the command (after `&&`, in a loop, behind `timeout`,
+    // an env assignment or a quoted path), so match the word.
+    const gates = after.filter((step) =>
+      /(^|[^\w.-])mvn[wd]?(?![\w.-])/.test(step.run ?? ''),
+    );
+    expect(gates.map(label)).toEqual(
+      expect.arrayContaining([
+        'Run Runtime Broker fault gates',
+        'Verify Hosted admission gates',
+        'Verify O4 filesystem process and capacity gates',
+      ]),
+    );
+    for (const step of gates) {
+      expect(step.if, label(step)).toBe(
+        "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}",
+      );
+      // A ceiling enters the summed step budget above, so a new gate has to
+      // re-derive the setup allowance instead of quietly spending it.
+      expect(step['timeout-minutes'] ?? 0, label(step)).toBeGreaterThan(0);
+    }
   });
 
   it('checks the admission gate classes whenever the admission step passes', () => {
