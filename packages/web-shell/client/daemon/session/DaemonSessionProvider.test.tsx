@@ -3412,6 +3412,72 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('hydrates the context window when first-prompt model selection supersedes attach metadata', async () => {
+    const initialContext =
+      createDeferred<Awaited<ReturnType<MockSession['context']>>>();
+    const selectedContext = {
+      v: 1 as const,
+      sessionId: 'lazy-session',
+      workspaceCwd: '/mock-workspace',
+      state: {
+        models: {
+          currentModelId: 'qwen3.8-max',
+          availableModels: [
+            {
+              modelId: 'qwen3.8-max',
+              name: 'Qwen 3.8 Max',
+              _meta: { contextLimit: 65_536 },
+            },
+          ],
+        },
+        configOptions: reasoningConfigOptions('medium'),
+      },
+    };
+    const session = createMockSession({
+      sessionId: 'lazy-session',
+      context: vi
+        .fn()
+        .mockReturnValueOnce(initialContext.promise)
+        .mockResolvedValue(selectedContext),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+    const providerActions = requireActions(actions);
+    await act(async () => {
+      await providerActions.createSession();
+    });
+    let attach: Promise<void> | undefined;
+    act(() => {
+      attach = providerActions.attachSession();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await attach;
+    expect(session.context).toHaveBeenCalledOnce();
+    await act(async () => {
+      await providerActions.setModel('qwen3.8-max');
+      initialContext.resolve({
+        ...selectedContext,
+        state: { models: { currentModelId: 'old-model' } },
+      });
+      await flushPromises();
+    });
+    expect(connection?.currentModel).toBe('qwen3.8-max');
+    expect(connection?.reasoning?.effort).toBe('medium');
+    expect(connection?.contextWindow).toBe(65_536);
+  });
+
   it('reattaches a first-prompt session after its attach is superseded by a controlled switch', async () => {
     const createdSession = createMockSession({ sessionId: 'session-created' });
     const existingSession = createMockSession({

@@ -252,6 +252,40 @@ describe('context usage counter reconciliation', () => {
   );
 });
 
+describe('model context window refresh', () => {
+  it.each([65_536, undefined])(
+    'uses the selected model limit when available (%s)',
+    async (contextLimit) => {
+      const session = createMockSession('session-a');
+      session.context.mockResolvedValue({
+        ...contextStatus('session-a'),
+        state: {
+          models: {
+            currentModelId: 'model-b',
+            availableModels: [{ modelId: 'model-b', _meta: { contextLimit } }],
+          },
+        },
+      });
+      const h = createActionsHarness({
+        session,
+        connection: {
+          status: 'connected',
+          sessionId: 'session-a',
+          currentModel: 'model-a',
+          contextWindow: 32_768,
+          tokenCount: 1_000,
+        },
+      });
+      await h.actions.setModel('model-b');
+      expect(h.getConnection()).toMatchObject({
+        currentModel: 'model-b',
+        contextWindow: contextLimit ?? 32_768,
+        tokenCount: 1_000,
+      });
+    },
+  );
+});
+
 describe('sendPrompt admission notices', () => {
   it.each([
     {

@@ -59,6 +59,7 @@ import {
   mapProviderStatus,
   mapSessionContextModels,
   mapReasoningControls,
+  mapSessionContextModels,
   mapSessionContextReasoning,
   mapSupportedCommands,
   selectGoalState,
@@ -2063,6 +2064,9 @@ export function createDaemonSessionActions({
               reasoning: context
                 ? mapSessionContextReasoning(context)
                 : undefined,
+              contextWindow:
+                mapSessionContextModels(context)?.contextWindow ??
+                current.contextWindow,
             };
           });
         }
