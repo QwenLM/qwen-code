@@ -38,6 +38,9 @@ describe('built-in DeepSeek reasoning', () => {
       'enable_thinking',
     ],
     ['https://dashscope-us.aliyuncs.com/compatible-mode/v1', 'enable_thinking'],
+    ['https://model-proxy.alibaba-inc.com/v1', 'enable_thinking'],
+    ['https://model-proxy.aliyun-inc.com/v1', 'enable_thinking'],
+    ['https://model-proxy.alicloudapi.com/v1', 'enable_thinking'],
     [
       'https://cn-hongkong.dashscope.aliyuncs.com/compatible-mode/v1',
       'enable_thinking',
@@ -62,6 +65,11 @@ describe('built-in DeepSeek reasoning', () => {
     'https://coding.dashscope.aliyuncs.com/v1',
     'https://coding-intl.dashscope.aliyuncs.com/v1',
     'https://unknown.dashscope.aliyuncs.com/compatible-mode/v1',
+    'https://model-proxy.alibaba-inc.com.evil.example/v1',
+    'https://model-proxy.aliyun-inc.com.evil.example/v1',
+    'https://model-proxy.alicloudapi.com.evil.example/v1',
+    'https://notalibaba-inc.com/v1',
+    'https://evil.example/model-proxy.alibaba-inc.com/v1',
   ])('does not infer a wire contract for %s', (baseUrl) => {
     expect(getBuiltinDeepSeekReasoning({ ...config, baseUrl })).toBeUndefined();
   });
@@ -72,6 +80,25 @@ describe('built-in DeepSeek reasoning', () => {
       expect(getBuiltinDeepSeekReasoning({ ...config, model })).toBeDefined();
     },
   );
+
+  it.each([
+    ['deepseek-v4.1-flash', true],
+    ['deepseek-v4.1-flash-1017', true],
+    ['DEEPSEEK-V4.1-FLASH', true],
+    ['deepseek-v4-pro', false],
+    ['deepseek-v4-flash', false],
+    ['deepseek-flash', false],
+    ['company-deepseek-v4.1-flash', false],
+    ['deepseek-v4.1-flash-custom', false],
+  ])('limits proxy inference to V4.1 Flash: %s', (model, supported) => {
+    expect(
+      getBuiltinDeepSeekReasoning({
+        ...config,
+        model,
+        baseUrl: 'https://model-proxy.alibaba-inc.com/v1',
+      }) !== undefined,
+    ).toBe(supported);
+  });
 
   it('recognizes the retired vision alias only on the official endpoint', () => {
     const model = 'deepseek-v4-flash-vision-exp';

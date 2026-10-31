@@ -320,7 +320,14 @@ export class GeneratedUiInstanceStore {
             ...request,
             signal: AbortSignal.any([request.signal, lease.controller.signal]),
           });
-          return this.current(instance, lease) ? result : { isError: true };
+          // A card that lost its lease gets no live result, only the
+          // outcome that says whether anything was sent.
+          return this.current(instance, lease)
+            ? result
+            : {
+                isError: true,
+                ...(result._meta ? { _meta: result._meta } : {}),
+              };
         },
       };
       entry.runtime = {

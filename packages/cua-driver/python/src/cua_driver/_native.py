@@ -486,9 +486,13 @@ def _uniffi_check_api_checksums(lib):
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_cua_driver_sdk_checksum_func_current_mac_os_permission_status() != 22890:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_cua_driver_sdk_checksum_func_native_ui_needs_pump() != 51465:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_cua_driver_sdk_checksum_func_open_mac_os_screen_recording_settings() != 6663:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_cua_driver_sdk_checksum_func_request_mac_os_permissions() != 61823:
+        raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    if lib.uniffi_cua_driver_sdk_checksum_func_set_native_ui_host_available() != 22416:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     if lib.uniffi_cua_driver_sdk_checksum_constructor_cuadriver_connect() != 60859:
         raise InternalError("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
@@ -1094,6 +1098,10 @@ _UniffiLib.uniffi_cua_driver_sdk_fn_func_current_mac_os_permission_status.argtyp
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_cua_driver_sdk_fn_func_current_mac_os_permission_status.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_cua_driver_sdk_fn_func_native_ui_needs_pump.argtypes = (
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_cua_driver_sdk_fn_func_native_ui_needs_pump.restype = ctypes.c_int8
 _UniffiLib.uniffi_cua_driver_sdk_fn_func_open_mac_os_screen_recording_settings.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
@@ -1102,6 +1110,11 @@ _UniffiLib.uniffi_cua_driver_sdk_fn_func_request_mac_os_permissions.argtypes = (
     ctypes.POINTER(_UniffiRustCallStatus),
 )
 _UniffiLib.uniffi_cua_driver_sdk_fn_func_request_mac_os_permissions.restype = _UniffiRustBuffer
+_UniffiLib.uniffi_cua_driver_sdk_fn_func_set_native_ui_host_available.argtypes = (
+    ctypes.c_int8,
+    ctypes.POINTER(_UniffiRustCallStatus),
+)
+_UniffiLib.uniffi_cua_driver_sdk_fn_func_set_native_ui_host_available.restype = ctypes.c_int8
 _UniffiLib.uniffi_cua_driver_sdk_fn_constructor_cuadriver_connect.argtypes = (
     _UniffiRustBuffer,
     ctypes.POINTER(_UniffiRustCallStatus),
@@ -1715,12 +1728,18 @@ _UniffiLib.uniffi_cua_driver_sdk_checksum_func_create_trusted_session_async.rest
 _UniffiLib.uniffi_cua_driver_sdk_checksum_func_current_mac_os_permission_status.argtypes = (
 )
 _UniffiLib.uniffi_cua_driver_sdk_checksum_func_current_mac_os_permission_status.restype = ctypes.c_uint16
+_UniffiLib.uniffi_cua_driver_sdk_checksum_func_native_ui_needs_pump.argtypes = (
+)
+_UniffiLib.uniffi_cua_driver_sdk_checksum_func_native_ui_needs_pump.restype = ctypes.c_uint16
 _UniffiLib.uniffi_cua_driver_sdk_checksum_func_open_mac_os_screen_recording_settings.argtypes = (
 )
 _UniffiLib.uniffi_cua_driver_sdk_checksum_func_open_mac_os_screen_recording_settings.restype = ctypes.c_uint16
 _UniffiLib.uniffi_cua_driver_sdk_checksum_func_request_mac_os_permissions.argtypes = (
 )
 _UniffiLib.uniffi_cua_driver_sdk_checksum_func_request_mac_os_permissions.restype = ctypes.c_uint16
+_UniffiLib.uniffi_cua_driver_sdk_checksum_func_set_native_ui_host_available.argtypes = (
+)
+_UniffiLib.uniffi_cua_driver_sdk_checksum_func_set_native_ui_host_available.restype = ctypes.c_uint16
 _UniffiLib.uniffi_cua_driver_sdk_checksum_constructor_cuadriver_connect.argtypes = (
 )
 _UniffiLib.uniffi_cua_driver_sdk_checksum_constructor_cuadriver_connect.restype = ctypes.c_uint16
@@ -7460,6 +7479,20 @@ def current_mac_os_permission_status() -> MacOsPermissionStatus:
         *_uniffi_lowered_args,
     )
     return _uniffi_lift_return(_uniffi_ffi_result)
+def native_ui_needs_pump() -> bool:
+    """
+    Host event-loop liveness only; this does not expose desktop state.
+"""
+    _uniffi_lowered_args = (
+    )
+    _uniffi_lift_return = _UniffiFfiConverterBoolean.lift
+    _uniffi_error_converter = None
+    _uniffi_ffi_result = _uniffi_rust_call_with_error(
+        _uniffi_error_converter,
+        _UniffiLib.uniffi_cua_driver_sdk_fn_func_native_ui_needs_pump,
+        *_uniffi_lowered_args,
+    )
+    return _uniffi_lift_return(_uniffi_ffi_result)
 def open_mac_os_screen_recording_settings() -> None:
     _uniffi_lowered_args = (
     )
@@ -7479,6 +7512,23 @@ def request_mac_os_permissions() -> MacOsPermissionStatus:
     _uniffi_ffi_result = _uniffi_rust_call_with_error(
         _uniffi_error_converter,
         _UniffiLib.uniffi_cua_driver_sdk_fn_func_request_mac_os_permissions,
+        *_uniffi_lowered_args,
+    )
+    return _uniffi_lift_return(_uniffi_ffi_result)
+def set_native_ui_host_available(available: bool) -> bool:
+    """
+    Constructor-scoped declaration by a host that services the native UI loop.
+"""
+
+    _UniffiFfiConverterBoolean.check_lower(available)
+    _uniffi_lowered_args = (
+        _UniffiFfiConverterBoolean.lower(available),
+    )
+    _uniffi_lift_return = _UniffiFfiConverterBoolean.lift
+    _uniffi_error_converter = None
+    _uniffi_ffi_result = _uniffi_rust_call_with_error(
+        _uniffi_error_converter,
+        _UniffiLib.uniffi_cua_driver_sdk_fn_func_set_native_ui_host_available,
         *_uniffi_lowered_args,
     )
     return _uniffi_lift_return(_uniffi_ffi_result)
@@ -7516,8 +7566,10 @@ __all__ = [
     "create_trusted_session",
     "create_trusted_session_async",
     "current_mac_os_permission_status",
+    "native_ui_needs_pump",
     "open_mac_os_screen_recording_settings",
     "request_mac_os_permissions",
+    "set_native_ui_host_available",
     "CuaDriver",
     "CuaDriverProtocol",
     "CuaDriverSession",
