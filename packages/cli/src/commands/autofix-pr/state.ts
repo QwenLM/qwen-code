@@ -53,6 +53,11 @@ export interface AutofixPrState {
   baseRefName: string;
   branch: string;
   worktreePath: string;
+  /** `prepare --in-place`: the watch fixes in the user's own checkout of
+   * the head branch — `worktreePath` is that checkout and `branch` the head
+   * branch itself. Attended, one round per start; no scheduled task, no
+   * background fix, and no helper ever discards what the checkout holds. */
+  inPlace?: true;
   viewer: string;
   prAuthor: string;
   lastKnownHeadSha: string;
@@ -95,6 +100,12 @@ export interface AutofixPrState {
   watch?: AutofixPrWatchOptions;
   /** What rounds left for a person, newest last, for `status`. */
   needsHuman?: NeedsHumanItem[];
+  /** The `needsHuman` lines a summary that reached the PR has reported, and
+   * the head it reported them on. Kept apart from `needsHuman`, which is
+   * recorded before any POST so `status` survives a later failure: this one
+   * advances only on a delivered (or adopted) summary, so a report that never
+   * arrived stays due on the next run. */
+  reportedNeedsHuman?: { sha: string; texts: string[] };
   /** When `prepare` made this state (ISO 8601): a gate cursor older than
    * it is a former watch's, which `status` does not report. */
   preparedAt?: string;
@@ -142,6 +153,9 @@ export interface PendingPost {
   bodyHash: string;
   /** The head the reply was posted on: a summary reports that head's push. */
   sha: string;
+  /** For a summary: the `needsHuman` lines its body reports, so adopting it
+   * marks exactly those as reported, never a later plan's. */
+  needsHuman?: string[];
 }
 
 /**
@@ -251,6 +265,10 @@ export interface AutofixPrPaths {
   /** The attempt of a fix agent running in the background (`fix-start`). */
   fixPath: string;
   branch: string;
+  /** Where an in-place prepare fetches the PR head: outside refs/heads (no
+   * branch of the watch's own) and private — the user's concurrent fetches
+   * rewrite FETCH_HEAD in the shared checkout. Only in-place uses it. */
+  headRef: string;
 }
 
 /**
@@ -589,6 +607,22 @@ export function assertPositiveInteger(value: number, what: string): void {
   }
 }
 
+/**
+ * The paths a helper operates on once it has read the state: the watch's
+ * files under `root`, and — for an in-place watch — the user's checkout
+ * and head branch the state names, not the worktree path the PR number
+ * alone derives.
+ */
+export function statePaths(
+  root: string,
+  state: AutofixPrState,
+): AutofixPrPaths {
+  const paths = autofixPrPaths(root, state.prNumber);
+  return state.inPlace
+    ? { ...paths, worktreePath: state.worktreePath, branch: state.branch }
+    : paths;
+}
+
 export function autofixPrPaths(root: string, prNumber: number): AutofixPrPaths {
   // The number goes into file names, the branch name and `refs/pull/<n>/head`.
   assertPositiveInteger(prNumber, 'PR number');
@@ -606,6 +640,7 @@ export function autofixPrPaths(root: string, prNumber: number): AutofixPrPaths {
     instructionsPath: join(tmp, `autofix-pr-${prNumber}-instructions.txt`),
     fixPath: join(tmp, `autofix-pr-${prNumber}-fix.json`),
     branch: `qwen-autofix/pr-${prNumber}`,
+    headRef: `refs/qwen-autofix/pr-${prNumber}/head`,
   };
 }
 
@@ -750,7 +785,8 @@ function isPendingPost(value: unknown): value is PendingPost {
     (post.where === 'summary' || Number.isInteger(post.where)) &&
     isStringList(post.handled) &&
     typeof post.bodyHash === 'string' &&
-    typeof post.sha === 'string'
+    typeof post.sha === 'string' &&
+    (post.needsHuman === undefined || isStringList(post.needsHuman))
   );
 }
 
@@ -847,6 +883,18 @@ export function stateDefect(state: AutofixPrState): string | null {
   ) {
     return 'needsHuman';
   }
+  if (
+    state.reportedNeedsHuman !== undefined &&
+    !(
+      typeof state.reportedNeedsHuman === 'object' &&
+      state.reportedNeedsHuman !== null &&
+      typeof state.reportedNeedsHuman.sha === 'string' &&
+      SHA_RE.test(state.reportedNeedsHuman.sha) &&
+      isStringList(state.reportedNeedsHuman.texts)
+    )
+  ) {
+    return 'reportedNeedsHuman';
+  }
   if (state.preparedAt !== undefined && typeof state.preparedAt !== 'string') {
     return 'preparedAt';
   }
@@ -925,7 +973,7 @@ export function readState(statePath: string): AutofixPrState | null {
   }
   // The fields these hold, and nothing else: what reaches `status`, a
   // rebuilt state and the next write is what the helpers wrote.
-  const { watch, ended, needsHuman } = parsed;
+  const { watch, ended, needsHuman, reportedNeedsHuman } = parsed;
   return {
     ...parsed,
     ...(watch
@@ -946,6 +994,14 @@ export function readState(statePath: string): AutofixPrState | null {
             at,
             text,
           })),
+        }
+      : {}),
+    ...(reportedNeedsHuman
+      ? {
+          reportedNeedsHuman: {
+            sha: reportedNeedsHuman.sha,
+            texts: [...reportedNeedsHuman.texts],
+          },
         }
       : {}),
   };

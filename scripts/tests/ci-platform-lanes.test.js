@@ -237,6 +237,26 @@ describe('raw JUnit report retention', () => {
   });
 });
 
+// The smoke lane keeps the classifier's trust decision and hosted overrides
+// but picks its own architecture, so its `runs-on` cannot be compared with
+// another lane's. Evaluate the real expression the way
+// `.github/scripts/ci-runner-routing.test.mjs` does.
+const runnerOn = (job, ubuntuRunner) => {
+  const expression = String(ci.jobs[job]['runs-on'])
+    .replace(/^\$\{\{\s*/, '')
+    .replace(/\s*\}\}$/, '');
+  return new Function(
+    'needs',
+    'fromJSON',
+    'contains',
+    `return (${expression});`,
+  )(
+    { classify_pr: { outputs: { ubuntu_runner: ubuntuRunner } } },
+    JSON.parse,
+    (labels, label) => labels.includes(label),
+  );
+};
+
 it('gives the shared Linux test lane one ceiling on both pools', () => {
   // The full suite outgrew 60 minutes on hosted runners too: on 2026-10-17,
   // 17 of the 30 hosted runs that ended on their own were cancelled at 60.
@@ -276,8 +296,19 @@ it('gives the ARM64 fleet the same contended-pool ceilings as the x64 pool', () 
   expect(timeoutMinutesOn('integration_no_ak', ARM_RUNNER)).toBe(60);
 });
 
-it('keeps the browser smoke on an isolated hosted runner', () => {
-  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe('ubuntu-latest');
+it('routes the browser smoke to ARM64 independently of the shared Linux test lane', () => {
+  // The lane keeps the classifier's trust decision and hosted overrides, but
+  // it no longer inherits the ordinary Linux fleet's architecture.
+  expect(runnerOn('web_shell_e2e_smoke', ECS_RUNNER)).toEqual([
+    'self-hosted',
+    'linux',
+    'arm64',
+  ]);
+  expect(runnerOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toEqual([
+    'ubuntu-latest',
+  ]);
+  // A missing classifier output (classify_pr skipped) is the hosted routing.
+  expect(runnerOn('web_shell_e2e_smoke', '')).toEqual(['ubuntu-latest']);
   const smoke = ci.jobs.web_shell_e2e_smoke.steps.find(
     (step) => step.name === 'Run web-shell browser smoke',
   );
@@ -1225,6 +1256,32 @@ describe('GitHub helper tests', () => {
         expect(invocation, step.name).toContain('--test-concurrency=1');
       }
     }
+  });
+
+  it('routes the battery tmpdir off the host /tmp tmpfs', () => {
+    // #15965: e2e-build.test.mjs mkdtemps thousands of chunk files via
+    // os.tmpdir(); on the ECS pool that defaulted to the shared /tmp tmpfs,
+    // whose ~1M inode quota filled up and failed the lane with ENOSPC while
+    // 202G of capacity stayed free. RUNNER_TEMP sits on the roomy data disk,
+    // same routing the unit lanes already use (#10035).
+    const step = (ci.jobs.lint_and_static.steps ?? []).find(
+      (candidate) => candidate.name === 'Run .github/scripts helper tests',
+    );
+    expect(step, 'helper-tests step missing').toBeDefined();
+    // Comments stripped: the rationale above the export names it too, so a pin
+    // satisfied by prose would stay green with the routing commented out.
+    const run = String(step.run)
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    expect(run).toContain('export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"');
+    expect(run.indexOf('export TMPDIR')).toBeLessThan(
+      run.indexOf('node --test'),
+    );
+    // The routed dir is private to the run and reaped on exit: RUNNER_TEMP
+    // itself is shared with every other job on the host.
+    expect(run).toContain('mktemp -d "${TMPDIR}/helper-tests-XXXXXX"');
+    expect(run).toContain('trap \'rm -rf "$HELPER_TMPDIR"\' EXIT');
   });
 
   it('retries the full-profile battery once against pool contention', () => {
