@@ -249,7 +249,7 @@ schema 固定每条记录的结构,以及它能清晰表达的所有规则,包�
 - `packages/core/src/managed-runtime/contracts/managed-extension-record-v1.schema.json` 和 `.fixtures.json`(新增)。
 - `packages/core/src/managed-runtime/managed-extension-record.ts` 及其测试(新增)。
 - `packages/core/src/managed-runtime/managed-session-records.ts` 及其测试:`monitor_run` 加入 v1 索引。
-- `packages/sdk-java/managed-agent-server` 中的 `ManagedExtensionRecords` 与 `ManagedExtensionRecordContractTest`(新增)。
+- `packages/managed-agent-server` 中的 `ManagedExtensionRecords` 与 `ManagedExtensionRecordContractTest`(新增)。
 - 本设计文档的两种语言版本(新增)。
 
 authority、存储、Harness、Broker、worker、路由和 CI workflow 均无改动。

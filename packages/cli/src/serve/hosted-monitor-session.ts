@@ -254,7 +254,15 @@ export class HostedMonitorSession {
     return this.revise(monitorId, (previous) => ({
       ...previous,
       stopReason,
-      run: { ...previous.run, state: 'settled', execution: 'settled' },
+      // A terminal state carries no recovery reason: the record the contract
+      // admits for `settled` names none, and a park or a rebuild leaves one
+      // behind that this settlement is exactly the evidence for (#13856).
+      run: {
+        ...previous.run,
+        state: 'settled',
+        execution: 'settled',
+        reason: null,
+      },
     }));
   }
 
@@ -276,6 +284,7 @@ export class HostedMonitorSession {
         ...previous.run,
         state: 'failed',
         execution: params.started ? 'settled' : 'not_started_proven',
+        reason: null,
       },
     }));
   }
@@ -342,7 +351,12 @@ export class HostedMonitorSession {
     return this.revise(monitorId, (previous) => ({
       ...previous,
       stopReason: 'stop_requested',
-      run: { ...previous.run, state: 'cancelled', execution: 'settled' },
+      run: {
+        ...previous.run,
+        state: 'cancelled',
+        execution: 'settled',
+        reason: null,
+      },
     }));
   }
 

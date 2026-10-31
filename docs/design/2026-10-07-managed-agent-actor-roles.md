@@ -2,6 +2,8 @@
 
 [English](2026-10-07-managed-agent-actor-roles.md) | [简体中文](2026-10-07-managed-agent-actor-roles.zh-CN.md)
 
+Current status: the cwd submission routes and `SESSION_CWD_CHANGE` entries below describe the historical role matrix. New directory-change admission is retired; existing operation query and settlement remain. See the [retirement design](2026-10-26-retire-managed-cwd-change.md).
+
 Issue: #13535 (R1 actor roles, R2 isolation acceptance). Parent: #12380 production
 enablement. Vocabulary source: #12867 section 10 (`reader`, `operator`, `owner`;
 `404` without read, `403` with read but without operate; idempotency domain
@@ -71,7 +73,6 @@ reads add a deployment policy gate (`403 artifact_content_forbidden`);
 workspace discovery lists only `can_read` rows (401 without actor); legacy
 (unbound) Sessions and agent definitions are **tenant-wide** — any actor in the
 tenant may mutate them today; internal store/publication routes admit a writer
-<<<<<<< HEAD
 HMAC credential, not an actor. The public surface is `/v1/agents/**`, `/v1/agent-automations` and
 `/api/agent/web-shell/v1/**` (`PublicSurface`), realised by eleven Spring
 controllers — the section-10 matrix enumerates the current 39 public + 24

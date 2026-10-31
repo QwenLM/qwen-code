@@ -17,8 +17,18 @@ on:
     branches:
       - 'main'
     paths:
+      - 'packages/sdk-java/*/persistence/src/main/resources/db/migration/**'
+      - 'packages/sdk-java/*/persistence/src/main/java/db/migration/**'
+      - 'packages/sdk-java/*/persistence/src/main/resources/db/managed-schema/**'
       - 'packages/sdk-java/*/src/main/resources/db/migration/**'
       - 'packages/sdk-java/*/src/main/java/db/migration/**'
+      - 'packages/sdk-java/*/src/main/resources/db/managed-schema/**'
+      - 'packages/managed-agent-server/persistence/src/main/resources/db/migration/**'
+      - 'packages/managed-agent-server/persistence/src/main/java/db/migration/**'
+      - 'packages/managed-agent-server/persistence/src/main/resources/db/managed-schema/**'
+      - 'packages/managed-agent-server/src/main/resources/db/migration/**'
+      - 'packages/managed-agent-server/src/main/java/db/migration/**'
+      - 'packages/managed-agent-server/src/main/resources/db/managed-schema/**'
       - 'scripts/check-flyway-open-prs.js'
       - 'scripts/flyway-migration-utils.js'
       - '.github/workflows/sdk-java-flyway-open-prs.yml'
@@ -168,4 +178,4 @@ jobs:
       - name: 'Re-check open pull requests'
         env:
           GH_TOKEN: '${{ github.token }}'
-        run: 'node scripts/check-flyway-open-prs.js packages/sdk-java/managed-agent-server packages/sdk-java/runtime-broker packages/sdk-java/qwencode'
+        run: 'node scripts/check-flyway-open-prs.js packages/managed-agent-server packages/sdk-java/qwencode'

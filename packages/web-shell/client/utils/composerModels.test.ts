@@ -5,7 +5,63 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { isStandaloneModelPickerUnavailable } from './composerModels';
+import {
+  HIDDEN_COMPOSER_MODEL_IDS,
+  appendUnavailableComposerModels,
+  isDiscontinuedSettingsModel,
+  isStandaloneModelPickerUnavailable,
+} from './composerModels';
+
+describe('isDiscontinuedSettingsModel', () => {
+  const oauth = { authType: 'qwen-oauth' };
+  const registryRow = { baseModelId: 'coder-model', isCurrent: false };
+
+  it('hides the registry entry of the discontinued built-in OAuth model', () => {
+    expect(isDiscontinuedSettingsModel(oauth, registryRow)).toBe(true);
+  });
+
+  it('keeps the row the session is currently running', () => {
+    // The daemon's provider list skips runtime rows and hardcodes
+    // `isRuntime: false`, so `isCurrent` is the only signal that a live
+    // qwen-oauth session still needs its own model listed.
+    expect(
+      isDiscontinuedSettingsModel(oauth, {
+        baseModelId: 'coder-model',
+        isCurrent: true,
+      }),
+    ).toBe(false);
+  });
+
+  it('keeps a same-named model on another auth type', () => {
+    expect(
+      isDiscontinuedSettingsModel({ authType: 'openai' }, registryRow),
+    ).toBe(false);
+  });
+
+  it('derives the hidden ids from HIDDEN_COMPOSER_MODEL_IDS', () => {
+    // The composer hides `coder-model(qwen-oauth)`; Settings must reach the
+    // same verdict for every id on that shared list instead of hardcoding one.
+    for (const id of HIDDEN_COMPOSER_MODEL_IDS) {
+      const parsed = /^(.*)\(([^)]+)\)$/.exec(id);
+      expect(parsed).not.toBeNull();
+      expect(
+        isDiscontinuedSettingsModel(
+          { authType: parsed[2] },
+          { baseModelId: parsed[1], isCurrent: false },
+        ),
+      ).toBe(true);
+    }
+  });
+
+  it('keeps another model on the OAuth auth type', () => {
+    expect(
+      isDiscontinuedSettingsModel(oauth, {
+        baseModelId: 'qwen3-coder-plus',
+        isCurrent: false,
+      }),
+    ).toBe(false);
+  });
+});
 
 describe('isStandaloneModelPickerUnavailable', () => {
   it('is available when a session is attached', () => {
@@ -69,5 +125,56 @@ describe('isStandaloneModelPickerUnavailable', () => {
         ],
       }),
     ).toBe(false);
+  });
+});
+
+describe('appendUnavailableComposerModels', () => {
+  it('appends injected models after available ones', () => {
+    expect(
+      appendUnavailableComposerModels(
+        [{ id: 'qwen-plus', label: 'Qwen Plus' }],
+        [{ id: 'qwen-max', label: 'Qwen Max', tooltip: 'Need Pro' }],
+      ),
+    ).toEqual([
+      { id: 'qwen-plus', label: 'Qwen Plus' },
+      {
+        id: 'qwen-max',
+        label: 'Qwen Max',
+        tooltip: 'Need Pro',
+        disabled: true,
+      },
+    ]);
+  });
+
+  it('keeps an available model when the host injects the same id', () => {
+    expect(
+      appendUnavailableComposerModels(
+        [{ id: 'qwen-plus', label: 'Live' }],
+        [{ id: 'qwen-plus', label: 'Catalog', tooltip: 'Locked' }],
+      ),
+    ).toEqual([{ id: 'qwen-plus', label: 'Live' }]);
+  });
+
+  it('skips empty, hidden, and duplicate injected ids', () => {
+    expect(
+      appendUnavailableComposerModels(
+        [{ id: 'qwen-plus' }],
+        [
+          { id: '  ' },
+          { id: 'coder-model(qwen-oauth)', tooltip: 'hidden' },
+          { id: 'qwen-max', tooltip: 'first' },
+          { id: 'qwen-max', tooltip: 'second' },
+        ],
+      ),
+    ).toEqual([
+      { id: 'qwen-plus' },
+      { id: 'qwen-max', tooltip: 'first', disabled: true },
+    ]);
+  });
+
+  it('leaves the list unchanged when the host omits unavailable models', () => {
+    expect(
+      appendUnavailableComposerModels([{ id: 'qwen-plus', label: 'Plus' }]),
+    ).toEqual([{ id: 'qwen-plus', label: 'Plus' }]);
   });
 });

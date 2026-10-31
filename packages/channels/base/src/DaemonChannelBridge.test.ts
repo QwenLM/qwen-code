@@ -5402,6 +5402,35 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
+  it.each(['stop', 'detach-fallback', 'explicit-cancel'] as const)(
+    'keeps %s cancellation provenance distinct',
+    async (operation) => {
+      const events = new EventQueue();
+      const session = createFakeSession(events);
+      const interrupt = vi.fn().mockResolvedValue(undefined);
+      session.interrupt = interrupt;
+      session.detach = vi.fn().mockRejectedValue(new Error('detach failed'));
+      const bridge = new DaemonChannelBridge({
+        cwd: '/repo',
+        sessionFactory: vi.fn().mockResolvedValue(session),
+      });
+      await bridge.start();
+      await bridge.newSession('/repo');
+      if (operation === 'stop') bridge.stop();
+      else if (operation === 'detach-fallback') {
+        await bridge.discardSession(session.sessionId);
+        expect(session.detach).toHaveBeenCalledOnce();
+      } else await bridge.cancelSession(session.sessionId);
+      expect(interrupt).toHaveBeenCalledTimes(
+        operation === 'explicit-cancel' ? 0 : 1,
+      );
+      expect(session.cancel).toHaveBeenCalledTimes(
+        operation === 'explicit-cancel' ? 1 : 0,
+      );
+      events.close();
+    },
+  );
+
   it('listSessions returns empty after bridge stop', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);

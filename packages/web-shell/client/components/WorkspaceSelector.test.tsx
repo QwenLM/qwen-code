@@ -71,6 +71,64 @@ describe('WorkspaceSelector', () => {
     expect(element.querySelector('button')).toBeNull();
   });
 
+  it('allows explicit selection of a sole Managed Workspace without a primary fallback', async () => {
+    const onSelectWorkspace = vi.fn();
+    const element = renderSelector({
+      workspaces: [
+        { id: 'ws-a', cwd: 'ws-a', label: 'A', primary: false, trusted: true },
+      ],
+      scratchSupported: false,
+      existingFolderSupported: false,
+      alwaysVisible: true,
+      onSelectWorkspace,
+    });
+    await act(async () => {
+      element
+        .querySelector('button')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    const option = document.querySelector<HTMLElement>(
+      '[role="menuitemradio"]',
+    )!;
+    expect(option.textContent).toContain('A');
+    await act(async () => option.click());
+    expect(onSelectWorkspace).toHaveBeenCalledExactlyOnceWith('ws-a');
+  });
+
+  it('selects an opaque Workspace ID matching the disabled standalone sentinel', async () => {
+    const onSelectWorkspace = vi.fn();
+    const element = renderSelector({
+      workspaces: [
+        {
+          id: '__standalone__',
+          cwd: '__standalone__',
+          label: 'Managed workspace',
+          primary: false,
+          trusted: true,
+        },
+      ],
+      scratchSupported: false,
+      existingFolderSupported: false,
+      alwaysVisible: true,
+      onSelectWorkspace,
+    });
+    await act(async () => {
+      element
+        .querySelector('button')!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    const option = document.querySelector<HTMLElement>(
+      '[role="menuitemradio"]',
+    )!;
+    expect(option.textContent).toContain('Managed workspace');
+    await act(async () => option.click());
+    expect(onSelectWorkspace).toHaveBeenCalledExactlyOnceWith('__standalone__');
+  });
+
   it('gates creation actions and disables untrusted workspaces', async () => {
     const onCreateScratch = vi.fn();
     const element = renderSelector({ onCreateScratch });

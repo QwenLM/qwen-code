@@ -4,6 +4,8 @@
 
 Status: implemented; under review. Part of #12952 and #12380.
 
+This document records the original files-only G0 slice. [Public foreground Shell admission](public-hosted-shell-admission.md) supersedes its files-only profile/tool boundary when the separate deployment Shell opt-in is enabled. Public callers still cannot select a profile; the Workspace files opt-in still gates creation input, and existing Sessions keep their persisted profile and approval mode.
+
 ## Problem and scope
 
 Hosted Read/Write/Edit already runs through the production Broker and worker,
@@ -103,7 +105,7 @@ reliable Workspace close. Cwd operations remain gated for bound Sessions.
 | Existing Broker/worker              | Reuse production routing and fencing                                                 | Selected Runtime and persisted Workspace |
 | Contract and README                 | Document the narrow creation capability and remaining gates                          | Public REST and WebShell adapter         |
 
-Production behavior changes under `packages/sdk-java/managed-agent-server`, in
+Production behavior changes under `packages/managed-agent-server`, in
 the private Hosted DTOs in `packages/sdk-java/qwencode`, in the CLI Hosted Session routes (`packages/cli`), and in the WebShell
 managed Sessions page and its providers (`packages/web-shell`); it covers the
 initial Workspace Read/Write/Edit Turn and the creator's later-Turn submit,

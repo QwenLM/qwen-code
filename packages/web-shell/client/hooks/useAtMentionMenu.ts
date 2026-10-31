@@ -1445,25 +1445,44 @@ export function useAtMentionMenu({
         item,
         insert,
       );
-      const tagText = insert.trimEnd();
-      const effects =
-        tag && createInlineTagEffect
-          ? [
-              createInlineTagEffect({
-                from: current.from,
-                to: current.from + tagText.length,
-                tag,
-              }),
-            ]
-          : undefined;
-      view.dispatch({
-        changes: { from: current.from, to: current.to, insert },
-        ...(effects ? { effects } : {}),
-        selection: { anchor: current.from + insert.length },
-        scrollIntoView: true,
-      });
-      view.focus();
-      close({ preserveProviderSelection: true });
+      const insertPrepared = (prepared: WebShellComposerTag | null) => {
+        const tagText = insert.trimEnd();
+        const effects =
+          prepared && createInlineTagEffect
+            ? [
+                createInlineTagEffect({
+                  from: current.from,
+                  to: current.from + tagText.length,
+                  tag: prepared,
+                }),
+              ]
+            : undefined;
+        view.dispatch({
+          changes: { from: current.from, to: current.to, insert },
+          ...(effects ? { effects } : {}),
+          selection: { anchor: current.from + insert.length },
+          scrollIntoView: true,
+        });
+        view.focus();
+        close({ preserveProviderSelection: true });
+      };
+      const actions = workspaceActionsRef.current;
+      if (tag?.kind === 'file' && actions?.prepareFileReference) {
+        const document = view.state.doc;
+        close({ preserveProviderSelection: true });
+        void actions
+          .prepareFileReference(tag)
+          .then((prepared) => {
+            if (
+              viewRef.current === view &&
+              workspaceActionsRef.current === actions
+            ) {
+              if (view.state.doc === document) insertPrepared(prepared);
+              else actions.onFileReferenceDiscarded?.();
+            }
+          })
+          .catch(() => undefined);
+      } else insertPrepared(tag);
       return true;
     },
     [
@@ -1475,6 +1494,7 @@ export function useAtMentionMenu({
       disabledRef,
       viewRef,
       onUploadRequest,
+      workspaceActionsRef,
     ],
   );
 

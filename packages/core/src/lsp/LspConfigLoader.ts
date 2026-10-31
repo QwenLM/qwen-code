@@ -22,6 +22,11 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 const debugLogger = createDebugLogger('LSP');
 const MAX_TCP_PORT = 65_535;
 
+/** Parses an LSP config file, ignoring the UTF-8 BOM some editors prepend. */
+function parseConfigJson(content: string): JsonValue {
+  return JSON.parse(content.replace(/^\uFEFF/, '')) as JsonValue;
+}
+
 export type LspUserConfigLoadResult =
   | { ok: true; configs: LspServerConfig[] }
   | { ok: false; error: Error };
@@ -41,7 +46,7 @@ export class LspConfigLoader {
 
     try {
       const configContent = fs.readFileSync(lspConfigPath, 'utf-8');
-      const data = JSON.parse(configContent);
+      const data = parseConfigJson(configContent);
       return this.parseConfigSource(data, lspConfigPath, {
         forceTrustRequired: true,
       });
@@ -55,7 +60,7 @@ export class LspConfigLoader {
     const lspConfigPath = path.join(this.workspaceRoot, '.lsp.json');
     try {
       const configContent = fs.readFileSync(lspConfigPath, 'utf-8');
-      const data = JSON.parse(configContent);
+      const data = parseConfigJson(configContent);
       return this.parseUserConfigSourceStrict(data, lspConfigPath);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -97,7 +102,7 @@ export class LspConfigLoader {
 
         try {
           const configContent = fs.readFileSync(configPath, 'utf-8');
-          const data = JSON.parse(configContent) as JsonValue;
+          const data = parseConfigJson(configContent);
           const hydrated = this.hydrateExtensionLspConfig(data, extension.path);
           configs.push(
             ...this.parseConfigSource(

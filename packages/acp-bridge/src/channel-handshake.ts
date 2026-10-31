@@ -64,6 +64,7 @@ export function createChannelInitializeRequest(
       _meta: {
         'qwen.goalProposals': true,
         [ASK_USER_QUESTION_CAPABILITY_META_KEY]: true,
+        'qwen.mcpAppHost': true,
       },
       fs: {
         readTextFile: delegateReadTextFileToClient,

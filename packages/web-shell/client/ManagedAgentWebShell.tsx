@@ -1,4 +1,5 @@
 import './styles/globals.css';
+import shellStyles from './App.module.css';
 import {
   useLayoutEffect,
   useMemo,
@@ -48,12 +49,12 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     style,
     baseUrl,
     credentials,
-    environmentId,
     fetch: fetchImpl,
     getHeaders,
     agentId,
     productScope,
     enableWorkspaceBinding,
+    modelPresets,
     saveArtifact,
   } = props;
   const resolvedLanguage = normalizeLanguage(language);
@@ -77,7 +78,6 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
       createJavaManagedAgentProvider({
         baseUrl,
         credentials,
-        environmentId,
         fetch: !hasFetch
           ? undefined
           : (...args) => (callbacksRef.current.fetchImpl ?? fetch)(...args),
@@ -87,6 +87,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
         agentId,
         productScope,
         enableWorkspaceBinding,
+        modelPresets,
         saveArtifact: !hasSaveArtifact
           ? undefined
           : (artifact, options) =>
@@ -96,10 +97,10 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
     [
       baseUrl,
       credentials,
-      environmentId,
       agentId,
       productScope,
       enableWorkspaceBinding,
+      modelPresets,
       hasFetch,
       hasGetHeaders,
       hasSaveArtifact,
@@ -161,7 +162,7 @@ export function ManagedAgentWebShell(props: ManagedAgentWebShellProps) {
                   <CompactModeContext.Provider value={false}>
                     <div
                       ref={setPortalRoot}
-                      className={`${theme === WebShellThemeId.Dark ? 'dark ' : ''}${className ?? ''}`}
+                      className={`${shellStyles.app} ${theme === WebShellThemeId.Dark ? `${shellStyles.themeDark} dark` : shellStyles.themeLight} ${className ?? ''}`}
                       style={style}
                       data-web-shell-root
                       data-web-shell-shadcn

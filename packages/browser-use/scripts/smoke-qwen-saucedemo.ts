@@ -5,7 +5,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import {
   access,
   chmod,
@@ -16,6 +16,7 @@ import {
   rm,
   writeFile,
 } from 'node:fs/promises';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -32,7 +33,8 @@ import {
 
 const PROMPT = [
   '这是 Qwen Browser Use 的隔离 SauceDemo 冒烟测试。',
-  '使用 browser-use skill 和标准 node_repl，',
+  '使用预加载的 cua 和 Node REPL 的 js 工具。',
+  '首次 js 调用只执行 var browser = await cua.getBrowser();，阅读返回文档后再继续；不要手动导入 SDK 或注册模块目录。',
   '用 standard_user / secret_sauce 登录 https://www.saucedemo.com/，',
   '动态识别价格最低的三件商品并加入购物车，完成整个结账流程，',
   '提交后验证完成页，最后告诉我含税总价。',
@@ -52,33 +54,48 @@ interface CommandResult {
   durationMs: number;
 }
 
+const apiKey = process.env['DASHSCOPE_API_KEY'];
+assert(apiKey, 'DASHSCOPE_API_KEY is required');
+const baseUrl = process.env['DASHSCOPE_BASE_URL'];
+assert(baseUrl, 'DASHSCOPE_BASE_URL is required');
+const model = process.env['QWEN_BROWSER_USE_MODEL'];
+assert(model, 'QWEN_BROWSER_USE_MODEL is required');
+const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
+const repositoryRoot = resolve(packageRoot, '../..');
+const qwenEntry = join(repositoryRoot, 'dist/cli.js');
+const nodeReplEntry = join(repositoryRoot, 'packages/node-repl/dist/index.js');
+// Resolve import-only exports from the MCP host, independent of the smoke cwd.
+const cuaResolution = spawnSync(
+  process.execPath,
+  [
+    '--input-type=module',
+    '--eval',
+    "process.stdout.write(import.meta.resolve('@qwen-code/cua-sdk/runtime'))",
+  ],
+  { cwd: dirname(nodeReplEntry), encoding: 'utf8', timeout: 10_000 },
+);
+assert(
+  cuaResolution.status === 0,
+  'Could not resolve CUA runtime: ' +
+    (cuaResolution.error?.message ?? cuaResolution.stderr),
+);
+const cuaRuntimeEntry = fileURLToPath(cuaResolution.stdout);
+const browserManifest = createRequire(cuaRuntimeEntry).resolve(
+  '@qwen-code/browser-use/package.json',
+);
+const browserPackageRoot = dirname(browserManifest);
+await Promise.all(
+  [
+    qwenEntry,
+    nodeReplEntry,
+    cuaRuntimeEntry,
+    join(browserPackageRoot, 'dist/index.js'),
+    join(browserPackageRoot, 'dist/native-host.js'),
+    createRequire(browserManifest).resolve('playwright-core/package.json'),
+  ].map((path) => access(path)),
+);
+
 await withManagedChrome('sauce', async (chrome) => {
-  const apiKey = process.env['DASHSCOPE_API_KEY'];
-  assert(apiKey, 'DASHSCOPE_API_KEY is required');
-  const baseUrl = process.env['DASHSCOPE_BASE_URL'];
-  assert(baseUrl, 'DASHSCOPE_BASE_URL is required');
-  const model = process.env['QWEN_BROWSER_USE_MODEL'];
-  assert(model, 'QWEN_BROWSER_USE_MODEL is required');
-  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-  const repositoryRoot = resolve(packageRoot, '../..');
-  const qwenEntry = join(repositoryRoot, 'dist/cli.js');
-  const nodeReplEntry = join(
-    repositoryRoot,
-    'packages/node-repl/dist/index.js',
-  );
-  const builtinSkillRoot = join(repositoryRoot, 'dist/bundled/browser-use');
-  const browserRuntimeRoot = join(builtinSkillRoot, 'runtime');
-  const browserRuntimeEntry = join(browserRuntimeRoot, 'index.js');
-  await Promise.all(
-    [
-      qwenEntry,
-      nodeReplEntry,
-      join(builtinSkillRoot, 'SKILL.md'),
-      browserRuntimeEntry,
-      join(browserRuntimeRoot, 'native-host.js'),
-      join(browserRuntimeRoot, 'node_modules/playwright-core/package.json'),
-    ].map((path) => access(path)),
-  );
   const runId = new Date()
     .toISOString()
     .replaceAll(':', '')
@@ -158,7 +175,7 @@ await withManagedChrome('sauce', async (chrome) => {
         '--allowed-mcp-server-names',
         'node-repl',
         '--core-tools',
-        'skill,tool_search',
+        'tool_search',
         '--approval-mode',
         'yolo',
         '--max-wall-time',
@@ -230,11 +247,7 @@ await withManagedChrome('sauce', async (chrome) => {
     const joinedOutput = calls.map((call) => call.output).join('\n');
     const checks = {
       existingNodeReplUsed: calls.length > 0,
-      browserSdkImported: stagedRuntimeImported(
-        calls,
-        browserRuntimeRoot,
-        builtinSkillRoot,
-      ),
+      preloadedBrowserUsed: preloadedBrowserUsed(calls),
       noModuleDirectoryRegistered:
         !moduleDirectoryRegistrationRequested(events),
       checkoutCompletionObserved:
@@ -364,46 +377,18 @@ function assertNoSecret(secret: string, ...values: string[]): void {
   );
 }
 
-// A run proves it loaded the staged built-in runtime only through an import
-// expression that names that runtime: a literal path under the staged
-// runtime directory, or a path the same or an earlier cell assembled from the
-// skill root the CLI substituted into SKILL.md. The cell must also reach the
-// setup export (a destructuring alias still names it). A literal entry loaded
-// from anywhere else — the fallback a model reaches for when the staged
-// import throws — disqualifies the run, because it is not the shipped
-// runtime that was exercised.
-function stagedRuntimeImported(
-  calls: NodeReplCall[],
-  browserRuntimeRoot: string,
-  builtinSkillRoot: string,
-): boolean {
-  const entryFile = /\/(?:index|native-host)\.js/;
-  let rootBound = false;
-  let staged = false;
-  for (const call of calls) {
-    for (const root of [builtinSkillRoot, browserRuntimeRoot]) {
-      if (
-        call.code.includes(`'${root}'`) ||
-        call.code.includes(`"${root}"`) ||
-        call.code.includes(`\`${root}\``)
-      )
-        rootBound = true;
-    }
-    let importsStaged = false;
-    for (const match of call.code.matchAll(/import\(([^()]*)\)/g)) {
-      const expression = match[1] ?? '';
-      const literal = /^\s*(['"`])([^'"`$]+)\1\s*$/.exec(expression)?.[2];
-      if (literal !== undefined) {
-        if (literal.startsWith(`${browserRuntimeRoot}/`)) importsStaged = true;
-        else if (entryFile.test(literal)) return false;
-        continue;
-      }
-      if (/index\.js/.test(expression) && rootBound) importsStaged = true;
-    }
-    if (importsStaged && call.code.includes('setupBrowserRuntime'))
-      staged = true;
-  }
-  return staged;
+// The first successful cell must acquire the preloaded browser and receive
+// its documentation. A manual import fallback does not exercise that entry.
+function preloadedBrowserUsed(calls: NodeReplCall[]): boolean {
+  const first = calls[0];
+  return (
+    first !== undefined &&
+    /^\s*(?:var|let|const)\s+\w+\s*=\s*await\s+cua\.getBrowser\(\)\s*;?\s*$/.test(
+      first.code,
+    ) &&
+    first.output.includes('# Qwen Browser Use') &&
+    calls.every((call) => !/\bimport\s*\(/.test(call.code))
+  );
 }
 
 // The prompt makes the model confirm cart.html with a separate tab.url() call

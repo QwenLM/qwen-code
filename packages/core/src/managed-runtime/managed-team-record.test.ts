@@ -94,7 +94,7 @@ function frozenDeep(value: unknown): boolean {
 }
 
 describe('managed-team-record/1 shared contract', () => {
-  it('projects no task and stays disabled for submission', () => {
+  it('projects no task, and enables only the lead-side domains', () => {
     expect(fixtures.contract).toBe('managed-team-record/1');
     expect(fixtures.leader).toBe(MANAGED_TEAM_LEADER);
     expect(fixtures.limits).toEqual({ ...MANAGED_TEAM_LIMITS });
@@ -107,10 +107,17 @@ describe('managed-team-record/1 shared contract', () => {
           body.taskKindOf(body.parse(fixtures.templates[template]).record),
         ).toBeNull();
       }
-      expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain(domain);
-      expect(() => assertManagedSessionDomainEnabled(domain)).toThrow(
-        `domain ${domain} is registered but not enabled for submission.`,
-      );
+      // H4e-b1 enabled the roster and the board after its physical pass;
+      // the mailbox and plans wait on H4e-b2 and H4e-b3.
+      if (domain === 'team_state' || domain === 'team_task') {
+        expect(MANAGED_SESSION_ENABLED_DOMAINS).toContain(domain);
+        expect(() => assertManagedSessionDomainEnabled(domain)).not.toThrow();
+      } else {
+        expect(MANAGED_SESSION_ENABLED_DOMAINS).not.toContain(domain);
+        expect(() => assertManagedSessionDomainEnabled(domain)).toThrow(
+          `domain ${domain} is registered but not enabled for submission.`,
+        );
+      }
     }
   });
 

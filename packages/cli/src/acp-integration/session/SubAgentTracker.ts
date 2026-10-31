@@ -6,6 +6,7 @@
 
 import type {
   AgentEventEmitter,
+  AgentStartEvent,
   AgentToolCallEvent,
   AgentToolResultEvent,
   AgentToolOutputUpdateEvent,
@@ -24,7 +25,8 @@ import {
   createDebugLogger,
 } from '@qwen-code/qwen-code-core';
 
-import type { SessionContext } from './types.js';
+import type { AgentIdentity, SessionContext, SubagentMeta } from './types.js';
+import { ROOT_AGENT_IDENTITY, deriveSubagentIdentity } from './types.js';
 import { ToolCallEmitter } from './emitters/tool-call-emitter.js';
 import { MessageEmitter } from './emitters/MessageEmitter.js';
 import type {
@@ -59,7 +61,7 @@ type PermissionRequester = (
 export class SubAgentTracker {
   private readonly toolCallEmitter: ToolCallEmitter;
   private readonly messageEmitter: MessageEmitter;
-  private readonly subagentMeta: {
+  private readonly subagentMeta: SubagentMeta & {
     parentToolCallId: string;
     subagentType: string;
   };
@@ -84,11 +86,21 @@ export class SubAgentTracker {
       signal,
     ) => requestPermissionWithAbort(this.client, params, signal),
     private readonly permissionPersistencePolicy?: PermissionPersistencePolicy,
+    private readonly parentAgent: AgentIdentity = ROOT_AGENT_IDENTITY,
     private readonly flattenStructuredQuestions = false,
   ) {
     this.toolCallEmitter = new ToolCallEmitter(ctx);
     this.messageEmitter = new MessageEmitter(ctx);
-    this.subagentMeta = { parentToolCallId, subagentType };
+    this.subagentMeta = {
+      parentToolCallId,
+      subagentType,
+      agent: deriveSubagentIdentity(subagentType, parentAgent),
+    };
+  }
+
+  /** The identity every frame this tracker emits is attributed to. */
+  get agentIdentity(): AgentIdentity {
+    return this.subagentMeta.agent!;
   }
 
   /**
@@ -102,6 +114,15 @@ export class SubAgentTracker {
     eventEmitter: AgentEventEmitter,
     abortSignal: AbortSignal,
   ): Array<() => void> {
+    const onStart = (...args: unknown[]) => {
+      const event = args[0] as AgentStartEvent;
+      if (abortSignal.aborted) return;
+      this.subagentMeta.subagentType = event.name;
+      this.subagentMeta.agent = deriveSubagentIdentity(
+        event.name,
+        this.parentAgent,
+      );
+    };
     const onToolCall = this.createToolCallHandler(abortSignal);
     const onToolResult = this.createToolResultHandler(abortSignal);
     const pending = new Set<string>();
@@ -144,6 +165,7 @@ export class SubAgentTracker {
     const onUsageMetadata = this.createUsageMetadataHandler(abortSignal);
     const onStreamText = this.createStreamTextHandler(abortSignal);
 
+    eventEmitter.on(AgentEventType.START, onStart);
     eventEmitter.on(AgentEventType.TOOL_CALL, onToolCall);
     eventEmitter.on(AgentEventType.TOOL_RESULT, onLifecycle);
     eventEmitter.on(AgentEventType.TOOL_RESULT, onToolResult);
@@ -154,6 +176,7 @@ export class SubAgentTracker {
 
     return [
       () => {
+        eventEmitter.off(AgentEventType.START, onStart);
         eventEmitter.off(AgentEventType.TOOL_CALL, onToolCall);
         eventEmitter.off(AgentEventType.TOOL_RESULT, onToolResult);
         if (closing) return;
@@ -222,6 +245,7 @@ export class SubAgentTracker {
           this.subagentMeta.subagentType,
           progressMessage,
           event.name,
+          this.subagentMeta.agent,
         )
         .catch((error) => {
           debugLogger.debug(
@@ -305,6 +329,7 @@ export class SubAgentTracker {
             this.subagentMeta.subagentType,
             `Waiting for permission: ${state?.tool?.displayName ?? event.name}`,
             event.name,
+            this.subagentMeta.agent,
           )
           .catch((error) => {
             debugLogger.debug(
