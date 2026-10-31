@@ -34,6 +34,8 @@ export interface FileSearchOptions {
   enableRecursiveFileSearch: boolean;
   enableFuzzySearch: boolean;
   maxDepth?: number;
+  // tools.useBuiltinRipgrep, forwarded to the crawler's ripgrep selection.
+  useBuiltinRipgrep?: boolean;
 }
 
 export class AbortError extends Error {
@@ -122,6 +124,7 @@ class RecursiveFileSearch implements FileSearch {
       cwd: this.options.projectRoot,
       ignore: this.ignore,
       useGitignore: this.options.useGitignore,
+      useBuiltinRipgrep: this.options.useBuiltinRipgrep,
       cache: this.options.cache,
       cacheTtl: this.options.cacheTtl,
       maxDepth: this.options.maxDepth,
@@ -258,6 +261,7 @@ class DirectoryFileSearch implements FileSearch {
       maxDepth: 0,
       ignore: this.ignore,
       useGitignore: this.options.useGitignore,
+      useBuiltinRipgrep: this.options.useBuiltinRipgrep,
       cache: this.options.cache,
       cacheTtl: this.options.cacheTtl,
     });

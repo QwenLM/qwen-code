@@ -80,12 +80,30 @@ type RipgrepProcessError = Error & {
 };
 
 const cachedSelections = new Map<boolean, RipgrepSelection>();
-let cachedHealth: RipgrepHealth | null = null;
+// Keyed by command, not a single slot: the crawler and the grep tool can hold
+// different selections (`tools.useBuiltinRipgrep`), and a shared slot made them
+// evict and re-probe each other's binary on every call.
+const cachedHealth = new Map<string, RipgrepHealth>();
 let macSigningAttempted = false;
+
+/**
+ * Last command `resolveRipgrepCommand` settled on, including a null result.
+ * A negative resolution otherwise falls through `resolveRipgrep` to a
+ * synchronous `command -v` fork on every crawl (~every 30 s while the user
+ * types `@`); the TTL keeps that bounded without freezing out a ripgrep
+ * installed mid-session.
+ */
+const RIPGREP_COMMAND_CACHE_MS = 30_000;
+let cachedCommand: {
+  key: boolean;
+  value: string | null;
+  expiresAt: number;
+} | null = null;
 
 export function _resetRipgrepUtilsCachesForTest(): void {
   cachedSelections.clear();
-  cachedHealth = null;
+  cachedHealth.clear();
+  cachedCommand = null;
   macSigningAttempted = false;
 }
 
@@ -254,12 +272,7 @@ export async function resolveRipgrep(
 export async function ensureRipgrepHealthy(
   selection: RipgrepSelection,
 ): Promise<void> {
-  if (
-    cachedHealth &&
-    cachedHealth.selection.command === selection.command &&
-    cachedHealth.working
-  )
-    return;
+  if (cachedHealth.get(selection.command)?.working) return;
 
   let working = false;
   let probeOutput = '';
@@ -275,9 +288,17 @@ export async function ensureRipgrepHealthy(
     probeOutput = stdout;
     probeCode = code;
     working = code === 0 && stdout.startsWith('ripgrep');
-    cachedHealth = { working, lastTested: Date.now(), selection };
+    cachedHealth.set(selection.command, {
+      working,
+      lastTested: Date.now(),
+      selection,
+    });
   } catch (error) {
-    cachedHealth = { working: false, lastTested: Date.now(), selection };
+    cachedHealth.set(selection.command, {
+      working: false,
+      lastTested: Date.now(),
+      selection,
+    });
     throw error;
   }
 
@@ -379,6 +400,42 @@ export async function canUseRipgrep(
 ): Promise<boolean> {
   const selection = await resolveHealthyRipgrep(useBuiltin);
   return selection !== null;
+}
+
+/**
+ * The command a caller should spawn, resolved through the same health check
+ * `runRipgrep` applies: a bundled binary that exists but cannot execute falls
+ * back to system `rg` (#2676). Null means no command could be resolved — no
+ * install, or a resolution that failed — so a caller with its own fallback can
+ * skip the spawn entirely.
+ */
+export async function resolveRipgrepCommand(
+  useBuiltin: boolean = true,
+): Promise<string | null> {
+  if (
+    cachedCommand &&
+    cachedCommand.key === useBuiltin &&
+    cachedCommand.expiresAt > Date.now()
+  ) {
+    return cachedCommand.value;
+  }
+
+  let value: string | null = null;
+  try {
+    value = (await resolveHealthyRipgrep(useBuiltin))?.command ?? null;
+  } catch (error) {
+    // The throw carries why the binary is unusable (exit code and what it
+    // printed); dropping it leaves only the caller's "ripgrep unavailable"
+    // line, which misreports a present-but-broken tool as an absent one.
+    debugLogger.warn(`Could not resolve a usable ripgrep: ${error}`);
+  }
+
+  cachedCommand = {
+    key: useBuiltin,
+    value,
+    expiresAt: Date.now() + RIPGREP_COMMAND_CACHE_MS,
+  };
+  return value;
 }
 
 function errorCodeOf(
