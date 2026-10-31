@@ -26,7 +26,6 @@ import { makeChatCompressionEvent } from '../telemetry/types.js';
 import { PreCompactTrigger, PostCompactTrigger } from '../hooks/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
-  estimateContentChars,
   resolveCompactionTuning,
   resolveSlimmingConfig,
   slimCompactionInput,
@@ -36,12 +35,14 @@ import {
   estimateContentTokens,
   estimatePromptTokens,
 } from './tokenEstimation.js';
+import { markCompressedHistory } from '../core/environmentContext.js';
 import {
   buildStateReminderParts,
   composePostCompactHistory,
   countToolResponseImages,
   postProcessSummary,
   stripAnalysisBlock,
+  trailingTurnPartsForAck,
   type SubagentSnapshot,
 } from './postCompactAttachments.js';
 
@@ -1317,11 +1318,14 @@ export class ChatCompressionService {
         // functionResponse (auto-compaction mid-tool-loop) keeps its matching
         // call — otherwise the next request has an orphaned functionResponse
         // → 400. (Manual orphans were already stripped above.) Folding into
-        // the ack avoids a model→model adjacency.
+        // the ack avoids a model→model adjacency. Same parts as the composer
+        // keeps (functionCall + plain narration text), so the degraded path
+        // does not lose the trailing turn's text either.
         const trailingFc = historyForCompose[historyForCompose.length - 1];
         const fcParts =
-          trailingFc?.role === 'model'
-            ? (trailingFc.parts ?? []).filter((p) => !!p.functionCall)
+          trailingFc?.role === 'model' &&
+          trailingFc.parts?.some((p) => !!p.functionCall)
+            ? trailingTurnPartsForAck(trailingFc)
             : [];
         // Re-apply the SAME plan-mode + subagent reminders the normal path
         // injects. These builders are pure (no disk I/O / history walking),
@@ -1345,6 +1349,7 @@ export class ChatCompressionService {
             ],
           },
         ];
+        markCompressedHistory(extraHistory);
       }
 
       // Best-effort token math using model-reported token counts when
@@ -1394,14 +1399,25 @@ export class ChatCompressionService {
         // compressionOutputTokenCount. Estimate their cost locally so the
         // inflation guard below fires when attachments dominate the
         // post-compact size.
-        const restorationChars = extraHistory
-          .slice(2) // skip [summary, model ack]
-          .reduce(
-            (acc, c) =>
-              acc + estimateContentChars(c, slimmingConfig.imageTokenEstimate),
-            0,
-          );
-        newTokenCount += Math.ceil(restorationChars / CHARS_PER_TOKEN);
+        //
+        // Since #14325 the composer folds these blocks (and the plan-mode /
+        // subagent reminders) into the summary entry itself, so they live in
+        // `extraHistory[0].parts[1..]` rather than in separate trailing
+        // entries. The summary text itself is already paid for by
+        // compressionOutputTokenCount. A folded tool-call turn was subtracted
+        // with sideQueryBase only when its response was pending; otherwise its
+        // cost remains in originalTokenCount and adding it would count twice.
+        const [summaryEntry, ackEntry] = extraHistory;
+        const restorationEntries: Content[] = [
+          { role: 'user', parts: (summaryEntry?.parts ?? []).slice(1) },
+          ...(pendingToolResult
+            ? [{ role: 'model', parts: (ackEntry?.parts ?? []).slice(1) }]
+            : []),
+        ];
+        newTokenCount += estimateContentTokens(
+          restorationEntries,
+          slimmingConfig.imageTokenEstimate,
+        );
       } else {
         const estimatedOriginalVisibleTokenCount = estimateContentTokens(
           curatedHistory,

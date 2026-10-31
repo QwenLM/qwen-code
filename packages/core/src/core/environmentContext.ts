@@ -674,7 +674,7 @@ export async function getInitialChatHistory(
  *  - The legacy ack-pair prelude (2 entries) — sessions saved before the
  *    startup context moved into system reminders.
  *  - The compressed-history prefix (2-4 entries) — summary, ack, and
- *    optionally a post-compact attachments entry produced by
+ *    optionally a legacy post-compact attachments entry produced by older builds of
  *    `composePostCompactHistory`. These synthetic entries must not be
  *    counted as real user prompts for rewind indexing.
  */
@@ -718,6 +718,12 @@ function detectCompressedPrefixLength(
   // Post-compression prefix for turn indexing and recovery. The startup-context
   // refresh/restore paths need compressed history to look like "no startup
   // prelude" so they don't strip or skip the compressed summary.
+  //
+  // Current composePostCompactHistory (#14325) always emits a 2-entry
+  // prefix: [user(summary + attachments?), model(ack [+ fc])]. Older
+  // sessions may still carry a trailing user(attachments) entry (and an
+  // optional model(fc)) after the ack — keep detecting those so rewind
+  // indexes correctly.
   if (
     typeof firstText !== 'string' ||
     !firstText.includes('Resume the prior task') ||
