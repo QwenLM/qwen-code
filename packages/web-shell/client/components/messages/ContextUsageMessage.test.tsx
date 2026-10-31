@@ -536,4 +536,67 @@ describe('ContextUsageMessage', () => {
       }
     },
   );
+
+  it('opens context file rows that carry an absolute path, and only those', () => {
+    const status = makeStatus(60, false);
+    status.usage.showDetails = true;
+    status.usage.breakdown.instructionFiles = 3;
+    status.usage.instructionFiles = [
+      { path: 'AGENTS.md', tokens: 3, absolutePath: '/workspace/AGENTS.md' },
+    ];
+    // Older producers combine real files into memoryFiles; the synthetic
+    // auto-memory aggregate has no absolute path.
+    status.usage.memoryFiles = [
+      { path: 'QWEN.md', tokens: 3, absolutePath: '/workspace/QWEN.md' },
+      { path: 'auto memory', tokens: 2 },
+    ];
+    const onOpenMemoryFile = vi.fn();
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <ContextUsageMessage
+            status={status}
+            compact
+            onOpenMemoryFile={onOpenMemoryFile}
+          />
+        </I18nProvider>,
+      );
+    });
+    mounted.push({ root, container });
+
+    const openable = container.querySelector<HTMLButtonElement>(
+      'button[title="AGENTS.md"]',
+    );
+    expect(openable).not.toBeNull();
+    // Legacy memoryFiles real files are openable too.
+    expect(container.querySelector('button[title="QWEN.md"]')).not.toBeNull();
+    // The synthetic aggregate has no absolute path and stays plain text.
+    expect(container.querySelector('button[title="auto memory"]')).toBeNull();
+    expect(container.querySelector('[title="auto memory"]')?.tagName).toBe(
+      'SPAN',
+    );
+
+    act(() => openable!.click());
+    expect(onOpenMemoryFile).toHaveBeenCalledTimes(1);
+    expect(onOpenMemoryFile).toHaveBeenCalledWith(
+      status.usage.instructionFiles![0],
+    );
+  });
+
+  it('keeps context file rows non-interactive when no opener is provided', () => {
+    const status = makeStatus(60, false);
+    status.usage.showDetails = true;
+    status.usage.breakdown.instructionFiles = 3;
+    status.usage.instructionFiles = [
+      { path: 'AGENTS.md', tokens: 3, absolutePath: '/workspace/AGENTS.md' },
+    ];
+    const container = render(status, true);
+    expect(container.querySelector('button[title="AGENTS.md"]')).toBeNull();
+    expect(container.querySelector('[title="AGENTS.md"]')?.tagName).toBe(
+      'SPAN',
+    );
+  });
 });
