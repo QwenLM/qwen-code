@@ -884,6 +884,17 @@ export function parseReviewArgs(
     }
     targetTokens.push(k.token);
   }
+  // A PR-shaped token outranks a file-shaped one regardless of arrival
+  // order: prose typed before a PR number ("有更新了，重新评审 6711")
+  // classifies as a file path, and first-token-wins let the sentence steal
+  // the target while the number was demoted to extraTokens. An explicit
+  // path spelling (`./6711`) is not PR-shaped and still wins as a file
+  // target.
+  const prIdx = targetTokens.findIndex(isPrShapedToken);
+  if (prIdx > 0) {
+    const [prToken] = targetTokens.splice(prIdx, 1);
+    targetTokens.unshift(prToken);
+  }
   // Same preference for positional spellings: when the target tokens hold
   // both a bare number and a same-number PR URL, the URL becomes the
   // target regardless of arrival order.

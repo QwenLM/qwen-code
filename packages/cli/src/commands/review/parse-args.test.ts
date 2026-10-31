@@ -398,6 +398,118 @@ const CASES: Case[] = [
     },
   },
   {
+    name: 'prose typed before a PR number never steals the target (re-review intent)',
+    raw: '有更新了，重新评审 6711',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['有更新了，重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'prose alone stays a file target — fail-closed, never guessed into a PR',
+    raw: '有更新了，重新评审',
+    expect: {
+      targetType: 'file',
+      extraTokens: [],
+    },
+  },
+  {
+    name: 'an explicit path spelling of a number stays a file target',
+    raw: './6711',
+    expect: {
+      targetType: 'file',
+      extraTokens: [],
+    },
+  },
+  {
+    name: 'a PR number outranks a file path typed before it',
+    raw: 'src/foo.ts 6711',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['src/foo.ts'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'prose beside a number and its URL: the URL wins, the number restates it',
+    raw: '重新评审 6711 https://github.com/QwenLM/qwen-code/pull/6711',
+    expect: {
+      targetType: 'pr-url',
+      extraTokens: ['重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'prose before an Aone CR URL never steals the target',
+    raw: '重新评审 https://code.alibaba-inc.com/group/repo/codereview/12345',
+    expect: {
+      targetType: 'pr-url',
+      extraTokens: ['重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'two different numbers with prose: the first PR-shaped wins, the rest disclosed',
+    raw: '有更新 6711 6712',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['有更新', '6712'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'prose as an invalid --effort value beside a number: the flag warning discloses it, the number is the target',
+    raw: '--effort 有更新 6711',
+    expect: {
+      targetType: 'pr-number',
+      effort: 'high',
+      extraTokens: [],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--comment beside prose and a number keeps posting authority (PR target, high)',
+    raw: '--comment 重新评审 6711',
+    expect: {
+      targetType: 'pr-number',
+      comment: { requested: true, effective: true },
+      effort: 'high',
+      extraTokens: ['重新评审'],
+      // The PR default is already high, so the forced-high warning stays
+      // silent; the only warning is the disclosed prose extra.
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--resume beside prose and a number stays effective on the PR target',
+    raw: '--resume 重新评审 6711',
+    expect: {
+      targetType: 'pr-number',
+      resume: { requested: true, effective: true },
+      extraTokens: ['重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'an invalid URL beside a number never becomes the target',
+    raw: 'https://github.com/QwenLM/qwen-code/pull/42oops 6711',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['https://github.com/QwenLM/qwen-code/pull/42oops'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'number-shaped prose (第6711号) is never guessed into a PR',
+    raw: '重新评审 第6711号',
+    expect: {
+      targetType: 'file',
+      extraTokens: ['第6711号'],
+      warningCount: 1,
+    },
+  },
+  {
     name: 'numeric-prefix junk after /pull/ is not a PR URL (bug: /pull/42oops read as PR 42)',
     raw: 'https://github.com/QwenLM/qwen-code/pull/42oops',
     expect: {

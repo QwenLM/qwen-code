@@ -5222,6 +5222,14 @@ describe('fetch-pr --resume', () => {
       OUT,
       expect.stringContaining('head-moved'),
     );
+    // The refusal teaches the right invocation for next time: this fresh
+    // run IS the re-review, and a plain run is the path that keeps the
+    // restart bound unspent.
+    expect(
+      producerMocks.writeStderrLine.mock.calls
+        .map((c) => String(c[0]))
+        .join('\n'),
+    ).toContain('After future updates use a plain `/review <n>` without');
   });
 
   it('falls through when the diff bytes changed — the content key', async () => {

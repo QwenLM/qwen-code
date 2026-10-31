@@ -935,6 +935,50 @@ describe('bundled review skill', () => {
     );
   });
 
+  it('pins the conversational-intent routing and the resume exclusion', () => {
+    // A prose re-review request ("有更新了，重新评审") carries no target the
+    // parser could classify: alone it becomes a file path, and beside a PR
+    // number it stole the target (the parser half is pinned in
+    // parse-args.test.ts). The routing clause is the ONE sanctioned
+    // departure from copy-verbatim, so pin its boundary sentences too —
+    // widening it re-opens the transcribed-argument incident.
+    const body = skillBody();
+    expect(body).toContain('Route conversational intent before the parser');
+    expect(body).toContain('never guess, and never pass the prose through');
+    expect(body).toContain(
+      'any input already carrying a number, URL, or path goes to the parser untouched',
+    );
+    expect(body).toContain("keep the CLI's args file untouched");
+    expect(body).toContain('copy it, do not reconstruct it');
+    // The routing fires on a NON-EMPTY request only: a bare `/review` is a
+    // local review, and the empty-stdin rule owns it. Without this boundary
+    // the clause reads as "no classifiable target → resolve a PR", which
+    // would hijack every bare local review into the last PR.
+    expect(body).toContain(
+      'When a non-empty request holds no classifiable target',
+    );
+    expect(body).toContain(
+      'a bare `/review` with no arguments is a local review, not intent',
+    );
+    // The resolved invocation keeps the flags the input already carries:
+    // resolving the target must not silently drop a `--comment` typed beside
+    // the prose, which would strip the run's posting authority.
+    expect(body).toContain(
+      'the target plus any flags the input already carries',
+    );
+    // --resume continues an interrupted run at an UNMOVED head only. The
+    // exclusion must survive in the verdict bullet and the routing clause,
+    // the two surfaces read before the flag is chosen; the frontmatter
+    // description carries the same exclusion for the invoking model.
+    expect(body).toContain(
+      'It is never the flag for a re-review after the PR gained commits',
+    );
+    expect(body).toContain('at an UNMOVED head');
+    expect(coreBody()).toContain(
+      'at an unmoved head (a re-review after new commits is a plain `/review <pr-number>`)',
+    );
+  });
+
   it('relays a remembered effort notice before the review starts', () => {
     const body = skillBody();
     expect(body).toContain(
