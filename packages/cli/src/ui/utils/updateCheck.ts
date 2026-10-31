@@ -32,10 +32,12 @@ export interface UpdateInfo {
   name: string;
 }
 
-// 5s matches comparable CLIs (e.g. Claude Code's autoUpdater uses
-// AbortSignal.timeout(5000)) and gives slow mirrors and corporate proxies a
-// realistic budget. Related: #7049.
-export const FETCH_TIMEOUT_MS = 5000;
+// 15s covers the full `node <npm-cli.js>` child lifecycle on Windows —
+// node.exe spawn, npm CLI bootstrap, config resolution, and the registry
+// round-trip — not just the network request. A 5s spawn-to-exit budget left
+// too little room for local startup on cold/slow Windows installs and surfaced
+// as a spurious registry timeout (#14686).
+export const FETCH_TIMEOUT_MS = 15000;
 
 /**
  * Sentinel error thrown when `fetchInfo()` does not resolve within
@@ -107,7 +109,7 @@ export function classifyUpdateCheckError(
 
 /**
  * Short human-readable reason for an update-check failure, for embedding in
- * status messages, e.g. "registry did not respond within 5s".
+ * status messages, e.g. "update check timed out after 15s".
  */
 export function describeUpdateCheckFailure(
   error: unknown,
@@ -115,7 +117,7 @@ export function describeUpdateCheckFailure(
 ): string {
   switch (classifyUpdateCheckError(error)) {
     case 'timeout':
-      return t('registry did not respond within {{seconds}}s', {
+      return t('update check timed out after {{seconds}}s', {
         seconds: String(Math.round(timeoutMs / 1000)),
       });
     case 'offline':
@@ -123,6 +125,26 @@ export function describeUpdateCheckFailure(
     default:
       return t('registry error');
   }
+}
+
+/**
+ * Full user-facing failure line for `qwen update` and `/update`. Only offline
+ * and registry failures get the network/registry hint; a timeout also covers
+ * local npm child-process startup (see `FETCH_TIMEOUT_MS`), so blaming the
+ * registry there would be misleading (#14686).
+ */
+export function describeUpdateCheckFailureMessage(
+  error: unknown,
+  timeoutMs: number = FETCH_TIMEOUT_MS,
+): string {
+  const reason = describeUpdateCheckFailure(error, timeoutMs);
+  if (classifyUpdateCheckError(error) === 'timeout') {
+    return t('Failed to check for updates ({{reason}}).', { reason });
+  }
+  return t(
+    'Failed to check for updates ({{reason}}). Please check your network or registry configuration.',
+    { reason },
+  );
 }
 
 async function fetchInfoWithTimeout(

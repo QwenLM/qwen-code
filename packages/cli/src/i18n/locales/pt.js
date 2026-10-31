@@ -2214,12 +2214,14 @@ export default {
     'Uma nova versão do Qwen Code está disponível! {{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!':
     'Qwen Code {{version}} está atualizado!',
+  'Failed to check for updates ({{reason}}).':
+    'Falha ao verificar atualizações ({{reason}}).',
   'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
     'Falha ao verificar atualizações ({{reason}}). Verifique sua rede ou configuração do registro.',
   'Update check skipped ({{reason}}) — run /update to retry.':
     'Verificação de atualização ignorada ({{reason}}) — execute /update para tentar novamente.',
-  'registry did not respond within {{seconds}}s':
-    'o registro não respondeu em {{seconds}}s',
+  'update check timed out after {{seconds}}s':
+    'a verificação de atualização expirou após {{seconds}}s',
   'registry unreachable': 'registro inacessível',
   'registry error': 'erro no registro',
   'Unable to check for updates: {{reason}}':

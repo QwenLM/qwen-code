@@ -2381,12 +2381,13 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Qwen Code 有新版本可用！{{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} 已是最新！',
+  'Failed to check for updates ({{reason}}).': '檢查更新失敗（{{reason}}）。',
   'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
     '檢查更新失敗（{{reason}}）。請檢查網路或 registry 設定。',
   'Update check skipped ({{reason}}) — run /update to retry.':
     '已略過更新檢查（{{reason}}）— 可執行 /update 重試。',
-  'registry did not respond within {{seconds}}s':
-    'registry 在 {{seconds}} 秒內未回應',
+  'update check timed out after {{seconds}}s':
+    '更新檢查在 {{seconds}} 秒後逾時',
   'registry unreachable': 'registry 無法連線',
   'registry error': 'registry 錯誤',
   'Unable to check for updates: {{reason}}': '無法檢查更新：{{reason}}',

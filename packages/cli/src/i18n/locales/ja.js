@@ -1992,12 +1992,14 @@ export default {
   'A new version of Qwen Code is available! {{current}} → {{latest}}':
     'Qwen Code の新しいバージョンがあります！{{current}} → {{latest}}',
   'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} は最新です！',
+  'Failed to check for updates ({{reason}}).':
+    'アップデートの確認に失敗しました（{{reason}}）。',
   'Failed to check for updates ({{reason}}). Please check your network or registry configuration.':
     'アップデートの確認に失敗しました（{{reason}}）。ネットワークまたはレジストリ設定を確認してください。',
   'Update check skipped ({{reason}}) — run /update to retry.':
     'アップデートの確認をスキップしました（{{reason}}）— /update で再試行できます。',
-  'registry did not respond within {{seconds}}s':
-    'レジストリが {{seconds}} 秒以内に応答しませんでした',
+  'update check timed out after {{seconds}}s':
+    'アップデート確認が {{seconds}} 秒後にタイムアウトしました',
   'registry unreachable': 'レジストリに接続できません',
   'registry error': 'レジストリエラー',
   'Unable to check for updates: {{reason}}':

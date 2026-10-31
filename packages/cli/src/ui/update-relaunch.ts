@@ -7,8 +7,6 @@
 import type { LoadedSettings } from '../config/settings.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
 
-const UPDATE_CHECK_FAILED_MESSAGE =
-  'Failed to check for updates ({{reason}}). Please check your network or registry configuration.';
 const UPDATE_FAILED_MESSAGE =
   'Automatic update failed. Please try updating manually.';
 const UPDATE_FAILED_WITH_ERROR_MESSAGE =
@@ -35,7 +33,7 @@ export async function updateBeforeRelaunch(
       : message;
   try {
     const [
-      { checkForUpdatesDetailed, describeUpdateCheckFailure },
+      { checkForUpdatesDetailed, describeUpdateCheckFailureMessage },
       { handleAutoUpdate },
       { getInstallationInfo },
       { performStandaloneUpdate },
@@ -88,11 +86,7 @@ export async function updateBeforeRelaunch(
       );
       return success || relaunchOnFailure;
     } else if (result.status === 'error') {
-      writeStderrLine(
-        t(UPDATE_CHECK_FAILED_MESSAGE, {
-          reason: describeUpdateCheckFailure(result.error),
-        }),
-      );
+      writeStderrLine(describeUpdateCheckFailureMessage(result.error));
     }
   } catch (error) {
     writeStderrLine(

@@ -36,6 +36,9 @@ vi.mock('../../utils/installationInfo.js', async (importOriginal) => ({
   getInstallationInfo,
 }));
 const { updateCommand } = await import('./update-command.js');
+const { UpdateCheckTimeoutError, FETCH_TIMEOUT_MS } = await import(
+  '../utils/updateCheck.js'
+);
 
 function context(
   executionMode: 'interactive' | 'non_interactive' | 'acp',
@@ -408,6 +411,22 @@ describe('updateCommand', () => {
       messageType: 'error',
       content:
         'Failed to check for updates (registry error). Please check your network or registry configuration.',
+    });
+    expect(getInstallationInfo).not.toHaveBeenCalled();
+  });
+
+  it('returns a neutral timeout error without blaming the registry (#14686)', async () => {
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'error',
+      error: new UpdateCheckTimeoutError(FETCH_TIMEOUT_MS),
+    });
+
+    const result = await updateCommand.action!(context('non_interactive'), '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: `Failed to check for updates (update check timed out after ${Math.round(FETCH_TIMEOUT_MS / 1000)}s).`,
     });
     expect(getInstallationInfo).not.toHaveBeenCalled();
   });
