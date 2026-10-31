@@ -52,7 +52,8 @@ const report = {
   postFailureLoads: [] as boolean[],
   postFailureCancellationLoads: 0,
   // Record non-resuming recovery modes separately from their wire origins.
-  // Both modes target the original prompt; cleanup alone cannot prove takeover.
+  // A targeted cancellation proves the replacement; a cleanup load only proves
+  // that no resume ran, so the two are counted apart.
   postFailureLoadOrigins: [] as string[],
   lateCancelReplays: 0,
   originalCancelBody: '',
@@ -161,6 +162,7 @@ const proxy = createServer(async (req, res) => {
       )
         report.continuationsAfterFailure++;
       let postFailureLoadIndex: number | undefined;
+      let postFailureCancellationLoad = false;
       if (injected && target.pathname.endsWith('/load')) {
         const cancellationOnly =
           fields.cancellationTakeover === true &&
@@ -168,9 +170,11 @@ const proxy = createServer(async (req, res) => {
           typeof fields.cancellationPromptId === 'string' &&
           fields.cancellationPromptId === report.promptId &&
           fields.recoveryCleanupPromptId === undefined;
+        // Cleanup does not carry the client prompt id, and both cleanup
+        // branches return before any resume, so a targeted cleanup load is
+        // non-resuming whatever prompt it names.
         const cleanupOnly =
           typeof fields.recoveryCleanupPromptId === 'string' &&
-          fields.recoveryCleanupPromptId === report.promptId &&
           fields.cancellationTakeover !== true &&
           fields.passiveManagedRuntimeRecovery !== true &&
           fields.cancellationPromptId === undefined;
@@ -182,8 +186,7 @@ const proxy = createServer(async (req, res) => {
         report.postFailureLoads.push(
           nonDriving && (cancellationOnly || cleanupOnly),
         );
-        if (nonDriving && cancellationOnly)
-          report.postFailureCancellationLoads++;
+        postFailureCancellationLoad = nonDriving && cancellationOnly;
         report.postFailureLoadOrigins.push(
           [
             `takeover=${fields.cancellationTakeover === true}`,
@@ -224,6 +227,8 @@ const proxy = createServer(async (req, res) => {
       if (postFailureLoadIndex !== undefined) {
         report.postFailureLoadOrigins[postFailureLoadIndex] +=
           ` status=${upstream.status}`;
+        if (postFailureCancellationLoad && upstream.ok)
+          report.postFailureCancellationLoads++;
       }
       if (target.pathname.endsWith('/events') && upstream.body) {
         res.writeHead(upstream.status, relayedHeaders(upstream.headers));

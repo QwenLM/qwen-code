@@ -1063,12 +1063,8 @@ describe('no-AK integration CI wiring', () => {
     );
     const webShellJob = getWorkflowJob(workflow, 'web_shell_e2e_smoke');
 
-    // The lane still takes its runner from the classifier, so an untrusted
-    // fork PR cannot reach a self-hosted host; the architecture override it
-    // applies on top is pinned in scripts/tests/ci-platform-lanes.test.js.
-    expect(webShellJob).toMatch(
-      /runs-on: .*needs\.classify_pr\.outputs\.ubuntu_runner/,
-    );
+    // Browser smoke stays hosted, including for untrusted fork PRs.
+    expect(webShellJob).toContain("runs-on: 'ubuntu-latest'");
     const hostedInstall = getWorkflowStep(
       webShellJob,
       'Install Playwright Chromium and WebKit (hosted)',
