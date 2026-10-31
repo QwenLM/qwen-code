@@ -208,9 +208,21 @@ function mockTokenStorage(getCredentials: Mock) {
 const noStoredCredentials = () =>
   mockTokenStorage(vi.fn().mockResolvedValue(null));
 
+/**
+ * Connect-time token lookups go through `getValidOAuthToken`; a provider that
+ * only stubs `getValidToken` gets one that wraps its result in a token.
+ */
 function mockOAuthProvider<T extends Obj>(provider: T): T {
+  const getValidToken = provider['getValidToken'] as Mock | undefined;
+  const impl: Obj = { ...provider };
+  if (getValidToken && !impl['getValidOAuthToken']) {
+    impl['getValidOAuthToken'] = async (...args: unknown[]) => {
+      const accessToken = await getValidToken(...args);
+      return accessToken ? { accessToken, tokenType: 'Bearer' } : null;
+    };
+  }
   vi.mocked(MCPOAuthProvider).mockImplementation(
-    () => ({ ...provider }) as unknown as MCPOAuthProvider,
+    () => ({ ...impl }) as unknown as MCPOAuthProvider,
   );
   return provider;
 }
@@ -659,6 +671,8 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
           ),
         );
       stubGlobalFetch(401);
+      const fetchSpy = vi.fn(async () => new Response(null, { status: 202 }));
+      _setMcpFetchForTest(fetchSpy as unknown as typeof fetch);
 
       await expect(connectHttp()).resolves.toBeDefined();
 
@@ -667,11 +681,63 @@ lOTTGqPpwFUbw2EMOOpFYuIyzGMIpUNMBjE2gvJiqFQ=
       expect(getValidToken).toHaveBeenCalledWith('http-server', creds());
       expect(connect).toHaveBeenCalledTimes(2);
       const oauthTransport = connect.mock.calls[1][0] as {
+        _fetch: typeof fetch;
         _requestInit?: { headers?: Record<string, string> };
       };
-      expect(oauthTransport._requestInit?.headers).toMatchObject({
-        Authorization: 'Bearer access-token',
+      // The token goes on each request, not into the connect-time headers.
+      expect(oauthTransport._requestInit?.headers).toBeUndefined();
+      await oauthTransport._fetch('http://test-server/mcp', { method: 'POST' });
+      const sentInit = fetchSpy.mock.calls[0] as unknown as [
+        unknown,
+        RequestInit,
+      ];
+      expect(new Headers(sentInit[1].headers).get('authorization')).toBe(
+        'Bearer access-token',
+      );
+    });
+
+    it('retries SSE connections after OAuth discovery with the token on each request', async () => {
+      const connect = mockConnect(
+        vi
+          .fn()
+          .mockRejectedValueOnce(new Error('HTTP 401 Unauthorized'))
+          .mockResolvedValueOnce(undefined),
+      );
+      mockTokenStorage(vi.fn().mockResolvedValue(creds()));
+      mockOAuthProvider({
+        authenticate: vi.fn().mockResolvedValue(undefined),
+        getValidToken: vi.fn().mockResolvedValue('access-token'),
       });
+      mockDiscoveredOAuth(['mcp.read']);
+      const fetchSpy = stubGlobalFetch(401);
+
+      await expect(
+        connectToMcpServer(
+          'sse-oauth-server',
+          { url: 'http://test-server/sse', oauth: { enabled: true } },
+          false,
+          workspace(),
+        ),
+      ).resolves.toBeDefined();
+
+      expect(connect).toHaveBeenCalledTimes(2);
+      const oauthTransport = connect.mock.calls[1][0] as {
+        _fetch: typeof fetch;
+        _requestInit?: { headers?: Record<string, string> };
+      };
+      expect(oauthTransport).toBeInstanceOf(SSEClientTransport);
+      // The token goes on each request, not into the connect-time headers.
+      expect(oauthTransport._requestInit?.headers).toBeUndefined();
+      fetchSpy.mockClear();
+      fetchSpy.mockResolvedValue(new Response(null, { status: 202 }));
+      await oauthTransport._fetch('http://test-server/sse', { method: 'POST' });
+      const sentInit = fetchSpy.mock.calls[0] as unknown as [
+        unknown,
+        RequestInit,
+      ];
+      expect(new Headers(sentInit[1].headers).get('authorization')).toBe(
+        'Bearer access-token',
+      );
     });
 
     it('falls back to base-url OAuth discovery when www-authenticate lacks resource metadata', async () => {
