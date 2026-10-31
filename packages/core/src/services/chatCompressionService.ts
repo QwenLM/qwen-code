@@ -761,10 +761,31 @@ export class ChatCompressionService {
     // side-query (issue #7960). Left unset when the side-query runs on the
     // main model, whose window `budgetWindow` then comes from below.
     let compactionModelWindow: number | undefined;
-    // Only check the window when the effective model differs from the main
-    // model — warning about the main model being "too small" is confusing
-    // when no compaction model was explicitly configured.
-    if (effectiveCompactionModel !== config.getModel()) {
+    // Which route a selector is actually sent on: `runSideQuery` forwards it
+    // to the send layer, where `resolveForModel` hands back the main content
+    // generator on exactly these terms (baseLlmClient.ts:861-871) — the
+    // resolved model is the main one, a spelled authType is the main one, and
+    // the `\0` endpoint pin matches the main base URL. That normalization is
+    // the only thing that makes `openai:test-model` and `test-model` one
+    // route; comparing route keys never would, because
+    // `resolvedModelIdentity` passes the model half through verbatim.
+    const onMainRoute = (selector: string) => {
+      const [model, pin] = selector.split('\0');
+      const resolved = resolveModelId(model, buildModelIdContext(config));
+      return (
+        (resolved?.modelId ?? model) === config.getModel() &&
+        (!resolved?.authType ||
+          resolved.authType === contentGeneratorConfig.authType) &&
+        (pin === undefined || pin === contentGeneratorConfig.baseUrl)
+      );
+    };
+    // Only check the window when the side-query is not on the main route —
+    // warning about the main model being "too small" is confusing when no
+    // compaction model was explicitly configured, and an equivalent
+    // picker-saved selector (provider-qualified or endpoint-pinned) IS the
+    // main route: the shared path posts the history unslimmed, so the guard
+    // must not pay for the slimming estimate either.
+    if (!onMainRoute(effectiveCompactionModel)) {
       // getCompactionModel() may carry the picker's endpoint pin as
       // `authType:id\0<declaredBaseUrl>` (#12760); measure the window of the
       // entry the request is actually routed to, not the first same-id row.
@@ -803,27 +824,9 @@ export class ChatCompressionService {
       }
     }
 
-    // Which route the side-query is actually sent on: `runSideQuery` forwards
-    // `effectiveCompactionModel` to the send layer, where `resolveForModel`
-    // hands back the main content generator on exactly these terms
-    // (baseLlmClient.ts:861-871) — the resolved model is the main one, a
-    // spelled authType is the main one, and the `\0` endpoint pin matches the
-    // main base URL. That normalization is the only thing that makes
-    // `openai:test-model` and `test-model` one route; comparing route keys
-    // never would, because `resolvedModelIdentity` passes the model half
-    // through verbatim.
-    const [sideQuerySelector, sideQueryPin] =
-      effectiveCompactionModel.split('\0');
-    const sideQueryResolved = resolveModelId(
-      sideQuerySelector,
-      buildModelIdContext(config),
-    );
-    const sideQueryOnMainRoute =
-      (sideQueryResolved?.modelId ?? sideQuerySelector) === config.getModel() &&
-      (!sideQueryResolved?.authType ||
-        sideQueryResolved.authType === contentGeneratorConfig.authType) &&
-      (sideQueryPin === undefined ||
-        sideQueryPin === contentGeneratorConfig.baseUrl);
+    // Re-read after the guard so a window-forced downgrade to the main model
+    // counts as the main route.
+    const sideQueryOnMainRoute = onMainRoute(effectiveCompactionModel);
     // The server-reported ceiling is scoped to the route that reported it
     // (#13876): it is evidence about the endpoint and model the rejected
     // request targeted, and nothing more. A per-turn model override, or a
@@ -955,7 +958,6 @@ export class ChatCompressionService {
     const sharedDirectiveTokenCount = Math.ceil(
       sharedRequestText.length / CHARS_PER_TOKEN,
     );
-    const usesMainModel = effectiveCompactionModel === config.getModel();
     const providerSupportsCacheSharing =
       supportsCompressionCacheSharing(config);
     // The anchor must be provider-reported, not merely non-zero: an
@@ -976,7 +978,7 @@ export class ChatCompressionService {
         COMPACT_MAX_OUTPUT_TOKENS <=
       reactiveContextCeiling;
     const canShareCache =
-      usesMainModel &&
+      sideQueryOnMainRoute &&
       providerSupportsCacheSharing &&
       hasProviderTokenCount &&
       sharedRequestFits &&
@@ -988,7 +990,7 @@ export class ChatCompressionService {
       // slimmed cold path exclusively (#10380).
       !opts.requestPayloadTooLarge;
     if (!canShareCache) {
-      const reason = !usesMainModel
+      const reason = !sideQueryOnMainRoute
         ? 'distinct compaction model'
         : !providerSupportsCacheSharing
           ? 'provider does not support cache sharing'

@@ -330,6 +330,13 @@ The `extra_body` field allows you to add custom parameters to the request body s
 | ----------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
 | `compactionModel` | string | Model used for chat compression (auto-compaction). Leave empty to fall back to the main model. A smaller or faster model can reduce compression latency and cost. Can also be set or cleared via `/model --compaction`. | `""`    |
 
+Explicitly selecting the current model with the same auth type and endpoint
+keeps compression eligible to share the main session's prompt cache, including
+provider-qualified selections saved by the model picker. Different models, auth
+types, or endpoint pins use the cold compression path. The existing provider,
+usage, and context-headroom requirements still apply; eligibility does not
+guarantee a provider cache hit.
+
 #### imageModel
 
 | Setting      | Type   | Description                                                                                                                                                                                                                                                                              | Default |

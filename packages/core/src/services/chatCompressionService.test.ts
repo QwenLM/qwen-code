@@ -1543,6 +1543,123 @@ describe('ChatCompressionService.compress cache sharing', () => {
     return { ...fixture, coldSpy, result };
   }
 
+  it.each([
+    { selector: undefined, sharesCache: true },
+    { selector: 'test-model', sharesCache: true },
+    { selector: 'openai:test-model', sharesCache: true },
+    {
+      selector: 'openai:test-model\0https://same.invalid/v1',
+      sharesCache: true,
+    },
+    { selector: 'compact-model', sharesCache: false },
+    { selector: 'anthropic:test-model', sharesCache: false },
+    {
+      selector: 'openai:test-model\0https://other.invalid/v1',
+      sharesCache: false,
+    },
+  ])(
+    'shares the compression cache only on the main route: $selector',
+    async ({ selector, sharesCache }) => {
+      compressionDebugLines.length = 0;
+      const history = turns('x'.repeat(120_000), 'ack');
+      const { config, generateText, run } = makeFixture({
+        history,
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://same.invalid/v1',
+        compactionModel: selector,
+        configuredModels: [
+          {
+            id: 'test-model',
+            contextWindowSize: 220_000,
+            registryBaseUrl: 'https://same.invalid/v1',
+          },
+          {
+            id: 'test-model',
+            contextWindowSize: 220_000,
+            registryBaseUrl: 'https://other.invalid/v1',
+          },
+        ],
+      });
+      const coldSpy = spyCold();
+
+      const result = await run();
+
+      expect(result.info.compressionStatus).toBe(CompressionStatus.COMPRESSED);
+      expect(generateText).toHaveBeenCalledTimes(sharesCache ? 1 : 0);
+      expect(coldSpy).toHaveBeenCalledTimes(sharesCache ? 0 : 1);
+      expectCacheLog(config, sharesCache, sharesCache);
+      expect(
+        compressionDebugLines.some((line) =>
+          line.includes('distinct compaction model'),
+        ),
+      ).toBe(!sharesCache);
+      if (sharesCache) {
+        const request = generateText.mock.calls[0]![0] as GenerateTextOptions;
+        expect(request.model).toBe(selector ?? 'test-model');
+        expect(request.systemInstruction).toBe(mainSystemInstruction);
+        expect(request.config?.tools).toBe(tools);
+        expect(request.contents.slice(0, -1)).toEqual(history);
+        expect(request.promptCacheSharing).toBe(true);
+      } else {
+        expect(coldSpy.mock.calls[0]![1].model).toBe(selector);
+      }
+    },
+  );
+
+  it('does not slim the history for an equivalent selector on the shared path', async () => {
+    const history = turns('x'.repeat(120_000), 'ack');
+    const slimSpy = vi.spyOn(slimmingModule, 'slimCompactionInput');
+    await expectShared({
+      history,
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://same.invalid/v1',
+      compactionModel: 'openai:test-model',
+      configuredModels: [
+        {
+          id: 'test-model',
+          contextWindowSize: 220_000,
+          registryBaseUrl: 'https://same.invalid/v1',
+        },
+      ],
+    });
+
+    expect(slimSpy).not.toHaveBeenCalled();
+  });
+
+  it('still slims for a genuinely distinct compaction model', async () => {
+    const history = turns('x'.repeat(120_000), 'ack');
+    const slimSpy = vi.spyOn(slimmingModule, 'slimCompactionInput');
+    await expectCold({
+      history,
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://same.invalid/v1',
+      compactionModel: 'compact-model',
+      configuredModels: [{ id: 'compact-model', contextWindowSize: 220_000 }],
+    });
+
+    expect(slimSpy).toHaveBeenCalled();
+  });
+
+  it('shares the cache after the window guard downgrades a distinct compaction model', async () => {
+    // The sideQueryOnMainRoute re-read happens after the guard, so a
+    // window-forced downgrade to the main model still takes the shared path.
+    // Hoisting the assignment above the guard flips this case to the cold
+    // path, and no other test catches that.
+    const history = turns('x'.repeat(120_000), 'ack');
+    const { config, generateText, result } = await expectShared({
+      history,
+      compactionModel: 'compact-model',
+      configuredModels: [{ id: 'compact-model', contextWindowSize: 1 }],
+    });
+
+    const request = generateText.mock.calls[0]![0] as {
+      promptCacheSharing?: boolean;
+    };
+    expect(request.promptCacheSharing).toBe(true);
+    expect(result.info.warning).toContain('too small');
+    expectCacheLog(config, true, true);
+  });
+
   it('preserves the main system, tools, and complete history before the compression directive', async () => {
     const history = makeHistory(42);
     const { config, generateText } = await expectShared(

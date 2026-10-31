@@ -12,7 +12,9 @@ system instruction cannot reuse the main session's cached prefix.
 Compression first attempts a specialized single-turn request when all of the
 following are true:
 
-- the compression model is the current main model;
+- the compression request routes to the main model — the resolved model,
+  auth type, and endpoint match the main generator, so provider-qualified and
+  endpoint-pinned selectors naming the main model qualify;
 - the active provider is Anthropic or OpenAI-compatible and cache control is
   enabled, or the provider is Gemini or Vertex AI (implicit provider-managed
   caching; `enableCacheControl` does not apply);
@@ -37,7 +39,8 @@ Using the current `GeminiChat` keeps the request scoped to the live session.
 The process-global fork cache is intentionally not used because it retains
 only a short history tail and can belong to another concurrent session.
 
-Sessions using a distinct compaction model stay on the existing path because
+Sessions whose compaction selector routes away from the main model (a
+different model, auth type, or endpoint) stay on the existing path because
 their cache identity differs from the main session. Media-bearing histories
 use the shared path first so the unchanged provider-facing prefix can reuse the
 main session's cache.
