@@ -17,6 +17,7 @@ import {
   fakeToolCall,
   startFakeOpenAIServer,
 } from '../integration-tests/fake-openai-server.js';
+import { SseObserver } from '../integration-tests/helpers/hosted-sse-observer.js';
 import { isDeepStrictEqual } from 'node:util';
 
 const root = process.cwd();
@@ -63,12 +64,20 @@ let siblingApprovalOptions: SavedApprovalOptions | undefined;
 // second Allow; both earlier Actions must end decided under their original IDs.
 let secondApprovalId: string | undefined;
 let verifiedOriginalTerminal: string | undefined;
-function saveEvidence(name: string, body: unknown): void {
-  if (!verificationMode) return;
+function writeEvidenceFile(
+  directory: string,
+  name: string,
+  body: unknown,
+): void {
+  mkdirSync(directory, { recursive: true });
   writeFileSync(
-    path.join(verificationDirectory, name),
+    path.join(directory, name),
     JSON.stringify(body, null, 2) + '\n',
   );
+}
+function saveEvidence(name: string, body: unknown): void {
+  if (!verificationMode) return;
+  writeEvidenceFile(verificationDirectory, name, body);
 }
 
 const argumentsList = process.argv.slice(2);
@@ -178,6 +187,13 @@ const verificationDirectory = path.resolve(
   root,
   process.env['G3_VERIFY_REPORT_DIR'] ??
     `.qwen/investigations/g3-step3-implementation/packaged-${verificationMode}-${Date.now()}`,
+);
+// The model-round arm has no gate mode; name its evidence explicitly instead
+// of borrowing a packaged-undefined-<epoch> directory (R1-10).
+const modelRoundEvidenceDirectory = path.resolve(
+  root,
+  process.env['G3_VERIFY_REPORT_DIR'] ??
+    `.qwen/investigations/g3-step3-implementation/model-round-${Date.now()}`,
 );
 
 if (
@@ -1250,37 +1266,13 @@ function finishedBeforeCommitWindow(
   sessionFilter: string,
   promptId: string,
 ): { attemptId: string; attemptSequence: number } {
-  const rows = runMysql(
-    port,
-    `SELECT HEX(record_bytes) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} ORDER BY first_sequence`,
-  ).split('\n');
-  const events: Array<{
-    kind: unknown;
-    sequence: number;
-    payload: Record<string, unknown>;
-  }> = [];
-  for (const row of rows) {
-    if (!row || row === 'NULL') continue;
-    for (const line of Buffer.from(row, 'hex').toString('utf8').split('\n')) {
-      if (!line) continue;
-      const record = JSON.parse(line) as {
-        subtype?: unknown;
-        managedSession?: {
-          kind?: unknown;
-          sequence?: unknown;
-          payload?: Record<string, unknown>;
-        };
-      };
-      if (record.subtype !== 'managed_session_event_v1') continue;
-      const event = record.managedSession;
-      if (!event || typeof event.sequence !== 'number') continue;
-      events.push({
-        kind: event.kind,
-        sequence: event.sequence,
-        payload: event.payload ?? {},
-      });
-    }
-  }
+  const events = readJournalManagedEvents(port, sessionFilter)
+    .filter((event) => typeof event.sequence === 'number')
+    .map((event) => ({
+      kind: event.kind,
+      sequence: event.sequence as number,
+      payload: event.payload ?? {},
+    }));
   events.sort((a, b) => a.sequence - b.sequence);
   const mainAttempts = events.filter(
     (event) =>
@@ -1332,38 +1324,19 @@ function siblingFinalPlan(
   sessionFilter: string,
   batchId: string,
 ): SiblingFinalPlan {
-  const rows = runMysql(
-    port,
-    `SELECT HEX(record_bytes) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} ORDER BY first_sequence`,
-  ).split('\n');
   let planRef: { resourceId?: string } | undefined;
   let planSequence = -1;
-  for (const row of rows) {
-    if (!row || row === 'NULL') continue;
-    for (const line of Buffer.from(row, 'hex').toString('utf8').split('\n')) {
-      if (!line) continue;
-      const record = JSON.parse(line) as {
-        subtype?: unknown;
-        managedSession?: {
-          kind?: unknown;
-          sequence?: unknown;
-          payload?: Record<string, unknown>;
-        };
-      };
-      if (record.subtype !== 'managed_session_event_v1') continue;
-      const event = record.managedSession;
-      if (
-        !event ||
-        typeof event.sequence !== 'number' ||
-        event.kind !== 'hosted.batch.planned'
-      )
-        continue;
-      const payload = event.payload ?? {};
-      if (payload['batchId'] !== batchId) continue;
-      if (event.sequence > planSequence) {
-        planSequence = event.sequence;
-        planRef = payload['planRef'] as { resourceId?: string } | undefined;
-      }
+  for (const event of readJournalManagedEvents(port, sessionFilter)) {
+    if (
+      typeof event.sequence !== 'number' ||
+      event.kind !== 'hosted.batch.planned'
+    )
+      continue;
+    const payload = event.payload ?? {};
+    if (payload['batchId'] !== batchId) continue;
+    if (event.sequence > planSequence) {
+      planSequence = event.sequence;
+      planRef = payload['planRef'] as { resourceId?: string } | undefined;
     }
   }
   if (!planRef?.resourceId)
@@ -1393,37 +1366,15 @@ interface B3RoundBudget {
   models: unknown;
 }
 function b3RoundAndBudget(port: number, sessionFilter: string): B3RoundBudget {
-  const rows = runMysql(
-    port,
-    `SELECT HEX(record_bytes) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} ORDER BY first_sequence`,
-  ).split('\n');
-  const attempts: Array<{
-    sequence: number;
-    payload: Record<string, unknown>;
-  }> = [];
-  for (const row of rows) {
-    if (!row || row === 'NULL') continue;
-    for (const line of Buffer.from(row, 'hex').toString('utf8').split('\n')) {
-      if (!line) continue;
-      const record = JSON.parse(line) as {
-        subtype?: unknown;
-        managedSession?: {
-          kind?: unknown;
-          sequence?: unknown;
-          payload?: Record<string, unknown>;
-        };
-      };
-      if (record.subtype !== 'managed_session_event_v1') continue;
-      const event = record.managedSession;
-      if (
-        !event ||
-        typeof event.sequence !== 'number' ||
-        event.kind !== 'model.attempt'
-      )
-        continue;
-      attempts.push({ sequence: event.sequence, payload: event.payload ?? {} });
-    }
-  }
+  const attempts = readJournalManagedEvents(port, sessionFilter)
+    .filter(
+      (event) =>
+        event.kind === 'model.attempt' && typeof event.sequence === 'number',
+    )
+    .map((event) => ({
+      sequence: event.sequence as number,
+      payload: event.payload ?? {},
+    }));
   attempts.sort((a, b) => a.sequence - b.sequence);
   if (attempts.length === 0) throw new Error('B3 window has no model attempt');
   const readResource = (ref: unknown): Record<string, unknown> | undefined => {
@@ -1513,6 +1464,335 @@ function assertB3CostContinuity(
   }
 }
 
+// The text-delta selector shared by deltaSequences (which throws on an empty
+// match) and b2DeltaIdentity (which tolerates it): one filter, two policies.
+function textDeltas(events: PublicEvent[], text: string): PublicEvent[] {
+  return events.filter(
+    (event) =>
+      event.type === 'item.output_text.delta' &&
+      eventText(event).includes(text),
+  );
+}
+
+// B2: one identity group per prefix text — the item/part ids the public deltas
+// carried while that prefix was live. After retraction the reload view blanks
+// those deltas, so the dead generations' identities survive only in the live
+// SSE capture; that is what makes the live view load-bearing.
+function b2DeltaIdentity(
+  events: PublicEvent[],
+  text: string,
+): { itemIds: string[]; partIds: string[]; sequences: number[] } {
+  const deltas = textDeltas(events, text);
+  const distinct = (values: Array<string | null | undefined>): string[] => [
+    ...new Set(values.filter((id): id is string => typeof id === 'string')),
+  ];
+  return {
+    itemIds: distinct(deltas.map((event) => event.item_id)),
+    partIds: distinct(deltas.map((event) => event.content_part_id)),
+    sequences: deltas.map((event) => event.sequence),
+  };
+}
+
+// The journal HEX decode shared by every window/identity reader: --batch text
+// would escape backslashes and corrupt the JSON, so rows are read as HEX and
+// decoded here, once.
+function readJournalManagedEvents(
+  port: number,
+  sessionFilter: string,
+): Array<{
+  kind?: unknown;
+  sequence?: unknown;
+  payload?: Record<string, unknown>;
+}> {
+  const rows = runMysql(
+    port,
+    `SELECT HEX(record_bytes) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} ORDER BY first_sequence`,
+  ).split('\n');
+  const events: Array<{
+    kind?: unknown;
+    sequence?: unknown;
+    payload?: Record<string, unknown>;
+  }> = [];
+  for (const row of rows) {
+    if (!row || row === 'NULL') continue;
+    for (const line of Buffer.from(row, 'hex').toString('utf8').split('\n')) {
+      if (!line) continue;
+      const record = JSON.parse(line) as {
+        subtype?: unknown;
+        managedSession?: {
+          kind?: unknown;
+          sequence?: unknown;
+          payload?: Record<string, unknown>;
+        };
+      };
+      if (record.subtype !== 'managed_session_event_v1') continue;
+      if (record.managedSession) events.push(record.managedSession);
+    }
+  }
+  return events;
+}
+
+// B2: the original prompt's model attempts, oldest first. Each streaming
+// generation must open a new attemptId.
+function b2ModelAttempts(
+  port: number,
+  sessionFilter: string,
+  promptId: string,
+): Array<{ attemptId: string; state: string; sequence: number }> {
+  const attempts: Array<{
+    attemptId: string;
+    state: string;
+    sequence: number;
+  }> = [];
+  for (const event of readJournalManagedEvents(port, sessionFilter)) {
+    if (event.kind !== 'model.attempt' || typeof event.sequence !== 'number')
+      continue;
+    const attemptId = event.payload?.['attemptId'];
+    if (
+      typeof attemptId !== 'string' ||
+      !attemptId.startsWith(`${promptId}:main:`)
+    )
+      continue;
+    attempts.push({
+      attemptId,
+      state: String(event.payload?.['state'] ?? ''),
+      sequence: event.sequence,
+    });
+  }
+  return attempts.sort((a, b) => a.sequence - b.sequence);
+}
+
+interface B2SseCapture {
+  events: PublicEvent[];
+  lastId: string;
+}
+
+// Open SSE observers must not hold the process open when the arm fails early:
+// the main finally aborts whatever is still pending.
+const b2SseObservers = new Set<SseObserver>();
+
+// B2: read the public SSE view through the shared SseObserver (wire-format
+// assertions included). One connection stays open across the Harness crashes
+// (the stream is control-plane-owned and reconciles from after=0 on connect).
+// `until` is a PROGRESS signal, not the exit: after it first holds, a bounded
+// drain window keeps reading so a double-projected terminal is still observed
+// (R1-2). SseObserver and waitUntil are free identifiers so behavioural tests
+// inject stubs.
+async function readPublicSse(
+  storeUrl: string,
+  sessionId: string,
+  options: {
+    tenantId: string;
+    after?: number;
+    lastEventId?: string;
+    until: (events: PublicEvent[]) => boolean;
+    timeoutMs: number;
+    drainMs?: number;
+  },
+): Promise<B2SseCapture> {
+  const observer = new SseObserver({
+    surface: 'public',
+    sessionId,
+    storeUrl,
+    tenantId: options.tenantId,
+    timeoutMs: options.timeoutMs,
+  });
+  b2SseObservers.add(observer);
+  const snapshot = (): PublicEvent[] =>
+    observer.frames.map((frame) => frame.data as unknown as PublicEvent);
+  const fail = (): void => {
+    if (observer.failure)
+      throw new Error(`B2 live SSE failed: ${String(observer.failure)}`);
+  };
+  try {
+    await observer.start(
+      options.lastEventId !== undefined
+        ? Number(options.lastEventId)
+        : options.after,
+    );
+    await waitUntil(
+      'B2 SSE capture progress',
+      () => {
+        fail();
+        return options.until(snapshot());
+      },
+      options.timeoutMs,
+    );
+    const drainMs = options.drainMs ?? 2_000;
+    const drainEnd = Date.now() + drainMs;
+    await waitUntil(
+      'B2 SSE capture drain',
+      () => {
+        fail();
+        return Date.now() >= drainEnd;
+      },
+      drainMs + 1_000,
+    );
+    fail();
+    const events = snapshot();
+    return { events, lastId: String(observer.frames.at(-1)?.id ?? '') };
+  } catch (error) {
+    if (observer.failure)
+      throw new Error(`B2 live SSE failed: ${String(observer.failure)}`);
+    if (observer.controller.signal.aborted)
+      throw new Error(
+        `B2 live SSE aborted (budget or teardown): ${String(error)}`,
+      );
+    throw new Error(`B2 live SSE capture incomplete: ${String(error)}`);
+  } finally {
+    observer.controller.abort();
+    await observer.task?.catch(() => undefined);
+    b2SseObservers.delete(observer);
+  }
+}
+
+// B2: the stream-view audit, lifted out of the arm's try block so behavioural
+// tests execute it (R1-6). The live capture holds the dead generations'
+// original identities; reload/replay hold the blanked prefixes and the
+// surviving answer. item_id is the Turn's ONE assistant item (stable across
+// the repair); the content Part is the stream identity — a delta continues the
+// previous Part only while that delta keeps its identity, so every retraction
+// must force a new Part (pairwise distinct Parts; every group must actually
+// carry the assistant item, R1-3; the replay compares Parts too, R1-4).
+function assertB2StreamViews(input: {
+  live: PublicEvent[];
+  reload: PublicEvent[];
+  replay: PublicEvent[];
+  partials: string[];
+  answer: string;
+  firstPrefixSequence: number;
+  secondPrefixSequence: number;
+  originalTurnId?: string;
+}): {
+  livePartial1: ReturnType<typeof b2DeltaIdentity>;
+  livePartial2: ReturnType<typeof b2DeltaIdentity>;
+  liveAnswer: ReturnType<typeof b2DeltaIdentity>;
+  reloadAnswer: ReturnType<typeof b2DeltaIdentity>;
+  replayAnswer: ReturnType<typeof b2DeltaIdentity>;
+} {
+  // The public stream.reconciled frame carries no payload: a client seeing one
+  // reloads. The converged view is the deltas after the LAST retraction.
+  const converged = (events: PublicEvent[]): string => {
+    const reconciled = events.filter(
+      (event) => event.type === 'stream.reconciled',
+    );
+    const last = reconciled.length
+      ? Math.max(...reconciled.map((event) => event.sequence))
+      : 0;
+    return events
+      .filter(
+        (event) =>
+          event.type === 'item.output_text.delta' && event.sequence > last,
+      )
+      .map(eventText)
+      .join('');
+  };
+  const terminalsOf = (events: PublicEvent[]): PublicEvent[] =>
+    events.filter(
+      (event) =>
+        event.terminal &&
+        (input.originalTurnId === undefined ||
+          event.turn_id === input.originalTurnId),
+    );
+  const livePartial1 = b2DeltaIdentity(input.live, input.partials[0]);
+  const livePartial2 = b2DeltaIdentity(input.live, input.partials[1]);
+  const liveAnswer = b2DeltaIdentity(input.live, input.answer);
+  const liveTerminals = terminalsOf(input.live);
+  const liveRetractions = input.live.filter(
+    (event) => event.type === 'stream.reconciled',
+  );
+  if (
+    converged(input.live) !== input.answer ||
+    liveTerminals.length !== 1 ||
+    liveTerminals[0].type !== 'turn.completed' ||
+    livePartial1.sequences.length === 0 ||
+    livePartial2.sequences.length === 0 ||
+    liveAnswer.sequences.length === 0 ||
+    liveRetractions.length < 2 ||
+    !reconciledBetween(
+      input.live,
+      Math.min(...livePartial1.sequences),
+      Math.min(...livePartial2.sequences),
+    ) ||
+    !reconciledBetween(
+      input.live,
+      Math.min(...livePartial2.sequences),
+      Math.min(...liveAnswer.sequences),
+    )
+  )
+    throw new Error(
+      `B2 live SSE: text=${JSON.stringify(converged(input.live))} terminals=${liveTerminals.length} partial1=${livePartial1.sequences.length} partial2=${livePartial2.sequences.length} answer=${liveAnswer.sequences.length} retractions=${liveRetractions.length} frames=${input.live.length}`,
+    );
+  const reloadAnswer = b2DeltaIdentity(input.reload, input.answer);
+  // F5: the live answer's identity is load-bearing — the persisted views being
+  // correct does not excuse a live stream that delivers the surviving answer
+  // under a dead Part, no identity, or a foreign item.
+  if (liveAnswer.itemIds.length === 0 || liveAnswer.partIds.length === 0)
+    throw new Error(
+      `B2 live SSE: the live answer carries no identity: ${JSON.stringify(liveAnswer)}`,
+    );
+  if (
+    liveAnswer.itemIds.join(',') !== reloadAnswer.itemIds.join(',') ||
+    liveAnswer.partIds.join(',') !== reloadAnswer.partIds.join(',')
+  )
+    throw new Error(
+      `B2 live SSE: the live answer identity differs from reload: live=${JSON.stringify(liveAnswer)} reload=${JSON.stringify(reloadAnswer)}`,
+    );
+  const groups = [livePartial1, livePartial2, reloadAnswer];
+  const itemIds = new Set(groups.flatMap((group) => group.itemIds));
+  if (
+    groups.some(
+      (group) => group.partIds.length === 0 || group.itemIds.length === 0,
+    ) ||
+    itemIds.size !== 1
+  )
+    throw new Error(
+      `B2 stream identities: expected one shared assistant item and a Part per generation: ${JSON.stringify(groups)}`,
+    );
+  for (let i = 0; i < groups.length; i += 1) {
+    for (let j = i + 1; j < groups.length; j += 1) {
+      if (groups[i].partIds.some((id) => groups[j].partIds.includes(id)))
+        throw new Error(
+          `B2 stream identities: generations ${i + 1} and ${j + 1} share a content Part (retraction did not break the continuation): ${JSON.stringify(groups)}`,
+        );
+    }
+  }
+  const blanked = (events: PublicEvent[], sequence: number): boolean => {
+    const delta = events.find((event) => event.sequence === sequence);
+    return (
+      !!delta &&
+      delta.type === 'item.output_text.delta' &&
+      eventText(delta) === '' &&
+      delta.item_id == null &&
+      delta.content_part_id == null
+    );
+  };
+  if (
+    !blanked(input.reload, input.firstPrefixSequence) ||
+    !blanked(input.reload, input.secondPrefixSequence)
+  )
+    throw new Error(
+      `B2 stream identities: retracted prefixes not blanked in reload at ${input.firstPrefixSequence}/${input.secondPrefixSequence}`,
+    );
+  const replayAnswer = b2DeltaIdentity(input.replay, input.answer);
+  const replayTerminals = terminalsOf(input.replay);
+  if (
+    converged(input.replay) !== input.answer ||
+    replayTerminals.length !== 1 ||
+    // F6: a reconnecting client shown a failure terminal while live/reload
+    // show success is not a passing B2.
+    replayTerminals[0].type !== 'turn.completed' ||
+    !blanked(input.replay, input.firstPrefixSequence) ||
+    !blanked(input.replay, input.secondPrefixSequence) ||
+    replayAnswer.itemIds.join(',') !== reloadAnswer.itemIds.join(',') ||
+    replayAnswer.partIds.join(',') !== reloadAnswer.partIds.join(',')
+  )
+    throw new Error(
+      `B2 replay view: text=${JSON.stringify(converged(input.replay))} terminals=${replayTerminals.length} answerIds=${replayAnswer.itemIds.join(',')} answerParts=${replayAnswer.partIds.join(',')} reloadIds=${reloadAnswer.itemIds.join(',')} reloadParts=${reloadAnswer.partIds.join(',')} frames=${input.replay.length}`,
+    );
+  return { livePartial1, livePartial2, liveAnswer, reloadAnswer, replayAnswer };
+}
+
 function assertPublicAnswer(events: PublicEvent[], expected: string): void {
   const terminal = events.filter((event) => event.terminal);
   const text = events
@@ -1552,6 +1832,9 @@ interface PublicEvent {
   sequence: number;
   terminal: boolean;
   type: string;
+  turn_id?: string | null;
+  item_id?: string | null;
+  content_part_id?: string | null;
   data?: unknown;
 }
 
@@ -1595,13 +1878,7 @@ async function publicTranscript(
 }
 
 function deltaSequences(events: PublicEvent[], text: string): number[] {
-  const sequences = events
-    .filter(
-      (event) =>
-        event.type === 'item.output_text.delta' &&
-        eventText(event).includes(text),
-    )
-    .map((event) => event.sequence);
+  const sequences = textDeltas(events, text).map((event) => event.sequence);
   // An empty list would turn Math.min into Infinity and every "before"
   // check into a vacuous pass.
   if (sequences.length === 0) {
@@ -2294,6 +2571,11 @@ try {
     let firstTurnLastSequence = 0;
     let formerDispatchOwner = '';
     let firstPrefixSequence = 0;
+    // B2: the live SSE capture stays open across both Harness crashes; the
+    // second prefix's sequence is hoisted so the audit can check its blanking.
+    let b2LiveCapture: Promise<B2SseCapture> | undefined;
+    let b2SecondPrefixSequence = 0;
+    let b2AttemptIds: string[] = [];
     let heldExecutionStartPath: string | undefined;
     let originalExecutionCallId: string | undefined;
     let originalRuntimeSessionId: string | undefined;
@@ -2523,6 +2805,25 @@ try {
       // The crash point is the first model round of a Session with no
       // Workspace: the provider already streamed a prefix the public feed
       // shows, and nothing but the saved model request can continue it.
+      if (harnessOnly) {
+        // B2: subscribe to the live public view before the first prefix. The
+        // stream is control-plane-owned, so this one connection survives both
+        // Harness crashes; Spring reconciles from after=0 on connect, so a
+        // slightly late subscribe still sees every frame. The terminal is a
+        // progress signal; the drain window keeps reading so a double
+        // projection is observed (R1-2).
+        b2LiveCapture = readPublicSse(springUrl, session.id, {
+          tenantId: tenant,
+          after: 0,
+          until: (events) => events.some((event) => event.terminal),
+          timeoutMs: 240_000,
+        });
+        // Awaited only at the audit; without this observer a capture that
+        // fails — or that the teardown aborts on an early arm failure — is an
+        // unhandled rejection that exits before the children are stopped
+        // (R1-1). The audit's await still sees the real rejection.
+        b2LiveCapture.catch(() => undefined);
+      }
       await waitUntil(
         'First model round partial text',
         async () =>
@@ -4603,6 +4904,7 @@ try {
             secondPrefixSequence,
           );
         previousPrefixSequence = secondPrefixSequence;
+        b2SecondPrefixSequence = secondPrefixSequence;
         boots.push(currentBoot());
         heads.push(currentHead());
         await crashChild(
@@ -4698,6 +5000,24 @@ try {
           `SELECT COUNT(*) FROM qwen_managed_agent.ma_resource WHERE ${sessionFilter} AND kind='managed-admission'`,
         ),
       );
+      // B2: attempt identities are checked BEFORE the shared audit — a reused
+      // attemptId collides the journal command ids, dedups the later
+      // generations' attempts and breaks recovery routing itself; naming the
+      // identity root cause first keeps the diagnosis specific.
+      if (harnessOnly) {
+        const b2Attempts = b2ModelAttempts(
+          mysqlPort,
+          sessionFilter,
+          firstPromptId,
+        );
+        b2AttemptIds = [
+          ...new Set(b2Attempts.map((attempt) => attempt.attemptId)),
+        ];
+        if (b2AttemptIds.length !== modelRoundPartials.length + 1)
+          throw new Error(
+            `B2 attempt identities: expected ${modelRoundPartials.length + 1} distinct attempts, got ${b2AttemptIds.length}: ${b2Attempts.map((attempt) => `${attempt.attemptId}:${attempt.state}`).join(',')}`,
+          );
+      }
       if (
         recovered.terminals.length !== 1 ||
         recovered.terminals[0].type !== 'turn.completed' ||
@@ -4728,6 +5048,47 @@ try {
         throw new Error(
           `Model-round failover audit failed: terminals=${JSON.stringify(recovered.terminals)} text=${JSON.stringify(recovered.text)} retractedBeforeNewDeltas=${retractedBeforeNewDeltas} terminalRows=${terminalRows()} roundRequests=${roundRequests.length} equalRequests=${roundRequests.every((request) => isDeepStrictEqual(request.body, roundRequests[0]?.body))} executions=${executionCount} turns=${turnCount} admissions=${admissionCount} admissionResources=${admissionResources} boots=${boots.join('->')} heads=${heads.map((head) => head.join(',')).join('->')}`,
         );
+      }
+
+      if (harnessOnly) {
+        // B2: the live SSE view captured across both crashes (drained past the
+        // terminal so a double projection is observed) and a Last-Event-ID: 0
+        // replay; the shared view audit owns the identity/blanking/terminal
+        // assertions so behavioural tests execute them.
+        if (!b2LiveCapture)
+          throw new Error('B2 live SSE capture was not started');
+        const b2Live = await b2LiveCapture;
+        const b2Replay = await readPublicSse(replacementSpringUrl, session.id, {
+          tenantId: tenant,
+          lastEventId: '0',
+          until: (events) => events.some((event) => event.terminal),
+          timeoutMs: 60_000,
+        });
+        const b2Views = assertB2StreamViews({
+          live: b2Live.events,
+          reload: recovered.events,
+          replay: b2Replay.events,
+          partials: modelRoundPartials,
+          answer: modelRoundResponse,
+          firstPrefixSequence,
+          secondPrefixSequence: b2SecondPrefixSequence,
+          originalTurnId: recovered.terminals[0]?.turn_id ?? undefined,
+        });
+        writeEvidenceFile(modelRoundEvidenceDirectory, 'b2-identities.json', {
+          attemptIds: b2AttemptIds,
+          live: {
+            partial1: b2Views.livePartial1,
+            partial2: b2Views.livePartial2,
+            answer: b2Views.liveAnswer,
+            frames: b2Live.events.length,
+            lastId: b2Live.lastId,
+          },
+          reloadAnswer: b2Views.reloadAnswer,
+          replay: {
+            answer: b2Views.replayAnswer,
+            frames: b2Replay.events.length,
+          },
+        });
       }
 
       if (frozenControlPlane) {
@@ -5594,6 +5955,9 @@ try {
     );
   }
 } finally {
+  // Abort any pending B2 SSE capture so an early arm failure exits promptly
+  // instead of waiting out the capture's budget on an open socket.
+  for (const observer of b2SseObservers) observer.controller.abort();
   // A frozen Harness holds SIGTERM pending from stopChild; wake it before
   // teardown so teardown does not burn the 10-second stall on every path,
   // failure or success. `harness` is try-block scoped, so reach it through
