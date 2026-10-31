@@ -416,7 +416,21 @@ function replyLocked(
       ...(summarized ? { summarizedSha: summarized } : {}),
       ...(summarized !== null && summarizedBlocked !== null
         ? {
-            reportedNeedsHuman: { sha: summarized, texts: summarizedBlocked },
+            reportedNeedsHuman: {
+              sha: summarized,
+              // A union, not a replacement: an earlier round may already have
+              // reported other items on this head, and adopting this summary
+              // must not make those reportable again. Another head's record
+              // is not merged — it is superseded.
+              texts: [
+                ...new Set([
+                  ...(state.reportedNeedsHuman?.sha === summarized
+                    ? state.reportedNeedsHuman.texts
+                    : []),
+                  ...summarizedBlocked,
+                ]),
+              ],
+            },
           }
         : {}),
     });

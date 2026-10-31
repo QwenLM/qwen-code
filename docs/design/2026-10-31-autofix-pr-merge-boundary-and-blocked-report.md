@@ -106,7 +106,13 @@ const summaryDue =
 ```
 
 A summary intent carries the lines it reports (`PendingPost.needsHuman`), so
-adoption marks exactly those. `prepare` carries `reportedNeedsHuman` forward
+adoption marks exactly those — **unioned** with what the same head already had
+reported, never replacing it. A second review round caught the replacement
+version: report A, then deliver a summary for B whose answer is lost, and
+adopting B would drop A from the record, so replaying A posted it a second
+time. Adopting a summary that reported no items erased the record outright.
+Both are now regressions. A record of another head is superseded, not merged.
+`prepare` carries `reportedNeedsHuman` forward
 when it recreates a worktree, alongside `summarizedSha`. The field is
 optional and validated like the rest of the state; a state file written by
 an older CLI simply has none, which costs at most one repeated report after
@@ -152,6 +158,10 @@ changes.
   that fails earlier in the same run leaves it due as well; and a summary
   that reached GitHub but lost its answer is adopted from its own intent,
   marked reported, and not posted twice.
+- `reply.test.ts`, two tests on adoption keeping the head's history, from the
+  second review round: A reported, then B delivered with its answer lost,
+  then A replayed — the record holds both and the replay posts nothing; and
+  adopting a summary that reported no items leaves A reported.
 - `SKILL.test.ts`: pins for the boundary paragraph, the confirmation bullet,
   and the sentences of the summary rule, including the retry sentence.
 - Mutation check: restoring the consumed-before-delivery trigger
@@ -219,13 +229,15 @@ changes.
 - `cd packages/core && npx vitest run src/skills/bundled/autofix-pr/SKILL.test.ts`
   — 11 passed (9 before this change).
 - `cd packages/cli && npx vitest run src/commands/autofix-pr` — 16 files,
-  485 passed; `reply.test.ts` alone 35 (30 before this change).
+  487 passed; `reply.test.ts` alone 37 (30 before this change).
 - Mutation check: putting the consumed-before-delivery trigger back
   (`freshNeedsHuman` in place of `unreportedNeedsHuman`) fails exactly the
   two failure-injection tests — the undelivered summary and the one blocked
   by an earlier thread reply — and leaves the adoption control and the
-  `--no-post` case green. The file was restored from a byte-exact backup
-  (sha256 compared), not from git, and the suites are green again.
+  `--no-post` case green. Dropping the adoption union instead fails exactly
+  the two history tests, leaving the original adoption control green. The
+  file was restored from a byte-exact backup (sha256 compared), not from git,
+  and the suites are green again.
 - `tsc --noEmit` in `packages/core`: clean. In `packages/cli`: 68 errors,
   every one in `src/acp-integration/*` or `src/serve/*`, from the checkout's
   stale `@qwen-code/acp-bridge` dist; none names a changed file. Putting the
@@ -250,6 +262,9 @@ changes.
   only then are the round's failures recorded handled.
 - A summary that reached the PR but lost its answer is adopted from its own
   intent, marked reported, and never posted twice.
+- Adoption unions with what the same head already had reported: an earlier
+  item stays reported and is not posted again, and a summary that reported no
+  items erases nothing.
 - `reportedNeedsHuman` is carried forward when `prepare` recreates a
   worktree, and `status` does not expose it.
 - A `--no-reply` watch posts nothing in any of these cases.

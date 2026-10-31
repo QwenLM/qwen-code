@@ -64,7 +64,7 @@ const summaryDue =
       : state.summarizedSha !== head));
 ```
 
-总结的意图里带上它所报告的那些行（`PendingPost.needsHuman`），所以认领时标记的正是那些事项。`prepare` 重建 worktree 时把 `reportedNeedsHuman` 与 `summarizedSha` 一起带过去。该字段可选，并像状态里其他字段一样被校验；旧版 CLI 写下的状态文件根本没有它，代价最多是升级后重复报告一次。`status` 不暴露它，所以 `reply` 之外没有读者需要改。
+总结的意图里带上它所报告的那些行（`PendingPost.needsHuman`），所以认领时标记的正是那些——并与该 head 上已报告过的内容**取并集**，绝不覆盖。第二轮评审抓到了覆盖版本：先报告 A，再送达一条关于 B 的总结但应答丢失，认领 B 就会把 A 从记录里丢掉，于是重放 A 会再发一次。认领一条没有报告任何事项的总结，更会把整份记录清空。两者现在都有回归用例。另一个 head 的记录是被取代，不是被合并。`prepare` 重建 worktree 时把 `reportedNeedsHuman` 与 `summarizedSha` 一起带过去。该字段可选，并像状态里其他字段一样被校验；旧版 CLI 写下的状态文件根本没有它，代价最多是升级后重复报告一次。`status` 不暴露它，所以 `reply` 之外没有读者需要改。
 
 ### 2. `SKILL.md`——边界与总结规则
 
@@ -83,8 +83,9 @@ const summaryDue =
 
 - `reply.test.ts`，两条关于去重的测试：受阻的一轮在已总结过的 head 上照发，同一份计划不再发，没有新事项的总结仍被跳过，同一 head 上新增事项再发一条；以及 `--no-post` 只记录不发出。两条都从"该 head 已被总结过"出发，所以都不可能只靠"每 head 一条"那条路径通过。
 - `reply.test.ts`，三条关于送达的测试，正是评审要求的：总结的 POST 从未到达 GitHub 时，这条报告仍然欠着，重跑会把它发出去（然后才把失败记为已处理）；同一次运行中更早的 thread 回复失败，同样留着这条报告；已到达 GitHub 但响应丢失的总结，按它自己的意图被认领、标记为已报告，且不会发第二次。
+- `reply.test.ts`，两条关于认领保留该 head 历史的测试，来自第二轮评审：先报告 A，再送达 B 但应答丢失，然后重放 A——记录里两者都在，重放什么都不发；以及认领一条没有报告任何事项的总结后，A 仍处于已报告状态。
 - `SKILL.test.ts`：为边界段落、确认 bullet 和总结规则的各句话加 pin，包括重跑那句。
-- 变异验证：把"送达前就被消耗的触发器"放回去（用 `freshNeedsHuman` 代替 `unreportedNeedsHuman`），恰好两条失败注入测试变红，认领对照组保持绿。
+- 变异验证：把"送达前就被消耗的触发器"放回去（用 `freshNeedsHuman` 代替 `unreportedNeedsHuman`），恰好两条失败注入测试变红，认领对照组保持绿。改为去掉认领时的并集，则恰好两条历史测试变红，原认领对照组保持绿。
 
 ## 设计决策与理由
 
@@ -105,8 +106,8 @@ const summaryDue =
 ## 验证
 
 - `cd packages/core && npx vitest run src/skills/bundled/autofix-pr/SKILL.test.ts`——11 通过（本次改动前 9）。
-- `cd packages/cli && npx vitest run src/commands/autofix-pr`——16 个文件、485 通过；其中 `reply.test.ts` 35 通过（本次改动前 30）。
-- 变异验证：把"送达前就被消耗的触发器"放回去（用 `freshNeedsHuman` 代替 `unreportedNeedsHuman`），恰好两条失败注入测试失败——未送达的总结、以及被更早的 thread 回复挡住的那条——认领对照组与 `--no-post` 用例保持绿。文件从字节级备份还原（比对 sha256），不是从 git 还原，随后套件重新全绿。
+- `cd packages/cli && npx vitest run src/commands/autofix-pr`——16 个文件、487 通过；其中 `reply.test.ts` 37 通过（本次改动前 30）。
+- 变异验证：把"送达前就被消耗的触发器"放回去（用 `freshNeedsHuman` 代替 `unreportedNeedsHuman`），恰好两条失败注入测试失败——未送达的总结、以及被更早的 thread 回复挡住的那条——认领对照组与 `--no-post` 用例保持绿。改为去掉认领时的并集，则恰好两条历史测试失败，原认领对照组保持绿。文件从字节级备份还原（比对 sha256），不是从 git 还原，随后套件重新全绿。
 - `packages/core` 的 `tsc --noEmit`：干净。`packages/cli`：68 个错误，全部位于 `src/acp-integration/*` 或 `src/serve/*`，来自本 checkout 过旧的 `@qwen-code/acp-bridge` dist；没有一个指向改动文件。把四个改动的 cli 文件换回它们在 `origin/main` 上的内容再跑一次，错误清单完全相同，所以这 68 个都是存量。文件从字节级备份还原并用 sha256 校验。
 - 未跑全量 `npm run build`：本 checkout 的依赖停在旧 lockfile（`mime` 2.6.0、`ignore` 5.3.2、`playwright-core` 1.58.2），会让 `packages/browser-use` 因与本次改动无关的原因失败。构建与 typecheck 以 PR 上的 CI 为准。
 - 所有改动文件的 ESLint 与 Prettier 均干净。
@@ -117,6 +118,7 @@ const summaryDue =
 - 重跑同一份计划什么都不发；之后同一 head 上出现新的受阻事项时再发一条。
 - POST 从未到达 PR 的总结——或更早在 thread 回复处就失败的那次运行——仍然欠着：重跑同一份计划会把它发出去，然后才把这一轮的失败记为已处理。
 - 已到达 PR 但响应丢失的总结，按它自己的意图被认领、标记为已报告，绝不发第二次。
+- 认领时与该 head 上已报告过的内容取并集：更早的事项仍处于已报告状态、不会再发一次，而一条没有报告任何事项的总结不会抹掉任何记录。
 - `prepare` 重建 worktree 时带上 `reportedNeedsHuman`，而 `status` 不暴露它。
 - `--no-reply` 的监视在上述任何情况下都不发任何东西。
 - skill 开头、启动确认和用户指南都写明：监视从不 approve、改变评审状态、合并、关闭或开启 auto-merge。

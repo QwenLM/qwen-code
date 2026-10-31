@@ -685,7 +685,11 @@ The helper decides what may be posted, against one fresh read of the PR
   each announced reply on the PR: one that is there — a POST that reached
   GitHub although its answer was lost — is recorded with exactly the
   comments it was posted for (`adopted`), and a summary with exactly the
-  items it reported; one that is not was never posted.
+  items it reported, merged with what an earlier delivered summary already
+  reported on that head: adopting a later summary never makes an earlier
+  item reportable again, and a summary that reported no items erases none.
+  A record of another head is superseded, not merged. One that is not on the
+  PR was never posted.
   A reply is never recognized by a later plan's wording, and a reply the
   tool posted for other comments is never taken for the answer to new ones.
 - A comment a reply names that is answered already is left out of it; the

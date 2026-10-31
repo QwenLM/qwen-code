@@ -1055,6 +1055,94 @@ describe('runReply', () => {
     expect(mocks.ghWithInput).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps earlier reported items when it adopts a later summary', () => {
+    writeState(paths.statePath, { ...state(), summarizedSha: HEAD });
+    const a: ReplyPlan = {
+      summary: { body: 'Needs a human: A.' },
+      needsHuman: ['A: the runner image'],
+    };
+    expect(reply(a)).toMatchObject({ summarySkipped: false });
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: ['A: the runner image'],
+    });
+
+    // A later round reports B; the POST lands, its answer does not.
+    const b: ReplyPlan = {
+      summary: { body: 'Needs a human: B.' },
+      needsHuman: ['B: the API change'],
+    };
+    mocks.ghWithInput.mockImplementationOnce(() => {
+      throw new Error('connection reset');
+    });
+    expect(() => reply(b)).toThrow(/connection reset/);
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: ['A: the runner image'],
+    });
+
+    const landed = {
+      ...comment('IC_60', 'me', 'OWNER'),
+      body: `Needs a human: B.\n\n${REPLY_MARKER}`,
+    };
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        comments: { pageInfo: { hasPreviousPage: false }, nodes: [landed] },
+      }),
+      viewer: 'me',
+    }));
+    expect(reply(b)).toMatchObject({ adopted: 1, summarySkipped: true });
+    // Adopting B adds B; it does not replace A.
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: ['A: the runner image', 'B: the API change'],
+    });
+
+    // So replaying A reports nothing again.
+    const calls = mocks.ghWithInput.mock.calls.length;
+    expect(reply(a)).toMatchObject({ summarySkipped: true });
+    expect(mocks.ghWithInput.mock.calls.length).toBe(calls);
+  });
+
+  it('keeps reported items when it adopts a summary that reported none', () => {
+    writeState(paths.statePath, { ...state(), summarizedSha: HEAD });
+    const a: ReplyPlan = {
+      summary: { body: 'Needs a human: A.' },
+      needsHuman: ['A: the runner image'],
+    };
+    reply(a);
+
+    // A round that only answers a comment reports no blocked items.
+    const answered: ReplyPlan = {
+      summary: { body: 'Answered the review.', handled: ['IC_1'] },
+    };
+    mocks.ghWithInput.mockImplementationOnce(() => {
+      throw new Error('connection reset');
+    });
+    expect(() => reply(answered)).toThrow(/connection reset/);
+    expect(state().pendingPosts![0].needsHuman).toBeUndefined();
+
+    const landed = {
+      ...comment('IC_61', 'me', 'OWNER'),
+      body: `Answered the review.\n\n${REPLY_MARKER}`,
+    };
+    mocks.fetchPrData.mockImplementation(() => ({
+      pr: prData({
+        comments: { pageInfo: { hasPreviousPage: false }, nodes: [landed] },
+      }),
+      viewer: 'me',
+    }));
+    expect(reply(answered)).toMatchObject({ adopted: 1, summarySkipped: true });
+    // An empty report erases nothing.
+    expect(state().reportedNeedsHuman).toEqual({
+      sha: HEAD,
+      texts: ['A: the runner image'],
+    });
+    const calls = mocks.ghWithInput.mock.calls.length;
+    expect(reply(a)).toMatchObject({ summarySkipped: true });
+    expect(mocks.ghWithInput.mock.calls.length).toBe(calls);
+  });
+
   it('posts again when the reply an earlier run announced never reached the PR', () => {
     mocks.ghWithInput.mockImplementationOnce(() => {
       throw new Error('connection refused');
