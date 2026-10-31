@@ -4655,6 +4655,8 @@ const EN: Messages = {
     'Notifications are blocked. Allow them in your browser site settings.',
   'browserNotifications.unavailable':
     'Notifications are unavailable in this browser or page context.',
+  'browserNotifications.desktopUnavailable':
+    'Web notifications are unavailable in this desktop window. Run qwen serve --port 4170 --open from your project folder, then allow notifications and use the chat in your browser. Keep that page open for reminders.',
   'browserNotifications.requesting': 'Waiting for your permission…',
   'browserNotifications.error':
     'Unable to enable or show notifications. Check your browser and system settings.',
@@ -8957,6 +8959,8 @@ const ZH: Messages = {
   'browserNotifications.waiting': '等待浏览器授权。',
   'browserNotifications.denied': '浏览器已阻止通知，请在浏览器站点设置中允许。',
   'browserNotifications.unavailable': '当前浏览器或页面环境无法使用通知。',
+  'browserNotifications.desktopUnavailable':
+    '当前桌面窗口无法使用网页通知。请在项目目录运行 qwen serve --port 4170 --open，在浏览器中允许通知并使用聊天；保持该页面打开以接收提醒。',
   'browserNotifications.requesting': '等待你的授权…',
   'browserNotifications.error': '无法启用或显示通知，请检查浏览器及系统设置。',
   'browserNotifications.temporary': '设置仅在当前页面有效。',
