@@ -566,6 +566,103 @@ describe('useShellCommandProcessor', () => {
     expect(setShellInputFocusedMock).toHaveBeenCalledWith(false);
   });
 
+  it.each([
+    {
+      aborted: true,
+      status: ToolCallStatus.Canceled,
+      cancellationPrefix: 'Command was cancelled.\n',
+      exitCode: null,
+      signal: null,
+      statusPrefix: '',
+    },
+    {
+      aborted: false,
+      status: ToolCallStatus.Error,
+      cancellationPrefix: '',
+      exitCode: null,
+      signal: null,
+      statusPrefix: '',
+    },
+    {
+      aborted: false,
+      status: ToolCallStatus.Error,
+      cancellationPrefix: '',
+      exitCode: 1,
+      signal: null,
+      statusPrefix: 'Exit code: 1.\n',
+    },
+    {
+      aborted: true,
+      status: ToolCallStatus.Canceled,
+      cancellationPrefix: 'Command was cancelled.\n',
+      exitCode: 0,
+      signal: null,
+      statusPrefix: 'Exit code: 0.\n',
+    },
+    {
+      aborted: true,
+      status: ToolCallStatus.Canceled,
+      cancellationPrefix: 'Command was cancelled.\n',
+      exitCode: 17,
+      signal: 15,
+      statusPrefix: 'Command terminated by signal: 15.\n',
+    },
+    {
+      aborted: false,
+      status: ToolCallStatus.Error,
+      cancellationPrefix: '',
+      exitCode: null,
+      signal: 15,
+      statusPrefix: 'Command terminated by signal: 15.\n',
+    },
+  ])(
+    'preserves cleanup diagnostics with aborted=$aborted, exit=$exitCode, signal=$signal as $status',
+    async ({
+      aborted,
+      status,
+      cancellationPrefix,
+      exitCode,
+      signal,
+      statusPrefix,
+    }) => {
+      const cleanupDiagnostic =
+        'Process group 12345 did not stop after SIGKILL';
+      const output = 'partial command output';
+      const finalOutput = `${cancellationPrefix}${statusPrefix}${cleanupDiagnostic}\n${output}`;
+      const { result } = renderProcessorHook();
+      const abortController = new AbortController();
+
+      act(() => {
+        result.current.handleShellCommand('sleep 5', abortController.signal);
+      });
+      const execPromise = onExecMock.mock.calls[0][0];
+
+      act(() => {
+        if (aborted) abortController.abort();
+        resolveExecutionPromise(
+          createMockServiceResult({
+            aborted,
+            error: new Error(cleanupDiagnostic),
+            exitCode,
+            signal,
+            output,
+          }),
+        );
+      });
+      await act(async () => await execPromise);
+
+      const finalToolDisplay = addItemToHistoryMock.mock.calls[1][0].tools[0];
+      expect.soft(finalToolDisplay.resultDisplay).toBe(finalOutput);
+      expect(finalToolDisplay.status).toBe(status);
+      const modelHistoryText = (
+        vi.mocked(mockLlmClient.addHistory).mock.calls[0]![0].parts![0]! as {
+          text: string;
+        }
+      ).text;
+      expect.soft(modelHistoryText).toContain(`\`\`\`\n${finalOutput}\n\`\`\``);
+    },
+  );
+
   it('should handle binary output result correctly', async () => {
     const { result } = renderProcessorHook();
     const binaryBuffer = Buffer.from([0x89, 0x50, 0x4e, 0x47]);

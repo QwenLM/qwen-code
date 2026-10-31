@@ -3326,7 +3326,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       }
     }
 
-    // When `result.error` is set, `coreToolScheduler` builds the
+    // For non-aborted errors, `coreToolScheduler` builds the
     // model-facing functionResponse from `error.message`, NOT from
     // `llmContent` (see `convertToFunctionResponse` and the error
     // branch in scheduler's success/error split). So if a long
@@ -3344,6 +3344,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // (PTY init dragging, remote-fs exec syscalls, security scanners
     // interposing) where the rare path could still trigger and the
     // hint would otherwise vanish.
+    // Unconfirmed cancellation cleanup is also an execution error; the abort
+    // and timeout paths suppress this advisory above.
     //
     // Use a `---` divider line so downstream consumers of
     // `error.message` (firePostToolUseFailureHook, telemetry grouping,

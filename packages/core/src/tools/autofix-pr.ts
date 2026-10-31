@@ -473,7 +473,7 @@ export async function runAutofixPrHelper(
         { streamStdout: true },
       );
       const result = await handle.result;
-      if (result.error) {
+      if (result.error && !result.aborted) {
         return {
           exitCode: null,
           stdout,
@@ -481,12 +481,13 @@ export async function runAutofixPrHelper(
           failure: `could not start: ${result.error.message}`,
         };
       }
+      const diagnostic = result.error ? `: ${result.error.message}` : '';
       if (timeout.aborted) {
         return {
           exitCode: result.exitCode,
           stdout,
           stderr,
-          failure: `timed out after ${timeoutMs / 60_000} minutes`,
+          failure: `timed out after ${timeoutMs / 60_000} minutes${diagnostic}`,
         };
       }
       if (result.aborted) {
@@ -494,7 +495,7 @@ export async function runAutofixPrHelper(
           exitCode: result.exitCode,
           stdout,
           stderr,
-          failure: 'cancelled',
+          failure: `cancelled${diagnostic}`,
         };
       }
       return {
