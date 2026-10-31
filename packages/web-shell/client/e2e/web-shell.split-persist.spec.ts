@@ -125,9 +125,18 @@ test('adds sidebar sessions to split without losing existing panes or drafts @sm
   );
 
   await openSessionMenu(page, 'Session A');
-  await page
-    .getByRole('menuitem', { name: 'Add to Split View', exact: true })
-    .click();
+  // Session A is already a pane: the split gate disables the action and the
+  // title names the cause, so the spec asserts the disabled state instead of
+  // a no-op click.
+  const reAdd = page.getByRole('menuitem', {
+    name: 'Add to Split View',
+    exact: true,
+  });
+  await expect(reAdd).toBeDisabled();
+  await expect(reAdd).toHaveAttribute(
+    'title',
+    'This session is already open in Split View',
+  );
   await expect(split.getByTestId('chat-pane')).toHaveCount(3);
   await expect(paneA.locator('.cm-content')).toHaveText(
     'Keep this split draft',
