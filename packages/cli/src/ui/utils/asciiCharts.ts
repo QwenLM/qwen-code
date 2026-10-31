@@ -243,7 +243,10 @@ export interface BrailleLineResult {
 }
 
 function fmtAxisValue(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}m`;
+  // 999,500 rounds to 1000k, so it belongs in the next unit. The axis rounds
+  // to whole thousands, so from 999,500 to 999,949 its top label reads 1.0m
+  // while the one-decimal peak label beside it still reads 999.5k to 999.9k.
+  if (n >= 999_500) return `${(n / 1_000_000).toFixed(1)}m`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(0)}k`;
   return `${n}`;
 }
