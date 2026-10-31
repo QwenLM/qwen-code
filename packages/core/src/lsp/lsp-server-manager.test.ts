@@ -63,7 +63,10 @@ type ManagerPrivates = {
   createLspConnection: (
     config: LspServerConfig,
   ) => Promise<LspConnectionResult>;
-  initializeLspServer: () => Promise<void>;
+  initializeLspServer: () => Promise<{
+    textDocumentSync: LspTextDocumentSync | undefined;
+    diagnosticPull: { document: boolean | undefined; workspace: boolean };
+  }>;
   findFirstTypescriptFile(): string | undefined;
   buildProcessEnv(env: Record<string, string>): NodeJS.ProcessEnv;
   buildCommandProbeEnv(env: Record<string, string>): NodeJS.ProcessEnv;
@@ -76,6 +79,7 @@ type ManagerPrivates = {
     signal: AbortSignal,
     cleanupAfterAbort?: (value: T) => void,
   ): Promise<T>;
+  resetHandle(handle: LspServerHandle): void;
 };
 
 const privates = (manager: LspServerManager) =>
@@ -160,7 +164,10 @@ function stubConnection(manager: LspServerManager, result: object) {
     initializeLspServer: spyPrivate(
       manager,
       'initializeLspServer',
-    ).mockResolvedValue(undefined),
+    ).mockResolvedValue({
+      textDocumentSync: undefined,
+      diagnosticPull: { document: false, workspace: false },
+    }),
   };
 }
 
@@ -379,6 +386,7 @@ describe('LspServerManager', () => {
         expect(manager.getHandles().get('clangd')).toMatchObject({
           status: 'READY',
           textDocumentSync,
+          diagnosticPull: { document: undefined, workspace: false },
         });
         expect(connection.initialize).toHaveBeenCalledExactlyOnceWith(
           expect.objectContaining({
@@ -390,8 +398,12 @@ describe('LspServerManager', () => {
                 references: { dynamicRegistration: false },
                 documentSymbol: { dynamicRegistration: false },
                 codeAction: { dynamicRegistration: false },
+                diagnostic: { dynamicRegistration: false },
               },
-              workspace: { workspaceFolders: true },
+              workspace: {
+                workspaceFolders: true,
+                diagnostics: { refreshSupport: false },
+              },
             },
           }),
         );
@@ -404,6 +416,68 @@ describe('LspServerManager', () => {
       }
     },
   );
+
+  it.each([
+    [undefined, undefined, false],
+    [null, undefined, false],
+    [false, false, false],
+    [true, true, false],
+    [
+      { interFileDependencies: false, workspaceDiagnostics: false },
+      true,
+      false,
+    ],
+    [{ interFileDependencies: true }, true, false],
+    [{ interFileDependencies: true, workspaceDiagnostics: true }, true, true],
+  ])(
+    'captures diagnosticProvider %j as document=%s workspace=%s',
+    async (diagnosticProvider, document, workspace) => {
+      const manager = createTrustedManager();
+      const connection = createMockConnection({
+        initialize: vi.fn(async () => ({
+          capabilities: { diagnosticProvider },
+        })),
+      });
+      const createSocket = vi
+        .spyOn(LspConnectionFactory, 'createSocketConnection')
+        .mockResolvedValue({ connection } as Awaited<
+          ReturnType<typeof LspConnectionFactory.createSocketConnection>
+        >);
+      try {
+        manager.setServerConfigs([
+          {
+            ...serverConfig,
+            command: undefined,
+            transport: 'socket',
+            socket: { port: 1234 },
+          },
+        ]);
+        await manager.startAll();
+        expect(manager.getHandles().get('clangd')).toMatchObject({
+          status: 'READY',
+          diagnosticPull: { document, workspace },
+        });
+      } finally {
+        await manager.stopAll();
+        createSocket.mockRestore();
+      }
+    },
+  );
+
+  it('clears diagnostic capability when a connection is reset', () => {
+    const manager = createTrustedManager();
+    const handle = {
+      config: serverConfig,
+      status: 'READY',
+      connection: createMockConnection(),
+      diagnosticPull: { document: true, workspace: true },
+    } as unknown as LspServerHandle;
+
+    privates(manager).resetHandle(handle);
+
+    expect(handle).toMatchObject({ status: 'NOT_STARTED' });
+    expect(handle.diagnosticPull).toBeUndefined();
+  });
 
   describe('reconcileServerConfigs', () => {
     it('starts added servers', async () => {
@@ -914,6 +988,7 @@ describe('LspServerManager', () => {
 
     const handle = manager.getHandles().get('clangd');
     expect(handle?.status).toBe('FAILED');
+    expect(handle?.diagnosticPull).toBeUndefined();
     expect(handle?.error?.message).toBe(
       'server process exited (code unknown, signal SIGKILL)',
     );
@@ -950,7 +1025,9 @@ describe('LspServerManager', () => {
     expect(debugLoggerMock.warn).toHaveBeenCalledWith(
       'LSP server clangd exited but maxRestarts is 0',
     );
-    expect(manager.getHandles().get('clangd')?.status).toBe('FAILED');
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.diagnosticPull).toBeUndefined();
   });
 
   it('retries the same config after crash restart attempts are exhausted', async () => {
@@ -965,6 +1042,7 @@ describe('LspServerManager', () => {
     handle!.restartAttempts = 1;
 
     crash.exit?.(1);
+    expect(handle!.diagnosticPull).toBeUndefined();
     const result = await manager.reconcileServerConfigs([config]);
 
     expect(result.restarted).toEqual(['clangd']);
@@ -1028,7 +1106,10 @@ describe('LspServerManager', () => {
         connection: createMockConnection(),
         process: createMockProcess() as unknown as ChildProcess,
       } as unknown as LspConnectionResult);
-    spyPrivate(manager, 'initializeLspServer').mockResolvedValue(undefined);
+    spyPrivate(manager, 'initializeLspServer').mockResolvedValue({
+      textDocumentSync: undefined,
+      diagnosticPull: { document: true, workspace: true },
+    });
 
     manager.setServerConfigs([{ ...serverConfig, restartOnCrash: true }]);
     await manager.startAll();
@@ -1173,7 +1254,7 @@ describe('LspServerManager', () => {
     stubConnection(manager, {
       connection: createMockConnection(),
       process: createMockProcess(),
-    }).initializeLspServer.mockReturnValue(new Promise<void>(() => {}));
+    }).initializeLspServer.mockReturnValue(new Promise<never>(() => {}));
 
     manager.setServerConfigs([serverConfig]);
     const startAll = manager.startAll();
@@ -1221,9 +1302,11 @@ describe('LspServerManager', () => {
   it('does not crash-restart a server that exits during protocol initialization', async () => {
     const { manager, crash, createLspConnection, initializeLspServer } =
       crashingManager();
-    let resolveInitialize!: () => void;
+    let resolveInitialize!: (
+      value: Awaited<ReturnType<ManagerPrivates['initializeLspServer']>>,
+    ) => void;
     initializeLspServer.mockReturnValue(
-      new Promise<void>((resolve) => {
+      new Promise((resolve) => {
         resolveInitialize = resolve;
       }),
     );
@@ -1234,7 +1317,10 @@ describe('LspServerManager', () => {
       expect(crash.exit).toBeDefined();
     });
     crash.exit?.(1);
-    resolveInitialize();
+    resolveInitialize({
+      textDocumentSync: undefined,
+      diagnosticPull: { document: true, workspace: true },
+    });
     await startAll;
 
     expect(createLspConnection).toHaveBeenCalledOnce();

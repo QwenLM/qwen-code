@@ -153,10 +153,10 @@ const JSON_RPC_METHOD_NOT_FOUND = -32601;
 
 /**
  * Whether a diagnostics pull failed because the server does not implement
- * pull diagnostics at all. The reply code is the only signal that works:
+ * the requested pull. The reply code remains necessary for undeclared support:
  * real servers that serve `textDocument/diagnostic` (pyright, gopls) do not
  * advertise `diagnosticProvider` for it, while servers that do not serve it
- * (typescript-language-server, clangd) answer `-32601` every time. Such a
+ * (typescript-language-server, clangd) can answer `-32601`. Such a
  * server says nothing about the queried file, so it neither vetoes another
  * server's answer nor backs a clean one — and it is still named when nothing
  * else answered, with wording that says what it actually did. Every other
@@ -776,7 +776,8 @@ export class NativeLspService {
   /**
    * Ready handles for a diagnostics query. Rejects outright when nothing is
    * ready — no matching server, a server that failed or never started, a
-   * server still starting up — because an empty ready set would otherwise be
+   * server still starting up, or every candidate being known not to support
+   * the requested pull — because an empty ready set would otherwise be
    * reported as a clean result. For a document query (`uri` given) the
    * rejection names only servers the queried file does not provably exclude;
    * when every configured server is irrelevant for the file the rejection
@@ -792,7 +793,9 @@ export class NativeLspService {
     serverName?: string,
     uri?: string,
   ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.getReadyHandles(serverName).filter(
+      ([, handle]) => this.diagnosticPullSupport(handle, uri) !== false,
+    );
     if (handles.length > 0) {
       return handles;
     }
@@ -800,9 +803,24 @@ export class NativeLspService {
       ([name]) => !serverName || name === serverName,
     );
     const extension = uri ? this.diagnosticFileExtension(uri) : undefined;
-    const skipped = configured
-      .filter(([, handle]) => !this.serverDeclaredIrrelevant(handle, extension))
-      .map(([name, handle]) => describeLspServerState(name, handle));
+    const candidates = configured.filter(
+      ([, handle]) => !this.serverDeclaredIrrelevant(handle, extension),
+    );
+    const eligible = candidates.filter(
+      ([, handle]) => this.diagnosticPullSupport(handle, uri) !== false,
+    );
+    if (candidates.length > 0 && eligible.length === 0) {
+      const unsupported = candidates.map(
+        ([name]) =>
+          `${name}: does not support ${uri ? 'document' : 'workspace'} pull diagnostics`,
+      );
+      throw new Error(
+        `No selected LSP server supports ${uri ? 'document' : 'workspace'} pull diagnostics (${boundedRejectionDetail(unsupported)})`,
+      );
+    }
+    const skipped = eligible.map(([name, handle]) =>
+      describeLspServerState(name, handle),
+    );
     if (skipped.length > 0) {
       throw new Error(
         `No LSP server is ready to provide diagnostics (${boundedRejectionDetail(skipped)})`,
@@ -823,9 +841,10 @@ export class NativeLspService {
   /**
    * Ready handles a diagnostics query has not asked yet, read from live state
    * so a server that finished starting while the query was in flight is asked
-   * rather than reported as unreachable. Uses the same relevance test as
-   * `unreachableDiagnosticServers`, so a server the queried file provably
-   * excludes is neither asked nor named.
+   * rather than reported as unreachable. Uses the same relevance and
+   * capability tests as `unreachableDiagnosticServers`, so a server the
+   * queried file provably excludes or that is known not to support the pull
+   * is neither asked nor named.
    */
   private newlyReadyDiagnosticHandles(
     asked: ReadonlyArray<readonly [string, unknown]>,
@@ -836,8 +855,18 @@ export class NativeLspService {
     return this.getReadyHandles(serverName).filter(
       ([name, handle]) =>
         !asked.some(([askedName]) => askedName === name) &&
+        this.diagnosticPullSupport(handle, uri) !== false &&
         !this.serverDeclaredIrrelevant(handle, extension),
     );
+  }
+
+  private diagnosticPullSupport(
+    handle: LspServerHandle,
+    uri: string | undefined,
+  ): boolean | undefined {
+    return uri
+      ? handle.diagnosticPull?.document
+      : handle.diagnosticPull?.workspace;
   }
 
   /**
@@ -985,9 +1014,9 @@ export class NativeLspService {
    * mistaken for an answer. For a document query (`uri` given), only servers
    * the file does not provably exclude can veto — a server that could never
    * own the file must not discard another server's authoritative empty
-   * report. For a workspace query every unreachable server vetoes, since the
-   * report would otherwise certify that server's slice of the workspace as
-   * clean.
+   * report. For a workspace query every unreachable server not known to lack
+   * workspace-pull support vetoes, since the report would otherwise certify
+   * that server's slice of the workspace as clean.
    */
   private unreachableDiagnosticServers(
     queried: ReadonlyArray<readonly [string, unknown]>,
@@ -1000,6 +1029,7 @@ export class NativeLspService {
         ([name, handle]) =>
           (!serverName || name === serverName) &&
           !queried.some(([queriedName]) => queriedName === name) &&
+          this.diagnosticPullSupport(handle, uri) !== false &&
           !this.serverDeclaredIrrelevant(handle, extension),
       )
       .map(([name, handle]) =>
