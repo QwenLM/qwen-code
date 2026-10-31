@@ -1597,6 +1597,26 @@ describe('ChatCompressionService.compress cache sharing', () => {
     expect(slimSpy).toHaveBeenCalled();
   });
 
+  it('shares the cache after the window guard downgrades a distinct compaction model', async () => {
+    // The sideQueryOnMainRoute re-read happens after the guard, so a
+    // window-forced downgrade to the main model still takes the shared path.
+    // Hoisting the assignment above the guard flips this case to the cold
+    // path, and no other test catches that.
+    const history = turns('x'.repeat(120_000), 'ack');
+    const { config, generateText, result } = await expectShared({
+      history,
+      compactionModel: 'compact-model',
+      configuredModels: [{ id: 'compact-model', contextWindowSize: 1 }],
+    });
+
+    const request = generateText.mock.calls[0]![0] as {
+      promptCacheSharing?: boolean;
+    };
+    expect(request.promptCacheSharing).toBe(true);
+    expect(result.info.warning).toContain('too small');
+    expectCacheLog(config, true, true);
+  });
+
   it('preserves the main system, tools, and complete history before the compression directive', async () => {
     const history = makeHistory(42);
     const { config, generateText } = await expectShared(
