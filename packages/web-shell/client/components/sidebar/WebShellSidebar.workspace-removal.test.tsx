@@ -179,6 +179,7 @@ const {
       updateWorkspace: vi.fn(),
       removeWorkspace: vi.fn(),
       listSessionGroups: vi.fn(),
+      updateWorkspacePin: vi.fn(),
       createSessionGroup: vi.fn(),
     },
     active,
@@ -7640,5 +7641,196 @@ describe('WebShellSidebar standalone grouping', () => {
         callsBeforeRetry,
       );
     });
+  });
+});
+
+describe('WebShellSidebar workspace pinning UI', () => {
+  const withPinning = (
+    entries: Array<
+      Partial<DaemonWorkspaceCapability> & { id: string; cwd: string }
+    >,
+  ) =>
+    ({
+      ...capabilities,
+      features: [...capabilities.features, 'workspace_pinning'],
+      workspaces: [
+        {
+          id: 'primary',
+          cwd: '/tmp/project',
+          primary: true,
+          trusted: true,
+          removable: false,
+        },
+        ...entries,
+      ],
+    }) as typeof capabilities;
+
+  beforeEach(() => {
+    workspaceActions.updateWorkspacePin?.mockReset();
+    workspaceActions.updateWorkspacePin?.mockResolvedValue(undefined);
+    workspace.refreshCapabilities.mockClear();
+  });
+
+  const rowOrder = (): string[] =>
+    Array.from(
+      container.querySelectorAll<HTMLElement>(
+        'button[aria-label="Workspace actions"]',
+      ),
+    )
+      .map((button) => {
+        const rowText = button.parentElement?.parentElement?.textContent ?? '';
+        return ['project', 'gamma', 'beta', 'alpha'].find((name) =>
+          rowText.includes(name),
+        );
+      })
+      .filter((name): name is string => name !== undefined);
+
+  it('sorts pinned workspaces newest-first above unpinned ones and badges them', () => {
+    const caps = withPinning([
+      {
+        id: 'alpha',
+        cwd: '/tmp/alpha',
+        primary: false,
+        trusted: true,
+        removable: true,
+        registrationIds: ['reg-alpha'],
+      },
+      {
+        id: 'beta',
+        cwd: '/tmp/beta',
+        primary: false,
+        trusted: true,
+        removable: true,
+        registrationIds: ['reg-beta'],
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      },
+      {
+        id: 'gamma',
+        cwd: '/tmp/gamma',
+        primary: false,
+        trusted: true,
+        removable: true,
+        registrationIds: ['reg-gamma'],
+        isPinned: true,
+        pinnedAt: '2026-06-01T00:00:00.000Z',
+      },
+    ]);
+    connection.capabilities = caps;
+    workspace.capabilities = caps;
+
+    renderSidebar();
+
+    const order = rowOrder();
+    const gamma = order.indexOf('gamma');
+    const beta = order.indexOf('beta');
+    const alpha = order.indexOf('alpha');
+    // Both pinned rows float above the unpinned one; the newest pin sorts first.
+    expect(gamma).toBeGreaterThanOrEqual(0);
+    expect(beta).toBeGreaterThanOrEqual(0);
+    expect(alpha).toBeGreaterThanOrEqual(0);
+    expect(gamma).toBeLessThan(beta);
+    expect(beta).toBeLessThan(alpha);
+
+    // Two pinned rows → two 📌 badges; the unpinned row has none.
+    expect(
+      container.querySelectorAll('[aria-label="Pinned workspace"]').length,
+    ).toBe(2);
+  });
+
+  it('pins an unpinned workspace from its context menu', async () => {
+    const caps = withPinning([
+      {
+        id: 'alpha',
+        cwd: '/tmp/alpha',
+        primary: false,
+        trusted: true,
+        removable: true,
+        registrationIds: ['reg-alpha'],
+      },
+    ]);
+    connection.capabilities = caps;
+    workspace.capabilities = caps;
+
+    renderSidebar();
+
+    const trigger = workspaceAction('/tmp/alpha');
+    expect(trigger).toBeDefined();
+    act(() => click(trigger!));
+
+    const pinItem = Array.from(
+      document.body.querySelectorAll<HTMLElement>('[role="menuitem"]'),
+    ).find((item) => item.textContent === 'Pin workspace');
+    expect(pinItem).toBeDefined();
+
+    await act(async () => {
+      click(pinItem!);
+    });
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    expect(workspaceActions.updateWorkspacePin).toHaveBeenCalledWith(
+      'reg-alpha',
+      true,
+    );
+    expect(workspace.refreshCapabilities).toHaveBeenCalled();
+  });
+
+  it('offers Unpin for a pinned workspace and omits Pin', () => {
+    const caps = withPinning([
+      {
+        id: 'beta',
+        cwd: '/tmp/beta',
+        primary: false,
+        trusted: true,
+        removable: true,
+        registrationIds: ['reg-beta'],
+        isPinned: true,
+        pinnedAt: '2026-01-01T00:00:00.000Z',
+      },
+    ]);
+    connection.capabilities = caps;
+    workspace.capabilities = caps;
+
+    renderSidebar();
+
+    const trigger = workspaceAction('/tmp/beta');
+    expect(trigger).toBeDefined();
+    act(() => click(trigger!));
+
+    const labels = menuItemLabels();
+    expect(labels).toContain('Unpin workspace');
+    expect(labels).not.toContain('Pin workspace');
+  });
+
+  it('does not offer the Pin action when the daemon lacks workspace_pinning', () => {
+    // Row is pinnable in shape (has registrationIds) but the tag is absent, so
+    // canPin must be false and the context menu must omit Pin/Unpin.
+    const caps = {
+      ...capabilities,
+      workspaces: [
+        {
+          id: 'alpha',
+          cwd: '/tmp/alpha',
+          primary: false,
+          trusted: true,
+          removable: true,
+          registrationIds: ['reg-alpha'],
+        },
+      ],
+    } as typeof capabilities;
+    connection.capabilities = caps;
+    workspace.capabilities = caps;
+
+    renderSidebar();
+
+    const trigger = workspaceAction('/tmp/alpha');
+    expect(trigger).toBeDefined();
+    act(() => click(trigger!));
+
+    const labels = menuItemLabels();
+    expect(labels).not.toContain('Pin workspace');
+    expect(labels).not.toContain('Unpin workspace');
   });
 });

@@ -524,6 +524,7 @@ describe('qwen serve — capabilities envelope', () => {
       'scratch_workspace_registration',
       ...(gitAvailableAtBoot ? ['git_workspace_clone'] : []),
       'workspace_runtime_removal',
+      'workspace_pinning',
       ...(nativeDirectoryPickerAtBoot ? ['native_directory_picker'] : []),
       'workspace_runtime',
       'workspace_directories',

@@ -15,6 +15,7 @@ import {
 } from './workspace-management.js';
 import { NativeDirectoryPickerUnavailableError } from '../native-directory-picker.js';
 import type {
+  WorkspaceEntry,
   WorkspaceRegistry,
   WorkspaceRuntime,
 } from '../workspace-registry.js';
@@ -92,6 +93,15 @@ function createMockRegistry(
       }
       current.registrationIds = [...(runtime.registrationIds ?? [])];
     }),
+    listAllEntries: () =>
+      runtimes.map(
+        (runtime) =>
+          ({
+            workspaceId: runtime.workspaceId,
+            registrationIds: runtime.registrationIds ?? [],
+            internal: false,
+          }) as unknown as WorkspaceEntry,
+      ) as readonly WorkspaceEntry[],
     resolveWorkspaceCwd: () => undefined,
     resolveLiveSessionOwner: () => ({ kind: 'not_found' }),
     beginDrain: vi.fn((runtime: WorkspaceRuntime) => {
@@ -3238,6 +3248,169 @@ describe('persistent workspace registrations', () => {
     expect((await forgetResult).status).toBe(500);
     await seal;
     expect(sealed).toBe(true);
+  });
+
+  it('pins and unpins a registration and reports the stored pin time', async () => {
+    const registrationId = workspaceRegistrationId(REAL_DIR);
+    const pinnedAt = '2026-01-01T00:00:00.000Z';
+    const setPinnedByIds = vi
+      .fn()
+      .mockResolvedValue({ matched: 1, changed: true, pinnedAt });
+    const { app } = createApp({
+      workspaceRegistrationStore: {
+        setPinnedByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const pinned = await request(app)
+      .patch(`/workspace-registrations/${registrationId}/pin`)
+      .send({ isPinned: true });
+    expect(pinned.status).toBe(200);
+    expect(setPinnedByIds).toHaveBeenCalledWith([registrationId], true);
+    expect(pinned.body).toEqual({
+      id: registrationId,
+      isPinned: true,
+      pinnedAt,
+    });
+
+    setPinnedByIds.mockResolvedValue({ matched: 1, changed: true });
+    const unpinned = await request(app)
+      .patch(`/workspace-registrations/${registrationId}/pin`)
+      .send({ isPinned: false });
+    expect(unpinned.status).toBe(200);
+    expect(setPinnedByIds).toHaveBeenLastCalledWith([registrationId], false);
+    expect(unpinned.body).toEqual({
+      id: registrationId,
+      isPinned: false,
+    });
+  });
+
+  it('pins every alias id of a multi-id registration in one commit', async () => {
+    const idA = 'reg-a';
+    const idB = 'reg-b';
+    const pinnedAt = '2026-02-02T00:00:00.000Z';
+    const setPinnedByIds = vi
+      .fn()
+      .mockResolvedValue({ matched: 2, changed: true, pinnedAt });
+    const { app } = createApp({
+      workspaceRegistry: createMockRegistry([
+        makeRuntime(REAL_DIR, { registrationIds: [idA, idB] }),
+      ]),
+      workspaceRegistrationStore: {
+        setPinnedByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    // Requesting either alias must fan out to BOTH ids in a single commit.
+    const res = await request(app)
+      .patch(`/workspace-registrations/${idA}/pin`)
+      .send({ isPinned: true });
+    expect(res.status).toBe(200);
+    expect(setPinnedByIds).toHaveBeenCalledWith([idA, idB], true);
+    expect(res.body).toEqual({ id: idA, isPinned: true, pinnedAt });
+
+    // Unpin reports isPinned:false (never resurrects a sibling alias stamp).
+    setPinnedByIds.mockResolvedValue({ matched: 2, changed: true });
+    const unpin = await request(app)
+      .patch(`/workspace-registrations/${idA}/pin`)
+      .send({ isPinned: false });
+    expect(unpin.status).toBe(200);
+    expect(setPinnedByIds).toHaveBeenLastCalledWith([idA, idB], false);
+    expect(unpin.body).toEqual({ id: idA, isPinned: false });
+  });
+
+  it('rejects a pin request whose body is not a boolean', async () => {
+    const registrationId = workspaceRegistrationId(REAL_DIR);
+    const setPinnedByIds = vi.fn();
+    const { app } = createApp({
+      workspaceRegistrationStore: {
+        setPinnedByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const missing = await request(app).patch(
+      `/workspace-registrations/${registrationId}/pin`,
+    );
+    expect(missing.status).toBe(400);
+    expect(missing.body.code).toBe('invalid_body');
+
+    const wrongType = await request(app)
+      .patch(`/workspace-registrations/${registrationId}/pin`)
+      .send({ isPinned: 'true' });
+    expect(wrongType.status).toBe(400);
+    expect(wrongType.body.code).toBe('invalid_body');
+    expect(setPinnedByIds).not.toHaveBeenCalled();
+  });
+
+  it('returns 404 when pinning a registration that is not stored', async () => {
+    const setPinnedByIds = vi
+      .fn()
+      .mockResolvedValue({ matched: 0, changed: false });
+    const { app } = createApp({
+      workspaceRegistrationStore: {
+        setPinnedByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .patch('/workspace-registrations/not-stored/pin')
+      .send({ isPinned: true });
+
+    expect(res.status).toBe(404);
+    expect(res.body.code).toBe('workspace_registration_not_found');
+  });
+
+  it('reports the current state when the pin is a no-op', async () => {
+    const registrationId = workspaceRegistrationId(REAL_DIR);
+    const setPinnedByIds = vi
+      .fn()
+      .mockResolvedValue({ matched: 1, changed: false });
+    const { app } = createApp({
+      workspaceRegistrationStore: {
+        setPinnedByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    const res = await request(app)
+      .patch(`/workspace-registrations/${registrationId}/pin`)
+      .send({ isPinned: false });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      id: registrationId,
+      isPinned: false,
+    });
+  });
+
+  it('returns 501 for pinning without a store', async () => {
+    const { app } = createApp();
+
+    const res = await request(app)
+      .patch('/workspace-registrations/any/pin')
+      .send({ isPinned: true });
+
+    expect(res.status).toBe(501);
+    expect(res.body.code).toBe('persistence_not_available');
+  });
+
+  it('returns 503 when pinning while the daemon is sealed', async () => {
+    const registrationId = workspaceRegistrationId(REAL_DIR);
+    const setPinnedByIds = vi
+      .fn()
+      .mockResolvedValue({ matched: 1, changed: true });
+    const { app, handle } = createApp({
+      workspaceRegistrationStore: {
+        setPinnedByIds,
+      } as unknown as WorkspaceRegistrationStore,
+    });
+
+    await handle.sealAndWait();
+
+    const res = await request(app)
+      .patch(`/workspace-registrations/${registrationId}/pin`)
+      .send({ isPinned: true });
+    expect(res.status).toBe(503);
+    expect(setPinnedByIds).not.toHaveBeenCalled();
   });
 });
 

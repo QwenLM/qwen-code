@@ -2169,10 +2169,23 @@ export function WebShellSidebar({
   // Only the rendered list is reordered: the derived cwd lists above feed
   // order-sensitive catalog query keys, so reordering them would re-subscribe
   // every secondary workspace's session catalog.
-  const orderedProjectWorkspaces = useMemo(
-    () => orderWorkspaces(projectWorkspaces, workspaceOrder),
-    [projectWorkspaces, workspaceOrder],
-  );
+  const orderedProjectWorkspaces = useMemo(() => {
+    const ordered = orderWorkspaces(projectWorkspaces, workspaceOrder);
+    // A pin outranks the stored manual order: pinned rows float above the
+    // unpinned ones, newest pin first, and each group keeps the user's order.
+    // A primary row the user has not moved off the top stays above the pins.
+    const leadCount = ordered[0]?.primary === true ? 1 : 0;
+    const leading = ordered.slice(0, leadCount);
+    const rest = ordered.slice(leadCount);
+    const pinned = rest.filter((entry) => entry.isPinned);
+    const unpinned = rest.filter((entry) => !entry.isPinned);
+    pinned.sort((a, b) => {
+      const aTime = a.pinnedAt ? new Date(a.pinnedAt).getTime() : 0;
+      const bTime = b.pinnedAt ? new Date(b.pinnedAt).getTime() : 0;
+      return bTime - aTime;
+    });
+    return [...leading, ...pinned, ...unpinned];
+  }, [projectWorkspaces, workspaceOrder]);
   const moveWorkspaceInList = useCallback(
     (cwd: string, direction: -1 | 1) => {
       const next = moveWorkspace(
@@ -4068,6 +4081,31 @@ export function WebShellSidebar({
       setSessionBusy,
       t,
     ],
+  );
+
+  const handleToggleWorkspacePin = useCallback(
+    (workspaceCapability: DaemonWorkspaceCapability) => {
+      const targetPinned = !workspaceCapability.isPinned;
+      const registrationId = workspaceCapability.registrationIds?.[0];
+      if (!registrationId) return;
+      void (async () => {
+        try {
+          await workspaceActions.updateWorkspacePin(
+            registrationId,
+            targetPinned,
+          );
+        } catch (error) {
+          onError(error, t('sidebar.pinWorkspaceFailed'));
+          return;
+        }
+        try {
+          await workspace.refreshCapabilities?.();
+        } catch {
+          // Reconciled by the next capabilities refresh.
+        }
+      })();
+    },
+    [workspaceActions, workspace, onError, t],
   );
 
   const handleArchive = useCallback(
@@ -7554,6 +7592,14 @@ export function WebShellSidebar({
                                       ws.primary &&
                                       ws.trusted &&
                                       Boolean(onOpenWorkspaceManagement);
+                                    const canPin =
+                                      !lockedWorkspaceCwd &&
+                                      !ws.primary &&
+                                      ws.registrationIds !== undefined &&
+                                      ws.registrationIds.length > 0 &&
+                                      workspace.capabilities?.features.includes(
+                                        'workspace_pinning',
+                                      ) === true;
                                     const workspaceIndex =
                                       orderedProjectWorkspaces.findIndex(
                                         (entry) => entry.cwd === ws.cwd,
@@ -7564,6 +7610,12 @@ export function WebShellSidebar({
                                       workspaceIndex >= 0 &&
                                       orderedProjectWorkspaces.length > 1;
                                     const menuActions: WorkspaceMenuActions = {
+                                      ...(canPin
+                                        ? {
+                                            togglePin: () =>
+                                              handleToggleWorkspacePin(ws),
+                                          }
+                                        : {}),
                                       ...(canRename
                                         ? {
                                             rename: () =>
