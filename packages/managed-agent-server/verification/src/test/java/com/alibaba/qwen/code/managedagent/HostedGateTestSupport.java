@@ -27,7 +27,9 @@ import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.util.ReflectionUtils;
 
+import java.lang.reflect.Field;
 import java.net.URI;
 import java.security.Principal;
 import java.time.Duration;
@@ -375,13 +377,31 @@ final class HostedGateTestSupport {
     // Spring holds no attachment to it.
     static HarnessSessionRef attachment(HarnessConnector connector,
             String sessionId) {
-        for (Object value : ((Map<?, ?>) ReflectionTestUtils.getField(
-                connector, "attachments")).values()) {
+        for (Object value : attachmentsOf(connector).values()) {
             if (value instanceof HarnessSessionRef ref
                     && sessionId.equals(ref.getHarnessSessionId())) {
                 return ref;
             }
         }
         return null;
+    }
+
+    // The bean Spring hands out can be a decorator around the connector that
+    // owns the map, so walk the delegate chain before reading the field. A
+    // chain that owns no map falls through to getField, which names the
+    // missing field instead of failing somewhere less obvious.
+    static Map<?, ?> attachmentsOf(HarnessConnector connector) {
+        HarnessConnector owner = connector;
+        while (owner != null && ReflectionUtils.findField(
+                owner.getClass(), "attachments", Map.class) == null) {
+            Field delegate = ReflectionUtils.findField(
+                    owner.getClass(), "delegate", HarnessConnector.class);
+            if (delegate == null) {
+                break;
+            }
+            ReflectionUtils.makeAccessible(delegate);
+            owner = (HarnessConnector) ReflectionUtils.getField(delegate, owner);
+        }
+        return (Map<?, ?>) ReflectionTestUtils.getField(owner, "attachments");
     }
 }

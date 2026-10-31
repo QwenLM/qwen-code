@@ -57,6 +57,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachmentsOf;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -1620,7 +1621,7 @@ class HostedPublicWorkspaceIT {
                     "requestId", "d6b-action", "response", response) : response;
             assertThat(request("POST", route, body, id, "reader", 403).at("/error/code").asText()).isEqualTo("action_forbidden");
             // The live Harness retains this approval while the dispatcher's attachment cache is cold.
-            ((Map<?, ?>) ReflectionTestUtils.getField(spring.getBean(HarnessConnector.class), "attachments")).clear();
+            attachmentsOf(spring.getBean(HarnessConnector.class)).clear();
             // Files sessions answer the first approval as a second OPERATOR
             // (R1's handoff) and the rest as the owner. A Shell answer runs
             // a command, so only the recorded owner may answer it.

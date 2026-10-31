@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
 import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
+import com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary;
 import org.junit.jupiter.api.Test;
 import org.springframework.context.ConfigurableApplicationContext;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -15,6 +16,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachmentsOf;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.bootWithFreshPorts;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
@@ -59,6 +61,23 @@ class HostedGateTestSupportTest {
 
         assertThat(attachment(connector, "session-a")).isSameAs(mine);
         assertThat(attachment(connector, "session-c")).isNull();
+    }
+
+    // The Spring bean is a decorator, not the connector that owns the map, so
+    // the lookup has to walk the delegate chain. Without this the Hosted gates
+    // fail in the test-support layer before the row under test runs (#15972).
+    @Test
+    void attachmentUnwrapsTheBoundaryToTheConnectorThatOwnsTheMap() {
+        var connector = mock(QwenHostedHarnessConnector.class);
+        var attachments = new LinkedHashMap<Object, HarnessSessionRef>();
+        HarnessSessionRef mine = ref("session-a");
+        attachments.put("mine", mine);
+        ReflectionTestUtils.setField(connector, "attachments", attachments);
+        var decorated = new SdkHarnessBoundary(new SdkHarnessBoundary(connector));
+
+        assertThat(attachment(decorated, "session-a")).isSameAs(mine);
+        assertThat(attachment(decorated, "session-c")).isNull();
+        assertThat(attachmentsOf(decorated)).isSameAs(attachments);
     }
 
     // The boot retry's only consumer is the deep MySQL lane; pin its contract
