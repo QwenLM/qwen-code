@@ -226,3 +226,44 @@ describe('Composer tag right inset', () => {
     ]);
   });
 });
+
+describe('At-mention picker subtitle overflow', () => {
+  it('stretches the subtitle in its grid track and keeps the compact override', () => {
+    expect(
+      sorted(entries((selector) => selector.endsWith('.atItemSubtitle'))),
+    ).toEqual(
+      sorted([
+        {
+          at: '',
+          selectors: ['.atItemLabel', '.atItemSubtitle'],
+          decls: [
+            'min-width: 0',
+            'overflow: hidden',
+            'font-size: 13px',
+            'line-height: 18px',
+            'text-overflow: ellipsis',
+            'white-space: nowrap',
+          ],
+        },
+        {
+          at: '',
+          selectors: ['.atItemSubtitle'],
+          decls: ['color: var(--muted-foreground)', 'text-align: right'],
+        },
+        {
+          at: '',
+          selectors: [
+            '.atPanel[data-web-shell-compact-overlay] .atItemSubtitle',
+          ],
+          decls: [
+            'justify-self: start',
+            'overflow-wrap: anywhere',
+            'text-align: left',
+            'text-overflow: clip',
+            'white-space: normal',
+          ],
+        },
+      ]),
+    );
+  });
+});
