@@ -3010,6 +3010,361 @@ describe('SessionOverviewPanel', () => {
     expect(container!.textContent).not.toContain('Failed to delete session');
   });
 
+  it.each([
+    { count: 100, batchSizes: [100] },
+    { count: 101, batchSizes: [100, 1] },
+    { count: 201, batchSizes: [100, 100, 1] },
+  ])(
+    'keeps delete requests within the route limit for $count selected sessions',
+    async ({ count, batchSizes }) => {
+      const many = Array.from({ length: count }, (_, index) =>
+        session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
+      );
+      sessionsState.sessions = many;
+      const invalidators = batchSizes.map(() => vi.fn());
+      const capture = vi.fn();
+      for (const invalidate of invalidators) {
+        capture.mockReturnValueOnce(invalidate);
+      }
+      generatedUiOwner = deletionOwner(capture);
+      const completeBatches: Array<() => void> = [];
+      workspaceClient.deleteSessionsData.mockImplementation(
+        async (ids: string[]) => {
+          if (ids.length > 100) throw new Error('max 100 session IDs');
+          await new Promise<void>((resolve) => completeBatches.push(resolve));
+          return { removed: ids, notFound: [], errors: [] };
+        },
+      );
+      render();
+      act(() => click(selectAllCheckbox()));
+      act(() => click(footerButton('Delete')!));
+      expect(document.body.textContent).toContain(`Delete ${count} sessions?`);
+      const confirm = document.querySelector(
+        '[data-slot="alert-dialog-action"]',
+      ) as HTMLElement;
+      act(() => click(confirm));
+      await flushAsync();
+
+      for (let index = 0; index < batchSizes.length; index += 1) {
+        expect(workspaceClient.deleteSessionsData).toHaveBeenCalledTimes(
+          index + 1,
+        );
+        expect(completeBatches).toHaveLength(index + 1);
+        expect(capture).toHaveBeenCalledTimes(index + 1);
+        expect(capture).toHaveBeenNthCalledWith(index + 1, '/w');
+        expect(capture.mock.invocationCallOrder[index]).toBeLessThan(
+          workspaceClient.deleteSessionsData.mock.invocationCallOrder[index]!,
+        );
+        expect(invalidators[index]).not.toHaveBeenCalled();
+        await act(async () => completeBatches[index]!());
+        await flushAsync();
+        expect(invalidators[index]).toHaveBeenCalledExactlyOnceWith(
+          many
+            .slice(index * 100, (index + 1) * 100)
+            .map((item) => item.sessionId),
+        );
+      }
+      for (const invalidate of invalidators) {
+        expect(invalidate).toHaveBeenCalledOnce();
+      }
+
+      const batches = workspaceClient.deleteSessionsData.mock.calls.map(
+        ([ids]) => ids as string[],
+      );
+      expect(batches.map((ids) => ids.length)).toEqual(batchSizes);
+      expect(batches.flat()).toEqual(many.map((item) => item.sessionId));
+      expect(container!.textContent).not.toContain('Failed to delete session');
+      expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledOnce();
+      expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+        '/w',
+      );
+    },
+  );
+
+  it('splits qualified delete batches without mixing workspace scopes', async () => {
+    connectionState.capabilities = {
+      features: ['workspace_qualified_rest_core'],
+      workspaceCwd: '/w',
+      workspaces: [
+        { id: 'w0', cwd: '/w', primary: true, trusted: true },
+        { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+      ],
+    };
+    sessionsState.sessions = [session('primary')];
+    const many = Array.from({ length: 101 }, (_, index) =>
+      session(`secondary-${index}`, { workspaceCwd: '/wsB' }),
+    );
+    otherWorkspaceSessions['/wsB'] = many;
+    const qualified = workspaceClient.workspaceByCwd('/wsB');
+    workspaceClient.workspaceByCwd.mockReturnValue(qualified);
+    render();
+    await flushAsync();
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Delete')!));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledOnce();
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith([
+      'primary',
+    ]);
+    expect(qualified.deleteSessionsData).toHaveBeenCalledTimes(2);
+    expect(qualified.deleteSessionsData).toHaveBeenNthCalledWith(
+      1,
+      many.slice(0, 100).map((item) => item.sessionId),
+    );
+    expect(qualified.deleteSessionsData).toHaveBeenNthCalledWith(2, [
+      many[100]!.sessionId,
+    ]);
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledTimes(2);
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/wsB',
+    );
+  });
+
+  it.each(['request', 'per-session'])(
+    'retains cross-workspace delete failures when the first is %s',
+    async (firstFailure) => {
+      connectionState.capabilities = {
+        features: ['workspace_qualified_rest_core'],
+        workspaceCwd: '/w',
+        workspaces: [
+          { id: 'w0', cwd: '/w', primary: true, trusted: true },
+          { id: 'w1', cwd: '/wsB', primary: false, trusted: true },
+        ],
+      };
+      sessionsState.sessions = [
+        session('primary', { updatedAt: '2026-01-02T00:00:00.000Z' }),
+      ];
+      otherWorkspaceSessions['/wsB'] = [
+        session('secondary', {
+          workspaceCwd: '/wsB',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        }),
+      ];
+      const qualified = workspaceClient.workspaceByCwd('/wsB');
+      workspaceClient.workspaceByCwd.mockReturnValue(qualified);
+      let completePrimary!: () => void;
+      workspaceClient.deleteSessionsData.mockImplementationOnce(
+        () =>
+          new Promise((resolve, reject) => {
+            completePrimary = () => {
+              if (firstFailure === 'request') {
+                reject(new Error('request failed'));
+              } else {
+                resolve({
+                  removed: [],
+                  notFound: [],
+                  errors: [{ sessionId: 'primary', error: 'locked' }],
+                });
+              }
+            };
+          }),
+      );
+      if (firstFailure === 'request') {
+        qualified.deleteSessionsData.mockResolvedValueOnce({
+          removed: [],
+          notFound: [],
+          errors: [{ sessionId: 'secondary', error: 'locked' }],
+        });
+      } else {
+        qualified.deleteSessionsData.mockRejectedValueOnce(
+          new Error('request failed'),
+        );
+      }
+      render();
+      await flushAsync();
+      act(() => click(selectAllCheckbox()));
+      act(() => click(footerButton('Delete')!));
+      act(() =>
+        click(
+          document.querySelector(
+            '[data-slot="alert-dialog-action"]',
+          ) as HTMLElement,
+        ),
+      );
+      await flushAsync();
+      expect(workspaceClient.deleteSessionsData).toHaveBeenCalledOnce();
+      expect(workspaceClient.deleteSessionsData).toHaveBeenCalledWith([
+        'primary',
+      ]);
+      expect(qualified.deleteSessionsData).not.toHaveBeenCalled();
+      await act(async () => completePrimary());
+      await flushAsync();
+      expect(qualified.deleteSessionsData).toHaveBeenCalledOnce();
+      expect(qualified.deleteSessionsData).toHaveBeenCalledWith(['secondary']);
+      expect(container!.textContent).toContain('locked');
+      expect(container!.textContent).toContain('request failed');
+      expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledTimes(
+        2,
+      );
+      expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+        '/w',
+      );
+      expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+        '/wsB',
+      );
+    },
+  );
+
+  it('reports distinct per-session failures from consecutive delete batches', async () => {
+    const many = Array.from({ length: 101 }, (_, index) =>
+      session(`review-${index}`),
+    );
+    sessionsState.sessions = many;
+    connectionState.sessionId = many[0]!.sessionId;
+    workspaceClient.deleteSessionsData
+      .mockResolvedValueOnce({
+        removed: many.slice(0, 98).map((item) => item.sessionId),
+        notFound: [],
+        errors: [
+          { sessionId: many[98]!.sessionId, error: 'locked' },
+          { sessionId: many[99]!.sessionId, error: 'permission denied' },
+        ],
+      })
+      .mockResolvedValueOnce({
+        removed: [],
+        notFound: [],
+        errors: [{ sessionId: many[100]!.sessionId, error: 'busy' }],
+      });
+    render({ onCurrentSessionRemoved });
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Delete')!));
+    act(() =>
+      click(
+        document.querySelector(
+          '[data-slot="alert-dialog-action"]',
+        ) as HTMLElement,
+      ),
+    );
+    await flushAsync();
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledTimes(2);
+    expect(workspaceClient.deleteSessionsData).toHaveBeenNthCalledWith(
+      1,
+      many.slice(0, 100).map((item) => item.sessionId),
+    );
+    expect(workspaceClient.deleteSessionsData).toHaveBeenNthCalledWith(2, [
+      many[100]!.sessionId,
+    ]);
+    expect(container!.textContent).toContain(
+      'Failed to delete session: locked; permission denied; busy',
+    );
+    expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+    expect(onCurrentSessionRemoved).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: many[0]!.sessionId }),
+    );
+  });
+
+  it('keeps partial delete results and clears a current session removed in a later batch', async () => {
+    const many = Array.from({ length: 201 }, (_, index) =>
+      session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
+    );
+    sessionsState.sessions = many;
+    connectionState.sessionId = many[200]!.sessionId;
+    workspaceClient.deleteSessionsData.mockResolvedValueOnce({
+      removed: many.slice(0, 98).map((item) => item.sessionId),
+      notFound: [many[98]!.sessionId],
+      errors: [{ sessionId: many[99]!.sessionId, error: 'locked' }],
+    });
+    render({ onCurrentSessionRemoved });
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Delete')!));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledTimes(3);
+    expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+    expect(onCurrentSessionRemoved).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: many[200]!.sessionId }),
+    );
+    expect(container!.textContent).toContain(
+      'Failed to delete session: locked',
+    );
+    expect(sessionsReload).toHaveBeenCalled();
+  });
+
+  it('keeps a successful deletion when a later batch request fails', async () => {
+    const many = Array.from({ length: 101 }, (_, index) =>
+      session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
+    );
+    sessionsState.sessions = many;
+    connectionState.sessionId = many[0]!.sessionId;
+    workspaceClient.deleteSessionsData
+      .mockResolvedValueOnce({
+        removed: many.slice(0, 100).map((item) => item.sessionId),
+        notFound: [],
+        errors: [],
+      })
+      .mockRejectedValueOnce(new Error('request failed'));
+    render({ onCurrentSessionRemoved });
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Delete')!));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledTimes(2);
+    expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+    expect(container!.textContent).toContain(
+      'Failed to delete session: request failed',
+    );
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
+    expect(sessionsReload).toHaveBeenCalled();
+  });
+
+  it('reports a later delete request failure after a per-session error', async () => {
+    const many = Array.from({ length: 201 }, (_, index) =>
+      session(`bulk-${index}`, { displayName: `Bulk ${index}` }),
+    );
+    sessionsState.sessions = many;
+    connectionState.sessionId = many[0]!.sessionId;
+    workspaceClient.deleteSessionsData
+      .mockResolvedValueOnce({
+        removed: many.slice(0, 99).map((item) => item.sessionId),
+        notFound: [],
+        errors: [{ sessionId: many[99]!.sessionId, error: 'locked' }],
+      })
+      .mockRejectedValueOnce(new Error('live_session_active'));
+    render({ onCurrentSessionRemoved });
+    act(() => click(selectAllCheckbox()));
+    act(() => click(footerButton('Delete')!));
+    const confirm = document.querySelector(
+      '[data-slot="alert-dialog-action"]',
+    ) as HTMLElement;
+    act(() => click(confirm));
+    await flushAsync();
+
+    expect(workspaceClient.deleteSessionsData).toHaveBeenCalledTimes(2);
+    expect(workspaceClient.deleteSessionsData).toHaveBeenNthCalledWith(
+      2,
+      many.slice(100, 200).map((item) => item.sessionId),
+    );
+    expect(onCurrentSessionRemoved).toHaveBeenCalledOnce();
+    expect(onCurrentSessionRemoved).toHaveBeenCalledWith(
+      expect.objectContaining({ sessionId: many[0]!.sessionId }),
+    );
+    expect(container!.textContent).toContain(
+      'Failed to delete session: locked',
+    );
+    expect(container!.textContent).toContain('live_session_active');
+    expect(sessionCatalogController.refreshWorkspace).toHaveBeenCalledWith(
+      '/w',
+    );
+  });
+
   it('clears a deleted current session after a partial batch failure', async () => {
     connectionState.sessionId = 'current';
     connectionState.capabilities = {
@@ -4075,6 +4430,74 @@ describe('SessionOverviewPanel standalone sessions', () => {
       expect(call.value.deleteSessionsData).not.toHaveBeenCalled();
     }
   });
+
+  it.each(['per-session', 'request'] as const)(
+    'retains workspace and standalone delete failures for %s failures',
+    async (failure) => {
+      useConversationsRuntimeCapabilities();
+      sessionsState.sessions = [
+        session('primary', { displayName: 'Workspace row' }),
+      ];
+      standaloneListPage.mockResolvedValue({
+        sessions: [
+          standaloneSession('st1', {
+            workspaceCwd: '/conv',
+            displayName: 'Standalone one',
+          }),
+          standaloneSession('st2', {
+            workspaceCwd: '/conv',
+            displayName: 'Standalone two',
+          }),
+        ],
+      });
+      workspaceClient.deleteSessionsData.mockResolvedValueOnce({
+        removed: [],
+        notFound: [],
+        errors: [{ sessionId: 'primary', error: 'workspace locked' }],
+      });
+      if (failure === 'request') {
+        workspaceClient.deleteStandaloneSessions.mockRejectedValueOnce(
+          new Error('solo unavailable'),
+        );
+      } else {
+        workspaceClient.deleteStandaloneSessions.mockResolvedValueOnce({
+          removed: [],
+          notFound: [],
+          errors: [
+            { sessionId: 'st1', message: 'solo locked' },
+            { sessionId: 'st2', message: 'solo busy' },
+          ],
+          fileCleanupPending: [],
+        });
+      }
+      render();
+      await flushAsync();
+      expect(rows()).toHaveLength(3);
+      act(() => click(selectAllCheckbox()));
+      act(() => click(footerButton('Delete')!));
+      act(() =>
+        click(
+          document.querySelector<HTMLElement>(
+            '[data-slot="alert-dialog-action"]',
+          )!,
+        ),
+      );
+      await flushAsync();
+
+      expect(
+        workspaceClient.deleteSessionsData,
+      ).toHaveBeenCalledExactlyOnceWith(['primary']);
+      expect(
+        workspaceClient.deleteStandaloneSessions,
+      ).toHaveBeenCalledExactlyOnceWith(['st1', 'st2']);
+      expect(container!.textContent).toContain(
+        `Failed to delete session: workspace locked; ${
+          failure === 'request' ? 'solo unavailable' : 'solo locked; solo busy'
+        }`,
+      );
+      expect(rows()).toHaveLength(3);
+    },
+  );
 
   it('labels a standalone row "No workspace" instead of the internal root', async () => {
     useConversationsRuntimeCapabilities();

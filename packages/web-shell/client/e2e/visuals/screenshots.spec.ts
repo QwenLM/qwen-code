@@ -759,6 +759,143 @@ for (const theme of THEMES) {
       await captureScreenshot(page, `session-overview-details-${theme}`);
     });
 
+    test('session overview bulk delete batches at the route limit', async ({
+      page,
+    }, testInfo) => {
+      const workspaceCwd = '/workspace/session-overview-bulk-delete';
+      // The mock catalog deliberately exceeds the real daemon's 100-row page cap.
+      const sessions = Array.from({ length: 101 }, (_, index) => ({
+        sessionId: `bulk-delete-${index}`,
+        displayName: `Bulk delete fixture ${index}`,
+        workspaceCwd,
+        clientCount: 0,
+        hasActivePrompt: false,
+        updatedAt: '2026-07-01T12:00:00.000Z',
+      }));
+      const scenario = createWebShellDaemonScenario({
+        workspaceCwd,
+        sessions: [
+          ...sessions,
+          {
+            sessionId: 'web-shell-e2e-session',
+            displayName: 'Current session to keep',
+            workspaceCwd,
+            clientCount: 1,
+            hasActivePrompt: true,
+          },
+        ],
+      });
+      const daemon = await installScenario(
+        page,
+        scenario,
+        resolveBaseURL(testInfo),
+      );
+      const batches: string[][] = [];
+      const browserErrors: string[] = [];
+      page.on('pageerror', (error) => browserErrors.push(error.message));
+      page.on('console', (message) => {
+        if (['error', 'warning'].includes(message.type())) {
+          browserErrors.push(message.text());
+        }
+      });
+      await page.route('**/workspace/models', (route) =>
+        route.fulfill({ json: { models: [] } }),
+      );
+      await page.route('**/daemon/status?*', (route) =>
+        route.fulfill({
+          json: {
+            v: 1,
+            detail: 'full',
+            generatedAt: '2026-07-01T12:00:00.000Z',
+            status: 'ok',
+            issues: [],
+            daemon: { pid: 0, uptimeMs: 0, mode: 'http-bridge', workspaceCwd },
+            full: {
+              sessions: scenario.sessions.map((session) => ({
+                ...session,
+                subscriberCount: 0,
+                attachCount: 0,
+                pendingPromptCount: 0,
+                pendingPermissionCount: 0,
+                lastEventId: 0,
+              })),
+            },
+          },
+        }),
+      );
+      await page.route('**/sessions/delete', async (route) => {
+        const { sessionIds } = route.request().postDataJSON() as {
+          sessionIds: string[];
+        };
+        batches.push(sessionIds);
+        if (sessionIds.length > 100) {
+          await route.fulfill({
+            status: 400,
+            json: { error: 'max 100 session IDs', code: 'invalid_request' },
+          });
+          return;
+        }
+        const removed = scenario.sessions
+          .filter((session) => sessionIds.includes(session.sessionId))
+          .map((session) => session.sessionId);
+        scenario.sessions = scenario.sessions.filter(
+          (session) => !removed.includes(session.sessionId),
+        );
+        await route.fulfill({
+          json: {
+            removed,
+            notFound: sessionIds.filter((id) => !removed.includes(id)),
+            errors: [],
+          },
+        });
+      });
+      await gotoSession(page, scenario, daemon, theme);
+      await page.getByRole('button', { name: 'More', exact: true }).click();
+      await page
+        .getByRole('button', { name: 'Session Overview', exact: true })
+        .click();
+      const panel = page.locator('[data-web-shell-session-panel]');
+      await panel
+        .getByRole('textbox', { name: 'Search title, branch, PR or ID…' })
+        .fill('Bulk delete fixture');
+      await expect(panel).toContainText('101 session(s)');
+      await panel
+        .getByRole('checkbox', { name: 'Select all', exact: true })
+        .check();
+      await expect(panel).toContainText('101 of 101 row(s) selected');
+      await panel
+        .locator('[data-web-shell-session-footer]')
+        .getByRole('button', { name: 'Delete', exact: true })
+        .click();
+      await expect(page.getByRole('alertdialog')).toContainText(
+        'Delete 101 sessions?',
+      );
+      await captureScreenshot(
+        page,
+        `session-overview-bulk-delete-confirm-${theme}`,
+      );
+      await page.locator('[data-slot="alert-dialog-action"]').click();
+      await expect(
+        panel
+          .getByText('No data', { exact: true })
+          .or(panel.getByText(/Failed to delete session/)),
+      ).toBeVisible();
+      await captureScreenshot(
+        page,
+        `session-overview-bulk-delete-result-${theme}`,
+      );
+      expect(batches.map((ids) => ids.length)).toEqual([100, 1]);
+      expect(batches.flat().sort()).toEqual(
+        sessions.map((session) => session.sessionId).sort(),
+      );
+      expect(scenario.sessions.map((session) => session.sessionId)).toEqual([
+        scenario.sessionId,
+      ]);
+      await expect(panel.getByText('No data', { exact: true })).toBeVisible();
+      await expect(panel).not.toContainText('Failed to delete session');
+      expect(browserErrors).toEqual([]);
+    });
+
     test('conversation search', async ({ page }, testInfo) => {
       const events = Array.from({ length: 12 }, (_, index) => [
         userTextEvent(`Explain synthetic example ${index + 1}.`, {
