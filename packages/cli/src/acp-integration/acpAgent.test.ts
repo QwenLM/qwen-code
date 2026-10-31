@@ -12722,14 +12722,30 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       },
     ]);
+    const routes = models.filter((model) =>
+      model.modelId.startsWith('qwen-route:v1:'),
+    );
+    expect(routes).toHaveLength(2);
+    // The tiered stable family keeps its manifest controls on opaque routes.
+    for (const route of routes) {
+      expect(route.configOptions).toMatchObject([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [
+            { value: 'none' },
+            { value: 'low' },
+            { value: 'medium' },
+            { value: 'xhigh' },
+          ],
+        },
+      ]);
+    }
     expect(
       models
-        .filter((model) => model !== stable)
+        .filter((model) => model !== stable && !routes.includes(model))
         .every((model) => model.configOptions === undefined),
     ).toBe(true);
-    expect(
-      models.filter((model) => model.modelId.startsWith('qwen-route:v1:')),
-    ).toHaveLength(2);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -14860,7 +14876,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   it.each([
     { modelId: 'qwen-plus', value: 'high', opaque: false },
-    { modelId: 'qwen3.8-max', value: 'medium', opaque: true },
+    { modelId: 'qwen-plus', value: 'medium', opaque: true },
   ])(
     'hides and rejects unsupported reasoning for $modelId with opaque=$opaque',
     async ({ modelId, value, opaque }) => {
