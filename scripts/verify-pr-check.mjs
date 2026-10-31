@@ -35,6 +35,14 @@ export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
  */
 export const ATTRIBUTIONS = ['pr', 'harness', 'environment'];
 
+/**
+ * Above this many assertions, a round has almost certainly folded an existing
+ * test suite into its own counts. The four such rounds among 18 recent CI
+ * artifacts (3918 to 7737) each counted whole workspace suites; one counted
+ * them again for every mutant run, so 7737 held a few dozen checks of its own.
+ */
+const SUITE_SIZED_TOTAL = 1000;
+
 const KEBAB_PNG = /^[a-z0-9]+(?:-[a-z0-9]+)*\.png$/;
 const OID = /^[0-9a-f]{7,40}$/;
 // GFM renders an ATX heading indented up to three spaces as a heading too
@@ -56,6 +64,8 @@ Checks a local round against the rules the CI publisher enforces:
   - verdict.txt is exactly one of merge-ready | findings | blocked | inconclusive
   - assertions.json holds non-negative integers, a positive total, and
     total == pass + fail
+  - assertions.json gates, when present, lists { suite, pass, fail } entries
+    (skipped optional) with non-negative integer counts up to 2^53-1
   - a merge-ready verdict carries no failed assertion
   - a findings/blocked verdict whose failures ledger attributes no failure to
     the PR is a contradiction: expected reds are passes
@@ -65,9 +75,10 @@ Checks a local round against the rules the CI publisher enforces:
 and warns (without failing) when the report does not lead with its verdict and
 head OID, when the verdict line is a heading (GitHub renders the whole
 paragraph as one giant H1), when evidence/ carries no kebab-case PNG capture,
-when a round with failures carries no failures ledger at all, or when
-comment.md — the exact body a local round posts, optional — repeats the
-heading shape or lacks the attribution footer.
+when a round with failures carries no failures ledger at all, when over
+${SUITE_SIZED_TOTAL} assertions come with no gates (an existing test suite
+counted as the round's own), or when comment.md — the exact body a local round
+posts, optional — repeats the heading shape or lacks the attribution footer.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -269,6 +280,44 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
           } else {
             attributions = ledger.map((entry) => entry.attribution);
           }
+        }
+        // Gate counts are the repo's existing tests, kept apart so that
+        // pass/fail/total measure what this round wrote. The messages carry
+        // no suite name: the publisher forwards error lines to its log.
+        const gates = parsed.gates;
+        // The safe-integer ceiling keeps parity with the publisher's jq:
+        // a JSON literal like 1e309 parses to Infinity here, while jq
+        // clamps it to a finite double that would otherwise pass.
+        const isCount = (value) =>
+          Number.isInteger(value) &&
+          value >= 0 &&
+          value <= Number.MAX_SAFE_INTEGER;
+        if (
+          gates !== undefined &&
+          (!Array.isArray(gates) ||
+            gates.some(
+              (gate) =>
+                !gate ||
+                typeof gate.suite !== 'string' ||
+                gate.suite.trim() === '' ||
+                !isCount(gate.pass) ||
+                !isCount(gate.fail) ||
+                (gate.skipped !== undefined && !isCount(gate.skipped)),
+            ))
+        ) {
+          errors.push(
+            'assertions.json gates must be an array of { suite, pass, fail } entries with non-negative integer counts (skipped optional)',
+          );
+        }
+        // An empty list records no suites, so it must not silence the
+        // size warning either.
+        if (
+          counts.total > SUITE_SIZED_TOTAL &&
+          (gates === undefined || (Array.isArray(gates) && gates.length === 0))
+        ) {
+          warnings.push(
+            `assertions.json counts ${counts.total} assertions and records no gates: an existing test suite's results belong in gates, not in pass, fail and total`,
+          );
         }
       }
     }
