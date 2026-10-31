@@ -10850,6 +10850,29 @@ describe('setApprovalMode with folder trust', () => {
       );
     });
 
+    it('should warn once when configured plansDirectory is an unreadable legacy dir', () => {
+      const legacyPlans = vi
+        .spyOn(Storage, 'getPlansDir')
+        .mockReturnValue(PLANS_DIR);
+      withReaddir(
+        () =>
+          (fs.readdirSync as Mock).mockImplementation(() => {
+            throw errnoError('EACCES');
+          }),
+        () => {
+          try {
+            expect(
+              configuredPlansWarnings().filter((warning) =>
+                warning.includes('Failed to read plan directory'),
+              ),
+            ).toHaveLength(1);
+          } finally {
+            legacyPlans.mockRestore();
+          }
+        },
+      );
+    });
+
     it('should reject configured plansDirectory outside targetDir', () => {
       expect(() => makeConfig({ plansDirectory: '../project-plans' })).toThrow(
         CONTAINMENT_ERROR,
@@ -10979,6 +11002,39 @@ describe('setApprovalMode with folder trust', () => {
           expect.stringContaining('Failed to read todo directory'),
         );
       } finally {
+        (fs.readdirSync as Mock).mockReturnValue([]);
+      }
+    });
+
+    it('should warn once when configured todosDirectory is an unreadable legacy dir', () => {
+      const currentTodosDir = path.join(
+        path.resolve(baseParams.targetDir),
+        'project-todos',
+      );
+      const legacyTodos = vi
+        .spyOn(Storage, 'getTodosDir')
+        .mockReturnValue(currentTodosDir);
+      const legacyError = new Error('EACCES') as NodeJS.ErrnoException;
+      legacyError.code = 'EACCES';
+      (fs.readdirSync as Mock).mockImplementation(() => {
+        throw legacyError;
+      });
+
+      try {
+        const config = new Config({
+          ...baseParams,
+          todosDirectory: './project-todos',
+        });
+
+        expect(
+          config
+            .getWarnings()
+            .filter((warning) =>
+              warning.includes('Failed to read todo directory'),
+            ),
+        ).toHaveLength(1);
+      } finally {
+        legacyTodos.mockRestore();
         (fs.readdirSync as Mock).mockReturnValue([]);
       }
     });

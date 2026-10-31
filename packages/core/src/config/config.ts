@@ -9755,12 +9755,8 @@ export class Config {
         return;
       }
 
-      // The configured dir can coincide with the legacy one; skip so an
-      // unreadable shared dir is not reported twice.
-      if (path.resolve(legacyDir) === path.resolve(currentDir)) {
-        return;
-      }
-
+      // The configured dir can coincide with the legacy one (cwd = $HOME). An
+      // unreadable shared dir warns once here, and a readable one hides nothing.
       const legacyFiles = this.getStorageFileNames(legacyDir, extension, noun);
       if (legacyFiles.length === 0) {
         return;
