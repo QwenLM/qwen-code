@@ -12465,6 +12465,184 @@ describe('LlmChat', async () => {
       });
     });
 
+    it('hoists the real functionResponse from behind an intervening model turn (#15411)', () => {
+      // [model[fc], user[text], model[text], user[fr_real]]: the window
+      // scan stops at the ordinary model turn, so the id used to be
+      // declared unmatched and a sentinel was planted next to the call
+      // while the genuine answer stayed orphaned two turns down — the
+      // model was told the tool "was not recorded" (parent symptom
+      // #15297). The widen pass adopts the real copy instead.
+      const { result, history } = repair([
+        userText('open /tmp/long.txt'),
+        content('model', readCall('call_behind_model', { path: '/x' })),
+        userText('actually, summarize first'),
+        modelText('Summarizing the plan.'),
+        resultTurn('call_behind_model', 'real file contents'),
+      ]);
+
+      expect(result.injected).toEqual([]);
+      expect(result.droppedDuplicates).toEqual([]);
+      // The source turn held only the fr and is removed: 5 → 4 entries.
+      expect(history.length).toBe(4);
+      // The real fr heads the user turn adjacent to its call.
+      expect(history[2]!.parts![0]!.functionResponse?.id).toBe(
+        'call_behind_model',
+      );
+      expect(history[2]!.parts![0]!.functionResponse?.response).toEqual({
+        output: 'real file contents',
+      });
+      expect(history[2]!.parts![1]).toEqual({
+        text: 'actually, summarize first',
+      });
+      // The genuine copy no longer sits behind the model turn.
+      const trailingHasFr = history
+        .slice(3)
+        .some((entry) =>
+          (entry.parts ?? []).some(
+            (part) => part.functionResponse?.id === 'call_behind_model',
+          ),
+        );
+      expect(trailingHasFr).toBe(false);
+      // Idempotent: a second pass finds the invariant already closed.
+      expect(chat.repairOrphanedToolUseTurns()).toEqual({
+        injected: [],
+        droppedDuplicates: [],
+      });
+    });
+
+    it('synthesizes the still-missing id while hoisting a late real copy of its sibling', () => {
+      // Mixed plan in one pass: one parallel callId has a genuine copy
+      // behind the model turn (hoist), the sibling has none (synthesize).
+      const { result, history } = repair([
+        userText('fan out two reads'),
+        content(
+          'model',
+          readCall('cid_wide_a', { path: '/a' }),
+          readCall('cid_wide_b', { path: '/b' }),
+        ),
+        userText('follow up'),
+        modelText('On it.'),
+        resultTurn('cid_wide_a', 'real for a'),
+      ]);
+
+      expect(result.injected).toEqual([
+        { callId: 'cid_wide_b', name: 'read_file' },
+      ]);
+      // The fr-only source turn is removed: 5 → 4 entries.
+      expect(history.length).toBe(4);
+      const adjacentParts = history[2]!.parts!;
+      expect(adjacentParts[0]!.functionResponse?.id).toBe('cid_wide_b');
+      expect(
+        adjacentParts[0]!.functionResponse?.response?.['error'],
+      ).toBeDefined();
+      expect(adjacentParts[1]!.functionResponse?.id).toBe('cid_wide_a');
+      expect(adjacentParts[1]!.functionResponse?.response).toEqual({
+        output: 'real for a',
+      });
+      expect(adjacentParts[2]).toEqual({ text: 'follow up' });
+    });
+
+    it('hoists the first genuine late copy and drops later duplicates for the same callId', () => {
+      // First-copy-wins holds across the widened search too: the first
+      // genuine copy is the survivor, extra genuine copies are dropped
+      // so the id keeps exactly one tool_result on the wire.
+      const { result, history } = repair([
+        userText('kick off'),
+        content('model', readCall('call_late_dup', { path: '/x' })),
+        userText('follow up'),
+        modelText('Working.'),
+        resultTurn('call_late_dup', 'first copy'),
+        resultTurn('call_late_dup', 'second copy'),
+      ]);
+
+      expect(result.injected).toEqual([]);
+      expect(result.droppedDuplicates).toEqual([
+        { callId: 'call_late_dup', name: 'read_file' },
+      ]);
+      // Both source turns held only an fr: both removed, 6 → 4 entries.
+      expect(history.length).toBe(4);
+      expect(history[2]!.parts![0]!.functionResponse?.response).toEqual({
+        output: 'first copy',
+      });
+      expect(history[2]!.parts![1]).toEqual({ text: 'follow up' });
+    });
+
+    it('keeps synthesizing when only a synthesized placeholder sits behind the model turn', () => {
+      // Placeholder-vs-genuine discrimination: a far sentinel is not the
+      // tool's real output, so the widen pass must neither adopt nor
+      // relocate it. A fresh sentinel still closes the pair adjacent to
+      // the call; the old one is left as-is (pre-existing shape).
+      const { result, history } = repair([
+        userText('kick off'),
+        content('model', readCall('call_sentinel_late', { path: '/x' })),
+        userText('follow up'),
+        modelText('On it.'),
+        content(
+          'user',
+          fnResponse(
+            'read_file',
+            { error: ORPHAN_TOOL_USE_REPAIR_REASON },
+            'call_sentinel_late',
+          ),
+        ),
+      ]);
+
+      expect(result.injected).toEqual([
+        { callId: 'call_sentinel_late', name: 'read_file' },
+      ]);
+      expect(history.length).toBe(5);
+      expect(history[2]!.parts![0]!.functionResponse?.id).toBe(
+        'call_sentinel_late',
+      );
+      expect(
+        (
+          history[2]!.parts![0]!.functionResponse?.response as {
+            error?: string;
+          }
+        ).error,
+      ).toMatch(/interrupted/i);
+      expect(history[2]!.parts![1]).toEqual({ text: 'follow up' });
+      // The far placeholder is untouched.
+      expect(history[4]!.parts![0]!.functionResponse?.response).toEqual({
+        error: ORPHAN_TOOL_USE_REPAIR_REASON,
+      });
+    });
+
+    it('keeps preserved call ids untouched even when a genuine late copy exists', () => {
+      // preserveCallIds means the caller owns the pair (restorable ask-
+      // user-question): neither synthesized nor relocated, exactly the
+      // pre-widen contract.
+      const history = [
+        userText('ask'),
+        content('model', fnCall('ask_user_question', {}, 'call_auq_late')),
+        userText('follow up'),
+        modelText('On it.'),
+        resultTurn('call_auq_late', 'answered elsewhere'),
+      ];
+      const { result } = repair(structuredClone(history), undefined, {
+        preserveCallIds: new Set(['call_auq_late']),
+      });
+
+      expect(result.injected).toEqual([]);
+      expect(chat.getHistory()).toEqual(history);
+    });
+
+    it('leaves later genuine copies alone when the window already has the first copy', () => {
+      // First-copy-wins: an in-window survivor suppresses both synthesis
+      // and the widen pass; a genuine copy further down is today's shape
+      // and is not chased (only same-window duplicates are deduped).
+      const { result } = repair([
+        userText('kick off'),
+        callTurn('call_inwin'),
+        resultTurn('call_inwin', 'canonical'),
+        modelText('noted'),
+        resultTurn('call_inwin', 'echo'),
+      ]);
+
+      expect(result.injected).toEqual([]);
+      expect(result.droppedDuplicates).toEqual([]);
+    });
+
     it('synthesizes missing fr AND hoists real fr in a parallel tool_use mismatch', () => {
       // The real fr covers only SOME parallel callIds from a non-adjacent
       // turn, so one model turn gets both fix-ups (synthesize AND hoist).

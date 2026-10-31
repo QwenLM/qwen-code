@@ -2091,7 +2091,8 @@ export function isSynthesizedRepairPart(part: Part): boolean {
 /**
  * Walk `history` left-to-right and close every dangling
  * tool_use ↔ tool_result pair. For each `model[functionCall]`:
- *  - SYNTHESIZE an `error` `functionResponse` for ids with no match;
+ *  - SYNTHESIZE an `error` `functionResponse` for ids with no genuine
+ *    match in the adjacent window or anywhere later in history;
  *  - HOIST a real fr from a non-adjacent later user turn into the
  *    adjacent one;
  *  - drop duplicate fr copies for the same id.
@@ -2226,6 +2227,53 @@ function planRepair(scan: ScanResult): RepairPlan {
 }
 
 /**
+ * WIDEN — for ids the adjacent-window scan left unmatched, search the
+ * REST of history for a genuine (non-synthesized) `functionResponse`
+ * and adopt the first copy as the hoist survivor; extra genuine copies
+ * drop as duplicates. The window scan only sees the consecutive user
+ * run after a `model[functionCall]`, so a real result that landed
+ * behind an ordinary `model[text]` turn (late submitQuery after a
+ * follow-up prompt) used to be synthesized over: a placeholder went in
+ * next to the call while the genuine answer stayed orphaned further
+ * down, leaving two `tool_result` blocks for one id. Synthesized
+ * placeholders never satisfy the search — hoisting one would relocate
+ * an error stub, not the tool's real output. Mutates `plan` only.
+ */
+function adoptLateResponses(
+  history: Content[],
+  scan: ScanResult,
+  plan: RepairPlan,
+): void {
+  for (const [id, name] of [...plan.synthesizeIds]) {
+    const locations: FrLocation[] = [];
+    for (let turnIdx = scan.scanEnd; turnIdx < history.length; turnIdx++) {
+      const parts = history[turnIdx]?.parts ?? [];
+      for (let partIdx = 0; partIdx < parts.length; partIdx++) {
+        const part = parts[partIdx]!;
+        if (part.functionResponse?.id !== id) continue;
+        if (isSynthesizedRepairPart(part)) continue;
+        locations.push({ turnIdx, partIdx, part });
+      }
+    }
+    const survivor = locations[0];
+    if (!survivor) continue;
+    plan.synthesizeIds = plan.synthesizeIds.filter(([sid]) => sid !== id);
+    plan.hoistedParts.push(survivor.part);
+    plan.removalTargets.push({
+      turnIdx: survivor.turnIdx,
+      partIdx: survivor.partIdx,
+    });
+    for (let k = 1; k < locations.length; k++) {
+      plan.removalTargets.push({
+        turnIdx: locations[k]!.turnIdx,
+        partIdx: locations[k]!.partIdx,
+      });
+      plan.droppedDuplicates.push({ callId: id, name });
+    }
+  }
+}
+
+/**
  * MUTATION — apply the plan to `history` in place. Returns the count
  * of new user turns inserted (0 or 1) so the outer loop can advance its
  * cursor.
@@ -2258,6 +2306,15 @@ function applyRepair(
   for (const loc of removals) {
     const turnParts = history[loc.turnIdx].parts;
     if (turnParts) turnParts.splice(loc.partIdx, 1);
+    // A late-hoist removal can empty a user turn beyond the scanned
+    // window; step (2) below only sweeps the window itself, so drop
+    // that turn here. Descending order keeps the index valid.
+    if (
+      loc.turnIdx >= plan.scanEnd &&
+      (history[loc.turnIdx]?.parts?.length ?? 0) === 0
+    ) {
+      history.splice(loc.turnIdx, 1);
+    }
   }
 
   // (2) Drop now-empty user turns after the resolved adjacent turn.
@@ -2327,6 +2384,11 @@ export function repairOrphanedToolUseTurns(
       plan.synthesizeIds = plan.synthesizeIds.filter(
         ([id]) => !preserveCallIds.has(id),
       );
+    }
+    if (plan.synthesizeIds.length > 0) {
+      // The window scan only sees the consecutive user run; fall back
+      // to the whole history before declaring the pair unanswerable.
+      adoptLateResponses(history, scan, plan);
     }
     if (plan.synthesizeIds.length === 0 && plan.removalTargets.length === 0) {
       continue;
