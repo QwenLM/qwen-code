@@ -6,7 +6,7 @@
 
 1. **Bind** — a non-loopback bind always carries a bearer: the operator's, or an ephemeral 128-bit one generated and printed once at startup. Boot refuses only when a supplied token source is explicitly empty/whitespace, or when a requested `localhost` resolves off-loopback with no token source resolved (which never generates).
 2. **Bearer auth** — `bearerAuth` middleware with constant-time SHA-256 compare protects normal API routes except `/health` on an ordinary loopback bind (`require_auth` moves that endpoint behind the bearer too). Channel webhook ingress is a separate pre-bearer route authenticated by `x-qwen-webhook-secret`. Web Shell document and asset routes remain pre-auth in every mode.
-3. **Host header allowlist** — on loopback, only `localhost`, `127.0.0.1`, `[::1]`, `host.docker.internal`, or the exact bound loopback address (plus port) are accepted; the corresponding port-less forms are also accepted when listening on 80 or 443. The allowlist defends against DNS rebinding. The Local Control LAN listener is the exception that always enforces its advertised-authority Host check, whatever the primary bind is.
+3. **Host header allowlist** — on loopback, only `localhost`, `127.0.0.1`, `[::1]`, `host.docker.internal`, or the exact bound loopback address are accepted, with any port or none. The allowlist defends against DNS rebinding, which the hostname alone decides; ignoring the port is what lets a port-forwarding hop (`ssh -L`, a VS Code remote window) through to the bearer check. The Local Control LAN listener is the exception that always enforces its advertised-authority Host check, whatever the primary bind is.
 4. **Origin control** — the runtime app always installs `allowOriginCors` over a mutable allowlist (`MutableOriginAllowlist`): the `--allow-origin <pattern>` entries seed it, and Local Control adds the LAN origin while enabled. Non-matching origins receive the 403 deny envelope. The unconditional deny wall (`denyBrowserOriginCors`) survives only in the bootstrap app that answers before the runtime starts.
 5. **Per-route mutation gate** — strict routes require operator authority. A token-less loopback primary listener is trusted; bearer-authenticated and paired Local Control requests also qualify. A token-less primary request that reaches this gate without trusted authority receives the distinct `code: 'token_required'` error. Missing or invalid configured credentials and unpaired Local Control credentials are rejected earlier by their listener-scoped bearer middleware with plain `401 Unauthorized`.
 6. **Device-flow auth** — separate OAuth surface for providers (`POST /workspace/auth/device-flow` + GET/DELETE on `/:id`).
@@ -136,10 +136,12 @@ proxy's `https` origin can never match the plain socket's scheme.
 
 ### `hostAllowlist`
 
-Loopback-only. Maintains a `Set<string>` keyed by port. Allowed Hosts:
+Loopback-only. Matches the Host **name** through `hostHeaderMatchesLoopbackBind` (`loopback-binds.ts`), shared with the ACP WebSocket upgrade gate so the two cannot drift. Allowed Hosts:
 
-- `localhost:<port>`, `127.0.0.1:<port>`, `[::1]:<port>`, `host.docker.internal:<port>`, and the exact bound loopback address with the same port. The last form covers the complete supported IPv4 loopback range (`127.0.0.0/8`) without admitting unrelated Hosts.
-- Plus the corresponding no-port forms **only** when bound to port 80 or 443 (per RFC 7230 §5.4 default-port omission).
+- `localhost`, `127.0.0.1`, `[::1]`, `host.docker.internal`, and the exact bound loopback address. The last form covers the complete supported IPv4 loopback range (`127.0.0.0/8`) without admitting unrelated Hosts.
+- With **any** port, or none (the latter is what RFC 7230 §5.4 default-port omission sends on 80/443).
+
+**The port is deliberately not matched.** It carries no weight in the defense: a browser always sends the authority of the URL it fetched, so an attacker page must already have been served the daemon's port to reach it at all, and a page on `evil.example` rebound to 127.0.0.1 still sends `Host: evil.example` and is still rejected. A non-browser client can spell any Host it likes and always could — the bearer token, not this gate, is what stops it. What matching the port did block was port-forwarding hops, where the client-side port is not the one the daemon bound: `ssh -L 8080:localhost:4170` and a VS Code remote window's `asExternalUri` both produced a pre-auth `403` that no token could clear (#12059).
 
 Host comparison is **case-insensitive** — Express normalizes header names but not values, so Docker proxies that capitalize Hosts (`Localhost:4170`, `HOST.docker.internal`) would 403 with an exact-string compare.
 

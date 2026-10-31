@@ -30,7 +30,7 @@
 
 隧道解析到带方括号的 IPv6 字面量同样不受支持，并会以明确提示 fail closed。无头 Chromium 会把无端口、具体端口和通配端口三种写法都判为非法 CSP host-source；`http://localhost:*` 也不会覆盖 `http://[::1]:<port>` 请求。因此，若要支持这种解析结果，需要找到浏览器兼容的策略表达方式，而不是删除这道守卫。
 
-已知限制（对真实 daemon 实测，而非推断）：Host 白名单（`packages/cli/src/serve/auth.ts` 的 `hostAllowlist`）只接受 `<host>:<daemon 端口>`，且它在鉴权**之前**就拒绝。`Host: localhost:<daemon 端口>` 返回 200；同一请求只要 Host 里是别的端口，即便带合法 bearer token 也返回 `403 {"error":"Invalid Host header"}`——去掉 token 后，白名单内的 Host 得到 401、另一个仍是 403，这就钉住了两者的先后顺序。VS Code 的转发通常复用 daemon 的端口号，这也正是今天手动转发能生效的原因，所以常见路径是通的；一旦客户端端口不同，shell 拿到的就是 403 而不是工作区。原始 TCP 转发会保留 Host 头，因此会撞上这道门；而把 Host 改写成 daemon 自身 authority 的代理则不会。放宽这道防 DNS rebinding 的防线是一个独立的、涉及安全的决策，不在本次改动范围内。
+曾经的已知限制，已在 #12059 中修复：Host 白名单（`packages/cli/src/serve/auth.ts` 的 `hostAllowlist`）过去只接受 `<host>:<daemon 端口>`，且它在鉴权**之前**就拒绝。`Host: localhost:<daemon 端口>` 返回 200；同一请求只要 Host 里是别的端口，即便带合法 bearer token 也返回 `403 {"error":"Invalid Host header"}`——去掉 token 后，白名单内的 Host 得到 401、另一个仍是 403，这就钉住了两者的先后顺序。下文那个悬而未决的问题——真实窗口是否复用 daemon 的端口——随后在一个 WSL 窗口上实测得到了答案：**并不复用。** 每个转发端口都拿到了自己的客户端端口号（daemon 的 `53667` 对外是 `127.0.0.1:64205`），于是 webview 把 `Host: 127.0.0.1:64205` 发给了绑定在 53667 上的 daemon，面板因一个鉴权前的 403 而一直空白；而同一台机器直接访问该 daemon 自己的端口时返回 401，也就是说通过了 Host 门。现在这道门只匹配 Host **主机名**而忽略端口（`hostHeaderMatchesLoopbackBind`）——防 DNS rebinding 真正依赖的就是主机名：浏览器发送的始终是它所请求 URL 的 authority，因此被重绑定到 127.0.0.1 的 `evil.example` 依旧会报出自己的名字，依旧被拒绝。原始 TCP 转发会保留 Host 头，因此过去会撞上这道门；而把 Host 改写成 daemon 自身 authority 的代理从来不会。
 
 ## 验证
 
@@ -38,4 +38,4 @@
 - `WebViewContent` 单测：`connect-src` 在本地保持仅 loopback，在远程增加 `localhost` 的 HTTP/WS 组合。
 - 五个行为测试在没有修复时会失败。两个本地窗口测试在修复前后都通过，其存在意义是钉住本地路径没有被放宽。
 - 机制层复现（无需桌面客户端）：在 Docker 容器里用扩展完全相同的 argv 启动真实 CLI，并用扩展完全相同的正则抓取它的地址。容器内访问 `/capabilities` 返回 200；从宿主发起同一个 `http://127.0.0.1:<port>` 请求则被拒绝——正是报告里的失败，且没有使用任何替身进程。随后在无头 Chromium 里分别加载两种 CSP（策略从 DOM 里回读校验）：改动前的策略会以 `connect-src` 违规拦掉 `http://localhost:<port>` 与 `ws://localhost:<port>`，改动后两者都放行，而 `wss://localhost:<port>` 在两种策略下都被 `ws:` 源放行。另一次 Chromium 探针确认，带方括号的 IPv6 host-source 无论不写端口、写具体端口还是写通配端口，都会被判为非法并忽略；有效的 `127.0.0.1` source 仍然生效，而 `localhost` 不会覆盖字面量 `[::1]` 请求。
-- 端到端确认需要真实的 Remote-SSH 或 Dev Container 窗口加桌面客户端，无法在无头环境运行；手动步骤见 E2E 测试计划。机制层探针覆盖不到的是 VS Code 自己的隧道——尤其是真实窗口究竟复用 daemon 的端口（200）还是拿到另一个端口（403）。
+- 端到端确认需要真实的 Remote-SSH 或 Dev Container 窗口加桌面客户端，无法在无头环境运行；手动步骤见 E2E 测试计划。机制层探针覆盖不到的是 VS Code 自己的隧道——尤其是真实窗口究竟复用 daemon 的端口（200）还是拿到另一个端口（403）。#12059 已在 WSL 窗口上给出答案：每次都是另一个端口，所以 403 是实际行为，而非边角情况（见上文那一段）。

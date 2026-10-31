@@ -2745,7 +2745,7 @@ function createBootstrapServeApp(input: {
   // Same admission order as the runtime app (createServeApp): Host gate, then
   // the remote same-origin check, then the CORS wall — so a request gets the
   // same reject body in every boot phase.
-  app.use(hostAllowlist(opts.hostname, getPort));
+  app.use(hostAllowlist(opts.hostname));
   installRemoteSelfOriginMiddleware(app, opts.hostname, opts.token);
   if (opts.allowOrigins && opts.allowOrigins.length > 0) {
     app.use(allowOriginCors(parseAllowOriginPatterns(opts.allowOrigins)));
