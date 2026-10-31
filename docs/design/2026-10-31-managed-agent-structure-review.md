@@ -227,7 +227,19 @@ cross-cutting "how the system works today" tour.
   permits connection-sharing SQL helpers to stay in one package.
   Replace the 7 public setters with constructor injection; express any real
   cycle with `ObjectProvider` or `@Lazy` instead of mutable wiring. Split the
-  mirrored test files in the same slices.
+  mirrored test files in the same slices. Setter investigation (2026-10-31):
+  four of the seven setters are Spring `@Autowired(required = false)`
+  optional-dependency injection (`lifecycle`, `definitions`,
+  `sessionWorktrees`, `journalEventTransport`) and three are required plain
+  `@Autowired` injection (`extensionPackages`, `creationSkills`,
+  `worktreeFiles` — its bean is supplied by
+  `ManagedAgentConfiguration.managedWorktreeFiles()`; the direct calls in
+  `VerificationFixtures` are test setup, not production wiring). Converting
+  them to constructor `ObjectProvider` injection is a large change to this
+  central 7,700-line class with ~30 test wiring sites, and its correctness
+  depends on Spring runtime assembly that the manual-setter unit tests do
+  not fully exercise; it warrants a dedicated design pass and full
+  integration verification before implementation, not an incremental slice.
 - `RuntimeBrokerService`: extract module-internal collaborators for recovery
   scanning, cancellation, tool holds, and observation cooldown; the service
   becomes a facade. The module already exists, so no cross-module contract
