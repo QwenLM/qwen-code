@@ -387,21 +387,35 @@ final class HostedGateTestSupport {
     }
 
     // The bean Spring hands out can be a decorator around the connector that
-    // owns the map, so walk the delegate chain before reading the field. A
-    // chain that owns no map falls through to getField, which names the
-    // missing field instead of failing somewhere less obvious.
-    static Map<?, ?> attachmentsOf(HarnessConnector connector) {
+    // owns the private state these gates read, so resolve the owner once and
+    // let every read share it. A chain that owns no attachment map stops at
+    // its last connector, so the caller's getField still names the missing
+    // field instead of failing somewhere less obvious.
+    static HarnessConnector connectorOwning(HarnessConnector connector) {
         HarnessConnector owner = connector;
-        while (owner != null && ReflectionUtils.findField(
-                owner.getClass(), "attachments", Map.class) == null) {
-            Field delegate = ReflectionUtils.findField(
-                    owner.getClass(), "delegate", HarnessConnector.class);
+        while (owner != null && declaredField(owner, "attachments", Map.class) == null) {
+            Field delegate = declaredField(owner, "delegate", HarnessConnector.class);
             if (delegate == null) {
                 break;
             }
             ReflectionUtils.makeAccessible(delegate);
             owner = (HarnessConnector) ReflectionUtils.getField(delegate, owner);
         }
-        return (Map<?, ?>) ReflectionTestUtils.getField(owner, "attachments");
+        return owner;
+    }
+
+    static Map<?, ?> attachmentsOf(HarnessConnector connector) {
+        return (Map<?, ?>) ReflectionTestUtils.getField(
+                connectorOwning(connector), "attachments");
+    }
+
+    // findField's type argument matches the declared type exactly, not by
+    // assignability, so a delegate declared as a concrete connector would be
+    // missed. Match on the name and check assignability instead. A field that
+    // exists and holds null is still a field: the caller reads its value.
+    private static Field declaredField(HarnessConnector owner, String name,
+            Class<?> type) {
+        Field field = ReflectionUtils.findField(owner.getClass(), name);
+        return field != null && type.isAssignableFrom(field.getType()) ? field : null;
     }
 }

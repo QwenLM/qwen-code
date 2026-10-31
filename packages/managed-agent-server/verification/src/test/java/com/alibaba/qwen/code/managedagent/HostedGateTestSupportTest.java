@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.daemon.HarnessSessionRef;
+import com.alibaba.qwen.code.daemon.HostedHarnessClient;
 import com.alibaba.qwen.code.managedagent.harness.QwenHostedHarnessConnector;
 import com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary;
 import org.junit.jupiter.api.Test;
@@ -19,6 +20,7 @@ import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachmen
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachmentsOf;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.bootWithFreshPorts;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.camel;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.connectorOwning;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -78,6 +80,31 @@ class HostedGateTestSupportTest {
         assertThat(attachment(decorated, "session-a")).isSameAs(mine);
         assertThat(attachment(decorated, "session-c")).isNull();
         assertThat(attachmentsOf(decorated)).isSameAs(attachments);
+    }
+
+    // The same bean is read for its client one line after its attachment, so
+    // resolving the owner has to serve every private read on it, not just the
+    // map (#15972 R1-1).
+    @Test
+    void connectorOwningServesEveryPrivateReadOnTheDecoratedBean() {
+        var connector = mock(QwenHostedHarnessConnector.class);
+        var attachments = new LinkedHashMap<Object, HarnessSessionRef>();
+        attachments.put("mine", ref("session-a"));
+        ReflectionTestUtils.setField(connector, "attachments", attachments);
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        ReflectionTestUtils.setField(connector, "client", client);
+        var decorated = new SdkHarnessBoundary(new SdkHarnessBoundary(connector));
+
+        assertThat(ReflectionTestUtils.getField(connectorOwning(decorated), "client"))
+                .isSameAs(client);
+        assertThat(connectorOwning(decorated)).isSameAs(connector);
+        assertThat(attachmentsOf(decorated)).isSameAs(attachments);
+
+        // A declared field holding null is still a field: the read returns null
+        // instead of the owner being treated as unresolved.
+        ReflectionTestUtils.setField(connector, "client", null);
+        assertThat(ReflectionTestUtils.getField(connectorOwning(decorated), "client"))
+                .isNull();
     }
 
     // The boot retry's only consumer is the deep MySQL lane; pin its contract

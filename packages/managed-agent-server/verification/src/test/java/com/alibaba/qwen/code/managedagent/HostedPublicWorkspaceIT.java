@@ -58,6 +58,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachmentsOf;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.connectorOwning;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -645,7 +646,8 @@ class HostedPublicWorkspaceIT {
             var connector = spring.getBean(HarnessConnector.class);
             var attached = attachment(connector, session);
             assertThat(attached).as("Spring's attachment to %s", session).isNotNull();
-            var client = (HostedHarnessClient) ReflectionTestUtils.getField(connector, "client");
+            var client = (HostedHarnessClient) ReflectionTestUtils.getField(
+                    connectorOwning(connector), "client");
             // The third request is counted before its handler finishes; wait for the
             // producer's prompt and all receipt handlers before taking final evidence.
             await().atMost(Duration.ofSeconds(15)).failFast(() -> {
