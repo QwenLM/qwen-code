@@ -3943,18 +3943,21 @@ describe('qwen-triage verify hardening round 2', () => {
     );
   });
 
-  // Status/report lifecycle is keyed on a machine marker, and identity
+  // Status/report lifecycle is keyed on machine markers, and identity
   // failures must not widen the ownership filter to every user.
-  it('keys the status comment on a marker and fails closed on identity', () => {
+  it('keys the status comment on markers and fails closed on identity', () => {
     for (const name of [
       'Resolve PR and snapshot metadata',
       'Post verification report comment',
     ]) {
       const s = step(name);
-      expect(s).toContain('qwen-triage:verify-state=running');
+      expect(s).toContain('qwen-triage:verify-run=${GITHUB_RUN_ID}');
       expect(s).not.toContain('$bot == ""');
       expect(s).toContain('.user.login == $bot');
     }
+    expect(step('Resolve PR and snapshot metadata')).toContain(
+      'qwen-triage:verify-state=running',
+    );
   });
 
   // The evidence-hosting path carries the untrusted-image checks; exercise
@@ -4465,12 +4468,14 @@ describe('qwen-triage verify hardening round 2', () => {
     const dir = mkdtempSync(join(tmpdir(), 'verify-upsert-'));
     try {
       // The stub records which HTTP verb the publisher used and against
-      // which comment id, and serves a comments listing from a fixture.
+      // which comment id, keeps the body it sent, and serves a comments
+      // listing from a fixture.
       writeFileSync(
         join(dir, 'gh'),
         [
           '#!/usr/bin/env bash',
           'all="$*"',
+          'for a in "$@"; do case "$a" in body=@*) cp "${a#body=@}" "$BODY_OUT";; esac; done',
           'case "$all" in',
           '  *"api user"*|*" user "*) echo qwen-code-ci-bot ;;',
           '  *"-X PATCH"*) echo "PATCH $all" >> "$CALLS" ;;',
@@ -4490,6 +4495,7 @@ describe('qwen-triage verify hardening round 2', () => {
       );
       const listing = join(dir, 'listing.json');
       const calls = join(dir, 'calls');
+      const bodyOut = join(dir, 'body.md');
       const M = '<!-- qwen-triage:verify -->';
       const RUNNING = '<!-- qwen-triage:verify-state=running -->';
       const run = (comments, env = {}) => {
@@ -4503,13 +4509,15 @@ describe('qwen-triage verify hardening round 2', () => {
             PATH: `${dir}:${process.env.PATH}`,
             LISTING: listing,
             CALLS: calls,
-            GH_STUB_OUT: join(dir, 'body.md'),
+            BODY_OUT: bodyOut,
             GH_TOKEN: 'x',
             GITHUB_REPOSITORY: 'QwenLM/qwen-code',
             RUNNER_TEMP: dir,
             GITHUB_STEP_SUMMARY: '/dev/null',
+            // A second attempt: the comment belongs to the run, not to one
+            // attempt of it.
             GITHUB_RUN_ID: '1',
-            GITHUB_RUN_ATTEMPT: '1',
+            GITHUB_RUN_ATTEMPT: '2',
             PR_NUMBER: '7999',
             RUN_URL: 'u',
             VERIFY_RESULT: 'success',
@@ -4540,6 +4548,24 @@ describe('qwen-triage verify hardening round 2', () => {
       expect(patched).toContain('PATCH');
       expect(patched).toContain('/issues/comments/555');
       expect(patched).not.toContain('POST');
+      // Both lookups select on the leading marker, and the run marker is
+      // what a re-run of this job finds.
+      expect(readFileSync(bodyOut, 'utf8').split('\n').slice(0, 2)).toEqual([
+        M,
+        '<!-- qwen-triage:verify-run=1 -->',
+      ]);
+
+      // Re-run after it published: the report it already wrote is replaced,
+      // not posted a second time.
+      const rerun = run([
+        {
+          id: 555,
+          user: { login: 'qwen-code-ci-bot' },
+          body: `${M}\n<!-- qwen-triage:verify-run=1 -->\n<!-- qwen-triage:verify-substantive -->\n\nreport`,
+        },
+      ]);
+      expect(rerun).toContain('/issues/comments/555');
+      expect(rerun).not.toContain('POST');
 
       // No prior comment: post fresh.
       expect(run([])).toContain('POST');
@@ -4557,7 +4583,7 @@ describe('qwen-triage verify hardening round 2', () => {
       const report = (id) => ({
         id,
         user: { login: 'qwen-code-ci-bot' },
-        body: `${M}\n<!-- qwen-triage:verify-substantive -->\n\nearlier report`,
+        body: `${M}\n<!-- qwen-triage:verify-run=2 -->\n<!-- qwen-triage:verify-substantive -->\n\nearlier report`,
       });
       for (const comments of [
         [report(600), status(601, 2)],
@@ -6099,6 +6125,44 @@ describe('qwen-triage verify publish fidelity', () => {
     }
   });
 
+  // A re-run of the publisher finds what it already published by the run
+  // marker, so every terminal body carries it, right after the leading
+  // marker both lookups select on.
+  it('keeps the run marker in every terminal body', () => {
+    const dir = fixture();
+    try {
+      const variants = {
+        'real report': { AGENT_VERDICT: 'merge-ready' },
+        'incomplete — cancelled': { VERIFY_RESULT: 'cancelled' },
+        'incomplete — infrastructure failure': {
+          VERIFY_RESULT: 'failure',
+          VERDICT: '',
+        },
+        'not run — skipped': { VERDICT: 'skipped', SKIP_REASON: 'closed' },
+        'not run — n/a': { VERDICT: 'n/a' },
+        'results unavailable': { DOWNLOAD_OUTCOME: 'failure' },
+        'the PR could not be built': {
+          VERDICT: 'fail',
+          PREPARE_FAILURE_PHASE: 'build',
+        },
+      };
+      for (const [shown, env] of Object.entries(variants)) {
+        const body = render(dir, {
+          NAME: `run-${Object.keys(variants).indexOf(shown)}`,
+          GITHUB_RUN_ID: '41',
+          ...env,
+        });
+        expect(body).toContain(shown);
+        expect(body.split('\n').slice(0, 2)).toEqual([
+          '<!-- qwen-triage:verify -->',
+          '<!-- qwen-triage:verify-run=41 -->',
+        ]);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // Images were collected across every round, oldest first, while the
   // report came from the newest: an earlier round holding eight images
   // filled the cap, and the published report showed none of its own.
@@ -6112,16 +6176,21 @@ describe('qwen-triage verify publish fidelity', () => {
         Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0]),
       );
     };
-    const images = (env) =>
-      [
-        ...render(dir, {
-          AGENT_VERDICT: 'merge-ready',
-          VERIFY_ASSETS_UPLOADER: 'true',
-          ALIYUN_OSS_BUCKET: 'b',
-          ALIYUN_OSS_PUBLIC_BASE_URL: 'https://oss.example.test',
-          ...env,
-        }).matchAll(/!\[([^\]]+)\]\(https:\/\/oss\.example\.test\//g),
+    const images = (env) => {
+      const body = render(dir, {
+        AGENT_VERDICT: 'merge-ready',
+        VERIFY_ASSETS_UPLOADER: 'true',
+        ALIYUN_OSS_BUCKET: 'b',
+        ALIYUN_OSS_PUBLIC_BASE_URL: 'https://oss.example.test',
+        ...env,
+      });
+      // Each published round holds one image and hosts it; another round's
+      // images must not be counted as failing the checks either.
+      expect(body).not.toContain('did not pass the hosting checks');
+      return [
+        ...body.matchAll(/!\[([^\]]+)\]\(https:\/\/oss\.example\.test\//g),
       ].map((m) => m[1]);
+    };
     try {
       // An earlier complete round with a full set, the newest complete
       // round with one image, and a newer directory holding images only.
@@ -6432,6 +6501,7 @@ describe('qwen-triage verify publish fidelity', () => {
           GH_TOKEN: 'x',
           GITHUB_REPOSITORY: 'QwenLM/qwen-code',
           GITHUB_RUN_ID: '1',
+          GITHUB_RUN_ATTEMPT: '2',
           PR_NUMBER: '7999',
           RUN_URL: 'u',
           RUNNER_TEMP: dir,
@@ -6478,12 +6548,16 @@ describe('qwen-triage verify publish fidelity', () => {
   // Taking it over put both rounds into one comment, and the later report
   // overwrote the earlier one.
   it("reuses only its own run's status comment", () => {
+    // The body exactly as both lookups read it: the verify marker first,
+    // then the state and this run's marker.
+    const written =
+      '-f body=<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-state=running -->\n<!-- qwen-triage:verify-run=1 -->\n\n';
     const own = statusComment([liveStatus(201, 1), liveStatus(202, 2)]);
     expect(own).toContain(
       'PATCH api --method PATCH repos/QwenLM/qwen-code/issues/comments/201 ',
     );
     expect(own).not.toContain('comments/202');
-    expect(own).toContain('<!-- qwen-triage:verify-run=1 -->');
+    expect(own).toContain(written);
 
     // Another round's live status, a run id that only starts with ours,
     // and our run marker in a comment the bot does not own: none is ours.
@@ -6495,7 +6569,7 @@ describe('qwen-triage verify publish fidelity', () => {
       const calls = statusComment([comment]);
       expect(calls).not.toContain('PATCH');
       expect(calls).toContain('POST');
-      expect(calls).toContain('<!-- qwen-triage:verify-run=1 -->');
+      expect(calls).toContain(written);
     }
   });
 

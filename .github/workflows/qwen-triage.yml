@@ -5190,8 +5190,8 @@ jobs:
     # per-PR group here would let a second /verify cancel a completed run's
     # pending publisher and drop its report entirely. Overlap between
     # publishers is instead made safe by the marker discipline below
-    # (bot-owned + prefix match, each run writes only into its own live
-    # status, post-fresh fallback), which is a correctness property rather
+    # (bot-owned + prefix match, each run writes only into its own
+    # comment, post-fresh fallback), which is a correctness property rather
     # than a scheduling one.
     concurrency:
       group: "${{ format('{0}-publish-verify-{1}', github.workflow, github.run_id) }}"
@@ -5337,6 +5337,10 @@ jobs:
             exit 0
           fi
           BODY_FILE="${RUNNER_TEMP:-/tmp}/verify-comment.md"
+          # Every body keeps the run marker the status step wrote, so this
+          # job, re-run after it published, finds its own comment again
+          # instead of posting the report twice.
+          RUN_MARKER="<!-- qwen-triage:verify-run=${GITHUB_RUN_ID} -->"
           # Set only from the published report's own verdict.txt below.
           AGENT_VERDICT=''
 
@@ -5773,7 +5777,7 @@ jobs:
           # drop the demotion the download-failure branch already honors.
           if [ "${VERIFY_RESULT:-}" = "cancelled" ]; then
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '%s\n%s\n\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER"
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); job cancelled before the report** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
@@ -5793,7 +5797,7 @@ jobs:
             } > "$BODY_FILE"
           elif [ "${VERIFY_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '%s\n%s\n\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER"
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); the job then failed before the report** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
@@ -5816,7 +5820,7 @@ jobs:
             # always "fails"; they must be answered before the
             # download-failure branch or their real reason is unreachable.
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '%s\n%s\n\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER"
               if [ "${VERDICT:-}" = "skipped" ]; then
                 printf '**Sandboxed verification: ⚠️ not run — skipped** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Skipped because %s.\n\n' "${SKIP_REASON:-the PR was not in a verifiable state}"
@@ -5844,7 +5848,7 @@ jobs:
             # the download did not, or a flaky PR gets a neutral
             # "results unavailable" notice instead of its ❌.
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '%s\n%s\n\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER"
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); result artifact unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
@@ -5897,7 +5901,7 @@ jobs:
             # mis-attribution this commit set out to remove, pointed the
             # other way.
             {
-              printf '%s\n\n' '<!-- qwen-triage:verify -->'
+              printf '%s\n%s\n\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER"
               # Reachable: the prepare step reports infra-error when the
               # registry was unreachable from the runner at failure time.
               if [ "${VERDICT:-}" = 'infra-error' ]; then
@@ -6139,7 +6143,7 @@ jobs:
               echo "::warning::${MISSING_REPORT_NOTE}"
             fi
             {
-              printf '%s\n' '<!-- qwen-triage:verify -->'
+              printf '%s\n%s\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER"
               # Substantive marker: this body carries findings, so a later
               # weak notice must not displace it as the follow-up round's
               # previous-report snapshot.
@@ -6231,11 +6235,12 @@ jobs:
             } > "$BODY_FILE"
           fi
 
-          # Replace only this run's own live status, found by its run
-          # marker; anything else gets a fresh comment. The newest marker
-          # comment may belong to another round — a later round's live
-          # status, or an earlier round's report — and replacing either
-          # would make one round overwrite the other.
+          # Write only into this run's own comment, found by its run marker:
+          # the live status its verify job posted, or the body this job
+          # already published if it is re-run. Anything else gets a fresh
+          # comment. The newest marker comment may belong to another round —
+          # a later round's live status, or an earlier round's report — and
+          # replacing either would make one round overwrite the other.
           # Same ownership discipline as the resolve step: only BOT-OWNED
           # comments STARTING with the marker are candidates, so a marker
           # pasted by any user cannot divert the bot into PATCHing (and
@@ -6253,14 +6258,14 @@ jobs:
               --method GET \
               --paginate \
               -F per_page=100 \
-              | jq -sr --arg bot "$BOT_LOGIN" --arg run "<!-- qwen-triage:verify-run=${GITHUB_RUN_ID} -->" \
+              | jq -sr --arg bot "$BOT_LOGIN" --arg run "$RUN_MARKER" \
                 '[.[][] | select((.body | startswith("<!-- qwen-triage:verify -->")) and .user.login == $bot
-                   and (.body | contains("<!-- qwen-triage:verify-state=running -->")) and (.body | contains($run)))]
+                   and (.body | contains($run)))]
                  | last | .id // empty'
           )"; then
             OWN_ID="$OWN_META"
           elif [ -n "$BOT_LOGIN" ]; then
-            echo "::warning::Failed to look up this run's status comment; will create a new one."
+            echo "::warning::Failed to look up this run's comment; will create a new one."
           fi
           # A failed PATCH (comment deleted, or ownership changed under us)
           # must still leave a terminal report on the PR, never silence.
