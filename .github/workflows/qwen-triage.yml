@@ -2585,6 +2585,9 @@ jobs:
           # Fail CLOSED on an identity lookup failure: an empty bot login
           # used to widen the filter to every user's comments, so one
           # transient API error could point the bot at an attacker's comment.
+          # The state and run markers count only in the header, the lines
+          # before the first blank line, where they are written: a report
+          # can quote them further down.
           if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
             echo "::warning::Could not resolve the bot identity; posting a fresh status comment instead of reusing one."
             BOT_LOGIN=''
@@ -2596,7 +2599,7 @@ jobs:
                 --method GET --paginate -F per_page=100 |
                 jq -rs --arg m "$MARKER" --arg s "$STATUS_MARKER" --arg run "$RUN_MARKER" --arg sub "$SUBSTANTIVE_MARKER" --arg bot "$BOT_LOGIN" \
                   '[.[][] | select((.body | startswith($m)) and .user.login == $bot)] as $mine
-                   | ($mine | map(select((.body | contains($s)) and (.body | contains($run)))) | last) as $own
+                   | ($mine | map(select(.body | split("\n\n")[0] | split("\n") | any(.[]; . == $s) and any(.[]; . == $run))) | last) as $own
                    | ($mine | map(select(.body | contains($sub))) | last) as $report
                    | "\($own.id // "")\t\($report.id // "")"'
             )" || EXISTING_META=''
@@ -5341,6 +5344,7 @@ jobs:
           # job, re-run after it published, finds its own comment again
           # instead of posting the report twice.
           RUN_MARKER="<!-- qwen-triage:verify-run=${GITHUB_RUN_ID} -->"
+          SUBSTANTIVE_MARKER='<!-- qwen-triage:verify-substantive -->'
           # Set only from the published report's own verdict.txt below.
           AGENT_VERDICT=''
 
@@ -5770,6 +5774,13 @@ jobs:
           PARTIAL_EN='The verification run did not complete, so the phases below may be partial or missing entirely. **Advisory evidence for human reviewers — not a review, an approval, or a CI check.**'
           PARTIAL_ZH='本次验证运行未正常结束，下列内容可能不完整甚至缺失。仅作为评审证据，**不构成评审、批准或 CI 检查**。'
 
+          # Every body opens with a header: the verify marker, this run's
+          # marker and, on a body that carries findings, the substantive
+          # marker, ended by a blank line. Choosing which comment to write
+          # into reads markers only from a header, so it is started once,
+          # here, and each branch below appends to it.
+          printf '%s\n%s\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER" > "$BODY_FILE"
+
           # The gate verdict travels via job outputs: it survives a later
           # agent-step failure, a job timeout, and a cancellation. A
           # recorded `flaky` must demote the headline in EVERY terminal
@@ -5777,7 +5788,7 @@ jobs:
           # drop the demotion the download-failure branch already honors.
           if [ "${VERIFY_RESULT:-}" = "cancelled" ]; then
             {
-              printf '%s\n%s\n\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER"
+              printf '\n'
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); job cancelled before the report** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
@@ -5794,10 +5805,10 @@ jobs:
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           elif [ "${VERIFY_RESULT:-}" != "success" ] || [ -z "${VERDICT:-}" ]; then
             {
-              printf '%s\n%s\n\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER"
+              printf '\n'
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); the job then failed before the report** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
@@ -5814,13 +5825,13 @@ jobs:
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           elif [ "${VERDICT:-}" = "skipped" ] || [ "${VERDICT:-}" = "n/a" ]; then
             # These outcomes deliberately upload nothing, so their download
             # always "fails"; they must be answered before the
             # download-failure branch or their real reason is unreachable.
             {
-              printf '%s\n%s\n\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER"
+              printf '\n'
               if [ "${VERDICT:-}" = "skipped" ]; then
                 printf '**Sandboxed verification: ⚠️ not run — skipped** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Skipped because %s.\n\n' "${SKIP_REASON:-the PR was not in a verifiable state}"
@@ -5835,7 +5846,7 @@ jobs:
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           elif [ "${DOWNLOAD_OUTCOME:-success}" != "success" ]; then
             # The verify job may have succeeded, but its artifact never
             # arrived (the download step is continue-on-error). Without this
@@ -5848,7 +5859,7 @@ jobs:
             # the download did not, or a flaky PR gets a neutral
             # "results unavailable" notice instead of its ❌.
             {
-              printf '%s\n%s\n\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER"
+              printf '\n'
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '**Sandboxed verification: ❌ not passed — non-deterministic tests (flakiness gate); result artifact unavailable** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf 'Flakiness gate: ❌ %s\n\n' "${FLAKE_SUMMARY:-changed test files returned different results across identical re-runs}"
@@ -5865,7 +5876,7 @@ jobs:
                 printf '</details>\n\n'
               fi
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           elif [ -n "${PREPARE_FAILURE_PHASE:-}" ]; then
             PREPARE_LOG="$(find verify-results -name 'prepare.log' 2>/dev/null | head -1 || true)"
             # Initialised, not merely defaulted at use: an inherited value
@@ -5901,10 +5912,10 @@ jobs:
             # mis-attribution this commit set out to remove, pointed the
             # other way.
             {
-              printf '%s\n%s\n\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER"
               # Reachable: the prepare step reports infra-error when the
               # registry was unreachable from the runner at failure time.
               if [ "${VERDICT:-}" = 'infra-error' ]; then
+                printf '\n'
                 printf '**Sandboxed verification: ⚠️ incomplete — infrastructure failure** - [workflow run](%s)\n\n' "$RUN_URL"
                 printf '`%s` failed before any verification started, and `registry.npmjs.org` was unreachable from the runner at that moment — so this looks like an infrastructure incident rather than a problem with this PR. Re-running `@qwen-code /verify` may well succeed; the install log below is the place to confirm.\n\n' "$PREPARE_COMMAND"
                 printf '<details>\n<summary>中文 — 判定：⚠️ 未完成 · 基础设施故障</summary>\n\n'
@@ -5920,7 +5931,7 @@ jobs:
               fi
               emit_block 'Install/build log' "$PREPARE_LOG" 20000
               printf '%s\n' '— _Qwen Code · sandboxed verification_'
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           else
             # Pin the artifact-dir shape and sort: a bare -name search takes
             # whatever directory find visits first, which is unordered. Rounds
@@ -6143,7 +6154,6 @@ jobs:
               echo "::warning::${MISSING_REPORT_NOTE}"
             fi
             {
-              printf '%s\n%s\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER"
               # Substantive marker: this body carries findings, so a later
               # weak notice must not displace it as the follow-up round's
               # previous-report snapshot.
@@ -6232,7 +6242,7 @@ jobs:
               else
                 printf '%s\n' '— _Qwen Code · sandboxed verification_'
               fi
-            } > "$BODY_FILE"
+            } >> "$BODY_FILE"
           fi
 
           # Write only into this run's own comment, found by its run marker:
@@ -6246,9 +6256,11 @@ jobs:
           # pasted by any user cannot divert the bot into PATCHing (and
           # failing on) someone else's comment.
           # Fail CLOSED on identity failure (an empty login previously
-          # widened the filter to every user's comments), and match the
-          # machine markers rather than prose a report could quote.
+          # widened the filter to every user's comments), and read the
+          # machine markers only from a header: a report, or a value a PR
+          # run produced, can quote one further down.
           OWN_ID=''
+          OWN_SUBSTANTIVE=''
           if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
             echo "::warning::Could not resolve the bot identity; posting a fresh comment instead of reusing one."
             BOT_LOGIN=''
@@ -6258,14 +6270,27 @@ jobs:
               --method GET \
               --paginate \
               -F per_page=100 \
-              | jq -sr --arg bot "$BOT_LOGIN" --arg run "$RUN_MARKER" \
-                '[.[][] | select((.body | startswith("<!-- qwen-triage:verify -->")) and .user.login == $bot
-                   and (.body | contains($run)))]
-                 | last | .id // empty'
+              | jq -sr --arg bot "$BOT_LOGIN" --arg run "$RUN_MARKER" --arg sub "$SUBSTANTIVE_MARKER" \
+                'def header: split("\n\n")[0] | split("\n");
+                 [.[][] | select((.body | startswith("<!-- qwen-triage:verify -->")) and .user.login == $bot)
+                    | (.body | header) as $h | select(any($h[]; . == $run))
+                    | "\(.id)\t\(any($h[]; . == $sub))"]
+                 | last // empty'
           )"; then
-            OWN_ID="$OWN_META"
+            OWN_ID="${OWN_META%%$'\t'*}"
+            OWN_SUBSTANTIVE="${OWN_META#*$'\t'}"
           elif [ -n "$BOT_LOGIN" ]; then
             echo "::warning::Failed to look up this run's comment; will create a new one."
+          fi
+          # A notice never replaces a body that carries findings. Re-run on
+          # its own, this job cannot download results (the artifact name
+          # carries the attempt), so its "results unavailable" notice would
+          # otherwise replace the round's report; it is posted beside it.
+          BODY_SUBSTANTIVE="$(
+            jq -Rrs --arg sub "$SUBSTANTIVE_MARKER" 'split("\n\n")[0] | split("\n") | any(.[]; . == $sub)' "$BODY_FILE" || true
+          )"
+          if [ "$OWN_SUBSTANTIVE" = true ] && [ "$BODY_SUBSTANTIVE" != true ]; then
+            OWN_ID=''
           fi
           # A failed PATCH (comment deleted, or ownership changed under us)
           # must still leave a terminal report on the PR, never silence.

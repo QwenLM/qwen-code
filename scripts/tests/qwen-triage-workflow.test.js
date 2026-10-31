@@ -4608,6 +4608,58 @@ describe('qwen-triage verify hardening round 2', () => {
       expect(cancelled).toContain('PATCH');
       expect(cancelled).toContain('/issues/comments/555');
       expect(cancelled).not.toContain('POST');
+
+      // A notice never replaces this run's published report. Re-run on its
+      // own, the job cannot download results (the artifact name carries the
+      // attempt), so a body that would say "results unavailable" is posted
+      // beside the report. A build failure carries findings and replaces it.
+      const ownReport = {
+        id: 555,
+        user: { login: 'qwen-code-ci-bot' },
+        body: `${M}\n<!-- qwen-triage:verify-run=1 -->\n<!-- qwen-triage:verify-substantive -->\n\nreport`,
+      };
+      for (const env of [
+        { DOWNLOAD_OUTCOME: 'failure' },
+        { VERIFY_RESULT: 'cancelled' },
+        { VERDICT: 'infra-error', PREPARE_FAILURE_PHASE: 'install' },
+      ]) {
+        const calls = run([ownReport], env);
+        expect(calls).toContain('POST');
+        expect(calls).not.toContain('/issues/comments/555');
+      }
+      const buildFail = run([ownReport], {
+        VERDICT: 'fail',
+        PREPARE_FAILURE_PHASE: 'build',
+      });
+      expect(buildFail).toContain('/issues/comments/555');
+      expect(buildFail).not.toContain('POST');
+      // A notice may replace this run's earlier notice.
+      const notice = run(
+        [
+          {
+            id: 555,
+            user: { login: 'qwen-code-ci-bot' },
+            body: `${M}\n<!-- qwen-triage:verify-run=1 -->\n\nresults unavailable`,
+          },
+        ],
+        { DOWNLOAD_OUTCOME: 'failure' },
+      );
+      expect(notice).toContain('/issues/comments/555');
+      expect(notice).not.toContain('POST');
+
+      // Markers count only in the header: another round's report quoting
+      // this run's marker further down is not this run's comment.
+      const quoting = {
+        id: 556,
+        user: { login: 'qwen-code-ci-bot' },
+        body: `${M}\n<!-- qwen-triage:verify-run=2 -->\n<!-- qwen-triage:verify-substantive -->\n\n\`\`\`\n${M}\n<!-- qwen-triage:verify-run=1 -->\n\`\`\``,
+      };
+      const quoted = run([status(555, 1), quoting]);
+      expect(quoted).toContain('/issues/comments/555');
+      expect(quoted).not.toContain('/issues/comments/556');
+      const quotedOnly = run([quoting]);
+      expect(quotedOnly).toContain('POST');
+      expect(quotedOnly).not.toContain('PATCH');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -6126,38 +6178,62 @@ describe('qwen-triage verify publish fidelity', () => {
   });
 
   // A re-run of the publisher finds what it already published by the run
-  // marker, so every terminal body carries it, right after the leading
-  // marker both lookups select on.
-  it('keeps the run marker in every terminal body', () => {
+  // marker, and a notice must not replace findings, so every terminal body
+  // opens with a header: the verify marker both lookups select on, this
+  // run's marker, and the substantive marker when it carries findings. The
+  // lookups read markers only from the lines before the first blank line.
+  it('opens every terminal body with its header', () => {
     const dir = fixture();
     try {
-      const variants = {
-        'real report': { AGENT_VERDICT: 'merge-ready' },
-        'incomplete — cancelled': { VERIFY_RESULT: 'cancelled' },
-        'incomplete — infrastructure failure': {
-          VERIFY_RESULT: 'failure',
-          VERDICT: '',
-        },
-        'not run — skipped': { VERDICT: 'skipped', SKIP_REASON: 'closed' },
-        'not run — n/a': { VERDICT: 'n/a' },
-        'results unavailable': { DOWNLOAD_OUTCOME: 'failure' },
-        'the PR could not be built': {
-          VERDICT: 'fail',
-          PREPARE_FAILURE_PHASE: 'build',
-        },
-      };
-      for (const [shown, env] of Object.entries(variants)) {
+      const weak = [
+        '<!-- qwen-triage:verify -->',
+        '<!-- qwen-triage:verify-run=41 -->',
+      ];
+      const strong = [...weak, '<!-- qwen-triage:verify-substantive -->'];
+      const variants = [
+        ['real report', strong, { AGENT_VERDICT: 'merge-ready' }],
+        ['incomplete — cancelled', weak, { VERIFY_RESULT: 'cancelled' }],
+        [
+          'incomplete — infrastructure failure',
+          weak,
+          { VERIFY_RESULT: 'failure', VERDICT: '' },
+        ],
+        [
+          'not run — skipped',
+          weak,
+          { VERDICT: 'skipped', SKIP_REASON: 'closed' },
+        ],
+        ['not run — n/a', weak, { VERDICT: 'n/a' }],
+        ['results unavailable', weak, { DOWNLOAD_OUTCOME: 'failure' }],
+        [
+          'the PR could not be built',
+          strong,
+          { VERDICT: 'fail', PREPARE_FAILURE_PHASE: 'build' },
+        ],
+        [
+          'was unreachable from the runner',
+          weak,
+          { VERDICT: 'infra-error', PREPARE_FAILURE_PHASE: 'install' },
+        ],
+      ];
+      variants.forEach(([shown, header, env], i) => {
         const body = render(dir, {
-          NAME: `run-${Object.keys(variants).indexOf(shown)}`,
+          NAME: `hdr-${i}`,
           GITHUB_RUN_ID: '41',
           ...env,
         });
         expect(body).toContain(shown);
-        expect(body.split('\n').slice(0, 2)).toEqual([
-          '<!-- qwen-triage:verify -->',
-          '<!-- qwen-triage:verify-run=41 -->',
-        ]);
-      }
+        expect(body.split('\n\n')[0].split('\n')).toEqual(header);
+      });
+
+      // Written once, before the branches, which only append: a new branch
+      // cannot open its body without it.
+      const code = publishScript()
+        .split('\n')
+        .filter((line) => !/^\s*#/.test(line))
+        .join('\n');
+      expect(code.match(/'<!-- qwen-triage:verify -->'/g)).toHaveLength(1);
+      expect(code.match(/[^>]> "\$BODY_FILE"/g)).toHaveLength(1);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -6561,10 +6637,23 @@ describe('qwen-triage verify publish fidelity', () => {
 
     // Another round's live status, a run id that only starts with ours,
     // and our run marker in a comment the bot does not own: none is ours.
+    // ...nor is this run's published report, which a re-run must not turn
+    // back into "running", nor a report quoting both markers below its
+    // header.
     for (const comment of [
       liveStatus(202, 2),
       liveStatus(212, 12),
       liveStatus(203, 1, { login: 'someone-else' }),
+      {
+        id: 204,
+        user: BOT,
+        body: '<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-run=1 -->\n<!-- qwen-triage:verify-substantive -->\n\nreport',
+      },
+      {
+        id: 205,
+        user: BOT,
+        body: '<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-run=2 -->\n\n```\n<!-- qwen-triage:verify-state=running -->\n<!-- qwen-triage:verify-run=1 -->\n```',
+      },
     ]) {
       const calls = statusComment([comment]);
       expect(calls).not.toContain('PATCH');
