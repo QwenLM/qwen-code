@@ -13,7 +13,6 @@ import {
 } from './goal-evidence.js';
 import {
   GOAL_DEFAULT_TOKEN_BUDGET,
-  GOAL_INFEASIBLE_NEXT_STEP,
   GOAL_NO_PROGRESS_TURN_LIMIT,
   GOAL_PAUSE_REASON_NO_PROGRESS,
   goalPauseReasonForVerifierFailure,
@@ -831,10 +830,10 @@ export function createGoalRuntime(
           ...meteredGoal,
           activeTimeMs: elapsedActiveTime(snapshot.goal, now),
           updatedAt: now,
-          lastReason:
-            attempt.proposal.blockerKind === 'infeasible'
-              ? `${outcome.result.reason} ${GOAL_INFEASIBLE_NEXT_STEP}`
-              : outcome.result.reason,
+          // The reason stays exactly what the verifier wrote: for an accepted
+          // infeasible blocker its prompt already spells the next step into the
+          // (localized) reason, so the runtime appends nothing of its own.
+          lastReason: outcome.result.reason,
         };
         const acceptedSnapshot: GoalSnapshotV2 = {
           v: GOAL_STATE_VERSION,
