@@ -2399,6 +2399,42 @@ describe('runNonInteractive', () => {
     }
   });
 
+  it('aborts the in-flight turn when a SIGHUP arrives', async () => {
+    setupMetricsMock();
+    const baseline = process.listenerCount('SIGHUP');
+    let turnSignal: AbortSignal | undefined;
+    mockLlmClient.sendMessageStream.mockImplementation(
+      (_parts: unknown, signal: AbortSignal) => {
+        turnSignal = signal;
+        return (async function* () {
+          // The model stream stays open until the run is aborted.
+          await new Promise<void>((resolve) => {
+            signal.addEventListener('abort', () => resolve(), { once: true });
+          });
+          yield {
+            type: LlmEventType.Finished,
+            value: { reason: undefined, usageMetadata: { totalTokenCount: 0 } },
+          };
+        })();
+      },
+    );
+
+    const run = runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'hello',
+      'sighup-effect',
+    ).catch(() => undefined);
+    await vi.waitFor(() => {
+      expect(turnSignal).toBeDefined();
+    });
+    process.emit('SIGHUP', 'SIGHUP');
+    await run;
+
+    expect(turnSignal?.aborted).toBe(true);
+    expect(process.listenerCount('SIGHUP')).toBe(baseline);
+  });
+
   it('records a user interrupt when the abort lands inside the settle window', async () => {
     // The same Ctrl+C a moment earlier is routed by `routeAbort` and named a
     // user interrupt; landing in `finishTurn`'s persistence window must not

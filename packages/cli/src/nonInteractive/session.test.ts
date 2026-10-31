@@ -205,6 +205,7 @@ describe('runNonInteractiveStreamJson', () => {
       | CLIControlResponse
       | ControlCancelRequest
     >;
+    close: ReturnType<typeof vi.fn>;
   };
   let mockOutputAdapter: {
     send: ReturnType<typeof vi.fn>;
@@ -287,6 +288,7 @@ describe('runNonInteractiveStreamJson', () => {
         // Default: empty stream
         // Override in tests as needed
       },
+      close: vi.fn(),
     };
     (
       StreamJsonInputReader as unknown as ReturnType<typeof vi.fn>
@@ -1148,6 +1150,35 @@ describe('runNonInteractiveStreamJson', () => {
     expect(turnControllers[1]).not.toBe(turnControllers[0]);
     expect(turnControllers[1]?.signal.aborted).toBe(false);
   });
+
+  it.each(['SIGTERM', 'SIGHUP'] as const)(
+    'ends an idle session on %s while its input stays open',
+    async (signal) => {
+      const baseline = process.listenerCount(signal);
+      let endInput!: () => void;
+      const inputEnded = new Promise<void>((resolve) => {
+        endInput = resolve;
+      });
+      mockInputReader.close = vi.fn(() => endInput());
+      // eslint-disable-next-line require-yield -- an open, silent input yields nothing
+      mockInputReader.read = async function* () {
+        // Nothing arrives and the input never reaches EOF on its own, like an
+        // SDK or IDE pipe that is still open while the session is idle.
+        await inputEnded;
+      };
+
+      const run = runNonInteractiveStreamJson(config, '');
+      await vi.waitFor(() => {
+        expect(process.listenerCount(signal)).toBe(baseline + 1);
+      });
+      process.emit(signal, signal);
+      await run;
+
+      expect(mockInputReader.close).toHaveBeenCalled();
+      expect(mockBackgroundShellRegistry.abortAll).toHaveBeenCalled();
+      expect(process.listenerCount(signal)).toBe(baseline);
+    },
+  );
 
   it.each(['SIGTERM', 'SIGHUP'] as const)(
     'emits a terminal error result when an accepted continuation is abandoned by %s shutdown',

@@ -887,6 +887,10 @@ class Session {
       debugLogger.info('[Session] Shutdown signal received');
       this.isShuttingDown = true;
       this.abortSession();
+      // `run()` checks for shutdown only after a message arrives. Close the
+      // reader so an idle session (stdin still open) also reaches
+      // drainAndShutdown() instead of waiting forever.
+      this.inputReader.close();
     };
 
     process.on('SIGINT', this.shutdownHandler);
