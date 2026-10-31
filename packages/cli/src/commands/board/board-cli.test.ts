@@ -147,6 +147,48 @@ describe('board CLI', () => {
     });
   });
 
+  it('compares actors exactly without folding case', async () => {
+    core.listBoardTasks.mockResolvedValue([
+      {
+        schemaVersion: 1,
+        id: TASK_ID,
+        subject: 'check',
+        createdBy: 'web',
+        owner: 'web',
+        status: 'pending',
+        createdAt: 1,
+        updatedAt: 1,
+        notes: [],
+      },
+    ]);
+    core.listAsks.mockResolvedValue([
+      {
+        schemaVersion: 1,
+        id: ASK_ID,
+        from: 'web',
+        to: 'api',
+        question: 'status?',
+        state: 'open',
+        createdAt: 1,
+        expiresAt: 2,
+        answer: null,
+        reason: null,
+        settledAt: null,
+      },
+    ]);
+
+    await parse('board show --board demo --as Web --json');
+    const strict = JSON.parse(written(stdout));
+    expect(strict.tasks).toEqual([]);
+    expect(strict.asks).toEqual([]);
+
+    stdout.mockClear();
+    await parse('board show --board demo --as web --json');
+    const exact = JSON.parse(written(stdout));
+    expect(exact.tasks).toHaveLength(1);
+    expect(exact.asks).toHaveLength(1);
+  });
+
   it('passes the declared actor when answering', async () => {
     core.answerAsk.mockResolvedValue({ id: ASK_ID, state: 'answered' });
     await parse(`board answer ${ASK_ID} yes --board demo --as web --json`);
