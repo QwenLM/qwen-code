@@ -927,13 +927,17 @@ describe('Hosted real-process gates', () => {
     },
   );
 
-  it('runs the Broker fault gates even when the Hosted verify fails', () => {
-    const steps = java.jobs['hosted-harness-mysql'].steps;
-    const gates = steps.find(
-      (step) => step.name === 'Run Runtime Broker fault gates',
-    );
+  it.each([
     // Without a condition a red Hosted verify skipped them on 10 of the 14
     // nights to 10-27, though they need neither its build nor MySQL.
+    'Run Runtime Broker fault gates',
+    // The same held for these, which rebuild the module and use the MySQL
+    // service under their own random tenants.
+    'Verify Hosted admission gates',
+  ])('runs the %s step even when the Hosted verify fails', (name) => {
+    const steps = java.jobs['hosted-harness-mysql'].steps;
+    const gates = steps.find((step) => step.name === name);
+    expect(gates, name).toBeDefined();
     expect(gates.if).toBe(
       "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}",
     );
@@ -948,11 +952,16 @@ describe('Hosted real-process gates', () => {
     // absorbs, fails nothing: either on the bundle step would leave the
     // gates spawning a missing dist/cli.js. So no step up to the install
     // may carry either key.
+    // Name the offenders in the message: vitest abbreviates an array whose
+    // string runs long to `[ Array(1) ]`, and the install step's own name
+    // is long enough to trip that.
     const setup = steps.slice(0, steps.indexOf(install) + 1);
+    const conditioned = setup
+      .filter((step) => 'if' in step || 'continue-on-error' in step)
+      .map((step) => step.name ?? step.id ?? step.uses);
     expect(
-      setup
-        .filter((step) => 'if' in step || 'continue-on-error' in step)
-        .map((step) => step.name),
+      conditioned,
+      `setup steps with if: or continue-on-error: ${conditioned.join(', ')}`,
     ).toEqual([]);
     const bundle = steps.findIndex(
       (step) => step.name === 'Install, build and bundle CLI',
@@ -960,6 +969,26 @@ describe('Hosted real-process gates', () => {
     expect(bundle).toBeGreaterThan(-1);
     expect(bundle).toBeLessThan(steps.indexOf(install));
     expect(steps.indexOf(install)).toBeLessThan(steps.indexOf(gates));
+  });
+
+  it('checks the admission gate classes whenever the admission step passes', () => {
+    const steps = java.jobs['hosted-harness-mysql'].steps;
+    const admission = steps.find(
+      (step) => step.name === 'Verify Hosted admission gates',
+    );
+    expect(admission.id).toBe('hosted_admission');
+    const check = steps.find(
+      (step) =>
+        step.name === 'Check that every Hosted admission gate class ran',
+    );
+    // Without its own condition the check runs only on a green job, so
+    // after a red Hosted verify it would skip while the admission step it
+    // audits ran: a class silently dropped from the profile would pass.
+    expect(check.if).toBe(
+      "${{ !cancelled() && steps.hosted_admission.outcome == 'success' }}",
+    );
+    expect(check.run).toContain('check-failsafe-reports.js hosted-gates');
+    expect(steps.indexOf(check)).toBe(steps.indexOf(admission) + 1);
   });
 
   // The Hosted*IT classes share one failsafe fork, so a case stalled to its

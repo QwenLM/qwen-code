@@ -1329,12 +1329,20 @@ jobs:
           retention-days: 7
 
       - name: 'Verify Hosted admission gates'
+        id: 'hosted_admission'
         # Its clean would otherwise discard the hosted lane's failsafe
         # reports and the fg7-cases evidence the hosts upload above, so it
         # runs after the fixture. The hosted-harness-gates profile carries a
         # 2400 s failsafe fork budget for both admission witness classes
         # (@Timeout(1800) each); the same killed-after-timeout pattern as the
         # hosted-harness-mysql verify applies.
+        # Like the fault gates it rebuilds the module and needs only the CLI
+        # bundle, the installed SDK and the MySQL service, each class under
+        # its own random tenant, so a red Hosted verify must not skip it:
+        # without this it did on all 13 nights from 10-14 to 10-30 that the
+        # verify failed, the three after the fault gates got this condition
+        # included.
+        if: "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}"
         timeout-minutes: 50
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
@@ -1347,6 +1355,9 @@ jobs:
           -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false"
           -Dmysql.user=root -Dmysql.password=hosted-fixture clean verify checkstyle:check
       - name: 'Check that every Hosted admission gate class ran'
+        # It reads only the admission step's reports, so it follows that
+        # step rather than the job status a red Hosted verify has already set.
+        if: "${{ !cancelled() && steps.hosted_admission.outcome == 'success' }}"
         run: 'node scripts/check-failsafe-reports.js hosted-gates packages/managed-agent-server'
 
       - name: 'Verify O4 filesystem process and capacity gates'
