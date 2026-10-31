@@ -9,6 +9,12 @@
 // evaluate BOTH against the same event matrix — including the negative
 // associations that must stay hosted — and assert they agree.
 //
+// pick_runner also publishes `lint_runner`, the one deliberate divergence:
+// Lint & Static routes EVERY pull request to the fleet, untrusted forks
+// included (maintainer decision 2026-10-31, shared-pool code-execution risk
+// accepted). The matrix below pins that divergence AND that ubuntu_runner
+// keeps the association gate for every other lane.
+//
 // test_windows carries a deliberately different policy. A pull_request run
 // executes the workflow YAML from the PR's own merge commit, so any trust
 // clause a PR can read it can also rewrite. The matrix evaluates the real
@@ -17,7 +23,7 @@
 // persistent pool.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it } from 'node:test';
@@ -117,8 +123,8 @@ function evalRunsOn(expression, { ecsDisabled, eventName, sameRepo, assoc }) {
 }
 
 // Executes the real pick_runner shell with the same inputs and returns the
-// selected runner exactly as CI would publish it.
-function runPickRunner({
+// selected runners exactly as CI would publish them.
+function runPickRunnerOutputs({
   ecsDisabled,
   sameRepo,
   assoc,
@@ -140,13 +146,34 @@ function runPickRunner({
     },
     encoding: 'utf8',
   });
+  const outputs = existsSync(outputFile)
+    ? readFileSync(outputFile, 'utf8')
+    : '';
   rmSync(tmp, { recursive: true, force: true });
   assert.equal(result.status, 0, `pick_runner failed: ${result.stderr}`);
-  const line = result.stdout
-    .split('\n')
-    .find((l) => l.startsWith('Selected Linux runner: '));
-  assert.ok(line, `no selection in pick_runner output: ${result.stdout}`);
-  return line.slice('Selected Linux runner: '.length);
+  const select = (prefix) => {
+    const line = result.stdout.split('\n').find((l) => l.startsWith(prefix));
+    assert.ok(line, `no selection in pick_runner output: ${result.stdout}`);
+    return line.slice(prefix.length);
+  };
+  const ubuntuRunner = select('Selected Linux runner: ');
+  const lintRunner = select('Selected lint runner: ');
+  // The stdout echo and the published output must agree — a rename of the
+  // GITHUB_OUTPUT key would otherwise pass the echo parse and break every
+  // downstream runs-on at runtime.
+  assert.ok(
+    outputs.split('\n').includes(`ubuntu_runner=${ubuntuRunner}`),
+    `ubuntu_runner not published: ${outputs}`,
+  );
+  assert.ok(
+    outputs.split('\n').includes(`lint_runner=${lintRunner}`),
+    `lint_runner not published: ${outputs}`,
+  );
+  return { ubuntuRunner, lintRunner };
+}
+
+function runPickRunner(inputs) {
+  return runPickRunnerOutputs(inputs).ubuntuRunner;
 }
 
 const ASSOCIATIONS = [
@@ -271,6 +298,133 @@ describe('ci.yml classify_pr runner routing', () => {
       /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
     );
     assert.match(classifyRunsOn, /github\.event_name == 'merge_group'/);
+  });
+});
+
+describe('ci.yml lint_runner routing', () => {
+  const ARM = '["self-hosted", "linux", "arm64"]';
+  const lintRunner = (inputs) => runPickRunnerOutputs(inputs).lintRunner;
+
+  it('routes every pull request to the fleet, untrusted forks included', () => {
+    // The maintainer decision this pins: Lint & Static executes PR code on
+    // the shared pool for ALL authors. If this matrix ever flips back to
+    // hosted for the negative associations without a deliberate decision,
+    // the lane silently regrows its hosted quota spend.
+    for (const sameRepo of [true, false]) {
+      for (const assoc of ASSOCIATIONS) {
+        assert.equal(
+          lintRunner({
+            ecsDisabled: false,
+            sameRepo,
+            assoc,
+            eventName: 'pull_request',
+          }),
+          ECS,
+          `lint sameRepo=${sameRepo} assoc='${assoc}' must route to ECS`,
+        );
+      }
+    }
+  });
+
+  it('keeps the kill-switch and hosted-fleet overrides', () => {
+    for (const assoc of ASSOCIATIONS) {
+      assert.equal(
+        lintRunner({
+          ecsDisabled: true,
+          sameRepo: true,
+          assoc,
+          eventName: 'pull_request',
+        }),
+        HOSTED,
+        'kill-switch must revert even lint to hosted',
+      );
+      assert.equal(
+        lintRunner({
+          ecsDisabled: false,
+          sameRepo: false,
+          assoc,
+          eventName: 'pull_request',
+          fleet: 'hosted',
+        }),
+        HOSTED,
+        'LINUX_RUNNER_FLEET=hosted must keep lint hosted',
+      );
+    }
+  });
+
+  it('follows the arm64 fleet selector', () => {
+    assert.equal(
+      lintRunner({
+        ecsDisabled: false,
+        sameRepo: false,
+        assoc: 'NONE',
+        eventName: 'pull_request',
+        fleet: 'arm64',
+      }),
+      ARM,
+    );
+  });
+
+  it('inherits ubuntu_runner on non-PR events and dispatch inputs', () => {
+    for (const eventName of ['merge_group', 'push']) {
+      assert.equal(
+        lintRunner({
+          ecsDisabled: false,
+          sameRepo: false,
+          assoc: '',
+          eventName,
+        }),
+        ECS,
+      );
+    }
+    assert.equal(
+      lintRunner({
+        ecsDisabled: false,
+        sameRepo: false,
+        assoc: '',
+        eventName: 'workflow_dispatch',
+        dispatch: 'self-hosted',
+      }),
+      ECS,
+    );
+    assert.equal(
+      lintRunner({
+        ecsDisabled: false,
+        sameRepo: false,
+        assoc: '',
+        eventName: 'workflow_dispatch',
+        dispatch: 'hosted',
+      }),
+      HOSTED,
+    );
+    assert.equal(
+      lintRunner({
+        ecsDisabled: true,
+        sameRepo: false,
+        assoc: '',
+        eventName: 'workflow_dispatch',
+        dispatch: 'self-hosted',
+      }),
+      HOSTED,
+    );
+  });
+
+  it('classify_pr publishes lint_runner from pick_runner', () => {
+    assert.equal(
+      ciDoc.jobs.classify_pr.outputs.lint_runner,
+      '${{ steps.pick_runner.outputs.lint_runner }}',
+    );
+  });
+
+  it('lint_and_static consumes lint_runner for runs-on and timeout', () => {
+    assert.equal(
+      String(ciDoc.jobs.lint_and_static['runs-on']),
+      '${{ fromJSON(needs.classify_pr.outputs.lint_runner || \'["ubuntu-latest"]\') }}',
+    );
+    assert.match(
+      String(ciDoc.jobs.lint_and_static['timeout-minutes']),
+      /needs\.classify_pr\.outputs\.lint_runner/,
+    );
   });
 });
 
