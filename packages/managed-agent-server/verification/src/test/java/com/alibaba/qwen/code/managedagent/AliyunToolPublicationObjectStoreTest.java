@@ -184,8 +184,8 @@ class AliyunToolPublicationObjectStoreTest {
     }
 
     private static ClientException timeout(String code) {
-        // The one-argument constructor leaves the code null, which the store
-        // treats as unclassified and never retries.
+        // The one-argument constructor sets the code to "Unknown", which is
+        // not in the store's transient set; pass the code explicitly.
         return new ClientException("fixture", code, "request");
     }
 }
