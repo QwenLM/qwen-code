@@ -1410,6 +1410,8 @@ export default {
     'Usage: /forget <memory text to remove>',
   'No managed auto-memory entries matched: {{query}}':
     'No managed auto-memory entries matched: {{query}}',
+  'Skipped files with unparseable frontmatter; matching entries were kept: {{files}}':
+    'Skipped files with unparseable frontmatter; matching entries were kept: {{files}}',
   'Consolidate managed auto-memory topic files.':
     'Consolidate managed auto-memory topic files.',
   'Import MCP servers from Claude configs':

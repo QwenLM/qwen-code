@@ -1258,6 +1258,8 @@ export default {
   'Usage: /forget <memory text to remove>': '用法：/forget <要刪除的記憶文本>',
   'No managed auto-memory entries matched: {{query}}':
     '沒有匹配的託管自動記憶條目：{{query}}',
+  'Skipped files with unparseable frontmatter; matching entries were kept: {{files}}':
+    '已略過 frontmatter 無法解析的檔案，相符的條目已保留：{{files}}',
   'Consolidate managed auto-memory topic files.': '整理託管自動記憶主題檔案',
   'Import MCP servers from Claude configs': '從 Claude 設定匯入 MCP 伺服器',
   'Open MCP management dialog': '打開 MCP 管理對話框',
