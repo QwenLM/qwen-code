@@ -898,30 +898,37 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
-    it('never ships the max tier to the tiered DashScope family end to end', async () => {
-      // `/effort max` persists the tier in config, so a raw pass-through 400s
-      // on this and every later request of the session: through the real
-      // provider, the wire body must carry the tier capped at xhigh.
-      const apiCall = await executeWith(
-        {
-          baseUrl: DASHSCOPE_URL,
-          model: 'qwen3.8-max',
-          authType: AuthType.QWEN_OAUTH,
-          reasoning: { effort: 'max' },
-        },
-        userRequest('qwen3.8-max', {
-          thinkingConfig: { includeThoughts: true },
-        }),
-        'prompt-id',
-        DashScopeOpenAICompatibleProvider,
-      );
+    it.each([
+      'qwen3.8-max',
+      'qwen-latest-series-invite-202610-m6',
+      'qwen4-plus',
+    ])(
+      'never ships the max tier to the tiered DashScope family end to end (%s)',
+      async (model) => {
+        // `/effort max` persists the tier in config, so a raw pass-through 400s
+        // on this and every later request of the session: through the real
+        // provider, the wire body must carry the tier capped at xhigh.
+        const apiCall = await executeWith(
+          {
+            baseUrl: DASHSCOPE_URL,
+            model,
+            authType: AuthType.QWEN_OAUTH,
+            reasoning: { effort: 'max' },
+          },
+          userRequest(model, {
+            thinkingConfig: { includeThoughts: true },
+          }),
+          'prompt-id',
+          DashScopeOpenAICompatibleProvider,
+        );
 
-      // The tier ships alone — no competing nested knob.
-      expectFields(apiCall, {
-        reasoning_effort: 'xhigh',
-        reasoning: undefined,
-      });
-    });
+        // The tier ships alone — no competing nested knob.
+        expectFields(apiCall, {
+          reasoning_effort: 'xhigh',
+          reasoning: undefined,
+        });
+      },
+    );
 
     it('never ships the max tier to a generic OpenAI-compatible endpoint end to end', async () => {
       // The same persisted-tier failure through the real default provider.
@@ -1362,7 +1369,9 @@ describe('ContentGenerationPipeline', () => {
     async function executeWithCapability(
       capability: unknown,
       configOverrides: Partial<ContentGeneratorConfig>,
-      model = 'deepseek-v4-pro',
+      // Neutral id: the DeepSeek-V4 prefix now carries a built-in contract on
+      // every host, which would mask the declared-capability path under test.
+      model = 'capability-probe',
     ): Promise<Record<string, unknown>> {
       mockCliConfig = {
         getResolvedModelConfig: vi
@@ -1457,6 +1466,10 @@ describe('ContentGenerationPipeline', () => {
       ['https://model-proxy.alibaba-inc.com/v1', 'enable_thinking'],
       ['https://model-proxy.aliyun-inc.com/v1', 'enable_thinking'],
       ['https://model-proxy.alicloudapi.com/v1', 'enable_thinking'],
+      [
+        'https://gateway.cn-shanghai.pai-eas.aliyuncs.com/api/predict/demo/v1',
+        'enable_thinking',
+      ],
     ])(
       'sends built-in DeepSeek selection and defaults through %s',
       async (baseUrl, field) => {
@@ -1544,6 +1557,79 @@ describe('ContentGenerationPipeline', () => {
               field === 'thinking' ? { type: 'disabled' } : false,
             );
           }
+        }
+      },
+    );
+
+    it('preserves a declared static effort for a newly recognized MaaS alias', async () => {
+      // The alias was not a known id before prefix recognition, so even on a
+      // MaaS host the declaration governs: the built-in normalizer must not
+      // flatten or re-tier the static nested effort.
+      const wire = await deepSeekWire(
+        {
+          baseUrl:
+            'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          samplingParams: { reasoning: { effort: 'medium' } },
+        },
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'high'],
+          defaultEffort: 'medium',
+          disableField: 'reasoning_effort',
+        },
+        'deepseek-v4.1-flash-custom',
+      );
+      expect(wire.reasoning).toEqual({ effort: 'medium' });
+      expect(wire.reasoning_effort).toBeUndefined();
+    });
+
+    it('preserves a declared configured effort for a newly recognized MaaS alias', async () => {
+      // A tier outside the declaration is dropped by the declared-capability
+      // path (the pre-PR contract); the new built-in must not normalize it
+      // into a declared tier and ship that instead.
+      const wire = await deepSeekWire(
+        {
+          baseUrl:
+            'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          reasoning: { effort: 'xhigh' },
+        },
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'high'],
+          defaultEffort: 'medium',
+          disableField: 'reasoning_effort',
+        },
+        'deepseek-v4.1-flash-custom',
+      );
+      expect(wire.reasoning).toBeUndefined();
+      expect(wire.reasoning_effort).toBeUndefined();
+    });
+
+    it.each([
+      [
+        'a toggle-only declaration',
+        {
+          thinking: true,
+          toggleOnly: true,
+          disableField: 'enable_thinking',
+        },
+        false,
+      ],
+      ['no declaration', undefined, true],
+    ] as const)(
+      'disables a qwen4 route with %s using the knob it reads',
+      async (_label, capability, tiered) => {
+        const wire = await deepSeekWire(
+          { baseUrl: DASHSCOPE_URL, reasoning: false },
+          capability,
+          'qwen4-plus',
+        );
+        if (tiered) {
+          expect(wire.reasoning_effort).toBe('none');
+          expect(wire.enable_thinking).toBeUndefined();
+        } else {
+          expect(wire.enable_thinking).toBe(false);
+          expect(wire.reasoning_effort).toBeUndefined();
         }
       },
     );

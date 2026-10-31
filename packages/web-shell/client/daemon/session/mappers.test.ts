@@ -11,6 +11,9 @@ import type {
   DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import {
+  applyConfigOptions,
+  getConfigOptionsUpdate,
+  mapWorkflowMode,
   getPlanExecutionMode,
   getReplayTokenCount,
   getReplayTokenUsage,
@@ -1658,4 +1661,122 @@ it('does not revive a completed background turn from its repeated start', () => 
     },
   });
   expect(replayed.backgroundTurn).toBeUndefined();
+});
+
+describe('Workflow mode configuration', () => {
+  const option = (requested: boolean, available = true) => ({
+    id: 'workflow_mode',
+    type: 'select',
+    currentValue: requested ? 'on' : 'off',
+    options: [{ value: 'off' }, { value: 'on' }],
+    _meta: {
+      'qwen.workflowMode': { available, effective: requested && available },
+    },
+  });
+
+  it.each([
+    [false, false],
+    [false, true],
+    [true, false],
+    [true, true],
+  ])(
+    'maps requested=%s independently of available=%s',
+    (requested, available) => {
+      expect(mapWorkflowMode([option(requested, available)])).toEqual({
+        workflowModeStatus: 'ready',
+        workflowMode: {
+          requested,
+          available,
+          effective: requested && available,
+        },
+      });
+    },
+  );
+
+  it.each([
+    ['missing metadata', { ...option(true), _meta: undefined }],
+    [
+      'nonboolean availability',
+      {
+        ...option(true),
+        _meta: { 'qwen.workflowMode': { available: 'true', effective: true } },
+      },
+    ],
+    [
+      'contradictory effectiveness',
+      {
+        ...option(true),
+        _meta: { 'qwen.workflowMode': { available: false, effective: true } },
+      },
+    ],
+    ['invalid requested value', { ...option(true), currentValue: true }],
+    ['missing off choice', { ...option(true), options: [{ value: 'on' }] }],
+    [
+      'invalid reason',
+      {
+        ...option(true),
+        _meta: {
+          'qwen.workflowMode': { available: true, effective: true, reason: 7 },
+        },
+      },
+    ],
+  ])('does not advertise malformed %s as off', (_name, invalid) => {
+    expect(mapWorkflowMode([invalid])).toEqual({
+      workflowModeStatus: 'unknown',
+      workflowMode: undefined,
+    });
+  });
+
+  it('distinguishes duplicate/unknown data from authoritative omission', () => {
+    expect(
+      mapWorkflowMode([option(true), option(false)]).workflowModeStatus,
+    ).toBe('unknown');
+    expect(mapWorkflowMode(undefined).workflowModeStatus).toBe('unknown');
+    const current: DaemonConnectionState = {
+      status: 'connected',
+      workflowMode: { requested: true, available: true, effective: true },
+      workflowModeStatus: 'ready',
+      context: {
+        v: 1,
+        sessionId: 's',
+        workspaceCwd: '/workspace',
+        state: { configOptions: [option(true)] },
+      },
+    };
+    expect(applyConfigOptions(current, undefined)).toMatchObject({
+      workflowMode: current.workflowMode,
+      workflowModeStatus: 'unknown',
+      context: current.context,
+    });
+    expect(applyConfigOptions(current, [])).toMatchObject({
+      workflowMode: undefined,
+      workflowModeStatus: 'unsupported',
+      context: { state: { configOptions: [] } },
+    });
+  });
+
+  it.each([false, true])(
+    'reads wrapped=%s config notifications without treating a synthetic snapshot as omission',
+    (wrapped) => {
+      const update = {
+        sessionUpdate: 'config_option_update',
+        configOptions: [option(true)],
+      };
+      const event = {
+        v: 1,
+        type: 'session_update',
+        data: wrapped ? { update } : update,
+      } as DaemonEvent;
+      expect(getConfigOptionsUpdate(event)).toEqual({
+        configOptions: update.configOptions,
+      });
+      expect(
+        getConfigOptionsUpdate({
+          v: 1,
+          type: 'session_snapshot',
+          data: { sessionId: 's' },
+        } as DaemonEvent),
+      ).toBeUndefined();
+    },
+  );
 });
