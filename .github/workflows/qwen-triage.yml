@@ -6009,20 +6009,29 @@ jobs:
                 # assertions" a measure of the repo, not of the round. Totals
                 # only, so no agent-chosen suite name reaches the body; a
                 # malformed list gets no line, and the checker refuses it.
-                # Shape rules mirror the checker's: a blank suite or a
-                # non-count skipped (false/null) is refused, not defaulted,
-                # so a shape the checker refuses never renders totals.
+                # Shape rules mirror the checker's, and one shared fixture
+                # table pins the parity: a blank suite or a non-count skipped
+                # (false/null) is refused, not defaulted, and counts stop at
+                # 2^53-1, the last integer JSON literals parse to exactly.
                 GATES_META="$(
-                  jq -r 'def count: type == "number" and . >= 0 and . == floor;
+                  jq -r 'def count: type == "number" and . >= 0 and . == floor and . <= 9007199254740991;
                          if (.gates | type) == "array" and (.gates | length) > 0
                             and (.gates | all(type == "object" and (.suite | type) == "string" and (.suite | test("\\S")) and (.pass | count) and (.fail | count) and ((has("skipped") | not) or (.skipped | count))))
-                         then "\(.gates | length) \(.gates | map(.pass) | add | floor) \(.gates | map(.fail) | add | floor) \(.gates | map(.skipped // 0) | add | floor)"
+                         then "\(.gates | length) \(.gates | map(.pass) | add | floor) \(.gates | map(.fail) | add | floor) \(.gates | map(.skipped // 0) | add | floor) \(.gates | map(select(.skipped != null)) | length)"
                          else empty end' "$ASSERTIONS_FILE" 2>/dev/null || true
                 )"
                 if [ -n "$GATES_META" ]; then
-                  read -r G_SUITES G_PASS G_FAIL G_SKIP <<< "$GATES_META"
-                  GATES_LINE="Targeted gates (existing tests, not counted above): ${G_PASS} passed · ${G_FAIL} failed · ${G_SKIP} skipped across ${G_SUITES} suite(s)"
-                  GATES_LINE_ZH="定向门禁（已有测试，不计入上面的断言）：${G_PASS} 通过 · ${G_FAIL} 失败 · ${G_SKIP} 跳过，共 ${G_SUITES} 个套件"
+                  read -r G_SUITES G_PASS G_FAIL G_SKIP G_RECORDED <<< "$GATES_META"
+                  # Absent skipped is "not recorded", not a measured zero:
+                  # the clause prints only when some entry carries the field.
+                  G_SKIP_CLAUSE=''
+                  G_SKIP_CLAUSE_ZH=''
+                  if [ "$G_RECORDED" != '0' ]; then
+                    G_SKIP_CLAUSE=" · ${G_SKIP} skipped"
+                    G_SKIP_CLAUSE_ZH=" · ${G_SKIP} 跳过"
+                  fi
+                  GATES_LINE="Targeted gates (existing tests, not counted above): ${G_PASS} passed · ${G_FAIL} failed${G_SKIP_CLAUSE} across ${G_SUITES} suite(s)"
+                  GATES_LINE_ZH="定向门禁（已有测试，不计入上面的断言）：${G_PASS} 通过 · ${G_FAIL} 失败${G_SKIP_CLAUSE_ZH}，共 ${G_SUITES} 个套件"
                 fi
               else
                 echo "::warning::assertions.json missing or inconsistent; not treating it as evidence."
@@ -6200,6 +6209,11 @@ jobs:
               fi
               if [ -n "$GATES_LINE" ]; then
                 printf '%s\n\n' "$GATES_LINE"
+                # Advisory only: a gate can be red for a pre-existing main
+                # failure, so this never refuses or demotes the verdict.
+                if [ "$TRUST_AGENT_VERDICT" = true ] && [ "${G_FAIL:-0}" != '0' ]; then
+                  printf 'Gate totals do not decide the verdict: a gate red the PR causes belongs in the assertion ledger above — read that count before trusting the verdict.\n\n'
+                fi
               fi
               if [ -n "$FLAKE_LINE" ]; then
                 printf '%s\n\n' "$FLAKE_LINE"
@@ -6231,6 +6245,9 @@ jobs:
               fi
               if [ -n "$GATES_LINE_ZH" ]; then
                 printf '%s\n\n' "$GATES_LINE_ZH"
+                if [ "$TRUST_AGENT_VERDICT" = true ] && [ "${G_FAIL:-0}" != '0' ]; then
+                  printf '门禁合计不影响判定：PR 导致的门禁红灯应记入上面的断言账本——采信判定前请先看那个数。\n\n'
+                fi
               fi
               if [ -n "$FLAKE_LINE_ZH" ]; then
                 printf '%s\n\n' "$FLAKE_LINE_ZH"

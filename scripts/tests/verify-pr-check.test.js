@@ -341,6 +341,19 @@ describe('gates', () => {
     expect(named.errors.join('\n')).not.toContain('@everyone');
   });
 
+  it('refuses counts beyond the safe integer range', () => {
+    // Raw literals: JSON.stringify would turn 1e309 into null and hide the
+    // overflow that the publisher's jq clamps to a finite double.
+    const raw = (pass) =>
+      check({
+        assertions: `{"pass":4,"fail":0,"total":4,"gates":[{"suite":"x","pass":${pass},"fail":0}]}`,
+      });
+    for (const pass of ['1e309', '1e308', '9007199254740992']) {
+      expect(raw(pass).errors.join('\n')).toMatch(GATES_ERROR);
+    }
+    expect(raw('9007199254740991').errors).toEqual([]);
+  });
+
   it('warns when a suite-sized total comes with no gates', () => {
     const big = check({
       assertions: JSON.stringify({ pass: 1001, fail: 0, total: 1001 }),

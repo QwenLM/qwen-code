@@ -65,7 +65,7 @@ Checks a local round against the rules the CI publisher enforces:
   - assertions.json holds non-negative integers, a positive total, and
     total == pass + fail
   - assertions.json gates, when present, lists { suite, pass, fail } entries
-    (skipped optional) with non-negative integer counts
+    (skipped optional) with non-negative integer counts up to 2^53-1
   - a merge-ready verdict carries no failed assertion
   - a findings/blocked verdict whose failures ledger attributes no failure to
     the PR is a contradiction: expected reds are passes
@@ -285,7 +285,13 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
         // pass/fail/total measure what this round wrote. The messages carry
         // no suite name: the publisher forwards error lines to its log.
         const gates = parsed.gates;
-        const isCount = (value) => Number.isInteger(value) && value >= 0;
+        // The safe-integer ceiling keeps parity with the publisher's jq:
+        // a JSON literal like 1e309 parses to Infinity here, while jq
+        // clamps it to a finite double that would otherwise pass.
+        const isCount = (value) =>
+          Number.isInteger(value) &&
+          value >= 0 &&
+          value <= Number.MAX_SAFE_INTEGER;
         if (
           gates !== undefined &&
           (!Array.isArray(gates) ||

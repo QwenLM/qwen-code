@@ -416,6 +416,7 @@ actually landed. The local path has no publisher enforcing the fail/mismatch
 rule, so run `node scripts/verify-pr-check.mjs <artifact dir>` and clear its
 errors and its verdict-shape and footer warnings before publishing (a
 missing footer is legitimate only when the model could not be resolved),
+act on a gates-size warning by recording the suites it ran under `gates`,
 then state the verdict word from `verdict.txt` verbatim. A published
 filename is spent: raw.githubusercontent serves a URL from cache, so
 overwriting `02-matrix.png` leaves every earlier link showing the old image.
@@ -1625,7 +1626,9 @@ head behaviour the PR got wrong. Measured example: a round reproduced a
 regression, asserted that the head showed it, and published `blocked` over
 4382 passes and 0 failures. The CI publisher runs `verify-pr-check.mjs` before
 it trusts any verdict, so run it on the artifact dir before you finish, in
-either path.
+either path. The publisher reads only the checker's last line and never
+echoes warnings, so a gates-size warning reaches nobody but you — record
+the suites under `gates` before publishing.
 
 ### report.md structure
 

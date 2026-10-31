@@ -40,7 +40,11 @@ const prSkill = readFileSync(
   'utf8',
 );
 const triageSkillDoc = readFileSync('.qwen/skills/triage/SKILL.md', 'utf8');
-import { ATTRIBUTIONS, VERDICTS } from '../../scripts/verify-pr-check.mjs';
+import {
+  ATTRIBUTIONS,
+  VERDICTS,
+  checkArtifacts,
+} from '../../scripts/verify-pr-check.mjs';
 
 const verifySkill = readFileSync('.qwen/skills/verify-pr/SKILL.md', 'utf8');
 const hasGnuRealpath =
@@ -6503,6 +6507,29 @@ describe('qwen-triage verify publish fidelity', () => {
       // A gate red is the repo's test result: the verdict still comes from
       // the round's own assertions and their ledger.
       expect(body).toContain('✅ passed');
+      // A trusted verdict over gate reds carries one advisory sentence,
+      // in both languages, without demoting the headline.
+      expect(body).toContain(
+        'Gate totals do not decide the verdict: a gate red the PR causes belongs in the assertion ledger above',
+      );
+      expect(body.indexOf('门禁合计不影响判定')).toBeGreaterThan(
+        body.indexOf('<details>'),
+      );
+
+      // Absent skipped is "not recorded", not a measured zero: the clause
+      // drops out, and with no gate red there is no advisory either.
+      const noSkip = publishWith('gates-noskip', {
+        ...counts,
+        gates: [{ suite: 'cli', pass: 1292, fail: 0 }],
+      });
+      expect(noSkip).toContain(
+        'Targeted gates (existing tests, not counted above): 1292 passed · 0 failed across 1 suite(s)',
+      );
+      expect(noSkip).toContain(
+        '定向门禁（已有测试，不计入上面的断言）：1292 通过 · 0 失败，共 1 个套件',
+      );
+      expect(noSkip).not.toContain('0 skipped');
+      expect(noSkip).not.toContain('Gate totals do not decide the verdict');
 
       // No list prints no line. Neither does a malformed one, and the
       // checker refuses it, so the verdict is not trusted either. The
@@ -6542,6 +6569,142 @@ describe('qwen-triage verify publish fidelity', () => {
     }
   });
 
+  // The shape rule lives in two implementations — the publisher's jq and
+  // checkArtifacts — so one table drives both: the totals line renders
+  // exactly when the checker accepts a non-empty list. A rule dropped from
+  // either side reds the fixture that rule covers, in either direction.
+  it('keeps the publisher jq and the checker one rule set', () => {
+    const dir = fixture();
+    const file = join(
+      dir,
+      'work',
+      'verify-results',
+      'prA-verify-1',
+      'assertions.json',
+    );
+    const triple = '"pass":10,"fail":0,"total":10';
+    const withGates = (gates) => `{${triple},"gates":${gates}}`;
+    // Raw literals, not JSON.stringify: 1e309 would serialize to null and
+    // hide the overflow that jq clamps to a finite double.
+    const table = [
+      {
+        name: 'valid',
+        text: withGates('[{"suite":"cli","pass":1290,"fail":2,"skipped":1}]'),
+        accepts: true,
+        renders: true,
+      },
+      {
+        name: 'max-safe',
+        text: withGates('[{"suite":"x","pass":9007199254740991,"fail":0}]'),
+        accepts: true,
+        renders: true,
+      },
+      { name: 'absent', text: `{${triple}}`, accepts: true, renders: false },
+      { name: 'empty', text: withGates('[]'), accepts: true, renders: false },
+      {
+        name: 'object',
+        text: withGates('{"cli":{"pass":1,"fail":0}}'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'null-entry',
+        text: withGates('[null]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'missing-suite',
+        text: withGates('[{"pass":1,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'blank-suite',
+        text: withGates('[{"suite":"   ","pass":1,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'string-count',
+        text: withGates('[{"suite":"x","pass":"1","fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'negative',
+        text: withGates('[{"suite":"x","pass":-1,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'fraction',
+        text: withGates('[{"suite":"x","pass":1,"fail":0.5}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'skipped-string',
+        text: withGates('[{"suite":"x","pass":1,"fail":0,"skipped":"2"}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'skipped-false',
+        text: withGates('[{"suite":"x","pass":1,"fail":0,"skipped":false}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'skipped-null',
+        text: withGates('[{"suite":"x","pass":1,"fail":0,"skipped":null}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'overflow',
+        text: withGates('[{"suite":"x","pass":1e309,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'huge-finite',
+        text: withGates('[{"suite":"x","pass":1e308,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+      {
+        name: 'over-max-safe',
+        text: withGates('[{"suite":"x","pass":9007199254740992,"fail":0}]'),
+        accepts: false,
+        renders: false,
+      },
+    ];
+    try {
+      for (const f of table) {
+        writeFileSync(file, f.text);
+        const result = checkArtifacts({
+          files: {
+            report: `merge-ready · 10 passed · 0 failed · 10 total · ${'b'.repeat(40)}\n\n# Report\n`,
+            verdict: 'merge-ready\n',
+            assertions: f.text,
+          },
+        });
+        const gatesError = result.errors.some((e) =>
+          e.includes('gates must be an array'),
+        );
+        const body = render(dir, {
+          NAME: `parity-${f.name}`,
+          AGENT_VERDICT: 'merge-ready',
+        });
+        expect(gatesError, f.name).toBe(!f.accepts);
+        expect(body.includes('Targeted gates'), f.name).toBe(f.renders);
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // The publisher reads `gates` only if rounds write it: both places the
   // skill defines the counts have to say where suite results go.
   it('teaches the gates field the publisher reads', () => {
@@ -6550,6 +6713,17 @@ describe('qwen-triage verify publish fidelity', () => {
     expect(flat).toContain('never in `pass`, `fail` or `total`');
     expect(flat).toContain('A mutant run is likewise one assertion');
     expect(flat).toContain('one `{suite, pass, fail}` entry per suite');
+    // The compensation for the change's main risk: the requirement that
+    // routes a PR-caused gate red back into the count the verdict reads.
+    expect(flat).toContain(
+      'A gate red the PR causes still reaches the verdict as an assertion',
+    );
+    // The size warning is inert unless the round is told to act on it,
+    // in both the local clear-list and the CI-path sentence.
+    expect(flat).toContain(
+      'act on a gates-size warning by recording the suites it ran under `gates`',
+    );
+    expect(flat).toContain('a gates-size warning reaches nobody but you');
   });
 
   // The checker runs only for a completed run with a report, valid counts
