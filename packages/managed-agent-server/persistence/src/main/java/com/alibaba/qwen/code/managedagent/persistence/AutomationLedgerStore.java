@@ -35,8 +35,10 @@ import java.util.Set;
  * projected in the same transaction as their journal commit.
  *
  * <p>Every occurrence write names the lease its writer holds: the insert selects its row from the
- * definition row the holder leases, and each settle is conditioned on that same holder and fence,
- * so a scanner whose lease expired under it cannot record or settle a decision.
+ * definition row the holder leases, and each settle is conditioned on that same holder and fence.
+ * Neither checks the lease's expiry: a writer whose lease lapsed can still write until another
+ * claims the definition, and that claim moves the fence, so from then on the earlier holder cannot
+ * record or settle a decision.
  */
 @Repository
 public class AutomationLedgerStore
