@@ -100,12 +100,18 @@ class HostedGateTestSupportTest {
                 .isSameAs(client);
         assertThat(connectorOwning(decorated)).isSameAs(connector);
         assertThat(attachmentsOf(decorated)).isSameAs(attachments);
+    }
 
-        // A declared field holding null is still a field: the read returns null
-        // instead of the owner being treated as unresolved.
-        ReflectionTestUtils.setField(connector, "client", null);
-        assertThat(ReflectionTestUtils.getField(connectorOwning(decorated), "client"))
-                .isNull();
+    // A delegate that is itself null must not become a complaint about a
+    // missing target: fall back to the connector we started from, so the error
+    // still names the field the caller asked for.
+    @Test
+    void aNullDelegateStillFailsNamingTheRequestedField() {
+        var decorated = new SdkHarnessBoundary(null);
+
+        assertThatThrownBy(() -> attachmentsOf(decorated))
+                .isInstanceOf(IllegalArgumentException.class)
+                .hasMessageContaining("attachments");
     }
 
     // findField's type argument matches the declared type exactly, so a

@@ -45,7 +45,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 // mechanics — the relay's loop control, the fault arms, the case
 // choreography — stay in the letters; only the byte-identical machinery
 // lives here.
-final class HostedGateTestSupport {
+public final class HostedGateTestSupport {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private HostedGateTestSupport() {
@@ -390,8 +390,11 @@ final class HostedGateTestSupport {
     // owns the private state these gates read, so resolve the owner once and
     // let every read share it. A chain that owns no attachment map stops at
     // its last connector, so the caller's getField still names the missing
-    // field instead of failing somewhere less obvious.
-    static HarnessConnector connectorOwning(HarnessConnector connector) {
+    // field instead of failing somewhere less obvious. A delegate that is
+    // itself null falls back to the connector we started from, for the same
+    // reason: getField(null, …) complains about the missing target instead of
+    // naming the field the caller asked for.
+    public static HarnessConnector connectorOwning(HarnessConnector connector) {
         HarnessConnector owner = connector;
         while (owner != null && declaredField(owner, "attachments", Map.class) == null) {
             Field delegate = declaredField(owner, "delegate", HarnessConnector.class);
@@ -401,7 +404,7 @@ final class HostedGateTestSupport {
             ReflectionUtils.makeAccessible(delegate);
             owner = (HarnessConnector) ReflectionUtils.getField(delegate, owner);
         }
-        return owner;
+        return owner != null ? owner : connector;
     }
 
     static Map<?, ?> attachmentsOf(HarnessConnector connector) {
