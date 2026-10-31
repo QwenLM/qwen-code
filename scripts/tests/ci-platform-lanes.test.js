@@ -1258,6 +1258,32 @@ describe('GitHub helper tests', () => {
     }
   });
 
+  it('routes the battery tmpdir off the host /tmp tmpfs', () => {
+    // #15965: e2e-build.test.mjs mkdtemps thousands of chunk files via
+    // os.tmpdir(); on the ECS pool that defaulted to the shared /tmp tmpfs,
+    // whose ~1M inode quota filled up and failed the lane with ENOSPC while
+    // 202G of capacity stayed free. RUNNER_TEMP sits on the roomy data disk,
+    // same routing the unit lanes already use (#10035).
+    const step = (ci.jobs.lint_and_static.steps ?? []).find(
+      (candidate) => candidate.name === 'Run .github/scripts helper tests',
+    );
+    expect(step, 'helper-tests step missing').toBeDefined();
+    // Comments stripped: the rationale above the export names it too, so a pin
+    // satisfied by prose would stay green with the routing commented out.
+    const run = String(step.run)
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    expect(run).toContain('export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"');
+    expect(run.indexOf('export TMPDIR')).toBeLessThan(
+      run.indexOf('node --test'),
+    );
+    // The routed dir is private to the run and reaped on exit: RUNNER_TEMP
+    // itself is shared with every other job on the host.
+    expect(run).toContain('mktemp -d "${TMPDIR}/helper-tests-XXXXXX"');
+    expect(run).toContain('trap \'rm -rf "$HELPER_TMPDIR"\' EXIT');
+  });
+
   it('retries the full-profile battery once against pool contention', () => {
     // #12772: the battery spawns real subprocess loops on the shared ECS
     // pool, and a push to main has no flaky-rerun patrol — one host hiccup
