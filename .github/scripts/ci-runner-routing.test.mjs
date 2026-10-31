@@ -2,18 +2,15 @@
 // qwen-autofix.yml scan lane, the trusted-PR lanes of #13245, and the
 // control-plane jobs that run no PR code.
 //
-// classify_pr carries the routing logic TWICE — the `runs-on` expression
-// (which selects the classify job's own runner) and the `pick_runner` shell
-// step (which publishes `ubuntu_runner` for downstream Linux jobs). If
-// they drift, classify and the Test job land on different pools. These tests
-// evaluate BOTH against the same event matrix — including the negative
-// associations that must stay hosted — and assert they agree.
-//
-// pick_runner also publishes `lint_runner`, the one deliberate divergence:
-// Lint & Static routes EVERY pull request to the fleet, untrusted forks
-// included (maintainer decision 2026-10-31, shared-pool code-execution risk
-// accepted). The matrix below pins that divergence AND that ubuntu_runner
-// keeps the association gate for every other lane.
+// classify_pr's own runner is unconditional ECS (kill-switch excepted):
+// the gate executes only trusted base-SHA code with a read-only token, and
+// keeping it on hosted for forks queued the whole fork CI chain behind a
+// scarce pool (2026-10-31 decision, same accepted risk class as lint).
+// The association routing for DOWNSTREAM lanes lives in the `pick_runner`
+// shell step, which publishes `ubuntu_runner` (association-gated) and
+// `lint_runner` (every pull request reaches the fleet). The matrix below
+// pins the gate's unconditional routing AND that ubuntu_runner keeps the
+// association gate for the test/integration lanes.
 //
 // test_windows carries a deliberately different policy. A pull_request run
 // executes the workflow YAML from the PR's own merge commit, so any trust
@@ -52,15 +49,10 @@ const pickRunner = ciDoc.jobs.classify_pr.steps.find(
   (s) => s.id === 'pick_runner',
 );
 
-// GitHub expression semantics for the classify runs-on, restricted to the
-// routing-relevant inputs: contains(list, '') is false, a missing
+// GitHub expression semantics for the runs-on expressions, restricted to
+// the routing-relevant inputs: contains(list, '') is false, a missing
 // pull_request (merge_group / dispatch) yields '' for both head.repo and
 // author_association.
-function simulateRunsOn({ ecsDisabled, sameRepo, assoc, mergeGroup }) {
-  const trusted = TRUSTED.includes(assoc);
-  const ecs = !ecsDisabled && (sameRepo || trusted || mergeGroup);
-  return ecs ? ECS : HOSTED;
-}
 
 // Evaluates a real `runs-on` expression text with the routing inputs
 // substituted, leaving only the &&/||/parenthesis skeleton — which matches
@@ -186,25 +178,31 @@ const ASSOCIATIONS = [
 ];
 
 describe('ci.yml classify_pr runner routing', () => {
-  it('the expression and the shell step agree on every association', () => {
+  it('the gate routes every association to ECS; the kill-switch wins', () => {
+    // classify executes trusted base-SHA code only, so its own runner needs
+    // no association gate — a hosted gate queued the entire fork CI chain.
+    // The downstream ubuntu_runner keeps the gate (next test).
     for (const sameRepo of [true, false]) {
       for (const assoc of ASSOCIATIONS) {
-        const expected = simulateRunsOn({
-          ecsDisabled: false,
-          sameRepo,
-          assoc,
-          mergeGroup: false,
-        });
-        const actual = runPickRunner({
-          ecsDisabled: false,
-          sameRepo,
-          assoc,
-          eventName: 'pull_request',
-        });
-        assert.equal(
-          actual,
-          expected,
-          `drift for sameRepo=${sameRepo} assoc='${assoc}'`,
+        assert.deepEqual(
+          evalRunsOn(classifyRunsOn, {
+            ecsDisabled: false,
+            eventName: 'pull_request',
+            sameRepo,
+            assoc,
+          }),
+          JSON.parse(ECS),
+          `gate sameRepo=${sameRepo} assoc='${assoc}' must reach ECS`,
+        );
+        assert.deepEqual(
+          evalRunsOn(classifyRunsOn, {
+            ecsDisabled: true,
+            eventName: 'pull_request',
+            sameRepo,
+            assoc,
+          }),
+          JSON.parse(HOSTED),
+          `kill-switch must revert the gate (assoc='${assoc}')`,
         );
       }
     }
@@ -286,18 +284,17 @@ describe('ci.yml classify_pr runner routing', () => {
     }
   });
 
-  it('the runs-on expression keeps the trusted clause and kill-switch', () => {
-    // Structural pins for the expression half of the drift guard — the
-    // simulation above re-implements it, so pin the real text too.
-    assert.match(
-      classifyRunsOn,
-      /contains\(fromJSON\('\["OWNER","MEMBER","COLLABORATOR"\]'\), github\.event\.pull_request\.author_association\)/,
-    );
+  it('the gate expression is unconditional except the kill-switch', () => {
+    // Structural pins: no association/head-repo clause may creep back into
+    // the gate (it would re-queue fork CI on hosted), and the kill-switch
+    // must stay the single escape hatch.
+    assert.doesNotMatch(classifyRunsOn, /author_association/);
+    assert.doesNotMatch(classifyRunsOn, /head\.repo\.full_name/);
     assert.match(
       classifyRunsOn,
       /vars\.MAINTAINER_ECS_RUNNER_DISABLED != 'true'/,
     );
-    assert.match(classifyRunsOn, /github\.event_name == 'merge_group'/);
+    assert.match(classifyRunsOn, /ecs-qwen/);
   });
 });
 
