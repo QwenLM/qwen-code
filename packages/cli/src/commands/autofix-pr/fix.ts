@@ -256,6 +256,11 @@ export function runFixStart(args: FixStartArgs): AutofixPrFixAttempt & {
   return withWatchLock(paths, args.pr, () => {
     const state = requireState(paths.statePath, args.pr);
     assertWatching(state);
+    if (state.inPlace) {
+      throw new Error(
+        `PR #${args.pr} is an in-place watch: its fixes run in the foreground, in the user's checkout, never in the background.`,
+      );
+    }
     const task = state.watch?.task;
     if (!task) {
       throw new Error(

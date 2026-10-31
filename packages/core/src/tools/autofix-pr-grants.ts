@@ -42,6 +42,9 @@ export interface ConfirmedWatch {
   preparedAt: string | null;
   /** The worktree's canonical path. */
   worktree: string;
+  /** `prepare --in-place`: `worktree` is the user's own checkout, so the
+   * watch's files sit in its `.qwen/tmp`, not beside the worktree. */
+  inPlace?: boolean;
   /** What GitHub said when `prepare` asked, just now. */
   authorCanPush: boolean;
 }
