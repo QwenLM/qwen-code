@@ -2587,8 +2587,7 @@ export default {
     '检查更新失败（{{reason}}）。请检查网络或 registry 配置。',
   'Update check skipped ({{reason}}) — run /update to retry.':
     '已跳过更新检查（{{reason}}）— 可运行 /update 重试。',
-  'registry did not respond within {{seconds}}s':
-    'registry 在 {{seconds}} 秒内未响应',
+  'timed out after {{seconds}}s': '{{seconds}} 秒后超时',
   'registry unreachable': 'registry 无法连接',
   'registry error': 'registry 错误',
   'Unable to check for updates: {{reason}}': '无法检查更新：{{reason}}',

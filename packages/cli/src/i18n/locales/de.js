@@ -2232,8 +2232,7 @@ export default {
     'Suche nach Updates fehlgeschlagen ({{reason}}). Bitte Netzwerk- oder Registry-Konfiguration prüfen.',
   'Update check skipped ({{reason}}) — run /update to retry.':
     'Update-Prüfung übersprungen ({{reason}}) — mit /update erneut versuchen.',
-  'registry did not respond within {{seconds}}s':
-    'Registry hat nicht innerhalb von {{seconds}}s geantwortet',
+  'timed out after {{seconds}}s': 'Zeitüberschreitung nach {{seconds}}s',
   'registry unreachable': 'Registry nicht erreichbar',
   'registry error': 'Registry-Fehler',
   'Unable to check for updates: {{reason}}':

@@ -2802,8 +2802,7 @@ export default {
     'Failed to check for updates ({{reason}}). Please check your network or registry configuration.',
   'Update check skipped ({{reason}}) — run /update to retry.':
     'Update check skipped ({{reason}}) — run /update to retry.',
-  'registry did not respond within {{seconds}}s':
-    'registry did not respond within {{seconds}}s',
+  'timed out after {{seconds}}s': 'timed out after {{seconds}}s',
   'registry unreachable': 'registry unreachable',
   'registry error': 'registry error',
   'Unable to check for updates: {{reason}}':

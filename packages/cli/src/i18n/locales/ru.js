@@ -2205,8 +2205,7 @@ export default {
     'Не удалось проверить обновления ({{reason}}). Проверьте сеть или настройки registry.',
   'Update check skipped ({{reason}}) — run /update to retry.':
     'Проверка обновлений пропущена ({{reason}}) — выполните /update для повторной попытки.',
-  'registry did not respond within {{seconds}}s':
-    'registry не ответил за {{seconds}} с',
+  'timed out after {{seconds}}s': 'тайм-аут через {{seconds}} с',
   'registry unreachable': 'registry недоступен',
   'registry error': 'ошибка registry',
   'Unable to check for updates: {{reason}}':

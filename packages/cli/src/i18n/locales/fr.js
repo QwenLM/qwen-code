@@ -2235,8 +2235,7 @@ export default {
     'Échec de la vérification des mises à jour ({{reason}}). Vérifiez votre réseau ou la configuration du registre.',
   'Update check skipped ({{reason}}) — run /update to retry.':
     'Vérification des mises à jour ignorée ({{reason}}) — exécutez /update pour réessayer.',
-  'registry did not respond within {{seconds}}s':
-    "le registre n'a pas répondu en {{seconds}}s",
+  'timed out after {{seconds}}s': 'expiré après {{seconds}}s',
   'registry unreachable': 'registre inaccessible',
   'registry error': 'erreur du registre',
   'Unable to check for updates: {{reason}}':

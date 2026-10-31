@@ -2184,8 +2184,7 @@ export default {
     "No s'han pogut comprovar les actualitzacions ({{reason}}). Comproveu la xarxa o la configuració del registre.",
   'Update check skipped ({{reason}}) — run /update to retry.':
     "S'ha omès la comprovació d'actualitzacions ({{reason}}) — executeu /update per tornar-ho a provar.",
-  'registry did not respond within {{seconds}}s':
-    'el registre no ha respost en {{seconds}}s',
+  'timed out after {{seconds}}s': 'temps esgotat després de {{seconds}}s',
   'registry unreachable': 'no es pot accedir al registre',
   'registry error': 'error del registre',
   'Unable to check for updates: {{reason}}':

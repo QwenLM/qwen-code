@@ -1996,8 +1996,7 @@ export default {
     'アップデートの確認に失敗しました（{{reason}}）。ネットワークまたはレジストリ設定を確認してください。',
   'Update check skipped ({{reason}}) — run /update to retry.':
     'アップデートの確認をスキップしました（{{reason}}）— /update で再試行できます。',
-  'registry did not respond within {{seconds}}s':
-    'レジストリが {{seconds}} 秒以内に応答しませんでした',
+  'timed out after {{seconds}}s': '{{seconds}} 秒でタイムアウトしました',
   'registry unreachable': 'レジストリに接続できません',
   'registry error': 'レジストリエラー',
   'Unable to check for updates: {{reason}}':
