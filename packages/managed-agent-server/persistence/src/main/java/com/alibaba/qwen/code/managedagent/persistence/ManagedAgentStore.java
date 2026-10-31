@@ -447,8 +447,24 @@ public class ManagedAgentStore implements AgentStateStore {
             throw new ManagedAgentException(400, "unsupported_model",
                     "The model is not published for this Agent.");
         }
-        AgentPin pin = selectApprovalMode(resolveAgentPin(tenantId, agentId,
-                requestedRevision, true), requestedApprovalMode, approvalSelectionSupported);
+        // Resolve the revision and compile the stored definition before Workspace
+        // resolution. External-profile eligibility and requested approval/plan
+        // options are checked after the Workspace determines the effective profile.
+        AgentPin resolvedPin = resolveAgentPin(tenantId, agentId, requestedRevision, true);
+        requireCreationScope(tenantId, idempotencyKey, true);
+        ResolvedBinding workspace = workspaces.resolveForCreation(tenantId, actorId, selection);
+        boolean external = workspaces.isExternal(workspace.binding());
+        if (external) {
+            if (!workspaces.externalFilesAllowed(workspace.binding()) || !"qwen-code".equals(agentId)
+                    || resolvedPin.digest() != null || resolvedPin.hooks() || resolvedPin.mcp()
+                    || Boolean.TRUE.equals(requestedPlanMode) || !skills.isEmpty() || extensionPins != null
+                    || input.stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
+                throw workspaceExecutionUnavailable();
+            }
+            resolvedPin = new AgentPin(resolvedPin.revision(), null, resolvedPin.approvalMode(),
+                    WorkspaceToolProfiles.EXTERNAL_FILES, false, false);
+        }
+        AgentPin pin = selectApprovalMode(resolvedPin, requestedApprovalMode, approvalSelectionSupported);
         boolean planMode = Boolean.TRUE.equals(requestedPlanMode);
         if (planMode && (!planModeSupported || !approvalSelectionSupported
                 || pin.hooks() || pin.mcp() || !(WorkspaceToolProfiles.FILES.equals(pin.toolProfile())
@@ -459,9 +475,6 @@ public class ManagedAgentStore implements AgentStateStore {
                 && !workspaceShellEnabled) {
             throw workspaceExecutionUnavailable();
         }
-        requireCreationScope(tenantId, idempotencyKey, true);
-        ResolvedBinding workspace = workspaces.resolveForCreation(
-                tenantId, actorId, selection);
         if (extensionPins != null) {
             if (extensionPackages == null) {
                 throw workspaceExecutionUnavailable();
@@ -487,13 +500,13 @@ public class ManagedAgentStore implements AgentStateStore {
                 throw workspaceExecutionUnavailable();
             }
             residentWorkspaces.requireCreation(jdbc, workspace.binding(), pin.toolProfile());
-        } else if (!sshWorkspace) {
+        } else if (!sshWorkspace && !external) {
             WorkspaceStorageKindGuard.requireLocalAlias(jdbc, tenantId, workspace.binding().getStorageId());
         }
         if (!resident && !input.isEmpty()
                 && (!WorkspaceExecutionProfile.CONFIG_REF.equals(workspace.configRef())
                         || !WorkspaceExecutionProfile.POLICY_REF.equals(workspace.policyRef())
-                        || !sshWorkspace && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
+                        || !sshWorkspace && !external && !configuredStorage(tenantId, workspace.binding().getStorageId()))) {
             throw workspaceExecutionUnavailable();
         }
         List<Map<String, Object>> merged = new ArrayList<>();
@@ -1566,6 +1579,19 @@ public class ManagedAgentStore implements AgentStateStore {
             throw workspaceExecutionUnavailable();
         }
         if (session.workspace() != null) {
+            if (workspaces.isExternal(session.workspace()) || WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())) {
+                if (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        || !workspaces.externalFilesAllowed(session.workspace())
+                        || !workspaces.accessOf(tenantId, actorId, session.workspace().getWorkspaceId()).canCreate()
+                        || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null
+                        || findChildLineage(tenantId, sessionId) != null || session.publicChildAgentsVersion() != 0 || hasMcpServers(session)
+                        || !creationSkills.effective(session).isEmpty() || creationSkills.initialSelection(tenantId, sessionId) != null
+                        || Boolean.TRUE.equals(jdbc.queryForObject("SELECT plan_enabled FROM ma_session WHERE tenant_id=? AND session_id=?",
+                                Boolean.class, tenantId, sessionId))
+                        || input.stream().anyMatch(block -> !Set.of("input_text", "text").contains(block.get("type")))) {
+                    throw workspaceExecutionUnavailable();
+                }
+            }
             if (isSshWorkspace(session.workspace())) {
                 requireSshToolProfile(session.toolProfile());
                 if (hasMcpServers(session)) {
@@ -2781,7 +2807,8 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         if (session.workspace() != null && !resumed) {
             if (kind == OperationKind.CLOSE || kind == OperationKind.DELETE && "ACTIVE".equals(session.status()) && WorkspaceToolProfiles.lifecycleProtocol(protocolVersion)) {
-                if (!supported || protocolVersion == 1 && !workspaceFilesEnabled) {
+                if (!supported || protocolVersion == 1 && !workspaceFilesEnabled
+                        && !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && workspaces.isExternal(session.workspace()))) {
                     throw workspaceExecutionUnavailable();
                 }
                 if ("ACTIVE".equals(session.status())) {
@@ -4906,13 +4933,16 @@ public class ManagedAgentStore implements AgentStateStore {
             String promptId) {
         var rows = jdbc.query("SELECT t.approval_mode, t.approval_revision, t.plan_enabled, t.permission_rules_json,"
                         + " s.approval_revision AS selected_revision, s.agent_id, s.agent_definition_digest,"
-                        + " s.workspace_id, s.tool_profile FROM ma_turn t JOIN ma_session s"
+                        + " s.workspace_id, s.tool_profile, s.parent_session_id, s.public_child_agents_version FROM ma_turn t JOIN ma_session s"
                         + " ON s.tenant_id=t.tenant_id AND s.session_id=t.session_id"
                         + " WHERE t.tenant_id=? AND t.session_id=? AND t.prompt_id=?", (row, index) -> {
                     if (("qwen-code".equals(row.getString("agent_id"))
                             ? row.getString("agent_definition_digest") != null
                             : row.getString("agent_definition_digest") == null) || row.getString("workspace_id") == null
-                            || !(WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))
+                            || !(WorkspaceToolProfiles.EXTERNAL_FILES.equals(row.getString("tool_profile"))
+                                    ? "qwen-code".equals(row.getString("agent_id")) && row.getString("agent_definition_digest") == null
+                                            && row.getString("parent_session_id") == null && row.getInt("public_child_agents_version") == 0
+                                    : WorkspaceToolProfiles.FILES.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.FILES_V3.equals(row.getString("tool_profile"))
                             || WorkspaceToolProfiles.isPublicShell(row.getString("tool_profile")))) {
                         return null;
@@ -5002,6 +5032,8 @@ public class ManagedAgentStore implements AgentStateStore {
         }
         if (!supported || session.agentDefinitionDigest() != null && !agentDefinitionSupported
                 || !workspaceFilesEnabled || !WorkspaceToolProfiles.supportsApprovalSelection(session)
+                || WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        && (!workspaces.externalFilesAllowed(session.workspace()) || findChildLineage(tenantId, sessionId) != null)
                 || WorkspaceToolProfiles.isPublicShell(session.toolProfile()) && !workspaceShellEnabled) {
             throw new ManagedAgentException(409, "unsupported_feature", "Approval selection is unavailable");
         }
@@ -7137,22 +7169,30 @@ public class ManagedAgentStore implements AgentStateStore {
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3','hosted-workspace-external-files/1')"
+                         + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
+                         + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))"
                         + " THEN COALESCE(selected_approval_mode, approval_mode) ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3','hosted-workspace-external-files/1')"
+                         + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
+                         + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))"
                         + " THEN approval_revision ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
-                        + " THEN plan_enabled ELSE NULL END,"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3','hosted-workspace-external-files/1')"
+                         + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
+                         + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))"
+                        + " THEN CASE WHEN tool_profile = 'hosted-workspace-external-files/1' THEN FALSE ELSE plan_enabled END ELSE NULL END,"
                         + " CASE WHEN ((agent_id=? AND agent_definition_digest IS NULL)"
                         + " OR (agent_id<>? AND agent_definition_digest IS NOT NULL))"
                         + " AND workspace_id IS NOT NULL AND tool_profile IN ('hosted-workspace-files/1',"
-                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3')"
+                        + " 'hosted-workspace-shell/1','hosted-workspace-files/3','hosted-workspace-external-files/1')"
+                         + " AND (tool_profile <> 'hosted-workspace-external-files/1' OR"
+                         + " (agent_id = X'7177656e2d636f6465' AND agent_definition_digest IS NULL AND parent_session_id IS NULL))"
                         + " THEN permission_rules_json ELSE NULL END"
                         + " FROM ma_session WHERE tenant_id = ? AND session_id = ?",
                 tenantId, sessionId, turnId, promptId, writeJson(input),

@@ -35,6 +35,11 @@ public interface ManagedWorkspaceRegistry {
     public boolean bindingCurrent(String tenantId, String workspaceId,
             long generation, String storageId);
 
+    /** Whether any registered EXTERNAL storage can host an external Workspace. */
+    public boolean externalFilesAvailable();
+
+    public boolean externalFilesAllowed(ContextBinding binding);
+
     public record WorkspaceSummary(String workspaceId, String displayName,
             String state, boolean canCreateSession, String defaultCwdRelative, boolean canSelectDirectory) {
         public WorkspaceSummary(String workspaceId, String displayName, String state, boolean canCreateSession) {

@@ -56,7 +56,7 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     private final ExternalRuntimeClient client;
     private final String providerId;
     private final Duration startupTimeout;
-    private final HttpRuntimeTransport transport = new HttpRuntimeTransport();
+    protected final HttpRuntimeTransport transport = new HttpRuntimeTransport();
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final Map<RuntimeProvisionSeed, Placement> placements = new ConcurrentHashMap<>();
     private final Map<List<Object>, Placement> placementsByLease = new ConcurrentHashMap<>();
@@ -402,12 +402,44 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
         }
     }
 
+    /** Validates durable originals without observing, allocating or adopting a placement. */
+    protected final Map<String, Object> validatedSavedBoot(RuntimeBindingRecord binding) {
+        if (binding == null || binding.getLease() == null || executor.isShutdown()) {
+            throw conflict();
+        }
+        RuntimeProvisionRequest request = binding.getRequest();
+        RuntimeProvisionSeed seed = binding.getProvisionSeed();
+        validate(request, seed);
+        if (!seed.matches(binding.getLease())) {
+            throw conflict();
+        }
+        Map<String, Object> boot = bootDocument(request, seed);
+        validateHandle(request, seed, binding.getResourceHandle(), boot);
+        synchronized (placements) {
+            for (Placement saved : placements.values()) {
+                if ((saved.seed().getProvisionRequestId().equals(seed.getProvisionRequestId())
+                        || saved.seed().getLeaseId().equals(seed.getLeaseId()))
+                        && (!saved.request().equals(request) || !saved.seed().equals(seed)
+                            || !Objects.equals(saved.handle(), binding.getResourceHandle())
+                            || saved.endpoint() != null && !saved.endpoint().equals(binding.getLease().getEndpoint()))) {
+                    throw conflict();
+                }
+            }
+        }
+        return boot;
+    }
+
     private void validateHandle(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
             RuntimeResourceHandle handle) {
+        validateHandle(request, seed, handle, bootDocument(request, seed));
+    }
+
+    private void validateHandle(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle handle, Map<String, Object> boot) {
         if (!supportsStartupRecovery(handle) || handle.getValue().size() != 4
                 || !providerId.equals(handle.getValue().get("providerId"))
                 || !seed.getProvisionRequestId().equals(handle.getValue().get("provisionRequestId"))
-                || !identity(request, seed).equals(handle.getValue().get("identity"))) {
+                || !identity(request, boot).equals(handle.getValue().get("identity"))) {
             throw conflict();
         }
         if (!Map.of("requestId", seed.getProvisionRequestId()).equals(handle.getValue().get("provider"))) {
@@ -416,7 +448,11 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     }
 
     private String identity(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
-        Map<String, Object> boot = new LinkedHashMap<>(bootDocument(request, seed));
+        return identity(request, bootDocument(request, seed));
+    }
+
+    private String identity(RuntimeProvisionRequest request, Map<String, Object> originalBoot) {
+        Map<String, Object> boot = new LinkedHashMap<>(originalBoot);
         boot.remove("token");
         return digest(Map.of("version", 1, "providerId", providerId,
                 "isolationKey", request.getIsolationKey(), "boot", boot));

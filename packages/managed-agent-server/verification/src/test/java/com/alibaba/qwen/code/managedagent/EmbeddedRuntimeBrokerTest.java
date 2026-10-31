@@ -462,6 +462,39 @@ class EmbeddedRuntimeBrokerTest {
     }
 
     @Test
+    void externalCloseCapabilityContainsRegistrationDriftAndReadFailure() throws Exception {
+        var source = new org.springframework.jdbc.datasource.DriverManagerDataSource(
+                "jdbc:h2:mem:external-capability-" + java.util.UUID.randomUUID()
+                        + ";MODE=MySQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1", "sa", "");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema.initialize(source);
+        var jdbc = new com.alibaba.qwen.code.managedagent.persistence.ManagedSchemaJdbcTemplate(source);
+        var manager = new org.springframework.jdbc.datasource.DataSourceTransactionManager(source);
+        var registrations = new com.alibaba.qwen.code.managedagent.persistence.ExternalStorageRegistrationStore(jdbc, manager);
+        registrations.registerExternalStorage("tenant", "register",
+                new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration(
+                        new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.ExternalStorageIdentity("provider", "physical", 1),
+                        new com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration.StorageAlias("workspace", "/alias/workspace", "/remote/workspace")));
+        new com.alibaba.qwen.code.managedagent.persistence.ExternalWorkspaceMaterializationStore(jdbc, manager)
+                .materialize("tenant", "workspace", "Name", "actor", "materialize");
+        var properties = properties();
+        properties.getRuntimeBroker().setProvisioner("external-workspace");
+        properties.getRuntimeBroker().setIsolationClass("session");
+        properties.getRuntimeBroker().setExternalProviderId("provider");
+        properties.getRuntimeBroker().setExternalProviderUrl("http://127.0.0.1:9");
+        properties.getRuntimeBroker().setExternalProviderToken("provider-token-for-tests");
+        var context = new ContextBinding("tenant", "workspace", 1, "workspace", ".", "config", 1);
+        try (var broker = new EmbeddedRuntimeBroker(mock(ManagedAgentStore.class), properties,
+                new InMemoryRuntimeBindingRepository(), new InMemoryRuntimeSessionRepository(),
+                new InMemoryToolExecutionRepository(), null, null, null, jdbc, manager)) {
+            assertThat(broker.supportsWorkspaceClose(context)).isTrue();
+            jdbc.update("UPDATE ma_storage SET registration_revision = 2");
+            assertThat(broker.supportsWorkspaceClose(context)).isFalse();
+            jdbc.execute("DROP TABLE ma_storage");
+            assertThat(broker.supportsWorkspaceClose(context)).isFalse();
+        }
+    }
+
+    @Test
     void refusesAnExternalScratchConfigurationWithoutAProviderUrl()
             throws Exception {
         ManagedAgentProperties properties = properties();

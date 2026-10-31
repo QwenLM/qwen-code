@@ -137,6 +137,227 @@ class HttpRuntimeTransportTest {
         server.stop(0);
     }
 
+    private static RuntimeProvisionRequest externalRequest() {
+        return new RuntimeProvisionRequest(new RuntimeScope("tenant-a", "workspace-a", "1", "/workspace/storage",
+                WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session"), "session-a", "external-workspace", "workspace-a");
+    }
+
+    private void externalAttestation(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        server.createContext(ManagedContextProtocol.ATTEST_PATH, exchange -> {
+            captured.set(exchange.getRequestBody().readAllBytes());
+            byte[] body = JsonCodec.encode(ManagedContextProtocol.attestationResponse(ManagedContextProtocol.boot(request, seed)));
+            exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, body.length);
+            exchange.getResponseBody().write(body);
+            exchange.close();
+        });
+    }
+
+    private static String externalDrained() {
+        return "{\"protocolVersion\":2,\"state\":\"drained\",\"proof\":{"
+                + "\"resourceId\":\"f120dc54-3d91-4dbb-84e3-3ca1127a883c\",\"kind\":\"external-publication\","
+                + "\"schemaVersion\":1,\"byteLength\":231,\"digest\":\"" + "a".repeat(64) + "\"},\"receipts\":[]}";
+    }
+
+    @Test
+    void externalDrainAttestsThenPostsFixedBootHeadersWithoutRequiringAResponseIncarnation() throws Exception {
+        var request = externalRequest();
+        var seed = ManagedContextProtocolTest.seed();
+        externalAttestation(request, seed);
+        reply.set(json(200, externalDrained().getBytes(StandardCharsets.UTF_8)));
+        transport.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+        assertEquals(HttpRuntimeTransport.EXTERNAL_STOP_PATH, capturedPath.get());
+        assertEquals(Map.of("protocolVersion", 2, "channel", "all"), JsonCodec.parseObject(captured.get(), "stop"));
+        assertEquals("Bearer " + seed.getToken(), capturedAuthorization.get());
+        assertEquals("no-store", capturedCacheControl.get());
+        assertEquals("application/json", capturedHeaders.get().getFirst("Content-Type"));
+        assertEquals(seed.getLeaseId(), capturedHeaders.get().getFirst("X-Qwen-Managed-Lease-Id"));
+        assertEquals(Long.toString(seed.getEpoch()), capturedHeaders.get().getFirst("X-Qwen-Managed-Lease-Epoch"));
+        assertEquals("3", capturedHeaders.get().getFirst("X-Qwen-Managed-Storage-Revision"));
+        assertEquals(seed.getGatewayIncarnation(), capturedHeaders.get().getFirst("X-Qwen-Managed-Runtime-Incarnation"));
+    }
+
+    @Test
+    void externalDrainAcceptsPublicationReceiptsButRejectsMalformedEntries() throws Exception {
+        var request = externalRequest();
+        var seed = ManagedContextProtocolTest.seed();
+        externalAttestation(request, seed);
+        ObjectNode body = (ObjectNode) JSON.readTree(externalDrained());
+        ObjectNode receipt = body.putArray("receipts").addObject();
+        String channelId = "d349deae-7931-48c2-9f22-39c340bbaaf9";
+        receipt.put("channelId", channelId);
+        receipt.set("receipt", body.get("proof").deepCopy());
+        String valid = JSON.writeValueAsString(body);
+        reply.set(json(200, valid.getBytes(StandardCharsets.UTF_8)));
+        transport.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS);
+        for (String invalid : List.of(valid.replace(channelId, "../private"),
+                valid.replace("\"receipt\":", "\"unexpected\":"),
+                valid.replace("\"receipt\":{", "\"receipt\":{\"extra\":true,"))) {
+            reply.set(json(200, invalid.getBytes(StandardCharsets.UTF_8)));
+            var failure = assertThrows(ExecutionException.class,
+                    () -> transport.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3)
+                            .toCompletableFuture().get(2, TimeUnit.SECONDS));
+            var refusal = assertInstanceOf(RuntimeBrokerException.class, failure.getCause());
+            assertEquals(400, refusal.getStatusCode());
+            assertFalse(refusal.isRetryable());
+        }
+    }
+
+    @Test
+    void externalDrainKeepsWorkerUncertaintyAndPendingChannelsRetryable() throws Exception {
+        var request = externalRequest();
+        var seed = ManagedContextProtocolTest.seed();
+        externalAttestation(request, seed);
+        for (String body : List.of("{\"protocolVersion\":2,\"state\":\"unknown\"}",
+                "{\"protocolVersion\":2,\"state\":\"undrained\","
+                        + "\"channels\":[\"d349deae-7931-48c2-9f22-39c340bbaaf9\"]}")) {
+            reply.set(json(200, body.getBytes(StandardCharsets.UTF_8)));
+            var failure = assertThrows(ExecutionException.class,
+                    () -> transport.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3)
+                            .toCompletableFuture().get(2, TimeUnit.SECONDS));
+            var pending = assertInstanceOf(RuntimeBrokerException.class, failure.getCause());
+            assertEquals(503, pending.getStatusCode());
+            assertEquals("managed_runtime_unavailable", pending.getCode());
+            assertTrue(pending.isRetryable());
+        }
+    }
+
+    @Test
+    void externalDrainRejectsAmbiguousOrNonFileProofsAndUnboundedReplies() throws Exception {
+        var request = externalRequest();
+        var seed = ManagedContextProtocolTest.seed();
+        externalAttestation(request, seed);
+        String valid = externalDrained();
+        List<String> invalid = List.of(
+                "{\"protocolVersion\":2,\"state\":\"unknown\",\"extra\":true}",
+                "{\"protocolVersion\":2,\"state\":\"undrained\",\"channels\":[\"shell\"]}",
+                valid.replace("\"receipts\":[]", "\"receipts\":[{}]"),
+                valid.replace("\"receipts\":[]", "\"receipts\":[],\"channels\":[]"),
+                valid.replace("\"schemaVersion\":1", "\"schemaVersion\":1.0"),
+                valid.replace("\"byteLength\":231", "\"byteLength\":0"),
+                valid.replace("\"byteLength\":231", "\"byteLength\":67108865"),
+                valid.replace("\"byteLength\":231", "\"byteLength\":1.00000000000000001"),
+                valid.replace("external-publication", "managed-tool-result-manifest"),
+                valid.replace("f120dc54-3d91-4dbb-84e3-3ca1127a883c", "../private"),
+                valid.replace("a".repeat(64), "A".repeat(64)),
+                valid.replace("\"state\":\"drained\"", "\"state\":\"unknown\",\"state\":\"drained\""),
+                valid.replace("\"schemaVersion\":1", "\"schemaVersion\":2,\"schemaVersion\":1"),
+                valid + "{}", valid + " ".repeat(64 * 1024));
+        for (String body : invalid) {
+            reply.set(json(200, body.getBytes(StandardCharsets.UTF_8)));
+            assertThrows(ExecutionException.class, () -> transport.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS), body.substring(0, Math.min(body.length(), 150)));
+        }
+        for (Reply malformed : List.of(json(409, valid.getBytes(StandardCharsets.UTF_8)),
+                new Reply(200, valid.getBytes(StandardCharsets.UTF_8), "no-store", "text/plain"),
+                new Reply(200, valid.getBytes(StandardCharsets.UTF_8), "public", "application/json"),
+                json(200, new byte[] {(byte) 0xc3, 0x28}))) {
+            reply.set(malformed);
+            assertThrows(ExecutionException.class, () -> transport.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        }
+    }
+
+    @Test
+    void externalDrainRefusesWrongAttestationAndRedirectingClientsBeforeSendingSecrets() throws Exception {
+        var request = externalRequest();
+        var seed = ManagedContextProtocolTest.seed();
+        var other = new RuntimeProvisionSeed(seed.getProvisionRequestId(), seed.getProvisionalRuntimeId(), "other-boot",
+                seed.getLeaseId(), seed.getEpoch(), seed.getToken());
+        externalAttestation(request, other);
+        assertThrows(ExecutionException.class, () -> transport.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3)
+                .toCompletableFuture().get(2, TimeUnit.SECONDS));
+        assertEquals(0, requestCount.get(), "wrong attestation must never reach stop");
+        captured.set(null);
+        var redirects = new HttpRuntimeTransport(HttpClient.newBuilder().followRedirects(HttpClient.Redirect.ALWAYS).build());
+        assertThrows(IllegalArgumentException.class,
+                () -> redirects.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3));
+        var redirectedEndpoint = new HttpRuntimeTransport(ignored -> URI.create("http://127.0.0.1:1/"));
+        assertThrows(IllegalArgumentException.class,
+                () -> redirectedEndpoint.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3));
+        assertNull(captured.get(), "redirect policy and endpoint must be checked before attestation");
+    }
+
+    @Test
+    void externalDrainNeverFollowsTheStopRedirectToACredentialSink() throws Exception {
+        var request = externalRequest();
+        var seed = ManagedContextProtocolTest.seed();
+        externalAttestation(request, seed);
+        AtomicInteger sinkHits = new AtomicInteger();
+        HttpServer sink = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        sink.createContext("/", exchange -> {
+            sinkHits.incrementAndGet();
+            exchange.sendResponseHeaders(200, -1);
+            exchange.close();
+        });
+        sink.start();
+        server.createContext(HttpRuntimeTransport.EXTERNAL_STOP_PATH, exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            exchange.getResponseHeaders().set("Location", "http://127.0.0.1:" + sink.getAddress().getPort() + "/");
+            exchange.sendResponseHeaders(307, -1);
+            exchange.close();
+        });
+        try {
+            assertThrows(ExecutionException.class, () -> transport.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3)
+                    .toCompletableFuture().get(2, TimeUnit.SECONDS));
+            assertEquals(0, sinkHits.get());
+        } finally {
+            sink.stop(0);
+        }
+    }
+
+    @Test
+    void externalDrainDeadlineAndCancellationCloseTheActiveSocket() throws Exception {
+        var request = externalRequest();
+        var seed = ManagedContextProtocolTest.seed();
+        for (boolean cancelAttestation : new boolean[] {true, false}) {
+            if (!cancelAttestation) {
+                externalAttestation(request, seed);
+            }
+            String path = cancelAttestation ? ManagedContextProtocol.ATTEST_PATH : HttpRuntimeTransport.EXTERNAL_STOP_PATH;
+            CountDownLatch started = new CountDownLatch(1);
+            CountDownLatch closed = new CountDownLatch(1);
+            server.createContext(path, exchange -> {
+                exchange.getRequestBody().readAllBytes();
+                exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                exchange.getResponseHeaders().set("Content-Type", "application/json");
+                exchange.sendResponseHeaders(200, 0);
+                started.countDown();
+                try (OutputStream out = exchange.getResponseBody()) {
+                    for (int tick = 0; tick < 100; tick++) {
+                        out.write(' ');
+                        out.flush();
+                        Thread.sleep(20);
+                    }
+                } catch (IOException gone) {
+                    closed.countDown();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                } finally {
+                    exchange.close();
+                }
+            });
+            var bounded = new HttpRuntimeTransport(HttpClient.newBuilder().version(HttpClient.Version.HTTP_1_1).build(),
+                    Duration.ofMillis(cancelAttestation ? 5000 : 500));
+            var pending = bounded.stopExternalWorkspaceDrained(contextLease(seed), request, seed, 3).toCompletableFuture();
+            try {
+                assertTrue(started.await(2, TimeUnit.SECONDS));
+                if (cancelAttestation) {
+                    assertTrue(pending.cancel(true));
+                } else {
+                    assertThrows(ExecutionException.class, () -> pending.get(2, TimeUnit.SECONDS));
+                }
+                assertTrue(closed.await(2, TimeUnit.SECONDS), "active HTTP socket must close, not just the returned future");
+            } finally {
+                pending.cancel(true);
+                server.removeContext(path);
+            }
+        }
+    }
+
     @Test
     void inventoryUsesTheAttestedLeaseAndRejectsPrivateRecipeFields() throws Exception {
         var request = ManagedContextProtocolTest.request();

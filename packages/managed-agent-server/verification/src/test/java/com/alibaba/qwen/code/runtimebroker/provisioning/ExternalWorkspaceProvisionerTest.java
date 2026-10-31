@@ -1,7 +1,10 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning;
 
+import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.ManagedExtensionExecutionProfile;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeLease;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
@@ -10,12 +13,17 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeResourceHandle;
 import com.alibaba.qwen.code.runtimebroker.RuntimeScope;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
+import com.alibaba.qwen.code.runtimebroker.protocol.ManagedContextProtocol;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
+import com.sun.net.httpserver.HttpServer;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
+import java.net.InetSocketAddress;
+import java.net.URI;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -25,6 +33,8 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -38,8 +48,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * registration; the Broker mints the shipped {@code managed-context/1} boot plus
  * the already-admitted {@code storage} member; identity, handle and recovery stay
  * bound to that registration; every disagreement fails closed with a permanent
- * code; and the profile never claims a close proof, so no Session can be placed
- * and then left unclosable.
+ * code. The saved-binding drain primitive does not advertise blanket close
+ * support or admit Hosted Sessions.
  */
 class ExternalWorkspaceProvisionerTest {
     private static final String TENANT = "tenant-a";
@@ -408,6 +418,213 @@ class ExternalWorkspaceProvisionerTest {
         assertFalse(subject.supportsStartupRecovery(scratchShaped));
     }
 
+    private static RuntimeBindingRecord draining(RuntimeProvisionRequest request, RuntimeProvisionSeed seed,
+            RuntimeResourceHandle handle, RuntimeLease lease, boolean drainRequested) {
+        Instant now = Instant.now();
+        return new RuntimeBindingRecord("binding-a", request, seed, 1, RuntimeBindingRecord.State.DRAINING,
+                lease, handle, 1, drainRequested, "broker-a", now.plusSeconds(60), 1, 1, now, now, now);
+    }
+
+    @Test
+    void savedOriginalDrainsAfterAdapterRestartWithoutObservingOrAllocating() throws Exception {
+        var subject = provisioner(registration(PROVIDER, 3, MOUNT));
+        var request = request();
+        var seed = seed("stop");
+        var handle = join(subject.ensureResource(request, seed, null));
+        subject.close();
+        subject = provisioner(registration(PROVIDER, 3, MOUNT));
+        AtomicInteger attestations = new AtomicInteger();
+        AtomicInteger stops = new AtomicInteger();
+        AtomicReference<Map<String, Object>> stopBody = new AtomicReference<>();
+        AtomicReference<com.sun.net.httpserver.Headers> stopHeaders = new AtomicReference<>();
+        HttpServer worker = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        worker.createContext(ManagedContextProtocol.ATTEST_PATH, exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            if (!("Bearer " + seed.getToken()).equals(exchange.getRequestHeaders().getFirst("Authorization"))) {
+                exchange.sendResponseHeaders(403, -1);
+                exchange.close();
+                return;
+            }
+            attestations.incrementAndGet();
+            byte[] bytes = JsonCodec.encode(ManagedContextProtocol.attestationResponse(ManagedContextProtocol.boot(request, seed)));
+            exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        worker.createContext("/internal/managed-runtime/v2/publication:stop-drained", exchange -> {
+            stopBody.set(JsonCodec.parseObject(exchange.getRequestBody().readAllBytes(), "stop"));
+            stopHeaders.set(exchange.getRequestHeaders());
+            stops.incrementAndGet();
+            byte[] bytes = JsonCodec.encode(Map.of("protocolVersion", 2, "state", "drained", "receipts", List.of(),
+                    "proof", Map.of("resourceId", "f120dc54-3d91-4dbb-84e3-3ca1127a883c", "kind", "external-publication",
+                            "schemaVersion", 1, "byteLength", 231, "digest", "a".repeat(64))));
+            exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        worker.start();
+        try {
+            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create("http://127.0.0.1:" + worker.getAddress().getPort()),
+                    seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+            var binding = draining(request, seed, handle, lease, true);
+            assertFalse(subject.supportsDrainedStop());
+            assertTrue(subject.supportsDrainedStop(binding));
+            Instant before = Instant.now();
+            RuntimeDrainReceipt receipt = join(subject.stopDrained(binding));
+            assertTrue(receipt.matches(binding));
+            assertEquals("binding-a", receipt.bindingId());
+            assertEquals(1, receipt.generation());
+            assertEquals(seed.getProvisionRequestId(), receipt.provisionRequestId());
+            assertEquals(handle, receipt.resourceHandle());
+            assertFalse(receipt.stoppedAt().isBefore(before));
+            assertFalse(receipt.stoppedAt().isAfter(Instant.now()));
+            org.junit.jupiter.api.Assertions.assertNull(receipt.executionMode());
+            org.junit.jupiter.api.Assertions.assertNull(receipt.stopScope());
+            assertEquals(1, attestations.get());
+            assertEquals(1, stops.get());
+            assertEquals(Map.of("protocolVersion", 2, "channel", "all"), stopBody.get());
+            assertEquals("3", stopHeaders.get().getFirst("X-Qwen-Managed-Storage-Revision"));
+            assertTrue(client.provisions.isEmpty());
+            assertTrue(client.observes.isEmpty());
+        } finally {
+            worker.stop(0);
+        }
+    }
+
+    @Test
+    void drainRefusesIncompleteAndChangedOriginalsBeforeNetworkOrProviderCalls() throws Exception {
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        Placement original = place(subject, "original");
+        int observations = client.observes.size();
+        var changedScope = new RuntimeScope(TENANT, ALIAS, "2", MOUNT, CAPABILITY, "session");
+        var changedRequest = new RuntimeProvisionRequest(changedScope, "isolation-a", ExternalWorkspaceProvisioner.KIND, ALIAS);
+        var changedSeed = new RuntimeProvisionSeed(original.seed().getProvisionRequestId(), "runtime-a", "new-incarnation",
+                original.seed().getLeaseId(), original.seed().getEpoch(), original.seed().getToken());
+        var changedToken = new RuntimeProvisionSeed(original.seed().getProvisionRequestId(), "runtime-a", "incarnation-a",
+                original.seed().getLeaseId(), original.seed().getEpoch(), "other-token");
+        var tokenLease = new RuntimeLease("runtime-a", original.lease().getEndpoint(), changedToken.getToken(),
+                changedToken.getLeaseId(), changedToken.getEpoch());
+        var changedEndpoint = new RuntimeLease("runtime-a", URI.create("http://127.0.0.1:1"), original.seed().getToken(),
+                original.seed().getLeaseId(), original.seed().getEpoch());
+        for (RuntimeBindingRecord invalid : List.of(
+                draining(original.request(), null, original.handle(), original.lease(), true),
+                draining(original.request(), original.seed(), null, original.lease(), true),
+                draining(original.request(), original.seed(), original.handle(), null, true),
+                draining(changedRequest, original.seed(), original.handle(), original.lease(), true),
+                draining(original.request(), changedSeed, original.handle(), original.lease(), true),
+                draining(original.request(), changedToken, original.handle(), tokenLease, true),
+                draining(original.request(), original.seed(), original.handle(), changedEndpoint, true))) {
+            assertFalse(subject.supportsDrainedStop(invalid));
+            var refused = failure(subject.stopDrained(invalid));
+            assertEquals(409, refused.getStatusCode());
+            assertEquals("runtime_broker_resource_conflict", refused.getCode());
+            assertFalse(refused.isRetryable());
+        }
+        failure(subject.stopDrained(draining(original.request(), original.seed(), original.handle(), original.lease(), false)));
+        assertEquals(observations, client.observes.size());
+        assertEquals(1, client.provisions.size());
+        subject.close();
+        subject = provisioner(registration(PROVIDER, 2, MOUNT));
+        var saved = draining(original.request(), original.seed(), original.handle(), original.lease(), true);
+        assertFalse(subject.supportsDrainedStop(saved));
+        failure(subject.stopDrained(saved));
+        subject.close();
+        subject = provisioner(registration("other-provider", 1, MOUNT));
+        assertFalse(subject.supportsDrainedStop(saved));
+        failure(subject.stopDrained(saved));
+        assertEquals(observations, client.observes.size());
+        assertEquals(1, client.provisions.size());
+    }
+
+    @Test
+    void drainCapabilityPreservesRetryableRegistryFailure() throws Exception {
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(subject, "registry-outage");
+        var saved = draining(original.request(), original.seed(), original.handle(), original.lease(), true);
+        subject.close();
+        var unavailable = new RuntimeBrokerException(503, "runtime_external_unavailable", "Registry read failed.", true);
+        provisioner = new ExternalWorkspaceProvisioner(client, (tenant, alias) -> {
+            throw unavailable;
+        }, PROVIDER, Duration.ofSeconds(5));
+        var failure = org.junit.jupiter.api.Assertions.assertThrows(RuntimeBrokerException.class,
+                () -> provisioner.supportsDrainedStop(saved));
+        org.junit.jupiter.api.Assertions.assertSame(unavailable, failure);
+        assertEquals(503, failure.getStatusCode());
+        assertTrue(failure.isRetryable());
+        org.junit.jupiter.api.Assertions.assertSame(unavailable, failure(provisioner.stopDrained(saved)));
+    }
+
+    @Test
+    void acquisitionRequiresPositiveContinuityButProvisionOnlyParityDoesNot() throws Exception {
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        var original = place(subject, "acquire-missing");
+        var ready = draining(original.request(), original.seed(), original.handle(), original.lease(), false)
+                .withState(RuntimeBindingRecord.State.READY, original.lease(), Instant.now());
+        int before = client.observes.size();
+        assertEquals("runtime_external_unavailable", failure(subject.verifyAcquisition(ready)).getCode());
+        assertEquals(before + 1, client.observes.size(), "One response supplies readiness and storage evidence");
+        assertEquals(1, client.provisions.size());
+        assertTrue(subject.isUsable(original.lease()), "Unknown acquisition evidence retains the original placement");
+        client.storage = evidence("confirms", 1);
+        failure(subject.verifyAcquisition(ready.withDrainRequested(true, Instant.now())));
+        assertEquals(before + 1, client.observes.size(), "Drain refuses acquisition before observing");
+        assertTrue(ExternalWorkspaceProvisioner.isWorkspaceRequest(original.request()));
+        assertFalse(ExternalWorkspaceProvisioner.isWorkspaceRequest(new RuntimeProvisionRequest(scope(CAPABILITY),
+                "isolation-a", ExternalRuntimeProvisioner.KIND, ALIAS)));
+    }
+
+    @Test
+    void acquisitionAfterRestartObservesOriginalOnceThenIndependentlyAttests() throws Exception {
+        var subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        var request = request();
+        var seed = seed("acquisition");
+        var handle = join(subject.ensureResource(request, seed, null));
+        subject.close();
+        subject = provisioner(registration(PROVIDER, 1, MOUNT));
+        AtomicInteger attestations = new AtomicInteger();
+        AtomicReference<Map<String, Object>> attestation = new AtomicReference<>(
+                ManagedContextProtocol.attestationResponse(ManagedContextProtocol.boot(request, seed)));
+        HttpServer worker = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        worker.createContext(ManagedContextProtocol.ATTEST_PATH, exchange -> {
+            exchange.getRequestBody().readAllBytes();
+            attestations.incrementAndGet();
+            byte[] bytes = JsonCodec.encode(attestation.get());
+            exchange.getResponseHeaders().set("Cache-Control", "no-store");
+            exchange.getResponseHeaders().set("Content-Type", "application/json");
+            exchange.sendResponseHeaders(200, bytes.length);
+            exchange.getResponseBody().write(bytes);
+            exchange.close();
+        });
+        worker.start();
+        try {
+            client.endpoint = "http://127.0.0.1:" + worker.getAddress().getPort();
+            client.observeState = "RUNNING";
+            client.storage = evidence("confirms", 1);
+            var lease = new RuntimeLease(seed.getProvisionalRuntimeId(), URI.create(client.endpoint), seed.getToken(), seed.getLeaseId(), seed.getEpoch());
+            var ready = draining(request, seed, handle, lease, false).withState(RuntimeBindingRecord.State.READY, lease, Instant.now());
+            join(subject.verifyAcquisition(ready));
+            assertEquals(1, client.observes.size());
+            assertEquals(Map.of("protocolVersion", 1, "provisionRequestId", seed.getProvisionRequestId(),
+                    "identity", handle.getValue().get("identity"), "handle", handle.getValue().get("provider")), client.observes.get(0));
+            assertEquals(1, attestations.get());
+            assertTrue(client.provisions.isEmpty());
+            Map<String, Object> changed = new LinkedHashMap<>(attestation.get());
+            changed.put("runtimeIncarnation", "another-incarnation");
+            attestation.set(changed);
+            failure(subject.verifyAcquisition(ready));
+            assertEquals(2, attestations.get(), "Provider readiness alone cannot establish worker identity");
+            client.storage = evidence("unknown", 1);
+            failure(subject.verifyAcquisition(ready));
+            assertEquals(2, attestations.get(), "Missing continuity refuses before worker acquisition attestation");
+        } finally {
+            worker.stop(0);
+        }
+    }
+
     private Map<String, Object> evidence(String continuity, long revision) {
         ExternalStorageRegistry.RegisteredExternalStorage storage =
                 registration(PROVIDER, revision, MOUNT);
@@ -423,6 +640,7 @@ class ExternalWorkspaceProvisionerTest {
         private Map<String, Object> provisionResponse = Map.of("protocolVersion", 1,
                 "handle", Map.of("requestId", "request-a"), "endpoint", ENDPOINT);
         private String observeState = "STARTING";
+        private String endpoint = ENDPOINT;
         private Map<String, Object> storage;
 
         @Override
@@ -438,7 +656,7 @@ class ExternalWorkspaceProvisionerTest {
             response.put("protocolVersion", 1);
             response.put("state", observeState);
             if ("RUNNING".equals(observeState)) {
-                response.put("endpoint", ENDPOINT);
+                response.put("endpoint", endpoint);
             }
             if (storage != null) {
                 response.put("storage", storage);

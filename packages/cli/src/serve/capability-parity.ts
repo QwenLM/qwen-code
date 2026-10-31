@@ -601,6 +601,7 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'RUNTIME_NODE_LIST',
   // Loopback operator registration has no client capability.
   'EXTERNAL_STORAGE_REGISTER',
+  'EXTERNAL_WORKSPACE_MATERIALIZE',
   // Internal writer and publication routes: between the control plane and its
   // own stores, behind writer credentials, never a client capability.
   'PUB_ADMISSION_PREPARE',

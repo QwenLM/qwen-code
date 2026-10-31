@@ -170,7 +170,34 @@ class ExternalRuntimeConfigurationTest {
                 broker.detail());
         properties.getHarness().setWorkspaceFilesEnabled(true);
         var error = assertThrows(IllegalStateException.class, properties::validateForPreflight);
-        assertTrue(error.getMessage().contains("storage provisioning prerequisite"), error.getMessage());
+        assertTrue(error.getMessage().contains("Hosted Workspace files require"), error.getMessage());
+    }
+
+    @Test
+    void filesOnlyExternalConfigurationRequiresCompleteServicesWithoutLocalMountFallback() {
+        var properties = properties("external-workspace");
+        properties.getHarness().setEnabled(true);
+        properties.getSessionStore().setEnabled(true);
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        assertTrue(properties.isExternalWorkspaceFilesConfigured());
+        assertEquals(ManagedAgentPreflight.Status.PASS, ManagedAgentPreflight.toolPathCheck(properties).status());
+        properties.validateForPreflight();
+        List<Consumer<ManagedAgentProperties>> forbidden = List.of(
+                p -> p.getHarness().setEnabled(false), p -> p.getSessionStore().setEnabled(false),
+                p -> p.getRuntimeBroker().setEnabled(false), p -> p.getHarness().setWorkspaceShellEnabled(true),
+                p -> p.getManagedExtensions().setEnabled(true), p -> p.getRuntimeBroker().setChildWorkspacesEnabled(true),
+                p -> p.getRuntimeBroker().setWorkspaceMounts(List.of(
+                        new ManagedAgentProperties.RuntimeBroker.WorkspaceMount("tenant", "storage", "/not-mounted"))),
+                p -> p.getRuntimeBroker().setVerifiedWorkspaceRecoveryEnabled(true));
+        for (var configure : forbidden) {
+            var invalid = properties("external-workspace");
+            invalid.getHarness().setEnabled(true);
+            invalid.getSessionStore().setEnabled(true);
+            invalid.getHarness().setWorkspaceFilesEnabled(true);
+            configure.accept(invalid);
+            assertFalse(invalid.isExternalWorkspaceFilesConfigured());
+            assertThrows(IllegalStateException.class, invalid::validateForPreflight);
+        }
     }
 
     @Test
@@ -190,9 +217,8 @@ class ExternalRuntimeConfigurationTest {
                 .stream().filter(check -> check.name().equals("external-prerequisite"))
                 .findFirst().orElseThrow();
         assertEquals(ManagedAgentPreflight.Status.WARN, warn.status());
-        assertTrue(warn.detail().contains("cannot execute Hosted tools or close a Session yet"),
-                warn.detail());
-        assertTrue(warn.detail().contains("every placement fails closed"), warn.detail());
+        assertTrue(warn.detail().contains("files are disabled or incompletely configured"), warn.detail());
+        assertTrue(warn.detail().contains("new Hosted files Sessions fail closed"), warn.detail());
         assertTrue(ManagedAgentPreflight.brokerChecks(scratchProperties()).stream()
                         .noneMatch(check -> check.name().equals("external-prerequisite")),
                 "the scratch profile is not a prerequisite");

@@ -159,7 +159,7 @@ public final class WorkspaceRecoveryCommand {
                 try (RuntimeBrokerService broker = new RuntimeBrokerService(
                         sessionId -> CompletableFuture.failedFuture(
                                 new IllegalStateException("Maintenance never resolves Sessions")),
-                        new WorkspaceRuntimeProvisioner(local, null, ownership), http,
+                        new WorkspaceRuntimeProvisioner(local, null, ownership, bindings), http,
                         bindings, sessions, executions, owner,
                         Duration.ofSeconds(30), Duration.ofSeconds(30))) {
                     for (int step = 0; step < 16; step++) {

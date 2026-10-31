@@ -359,7 +359,8 @@ public class ManagedAgentProperties
                 && (!harness.isEnabled()
                         || !sessionStore.isEnabled()
                         || !runtimeBroker.isEnabled()
-                        || !residentFiles && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
+                        || !residentFiles && !isExternalWorkspaceFilesConfigured()
+                         && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
                         || !WorkspaceExecutionProfile.admitsIsolationClass(runtimeBroker.getIsolationClass())
                         || (runtimeBroker.getWorkspaceMounts().isEmpty()
                                 && runtimeBroker.getWorkspaceCreationRoot().isBlank()
@@ -472,20 +473,31 @@ public class ManagedAgentProperties
         }
     }
 
-    /**
-     * Shared startup and preflight validation for every external worker kind.
-     *
-     * <p>{@code external-workspace} is a provisioning prerequisite in this
-     * increment: it binds registered EXTERNAL storage, but Hosted files, Shell and
-     * Session close stay unimplemented, so it must keep the managed Workspace
-     * features disabled exactly as the scratch profile does.
-     */
+    /** Static configuration eligibility, never negotiated readiness or worker proof. */
+    public boolean isExternalWorkspaceFilesConfigured() {
+        if (!ExternalRuntimeKinds.isWorkspace(runtimeBroker.getProvisioner())
+                || !harness.isWorkspaceFilesEnabled() || !harness.isEnabled()
+                || !sessionStore.isEnabled() || !runtimeBroker.isEnabled()) {
+            return false;
+        }
+        try {
+            validateExternalRuntime();
+            return harness.getApprovalMode() != null
+                    && Set.of("yolo", "default", "auto-edit").contains(harness.getApprovalMode().toLowerCase(Locale.ROOT));
+        } catch (IllegalStateException | IllegalArgumentException invalid) {
+            return false;
+        }
+    }
+
+    /** Shared startup and preflight validation for every external worker kind. */
     public void validateExternalRuntime() {
         String provisioner = runtimeBroker.getProvisioner();
         if (!ExternalRuntimeKinds.isExternal(provisioner)) {
             return;
         }
-        if (harness.isWorkspaceFilesEnabled() || harness.isWorkspaceShellEnabled()
+        if (harness.isWorkspaceFilesEnabled() && !ExternalRuntimeKinds.isWorkspace(provisioner)
+                || harness.isWorkspaceShellEnabled()
+                || ExternalRuntimeKinds.isWorkspace(provisioner) && (managedExtensions.isEnabled() || extensions.isEnabled())
                 || !runtimeBroker.getWorkspaceMounts().isEmpty()
                 || !runtimeBroker.getResidentWorkspaces().isEmpty()
                 || StringUtils.isNotBlank(runtimeBroker.getWorkspaceCreationRoot())
@@ -495,9 +507,8 @@ public class ManagedAgentProperties
                 || runtimeBroker.isChildWorkspacesEnabled() || runtimeBroker.isChildSnapshotsEnabled()
                 || runtimeBroker.getSsh().isEnabled() || !runtimeBroker.getSsh().getNodes().isEmpty()) {
             throw new IllegalStateException(ExternalRuntimeKinds.isWorkspace(provisioner)
-                    ? "External Workspace Runtime is a storage provisioning prerequisite;"
-                            + " managed Workspace files, Shell and recovery features must stay"
-                            + " disabled until files execution and Session close are verified"
+                    ? "External Workspace Runtime supports registered files-only Sessions;"
+                            + " local mounts, Shell, extensions, children and recovery features must stay disabled"
                     : "External Runtime supports scratch Sessions only;"
                             + " managed Workspace features must be disabled");
         }

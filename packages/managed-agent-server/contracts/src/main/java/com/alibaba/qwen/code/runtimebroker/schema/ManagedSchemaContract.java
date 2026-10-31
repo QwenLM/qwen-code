@@ -88,7 +88,8 @@ public final class ManagedSchemaContract {
         CHANNEL_INGRESS,
         ACTION_DECISION,
         WORKSPACE_CREATE,
-        EXTERNAL_STORAGE
+        EXTERNAL_STORAGE,
+        EXTERNAL_WORKSPACE
     }
 
     public enum ReceiptScope {

@@ -909,6 +909,33 @@ class QwenHostedHarnessConnectorTest {
     }
 
     @Test
+    void externalProfileRequiresExactNegotiationButSavedCloseSurvivesFilesDisablement() {
+        HostedHarnessClient client = mock(HostedHarnessClient.class);
+        HostedHarnessCapabilities capabilities = mock(HostedHarnessCapabilities.class);
+        when(client.capabilities()).thenReturn(capabilities);
+        when(capabilities.getLifecycleProtocolVersion()).thenReturn(1);
+        var properties = properties();
+        properties.getHarness().setWorkspaceFilesEnabled(true);
+        var connector = new QwenHostedHarnessConnector(properties, mock(AgentStateStore.class), mock(WorkspaceExecutionStore.class));
+        ReflectionTestUtils.setField(connector, "client", client);
+        String profile = "hosted-workspace-external-files/1";
+        assertThat(connector.supportsLifecycle(profile)).isFalse();
+        when(capabilities.getFeatures()).thenReturn(List.of("hosted-workspace-external-files/2"));
+        assertThat(connector.supportsLifecycle(profile)).isFalse();
+        assertThat(connector.supportsSavedLifecycle(profile)).isFalse();
+        when(capabilities.getFeatures()).thenReturn(List.of(profile));
+        assertThat(connector.supportsLifecycle(profile)).isTrue();
+        properties.getHarness().setWorkspaceFilesEnabled(false);
+        assertThat(connector.supportsLifecycle(profile)).isFalse();
+        assertThat(connector.supportsSavedLifecycle(profile)).isTrue();
+        assertThat(connector.supportsSavedLifecycle("hosted-workspace-files/1")).isFalse();
+        when(capabilities.getLifecycleProtocolVersion()).thenReturn(2);
+        assertThat(connector.supportsSavedLifecycle(profile)).isFalse();
+        verify(client, never()).createSession(any());
+        verify(client, never()).loadSession(any());
+    }
+
+    @Test
     void successorDetachesTheOriginalSessionWithoutLoadingAnAttachment() {
         HostedHarnessClient client = mock(HostedHarnessClient.class);
         QwenHostedHarnessConnector successor = connector(client);

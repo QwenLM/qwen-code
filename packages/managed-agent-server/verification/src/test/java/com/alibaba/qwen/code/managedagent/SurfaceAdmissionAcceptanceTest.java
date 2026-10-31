@@ -569,7 +569,7 @@ public class SurfaceAdmissionAcceptanceTest {
             }
             case SESSION_OPTIONS ->
                 expect(entry, null, 401, "actor_required");
-            case INTERNAL_OPERATOR -> expect(entry, null, 403, "external_storage_registration_denied");
+            case INTERNAL_OPERATOR -> expect(entry, null, 403, "operator_credential_required");
             case INTERNAL_WRITER ->
                 expectInternal(entry);
             default -> throw new AssertionError(

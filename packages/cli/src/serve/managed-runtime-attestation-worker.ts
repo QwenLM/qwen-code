@@ -371,6 +371,7 @@ export async function startManagedRuntimeAttestationWorker(
           : { directory, workspaceRoot: directory, preapproved: false };
       });
     }
+    publication?.register(app, executor);
     if (csiBoot) {
       registerManagedCsiDrainRoute(app, csiBoot, executor);
       registerManagedCsiAckRoute(app, csiBoot, executor);
@@ -404,6 +405,7 @@ export async function startManagedRuntimeAttestationWorker(
                   ]
                 : []),
               ...MANAGED_TOOL_RESULT_ROUTES,
+              ...(publication ? EXTERNAL_PUBLICATION_ROUTES : []),
               ...(sshRuntime ? [sshRuntime.route] : []),
               ...(remotePublishers ? [MANAGED_SHELL_PUBLISHER_ROUTE] : []),
               ...(!capturePublisher &&

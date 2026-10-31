@@ -417,9 +417,19 @@ public class HarnessPoolConnector implements HarnessConnector {
 
     @Override
     public boolean supportsLifecycle(String profile) {
+        if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)) {
+            return isWorkspaceFilesAvailable() && supportsSavedLifecycle(profile);
+        }
         return contract != null && (WorkspaceToolProfiles.FILES.equals(profile)
                 ? isWorkspaceFilesAvailable() && contract.lifecycle() == 1
                 : WorkspaceToolProfiles.lifecycleProtocol(profile) == 2 && contract.profiles().contains(profile));
+    }
+
+    @Override
+    public boolean supportsSavedLifecycle(String profile) {
+        return WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                ? contract != null && contract.lifecycle() == 1 && contract.features().contains(WorkspaceToolProfiles.EXTERNAL_FILES)
+                : supportsLifecycle(profile);
     }
 
     @Override

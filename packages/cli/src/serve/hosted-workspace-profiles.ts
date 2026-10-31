@@ -9,6 +9,8 @@
 // persisted by one and refused by another.
 
 export const HOSTED_WORKSPACE_FILE_PROFILE = 'hosted-workspace-files/1';
+export const HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE =
+  'hosted-workspace-external-files/1';
 export const HOSTED_WORKSPACE_SHELL_PROFILE = 'hosted-workspace-shell/1';
 export const HOSTED_WORKSPACE_FILE_PROFILE_V2 = 'hosted-workspace-files/2';
 // #15076: `files/3` adds `todo_write` to its `/2` counterpart. A new version
@@ -25,6 +27,7 @@ export const HOSTED_WORKSPACE_READ_PROFILE = 'hosted-workspace-read/1';
 
 export type HostedWorkspaceToolProfile =
   | typeof HOSTED_WORKSPACE_FILE_PROFILE
+  | typeof HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
   | typeof HOSTED_WORKSPACE_SHELL_PROFILE
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V2
   | typeof HOSTED_WORKSPACE_FILE_PROFILE_V3
@@ -36,6 +39,7 @@ export function isHostedWorkspaceProfile(
 ): profile is HostedWorkspaceToolProfile {
   return (
     profile === HOSTED_WORKSPACE_FILE_PROFILE ||
+    profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
     profile === HOSTED_WORKSPACE_SHELL_PROFILE ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V2 ||
     profile === HOSTED_WORKSPACE_FILE_PROFILE_V3 ||
@@ -75,10 +79,37 @@ export function isHostedWorkspaceSearchProfile(profile: unknown): boolean {
 export function isHostedWorkspaceGlobProfile(profile: unknown): boolean {
   return (
     isHostedWorkspaceSearchProfile(profile) ||
+    profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
     profile === HOSTED_WORKSPACE_READ_PROFILE
   );
 }
 
 export function isHostedWorkspaceReadProfile(profile: unknown): boolean {
   return profile === HOSTED_WORKSPACE_READ_PROFILE;
+}
+
+export function hasHostedExternalFilesExcludedOptions(
+  value: Record<string, unknown> | null | undefined,
+): boolean {
+  return (
+    [
+      'agentDefinition',
+      'sessionSkillsRef',
+      'hookCatalog',
+      'mcpServers',
+      'initialSelection',
+      'publicChildModelRoute',
+      'publicChildExtensionAgent',
+      'lineage',
+      'captureBytes',
+    ].some((key) => value?.[key] !== undefined) ||
+    value?.['childWorkspaces'] === true ||
+    value?.['childSnapshots'] === true ||
+    (value?.['publicChildAgentsVersion'] ?? 0) !== 0 ||
+    value?.['planMode'] === true ||
+    (typeof value?.['approvalSelection'] === 'object' &&
+      value['approvalSelection'] !== null &&
+      (value['approvalSelection'] as Record<string, unknown>)['planMode'] ===
+        true)
+  );
 }

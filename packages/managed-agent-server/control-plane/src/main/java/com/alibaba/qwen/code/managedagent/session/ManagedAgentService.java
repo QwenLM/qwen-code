@@ -120,11 +120,14 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
     private org.springframework.beans.factory.ObjectProvider<SessionRecoveryService> recoveryServices;
     private java.util.function.Supplier<java.time.Duration> renameLeaseDuration = () -> java.time.Duration.ofSeconds(60);
     private Clock renameClock = Clock.systemUTC();
+    private boolean externalFilesConfiguration;
 
     @Autowired
     void configureRenameDelivery(ManagedAgentSettings properties, @Qualifier("managedAgentClock") Clock clock) {
         renameLeaseDuration = properties.getDispatch()::getLeaseDuration;
         renameClock = clock;
+        externalFilesConfiguration = com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE
+                .equals(properties.getRuntimeBroker().getProvisioner());
     }
 
     @Autowired(required = false)
@@ -147,7 +150,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             return false;
         }
         return session.workspace() == null || RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
-                && harness.supportsLifecycle(session.toolProfile());
+                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()));
     }
 
     private boolean hasActions(SessionRecord session) {
@@ -250,6 +254,11 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
             String tenantId, String actorId, String agentId) {
         requireModelActor(actorId);
         var options = store.workspaceSessionOptions(tenantId, agentId);
+        if (externalFilesConfiguration) {
+            return new WebShellSessionOptions(options.approvalMode(), options.availableApprovalModes(),
+                    false, false, false, "qwen-code".equals(agentId) && workspaces.externalFilesAvailable()
+                            && !store.modelOptions().isEmpty() && harness.supportsModelSelection());
+        }
         if ("qwen-code".equals(agentId) && store.workspaceShellEnabled() && harness.supportsApprovalSelection()) {
             return new WebShellSessionOptions(options.approvalMode(), List.of("default", "auto-edit", "yolo"),
                     harness.supportsPlanMode(), harness.supportsInputAttachments(), harness.supportsSessionSkills(),
@@ -440,6 +449,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         if (recorded.isPresent()) {
             dispatch(tenantId, recorded.get(), true);
             return response(recorded.get());
+        }
+        if (externalFilesConfiguration && !workspaces.externalFilesAvailable()) {
+            throw new ManagedAgentException(409, "workspace_unavailable", "External Workspace creation is unavailable.");
         }
         if (modelId != null && (!"qwen-code".equals(agentId) || !harness.supportsModelSelection())) {
             throw new ManagedAgentException(409, "unsupported_feature",
@@ -1470,7 +1482,7 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
                         false, foregroundShell(session, worktree),
                         visible && modelSelectionSupported && mayChangeContext,
                         visible && approvalSupported && mayChangeContext && !Boolean.FALSE.equals(foregroundShell(session, worktree)),
-                        visible && maySubmit && harness.supportsInputAttachments(),
+                        visible && maySubmit && !WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) && harness.supportsInputAttachments(),
                         visible && "ACTIVE".equals(session.status()) && renameSupported
                                 && (session.workspace() == null || maySubmit),
                         visible && approvalExecutable && compressionSupported && compression.available(),
@@ -1491,7 +1503,8 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         }
         return retention || session.workspace() != null
                 && RuntimeWarmer.supportsClose(runtimeWarmer, session.workspace())
-                && harness.supportsLifecycle(session.toolProfile());
+                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        ? harness.supportsSavedLifecycle(session.toolProfile()) : harness.supportsLifecycle(session.toolProfile()));
     }
 
     private Boolean childAgentsCapability(SessionRecord session, SessionWorktreeStore.Descriptor worktree) {
@@ -1796,7 +1809,9 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         return session.workspace() != null && "ACTIVE".equals(session.status())
                 && session.deletedAt() == null && store.workspaceFilesEnabled()
                 && ready(worktree)
-                && (runtimeWarmer == null || runtimeWarmer.supportsWorkspaceContextChange(session.workspace()));
+                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        ? workspaces.externalFilesAllowed(session.workspace())
+                        : runtimeWarmer == null || runtimeWarmer.supportsWorkspaceContextChange(session.workspace()));
     }
 
     void requireLegacyWorkspace(String tenantId, String actorId,

@@ -429,7 +429,7 @@ public class ManagedSessionStore
         }
         authorizeOrdinary(tenantId, sessionId, writerToken, request);
         var rows = jdbc.queryForList("SELECT agent_id, agent_definition_digest, tool_profile, workspace_id,"
-                + " approval_mode, selected_approval_mode, approval_revision, permission_rules_json FROM ma_session"
+                + " parent_session_id, public_child_agents_version, approval_mode, selected_approval_mode, approval_revision, permission_rules_json FROM ma_session"
                 + " WHERE tenant_id=? AND session_id=? FOR UPDATE", tenantId, sessionId);
         if (rows.size() != 1) {
             throw conflict("managed_session_scope_conflict", "The Managed Session is missing.");
@@ -439,7 +439,10 @@ public class ManagedSessionStore
         if (row.get("workspace_id") == null
                 || ("qwen-code".equals(row.get("agent_id"))
                         ? row.get("agent_definition_digest") != null : row.get("agent_definition_digest") == null)
-                || !(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES.equals(profile)
+                || !(com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                        ? "qwen-code".equals(row.get("agent_id")) && row.get("agent_definition_digest") == null
+                                && row.get("parent_session_id") == null && ((Number) row.get("public_child_agents_version")).intValue() == 0
+                        : com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES.equals(profile)
                         || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES_V3.equals(profile)
                         || com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.isPublicShell(profile))) {
             return null;

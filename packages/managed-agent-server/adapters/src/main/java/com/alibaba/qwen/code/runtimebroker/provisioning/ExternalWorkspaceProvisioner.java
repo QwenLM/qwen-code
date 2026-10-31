@@ -1,6 +1,9 @@
 package com.alibaba.qwen.code.runtimebroker.provisioning;
 
+import com.alibaba.qwen.code.runtimebroker.BrokerValues;
+import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.RuntimeDrainReceipt;
 import com.alibaba.qwen.code.runtimebroker.RuntimeObservation;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionRequest;
 import com.alibaba.qwen.code.runtimebroker.RuntimeProvisionSeed;
@@ -12,25 +15,27 @@ import com.alibaba.qwen.code.runtimebroker.spi.ExternalRuntimeClient;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionStage;
 
 /**
  * Session-exclusive workers whose Workspace is a registered EXTERNAL storage
  * tree instead of a local directory.
  *
- * <p>This is the <em>provisioning prerequisite</em> of
- * {@code docs/design/2026-10-25-external-hosted-workspace.md} (step 3a), not the
- * product feature: it mints the shipped {@code managed-context/1} boot plus the
- * already-admitted {@code storage} member, so a provider can place a worker on a
- * registered tree and report continuity evidence. Hosted files, foreground shell,
- * approval, capture and close/drain stay unimplemented, and
- * {@link #supportsDrainedStop()} therefore stays {@code false}: a Session placed
- * here cannot be closed, which is why no configuration admits one yet.
+ * <p>This is internal provisioning, acquisition proof and drain plumbing, not
+ * a public Hosted profile. It mints the shipped {@code managed-context/1} boot
+ * plus the admitted {@code storage} member. Acquisition additionally requires
+ * positive current storage continuity and independent original-worker attestation.
+ * Public profile activation is separately gated by the control plane. The guarded
+ * drain primitive is not blanket close support: {@link #supportsDrainedStop()}
+ * stays {@code false}; kind eligibility never substitutes for saved-binding proof.
  *
  * <p>Trust boundary: the request only names a tenant-bound alias. Provider
  * identity, physical key, registration revision, alias path and mount root come
@@ -51,18 +56,133 @@ public final class ExternalWorkspaceProvisioner extends ExternalRuntimeProvision
     private static final Set<String> EVIDENCE_KEYS =
             Set.of("storageRef", "mountRoot", "continuity");
     private final ExternalStorageRegistry registry;
+    private final ExternalRuntimeClient client;
     private final String provider;
 
     public ExternalWorkspaceProvisioner(ExternalRuntimeClient client, ExternalStorageRegistry registry,
             String providerId, Duration startupTimeout) {
         super(client, providerId, startupTimeout);
         this.registry = Objects.requireNonNull(registry, "registry");
+        this.client = client;
         this.provider = providerId;
     }
 
     @Override
     public String kind() {
         return KIND;
+    }
+
+    /** Structural selection only; not acquisition or execution authority. */
+    public static boolean isWorkspaceRequest(RuntimeProvisionRequest request) {
+        return WorkspaceExecutionProfile.isExternalWorkspaceRequest(request);
+    }
+
+    /** Verifies the saved original for acquisition; never provisions a replacement. */
+    public CompletionStage<Void> verifyAcquisition(RuntimeBindingRecord binding) {
+        try {
+            if (binding == null || !isWorkspaceRequest(binding.getRequest())
+                    || binding.getState() != RuntimeBindingRecord.State.READY || binding.isDrainRequested()
+                    || binding.getAttestationGeneration() <= 0) {
+                throw refuse("external_workspace_acquisition_unverified", "Original Workspace binding is not ready.");
+            }
+            validatedSavedBoot(binding);
+            var request = binding.getRequest();
+            var seed = binding.getProvisionSeed();
+            var handle = binding.getResourceHandle();
+            var lease = binding.getLease();
+            // Reconcile only the saved original. Unlike provision-only observation,
+            // this same response must also positively confirm storage continuity.
+            return client.observe(Map.of("protocolVersion", 1,
+                    "provisionRequestId", seed.getProvisionRequestId(),
+                    "identity", handle.getValue().get("identity"),
+                    "handle", handle.getValue().get("provider"))).thenCompose(response -> {
+                        if (response == null || !Long.valueOf(1).equals(
+                                BrokerValues.exactLong(response.get("protocolVersion")))) {
+                            throw refuse("external_workspace_acquisition_unverified", "Original provider response is invalid.");
+                        }
+                        requireOriginalReady(binding, observation(request, seed, handle, response));
+                        if (!(response.get("storage") instanceof Map<?, ?> evidence)
+                                || !"confirms".equals(evidence.get("continuity"))) {
+                            throw new RuntimeBrokerException(503, "runtime_external_unavailable",
+                                "External Workspace continuity is not confirmed.", true);
+                        }
+                        return transport.attest(lease, request, seed);
+                    }).thenAccept(attestation -> {
+                        if (attestation == null
+                                || !lease.getRuntimeInstanceId().equals(attestation.getRuntimeInstanceId())
+                                || !seed.getGatewayIncarnation().equals(attestation.getRuntimeIncarnation())
+                                || !lease.getLeaseId().equals(attestation.getLeaseId())
+                                || lease.getEpoch() != attestation.getEpoch()
+                                || !request.getScope().equals(attestation.getScope())
+                                || !request.getStorageId().equals(attestation.getStorageId())
+                                || !seed.getProvisionRequestId().equals(attestation.getProvisionRequestId())) {
+                            throw refuse("runtime_broker_attestation_conflict", "Original Workspace attestation differs.");
+                        }
+                    });
+        } catch (RuntimeException invalid) {
+            return CompletableFuture.failedFuture(invalid);
+        }
+    }
+
+    private static void requireOriginalReady(RuntimeBindingRecord binding, RuntimeObservation observed) {
+        if (observed == null || observed.getOutcome() == RuntimeObservation.Outcome.UNKNOWN
+                || observed.getOutcome() == RuntimeObservation.Outcome.STARTING) {
+            throw new RuntimeBrokerException(503, "runtime_external_unavailable",
+                    "Original Workspace readiness is unknown.", true);
+        }
+        var lease = binding.getLease();
+        if (observed.getOutcome() != RuntimeObservation.Outcome.READY
+                || !binding.getResourceHandle().equals(observed.getHandle())
+                || !lease.getRuntimeInstanceId().equals(observed.getRuntimeInstanceId())
+                || !lease.getEndpoint().equals(observed.getEndpoint())
+                || !lease.getLeaseId().equals(observed.getLeaseId()) || lease.getEpoch() != observed.getEpoch()) {
+            throw refuse("external_workspace_acquisition_unverified", "Original Workspace identity differs.");
+        }
+    }
+
+    @Override
+    public boolean supportsDrainedStopKind(String kind) {
+        return KIND.equals(kind) && registry != null && client != null && transport != null;
+    }
+
+    @Override
+    public boolean supportsDrainedStop(RuntimeBindingRecord binding) {
+        try {
+            validatedSavedBoot(binding);
+            return true;
+        } catch (RuntimeBrokerException failure) {
+            if (failure.isRetryable()) {
+                throw failure;
+            }
+            return false;
+        } catch (RuntimeException invalid) {
+            return false;
+        }
+    }
+
+    @Override
+    public CompletionStage<RuntimeDrainReceipt> stopDrained(RuntimeBindingRecord binding) {
+        try {
+            if (binding == null || !binding.isDrainRequested()) {
+                throw refuse("workspace_close_identity_unverified", "External Workspace drain is not authorized.");
+            }
+            Map<String, Object> boot = validatedSavedBoot(binding);
+            Map<?, ?> storage = (Map<?, ?>) boot.get("storage");
+            long revision = ((Number) storage.get("registrationRevision")).longValue();
+            var stop = transport.stopExternalWorkspaceDrained(binding.getLease(), binding.getRequest(),
+                    binding.getProvisionSeed(), revision).toCompletableFuture();
+            var receipt = stop.thenApply(ignored -> new RuntimeDrainReceipt(binding.getBindingId(),
+                    binding.getGeneration(), binding.getProvisionSeed().getProvisionRequestId(),
+                    binding.getResourceHandle(), Instant.now()));
+            receipt.whenComplete((ignored, error) -> {
+                if (receipt.isCancelled()) {
+                    stop.cancel(true);
+                }
+            });
+            return receipt;
+        } catch (RuntimeException invalid) {
+            return CompletableFuture.failedFuture(invalid);
+        }
     }
 
     /**

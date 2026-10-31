@@ -47,6 +47,7 @@ import {
   HOSTED_TODO_MAX_ITEMS,
 } from './hosted-workspace-tool-input.js';
 import {
+  HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE,
   HOSTED_WORKSPACE_SHELL_PROFILE,
   HOSTED_WORKSPACE_FILE_PROFILE_V2,
@@ -1989,6 +1990,31 @@ export class HostedWorkspaceToolTurn {
       publicPlanMode?: boolean;
     },
   ) {
+    if (
+      extras?.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE &&
+      (publicationOrShell !== undefined ||
+        shell !== undefined ||
+        [
+          extras.mcp,
+          extras.hooks,
+          extras.childRuns,
+          extras.monitors,
+          extras.backgroundLane,
+          extras.childAgents,
+          extras.messages,
+          extras.teams,
+          extras.commands,
+          extras.skills,
+          extras.extensionConfig,
+          extras.allowedToolNames,
+        ].some((lane) => lane !== undefined) ||
+        (extras.extensionAgents?.length ?? 0) > 0 ||
+        extras.publicPlanMode === true ||
+        extras.memberPlanMode === true)
+    )
+      throw new Error(
+        'External files profile does not support optional lanes.',
+      );
     this.extensionConfig = extras?.extensionConfig;
     this.foregroundOnly = extras?.foregroundOnly === true;
     this.mcp = this.foregroundOnly ? undefined : extras?.mcp;
@@ -2133,6 +2159,13 @@ export class HostedWorkspaceToolTurn {
 
   async declarations(signal: AbortSignal): Promise<FunctionDeclaration[]> {
     signal.throwIfAborted();
+    if (this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE) {
+      this.advertised = hostedWorkspaceDeclarations(
+        [...HOSTED_WORKSPACE_FILE_TOOLS, HOSTED_GLOB_TOOL],
+        !this.fileBackupsEnabled,
+      );
+      return this.advertised;
+    }
     if (
       this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
       (this.profile === undefined &&
@@ -2656,6 +2689,7 @@ export class HostedWorkspaceToolTurn {
       !this.hooks &&
       !this.mcp &&
       (this.profile === HOSTED_WORKSPACE_FILE_PROFILE ||
+        this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE ||
         isHostedWorkspaceReadProfile(this.profile))
     ) {
       this.uncertain = true;
@@ -2675,16 +2709,23 @@ export class HostedWorkspaceToolTurn {
           items.every(
             (item) =>
               item.state === 'settled' &&
-              ['read_file', 'write_file', 'edit', 'glob', 'web_fetch'].includes(
-                item.toolName,
-              ),
+              [
+                'read_file',
+                'write_file',
+                'edit',
+                'glob',
+                ...(this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
+                  ? []
+                  : ['web_fetch']),
+              ].includes(item.toolName),
           ) &&
           (saved ||
             items.every((item) =>
               [
                 'read_file',
                 'glob',
-                ...(isHostedWorkspaceReadProfile(this.profile)
+                ...(isHostedWorkspaceReadProfile(this.profile) ||
+                this.profile === HOSTED_WORKSPACE_EXTERNAL_FILES_PROFILE
                   ? []
                   : ['web_fetch']),
               ].includes(item.toolName),

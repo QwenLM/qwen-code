@@ -30,4 +30,20 @@ public final class WorkspaceExecutionProfile {
         return admitsCapabilityDigest(scope.getCapabilityDigest())
                 && "workspace".equals(scope.getIsolationClass());
     }
+
+    /**
+     * Structural selection of the registered EXTERNAL Workspace profile; not
+     * acquisition or execution authority. Lives here because Contracts owns the
+     * admission fence and cannot see the provisioner that consumes it.
+     */
+    public static boolean isExternalWorkspaceRequest(RuntimeProvisionRequest request) {
+        return request != null
+                && com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.EXTERNAL_WORKSPACE
+                        .equals(request.getProvisionerKind())
+                && request.isManagedContext()
+                && CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())
+                && admitsIsolationClass(request.getScope().getIsolationClass())
+                && request.getIsolationKey() != null && !request.getIsolationKey().trim().isEmpty()
+                && request.getScope().getWorkspaceId().equals(request.getStorageId());
+    }
 }

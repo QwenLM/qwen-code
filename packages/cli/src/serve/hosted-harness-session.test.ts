@@ -17174,8 +17174,277 @@ describe('Hosted Harness no-tool session', () => {
     60_000,
   );
 
-  it.each(['hosted-workspace-files/1', 'hosted-workspace-shell/1'])(
-    'persists the SSH foreground-only surface through resident and cold loads of %s',
+  it.each(['Hook pin', 'extension config_install'])(
+    'refuses an external files saved session with %s on cold load',
+    async (configuration) => {
+      const key = {
+        tenantId: 'tenant',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      };
+      const resources = LocalManagedSessionResourceStore.create({
+        runtimeBaseDir: state.root,
+        sessionKey: key,
+      });
+      const managed = await openManagedSession({
+        runtimeBaseDir: state.root,
+        transcriptPath: '',
+        sessionId: SESSION_ID,
+        sessionKey: key,
+        cwd: state.root,
+        version: 'hosted-harness/1',
+        workerId: BOOT_ID,
+        activationLeaseDurationMs: 60_000,
+        journalStore: new LocalJsonlManagedSessionJournalStore({
+          runtimeBaseDir: state.root,
+          sessionId: SESSION_ID,
+          transcriptPath: path.join(state.root, `${SESSION_ID}.jsonl`),
+        }),
+        resourceStore: resources,
+        create: {
+          definitionRef: await resources.publish(
+            'managed-definition',
+            Buffer.from(
+              JSON.stringify({
+                engine: 'managed',
+                sessionId: SESSION_ID,
+                toolProfile: 'hosted-workspace-external-files/1',
+                approvalMode: 'yolo',
+                approvalTimeoutMs: 60_000,
+                ...(configuration === 'Hook pin'
+                  ? { hookCatalog: hookPin }
+                  : {}),
+              }),
+            ),
+          ),
+          rootSnapshotRef: await resources.publish(
+            'managed-root',
+            Buffer.from(JSON.stringify({ cwd: state.root })),
+          ),
+          createdBy: 'hosted-harness',
+        },
+      });
+      if (configuration === 'extension config_install') {
+        const operationId = randomUUID();
+        await managed.authority.commitDomainRecord(
+          {
+            operation: 'extensionConfig.apply.preparing',
+            commandId: operationId,
+            sessionKey: key,
+            contentDigest: 'c'.repeat(64),
+          },
+          {
+            domain: 'config_install',
+            content: {
+              kind: 'hosted-extension-config',
+              formatVersion: 1,
+              command: {
+                operationId,
+                actorKey: 'b'.repeat(64),
+                expectedRevision: 0,
+                extensions: [],
+              },
+              mode: 'apply',
+              phaseOperationId: operationId,
+              configRevision: 1,
+              previousConfigRevision: 0,
+              phase: 'preparing',
+              previousBundleRef: null,
+              restoresBundleRef: null,
+              bundleRef: null,
+              rootSnapshotRef: await resources.publish(
+                'managed-root',
+                Buffer.from(JSON.stringify({ cwd: state.root })),
+              ),
+              stageAckRefs: [],
+              enableAckRefs: [],
+              error: null,
+            },
+          },
+          { class: 'trusted_entry' },
+        );
+      }
+      await managed.close();
+      const broker = vi.spyOn(HostedWorkspaceBroker.prototype, 'control');
+      const response = await headers(
+        supertest(await app(true)).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store() });
+      expect(response.status).toBe(409);
+      expect(response.body.code).toBe('hosted_tool_profile_conflict');
+      expect(broker).not.toHaveBeenCalled();
+      expect(state.model).not.toHaveBeenCalled();
+    },
+  );
+
+  it('requires the exact consumer token for external files create and lifecycle load', async () => {
+    const descriptorCount = state.storeOptions.length;
+    const result = express();
+    result.use(express.json());
+    const advertised = createHostedHarnessContract(
+      `sha256:${'a'.repeat(64)}`,
+      BOOT_ID,
+    );
+    const contract = {
+      ...advertised,
+      features: advertised.features?.filter(
+        (feature) => feature !== 'hosted-workspace-external-files/1',
+      ),
+    };
+    installHostedHarnessContractMiddleware(result, contract);
+    registerHostedHarnessSessionRoutes(result, contract, state.root, {
+      baseUrl: 'http://127.0.0.1:1',
+      token: 'test',
+    });
+    for (const route of ['/session', `/session/${SESSION_ID}/load`]) {
+      const response = await headers(supertest(result).post(route)).send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-external-files/1',
+        ...(route.endsWith('/load')
+          ? { lifecycleAuthority: { operationId: 'close', claimGeneration: 1 } }
+          : {}),
+      });
+      expect(response.status).toBe(400);
+      expect(response.body.code).toBe('hosted_tool_profile_unavailable');
+    }
+    expect(state.storeOptions).toHaveLength(descriptorCount);
+  });
+
+  it('preserves external files on cold load without hidden lanes and closes with lifecycle v1', async () => {
+    const profile = 'hosted-workspace-external-files/1';
+    const server = await app(true);
+    const created = await headers(supertest(server).post('/session'))
+      .send({
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: profile,
+      })
+      .expect(200);
+    const assertNoLanes = async (clientId: string) => {
+      for (const [route, code] of [
+        ['automations/operations', 'hosted_automations_unavailable'],
+        ['channels/operations', 'hosted_channels_unavailable'],
+        ['files/rewind', 'hosted_file_history_unavailable'],
+      ]) {
+        const response = await headers(
+          supertest(server).post(`/session/${SESSION_ID}/${route}`),
+        )
+          .set('X-Qwen-Client-Id', clientId)
+          .send({});
+        expect(response.status).toBe(409);
+        expect(response.body.code).toBe(code);
+      }
+      const prompt = [{ type: 'text', text: 'enter plan mode' }];
+      const refusedPlan = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/prompt`),
+      )
+        .set('X-Qwen-Client-Id', clientId)
+        .send({
+          prompt,
+          promptId: randomUUID(),
+          payloadDigest: `sha256:${createHash('sha256').update(JSON.stringify(prompt)).digest('hex')}`,
+          approvalSelection: { mode: 'yolo', revision: 1, planMode: true },
+        });
+      expect(refusedPlan.status).toBe(400);
+      expect(refusedPlan.body.code).toBe('invalid_hosted_approval_selection');
+    };
+    await assertNoLanes(created.body.clientId as string);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', created.body.clientId as string)
+      .expect(204);
+    const loaded = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({ managedSessionStore: store() })
+      .expect(200);
+    await assertNoLanes(loaded.body.clientId as string);
+    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .expect(204);
+    const authority = { operationId: 'external-close', claimGeneration: 1 };
+    const lifecycleLoad = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    )
+      .send({
+        managedSessionStore: store(),
+        toolProfile: profile,
+        lifecycleProtocolVersion: 1,
+        lifecycleAuthority: authority,
+      })
+      .expect(200);
+    const closed = await headers(
+      supertest(server).post(`/session/${SESSION_ID}/lifecycle`),
+    )
+      .set('X-Qwen-Client-Id', lifecycleLoad.body.clientId as string)
+      .send({
+        protocolVersion: 1,
+        kind: 'close',
+        sessionKey: {
+          tenantId: 'tenant',
+          workspaceId: 'workspace',
+          sessionId: SESSION_ID,
+        },
+        authority,
+      })
+      .expect(200);
+    expect(closed.body.effects).toEqual([]);
+    expect(state.authorizeLifecycle).toHaveBeenCalledWith('close');
+    await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+      .set('X-Qwen-Client-Id', lifecycleLoad.body.clientId as string)
+      .send({ authority })
+      .expect(204);
+  });
+
+  it.each([
+    { agentDefinition: {} },
+    { sessionSkillsRef: {} },
+    { mcpServers: [] },
+    { hookCatalog: {} },
+    { initialSelection: {} },
+    { lineage: {} },
+    { childWorkspaces: true },
+    { childSnapshots: true },
+    { publicChildAgentsVersion: 1 },
+    { captureBytes: 1024 },
+    { planMode: true },
+  ])(
+    'refuses external files optional lanes on create and load: %j',
+    async (extra) => {
+      const server = await app(true);
+      const definition = {
+        sessionId: SESSION_ID,
+        sessionScope: 'thread',
+        managedSessionStore: store(),
+        toolProfile: 'hosted-workspace-external-files/1',
+      };
+      await headers(supertest(server).post('/session'))
+        .send({ ...definition, ...extra })
+        .expect(400);
+      const created = await headers(supertest(server).post('/session'))
+        .send(definition)
+        .expect(200);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/load`))
+        .send({ managedSessionStore: store(), ...extra })
+        .expect(400);
+      await headers(supertest(server).post(`/session/${SESSION_ID}/detach`))
+        .set('X-Qwen-Client-Id', created.body.clientId as string)
+        .expect(204);
+      const refused = await headers(
+        supertest(server).post(`/session/${SESSION_ID}/load`),
+      ).send({ managedSessionStore: store(), ...extra });
+      expect([400, 409]).toContain(refused.status);
+      expect(state.model).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    'hosted-workspace-files/1',
+    'hosted-workspace-shell/1',
+    'hosted-workspace-external-files/1',
+  ])(
+    'persists the foreground-only surface through resident and cold loads of %s',
     async (profile) => {
       vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
       const server = await app(true);
@@ -17215,7 +17484,9 @@ describe('Hosted Harness no-tool session', () => {
           'read_file',
           'write_file',
           'edit',
-          'web_fetch',
+          ...(profile === 'hosted-workspace-external-files/1'
+            ? ['glob']
+            : ['web_fetch']),
           ...(profile.includes('shell') ? ['run_shell_command', 'glob'] : []),
         ]);
       };
@@ -17252,7 +17523,7 @@ describe('Hosted Harness no-tool session', () => {
           managedSessionStore: store(),
           childWorkspaces: true,
         })
-        .expect(409);
+        .expect(profile === 'hosted-workspace-external-files/1' ? 400 : 409);
       await surface(clientId);
       await headers(supertest(server).delete(`/session/${SESSION_ID}`)).set(
         'X-Qwen-Client-Id',

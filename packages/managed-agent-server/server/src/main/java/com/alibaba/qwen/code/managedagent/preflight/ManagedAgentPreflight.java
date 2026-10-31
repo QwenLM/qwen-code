@@ -1014,6 +1014,10 @@ public final class ManagedAgentPreflight {
         boolean files = harness.isWorkspaceFilesEnabled();
         boolean shell = harness.isWorkspaceShellEnabled();
         if (ExternalRuntimeKinds.isExternal(broker.getProvisioner()) && (files || shell)) {
+            if (properties.isExternalWorkspaceFilesConfigured()) {
+                return new Check("tool-path", Status.PASS,
+                        "External Workspace files configuration is supported; negotiated readiness and original-worker close proof remain required", null);
+            }
             return new Check("tool-path", Status.FAIL,
                     ExternalRuntimeKinds.isWorkspace(broker.getProvisioner())
                                     ? "External Workspace Runtime is a storage provisioning prerequisite"
@@ -1184,9 +1188,9 @@ public final class ManagedAgentPreflight {
                     // Configurable is not the same as usable: say so, so an
                     // operator is never misled by the PASS above.
                     checks.add(new Check("external-prerequisite", Status.WARN,
-                            "external-workspace can provision a storage-bound worker, but it"
-                                    + " cannot execute Hosted tools or close a Session yet;"
-                                    + " every placement fails closed",
+                            properties.isExternalWorkspaceFilesConfigured()
+                                    ? "External files require exact Harness negotiation and current registration; original-worker close proof is checked at drain"
+                                    : "external-workspace files are disabled or incompletely configured; new Hosted files Sessions fail closed",
                             "keep this profile out of production until files execution and"
                                     + " Session close are verified (step 3b/3c)"));
                 }

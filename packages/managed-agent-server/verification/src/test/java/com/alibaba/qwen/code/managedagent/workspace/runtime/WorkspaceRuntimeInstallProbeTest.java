@@ -104,9 +104,7 @@ public class WorkspaceRuntimeInstallProbeTest {
         Files.createDirectories(root.resolve("services/b"));
         WorkspaceStorageGuard guard = mock(WorkspaceStorageGuard.class);
         when(guard.enabled()).thenReturn(true);
-        var dataSource = new DriverManagerDataSource(
-                "jdbc:h2:mem:probe-guarded;MODE=MySQL;DB_CLOSE_DELAY=-1",
-                "sa", "");
+        var dataSource = probeDataSource("probe-guarded");
         WorkspaceRuntimeResolver guarded = new WorkspaceRuntimeResolver(
                 null, com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new JdbcTemplate(
                         dataSource),
@@ -211,9 +209,7 @@ public class WorkspaceRuntimeInstallProbeTest {
         Files.delete(root.resolve("gone"));
         WorkspaceStorageGuard guard = mock(WorkspaceStorageGuard.class);
         when(guard.enabled()).thenReturn(true);
-        var dataSource = new DriverManagerDataSource(
-                "jdbc:h2:mem:probe-candidate;MODE=MySQL;DB_CLOSE_DELAY=-1",
-                "sa", "");
+        var dataSource = probeDataSource("probe-candidate");
         WorkspaceRuntimeResolver guarded = new WorkspaceRuntimeResolver(
                 null, com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new JdbcTemplate(
                         dataSource),
@@ -286,12 +282,24 @@ public class WorkspaceRuntimeInstallProbeTest {
     }
 
     private WorkspaceRuntimeResolver resolver(Path root) {
-        var dataSource = new DriverManagerDataSource(
-                "jdbc:h2:mem:probe;MODE=MySQL;DB_CLOSE_DELAY=-1", "sa", "");
+        var dataSource = probeDataSource("probe");
         return new WorkspaceRuntimeResolver(null,
                 com.alibaba.qwen.code.managedagent.VerificationFixtures.configure(new WorkspaceExecutionStore(new JdbcTemplate(dataSource),
                         new DataSourceTransactionManager(dataSource))),
                 mountProperties(root));
+    }
+
+    // The probe reads the storage kind to refuse an EXTERNAL tree the bridge
+    // has no mount for, so its fixture needs the managed catalog: an empty
+    // database is not one the production path can face.
+    private static DriverManagerDataSource probeDataSource(String name) {
+        var dataSource = new DriverManagerDataSource(
+                "jdbc:h2:mem:" + name
+                        + ";MODE=MySQL;DB_CLOSE_DELAY=-1;DATABASE_TO_LOWER=TRUE",
+                "sa", "");
+        com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchema
+                .initialize(dataSource);
+        return dataSource;
     }
 
     private ManagedAgentProperties mountProperties(Path root) {

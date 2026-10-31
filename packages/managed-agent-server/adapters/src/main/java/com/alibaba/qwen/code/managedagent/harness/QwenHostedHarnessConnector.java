@@ -299,12 +299,29 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     @Override
     public boolean supportsLifecycle(String profile) {
         try {
+            if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)) {
+                return isWorkspaceFilesAvailable() && supportsSavedLifecycle(profile);
+            }
             return WorkspaceToolProfiles.FILES.equals(profile)
                     ? isWorkspaceFilesAvailable() && client().capabilities().getLifecycleProtocolVersion() == 1
                     : WorkspaceToolProfiles.lifecycleProtocol(profile) == 2
                             && client().capabilities().getLifecycleV2Profiles().contains(profile);
         } catch (com.alibaba.qwen.code.daemon.DaemonException
                 | IllegalStateException unavailable) {
+            return false;
+        }
+    }
+
+    @Override
+    public boolean supportsSavedLifecycle(String profile) {
+        if (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)) {
+            return supportsLifecycle(profile);
+        }
+        try {
+            var capabilities = client().capabilities();
+            return capabilities.getLifecycleProtocolVersion() == 1
+                    && capabilities.getFeatures().contains(WorkspaceToolProfiles.EXTERNAL_FILES);
+        } catch (com.alibaba.qwen.code.daemon.DaemonException | IllegalStateException unavailable) {
             return false;
         }
     }
@@ -490,7 +507,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
             if (actionResponse) {
                 workspaceExecution.authorizeActionResponse(session);
-                if (!passiveManagedRuntimeRecovery) {
+                if (!passiveManagedRuntimeRecovery && (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())
+                        || !workspaceExecution.isExternal(session.workspace()))) {
                     workspaceExecution.verifyMountForProbe(session.workspace());
                 }
             } else if (passiveManagedRuntimeRecovery && loadExisting) {
@@ -1511,7 +1529,9 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
             }
             if (actionResponse) {
                 workspaceExecution.authorizeActionResponse(session);
-                workspaceExecution.verifyMountForProbe(session.workspace());
+                if (!WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) || !workspaceExecution.isExternal(session.workspace())) {
+                    workspaceExecution.verifyMountForProbe(session.workspace());
+                }
             } else {
                 workspaceExecution.authorize(session);
             }
@@ -1953,11 +1973,23 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
     }
 
     private void requireApprovalSelectionSupport(SessionRecord session) {
+        if (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile())) {
+            if (!supportsLifecycle(session.toolProfile()) || session.workspace() == null
+                    || workspaceExecution == null || !workspaceExecution.isExternal(session.workspace())
+                    || !"qwen-code".equals(session.agentId()) || session.agentDefinitionDigest() != null
+                    || session.publicChildAgentsVersion() != 0
+                    || sessions.findChildLineage(session.tenantId(), session.sessionId()) != null
+                    || sessionSkills != null && (!sessionSkills.effective(session).isEmpty()
+                            || initialSelection(session) != null)) {
+                throw new IllegalStateException("External Workspace files profile is unavailable");
+            }
+        }
         var active = sessions.findActiveTurns(session.tenantId(), List.of(session.sessionId())).get(session.sessionId());
         var activeTurn = active == null ? null : sessions.findTurn(session.tenantId(), session.sessionId(), active.turnId())
                 .orElseThrow(() -> new IllegalStateException("The active Turn is missing"));
         if (activeTurn != null && activeTurn.input().stream().anyMatch(block -> "image".equals(block.get("type"))
-                || "resource".equals(block.get("type"))) && !supportsInputAttachments()) {
+                || "resource".equals(block.get("type")))
+                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) || !supportsInputAttachments())) {
             throw new IllegalStateException("Hosted input attachments are unavailable");
         }
         if (!WorkspaceToolProfiles.supportsApprovalSelection(session)) {
@@ -1965,7 +1997,8 @@ public class QwenHostedHarnessConnector implements HarnessConnector {
         }
         var selected = sessions.findApprovalSelections(session.tenantId(), List.of(session.sessionId())).get(session.sessionId());
         requireExtendedApprovalSupport(selected);
-        if (selected != null && selected.planMode() && !supportsPlanMode()) {
+        if (selected != null && selected.planMode()
+                && (WorkspaceToolProfiles.EXTERNAL_FILES.equals(session.toolProfile()) || !supportsPlanMode())) {
             throw new IllegalStateException("Hosted Plan mode is unavailable");
         }
         boolean changed = selected != null && selected.revision() > 0;

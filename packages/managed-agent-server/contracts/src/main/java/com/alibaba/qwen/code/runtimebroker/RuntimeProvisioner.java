@@ -107,6 +107,11 @@ public interface RuntimeProvisioner extends AutoCloseable {
         return false;
     }
 
+    /** Implementation eligibility only; a saved original still requires binding proof. */
+    default boolean supportsDrainedStopKind(String kind) {
+        return kind != null && supportsKind(kind) && supportsDrainedStop();
+    }
+
     /** Stop eligibility belongs to the saved placement, not another routed provider. */
     public default boolean supportsDrainedStop(RuntimeBindingRecord binding) {
         return binding != null && supportsKind(binding.getRequest().getProvisionerKind()) && supportsDrainedStop();

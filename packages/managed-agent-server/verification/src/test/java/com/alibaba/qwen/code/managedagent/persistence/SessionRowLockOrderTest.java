@@ -314,8 +314,16 @@ class SessionRowLockOrderTest {
                     Map.entry("WorkspaceCsiApplicationWorkerMatch.java",
                             Set.of("WorkspaceCsiApplicationWorkerMatch.number/1",
                                     "WorkspaceCsiApplicationWorkerMatch.object/1")),
+                    // The external-ownership lambdas call
+                    // JdbcExternalWorkspaceOwnership.claim/4, whose receiver
+                    // lives outside this package: the parse cannot see its
+                    // members, and the name/arity collide with this file's own
+                    // claim/4. The callee locks the Session row first and
+                    // reaches ma_runtime_session rows only — never ma_turn —
+                    // so no Turn ordering is at stake.
                     Map.entry("WorkspaceExecutionStore.java",
-                            Set.of("WorkspaceExecutionStore.createdStorageRoot/2",
+                            Set.of("ExternalWork.apply/3",
+                                    "WorkspaceExecutionStore.createdStorageRoot/2",
                                     "WorkspaceExecutionStore.storageKey/2")),
                     Map.entry("WorkspaceCsiCheckpointSnapshotStore.java",
                             Set.of("WorkspaceCsiCheckpointSnapshotStore.hash/1",

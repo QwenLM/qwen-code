@@ -15,6 +15,11 @@ public interface RuntimeWarmer {
         return false;
     }
 
+    default boolean supportsWorkspaceClose(String profile) {
+        return !com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.EXTERNAL_FILES.equals(profile)
+                && supportsWorkspaceClose();
+    }
+
     public default boolean supportsWorkspaceClose(ContextBinding binding) {
         return supportsWorkspaceClose();
     }

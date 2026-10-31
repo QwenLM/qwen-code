@@ -604,6 +604,89 @@ describe('ManagedSessionsPage', () => {
     }
   });
 
+  it.each([
+    ['closed', 'session_not_active', false],
+    ['closing', 'session_not_active', true],
+    ['closed', 'recovery_blocked', true],
+  ] as const)(
+    'shows recovery for %s and %s only when needed',
+    async (lifecycleStatus, reasonCode, visible) => {
+      mocks.client.getSession.mockResolvedValue(
+        summary('s1', {
+          lifecycleStatus,
+          capabilities: { canSend: false, canCancel: false },
+          recovery: {
+            state: 'operator_required',
+            reasonCode,
+            nextTurnAllowed: false,
+            actions: {
+              recheck: false,
+              cancel: false,
+              // SessionRecoveryService derives this as !nextTurnAllowed, so a
+              // closed Session always advertises the handoff.
+              continueInNewSession: true,
+            },
+          },
+        }),
+      );
+
+      await render('s1');
+      expect(container.textContent).toContain('Persisted answer');
+      expect(container.querySelector('textarea')?.disabled).toBe(true);
+      expect(
+        container.textContent?.includes(
+          'This Session needs operator attention',
+        ),
+      ).toBe(visible);
+    },
+  );
+
+  it('keeps the handoff reachable on a closed Session', async () => {
+    provider.workspaceBinding = {
+      agentId: 'agent-a',
+      list: vi.fn().mockResolvedValue({
+        data: [],
+        supported: true,
+        canCreateWorkspace: true,
+      }),
+      get: vi.fn(),
+      createEmpty: vi.fn(),
+      createSession: vi.fn(),
+      createWorkspace: vi.fn(),
+    };
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', {
+        lifecycleStatus: 'closed',
+        capabilities: { canSend: false, canCancel: false },
+        recovery: {
+          state: 'operator_required',
+          reasonCode: 'session_not_active',
+          nextTurnAllowed: false,
+          actions: {
+            recheck: false,
+            cancel: false,
+            continueInNewSession: true,
+          },
+        },
+      }),
+    );
+
+    await render('s1');
+    // The attention framing is suppressed for a closed Session, but the
+    // action it alone renders must still be there.
+    expect(container.textContent).not.toContain(
+      'This Session needs operator attention',
+    );
+    // The operator-facing explanation must go with the framing: asking for an
+    // operator on an already-closed Session is the warning this PR removed.
+    expect(container.textContent).not.toContain('Ask an operator to inspect');
+    expect(
+      [...container.querySelectorAll('button')].some(
+        (button) => button.textContent === 'Continue in a new Session',
+      ),
+    ).toBe(true);
+  });
+
   it.each(['closed', 'archived'])(
     'keeps %s history read only when native recovery is ready',
     async (lifecycleStatus) => {

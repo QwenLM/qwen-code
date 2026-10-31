@@ -110,6 +110,10 @@ public interface HarnessConnector extends AutoCloseable {
         return com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles.FILES.equals(profile) && supportsLifecycle();
     }
 
+    default boolean supportsSavedLifecycle(String profile) {
+        return supportsLifecycle(profile);
+    }
+
     public default void prepareLifecycleResources(com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord operation) {
         throw new UnsupportedOperationException("Hosted resource lifecycle is unavailable");
     }

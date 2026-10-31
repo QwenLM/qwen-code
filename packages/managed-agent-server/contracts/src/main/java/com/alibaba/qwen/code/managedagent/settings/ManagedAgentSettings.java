@@ -7,6 +7,7 @@ import java.util.Map;
 public interface ManagedAgentSettings {
     public Harness getHarness();
     public boolean admitsPublicChildAgents();
+    public boolean isExternalWorkspaceFilesConfigured();
     public Automation getAutomation();
     public Channels getChannels();
     public EventTransport getEventTransport();

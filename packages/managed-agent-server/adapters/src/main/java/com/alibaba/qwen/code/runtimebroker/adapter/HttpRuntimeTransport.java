@@ -78,6 +78,8 @@ public final class HttpRuntimeTransport implements com.alibaba.qwen.code.runtime
     static final String V3_CANCEL_PATH = "/internal/managed-runtime/v3/cancel";
     static final String V3_ACKNOWLEDGE_PATH = "/internal/managed-runtime/v3/acknowledge";
     static final String PUBLICATION_INSTALL_PATH = "/internal/managed-runtime/v3/publications:install";
+    static final String EXTERNAL_STOP_PATH = "/internal/managed-runtime/v2/publication:stop-drained";
+    private static final int EXTERNAL_STOP_LIMIT = 64 * 1024;
     public static final Duration REQUEST_TIMEOUT = Duration.ofSeconds(30);
     private static final Set<String> RESPONSE_FIELDS = Set.of(
             "protocolVersion", "runtimeInstanceId", "runtimeIncarnation",
@@ -352,6 +354,11 @@ public final class HttpRuntimeTransport implements com.alibaba.qwen.code.runtime
     @Override
     public CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
             RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
+        return attest(lease, request, seed, false);
+    }
+
+    private CompletionStage<RuntimeAttestation> attest(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, boolean cancelExchange) {
         if (lease == null || request == null || seed == null) {
             throw new IllegalArgumentException(
                     "lease, request, and seed are required");
@@ -372,13 +379,21 @@ public final class HttpRuntimeTransport implements com.alibaba.qwen.code.runtime
                     BODY_LIMIT_BYTES);
             String incarnation = files ? seed.getGatewayIncarnation() : null;
             long started = System.nanoTime();
-            return post(lease, path, encoded, BODY_LIMIT_BYTES, incarnation)
+            var cancelled = new java.util.concurrent.atomic.AtomicBoolean();
+            var pending = new java.util.concurrent.atomic.AtomicReference<>(
+                    post(lease, path, encoded, BODY_LIMIT_BYTES, incarnation).toCompletableFuture());
+            var attested = pending.get()
                     .exceptionallyCompose(error -> {
                         long remaining = requestTimeout.toNanos() - (System.nanoTime() - started);
                         // Read-only confirmation can race an idle SSH connection closing.
                         if (remaining > 0 && causedByEof(error)) {
-                            return post(lease, path, encoded, BODY_LIMIT_BYTES, incarnation,
-                                    Duration.ofNanos(remaining));
+                            var retry = post(lease, path, encoded, BODY_LIMIT_BYTES, incarnation,
+                                    Duration.ofNanos(remaining)).toCompletableFuture();
+                            pending.set(retry);
+                            if (cancelled.get()) {
+                                retry.cancel(true);
+                            }
+                            return retry;
                         }
                         return CompletableFuture.failedFuture(unwrap(error));
                     })
@@ -392,6 +407,13 @@ public final class HttpRuntimeTransport implements com.alibaba.qwen.code.runtime
                                 seed.getEpoch(), request.getScope(),
                                 seed.getProvisionRequestId(), request.getStorageId());
                     });
+            attested.whenCompleteAsync((value, error) -> {
+                if (cancelExchange && attested.isCancelled()) {
+                    cancelled.set(true);
+                    pending.get().cancel(true);
+                }
+            });
+            return attested;
         }
         RuntimeScope scope = request.getScope();
         Map<String, Object> body = new LinkedHashMap<>();
@@ -442,6 +464,130 @@ public final class HttpRuntimeTransport implements com.alibaba.qwen.code.runtime
             }
         });
         return returned;
+    }
+
+    /** Attests and retires only the saved external worker; the private proof bytes are not fetched. */
+    public CompletionStage<Void> stopExternalWorkspaceDrained(RuntimeLease lease,
+            RuntimeProvisionRequest request, RuntimeProvisionSeed seed, long registrationRevision) {
+        if (lease == null || seed == null || !seed.matches(lease) || request == null
+                || !"external-workspace".equals(request.getProvisionerKind()) || !request.isManagedContext()
+                || !"session".equals(request.getScope().getIsolationClass())
+                || !WorkspaceExecutionProfile.CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())
+                || registrationRevision <= 0 || registrationRevision > 9_007_199_254_740_991L
+                || client.followRedirects() != HttpClient.Redirect.NEVER
+                || !lease.getEndpoint().equals(endpoint(lease))) {
+            throw new IllegalArgumentException("Original external Workspace stop identity is required.");
+        }
+        HttpRequest stop = HttpRequest.newBuilder(lease.getEndpoint().resolve(EXTERNAL_STOP_PATH))
+                .timeout(requestTimeout)
+                .header("Authorization", "Bearer " + lease.getToken())
+                .header("Cache-Control", "no-store")
+                .header("Content-Type", "application/json")
+                .header("X-Qwen-Managed-Lease-Id", lease.getLeaseId())
+                .header("X-Qwen-Managed-Lease-Epoch", Long.toString(lease.getEpoch()))
+                .header("X-Qwen-Managed-Storage-Revision", Long.toString(registrationRevision))
+                .header("X-Qwen-Managed-Runtime-Incarnation", seed.getGatewayIncarnation())
+                .POST(HttpRequest.BodyPublishers.ofByteArray(encodeToolRequest(
+                        Map.of("protocolVersion", 2, "channel", "all"), EXTERNAL_STOP_LIMIT))).build();
+        // Pin the attestation too: a resolver must not switch origins between the two requests.
+        var attestation = new HttpRuntimeTransport(client, requestTimeout).attest(lease, request, seed, true)
+                .toCompletableFuture();
+        var active = new java.util.concurrent.atomic.AtomicReference<CompletableFuture<?>>(attestation);
+        CompletableFuture<Void> result = new CompletableFuture<>();
+        result.orTimeout(requestTimeout.toMillis(), TimeUnit.MILLISECONDS);
+        result.whenCompleteAsync((ignored, error) -> {
+            if (error != null || result.isCancelled()) {
+                active.get().cancel(true);
+            }
+        });
+        attestation.whenComplete((ignored, error) -> {
+            if (result.isDone()) {
+                return;
+            }
+            if (error != null) {
+                result.completeExceptionally(unwrap(error));
+                return;
+            }
+            try {
+                var exchange = client.sendAsync(stop, info -> new BoundedBodySubscriber(EXTERNAL_STOP_LIMIT));
+                active.set(exchange);
+                if (result.isDone()) {
+                    exchange.cancel(true);
+                    return;
+                }
+                exchange.whenComplete((response, failure) -> {
+                    if (failure != null) {
+                        result.completeExceptionally(unavailable(unwrap(failure)));
+                        return;
+                    }
+                    try {
+                        if (response.statusCode() != 200 || response.body().overflow()
+                                || !"no-store".equals(response.headers().firstValue("Cache-Control").orElse(""))
+                                || !jsonContentType(response.headers().firstValue("Content-Type").orElse(""))
+                                || response.headers().firstValue("Content-Encoding").isPresent()) {
+                            throw protocol("External Workspace drain was not confirmed.");
+                        }
+                        validateExternalDrain(response.body().bytes());
+                        result.complete(null);
+                    } catch (RuntimeException invalid) {
+                        result.completeExceptionally(invalid);
+                    }
+                });
+            } catch (RuntimeException failure) {
+                result.completeExceptionally(failure);
+            }
+        });
+        return result;
+    }
+
+    private static void validateExternalDrain(byte[] bytes) {
+        // Reuse only the strict JSON reader, not the CSI identity or protocol validators.
+        Map<String, Object> response = ManagedCsiFilesProtocol.parse(bytes, EXTERNAL_STOP_LIMIT);
+        if (!Long.valueOf(2).equals(BrokerValues.exactLong(response.get("protocolVersion")))) {
+            throw protocol("External Workspace drain was not confirmed.");
+        }
+        if ("unknown".equals(response.get("state"))
+                && response.keySet().equals(Set.of("protocolVersion", "state"))) {
+            throw unavailable(null);
+        }
+        if ("undrained".equals(response.get("state"))
+                && response.keySet().equals(Set.of("protocolVersion", "state", "channels"))
+                && response.get("channels") instanceof List<?> channels && !channels.isEmpty()
+                && channels.stream().allMatch(channel -> channel instanceof String id
+                        && id.matches("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"))) {
+            throw unavailable(null);
+        }
+        if (!response.keySet().equals(Set.of("protocolVersion", "state", "proof", "receipts"))
+                || !"drained".equals(response.get("state"))
+                || !(response.get("receipts") instanceof List<?> receipts)) {
+            throw protocol("External Workspace drain was not confirmed.");
+        }
+        validateExternalDrainReference(response.get("proof"));
+        for (Object value : receipts) {
+            if (!(value instanceof Map<?, ?> receipt)
+                    || !receipt.keySet().equals(Set.of("channelId", "receipt"))
+                    || !(receipt.get("channelId") instanceof String channelId)
+                    || !channelId.matches("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")) {
+                throw protocol("External Workspace drain receipt is invalid.");
+            }
+            validateExternalDrainReference(receipt.get("receipt"));
+        }
+    }
+
+    private static void validateExternalDrainReference(Object value) {
+        if (!(value instanceof Map<?, ?> proof)
+                || !proof.keySet().equals(V3_MANIFEST_REF_FIELDS)
+                || !(proof.get("resourceId") instanceof String resourceId)
+                || !resourceId.matches("[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
+                || !"external-publication".equals(proof.get("kind"))
+                || !Long.valueOf(1).equals(BrokerValues.exactLong(proof.get("schemaVersion")))
+                || !(proof.get("digest") instanceof String digest) || !digest.matches("[0-9a-f]{64}")) {
+            throw protocol("External Workspace drain was not confirmed.");
+        }
+        Long length = BrokerValues.exactLong(proof.get("byteLength"));
+        if (length == null || length <= 0 || length > 64 * 1024 * 1024) {
+            throw protocol("External Workspace drain proof reference is invalid.");
+        }
     }
 
     @Override

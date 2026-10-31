@@ -2,7 +2,23 @@
 
 [English](2026-10-25-external-hosted-workspace.md) | [简体中文](2026-10-25-external-hosted-workspace.zh-CN.md)
 
-Status: **step 3a (provisioning prerequisite) implemented; the product feature is not.** Builds on `docs/design/2026-10-23-external-runtime-provider.md` (phase 1, `external-scratch`, accepted contract) and the verified Aone operator‑adapter rehearsal. Nothing here weakens `external-scratch` invariants: deterministic logical handle before the first remote call, no replacement after a lost reply, no release‑to‑kill, Broker‑side independent attestation, provider deduplication by `provisionRequestId`.
+Status: **A / step 3a / B0 / B1 / B2 implemented for the exact public external-files profile; selected files/default-approval/safe-close E2E passed. #15512 is not complete.** §14 records the current milestone and remaining gates. Builds on [phase 1](2026-10-23-external-runtime-provider.md) (`external-scratch`, accepted contract) and the earlier Aone operator-adapter rehearsal; that rehearsal is not evidence for this milestone. Nothing here weakens `external-scratch` invariants: deterministic logical handle before the first remote call, no replacement after a lost reply, no release-to-kill, Broker-side independent attestation, provider deduplication by `provisionRequestId`.
+
+**Reading order:** the A amendment and §§12–13 retain their historical slice boundaries, not current blanket admission refusals. §§1–11 retain the wider phase-2 goals and proposals; where they differ, the implemented contracts in §§12–14 take precedence. In particular, the new boot document, nonce/marker changes and shell/capture proposals are not claims of shipped behavior.
+
+## Amendment: bounded slice A (2026-10-27)
+
+This standalone increment uses the existing external storage registration on main; it does not depend on #15654 or copy its registry/provisioner. `POST /internal/managed-workspaces/v1/workspace:materialize-external` materializes metadata for an existing `REGISTERED` `EXTERNAL` alias. Its closed, 16 KiB JSON body accepts only `registeredAliasId`, `displayName`, `ownerActorId`, `idempotencyKey`, and optional trace-only `requestId`. `registeredAliasId` is the registered `tenantWorkspaceId`, not a path or registration receipt ID.
+
+The existing exact loopback listener/local-peer checks and Broker bearer credential authenticate the operator's authority to delegate a grant. The validated `ownerActorId` is the **grantee**, not the authenticated caller or evidence of tenant membership. The operator must choose the correct tenant and grantee; the validated tenant header scopes registration lookup, Workspace, grant and receipt keys. Public signature and trusted-actor filters are unchanged. A tenant header alone cannot invoke this route.
+
+A fresh transaction takes the tenant placement-domain lock, checks the stored registration and owner agree on tenant, alias identity/keys, full provider/physical identity, revision and mount root, and refuses existing Workspaces, Runtime bindings, holders or maintenance. The registration JSON remains authoritative: alias-path validation uses the existing registration value rules; this is not detection of arbitrary out-of-band database tampering. The operation creates only `ma_workspace` (`workspaceId = storageId = tenantWorkspaceId`, generation 1, `ACTIVE`, `ROOT`, fixed `WorkspaceExecutionProfile.CONFIG_REF`/`POLICY_REF`, no default), one `OWNER` grant, and a completed `EXTERNAL_WORKSPACE` receipt atomically. Storage and its `UNVERIFIED` owner remain unchanged. No central filesystem, storage allocation, provider HTTP or worker operation occurs.
+
+An exact retry returns the original receipt, even after grant revocation, rename or removal; it never restores a grant, name or active state. The receipt records the creation outcome, not live state or execution authority. Changing alias, display name or grantee under the same tenant/idempotency key conflicts. At the A-only checkpoint, discovery stayed readable to the grantee, but `canCreateSession` and WebShell `canSelectDirectory` were false for EXTERNAL storage, including batch-readable grants. Both empty and prompted Session creation were denied by the existing storage-kind guard. A included no resolver, transport, execution or tool-profile activation; §14 supersedes that admission limit for the exact files profile.
+
+The distinct receipt namespace requires extending the existing enum and V1 CHECK. This follows the pre-release fresh-catalog policy: source reversion is independent, but does **not** promise an old binary can open the changed catalog. Recreate task/development catalogs; no V2 migration or schema-version bump is added.
+
+Verification for A consists of operator/tenant/closed-body tests, exact receipt replay and no-resurrection tests, persisted tuple and busy-owner refusal, honest public/WebShell discovery and real Session-service denial, plus MySQL same-key/different-key concurrency. These tests are not evidence of external Hosted execution. At that checkpoint, full tools, drain/ACK safety, recovery and public worker E2E were later increments; §14 records the bounded progress since then. The older execution proposals below must be reconciled with the shipped boot/publication contracts before implementation; A neither implements nor endorses a second wire protocol.
 
 ## 1. Why this phase exists
 
@@ -25,7 +41,7 @@ Explicitly out of scope for this design (moves to later phases on request): publ
 | Provider HTTP additions   | `provision`, `observe`                | + `storage:provision`, `storage:observe`, publication/capture (§5, §7 reuse wire discipline) |
 | Workspace state machine   | —                                     | same state machine as LOCAL/SSH_LOCAL with new ownership kind `EXTERNAL`                     |
 
-The profile is selected by `QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER=external-workspace` in a deployment where Workspace files and/or shell are explicitly enabled. The phase‑1 scratch profile and its validation (`validateExternalRuntime`) remain untouched.
+The current profile is selected by `QWEN_MANAGED_AGENT_RUNTIME_PROVISIONER=external-workspace` with `workspaceFilesEnabled=true` and the closed configuration/negotiation gates in §14. Shell must remain disabled. The table describes the wider target, not the admitted tool set; `external-scratch` still refuses Workspace features.
 
 ## 3. Identity and wire contract (shared transport discipline)
 
@@ -98,7 +114,7 @@ All three changes are small, tabled extensions; reachability of a remote worker 
 
 ## 6. Worker admission: boot‑v2 in container mode (CLI)
 
-Today the container boot path refuses boot‑v2. This phase adds `ManagedRuntimeWorkerBoot` v2 in container mode with **storage‑side paranoia**:
+The original proposal assumed the container boot path refused boot-v2 and proposed `ManagedRuntimeWorkerBoot` v2 admission with **storage-side checks**. This is not the implemented boot contract (see §12):
 
 - This phase introduces a **new closed boot document** — `managed-runtime-boot/2` — rather than widening the shipped `ManagedContextBoot` boot‑v2 key set. That document is parsed by an exact key‑list check (`readClosed` rejects any document whose sorted keys are not the expected sixteen), so adding a member to it would reject every shipped boot‑v2 document and every CSI v3–v6 envelope that wraps one. The new document has its own version and its own closed key list; shipped boot‑v2 parsing is unchanged, which is what makes this step inert for existing workers.
 - The new document carries one provider‑neutral storage member, `externalStorage: {kind: "external", storageRef, mountNonce, aliasPath, mountRoot}`, inside which `aliasPath` and `mountRoot` are members of this object rather than a second top‑level mount root. The member is named `externalStorage`, not `storage`, because the shipped `ManagedCsiBoot.storage` already carries provider‑specific fields (`physicalKey`, `registrationRevision`, `driver`): reusing the name would put two incompatible definitions of one key in the same envelope family. `storageRef` is the canonical‑JSON sha256 of the registered `ExternalStorageIdentity` (§3 digest discipline) and `mountNonce` is an opaque control‑plane value, so **this document** names neither `physicalKey` nor a provider ID — the phase‑1 rule against provider‑specific boot fields holds for it, and the CSI document’s own provider fields are untouched. Revision drift is committed inside `storageRef`, so a re‑registration changes the only storage identifier this worker ever sees.
@@ -124,7 +140,7 @@ The hardest gap for remote foreground shell is evidence — who saw what, and wh
 - The Broker consumes via `publication:read` exactly like its local consumer. An unrecognized channel or stale lease = closed error; no graceful degradation to "no capture".
 - `stopDrained` (§8) publishes a final receipt for each channel. The close path requires all captured queues drained to end‑of‑stream sequence, otherwise close stays blocked/cancelled.
 
-Foreground only in this design; background shell execution (`is_background`) is a later phase with its own evidence story.
+Foreground shell and `monitor` remain targets, not capabilities of §14's files milestone. Background shell execution (`is_background`) is a later phase with its own evidence story.
 
 ## 8. Exact‑worker `stopDrained` and storage ownership fences
 
@@ -172,9 +188,9 @@ Each step is independently revertible. The phase‑1 contract and its fault‑ga
 
 ## 12. Implemented step 3a: the provisioning prerequisite
 
-The first slice of step 3 landed as a Broker/adapter prerequisite, not as the product
-feature. It adds the `external-workspace` provisioner kind and nothing a user can reach
-yet:
+This section records the historical step-3a checkpoint, before B0–B2. It added the
+`external-workspace` provisioner kind as a Broker/adapter prerequisite, not yet a
+user-reachable product feature; its admission limits below are superseded by §14:
 
 - **Kind and transport.** `ExternalWorkspaceProvisioner` extends the shipped
   `external-scratch` provisioner, so placement, durable handle, idempotency by
@@ -211,21 +227,65 @@ yet:
   `unknown` keeps ownership but loses readiness, `denies` is a permanent refusal, and
   absent evidence keeps the phase-1 meaning because this slice authorizes no writes.
 
-Deliberately **not** in this slice: Hosted tool profiles and EXTERNAL execution admission
+Deliberately **not** in step 3a: Hosted tool profiles and EXTERNAL execution admission
 (§5), foreground shell publication consumption (§7), `stopDrained` (§8) and close gating.
-`supportsDrainedStop()` therefore stays `false`, a Session placed here could not be
-closed, and the configuration validator still refuses every managed Workspace feature for
-both external kinds. The provisioner is therefore **configurable, but no Session can be
-placed yet, and every placement fails closed**: the profile is opt-in through
-configuration, preflight reports a prerequisite warning saying exactly that, and only
-component and contract tests drive a placement.
+At that checkpoint, `supportsDrainedStop()` was `false`, a Session placed here could not
+be closed, and configuration refused every managed Workspace feature for both external
+kinds. The provisioner was **configurable, but no Session could be placed, and every
+placement failed closed**: preflight reported that prerequisite limit, and only
+component and contract tests drove a placement. This is not the current §14 behavior.
 
-**#15512 is not complete.** Files execution (`read_file`/`write_file`/`edit`/`glob`),
-foreground shell, approval, capture, and a verified close/drain remain unimplemented; the
-profile is not deployable for Hosted tools until those land and are verified.
+**Historical step-3a verdict:** #15512 was not complete; files execution, foreground
+shell, approval, capture and verified close/drain were unimplemented. Files, default
+approval and selected safe-close E2E have since landed (§14), but full-goal acceptance
+and deployment readiness remain pending.
 
 Recorded deviations from §6, for the follow-up slices: no new
 `managed-runtime-boot/2` document, no reversal of mount-root ownership, and no
 `rootDevice`/`rootInode` receipt. Those are worker-contract changes, and the shipped
 `storage` contract is already a published adapter surface; a repository with no producer
 of a document is not evidence that no consumer exists.
+
+## 13. B0 amendment: inert same-origin native drain
+
+This section records the B0-only checkpoint: it supplied the drain primitive, not Hosted admission or complete close orchestration. Its inert boundary below is historical; B1/B2 connect it in §14. The following B0 decisions supersede the proposed separate-ingress and drain-proof assumptions in §§3, 6 and 8; §12 records the earlier step 3a scope.
+
+- **One saved origin, existing routes.** External boot registers the existing publication object and executor on the main worker application and adds its routes to the owned-route gate. The separate publication listener and ready advertisement remain compatible; both listeners share retirement and channel state. Express registration escapes the literal colon in `publication:*` paths, preventing a parameterized route from matching a different operation. Wire paths do not change. The Broker uses the persisted `RuntimeLease.endpoint` for independent context attestation, then `POST /internal/managed-runtime/v2/publication:stop-drained` with exactly `{"protocolVersion":2,"channel":"all"}`. There is no second endpoint or port derivation.
+- **Original identity before I/O.** The provisioner reuses base validation for the saved request, seed, credentials and canonical storage-bound handle, checks the current registration tuple and any retained endpoint, and requires `external-workspace`, managed context, session isolation and the exact Workspace capability digest. Missing or conflicting originals yield no receipt; a restarted adapter uses complete saved identity without allocation or provider observation. Transport rejects redirects and a substituted resolved origin before attestation. Stop sends Bearer, lease ID/epoch, `X-Qwen-Managed-Storage-Revision`, `X-Qwen-Managed-Runtime-Incarnation`, JSON and `Cache-Control: no-store`; the boot header values are fixed before attestation. Stop does not require a response-incarnation header, which publication does not emit. The stop envelope is bounded to 64 KiB, and deadline/cancellation closes the active HTTP exchange.
+- **Narrow evidence, not proof retrieval.** Only HTTP 200 with JSON/no-store and exact `{protocolVersion:2,state:'drained',proof,receipts:[]}` is accepted. Strict parsing rejects duplicate keys, trailing tokens, malformed UTF-8 and non-integer numeric tokens. The proof has exactly `resourceId/kind/schemaVersion/byteLength/digest`: a producer-shaped UUID, `external-publication`, integer `1`, positive integer length at most 64 MiB, and raw lowercase 64-hex SHA-256. Unknown, undrained, nonempty channels/receipts or malformed replies produce no receipt. The Broker trusts the authenticated worker's assertion after attestation; it does **not** fetch or hash the private proof bytes, claim atomic attest-and-stop, or resist a malicious clone behind a compromised trusted ingress. Same-origin routing must reach the original worker.
+- **Retirement is not process exit.** Successful drain seals managed writer admission and retires execution resources; the HTTP process may remain alive. The native receipt uses the existing five-field binding/generation/provision-request/handle/time constructor, with Broker observation time as `stoppedAt`, no extension mode or scope. Binding-state and operation-claim authority belong to the Broker calling chain, not duplicated provisioner predicates; the primitive requires the drain request and validated original identity.
+- **Inert at the B0-only checkpoint (superseded by §14).** Per-binding `supportsDrainedStop(binding)` could recognize a valid original, but no-argument `supportsDrainedStop()` stayed false. The SQL-backed `WorkspaceExecutionStore.canStopDrained` guard still refused EXTERNAL. ACK replay, receipt-before-owner-release orchestration and EXTERNAL execution ownership were follow-up work. No public tools, Hosted profile or admission switch was enabled, and `release` remained a no-op. #15512 was not complete.
+
+Focused mechanism checks cover shared listener state and literal routes; original headers and success without a response-incarnation echo; identity/registration rejection; strict malformed and bounded replies; redirect sinks receiving no request; active-socket cancellation/deadline; and restart from saved identity without allocation. Those B0 checks alone did not establish public Hosted execution, SQL owner release or a real-provider end-to-end close. §14 adds the selected public-files evidence, not real-provider or full-goal acceptance.
+
+## 14. Public external-files milestone: A / B0 / B1 / B2
+
+### Implemented boundary
+
+A materializes metadata/grants; step 3a supplies registered placement; B0 supplies original-worker native drain; B1 connects lifecycle close and SQL ownership; B2 enables public files/default approval. The exact profile is `hosted-workspace-external-files/1`, with only `read_file`, `write_file`, `edit` and `glob`. Public discovery and Session creation now admit that profile when its gates pass, rather than rejecting every EXTERNAL placement.
+
+Admission requires the selected `external-workspace` kind, `workspaceFilesEnabled=true`, enabled Harness/session store/Broker, valid external-provider configuration, session isolation without create-warm, and the negotiated feature token `hosted-workspace-external-files/1` with lifecycle protocol `1` and supported Workspace close. Registration, provider and root binding must still match. Configuration eligibility alone is not negotiated readiness or worker proof. The selected E2E used `default` approval; it does not certify every approval mode.
+
+The options stay closed: no shell, `monitor`, capture, skills, hooks/extensions, MCP, child agents/workspaces/snapshots, plan mode, rewind or input attachments. Local mounts/import, SSH and verified/operator/trusted-local-reboot recovery switches remain disabled. This is not the full Hosted tool profile. See [configuration](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/config/ManagedAgentProperties.java), [admission](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedWorkspaceRegistry.java) and [closed Harness options](../../packages/cli/src/serve/hosted-workspace-profiles.ts).
+
+### Close and ownership
+
+Lifecycle protocol `1` can legitimately persist `storeSynthesized=true` with empty `effects`: the store derives the receipt from the idle journal and verified committed `definitionRef` under this no-hooks profile. This is **not** a Harness wire-settle response and is **not** native drain proof. The close chain separately detaches the Harness, requires no live journal writer, and drains the original binding/generation/handle through B0 before releasing physical ownership.
+
+The SQL physical holder survives tool completion and Runtime member/mount release; it is not a per-tool lock. Member execution claims can be released/reclaimed without freeing that holder. Only the original-generation stopped-release checks and durable drain receipt permit clearing its runtime holder fields. Storage metadata and grants remain. Retirement need not terminate the worker process, and provider `release` remains a no-op. See [lifecycle orchestration](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/session/SessionLifecycleCoordinator.java), [journal receipt](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/WorkspaceLifecycleStore.java) and [SQL ownership](../../packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/runtimebroker/JdbcExternalWorkspaceOwnership.java).
+
+### Observed acceptance and provenance
+
+On remote191, the selected [public files/close E2E](../../packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/ExternalPublicFilesE2E.java) completed **1 test, 0 failures, 0 errors, 0 skipped**, including final summary and cleanup. It used real Spring public APIs, isolated MySQL 8.4.13, built Hosted Harness, external Runtime worker, filesystem and journal; the allocator and OpenAI model were controlled local fixtures, **not a cloud-provider or real-model acceptance run**.
+
+Observed: authorized/idempotent registration and materialization; owner-only discovery; four real tools in order write → read → edit → glob; two approved Actions, five model requests and one allocation; untouched decoy root; terminal public events, Items/tool details and verified same-session history resources. Close reached Session `CLOSED` / binding `RELEASED`, cleared holder runtime fields, retained metadata/grants/history and left no live writer. The original native drain receipt persisted; main/legacy stop endpoints agreed. Authenticated late writes returned `409` without creating a file; late public input and idempotent close added no effects or allocation. The original worker stayed alive until cleanup.
+
+The retained evidence packet matched all 47 recorded runtime source hashes to checkpoint `dd5c2d2fb2e2665dd593b27fffa50e2cf4dc510d` and verified the artifact manifest before/after execution; copied Core commit metadata was separately disclosed. This establishes the selected scenario through source/artifact provenance, **not that every checkpoint test or latest full CI is certified**. Earlier failed attempts remain evidence, not erased by this pass.
+
+### Changes after the recorded checkpoint
+
+The acceptance packet above is historical evidence for `dd5c2d2fb2e2665dd593b27fffa50e2cf4dc510d`; #15685 was integrated as `0f7b8c006d77527a3a4555caf8d8ec41e998ffca`. Later repairs moved Agent pin validation before Workspace resolution and permitted a legitimately claimed LOST binding to retain its state until stop proof commits. Subsequent review repairs also change registration error handling and execution eligibility checks. These changes are **outside that recorded end-to-end run**. Focused regression tests are separate evidence, not a replay of the public-files/close acceptance on the latest head.
+
+### Remaining goal and gates
+
+**C remains open:** foreground `run_shell_command`, `monitor`, publication/capture and their close semantics are not done. `monitor` was in the initial §1 goal and remains a target, not a silently dropped requirement. True `LOST` recovery, Broker/adapter process-restart recovery, real concurrent ownership/recovery scenarios and real-provider acceptance remain open work, not completed or verified by this run. Full CI/fault suites, human review and acceptance/deployment gates remain pending. UI verification is pending; no viewer or screenshot success is claimed here. This closes the documentation comparison of user impact against the goal, not #15512 or the full phase-2 goal.

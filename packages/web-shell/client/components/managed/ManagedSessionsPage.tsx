@@ -1803,6 +1803,15 @@ function ManagedSessionsContent({
           )}
           {recovery.value && (
             <ManagedRecoveryPanel
+              // A closed Session always advertises the handoff, and this
+              // panel is the only renderer of that action: hide only the
+              // operator-attention framing, never the panel.
+              attention={
+                !(
+                  summary?.lifecycleStatus === 'closed' &&
+                  recovery.value.reasonCode === 'session_not_active'
+                )
+              }
               recovery={recovery.value}
               busy={!interactive || recovery.busy || turnCancel.busy}
               error={recovery.error}
