@@ -78,8 +78,11 @@ const approvalFaults = [
   'after-decision',
   'after-prepare',
   'after-result',
+  'finished-before-commit',
+  'cleanup-failed',
   'decision-reply-lost',
   'admission-reply-lost',
+  'load-reply-lost',
   'terminal-reply-lost',
   'terminal-write-failed',
 ] as const;
@@ -122,7 +125,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     index += 1;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|decision-reply-lost|admission-reply-lost|terminal-reply-lost|terminal-write-failed]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
     );
   }
 }
@@ -244,7 +247,7 @@ if (!Number.isSafeInteger(runtimeDelayMs) || runtimeDelayMs < 0) {
 
 const cliBundle = path.join(root, 'dist', 'cli.js');
 const springModule = path.join(root, 'packages', 'managed-agent-server');
-const springTarget = path.join(springModule, 'target');
+const springTarget = path.join(springModule, 'server', 'target');
 // The pom attaches classified repackage executions alongside the
 // unclassified server jar, so a wildcard over target/ matches several
 // artifacts. Read the project version from the
@@ -255,7 +258,7 @@ const springTarget = path.join(springModule, 'target');
 // re-indenting the element cannot flow newlines into the jar path.
 const pomXml = readFileSync(path.join(springModule, 'pom.xml'), 'utf8');
 const pomVersion = pomXml.match(
-  /<artifactId>qwen-managed-agent-server<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
+  /<artifactId>qwen-managed-agent-parent<\/artifactId>\s*<version>\s*([^<]*?\S)\s*<\/version>/,
 )?.[1];
 if (!pomVersion) {
   throw new Error(
@@ -602,15 +605,25 @@ type HeldExecutionStartProxy = {
   close: () => Promise<void>;
   heldPath: () => string | undefined;
   observations: () => string[];
+  // C3: every Runtime cleanup release is refused until allowRelease(), so
+  // the doomed generation cannot discharge its own cleanup debt before the
+  // crash lands.
+  releaseFailureCount: () => number;
+  releaseSuccessCount: () => number;
+  allowRelease: () => void;
 };
 
 async function startHeldExecutionStartProxy(
   targetOrigin: string,
   holdExecutionStart = true,
+  failRelease = false,
 ): Promise<HeldExecutionStartProxy> {
   let heldPath: string | undefined;
   const observations: string[] = [];
   let closed = false;
+  let releaseAllowed = !failRelease;
+  let releaseFailureCount = 0;
+  let releaseSuccessCount = 0;
   const server: Server = createServer((request, response) => {
     void (async () => {
       const chunks: Buffer[] = [];
@@ -620,6 +633,21 @@ async function startHeldExecutionStartProxy(
       const target = new URL(request.url ?? '/', targetOrigin);
       const method = request.method ?? 'GET';
       observations.push(`${method} ${target.pathname} received`);
+      if (
+        failRelease &&
+        method === 'POST' &&
+        target.pathname.endsWith(':release') &&
+        !target.pathname.endsWith(':release-mount')
+      ) {
+        if (!releaseAllowed) {
+          releaseFailureCount += 1;
+          observations.push(`${method} ${target.pathname} refused`);
+          response.writeHead(500, { 'content-type': 'application/json' });
+          response.end('{"error":"e2e_cleanup_release_failed"}');
+          return;
+        }
+        releaseSuccessCount += 1;
+      }
       if (
         holdExecutionStart &&
         method === 'POST' &&
@@ -696,6 +724,12 @@ async function startHeldExecutionStartProxy(
     baseUrl: `http://127.0.0.1:${address.port}`,
     heldPath: () => heldPath,
     observations: () => [...observations],
+    releaseFailureCount: () => releaseFailureCount,
+    releaseSuccessCount: () => releaseSuccessCount,
+    allowRelease: () => {
+      releaseAllowed = true;
+      observations.push('release allowed');
+    },
     close: async () => {
       if (closed) return;
       closed = true;
@@ -1166,6 +1200,87 @@ function assertStoredAnswer(
     throw new Error(
       `Expected exactly one managed-message-chunks manifest, found ${manifests.length}`,
     );
+}
+
+// B3a: assert the crash window from the same durable journal the recovery
+// reader reads, not from the hook's log line. The window's left boundary is
+// the post-tool main attempt's usage-only Finished marker (state
+// output_committed); its right boundary is the assistant message.committed
+// that has not landed yet. This mirrors findHostedCommittedModelOutput's own
+// discriminator — a latest main attempt that is not output_committed, or an
+// assistant commit at/after that attempt, both fall outside the window — so a
+// hold moved above the Finished commit reds here instead of passing vacuously
+// (the recovery reader also accepts a saved request whose attempt is still
+// started, so request count / parity / answer equality cannot tell that
+// earlier crash apart from B3a). The journal is UTF-8 JSON Lines in
+// ma_session_journal_tx.record_bytes; read it back as HEX like the stored
+// answer probe so embedded newlines never split a row.
+function finishedBeforeCommitWindow(
+  port: number,
+  sessionFilter: string,
+  promptId: string,
+): { attemptId: string; attemptSequence: number } {
+  const rows = runMysql(
+    port,
+    `SELECT HEX(record_bytes) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} ORDER BY first_sequence`,
+  ).split('\n');
+  const events: Array<{
+    kind: unknown;
+    sequence: number;
+    payload: Record<string, unknown>;
+  }> = [];
+  for (const row of rows) {
+    if (!row || row === 'NULL') continue;
+    for (const line of Buffer.from(row, 'hex').toString('utf8').split('\n')) {
+      if (!line) continue;
+      const record = JSON.parse(line) as {
+        subtype?: unknown;
+        managedSession?: {
+          kind?: unknown;
+          sequence?: unknown;
+          payload?: Record<string, unknown>;
+        };
+      };
+      if (record.subtype !== 'managed_session_event_v1') continue;
+      const event = record.managedSession;
+      if (!event || typeof event.sequence !== 'number') continue;
+      events.push({
+        kind: event.kind,
+        sequence: event.sequence,
+        payload: event.payload ?? {},
+      });
+    }
+  }
+  events.sort((a, b) => a.sequence - b.sequence);
+  const mainAttempts = events.filter(
+    (event) =>
+      event.kind === 'model.attempt' &&
+      typeof event.payload['attemptId'] === 'string' &&
+      (event.payload['attemptId'] as string).startsWith(`${promptId}:main:`),
+  );
+  const latestAttempt = mainAttempts[mainAttempts.length - 1];
+  if (!latestAttempt)
+    throw new Error(
+      `Finished-before-commit crash window has no main model attempt: promptId=${promptId}`,
+    );
+  if (latestAttempt.payload['state'] !== 'output_committed')
+    throw new Error(
+      `Finished-before-commit crash landed before the model Finished marker committed: attemptState=${String(latestAttempt.payload['state'])} attemptId=${String(latestAttempt.payload['attemptId'])}`,
+    );
+  const assistantCommit = events.find(
+    (event) =>
+      event.kind === 'message.committed' &&
+      event.payload['role'] === 'assistant' &&
+      event.sequence > latestAttempt.sequence,
+  );
+  if (assistantCommit)
+    throw new Error(
+      `Finished-before-commit crash landed after the assistant commit: commitSequence=${assistantCommit.sequence} attemptSequence=${latestAttempt.sequence}`,
+    );
+  return {
+    attemptId: latestAttempt.payload['attemptId'] as string,
+    attemptSequence: latestAttempt.sequence,
+  };
 }
 
 function assertPublicAnswer(events: PublicEvent[], expected: string): void {
@@ -1708,7 +1823,7 @@ try {
       [
         '-cp',
         springJar,
-        '-Dloader.main=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain',
+        '-Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceStorageRegistrationMain',
         'org.springframework.boot.loader.launch.PropertiesLauncher',
         'register',
         tenant,
@@ -2314,12 +2429,16 @@ try {
       // to commit. after-result must NOT be held here: its barrier is the
       // committed result, so holding :start would keep the execution at
       // PREPARED and its own wait for SETTLED could never succeed.
+      // cleanup-failed keeps :start live and refuses the release instead.
       if (
         approvalFault === 'after-decision' ||
-        approvalFault === 'after-prepare'
+        approvalFault === 'after-prepare' ||
+        approvalFault === 'cleanup-failed'
       ) {
         replacementBrokerProxy = await startHeldExecutionStartProxy(
           `http://127.0.0.1:${brokerPort}`,
+          approvalFault !== 'cleanup-failed',
+          approvalFault === 'cleanup-failed',
         );
       }
       replacementBrokerUrl =
@@ -2429,7 +2548,10 @@ try {
     // Every replacement generation answers on the same port with a fresh
     // home: the Harness-only model-round arm starts a third one after the
     // second dies mid-round.
-    const startReplacementHarness = async (name: string): Promise<Child> => {
+    const startReplacementHarness = async (
+      name: string,
+      crashBeforeAssistantCommit = false,
+    ): Promise<Child> => {
       const next = start(
         process.execPath,
         [
@@ -2469,6 +2591,17 @@ try {
             QWEN_MODEL: 'fake-model',
             QWEN_RUNTIME_BROKER_TOKEN: brokerToken,
             QWEN_RUNTIME_BROKER_URL: replacementBrokerUrl,
+            // A4: the replacement loses its first load attach reply once, so
+            // the control plane must redrive into the now-active driver.
+            ...(approvalFault === 'load-reply-lost'
+              ? { QWEN_E2E_DROP_LOAD_REPLY: session.id }
+              : {}),
+            // B3a: only the generation that must crash carries this flag; the
+            // post-fault recovery generation must not inherit it, or it would
+            // crash in the same window forever.
+            ...(crashBeforeAssistantCommit
+              ? { QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT: session.id }
+              : {}),
           },
         },
         name,
@@ -2489,6 +2622,7 @@ try {
     };
     let replacementHarness = await startReplacementHarness(
       'Replacement Hosted Harness',
+      approvalFault === 'finished-before-commit',
     );
 
     if (approvalRecovery) {
@@ -2504,6 +2638,18 @@ try {
         120_000,
         replacementHarness,
       );
+      if (approvalFault === 'load-reply-lost') {
+        // The fault must actually have landed: the replacement lost its first
+        // load attach reply (after its driver started). A redrive that never
+        // lost a reply would prove nothing about the active-driver handoff.
+        await waitUntil(
+          'Takeover load reply lost',
+          () =>
+            replacementHarness.log().includes('E2E dropping first load reply'),
+          120_000,
+          replacementHarness,
+        );
+      }
       const actionBeforeResponse = await fetchJson<Record<string, unknown>>(
         `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${originalApprovalId}`,
         { headers: tenantHeaders(tenant) },
@@ -2619,6 +2765,8 @@ try {
         approvalFault === 'after-decision' ||
         approvalFault === 'after-prepare' ||
         approvalFault === 'after-result' ||
+        approvalFault === 'finished-before-commit' ||
+        approvalFault === 'cleanup-failed' ||
         approvalFault === 'terminal-reply-lost' ||
         approvalFault === 'terminal-write-failed'
       ) {
@@ -2697,6 +2845,27 @@ try {
           // projects it; a second store commit is not required.
           terminalAcceptsAtBarrier =
             storeFaultProxy?.terminalAcceptCount() ?? 0;
+        } else if (approvalFault === 'cleanup-failed') {
+          // C3: the release refusal is the fault; the crash must land after
+          // the control plane projected the terminal, or the dispatch scan
+          // would take a RUNNING Turn over and pay the debt through that
+          // path. Only a terminal Turn proves the cleanup-only retry.
+          await waitUntil(
+            'Runtime cleanup release refused',
+            () => (replacementBrokerProxy?.releaseFailureCount() ?? 0) > 0,
+            120_000,
+            replacementHarness,
+          );
+          await waitUntil(
+            'Original Turn projected before the cleanup crash',
+            () =>
+              runMysql(
+                mysqlPort,
+                `SELECT status FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY gmt_create DESC LIMIT 1`,
+              ) === 'COMPLETED',
+            120_000,
+            replacementHarness,
+          );
         } else if (approvalFault === 'after-decision') {
           // The 202 admitted the response operation, not the decision. Wait
           // for the durable decision row and its receipt before SIGKILL.
@@ -2712,6 +2881,21 @@ try {
             120_000,
             replacementHarness,
           );
+        } else if (approvalFault === 'finished-before-commit') {
+          // B3a: the replacement hooked the window after its post-tool stream
+          // Finished marker is durable but before the assistant commit. The
+          // barrier line proves the fault landed inside that window; the
+          // recovery parity check below proves the next generation reissued
+          // the saved request rather than compensating a committed terminal.
+          await waitUntil(
+            'Finished turn held before the assistant commit',
+            () =>
+              replacementHarness
+                .log()
+                .includes('E2E holding finished turn before assistant commit'),
+            120_000,
+            replacementHarness,
+          );
         } else {
           // The enclosing condition lists every crash-type fault. A new one
           // added without a barrier here must fail loudly instead of
@@ -2724,6 +2908,33 @@ try {
           mysqlPort,
           'SELECT execution_state, dispatch_generation FROM qwen_managed_agent.ma_tool_execution',
         );
+        if (
+          approvalFault === 'finished-before-commit' &&
+          executionAtCrash !== 'SETTLED\t1'
+        ) {
+          // The crash must land after the approved result settled and its
+          // post-tool round reached the window, not before. Assert the durable
+          // precondition from MySQL like the sibling crash arms, rather than
+          // trusting the hook's log line alone.
+          throw new Error(
+            `Finished-before-commit crash did not land after the approved result settled: executionAtCrash=${executionAtCrash}`,
+          );
+        }
+        // The settled execution alone does not prove the crash landed inside
+        // B3a: the post-tool round could have been held before its durable
+        // Finished marker committed. Read the window from the same journal the
+        // recovery reads and retain the attempt identity as evidence.
+        const finishedWindow =
+          approvalFault === 'finished-before-commit'
+            ? finishedBeforeCommitWindow(
+                mysqlPort,
+                sessionFilter,
+                runMysql(
+                  mysqlPort,
+                  `SELECT prompt_id FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY gmt_create DESC LIMIT 1`,
+                ),
+              )
+            : undefined;
         const publishedPrefix =
           approvalFault === 'after-result'
             ? await publicTranscript(replacementSpringUrl, tenant, session.id)
@@ -2739,7 +2950,16 @@ try {
           fault: approvalFault,
           crashedHarnessBootId: crashedBootId,
           executionAtCrash,
+          finishedBeforeCommitWindow: finishedWindow,
           heldExecutionStartPath: replacementBrokerProxy?.heldPath(),
+          releaseFailures: replacementBrokerProxy?.releaseFailureCount(),
+          turnStatusAtCrash:
+            approvalFault === 'cleanup-failed'
+              ? runMysql(
+                  mysqlPort,
+                  `SELECT status FROM qwen_managed_agent.ma_turn WHERE ${sessionFilter} ORDER BY gmt_create DESC LIMIT 1`,
+                )
+              : undefined,
           terminalFault: storeFaultProxy
             ? {
                 rejected: storeFaultProxy.terminalRejectCount(),
@@ -2773,9 +2993,15 @@ try {
           storeFaultProxy?.allowTerminal();
         }
         if (replacementBrokerProxy) {
-          await replacementBrokerProxy.close();
-          replacementBrokerProxy = undefined;
-          replacementBrokerUrl = `http://127.0.0.1:${brokerPort}`;
+          if (approvalFault === 'cleanup-failed') {
+            // Keep the proxy so the replacement's successful release of the
+            // original identity is witnessed on the same fault boundary.
+            replacementBrokerProxy.allowRelease();
+          } else {
+            await replacementBrokerProxy.close();
+            replacementBrokerProxy = undefined;
+            replacementBrokerUrl = `http://127.0.0.1:${brokerPort}`;
+          }
         }
         // The crashed generation's disk is scrapped like every replaced
         // Harness home; the fresh one must recover from MySQL alone.
@@ -2801,18 +3027,31 @@ try {
         replacementHarness = await startReplacementHarness(
           'Post-fault recovery Harness',
         );
-        await waitUntil(
-          'Post-fault recovery Harness adopted the Session',
-          () => {
-            const boot = runMysql(
-              mysqlPort,
-              `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
-            );
-            return boot.length > 0 && boot !== crashedBootId;
-          },
-          120_000,
-          replacementHarness,
-        );
+        if (approvalFault === 'cleanup-failed') {
+          // C3 has no Turn left to adopt: the replacement's first contact is
+          // the cleanup-only load the debt scan issues, and it must not
+          // rebind the Session's turn identity. The release it performs on
+          // the still-open proxy is the proof that the retry reached it.
+          await waitUntil(
+            'Post-fault cleanup retry reached the replacement',
+            () => (replacementBrokerProxy?.releaseSuccessCount() ?? 0) > 0,
+            120_000,
+            replacementHarness,
+          );
+        } else {
+          await waitUntil(
+            'Post-fault recovery Harness adopted the Session',
+            () => {
+              const boot = runMysql(
+                mysqlPort,
+                `SELECT harness_boot_id FROM qwen_managed_agent.ma_session WHERE ${sessionFilter}`,
+              );
+              return boot.length > 0 && boot !== crashedBootId;
+            },
+            120_000,
+            replacementHarness,
+          );
+        }
       }
       const recovered = await waitForTerminal(
         replacementSpringUrl,
@@ -2984,7 +3223,8 @@ try {
         JSON.stringify(request.body.messages).includes('"role":"tool"'),
       );
       const expectedModelsAfterResults =
-        approvalFault === 'after-result'
+        approvalFault === 'after-result' ||
+        approvalFault === 'finished-before-commit'
           ? 2
           : ['allow', 'deny'].includes(verificationMode)
             ? 1
@@ -2996,7 +3236,10 @@ try {
         throw new Error(
           `Approval replayed inference or skipped result inference: ${initialRequests.length}+${modelAfterResults.length}`,
         );
-      if (approvalFault === 'after-result') {
+      if (
+        approvalFault === 'after-result' ||
+        approvalFault === 'finished-before-commit'
+      ) {
         const parity = isDeepStrictEqual(
           modelAfterResults[0]?.body,
           modelAfterResults[1]?.body,
@@ -3082,7 +3325,27 @@ try {
             `Terminal write fault was not compensated: reject=${storeFaultProxy?.terminalRejectCount()} accept=${storeFaultProxy?.terminalAcceptCount()} observations=${storeFaultProxy?.observations().join(' | ')}`,
           );
       }
+      if (approvalFault === 'cleanup-failed') {
+        const failures = replacementBrokerProxy?.releaseFailureCount() ?? 0;
+        const successes = replacementBrokerProxy?.releaseSuccessCount() ?? 0;
+        // The debt projection is the scan's input; a confirmed cleanup
+        // removes it. A surviving row here means only the Turn's own driver
+        // (or an operator) could still pay it — exactly the gap this arm
+        // exists to keep closed.
+        const debt = Number(
+          runMysql(
+            mysqlPort,
+            `SELECT COUNT(*) FROM qwen_managed_agent.ma_resource_ref WHERE ${sessionFilter} AND owner_kind='HOSTED_CLEANUP'`,
+          ),
+        );
+        if (failures < 1 || successes < 1 || debt !== 0)
+          throw new Error(
+            `Cleanup fault was not retried after the replacement: failures=${failures} successes=${successes} debt=${debt}`,
+          );
+      }
       const faultObservations = {
+        releaseFailures: replacementBrokerProxy?.releaseFailureCount() ?? 0,
+        releaseSuccesses: replacementBrokerProxy?.releaseSuccessCount() ?? 0,
         terminalRejects: storeFaultProxy?.terminalRejectCount() ?? 0,
         terminalAccepts: storeFaultProxy?.terminalAcceptCount() ?? 0,
         terminalAcceptsAtBarrier,

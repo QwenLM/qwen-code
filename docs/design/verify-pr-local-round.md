@@ -2,8 +2,8 @@
 
 [English](verify-pr-local-round.md) | [简体中文](verify-pr-local-round.zh-CN.md)
 
-Status: implemented; extended with the counting, guard and coverage rules
-below.
+Status: implemented; extended with the counting, guard, coverage and
+attribution-footer rules below.
 
 ## Problem
 
@@ -59,8 +59,9 @@ them rather than at the end of the document.
 
 - `scripts/verify-pr-prepare.mjs <pr> --repo <owner>/<repo>` resolves the
   coordinates: fetch the snapshot with the field list the lane uses, verify both
-  OIDs exist in this clone, create the artifact directory with its `evidence/`
-  subdirectory, and report the isolation signals the process can observe. It
+  OIDs exist in this clone, refuse a tree that is not a clean checkout of the
+  PR head, create the artifact directory with its `evidence/` subdirectory,
+  and report the isolation signals the process can observe. It
   does not gate on them: resolving metadata needs `gh`, and `gh` and the
   boundary are mutually exclusive, so this path always runs on the host. The
   gate is `--require-isolation`, meant to run inside the boundary before the
@@ -93,6 +94,58 @@ for is a file no round produces, and a check over an absent file is silent:
   `rows[].commit`. A listed commit with no row is an error naming the commits,
   and so is an empty list: a claim over no commits is vacuously true.
 
+Each prepared artifact directory keeps `context.json` with the round's full
+coordinates — `repo`, `pr`, `baseRefOid` and `headRefOid` — so a local round
+reads both OIDs from one file instead of deriving them from `HEAD`. Prepare
+writes it only when the current tree is a clean checkout of `headRefOid`:
+the round reuses that tree as the head side of its A/B, so a wrong HEAD exits
+3 naming the `git checkout` to run, and a dirty tree exits 3 asking the
+maintainer to commit or stash — the script never stashes for them, and a
+refusal creates no artifact directory. The checker prefers that round's
+snapshot and names the source it uses. Older directories fall back to the
+shared per-PR snapshot; an unreadable or invalid round snapshot warns instead
+of using a later round's shared head.
+
+## Attribution footer
+
+A published verification comment ends with the same attribution shape
+`/review` posts:
+
+`_— <model> via Qwen Code /verify-pr (v<cli-version>; skill <skill-hash>)_`
+
+- The model is the identity the round ran under, the CLI version is
+  `qwen --version`, and the skill version is the first 12 characters of
+  `git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md`. A content
+  hash, not a commit: the lane's tree is depth-2 and its `.qwen` arrives by
+  `git archive`, so no history is reachable, and the hash names exactly the
+  instructions the round loaded — including uncommitted edits on a
+  workstation. `--no-filters` because prepare leaves `.git` node-owned,
+  and a planted clean filter would otherwise choose what gets hashed — or
+  run as root.
+- In the lane, all three values are workflow-owned outputs of the run step
+  — the configured model, the runner's CLI, the re-pinned skill file —
+  never read from the agent-writable artifact tree. They are collected
+  right after the base re-pin and BEFORE the agent starts: the workspace
+  parent directory stays node-owned, so during the agent era PR code can
+  replace the whole `.qwen` directory (mv + mkdir) without touching the
+  root-owned files inside it, and a post-agent hash could name instructions
+  the round never loaded. A meta-test pins that ordering, not just the
+  strings. The publisher stamps the footer only on a body that carries a
+  report and only when all three values arrived; otherwise the comment
+  keeps the generic `— _Qwen Code · sandboxed verification_` signature,
+  which every weak notice (cancelled / infra / skipped / results
+  unavailable / downloaded artifact with no report) also keeps: they report
+  the lane, not a round.
+- A local round resolves the model from `$QWEN_CODE_MODEL_IDENTITY` (else
+  `$QWEN_CODE_MODEL`) and omits the footer when neither is set — an empty
+  identity is worse than none, and a workstation round never claims the
+  lane's `sandboxed verification` signature.
+- `report.md` itself carries no footer: both publish paths append it at
+  comment time, so a footer written into the report would appear twice.
+- A workflow meta-test pins the same template on both surfaces (publisher
+  and skill), so a wording edit to one cannot leave the other posting a
+  different shape.
+
 ## Design decisions
 
 1. **`--repo` is mandatory.** A script cannot distinguish a maintainer's clone
@@ -101,7 +154,11 @@ for is a file no round produces, and a check over an absent file is silent:
    failure the skill already warns about.
 2. **The scripts never touch the round, and the coordinate path does not gate on
    isolation.** Prepare fetches metadata and creates directories; it does not
-   checkout a worktree, build, or execute PR code. It also cannot decide whether
+   checkout a worktree, build, or execute PR code. It does gate on the tree,
+   because the round runs the head side of its A/B in the current tree: a HEAD
+   other than the PR head, or any uncommitted change, would measure code the
+   report does not name, so both are refused before anything is written. It
+   also cannot decide whether
    this process may run that code: it must reach `gh`, which the boundary
    excludes by design, so it always runs on the host. A gate there would fire on
    every round and turn the override into the normal path, so the check is a
@@ -143,6 +200,14 @@ for is a file no round produces, and a check over an absent file is silent:
   marker is not credential-free readiness either: the CLI's own Docker/Podman
   launcher mounts the gcloud config and ADC file and copies model keys, so the
   gate also requires an explicit attestation and refuses on a visible signal.
+- The tree gate attests source identity only. `dist/` and `node_modules/` are
+  gitignored, so a clean checkout of the head can still carry a build from an
+  earlier commit — reproduced in review: prepare exited 0 while the ignored
+  build ran old code under the new head's label. Install/build reuse is
+  therefore conditional on the round establishing the artifacts were produced
+  for this head (otherwise it rebuilds per the local install strategy), and
+  the prepare success line says "verify or refresh its install/build first"
+  instead of advertising unconditional build reuse.
 - Two implementations of the publish rules can drift. A workflow meta-test pins
   the checker verdict vocabulary to the publisher case labels, so a fifth word
   on one side fails the suite. The CI publisher remains authoritative.
@@ -222,6 +287,11 @@ for is a file no round produces, and a check over an absent file is silent:
 - For the guard, a `gh` stand-in on `PATH` drives the real CLI down both
   paths, so "writes no file when a call fails" is observed rather than inferred
   from the pure function.
+- The publish step is executed with and without the three attribution
+  outputs, asserting the exact last line of the posted body in each case —
+  including a downloaded artifact with no report — and structural pins
+  hold the collection ordering (re-pin, then collect, then agent start)
+  and the skill's footer template to the publisher's.
 - A vacuity matrix over every guard this change adds: revert one clause in
   place, run the suite that should catch it, restore. A row counts as killed
   only when the named assertion goes red, not merely some assertion. Measured:
@@ -272,10 +342,19 @@ for is a file no round produces, and a check over an absent file is silent:
 ## Acceptance criteria
 
 - `prepare` on a clone holding both OIDs writes a snapshot whose
-  `baseRefOid`/`headRefOid` match the PR, creates the glob-matching directory,
+  `baseRefOid`/`headRefOid` match the PR, creates the glob-matching directory
+  with a `context.json` holding `repo`, `pr`, `baseRefOid` and `headRefOid`,
   and exits 0 on the host. `--require-isolation` passes only when a container
   marker is present, `QWEN_VERIFY_CREDENTIAL_FREE=1` attests to a clean
   boundary, and no known credential signal is visible; otherwise it exits 4.
+- `prepare` exits 3 when HEAD is not the PR head (naming the `git checkout` to
+  run), when the tree carries uncommitted changes, tracked or untracked
+  (naming the entries and a stash form that clears untracked files), or when
+  index flags hide tracked state (skip-worktree / assume-unchanged, as a
+  sparse checkout sets). No refusal writes an artifact directory, and the
+  script never stashes for the maintainer. A detached HEAD at the PR head
+  passes: the identity is the OID, not a branch, and a test pins that the
+  printed checkout remedy reaches exit 0.
 - A missing OID fails with a fetch naming the `--repo` repository, not `origin`.
 - `check` rejects `merge-ready` with a failed assertion, an inconsistent
   triple, and an unknown verdict word; it accepts `findings` with the same
@@ -301,7 +380,18 @@ for is a file no round produces, and a check over an absent file is silent:
 - `guard --compare` reports dirty when an item's body changed and its timestamp
   did not, and when a review's state changed, and `guard --snapshot` refuses a
   list whose items carry no body or, for reviews, no state.
+- A published report comment ends with the attribution footer when the
+  model, CLI version and skill hash all resolved, and with the generic
+  signature otherwise; weak notices — including a downloaded artifact with
+  no report — always keep the generic signature. The lane collects the
+  three values after the base re-pin and before the agent starts, and a
+  meta-test pins that ordering. The skill and the publisher carry the same
+  footer template, pinned by a meta-test, and `report.md` carries no footer
+  of its own.
 - No script executes PR code.
+- A report with its own round snapshot keeps the same checked head after a
+  later preparation into a different artifact directory. Publishable round
+  snapshots contain no PR title or body.
 
 ## Open questions
 

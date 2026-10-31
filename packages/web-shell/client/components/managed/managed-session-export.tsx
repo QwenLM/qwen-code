@@ -19,6 +19,7 @@ export interface ManagedReadingExport {
   session: ManagedAgentSessionSummary;
   exportedAt: string;
   snapshotThroughSequence: number;
+  consistency?: 'live';
   blocks: ExportBlock[];
 }
 function object(value: unknown): Record<string, unknown> {
@@ -122,6 +123,7 @@ export async function collectManagedReadingExport(
   signal: AbortSignal,
 ): Promise<ManagedReadingExport> {
   if (!provider.exportSnapshot) throw new Error('unsupported_export');
+  const live = provider.exportConsistency === 'live';
   const preparation = new AbortController();
   const cancelPreparation = () => preparation.abort(signal.reason);
   signal.addEventListener('abort', cancelPreparation, { once: true });
@@ -151,7 +153,7 @@ export async function collectManagedReadingExport(
         page.snapshotThroughSequence < 0
       )
         throw new Error('invalid_export_snapshot');
-      if (page.snapshotThroughSequence >= session.lastSequence!) break;
+      if (live || page.snapshotThroughSequence >= session.lastSequence!) break;
       await delay(preparation.signal);
     } while (page.snapshotThroughSequence < session.lastSequence!);
   } catch (error) {
@@ -184,7 +186,7 @@ export async function collectManagedReadingExport(
         !Number.isSafeInteger(item.lastSequence) ||
         item.firstSequence < 0 ||
         item.firstSequence > item.lastSequence ||
-        item.lastSequence > watermark
+        (live ? item.firstSequence > watermark : item.lastSequence > watermark)
       )
         throw new Error('invalid_export_snapshot');
       identities.add(item.itemId);
@@ -204,6 +206,7 @@ export async function collectManagedReadingExport(
     session,
     exportedAt: new Date().toISOString(),
     snapshotThroughSequence: watermark,
+    ...(live ? { consistency: 'live' as const } : {}),
     blocks: blocks(items),
   };
 }
@@ -216,7 +219,7 @@ export function renderManagedReadingExport(
   const title = data.session.title || data.session.sessionId;
   if (format === 'md') {
     content =
-      `# ${title.replace(/[\r\n]/g, ' ')}\n\nSession: ${data.session.sessionId}\n\nExported: ${data.exportedAt}\n\nSnapshot: ${data.snapshotThroughSequence}\n\n` +
+      `# ${title.replace(/[\r\n]/g, ' ')}\n\nSession: ${data.session.sessionId}\n\nExported: ${data.exportedAt}\n\n${data.consistency === 'live' ? 'Live export range' : 'Snapshot'}: ${data.snapshotThroughSequence}\n\n` +
       data.blocks
         .map(
           (block) =>
@@ -228,7 +231,8 @@ export function renderManagedReadingExport(
       <main>
         <h1>{title}</h1>
         <p>
-          {data.session.sessionId} · {data.exportedAt} · Snapshot{' '}
+          {data.session.sessionId} · {data.exportedAt} ·{' '}
+          {data.consistency === 'live' ? 'Live export range' : 'Snapshot'}{' '}
           {data.snapshotThroughSequence}
         </p>
         {data.blocks.map((block, index) => (

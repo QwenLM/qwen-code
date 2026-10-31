@@ -408,6 +408,7 @@ interface ChatEditorRenderProps
     | 'btwEnabled'
     | 'isPreparing'
     | 'contextChipPlacement'
+    | 'gitContextControl'
     | 'standaloneTargetSupported'
     | 'onSelectStandaloneTarget'
     | 'workspaceSelectionDisabled'
@@ -2193,6 +2194,30 @@ describe('ChatEditor context chip placement', () => {
     expect(
       toolbar!.querySelector('[aria-label^="Current Git branch:"]'),
     ).toBeNull();
+  });
+
+  it('places a service-owned Git control beside the workspace without a Local Git picker', () => {
+    const container = renderChatEditor({
+      ...workspaceProps,
+      contextChipPlacement: 'below',
+      gitContextControl: <button type="button">Managed worktree</button>,
+    });
+    const row = container.querySelector(
+      '[data-web-shell-composer-context-row]',
+    )!;
+    expect(row.querySelector('button[aria-label="Workspace"]')).not.toBeNull();
+    expect(row.textContent).toContain('Managed worktree');
+    expect(
+      container
+        .querySelector('[data-web-shell-composer-surface]')!
+        .contains(row),
+    ).toBe(false);
+    expect(
+      [...container.querySelectorAll('button')].filter(
+        (button) => button.textContent === 'Managed worktree',
+      ),
+    ).toHaveLength(1);
+    expect(container.querySelector('[data-testid="branch-picker"]')).toBeNull();
   });
 
   it('leaves the workspace to the header and keeps git in the toolbar', () => {
@@ -4953,6 +4978,25 @@ describe('ChatEditor mobile composer actions', () => {
     expect(
       container.querySelector('[data-web-shell-context-usage]'),
     ).not.toBeNull();
+  });
+
+  it('keeps the service-owned Git control once in the mobile context row', () => {
+    mobileComposer();
+    const container = renderChatEditor({
+      contextChipPlacement: 'below',
+      gitContextControl: <button type="button">Managed worktree</button>,
+      visibleToolbarActions: [],
+    });
+    const row = container.querySelector('[class*="mobileContextRow"]')!;
+    expect(row.textContent).toContain('Managed worktree');
+    expect(
+      [...container.querySelectorAll('button')].filter(
+        (button) => button.textContent === 'Managed worktree',
+      ),
+    ).toHaveLength(1);
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
   });
 
   it.each([{ sessionId: 'b' }, { atWorkspaceCwd: '/b' }, { disabled: true }])(
