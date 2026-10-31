@@ -768,6 +768,57 @@ describe('model configuration manifest', () => {
     },
   );
 
+  it.each(['qwen4-plus', 'qwen-latest-series-invite-202610-m6'])(
+    'projects tiered controls for %s on opaque duplicate-endpoint routes',
+    (model) => {
+      const baseUrl =
+        'https://llm-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+      const generation = {
+        model,
+        authType: 'openai',
+        baseUrl,
+        reasoningSnapshot: [
+          { id: model, authType: 'openai', baseUrl, reasoning: undefined },
+          {
+            id: model,
+            authType: 'openai',
+            baseUrl:
+              'https://llm-b.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+            reasoning: undefined,
+          },
+        ],
+        reasoningRouteBaseUrl: baseUrl,
+      } as unknown as ContentGeneratorConfig;
+      expect(
+        buildModelReasoningRoutePreview(
+          generation,
+          resolveReasoningForModel(undefined, generation),
+          undefined,
+          true,
+        )?.[0],
+      ).toMatchObject({
+        currentValue: 'xhigh',
+        options: [
+          { value: 'none' },
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'xhigh' },
+        ],
+      });
+    },
+  );
+
+  it('keeps opaque routes without a known contract control-free', () => {
+    const generation = {
+      model: 'qwen3.7-plus',
+      authType: 'openai',
+      baseUrl: 'https://llm-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+    } as ContentGeneratorConfig;
+    expect(
+      buildModelReasoningRoutePreview(generation, undefined, undefined, true),
+    ).toBeUndefined();
+  });
+
   it('builds the stable qwen3.8-max default reasoning option', () => {
     expect(buildModelReasoningConfigOption('qwen3.8-max')).toMatchObject({
       id: 'reasoning_effort',

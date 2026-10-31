@@ -324,14 +324,18 @@ export function captureReasoningSnapshot(
   );
 }
 
-export function resolveReasoningForModel(
+/**
+ * The raw `capabilities.reasoning` declaration governing a route, before any
+ * built-in fallback: the route-aware snapshot row when present, else the
+ * registry entry. Exposed so wire-shaping consumers can stand the built-in
+ * normalizer down whenever an explicit declaration governs.
+ */
+export function resolveReasoningDeclaration(
   config: Pick<Config, 'getResolvedModelConfig'> | undefined,
   generation: ContentGeneratorConfig,
   model = generation.model,
-  strict = false,
-): ResolvedReasoning | undefined {
+): unknown {
   model = getRequestModel(generation, model);
-  let declaration: unknown;
   if (generation.reasoningSnapshot) {
     const rows = generation.reasoningSnapshot.filter(
       (row) => row.authType === generation.authType && row.id === model,
@@ -350,16 +354,25 @@ export function resolveReasoningForModel(
                 row.registryBaseUrl === undefined &&
                 row.baseUrl === generation.baseUrl,
             ));
-    declaration = row?.reasoning;
-  } else {
-    declaration = generation.authType
-      ? config?.getResolvedModelConfig?.(
-          generation.authType,
-          model,
-          generation.baseUrl,
-        )?.capabilities?.reasoning
-      : undefined;
+    return row?.reasoning;
   }
+  return generation.authType
+    ? config?.getResolvedModelConfig?.(
+        generation.authType,
+        model,
+        generation.baseUrl,
+      )?.capabilities?.reasoning
+    : undefined;
+}
+
+export function resolveReasoningForModel(
+  config: Pick<Config, 'getResolvedModelConfig'> | undefined,
+  generation: ContentGeneratorConfig,
+  model = generation.model,
+  strict = false,
+): ResolvedReasoning | undefined {
+  model = getRequestModel(generation, model);
+  const declaration = resolveReasoningDeclaration(config, generation, model);
   return (
     strict ? validateReasoningCapabilities : resolveReasoningCapabilities
   )(

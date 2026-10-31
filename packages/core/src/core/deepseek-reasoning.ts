@@ -27,25 +27,78 @@ function isDeepSeekV4Model(model: string | undefined): boolean {
   return /^deepseek-v4/i.test(model ?? '');
 }
 
-function getDeepSeekEndpoint(
-  baseUrl: string | undefined,
-  model: string | undefined,
-): 'official' | 'maas' | undefined {
-  let hostname: string;
+// Newer Flash aliases — the stable ids and any suffixed gateway alias under
+// the v4.1-flash prefix — share the official xhigh→high mapping. The legacy
+// deepseek-v4-flash id and the pro family keep the MaaS xhigh→max rule.
+function isNewerFlashAlias(model: string | undefined): boolean {
+  const normalized = model?.toLowerCase() ?? '';
+  return (
+    (FLASH_MODELS.has(normalized) && normalized !== 'deepseek-v4-flash') ||
+    normalized.startsWith('deepseek-v4.1-flash')
+  );
+}
+
+function hostnameOf(baseUrl: string | undefined): string | undefined {
   try {
-    hostname = new URL(baseUrl ?? '').hostname.toLowerCase();
+    return new URL(baseUrl ?? '').hostname.toLowerCase();
   } catch {
     return undefined;
   }
-  if (hostname === 'api.deepseek.com' || hostname.endsWith('.api.deepseek.com'))
-    return 'official';
-  if (
+}
+
+export function isDeepSeekOfficialBaseUrl(
+  baseUrl: string | undefined,
+): boolean {
+  const hostname = hostnameOf(baseUrl);
+  return (
+    hostname !== undefined &&
+    (hostname === 'api.deepseek.com' || hostname.endsWith('.api.deepseek.com'))
+  );
+}
+
+function isDeepSeekMaasHostname(hostname: string): boolean {
+  return (
     hostname.endsWith('.maas.aliyuncs.com') ||
     /^(?:dashscope(?:-intl|-us)?|cn-hongkong\.dashscope)\.aliyuncs\.com$/.test(
       hostname,
     )
-  )
-    return 'maas';
+  );
+}
+
+/**
+ * Routes where the built-in DeepSeek contract shipped before third-party
+ * prefix recognition: the official endpoint, the MaaS/DashScope whitelist,
+ * and the internal-proxy exception for the V4.1 Flash aliases. There the
+ * normalizer keeps its established interaction with explicit declarations;
+ * only on newly recognized third-party hosts does a declaration stand it
+ * down.
+ */
+export function isDeepSeekEstablishedHost(
+  baseUrl: string | undefined,
+  model: string | undefined,
+): boolean {
+  const hostname = hostnameOf(baseUrl);
+  if (hostname === undefined) return false;
+  if (hostname === 'api.deepseek.com' || hostname.endsWith('.api.deepseek.com'))
+    return true;
+  if (isDeepSeekMaasHostname(hostname)) return true;
+  return (
+    /^deepseek-v4\.1-flash(?:-1017)?$/i.test(model ?? '') &&
+    (hostname.endsWith('.alibaba-inc.com') ||
+      hostname.endsWith('.aliyun-inc.com') ||
+      hostname.endsWith('.alicloudapi.com'))
+  );
+}
+
+function getDeepSeekEndpoint(
+  baseUrl: string | undefined,
+  model: string | undefined,
+): 'official' | 'maas' | undefined {
+  const hostname = hostnameOf(baseUrl);
+  if (hostname === undefined) return undefined;
+  if (hostname === 'api.deepseek.com' || hostname.endsWith('.api.deepseek.com'))
+    return 'official';
+  if (isDeepSeekMaasHostname(hostname)) return 'maas';
   // DeepSeek-V4 models are hosted by many third-party OpenAI-compatible
   // gateways (PAI-EAS, internal proxies, ...); the model id alone identifies
   // the MaaS-style wire contract there, so no hostname whitelist applies.
@@ -97,8 +150,7 @@ export function normalizeDeepSeekReasoningEffort(
   // current official mapping for the newer Flash aliases.
   if (effort === 'xhigh')
     return (builtin && getDeepSeekEndpoint(baseUrl, model) === 'official') ||
-      (FLASH_MODELS.has(model?.toLowerCase() ?? '') &&
-        model?.toLowerCase() !== 'deepseek-v4-flash')
+      isNewerFlashAlias(model)
       ? 'high'
       : 'max';
   return effort;
@@ -139,6 +191,7 @@ export function applyDeepSeekReasoningEffort<T extends object>(
 export function getDeepSeekReasoningState(
   config: Partial<ContentGeneratorConfig>,
   resolved: ResolvedReasoning | undefined,
+  declared = false,
 ): { enabled: boolean; effort?: ReasoningEffort } | undefined {
   const model = getRequestModel(config);
   if (
@@ -146,7 +199,11 @@ export function getDeepSeekReasoningState(
     !resolved ||
     (resolved.profile !== undefined &&
       resolved.profile !== 'deepseek-openai') ||
-    resolved.toggleOnly
+    resolved.toggleOnly ||
+    // An explicit declaration governs the wire on newly recognized
+    // third-party hosts; the built-in normalizer must not override its
+    // declared/static effort there.
+    (declared && !isDeepSeekEstablishedHost(config.baseUrl, model))
   )
     return undefined;
   const defaultEffort = resolved.defaultEffort;

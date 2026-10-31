@@ -12,6 +12,7 @@ import {
   getDeepSeekReasoningState,
   normalizeDeepSeekReasoningEffort,
 } from './deepseek-reasoning.js';
+import { getEffectiveReasoning } from './reasoning-overrides.js';
 import { AuthType } from '../utils/auth-type.js';
 
 const official = 'https://api.deepseek.com/v1';
@@ -203,6 +204,12 @@ describe('built-in DeepSeek reasoning', () => {
     [maas, 'deepseek-v4-pro-0813', 'low', 'low'],
     [maas, 'deepseek-v4-pro-0813', 'xhigh', 'max'],
     [maas, 'deepseek-v4-flash-0731', 'xhigh', 'max'],
+    [
+      'https://gateway.example.com/v1',
+      'deepseek-v4.1-flash-custom',
+      'xhigh',
+      'high',
+    ],
     ['https://gateway.example.com/v1', 'DeepSeek-V4-Pro', 'low', 'high'],
     [
       'https://gateway.example.com/v1',
@@ -218,6 +225,77 @@ describe('built-in DeepSeek reasoning', () => {
     expect(normalizeDeepSeekReasoningEffort(effort, model, baseUrl)).toBe(
       expected,
     );
+  });
+
+  it('normalizes gateway Flash aliases identically to the stable Flash id', () => {
+    const gateway = 'https://gateway.example.com/v1';
+    for (const model of [
+      'deepseek-v4.1-flash-1017',
+      'deepseek-v4.1-flash-custom',
+      'DEEPSEEK-V4.1-FLASH-ALIAS',
+    ]) {
+      expect(normalizeDeepSeekReasoningEffort('xhigh', model, gateway)).toBe(
+        'high',
+      );
+      const generation: ContentGeneratorConfig = {
+        model,
+        authType: AuthType.USE_OPENAI,
+        baseUrl: gateway,
+        reasoning: { effort: 'xhigh' },
+      };
+      expect(
+        getEffectiveReasoning(
+          generation,
+          getBuiltinDeepSeekReasoning(generation),
+        ),
+      ).toEqual({ effort: 'high' });
+      expect(
+        applyDeepSeekReasoningEffort(
+          { model, reasoning: { effort: 'xhigh' } },
+          gateway,
+        ),
+      ).toEqual({ model, reasoning_effort: 'high' });
+    }
+    expect(
+      normalizeDeepSeekReasoningEffort('xhigh', 'deepseek-v4-flash', gateway),
+    ).toBe('max');
+    expect(
+      normalizeDeepSeekReasoningEffort('xhigh', 'deepseek-v4-pro', gateway),
+    ).toBe('max');
+  });
+
+  it('stands the state normalizer down for a declared third-party route', () => {
+    const declaration = {
+      thinking: true,
+      efforts: ['low', 'medium', 'high'],
+      defaultEffort: 'medium',
+      disableField: 'reasoning_effort',
+    } as const;
+    const gatewayGeneration: ContentGeneratorConfig = {
+      model: 'deepseek-v4-pro',
+      authType: AuthType.USE_OPENAI,
+      baseUrl: 'https://gateway.example.com/v1',
+    };
+    expect(
+      getDeepSeekReasoningState(gatewayGeneration, declaration, true),
+    ).toBeUndefined();
+    expect(
+      getDeepSeekReasoningState(gatewayGeneration, declaration, false),
+    ).toBeDefined();
+    expect(
+      getDeepSeekReasoningState(
+        { ...gatewayGeneration, baseUrl: maas },
+        declaration,
+        true,
+      ),
+    ).toBeDefined();
+    expect(
+      getDeepSeekReasoningState(
+        { ...gatewayGeneration, baseUrl: official },
+        declaration,
+        true,
+      ),
+    ).toMatchObject({ enabled: true, effort: 'medium' });
   });
 
   it('flattens static nested effort while preserving flat overrides and siblings', () => {

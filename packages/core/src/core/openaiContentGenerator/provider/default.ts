@@ -22,11 +22,13 @@ import {
 import { isOpenRouterHostname } from './openrouter.js';
 import {
   getEffectiveReasoning,
+  resolveReasoningDeclaration,
   resolveReasoningForModel,
 } from '../../reasoning-overrides.js';
 import {
   applyDeepSeekReasoningEffort,
   getBuiltinDeepSeekReasoning,
+  isDeepSeekEstablishedHost,
 } from '../../deepseek-reasoning.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
@@ -258,6 +260,19 @@ export class DefaultOpenAICompatibleProvider
       !resolved ||
       resolved.toggleOnly ||
       (resolved.profile !== undefined && resolved.profile !== 'deepseek-openai')
+    )
+      return body;
+    // On newly recognized third-party hosts an explicit declaration governs
+    // the wire shape: the built-in normalizer must not flatten or re-tier its
+    // declared or static effort. Established DeepSeek hosts keep their
+    // shipped interaction.
+    if (
+      !isDeepSeekEstablishedHost(this.contentGeneratorConfig.baseUrl, model) &&
+      resolveReasoningDeclaration(
+        this.cliConfig,
+        this.contentGeneratorConfig,
+        model,
+      ) !== undefined
     )
       return body;
     const reasoning = getEffectiveReasoning(

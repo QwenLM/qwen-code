@@ -330,9 +330,11 @@ import {
 } from './child-heap-probe.js';
 import {
   captureReasoningSnapshot,
+  resolveReasoningDeclaration,
   resolveReasoningForModel,
 } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
 import { getDeepSeekReasoningState } from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
+import { isTieredEffortQwenPrefix } from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import {
   applyReasoningSelection,
@@ -342,6 +344,7 @@ import {
   getConfiguredModelReasoning,
   getDefaultReasoningConfig,
   getGptReasoningOverrideState,
+  getModelConfiguration,
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
   parseReasoningSelection,
@@ -7142,7 +7145,7 @@ class QwenAgent implements Agent {
           ].map((sources) => [sources, sources?.['reasoning']] as const);
           try {
             if (modelReasoning && !modelReasoning.toggleOnly) {
-              clearReasoningRequestOverrides(generation);
+              clearReasoningRequestOverrides(generation, config);
             }
             applyReasoningSelection(config, selected, defaultReasoning);
             if (!modelReasoning && selected !== REASONING_EFFORT_NONE) {
@@ -16832,7 +16835,7 @@ class QwenAgent implements Agent {
       return;
     }
     if (generation && modelReasoning && !modelReasoning.toggleOnly) {
-      clearReasoningRequestOverrides(generation);
+      clearReasoningRequestOverrides(generation, config);
     }
     if (
       selection === REASONING_EFFORT_NONE ||
@@ -16840,6 +16843,7 @@ class QwenAgent implements Agent {
         getDeepSeekReasoningState(
           generation,
           resolveReasoningForModel(config, generation),
+          resolveReasoningDeclaration(config, generation) !== undefined,
         ))
     ) {
       applyReasoningSelection(config, selection);
@@ -17668,12 +17672,14 @@ class QwenAgent implements Agent {
       getDeepSeekReasoningState(
         generation,
         resolveReasoningForModel(config, generation),
+        resolveReasoningDeclaration(config, generation) !== undefined,
       );
     if (
       activeRuntimeSnapshot ||
       (currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
         !modelReasoning?.profile &&
-        !deepSeekState) ||
+        !deepSeekState &&
+        !isTieredEffortQwenPrefix(reasoningModel)) ||
       !isReasoningSelectionSupported(
         reasoningModel,
         REASONING_EFFORT_DEFAULT,
@@ -17837,12 +17843,21 @@ class QwenAgent implements Agent {
       getDeepSeekReasoningState(
         generation,
         resolveReasoningForModel(config, generation),
+        resolveReasoningDeclaration(config, generation) !== undefined,
       );
-    return completeModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
+    if (
+      completeModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
       !reasoning?.profile &&
       !deepSeekState
-      ? undefined
-      : reasoning;
+    ) {
+      // The new tiered Qwen families carry their contract in the manifest;
+      // routed selectors must not hide it.
+      const wireModel = getRequestModel(generation ?? {});
+      return isTieredEffortQwenPrefix(wireModel)
+        ? getModelConfiguration(wireModel)?.reasoning
+        : undefined;
+    }
+    return reasoning;
   }
 
   private buildSelectableModelOptions(config: Config) {

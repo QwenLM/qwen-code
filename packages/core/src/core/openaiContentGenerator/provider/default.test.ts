@@ -494,6 +494,61 @@ describe('DefaultOpenAICompatibleProvider', () => {
       });
     });
 
+    it('preserves a declared static effort against the built-in normalizer on third-party hosts', () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        authType: 'openai' as ContentGeneratorConfig['authType'],
+        model: 'deepseek-v4-pro',
+        baseUrl: 'https://gateway.example.com/v1',
+        samplingParams: { reasoning: { effort: 'medium' } },
+      } as ContentGeneratorConfig;
+      mockCliConfig.getResolvedModelConfig = vi.fn().mockReturnValue({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['low', 'medium', 'high'],
+            defaultEffort: 'medium',
+            disableField: 'reasoning_effort',
+          },
+        },
+      });
+      const request = {
+        model: 'deepseek-v4-pro',
+        messages: [],
+        reasoning: { effort: 'medium' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+      const wire = build(request, providerWith({})) as Record<string, unknown>;
+      expect(wire['reasoning']).toEqual({ effort: 'medium' });
+      expect(wire['reasoning_effort']).toBeUndefined();
+    });
+
+    it('keeps the official reshape for a declared route on the official host', () => {
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        authType: 'openai' as ContentGeneratorConfig['authType'],
+        model: 'deepseek-v4-pro',
+        baseUrl: 'https://api.deepseek.com/v1',
+      } as ContentGeneratorConfig;
+      mockCliConfig.getResolvedModelConfig = vi.fn().mockReturnValue({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['low', 'medium', 'high'],
+            defaultEffort: 'medium',
+            disableField: 'reasoning_effort',
+          },
+        },
+      });
+      const request = {
+        model: 'deepseek-v4-pro',
+        messages: [],
+        reasoning: { effort: 'medium' },
+      } as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+      const wire = build(request, providerWith({})) as Record<string, unknown>;
+      expect(wire['reasoning_effort']).toBe('high');
+      expect(wire['reasoning']).toBeUndefined();
+    });
+
     it.each(['', 42])(
       'does not translate an invalid configured effort %j',
       (effort) => {
