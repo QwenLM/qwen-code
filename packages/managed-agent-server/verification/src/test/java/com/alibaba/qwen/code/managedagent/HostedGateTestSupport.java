@@ -9,7 +9,6 @@ import com.alibaba.qwen.code.managedagent.adapters.artifact.AliyunObjectStoreCli
 import com.alibaba.qwen.code.managedagent.api.AuthenticatedTenantActor;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.SourceEvent;
-import com.alibaba.qwen.code.managedagent.harness.SdkHarnessBoundary;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationKind;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.OperationRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ProjectedEvent;
@@ -28,7 +27,9 @@ import org.springframework.core.Ordered;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.test.util.ReflectionTestUtils;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.util.ReflectionUtils;
 
+import java.lang.reflect.Field;
 import java.net.URI;
 import java.security.Principal;
 import java.time.Duration;
@@ -48,12 +49,6 @@ public final class HostedGateTestSupport {
     private static final ObjectMapper JSON = new ObjectMapper();
 
     private HostedGateTestSupport() {
-    }
-
-    public static HarnessConnector harnessDelegate(HarnessConnector connector) {
-        return connector instanceof SdkHarnessBoundary
-                ? (HarnessConnector) ReflectionTestUtils.getField(connector, "delegate")
-                : connector;
     }
 
     // A Hosted IT advertises ports it probed by binding an ephemeral port
@@ -382,13 +377,48 @@ public final class HostedGateTestSupport {
     // Spring holds no attachment to it.
     static HarnessSessionRef attachment(HarnessConnector connector,
             String sessionId) {
-        for (Object value : ((Map<?, ?>) ReflectionTestUtils.getField(
-                harnessDelegate(connector), "attachments")).values()) {
+        for (Object value : attachmentsOf(connector).values()) {
             if (value instanceof HarnessSessionRef ref
                     && sessionId.equals(ref.getHarnessSessionId())) {
                 return ref;
             }
         }
         return null;
+    }
+
+    // The bean Spring hands out can be a decorator around the connector that
+    // owns the private state these gates read, so resolve the owner once and
+    // let every read share it. A chain that owns no attachment map stops at
+    // its last connector, so the caller's getField still names the missing
+    // field instead of failing somewhere less obvious. A delegate that is
+    // itself null falls back to the connector we started from, for the same
+    // reason: getField(null, …) complains about the missing target instead of
+    // naming the field the caller asked for.
+    public static HarnessConnector connectorOwning(HarnessConnector connector) {
+        HarnessConnector owner = connector;
+        while (owner != null && declaredField(owner, "attachments", Map.class) == null) {
+            Field delegate = declaredField(owner, "delegate", HarnessConnector.class);
+            if (delegate == null) {
+                break;
+            }
+            ReflectionUtils.makeAccessible(delegate);
+            owner = (HarnessConnector) ReflectionUtils.getField(delegate, owner);
+        }
+        return owner != null ? owner : connector;
+    }
+
+    static Map<?, ?> attachmentsOf(HarnessConnector connector) {
+        return (Map<?, ?>) ReflectionTestUtils.getField(
+                connectorOwning(connector), "attachments");
+    }
+
+    // findField's type argument matches the declared type exactly, not by
+    // assignability, so a delegate declared as a concrete connector would be
+    // missed. Match on the name and check assignability instead. A field that
+    // exists and holds null is still a field: the caller reads its value.
+    private static Field declaredField(HarnessConnector owner, String name,
+            Class<?> type) {
+        Field field = ReflectionUtils.findField(owner.getClass(), name);
+        return field != null && type.isAssignableFrom(field.getType()) ? field : null;
     }
 }

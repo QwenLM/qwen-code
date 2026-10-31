@@ -2,7 +2,8 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.RecoveryStatus;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecovery;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.SessionRecoveryActions;
@@ -24,13 +25,13 @@ public class SessionRecoveryService {
     private static final Set<String> STATES = Set.of("recovering", "awaiting_evidence",
             "cleanup_pending", "ready", "operator_required");
     private final ManagedAgentService sessions;
-    private final AgentStateStore store;
+    private final SessionQueryStore store;
     private final HarnessCoordinator coordinator;
     private final HarnessConnector harness;
     private final SessionRecoveryRepository recovery;
     private final ManagedSessionStore journals;
 
-    public SessionRecoveryService(ManagedAgentService sessions, AgentStateStore store,
+    public SessionRecoveryService(ManagedAgentService sessions, SessionQueryStore store,
             HarnessCoordinator coordinator, HarnessConnector harness, SessionRecoveryRepository recovery, ManagedSessionStore journals) {
         this.sessions = sessions;
         this.store = store;
@@ -188,14 +189,14 @@ public class SessionRecoveryService {
     private static boolean recoveryIntent(TurnRecord turn) {
         return turn != null && ACTIVE.contains(turn.status())
                 && ("CANCELLING".equals(turn.status())
-                        || AgentStateStore.RUNTIME_RECOVERY_BLOCKED.equals(turn.errorCode())
-                        || AgentStateStore.WORKFLOW_RECOVERY_BLOCKED.equals(turn.errorCode()));
+                        || TurnExecutionStore.RUNTIME_RECOVERY_BLOCKED.equals(turn.errorCode())
+                        || TurnExecutionStore.WORKFLOW_RECOVERY_BLOCKED.equals(turn.errorCode()));
     }
 
     private static boolean recheckIntent(TurnRecord turn) {
         return turn != null && ACTIVE.contains(turn.status())
                 && ("CANCELLING".equals(turn.status())
-                        || AgentStateStore.RUNTIME_RECOVERY_BLOCKED.equals(turn.errorCode()));
+                        || TurnExecutionStore.RUNTIME_RECOVERY_BLOCKED.equals(turn.errorCode()));
     }
 
     private static SessionRecovery view(String state, String reason, TurnRecord turn,

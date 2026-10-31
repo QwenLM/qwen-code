@@ -57,7 +57,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachment;
-import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.harnessDelegate;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.attachmentsOf;
+import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.connectorOwning;
 import static com.alibaba.qwen.code.managedagent.HostedGateTestSupport.quote;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
@@ -642,10 +643,11 @@ class HostedPublicWorkspaceIT {
                 assertThat(jdbc.queryForList("SELECT execution_state FROM ma_tool_execution WHERE harness_session_id = ?",
                         String.class, session)).containsExactly("UNKNOWN");
             });
-            var connector = harnessDelegate(spring.getBean(HarnessConnector.class));
+            var connector = spring.getBean(HarnessConnector.class);
             var attached = attachment(connector, session);
             assertThat(attached).as("Spring's attachment to %s", session).isNotNull();
-            var client = (HostedHarnessClient) ReflectionTestUtils.getField(connector, "client");
+            var client = (HostedHarnessClient) ReflectionTestUtils.getField(
+                    connectorOwning(connector), "client");
             // The third request is counted before its handler finishes; wait for the
             // producer's prompt and all receipt handlers before taking final evidence.
             await().atMost(Duration.ofSeconds(15)).failFast(() -> {
@@ -1621,7 +1623,7 @@ class HostedPublicWorkspaceIT {
                     "requestId", "d6b-action", "response", response) : response;
             assertThat(request("POST", route, body, id, "reader", 403).at("/error/code").asText()).isEqualTo("action_forbidden");
             // The live Harness retains this approval while the dispatcher's attachment cache is cold.
-            ((Map<?, ?>) ReflectionTestUtils.getField(harnessDelegate(spring.getBean(HarnessConnector.class)), "attachments")).clear();
+            attachmentsOf(spring.getBean(HarnessConnector.class)).clear();
             // Files sessions answer the first approval as a second OPERATOR
             // (R1's handoff) and the rest as the owner. A Shell answer runs
             // a command, so only the recorded owner may answer it.

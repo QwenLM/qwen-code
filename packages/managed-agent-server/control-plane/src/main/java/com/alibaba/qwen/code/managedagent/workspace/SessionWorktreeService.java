@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.workspace;
 
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.TurnExecutionStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceException;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.SessionWorktreeOperations;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
@@ -32,7 +32,7 @@ public class SessionWorktreeService {
     private final SessionWorktreeStore store;
     private final WorkspaceExecutionStore execution;
     private final ManagedAgentSettings properties;
-    private final AgentStateStore sessions;
+    private final TurnExecutionStore sessions;
     private final HarnessCoordinator coordinator;
     private final String owner = "session-worktree-" + UUID.randomUUID();
     private final ScheduledExecutorService renewals = Executors.newSingleThreadScheduledExecutor(task -> {
@@ -51,7 +51,7 @@ public class SessionWorktreeService {
     }
 
     public SessionWorktreeService(SessionWorktreeStore store, WorkspaceExecutionStore execution,
-            ManagedAgentSettings properties, AgentStateStore sessions, HarnessCoordinator coordinator) {
+            ManagedAgentSettings properties, TurnExecutionStore sessions, HarnessCoordinator coordinator) {
         this.store = store;
         this.execution = execution;
         this.properties = properties;
