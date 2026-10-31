@@ -73,24 +73,45 @@ resolve_merge_conflicts`). A scope option has to reach the watch options,
 
 ## Changes
 
-### 1. `reply.ts` — a blocked round is due a summary
+### 1. `reply.ts` — a blocked round is due a summary, until one is delivered
 
-The plan's `needsHuman` lines that this head has not recorded are computed
-once (`freshNeedsHuman`) and used both to record the items and to decide the
-summary:
+Two keys, deliberately separate:
+
+- `needsHuman` keeps every item a round left for a person, for `status`. It
+  is written **before** any POST, so a run that fails later still leaves the
+  list behind. Its `(head, text)` deduplication is unchanged.
+- `reportedNeedsHuman` (`{ sha, texts }`) records what a summary that
+  **reached the PR** reported. It advances only after the summary posted, or
+  when a later run adopts a summary whose answer was lost — from the items
+  that summary's own `pendingPosts` intent recorded, never from a later
+  plan's wording.
+
+The trigger reads the second key against the plan, not the first:
 
 ```ts
+const planNeedsHuman = [...new Set(plan.needsHuman)].filter((t) => t !== '');
+const reportedBlocked = new Set(
+  state.reportedNeedsHuman?.sha === head ? state.reportedNeedsHuman.texts : [],
+);
+const unreportedNeedsHuman = planNeedsHuman.filter(
+  (text) => !reportedBlocked.has(text),
+);
+
 const summaryDue =
   summary !== null &&
-  (freshNeedsHuman.length > 0 ||
+  (unreportedNeedsHuman.length > 0 ||
     ((summary.handled ?? []).length > 0
       ? summaryHandled.length > 0 || pushUnsummarized
       : state.summarizedSha !== head));
 ```
 
-No new state field, no schema change: the deduplication that already keeps
-`needsHuman` from growing on a retry is what keeps the summary from
-repeating.
+A summary intent carries the lines it reports (`PendingPost.needsHuman`), so
+adoption marks exactly those. `prepare` carries `reportedNeedsHuman` forward
+when it recreates a worktree, alongside `summarizedSha`. The field is
+optional and validated like the rest of the state; a state file written by
+an older CLI simply has none, which costs at most one repeated report after
+an upgrade. `status` does not expose it, so no reader outside `reply`
+changes.
 
 ### 2. `SKILL.md` — the boundary and the summary rule
 
@@ -105,6 +126,8 @@ repeating.
   issue comment was answered, and `needsHuman` is empty. The deduplication
   is described as the helper's, not the round's.
 - The `needsHuman` bullet says the summary reports the items on the PR.
+- The summary rule says a report that never reached the PR is still owed, so
+  a failed `reply` is run again with the same plan.
 
 ### 3. Documentation
 
@@ -118,21 +141,38 @@ repeating.
 
 ### 4. Tests
 
-- `reply.test.ts`: a blocked round posts on an already-summarized head; the
-  same plan posts nothing again; a summary with nothing new stays skipped;
-  a new item on that head posts again; `--no-post` records and posts
-  nothing. The first assertion was mutation-checked (with the new condition
-  disabled the test fails on `summarySkipped`).
+- `reply.test.ts`, two tests on deduplication: a blocked round posts on an
+  already-summarized head, the same plan posts nothing again, a summary with
+  nothing new stays skipped, and a new item on that head posts again; and
+  `--no-post` records without posting. Both start from a head that is
+  already summarized, so neither can pass on the once-per-head path alone.
+- `reply.test.ts`, three tests on delivery, which is what review asked
+  for: a summary POST that never reached GitHub leaves the report due and
+  the retry posts it (before recording the failure handled); a thread reply
+  that fails earlier in the same run leaves it due as well; and a summary
+  that reached GitHub but lost its answer is adopted from its own intent,
+  marked reported, and not posted twice.
 - `SKILL.test.ts`: pins for the boundary paragraph, the confirmation bullet,
-  and the three sentences of the summary rule.
+  and the sentences of the summary rule, including the retry sentence.
+- Mutation check: restoring the consumed-before-delivery trigger
+  (`freshNeedsHuman` in place of `unreportedNeedsHuman`) fails exactly the
+  two failure-injection cases and leaves the adoption control green.
 
 ## Design decisions and rationale
 
-- **Gate on fresh `needsHuman` lines, not on a new state field.** A
-  `blockedSummarySha` would duplicate what `(head, text)` deduplication
-  already knows, and would need state validation and migration. Deriving
-  the condition from data the helper already records keeps the change to
-  one expression and makes a retry of the same plan silent by construction.
+- **Two keys: one for `status`, one for delivery.** The first implementation
+  gated the summary on `freshNeedsHuman` — the lines the `needsHuman` list
+  had not recorded — to avoid a new state field. Review found that this
+  spends the trigger before delivery: the list is written before any POST,
+  so a summary whose POST failed, or whose run failed earlier at a thread
+  reply, is suppressed on every retry, while the round still records its
+  failures handled and the gate stops reporting them. The blocker would
+  vanish from the PR _and_ from the gate — the exact silence this change
+  exists to remove. Making the list's write lazy was rejected as the fix:
+  that early write is load-bearing for `status` after a later failure. The
+  two concerns are separated instead, and `reportedNeedsHuman` advances only
+  on delivery or adoption. One optional state field is the price of a
+  trigger a failed POST cannot spend.
 - **The condition applies to both branches of `summaryDue`.** A round that
   answers comments _and_ leaves something for a person is blocked too; its
   summary must not depend on whether the comments it names were already
@@ -161,27 +201,37 @@ repeating.
   stuck one cannot loop on the same item.
 - `--no-reply` (`reply --no-post`) records the same state and posts nothing,
   unchanged.
-- "New" means what the `needsHuman` list no longer holds: it keeps the
-  newest 20 items of the watch (`MAX_NEEDS_HUMAN`). A plan with more than 20
-  blocked lines, or an item that later ones pushed out of the list, can
-  therefore be reported again. The cost is one extra comment, never a loop:
-  a round runs only when the gate reports a new event.
+- "New" is exact string equality on the plan's `needsHuman` text, which the
+  model writes and the helper only normalizes for whitespace and cuts at
+  300 characters. A later round that re-phrases the same blocker reports it
+  again. The gate is the real rate limiter — a round runs only on a new
+  event — so the cost is one extra comment, never a loop.
+- Report deduplication is exact for a head: `reportedNeedsHuman` keeps every
+  line a delivered summary reported, with no window. The 20-item limit
+  (`MAX_NEEDS_HUMAN`) belongs to `needsHuman`, which is what `status` lists,
+  so an old item can scroll out of the status list while staying reported on
+  the PR.
 - The gate probe, the cursor, the push budget and the trust rules are
   untouched.
 
 ## Validation
 
 - `cd packages/core && npx vitest run src/skills/bundled/autofix-pr/SKILL.test.ts`
-  — 11 passed (9 before).
+  — 11 passed (9 before this change).
 - `cd packages/cli && npx vitest run src/commands/autofix-pr` — 16 files,
-  482 passed; `reply.test.ts` alone 32 (30 before).
-- Mutation check: with `freshNeedsHuman.length > 0` disabled, the new
-  blocked-round test fails on `summarySkipped`; restored, it passes.
+  485 passed; `reply.test.ts` alone 35 (30 before this change).
+- Mutation check: putting the consumed-before-delivery trigger back
+  (`freshNeedsHuman` in place of `unreportedNeedsHuman`) fails exactly the
+  two failure-injection tests — the undelivered summary and the one blocked
+  by an earlier thread reply — and leaves the adoption control and the
+  `--no-post` case green. The file was restored from a byte-exact backup
+  (sha256 compared), not from git, and the suites are green again.
 - `tsc --noEmit` in `packages/core`: clean. In `packages/cli`: 68 errors,
   every one in `src/acp-integration/*` or `src/serve/*`, from the checkout's
-  stale `@qwen-code/acp-bridge` dist; none names a changed file. Restoring
-  the two changed files to the base commit and re-running gives an identical
-  error list, so all 68 are pre-existing.
+  stale `@qwen-code/acp-bridge` dist; none names a changed file. Putting the
+  four changed cli files back to their `origin/main` content and re-running
+  gives an identical error list, so all 68 are pre-existing. The files were
+  restored from a byte-exact backup and verified with sha256.
 - A full `npm run build` was not run: this checkout's dependencies predate
   the lockfile (`mime` 2.6.0, `ignore` 5.3.2, `playwright-core` 1.58.2),
   which fails `packages/browser-use` for reasons unrelated to this change.
@@ -195,7 +245,14 @@ repeating.
   earlier round summarized.
 - Running the same plan again posts nothing; a later round with a new
   blocked item on the same head posts once more.
-- A `--no-reply` watch posts nothing in either case.
+- A summary whose POST never reached the PR — or whose run failed earlier,
+  at a thread reply — is still due: the next run of the plan posts it, and
+  only then are the round's failures recorded handled.
+- A summary that reached the PR but lost its answer is adopted from its own
+  intent, marked reported, and never posted twice.
+- `reportedNeedsHuman` is carried forward when `prepare` recreates a
+  worktree, and `status` does not expose it.
+- A `--no-reply` watch posts nothing in any of these cases.
 - The skill's opening, the start confirmation and the user guide all state
   that the watch never approves, changes the review state, merges, closes
   or enables auto-merge.

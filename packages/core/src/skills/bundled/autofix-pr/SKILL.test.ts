@@ -359,6 +359,10 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain(
       'a summary that answers no comments goes out once per head, and a later round posts one again only when it leaves something new for a person',
     );
+    // A report that never reached the PR is not spent: the round runs again.
+    expect(body).toContain(
+      'One that never reached the PR is still owed, so a failed `reply` is run again with the same plan.',
+    );
     expect(body).toContain(
       'Omit it (`null`) only when nothing was pushed, no review or issue comment was answered, and `needsHuman` is empty.',
     );
