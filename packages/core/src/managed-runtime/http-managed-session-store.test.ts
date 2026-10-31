@@ -4365,7 +4365,10 @@ describe('HTTP Managed Session store', () => {
       fetchFn,
     });
     try {
-      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      expect(journal.writerSealed).toBe(false);
       const bytes = Buffer.from('{"retained":true}');
       const ref = await stores.resourceStore.publish('managed-input', bytes);
       await vi.advanceTimersByTimeAsync(500);
@@ -4377,9 +4380,11 @@ describe('HTTP Managed Session store', () => {
       expect(joined).toBe(false);
       finishRenewal();
       await stopped;
+      expect(journal.writerSealed).toBe(false);
       await vi.advanceTimersByTimeAsync(5000);
       await expect(stores.assertWritable()).rejects.toThrow('locally stopped');
       await expect(stores.close()).rejects.toThrow('locally stopped');
+      expect(journal.writerSealed).toBe(false);
       expect(
         fetchFn.mock.calls.filter(([input]) =>
           requestUrl(input).endsWith('/writers:renew'),
@@ -4421,7 +4426,10 @@ describe('HTTP Managed Session store', () => {
       fetchFn,
     });
     try {
-      await stores.journalStore.open({ sessionKey: SESSION_KEY });
+      const journal = await stores.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      expect(journal.writerSealed).toBe(false);
       await vi.advanceTimersByTimeAsync(500);
       expect(
         fetchFn.mock.calls.some(([input]) =>
@@ -4431,8 +4439,11 @@ describe('HTTP Managed Session store', () => {
       const closing = stores.close();
       finishRenewal();
       await vi.advanceTimersByTimeAsync(0);
+      expect(server.sealCount).toBe(1);
+      expect(journal.writerSealed).toBe(false);
       finishSeal();
       await closing;
+      expect(journal.writerSealed).toBe(true);
       await vi.advanceTimersByTimeAsync(1000);
       expect(
         fetchFn.mock.calls.filter(([input]) =>
@@ -4447,6 +4458,55 @@ describe('HTTP Managed Session store', () => {
       vi.useRealTimers();
     }
   });
+
+  it.each(['mismatched generation', 'unsealed state', 'invalid JSON'])(
+    'keeps the external writer unsealed after a seal receipt with %s',
+    async (failure) => {
+      const server = new FakeManagedSessionStore();
+      let invalidReceipt = true;
+      const fetchFn = vi.fn<typeof fetch>(async (input, init) => {
+        const response = await server.fetch(input, init);
+        if (!requestUrl(input).endsWith('/writers:seal') || !invalidReceipt)
+          return response;
+        if (failure === 'invalid JSON') {
+          return new Response('not JSON', {
+            headers: response.headers,
+          });
+        }
+        return jsonResponse({
+          ...(await response.json()),
+          ...(failure === 'mismatched generation'
+            ? { writerGeneration: 2 }
+            : { state: 'ACTIVE' }),
+        });
+      });
+      const stores = createHttpManagedSessionStores({
+        baseUrl: 'http://127.0.0.1:8080',
+        sessionKey: SESSION_KEY,
+        writerId: 'harness-a',
+        writerToken: TOKEN_A,
+        fetchFn,
+      });
+      try {
+        const journal = await stores.journalStore.open({
+          sessionKey: SESSION_KEY,
+        });
+        expect(journal.writerSealed).toBe(false);
+        await expect(stores.close()).rejects.toThrow(
+          failure === 'invalid JSON'
+            ? 'invalid JSON'
+            : 'seal receipt does not match the active writer',
+        );
+        expect(journal.writerSealed).toBe(false);
+        invalidReceipt = false;
+        await stores.close();
+        expect(journal.writerSealed).toBe(true);
+        expect(server.sealCount).toBe(2);
+      } finally {
+        await stores.stopLocal();
+      }
+    },
+  );
 
   // Regression for R1-38: a failed close-time seal must not keep the grant
   // on the renewal cadence. The backend re-issues the same writer generation
@@ -4469,12 +4529,16 @@ describe('HTTP Managed Session store', () => {
     const first = createHttpManagedSessionStores(options);
     const second = createHttpManagedSessionStores(options);
     try {
-      await first.journalStore.open({ sessionKey: SESSION_KEY });
+      const firstJournal = await first.journalStore.open({
+        sessionKey: SESSION_KEY,
+      });
+      expect(firstJournal.writerSealed).toBe(false);
       await vi.advanceTimersByTimeAsync(30_000);
       expect(server.renewCount).toBe(1);
 
       server.sealFailuresRemaining = 1;
       await expect(first.close()).rejects.toThrow('backend down');
+      expect(firstJournal.writerSealed).toBe(false);
       expect(server.sealCount).toBe(1);
       expect(server.state).toBe('ACTIVE');
       // `first` is the only writer in this window, so any renewal here is
@@ -4501,6 +4565,7 @@ describe('HTTP Managed Session store', () => {
       // The lapsed grant stays sealable by its own writer, so a caller that
       // retries close() still converges the journal to SEALED.
       await first.close();
+      expect(firstJournal.writerSealed).toBe(true);
       expect(server.state).toBe('SEALED');
     } finally {
       await first.close().catch(() => undefined);
