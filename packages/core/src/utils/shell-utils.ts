@@ -10,6 +10,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { parse, quote } from 'shell-quote';
 import { isTool } from './is-tool.js';
+import { isBashWordSeparator } from './bash-lexer.js';
 import { isShellCommandReadOnly } from './shellReadOnlyChecker.js';
 import {
   execFile,
@@ -283,10 +284,18 @@ export function splitCommands(command: string): string[] {
   const quoteStack: Array<{ single: boolean; double: boolean }> = [];
   let i = 0;
 
-  const previousNonWhitespaceChar = (index: number): string | undefined => {
+  // Skip only the characters bash's lexer discards — space, tab and newline.
+  // `/\s/` also skipped `\r`, `\v`, `\f`, `\u00a0` and the rest of Unicode
+  // whitespace, which bash treats as ordinary word characters, so
+  // `echo x >\r& rm -rf /` read the `\r` as if it were spacing and kept the
+  // `& rm` in one segment with the `echo` (#12089).
+  const previousNonWordSeparatorChar = (index: number): string | undefined => {
     for (let j = index - 1; j >= 0; j--) {
       const ch = command[j];
-      if (ch && !/\s/.test(ch)) {
+      if (ch === undefined) {
+        break;
+      }
+      if (!isBashWordSeparator(ch)) {
         return ch;
       }
     }
@@ -367,36 +376,36 @@ export function splitCommands(command: string): string[] {
         (char === '&' && nextChar === '&') ||
         (char === '|' && (nextChar === '|' || nextChar === '&'))
       ) {
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
         i++; // Skip the next character
       } else if (char === ';') {
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
       } else if (char === '&') {
-        const prevChar = previousNonWhitespaceChar(i);
+        const prevChar = previousNonWordSeparatorChar(i);
         if (prevChar === '>' || prevChar === '<') {
           currentCommand += char;
         } else {
-          commands.push(currentCommand.trim());
+          commands.push(trimBashEdgeSeparators(currentCommand));
           currentCommand = '';
         }
       } else if (char === '|') {
-        const prevChar = previousNonWhitespaceChar(i);
+        const prevChar = previousNonWordSeparatorChar(i);
         if (prevChar === '>') {
           currentCommand += char;
         } else {
-          commands.push(currentCommand.trim());
+          commands.push(trimBashEdgeSeparators(currentCommand));
           currentCommand = '';
         }
       } else if (char === '\r' && nextChar === '\n') {
         // Windows-style \r\n newline - treat as command separator
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
         i++; // Skip the \n
       } else if (char === '\n') {
         // Unix-style \n newline - treat as command separator
-        commands.push(currentCommand.trim());
+        commands.push(trimBashEdgeSeparators(currentCommand));
         currentCommand = '';
       } else {
         currentCommand += char;
@@ -407,11 +416,20 @@ export function splitCommands(command: string): string[] {
     i++;
   }
 
-  if (currentCommand.trim()) {
-    commands.push(currentCommand.trim());
+  const finalSegment = trimBashEdgeSeparators(currentCommand);
+  if (finalSegment) {
+    commands.push(finalSegment);
   }
 
-  return commands.filter(Boolean); // Filter out any empty strings
+  // A segment made only of whitespace-class characters is not a command: bash
+  // has a word there, but `checkCommandPermissions` normalizes the segment to
+  // '' and `isCommandAllowed('')` answers 'ask', so a phantom segment from a
+  // mixed-line-ending paste or an NBSP copied off a web page turns a user's
+  // allow rule into a prompt for every command it prefixes. `trim()` decides
+  // *whether* a segment carries any non-whitespace text; it never rewrites the
+  // text of a segment that is kept, so a redirection target made of a bare CR,
+  // VT, FF or NBSP still survives.
+  return commands.filter((command) => command.trim().length > 0);
 }
 
 /**
@@ -1166,10 +1184,13 @@ export function hasNonFinalTopLevelBackgroundOperator(
   let inBackticks = false;
   let commandSubstitutionDepth = 0;
 
+  // Bash skips only space, tab and newline when it locates the character
+  // before an `&`, so `/\s/` here read a bare CR or NBSP as spacing and mistook
+  // `echo x >\r& y` for a `>&` redirect instead of a background operator.
   const previousNonWhitespace = (index: number): string | undefined => {
     for (let i = index - 1; i >= 0; i--) {
       const char = command[i];
-      if (char !== undefined && !/\s/.test(char)) return char;
+      if (char !== undefined && !isBashWordSeparator(char)) return char;
     }
     return undefined;
   };
@@ -2291,7 +2312,17 @@ export async function checkCommandPermissions(
     };
   }
 
-  const normalize = (cmd: string): string => cmd.trim().replace(/\s+/g, ' ');
+  // `splitCommands` keeps a CR, VT, FF or NBSP at a segment edge on purpose:
+  // bash may read that character as a redirect target, so the segment text has
+  // to stay faithful for the callers that evaluate it as written. This gate,
+  // however, asks the PermissionManager about each segment, and it must not
+  // hand it a command that differs from the user's only by an invisible
+  // character: `.trim()` deletes that whole target (`echo x >\r` becomes a bare
+  // `echo x >`, which no write rule can match) while folding `\s` into a space
+  // turns the target into a word. Trim only the separators bash itself treats
+  // as layout, and collapse those.
+  const normalize = (cmd: string): string =>
+    trimBashEdgeSeparators(cmd).replace(/[ \t\n]+/g, ' ');
   const commandsToValidate = splitCommands(command).map(normalize);
   const invocation: AnyToolInvocation & { params: { command: string } } = {
     params: { command: '' },

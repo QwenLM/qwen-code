@@ -15,6 +15,7 @@ import {
   normalizeMcpToolName,
 } from '../utils/tool-name-utils.js';
 import { isNodeError } from '../utils/errors.js';
+import { isBashWordSeparator } from '../utils/bash-lexer.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
 
@@ -889,19 +890,6 @@ export function buildHumanReadableRuleLabel(rules: string[]): string {
 const SHELL_OPERATORS = ['&&', '||', ';;', '|&', '|', ';', '&', '\n'];
 
 /**
- * The characters bash's lexer treats as whitespace (space, tab and newline —
- * `whitespace(c)` in bash's `parse.y`). These coincide with bash's default
- * `IFS`, but `IFS` is not what matters here: operator adjacency is decided by
- * the lexer, so this list must not be widened to follow a custom `IFS` —
- * doing so re-joins `>\r&`-style payloads into one segment.
- *
- * JavaScript's `\s` also matches `\r`, `\v`, `\f`, `\u00a0` and other
- * Unicode whitespace, none of which bash treats as separators — bash takes
- * such a character as part of the neighbouring word instead.
- */
-const BASH_WORD_SEPARATORS = [' ', '\t', '\n'];
-
-/**
  * Trim only the whitespace bash's lexer discards, leaving characters bash
  * treats as ordinary word characters in place.
  *
@@ -913,10 +901,10 @@ const BASH_WORD_SEPARATORS = [' ', '\t', '\n'];
 function trimBashWordSeparators(text: string): string {
   let start = 0;
   let end = text.length;
-  while (start < end && BASH_WORD_SEPARATORS.includes(text[start]!)) {
+  while (start < end && isBashWordSeparator(text[start])) {
     start++;
   }
-  while (end > start && BASH_WORD_SEPARATORS.includes(text[end - 1]!)) {
+  while (end > start && isBashWordSeparator(text[end - 1])) {
     end--;
   }
   return text.slice(start, end);
@@ -952,7 +940,7 @@ function precedingBackslashCount(command: string, index: number): number {
  * keep both halves in one segment and let the `echo`'s allow rule cover the
  * `rm`.
  *
- * The scan skips only {@link BASH_WORD_SEPARATORS}: with `\s` it also skipped
+ * The scan skips only {@link isBashWordSeparator}: with `\s` it also skipped
  * `\r`/`\v`/`\f`/`\u00a0`, which bash treats as ordinary word characters, so
  * `echo x >\r& rm -rf /` collapsed into one segment whose `echo x` allow rule
  * covered the `rm` (#11851).
@@ -963,7 +951,7 @@ function isAsyncOperator(command: string, index: number): boolean {
   }
   for (let j = index - 1; j >= 0; j--) {
     const ch = command[j]!;
-    if (BASH_WORD_SEPARATORS.includes(ch)) {
+    if (isBashWordSeparator(ch)) {
       continue;
     }
     if (ch === '>' || ch === '<') {
