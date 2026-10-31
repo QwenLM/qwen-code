@@ -17,11 +17,13 @@ describe('sanitizeChildEnv', () => {
       QWEN_SERVER_TOKEN: 'super-secret',
       QWEN_DAEMON_TOKEN: 'also-secret',
       QWEN_CODE_PRIVATE_ACP_CAPABILITY: 'private-capability',
+      QWEN_MANAGED_RUNTIME_BROKER_TOKEN: 'broker-secret',
       PATH: '/usr/bin',
     });
     expect(result['QWEN_SERVER_TOKEN']).toBeUndefined();
     expect(result['QWEN_DAEMON_TOKEN']).toBeUndefined();
     expect(result['QWEN_CODE_PRIVATE_ACP_CAPABILITY']).toBeUndefined();
+    expect(result['QWEN_MANAGED_RUNTIME_BROKER_TOKEN']).toBeUndefined();
   });
 
   it('preserves benign vars and third-party credentials that shell workflows need', () => {
@@ -71,6 +73,7 @@ describe('sanitizeChildEnv', () => {
       'QWEN_CODE_EXTERNAL_TOOL_GUARD_TOKEN',
       'QWEN_CODE_PRIVATE_ACP_CAPABILITY',
       'QWEN_DAEMON_TOKEN',
+      'QWEN_MANAGED_RUNTIME_BROKER_TOKEN',
       'QWEN_SERVER_TOKEN',
     ]);
   });

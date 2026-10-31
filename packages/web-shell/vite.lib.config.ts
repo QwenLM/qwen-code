@@ -209,6 +209,10 @@ const TRANSCRIPT_STUBS = new Map(
       './client/components/messages/SelectionCopyMenu.transcript-stub.tsx',
     ],
     [
+      './client/utils/selectionClipboard.ts',
+      './client/utils/selectionClipboard.transcript-stub.ts',
+    ],
+    [
       './client/components/messages/workflow-agent-details.ts',
       './client/components/messages/workflow-agent-details.transcript-stub.ts',
     ],

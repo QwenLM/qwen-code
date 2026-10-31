@@ -324,6 +324,26 @@ describe('OpenTuiLoadingIndicator', () => {
 });
 
 describe('OpenTuiFooter', () => {
+  it.each([true, false])(
+    'shows saved mode even when capability is unavailable (%s)',
+    (available) => {
+      const { container } = render(
+        <Footer
+          config={fakeConfig({
+            getWorkflowMode: () => ({
+              requested: true,
+              available,
+              effective: available,
+            }),
+          })}
+          streaming={false}
+        />,
+      );
+      expect(container.textContent).toContain(
+        available ? 'Workflow mode: on' : 'Workflow mode: on (unavailable)',
+      );
+    },
+  );
   it.each(['NORMAL', 'INSERT'] as const)(
     'shows %s in the existing hint slot below exit warnings',
     (vimMode) => {

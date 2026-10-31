@@ -440,10 +440,10 @@ describe('managed session record sink', () => {
       message: { role: 'user', parts: [{ text: 'Continue' }] },
     });
     await harness.sink.write(later);
-    expect((await harness.sink.projectModelHistory()).apiHistory).toEqual([
-      ...compressedHistory,
-      later.message,
-    ]);
+    // toMatchObject: restored records also carry their record-derived rewind id.
+    expect((await harness.sink.projectModelHistory()).apiHistory).toMatchObject(
+      [...compressedHistory, later.message],
+    );
     expect(await harness.sink.project()).toEqual([original, later]);
     const cold = await readManagedSessionRecords({
       transcriptPath: harness.transcriptPath,
@@ -463,6 +463,26 @@ describe('managed session record sink', () => {
     });
     await harness.sink.write(attempt);
     expect(await harness.sink.project()).toEqual([attempt]);
+    await harness.close();
+  });
+
+  it('round-trips marked memory snapshots through the managed projection', async () => {
+    const harness = await createHarness();
+    const snapshot = record({
+      type: 'system',
+      subtype: 'memory_catalog_snapshot',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            text: 'full catalog',
+            partMetadata: { 'qwen-code:memory-catalog-snapshot': true },
+          },
+        ],
+      },
+    });
+    await harness.sink.write(snapshot);
+    expect(await harness.sink.project()).toEqual([snapshot]);
     await harness.close();
   });
 

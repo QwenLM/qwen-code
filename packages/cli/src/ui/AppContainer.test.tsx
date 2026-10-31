@@ -283,7 +283,6 @@ vi.mock('./hooks/useWorktreeSession.js');
 vi.mock('./hooks/useProviderUpdates.js', () => ({
   useProviderUpdates: vi.fn(() => ({
     providerUpdateRequest: undefined,
-    dismissProviderUpdate: vi.fn(),
   })),
 }));
 vi.mock('./contexts/VimModeContext.js');
@@ -377,16 +376,23 @@ describe('AppContainer State Management', () => {
   // timeout without any real hang.
   vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 
-  // That same initialize() creates a real ExtensionStore under ~/.qwen; some
-  // runners — including the review-address verification gate's clean child —
-  // inherit a HOME the test process cannot write to. Ordinary CI already
-  // overrides HOME, so point it at a scratch directory for this suite, and
-  // leave that directory alone: the mount effect's initialize() is un-awaited,
-  // so store work can still be in flight at afterAll, and deleting the tree
+  // That same initialize() creates a real ExtensionStore under the resolved
+  // QWEN_HOME (~/.qwen when unset); some runners — including the
+  // review-address verification gate's clean child — inherit a HOME the test
+  // process cannot write to. Ordinary CI already overrides HOME, so point
+  // both HOME and QWEN_HOME at a scratch directory for this suite, and leave
+  // that directory alone: the mount effect's initialize() is un-awaited, so
+  // store work can still be in flight at afterAll, and deleting the tree
   // there fails it with ENOENT — an unhandled rejection that fails the run.
+  // QWEN_HOME must be pinned here explicitly: test-setup.ts otherwise pins it
+  // to a per-file directory that it deletes at afterAll, and QWEN_HOME
+  // outranks HOME for the store root, so the in-flight chain would target
+  // exactly the tree the suite pin deletes.
   const savedHome = process.env['HOME'];
+  const savedQwenHome = process.env['QWEN_HOME'];
   const suiteHome = mkdtempSync(join(tmpdir(), 'qwen-appcontainer-home-'));
   process.env['HOME'] = suiteHome;
+  process.env['QWEN_HOME'] = suiteHome;
 
   afterAll(() => {
     if (savedHome === undefined) {
@@ -394,6 +400,20 @@ describe('AppContainer State Management', () => {
     } else {
       process.env['HOME'] = savedHome;
     }
+    if (savedQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = savedQwenHome;
+    }
+  });
+
+  it('keeps the extension store root on the never-deleted suite scratch home', () => {
+    // The mount effect's initialize() runs real store work against the
+    // resolved QWEN_HOME that can still be in flight at afterAll;
+    // test-setup.ts deletes its per-file pin there. If this redirect is
+    // lost, that work fails ENOENT as an unhandled rejection and fails the
+    // whole run — so pin the redirect itself down deterministically.
+    expect(process.env['QWEN_HOME']).toBe(suiteHome);
   });
 
   let mockConfig: Config;
@@ -783,6 +803,7 @@ describe('AppContainer State Management', () => {
           initialize,
           subscribe: () => () => {},
           setPresentation: vi.fn(),
+          setRenderInput: vi.fn(),
         } as unknown as interactiveMods.InteractiveModSession);
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
@@ -880,6 +901,10 @@ describe('AppContainer State Management', () => {
     ['unknown', 'workflow inspect', false, false, true, true],
     ['opt-out', 'workflow inspect', true, true, true, true],
     ['missing tool', 'workflow inspect', true, false, false, true],
+    ['mode', 'Run the tests', false, false, true, false],
+    ['mode running', 'Run the tests', false, false, true, false],
+    ['pending exit', 'Run the tests', false, false, true, false],
+    ['late mode transition', 'Run the tests', false, false, true, false],
   ] as const)(
     'accepts completed speculation only without a current workflow intent: %s',
     async (_label, text, human, optOut, reachable, acceptCached) => {
@@ -912,16 +937,33 @@ describe('AppContainer State Management', () => {
       mockSettings.merged.ui!.disableWorkflowKeywordTrigger = optOut;
       generatePromptSuggestionMock.mockResolvedValue({ suggestion: text });
       const controller = new AbortController();
+      const cleanupOverlay = vi.fn().mockResolvedValue(undefined);
       const speculation = {
-        status: 'completed',
+        status: _label === 'mode running' ? 'running' : 'completed',
         suggestion: text,
         messages: [{ role: 'model', parts: [{ text: 'cached result' }] }],
-        overlayFs: null,
+        overlayFs: acceptCached ? null : { cleanup: cleanupOverlay },
         abortController: controller,
         startTime: Date.now(),
         toolUseCount: 0,
       };
-      startSpeculationMock.mockResolvedValue(speculation);
+      let resolveSpeculation!: (state: typeof speculation) => void;
+      if (_label === 'late mode transition') {
+        startSpeculationMock.mockReturnValue(
+          new Promise((resolve) => {
+            resolveSpeculation = resolve;
+          }),
+        );
+      } else {
+        startSpeculationMock.mockResolvedValue(speculation);
+      }
+      let modeChanged: (() => void) | undefined;
+      vi.spyOn(mockConfig, 'onWorkflowModeChange').mockImplementation(
+        (listener) => {
+          modeChanged = () => listener(mockConfig.getWorkflowMode());
+          return () => {};
+        },
+      );
       const queue = vi.fn();
       mockedUseMessageQueue.mockReturnValue({
         ...mockedUseMessageQueue(),
@@ -956,6 +998,28 @@ describe('AppContainer State Management', () => {
       await vi.waitFor(() =>
         expect(startSpeculationMock).toHaveBeenCalledOnce(),
       );
+      if (
+        _label === 'mode' ||
+        _label === 'mode running' ||
+        _label === 'pending exit' ||
+        _label === 'late mode transition'
+      ) {
+        const modeContext = vi
+          .spyOn(mockConfig, 'hasWorkflowModeContext')
+          .mockReturnValue(true);
+        if (_label !== 'mode') {
+          await act(async () => modeChanged?.());
+          if (_label === 'late mode transition') {
+            modeContext.mockReturnValue(false);
+            await act(async () => {
+              modeChanged?.();
+              resolveSpeculation(speculation);
+            });
+          }
+          expect(controller.signal.aborted).toBe(true);
+          expect(cleanupOverlay).toHaveBeenCalledOnce();
+        }
+      }
       await act(async () => {
         capturedUIActions.handleFinalSubmit(text, {
           submittedPrompt: text,
@@ -973,9 +1037,10 @@ describe('AppContainer State Management', () => {
         expect(addHistory).not.toHaveBeenCalled();
         expect(queue).toHaveBeenCalledWith(text, false, text, false, {
           displayText: text,
-          humanInput: { text },
+          humanInput: human ? { text } : undefined,
         });
         expect(controller.signal.aborted).toBe(true);
+        expect(cleanupOverlay).toHaveBeenCalledOnce();
       }
     },
   );
@@ -1116,6 +1181,9 @@ describe('AppContainer State Management', () => {
     noLlmClient?: boolean;
     history?: HistoryItem[];
     contextFilePaths?: string[];
+    recordedTurnIndex?: number;
+    recordedTurnIndices?: Record<string, number>;
+    snapshots?: Array<{ promptId: string }>;
   };
 
   const renderRewindHarness = (options: RewindHarnessOptions = {}) => {
@@ -1185,7 +1253,7 @@ describe('AppContainer State Management', () => {
         },
       );
     }
-    const snapshots = [
+    const snapshots = options.snapshots ?? [
       { promptId: 'prompt-1' },
       { promptId: 'prompt-2' },
       { promptId: 'prompt-3' },
@@ -1197,8 +1265,22 @@ describe('AppContainer State Management', () => {
     } as unknown as ReturnType<Config['getFileHistoryService']>);
 
     const rewindRecording = vi.fn();
+    const getRewindTurnIndex = vi.fn((promptId: string) => {
+      if (options.recordedTurnIndices) {
+        return options.recordedTurnIndices[promptId] ?? -1;
+      }
+      const targetId =
+        target.type === 'user'
+          ? (target.promptId ?? target.rewindId)
+          : undefined;
+      if (options.recordedTurnIndex !== undefined && promptId === targetId) {
+        return options.recordedTurnIndex;
+      }
+      return ['prompt-1', 'prompt-2', 'prompt-3'].indexOf(promptId);
+    });
     vi.spyOn(mockConfig, 'getChatRecordingService').mockReturnValue({
       rewindRecording,
+      getRewindTurnIndex,
     } as unknown as NonNullable<ReturnType<Config['getChatRecordingService']>>);
 
     if (options.contextFilePaths) {
@@ -1226,6 +1308,7 @@ describe('AppContainer State Management', () => {
       getHistoryShallow,
       truncateHistory,
       rewindRecording,
+      getRewindTurnIndex,
       snapshots,
     };
   };
@@ -5136,7 +5219,7 @@ describe('AppContainer State Management', () => {
       // Third cleanup leg: in-memory chat history is stripped so the
       // cancelled prompt doesn't ride along on the next request as an
       // orphan user turn.
-      expect(mockStripOrphans).toHaveBeenCalled();
+      expect(mockStripOrphans).toHaveBeenCalledWith(true);
       // Fourth cleanup leg: Ink's static-rendered transcript region
       // is append-only — shrinking the underlying array doesn't unprint
       // already-flushed lines. `refreshStatic` writes the clear-terminal
@@ -5287,7 +5370,7 @@ describe('AppContainer State Management', () => {
         wasGoalTurn: true,
       });
 
-      expect(mockStripOrphans).toHaveBeenCalled();
+      expect(mockStripOrphans).toHaveBeenCalledWith(true);
       // Auto-restore itself bailed: there was no user item to rewind.
       expect(mockTruncateToItem).not.toHaveBeenCalled();
     });
@@ -7343,6 +7426,70 @@ describe('AppContainer State Management', () => {
       expect(lastCall[2]).toBe(1);
     });
 
+    it('reports the Mod band input and measures the controls again for a new tree', () => {
+      mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 30 });
+      mockedMeasureElement.mockReturnValue({ width: 100, height: 5 });
+      let band: interactiveMods.ModBand | undefined;
+      let notify = () => {};
+      const setRenderInput = vi.fn();
+      const modSession = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        subscribe: () => () => {},
+        setPresentation: vi.fn(),
+        setRenderInput,
+        subscribeBand: (listener: () => void) => {
+          notify = listener;
+          return () => {};
+        },
+        getBand: () => band,
+      } as unknown as interactiveMods.InteractiveModSession;
+      const getModSession = interactiveMods.getInteractiveModSession;
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockImplementation((config) =>
+          config === mockConfig ? modSession : getModSession(config),
+        );
+      try {
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        expect(setRenderInput).toHaveBeenLastCalledWith({
+          surface: 'terminal',
+          component: 'AbovePrompt',
+          requestId: 'above-prompt',
+          viewport: { columns: 100, rows: 30, isFullscreen: false },
+          props: {
+            hasSurvey: false,
+            isWorking: false,
+            maxRows: 10,
+            bodyColumns: 95,
+            scroll: { offset: 0, bodyRows: 9 },
+            view: {},
+          },
+        });
+        const measured = mockedMeasureElement.mock.calls.length;
+        act(() => {
+          band = {
+            tree: { type: 'Text', children: ['☀'] },
+            owner: 'token-weather',
+            revision: 1,
+          };
+          notify();
+        });
+        expect(mockedMeasureElement.mock.calls.length).toBeGreaterThan(
+          measured,
+        );
+      } finally {
+        owner.mockRestore();
+        mockedMeasureElement.mockReset();
+      }
+    });
+
     it('hands ink the shared STATIC_EXTRA_HEIGHT for its dialog budget', () => {
       render(
         <AppContainer
@@ -7574,6 +7721,7 @@ describe('AppContainer State Management', () => {
         const runtime = {
           initialize: vi.fn().mockResolvedValue(undefined),
           loadCommands: vi.fn().mockResolvedValue([]),
+          setRenderInput: vi.fn(),
           close: vi.fn().mockResolvedValue(undefined),
         };
         const create = vi
@@ -7687,7 +7835,13 @@ describe('AppContainer State Management', () => {
             return () => {};
           },
           setPresentation: vi.fn(),
+          setRenderInput: vi.fn(),
         } as unknown as interactiveMods.InteractiveModSession;
+        // Scope the mock to this test's own Config: mount effects from
+        // earlier tests can still be in flight (they run the real
+        // config.initialize()), and an unscoped mockReturnValue lets those
+        // stale effects call this test's initialize(), inflating the
+        // exact-once assertion below.
         const owner = vi
           .spyOn(interactiveMods, 'getInteractiveModSession')
           .mockImplementation((config) =>
@@ -8726,6 +8880,196 @@ describe('AppContainer State Management', () => {
       );
     });
 
+    it.each(['promptId', 'rewindId'] as const)(
+      'resolves the recorded boundary independently through %s',
+      async (field) => {
+        const key = field === 'promptId' ? 'prompt-2' : 'legacy-record:target';
+        const target: HistoryItem = {
+          id: 3,
+          type: 'user',
+          text: 'second prompt',
+          [field]: key,
+        };
+        const harness = renderRewindHarness({
+          history: [
+            rewindUserItem(1, 'first prompt', 'prompt-1'),
+            { id: 2, type: 'gemini', text: 'first response' },
+            target,
+          ],
+          apiHistory: [
+            apiUser('first prompt', 'prompt-1'),
+            apiModel('first response'),
+            apiUser('second prompt', key),
+          ],
+          recordedTurnIndex: 3,
+          ...(field === 'rewindId' ? { snapshots: [] } : {}),
+        });
+        await runRewind(target, 'conversation');
+        expect(harness.getRewindTurnIndex).toHaveBeenCalledWith(key);
+        expect(harness.truncateHistory).toHaveBeenCalledWith(2);
+        expect(harness.rewindRecording).toHaveBeenCalledWith(
+          3,
+          expect.any(Object),
+          field === 'rewindId' ? [] : harness.snapshots.slice(0, 2),
+        );
+        expect(harness.rewind).not.toHaveBeenCalled();
+      },
+    );
+
+    it('preserves checkpoint snapshots through hidden recorded turns', async () => {
+      const snapshots = [
+        { promptId: 'prompt-1' },
+        { promptId: 'older-unmapped' },
+        { promptId: 'hidden-image' },
+        { promptId: 'prompt-2' },
+        { promptId: 'prompt-3' },
+      ];
+      const harness = renderRewindHarness({
+        snapshots,
+        recordedTurnIndices: {
+          'prompt-1': 0,
+          'hidden-image': 1,
+          'prompt-2': 3,
+          'prompt-3': 4,
+        },
+      });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).toHaveBeenCalledWith('prompt-2', true);
+      expect(harness.rewindRecording).toHaveBeenCalledWith(
+        3,
+        { truncatedCount: 2 },
+        [snapshots[0], snapshots[1], snapshots[2], snapshots[3]],
+      );
+    });
+
+    it('excludes future snapshots after earlier checkpoints have been evicted', async () => {
+      const target = rewindUserItem(7, 'target', 'prompt-102');
+      const snapshots = [
+        { promptId: 'prompt-101' },
+        { promptId: 'prompt-102' },
+        { promptId: 'prompt-103' },
+      ];
+      const harness = renderRewindHarness({
+        history: [
+          rewindUserItem(1, 'first prompt', 'prompt-1'),
+          { id: 2, type: 'gemini', text: 'first response' },
+          rewindUserItem(3, 'second prompt', 'prompt-2'),
+          { id: 4, type: 'gemini', text: 'second response' },
+          rewindUserItem(5, 'retained checkpoint', 'prompt-101'),
+          { id: 6, type: 'gemini', text: 'prior response' },
+          target,
+          { id: 8, type: 'gemini', text: 'target response' },
+        ],
+        apiHistory: [
+          apiUser('retained checkpoint', 'prompt-101'),
+          apiModel('prior response'),
+          apiUser('target', 'prompt-102'),
+        ],
+        snapshots,
+        recordedTurnIndices: {
+          'prompt-101': 100,
+          'prompt-102': 101,
+          'prompt-103': 102,
+        },
+      });
+
+      await runRewind(target, 'conversation');
+
+      expect(harness.rewindRecording).toHaveBeenCalledWith(
+        101,
+        { truncatedCount: 2 },
+        [snapshots[0], snapshots[1]],
+      );
+    });
+
+    it('refuses duplicate target checkpoints before changing files or conversation', async () => {
+      const harness = renderRewindHarness({
+        snapshots: [{ promptId: 'prompt-2' }, { promptId: 'prompt-2' }],
+      });
+
+      await runRewind(harness.target, 'both');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.setText).not.toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Rewind failed: This turn has no unique checkpoint association.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('refuses an unlinked checkpoint when a legacy target has no checkpoint', async () => {
+      const key = 'legacy-record:target';
+      const target: HistoryItem = {
+        id: 3,
+        type: 'user',
+        text: 'legacy target',
+        rewindId: key,
+      };
+      const harness = renderRewindHarness({
+        history: [
+          rewindUserItem(1, 'first prompt', 'prompt-1'),
+          { id: 2, type: 'gemini', text: 'first response' },
+          target,
+        ],
+        apiHistory: [
+          apiUser('first prompt', 'prompt-1'),
+          apiModel('first response'),
+          apiUser('legacy target', key),
+        ],
+        snapshots: [{ promptId: 'prompt-1' }, { promptId: 'unlinked' }],
+        recordedTurnIndices: { 'prompt-1': 0, [key]: 2 },
+      });
+
+      await runRewind(target, 'conversation');
+
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.setText).not.toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Rewind failed: This turn has no unique checkpoint association.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('refuses an unlinked recorded boundary before changing files or conversation', async () => {
+      const harness = renderRewindHarness({ recordedTurnIndex: -1 });
+      await runRewind(harness.target, 'both');
+      expect(harness.rewind).not.toHaveBeenCalled();
+      expect(harness.truncateHistory).not.toHaveBeenCalled();
+      expect(harness.loadHistory).not.toHaveBeenCalled();
+      expect(harness.setText).not.toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+      expect(harness.addItem).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'error',
+          text: 'Rewind failed: This turn has no unique recorded boundary.',
+        }),
+        expect.any(Number),
+      );
+    });
+
+    it('keeps conversation rewind available when recording is disabled', async () => {
+      const harness = renderRewindHarness();
+      vi.mocked(mockConfig.getChatRecordingService).mockReturnValue(undefined);
+      await runRewind(harness.target, 'conversation');
+      expect(harness.truncateHistory).toHaveBeenCalledWith(2);
+      expect(harness.loadHistory).toHaveBeenCalled();
+      expect(harness.rewindRecording).not.toHaveBeenCalled();
+    });
+
     it('truncates conversation when both-mode file restore succeeds', async () => {
       const harness = renderRewindHarness();
 
@@ -9069,6 +9413,94 @@ describe('AppContainer State Management', () => {
     });
   });
 
+  describe('rewind command origin admission', () => {
+    it('opens the admitted builtin slash rewind during its own artificial responding state', () => {
+      mockedUseLlmStream.mockReturnValue({
+        ...mockedUseLlmStream(),
+        streamingState: StreamingState.Responding,
+      });
+      renderRewindHarness();
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+        -1,
+      )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+      act(() => actions.openRewindSelector('slash-command'));
+      expect(capturedUIState.isRewindSelectorOpen).toBe(true);
+    });
+
+    it.each([StreamingState.Responding, StreamingState.WaitingForConfirmation])(
+      'keeps keyboard double-Escape and default UI rewind closed while the owner is %s',
+      (streamingState) => {
+        mockedUseLlmStream.mockReturnValue({
+          ...mockedUseLlmStream(),
+          streamingState,
+        });
+        renderRewindHarness();
+        act(() => capturedUIActions.openRewindSelector());
+        expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+        const keypress = getGlobalKeypress();
+        expect(keypress).toBeDefined();
+        const escape: Key = {
+          name: 'escape',
+          sequence: '\x1b',
+          ctrl: false,
+          meta: false,
+          shift: false,
+          paste: false,
+        };
+        act(() => {
+          keypress!(escape);
+          keypress!(escape);
+        });
+        expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+      },
+    );
+
+    it('does not bypass tool confirmation with slash rewind origin', () => {
+      mockedUseLlmStream.mockReturnValue({
+        ...mockedUseLlmStream(),
+        streamingState: StreamingState.WaitingForConfirmation,
+      });
+      renderRewindHarness();
+      const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+        -1,
+      )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+      act(() => actions.openRewindSelector('slash-command'));
+      expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+    });
+
+    it.each(['ide', 'dialog', 'no-user'] as const)(
+      'preserves the %s guard for admitted slash rewind',
+      (blockedBy) => {
+        mockedUseLlmStream.mockReturnValue({
+          ...mockedUseLlmStream(),
+          streamingState: StreamingState.Responding,
+        });
+        if (blockedBy === 'ide')
+          vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(true);
+        if (blockedBy === 'dialog')
+          mockedUseThemeCommand.mockReturnValue({
+            ...mockedUseThemeCommand(),
+            isThemeDialogOpen: true,
+          });
+        const harness = renderRewindHarness(
+          blockedBy === 'no-user' ? { history: [] } : {},
+        );
+        const actions = mockedUseSlashCommandProcessor.mock.calls.at(
+          -1,
+        )?.[12] as Parameters<typeof useSlashCommandProcessor>[12];
+        act(() => actions.openRewindSelector('slash-command'));
+        expect(capturedUIState.isRewindSelectorOpen).toBe(false);
+        if (blockedBy === 'ide')
+          expect(harness.addItem).toHaveBeenCalledWith(
+            expect.objectContaining({
+              text: 'Rewind is disabled in IDE mode.',
+            }),
+            expect.any(Number),
+          );
+      },
+    );
+  });
+
   describe('IDE mode rewind guard', () => {
     it('shows info message instead of opening rewind selector when IDE mode is enabled', () => {
       const mockAddItem = vi.fn();
@@ -9117,7 +9549,7 @@ describe('AppContainer State Management', () => {
     it('opens rewind selector normally when IDE mode is disabled', () => {
       const mockAddItemDisabled = vi.fn();
       mockedUseHistory.mockReturnValue({
-        history: [{ id: 1, type: 'user', text: 'hello' }],
+        history: [{ id: 1, type: 'user', text: 'hello', promptId: 'prompt-1' }],
         addItem: mockAddItemDisabled,
         updateItem: vi.fn(),
         clearItems: vi.fn(),
@@ -9146,9 +9578,48 @@ describe('AppContainer State Management', () => {
         />,
       );
 
-      capturedUIActions.openRewindSelector();
+      act(() => capturedUIActions.openRewindSelector());
 
       expect(mockAddItemDisabled).not.toHaveBeenCalled();
+      expect(capturedUIState.isRewindSelectorOpen).toBe(true);
+    });
+
+    it('does not open the selector when no turn carries a rewind identity', () => {
+      const mockAddItem = vi.fn();
+      mockedUseHistory.mockReturnValue({
+        history: [{ id: 1, type: 'user', text: 'hello' }],
+        addItem: mockAddItem,
+        updateItem: vi.fn(),
+        clearItems: vi.fn(),
+        loadHistory: vi.fn(),
+        truncateToItem: vi.fn(),
+      });
+      mockedUseLlmStream.mockReturnValue({
+        streamingState: 'idle',
+        submitQuery: vi.fn(),
+        initError: null,
+        pendingHistoryItems: [],
+        thought: null,
+        cancelOngoingRequest: vi.fn(),
+        retryLastPrompt: vi.fn(),
+        streamingResponseLengthRef: { current: 0 },
+        isReceivingContent: false,
+      });
+      vi.spyOn(mockConfig, 'getIdeMode').mockReturnValue(false);
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={mockSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      act(() => capturedUIActions.openRewindSelector());
+
+      expect(mockAddItem).not.toHaveBeenCalled();
+      expect(capturedUIState.isRewindSelectorOpen).toBeFalsy();
     });
   });
 

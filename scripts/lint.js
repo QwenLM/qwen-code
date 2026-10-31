@@ -6,11 +6,19 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { execSync } from 'node:child_process';
+import { execSync, spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { mkdirSync, rmSync } from 'node:fs';
+import {
+  appendFileSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+} from 'node:fs';
 import { homedir, tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, posix } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { getLintScope } from './lint-scope.js';
 
 const ACTIONLINT_VERSION = '1.7.12';
 const SHELLCHECK_VERSION = '0.11.0';
@@ -308,13 +316,15 @@ function runCommand(command, stdio = 'inherit') {
   }
 }
 
-export function setupLinters() {
+export function setupLinters(scope = { full: true }) {
   console.log('Setting up linters...');
   rmSync(TEMP_DIR, { recursive: true, force: true });
   mkdirSync(TEMP_DIR, { recursive: true });
 
   const linters = getLinters();
   for (const linter in linters) {
+    if (!scope.full && !scope[linter]?.length && scope[linter] !== true)
+      continue;
     const { check, installer } = linters[linter];
     if (!runCommand(check, 'ignore')) {
       console.log(`Installing ${linter}...`);
@@ -372,37 +382,189 @@ export function runPrettier() {
   }
 }
 
-function main() {
-  const args = process.argv.slice(2);
+// Prettier's experimental CLI only discovers a config or ignore file in the
+// directory it starts from, so the lane has to chdir. One spawn per touched
+// directory pays a cold start each (0.24 s measured, against a 37 s whole-repo
+// run), which inverts on a wide diff: this repository holds 655 directories
+// with prettier-eligible files. Group by the nearest ancestor that actually
+// carries one instead, so a diff without nested configuration costs a single
+// spawn.
+const PRETTIER_CONFIG_FILE =
+  /^(?:\.prettierrc(?:\.[^/]+)?|prettier\.config\.(?:js|cjs|mjs|ts)|\.prettierignore|\.gitignore)$/;
 
-  if (args.includes('--setup')) {
-    setupLinters();
-  }
-  if (args.includes('--eslint')) {
-    runESLint();
-  }
-  if (args.includes('--actionlint')) {
-    runActionlint();
-  }
-  if (args.includes('--shellcheck')) {
-    runShellcheck();
-  }
-  if (args.includes('--yamllint')) {
-    runYamllint();
-  }
-  if (args.includes('--prettier')) {
-    runPrettier();
-  }
-
-  if (args.length === 0) {
-    setupLinters();
-    runESLint();
-    runActionlint();
-    runShellcheck();
-    runYamllint();
-    runPrettier();
-    console.log('\nAll linting checks passed!');
+function prettierGroupFor(cwd, file, cache) {
+  for (let directory = dirname(file); ; directory = dirname(directory)) {
+    if (!cache.has(directory)) {
+      let carriesConfig = false;
+      try {
+        carriesConfig = readdirSync(join(cwd, directory)).some((name) =>
+          PRETTIER_CONFIG_FILE.test(name),
+        );
+      } catch {
+        // An unreadable directory carries nothing this lane could load.
+      }
+      cache.set(directory, carriesConfig);
+    }
+    if (cache.get(directory)) return directory;
+    if (directory === '.' || directory === '') return '.';
   }
 }
 
-main();
+function runChangedFiles(command, options, files) {
+  if (files.length === 0) {
+    console.log(`Skipping ${command}: no relevant changed files.`);
+    return;
+  }
+  console.log(`\nRunning ${command} on ${files.length} selected files...`);
+  // Explicit targets do not make the experimental Prettier CLI discover
+  // nested config/ignore files. Start in the nearest directory that carries
+  // one (see prettierGroupFor) and name each target relative to that
+  // directory, so the file Prettier resolves is the file that was selected —
+  // a bare basename would miss every file that sits below its group directory.
+  const root = process.cwd();
+  const configCache = new Map();
+  const groups =
+    command === 'prettier'
+      ? Object.groupBy(files, (file) =>
+          prettierGroupFor(root, file, configCache),
+        )
+      : { '.': files };
+  // Accumulate failures instead of exiting on the first non-zero status:
+  // Prettier runs per directory with directory-relative targets, so its own
+  // output never names the directory, and aborting would leave the remaining
+  // directories unchecked and unreported in the same run.
+  let failed = false;
+  for (const [directory, selected] of Object.entries(groups)) {
+    const targets =
+      command === 'prettier'
+        ? selected.map((file) => posix.relative(directory, file))
+        : selected;
+    if (command === 'prettier') console.log(`\nChecking ${directory}`);
+    // 50 keeps argv far below the OS limit while leaving room for long paths.
+    for (let index = 0; index < targets.length; index += 50) {
+      const result = spawnSync(
+        command,
+        [
+          ...options,
+          // Prettier's experimental CLI escapes paths after `--` as globs.
+          // The ./ prefix already prevents filenames being parsed as options.
+          ...(command === 'prettier' ? [] : ['--']),
+          ...targets.slice(index, index + 50).map((file) => `./${file}`),
+        ],
+        {
+          cwd: join(root, directory),
+          env: { ...process.env, PATH: getLinterPath() },
+          stdio: 'inherit',
+          encoding: 'utf8',
+          maxBuffer: 32 * 1024 * 1024,
+        },
+      );
+      if (result.error) console.error(result.error.message);
+      if (result.status !== 0) failed = true;
+    }
+  }
+  if (failed) process.exit(1);
+}
+
+// A history fallback is the one full scan nobody expects: the lane stays
+// green while every file is checked, so without a signal the optimization can
+// silently stop working — after #15381 a failing history fetch made 3 of 8
+// sampled PR runs fall back to full lint with nothing in the UI showing it.
+// Falling back because a lint config or dependency changed is routine and
+// stays quiet. The summary is deduplicated because every lane invokes this
+// script separately.
+function announceHistoryFallback(scope) {
+  const reason = scope.full ? (scope.reason ?? '') : '';
+  if (!reason.startsWith('Incremental selection unavailable:')) return;
+  if (process.env.GITHUB_ACTIONS !== 'true') return;
+  console.log(`::warning::${reason}; running the full lint`);
+  const summary = process.env.GITHUB_STEP_SUMMARY;
+  if (!summary) return;
+  const line = `- Incremental lint unavailable: ${reason}\n`;
+  try {
+    if (readFileSync(summary, 'utf8').includes(reason)) return;
+  } catch {
+    // Missing summary file is the normal first-write case.
+  }
+  appendFileSync(summary, line);
+}
+
+async function main() {
+  const args = process.argv.slice(2);
+
+  const scope = await getLintScope();
+  if (
+    !scope.full &&
+    scope.prettier.length &&
+    (args.length === 0 || args.includes('--prettier'))
+  ) {
+    const { getFileInfo } = await import('prettier');
+    const supported = await Promise.all(
+      scope.prettier.map(async (file) =>
+        (await getFileInfo(file)).inferredParser ? file : null,
+      ),
+    );
+    scope.prettier = supported.filter(Boolean);
+  }
+  console.log(
+    scope.full ? `Full lint: ${scope.reason}` : 'Incremental PR lint.',
+  );
+  announceHistoryFallback(scope);
+  if (args.length === 0 || args.includes('--setup')) setupLinters(scope);
+  const lanes = {
+    eslint: () =>
+      scope.full
+        ? runESLint()
+        : runChangedFiles(
+            'eslint',
+            // `lint:ci` in package.json stays the source of truth for the
+            // policy: flat-config `--ext` is additive to the config's own
+            // `files` scope, and `lint-scope.js` selects the same file types.
+            // Keep the three in step — a flag added only there is not applied
+            // to this path, and `--no-warn-ignored` is required because
+            // eslint.config.js globally ignores tracked vendored trees.
+            ['--ext', '.ts,.tsx', '--max-warnings', '0', '--no-warn-ignored'],
+            scope.eslint,
+          ),
+    actionlint: () => {
+      if (scope.full || scope.actionlint) runActionlint();
+      else console.log('Skipping actionlint: no workflow or action changes.');
+    },
+    shellcheck: () => {
+      if (scope.full || scope.shellcheck) runShellcheck();
+      else console.log('Skipping shellcheck: no shell or helper changes.');
+    },
+    yamllint: () =>
+      scope.full
+        ? runYamllint()
+        : runChangedFiles('yamllint', ['--format', 'github'], scope.yamllint),
+    prettier: () =>
+      scope.full
+        ? runPrettier()
+        : runChangedFiles(
+            'prettier',
+            ['--experimental-cli', '--check', '--ignore-unknown'],
+            scope.prettier,
+          ),
+  };
+  for (const [name, run] of Object.entries(lanes)) {
+    if (args.length === 0 || args.includes(`--${name}`)) run();
+  }
+  if (args.length === 0) console.log('\nAll linting checks passed!');
+}
+
+// Run the CLI only when this file IS the entry point. The CI provisioning
+// steps import the installer helpers (`getLinters`, `getLinterTempDir`); an
+// unconditional main() made every such import execute a full lint pass
+// instead of installing anything, silently, under continue-on-error
+// (PR #16001 review, round 4). The argv[1] guard keeps `node -e` imports
+// (no argv[1]) inert too.
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
+  main().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+}

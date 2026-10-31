@@ -44,7 +44,10 @@ import {
   coalesceFindingsHistoryItems,
   isFindingsListDisplay,
 } from '../utils/findings-coalescing.js';
-import { projectItemToStreamEvent } from './item-projection.js';
+import {
+  projectHistoryToStreamEvents,
+  projectItemToStreamEvent,
+} from './item-projection.js';
 import type {
   OpenTuiCommandHost,
   ShellConfirmationResolution,
@@ -77,13 +80,17 @@ export interface OpenTuiConfirmationBridge {
   presentShell(
     commands: readonly string[],
   ): Promise<ShellConfirmationResolution>;
-  presentAction(prompt: ReactNode): Promise<boolean>;
+  presentAction(
+    prompt: ReactNode,
+    options?: Pick<ConfirmationRequest, 'signal' | 'isCurrent'>,
+  ): Promise<boolean>;
 }
 
 export interface OpenTuiAppHostDeps {
   config: Config;
   settings: LoadedSettings;
   logger: Logger | null;
+  startupHistory?: HistoryItem[];
   transcript: OpenTuiTranscriptController;
   confirmations: OpenTuiConfirmationBridge;
   /** Signals the shell to re-read (drives `useSyncExternalStore`). */
@@ -117,13 +124,16 @@ type HistoryItemUpdater = (
 export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
   readonly config: Config;
   readonly settings: LoadedSettings;
-  readonly logger: Logger | null;
+  get logger(): Logger | null {
+    return this.deps.logger;
+  }
 
   private readonly deps: OpenTuiAppHostDeps;
   private readonly transcript: OpenTuiTranscriptController;
 
   private history: HistoryItem[] = [];
   private messageIdCounter = 0;
+  private lastMessageId = 0;
   private pendingItemState: HistoryItemWithoutId | null = null;
   private btwItemValue: HistoryItemBtw | null = null;
   private debugMessageValue = '';
@@ -145,8 +155,10 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
     this.deps = deps;
     this.config = deps.config;
     this.settings = deps.settings;
-    this.logger = deps.logger;
     this.transcript = deps.transcript;
+    this.history = deps.startupHistory ?? [];
+    for (const item of this.history)
+      this.lastMessageId = Math.max(this.lastMessageId, item.id);
   }
 
   // --- external-store plumbing (app-shell re-render) ----------------------
@@ -191,16 +203,22 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
   }
 
   addItem: UseHistoryManagerReturn['addItem'] = (itemData, baseTimestamp) => {
-    const id = baseTimestamp + ++this.messageIdCounter;
+    const id = Math.max(
+      baseTimestamp + ++this.messageIdCounter,
+      this.lastMessageId + 1,
+    );
+    this.lastMessageId = id;
     const newItem = { ...itemData, id } as HistoryItem;
 
     const prev = this.history;
+    const lastItem = prev[prev.length - 1];
     if (
       !(
         prev.length > 0 &&
-        prev[prev.length - 1].type === 'user' &&
+        lastItem.type === 'user' &&
         newItem.type === 'user' &&
-        prev[prev.length - 1].text === newItem.text
+        lastItem.sentToModel !== true &&
+        lastItem.text === newItem.text
       )
     ) {
       const next = [...prev, newItem];
@@ -209,21 +227,49 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
         newItem.tools.some((tool) => isFindingsListDisplay(tool.resultDisplay))
           ? coalesceFindingsHistoryItems(next)
           : next;
-      // U-28 project-on-write: the recorded item becomes a transcript row so
-      // command output is visible. updateItem/loadHistory do not project —
-      // one is a flag flip the live row ignores, the other is followed by a
-      // wholesale transcript reset.
-      const event = projectItemToStreamEvent(newItem, {
+      // Coalescing changes earlier canonical tool groups as well as this row.
+      for (let index = 0; index < prev.length; index++) {
+        if (this.history[index] !== prev[index])
+          this.replaceCanonicalProjection(this.history[index]);
+      }
+      const committed = this.history[this.history.length - 1];
+      const event = projectItemToStreamEvent(committed, {
         config: this.config,
         stats: this.sessionStats,
         settings: this.settings,
         extensionsUpdateState: this.extensionsUpdateState,
       });
-      if (event) this.transcript.append(event);
+      if (event) {
+        this.transcript.append({
+          ...event,
+          historyId: id,
+          canonicalHistoryItem: committed,
+          ...(committed.display ? { historyDisplay: committed.display } : {}),
+        });
+      } else {
+        this.transcript.append({
+          type: 'canonical-history',
+          historyId: id,
+          canonicalHistoryItem: committed,
+        });
+      }
     }
     this.notify();
     return id;
   };
+
+  private replaceCanonicalProjection(item: HistoryItem): void {
+    this.transcript.append({
+      type: 'canonical-history-replace',
+      item,
+      events: projectHistoryToStreamEvents([item], {
+        config: this.config,
+        stats: this.sessionStats,
+        settings: this.settings,
+        extensionsUpdateState: this.extensionsUpdateState,
+      }).filter((event) => event.type !== 'done'),
+    });
+  }
 
   updateItem: UseHistoryManagerReturn['updateItem'] = (id, updates) => {
     const index = this.history.findIndex((item) => item.id === id);
@@ -234,20 +280,26 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
         : updates;
     this.history[index] = { ...this.history[index], ...patch } as HistoryItem;
     this.history = [...this.history];
+    const item = this.history[index];
+    this.replaceCanonicalProjection(item);
     this.notify();
   };
 
   clearItems: UseHistoryManagerReturn['clearItems'] = () => {
     this.history = [];
     this.messageIdCounter = 0;
+    this.lastMessageId = 0;
     // Contract completion (U-29): SessionSwitchHost documents clearItems as
     // clearing the command history AND the visible transcript.
     this.transcript.clear();
     this.notify();
   };
 
-  loadHistory: UseHistoryManagerReturn['loadHistory'] = (newHistory) => {
+  loadHistory: OpenTuiCommandHost['loadHistory'] = (newHistory, mode) => {
     this.history = newHistory;
+    for (const item of newHistory)
+      this.lastMessageId = Math.max(this.lastMessageId, item.id);
+    if (mode === 'expand') this.transcript.append({ type: 'history-expanded' });
     this.notify();
   };
 
@@ -351,8 +403,14 @@ export class OpenTuiAppHost implements OpenTuiCommandHost, SessionSwitchHost {
    * a denial too.
    */
   addConfirmUpdateExtensionRequest(value: ConfirmationRequest): void {
-    void this.deps.confirmations
-      .presentAction(value.prompt)
+    const pending =
+      value.signal || value.isCurrent
+        ? this.deps.confirmations.presentAction(value.prompt, {
+            signal: value.signal,
+            isCurrent: value.isCurrent,
+          })
+        : this.deps.confirmations.presentAction(value.prompt);
+    void pending
       .catch(() => false)
       .then((confirmed) => value.onConfirm(confirmed));
   }

@@ -218,6 +218,7 @@ export default {
   'toolDisplayName.CronCreate': 'toolDisplayName.CronCreate',
   'toolDisplayName.CronList': 'toolDisplayName.CronList',
   'toolDisplayName.CronDelete': 'toolDisplayName.CronDelete',
+  'toolDisplayName.AutofixPr': 'toolDisplayName.AutofixPr',
   'toolDisplayName.LoopWakeup': 'toolDisplayName.LoopWakeup',
   'toolDisplayName.CreateSubSession': 'toolDisplayName.CreateSubSession',
   'toolDisplayName.ListAgents': 'toolDisplayName.ListAgents',
@@ -2466,6 +2467,8 @@ export default {
   'System prompt': 'System prompt',
   'Built-in tools': 'Built-in tools',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Instruction files',
+  'Auto memory': 'Auto memory',
   'Memory files': 'Memory files',
   Skills: 'Skills',
   Messages: 'Messages',
@@ -2787,6 +2790,8 @@ export default {
   out: 'out',
 
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.',
   'Check for Qwen Code updates and install if available':
     'Check for Qwen Code updates and install if available',
   'Qwen Code update available! {{current}} → {{latest}}':

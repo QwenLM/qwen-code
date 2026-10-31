@@ -995,6 +995,42 @@ jobs:
           fi
           exit 0
 
+      - name: 'Provision review linters (actionlint + shellcheck)'
+        if: "steps.context.outputs.should_run == 'true'"
+        # The review's deterministic script-lint gate spawns actionlint and
+        # shellcheck from PATH; without them every workflow/shell PR caps as
+        # unreviewed and the real-binary regressions never run (PR #16001
+        # review). Install through the repo's own pinned, SHA-256-verified
+        # installer and promote the fresh job-scoped tool dirs onto
+        # GITHUB_PATH — prepended, so the verified bytes shadow anything a
+        # shared runner left on PATH. The install is unconditional (no
+        # `command -v` shortcut): a pre-existing binary is exactly the plant
+        # the capture-tools step refuses to trust. Failure degrades, not
+        # blocks: the gate caps the review as unreviewed, disclosed.
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |-
+          node --input-type=module -e '
+            import { execSync } from "node:child_process";
+            import { appendFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+            import { getLinters, getLinterTempDir } from "./scripts/lint.js";
+            const tempDir = getLinterTempDir();
+            rmSync(tempDir, { recursive: true, force: true });
+            mkdirSync(tempDir, { recursive: true });
+            const linters = getLinters();
+            for (const name of ["actionlint", "shellcheck"]) {
+              execSync(linters[name].installer, { stdio: "inherit" });
+              // Verify the install produced its binary BEFORE promoting the
+              // dir: a silent no-op install must fail this step visibly
+              // (continue-on-error tolerates it, the UI shows it), not
+              // degrade to a review lane without linters (PR #16001 F2).
+              const bin = tempDir + "/" + name + "/" + name;
+              if (!existsSync(bin)) throw new Error(name + " installer produced no binary at " + bin);
+              appendFileSync(process.env.GITHUB_PATH, tempDir + "/" + name + "\n");
+            }
+            console.log("PROVISIONED actionlint + shellcheck into " + tempDir);
+          '
+
       - name: 'Prepare review scratch directory'
         id: 'review_scratch'
         if: "steps.context.outputs.should_run == 'true'"
@@ -1010,7 +1046,14 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           OPENAI_API_KEY: '${{ secrets.REVIEW_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.REVIEW_OPENAI_BASE_URL }}'
-          OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          # Review model, plus the canary split that sends a PR-number slice
+          # of reviews to a second model. All three arrive as variables so a
+          # rollout is a repository-variable change, never a workflow edit:
+          # an empty canary or percent keeps today's single model, and
+          # review_model_for_bucket below turns them into OPENAI_MODEL.
+          REVIEW_MODEL_DEFAULT: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          REVIEW_MODEL_CANARY: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY }}'
+          REVIEW_MODEL_CANARY_PERCENT: '${{ vars.QWEN_PR_REVIEW_MODEL_CANARY_PERCENT }}'
           QWEN_PR_REVIEW_EFFORT: '${{ vars.QWEN_PR_REVIEW_EFFORT }}'
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           REVIEW_MODE: '${{ steps.context.outputs.review_mode }}'
@@ -1620,6 +1663,83 @@ jobs:
           elif [ "$REVIEW_MODE" = "comment" ]; then
             PROMPT="${PROMPT} --comment"
           fi
+
+          # The percent both consumers read — the router's bucket test and the
+          # cohort notice below — normalized once so the notice cannot report a
+          # split the router did not apply. Shape follows SALVAGE_ELAPSED_PERCENT
+          # (strip leading zeros, bound the digit count) but clamps to the
+          # opposite pole: there 100 means cede, here it would mean full
+          # rollout, so a typo on a repository variable must land on off. Keep
+          # the digit bound — bash wraps 20-digit values, and
+          # $((10#18446744073709551666)) is 50, a silent half rollout.
+          canary_percent_effective() {
+            local percent="$1"
+            case "$percent" in
+              ''|*[!0-9]*) percent=0 ;;
+            esac
+            percent="${percent#"${percent%%[!0]*}"}"
+            percent="${percent:-0}"
+            if [ "${#percent}" -gt 3 ]; then
+              percent=0
+            fi
+            percent=$((10#$percent))
+            if [ "$percent" -gt 100 ]; then
+              percent=0
+            fi
+            echo "$percent"
+          }
+
+          # Canary routing for the review model. A PR's NUMBER picks its bucket
+          # for the PR's whole life, so every re-review of the same PR — and
+          # every finding one round is judged against the next — stays on one
+          # model; a per-run bucket would flip models mid-PR and make two rounds
+          # of reviews incomparable. Percent zero means off, and an unresolvable
+          # PR number keeps the default: the canary must never be the reason a
+          # review breaks.
+          # KEEP THE SHAPE: scripts/tests/qwen-pr-review-workflow.test.js slices
+          # both functions plus the call site and executes the real bash, so the
+          # helper stays above the router and both braces sit at column 0.
+          review_model_for_bucket() {
+            local default_model="$1" canary_model="$2" pr="$4"
+            local percent
+            percent="$(canary_percent_effective "$3")"
+            case "$pr" in
+              ''|*[!0-9]*)
+                echo "$default_model"
+                return 0
+                ;;
+            esac
+            if [ -n "$canary_model" ] && [ "$percent" -gt 0 ] &&
+              [ $((10#$pr % 100)) -lt "$percent" ]; then
+              echo "$canary_model"
+            else
+              echo "$default_model"
+            fi
+          }
+
+          # A padded canary name (" qwen3-coder-plus ") would reach --model
+          # verbatim, the provider would reject it, and that failure is
+          # terminal for the whole cohort on every re-review round — the same
+          # whitespace class QWEN_REVIEW_ASSETS_REPO above trims for. Trimming
+          # keeps "empty means no split": whitespace-only routes to the
+          # default rather than inventing a cohort.
+          REVIEW_MODEL_CANARY="${REVIEW_MODEL_CANARY:-}"
+          REVIEW_MODEL_CANARY="${REVIEW_MODEL_CANARY#"${REVIEW_MODEL_CANARY%%[![:space:]]*}"}"
+          REVIEW_MODEL_CANARY="${REVIEW_MODEL_CANARY%"${REVIEW_MODEL_CANARY##*[![:space:]]}"}"
+
+          CANARY_PERCENT_EFFECTIVE="$(canary_percent_effective \
+            "${REVIEW_MODEL_CANARY_PERCENT:-}")"
+          OPENAI_MODEL="$(review_model_for_bucket \
+            "${REVIEW_MODEL_DEFAULT:-}" "$REVIEW_MODEL_CANARY" \
+            "$CANARY_PERCENT_EFFECTIVE" "${PR_NUMBER:-}")"
+          export OPENAI_MODEL
+          # The run's own record of which cohort served this review: the model
+          # is not carried anywhere else a later comparison could read it (the
+          # cost ledger has tokens, not a model), so a rollout that cannot be
+          # told apart afterwards is unmeasurable. Both fields are the resolved
+          # ones — the raw percent would certify a cohort the router clamped
+          # away.
+          echo "::notice title=Review model::${OPENAI_MODEL:-<CLI default>} (PR #${PR_NUMBER:-?}, canary ${CANARY_PERCENT_EFFECTIVE}%)"
 
           MODEL_ARGS=()
           if [ -n "${OPENAI_MODEL:-}" ]; then
