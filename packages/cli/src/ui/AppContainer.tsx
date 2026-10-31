@@ -209,6 +209,10 @@ import { useKeypress, type Key } from './hooks/useKeypress.js';
 import { keyMatchers, Command } from './keyMatchers.js';
 import { useLoadingIndicator } from './hooks/useLoadingIndicator.js';
 import { useTerminalProgress } from './hooks/useTerminalProgress.js';
+import {
+  useProgramStatus,
+  programStatusBlockedKind,
+} from './hooks/use-program-status.js';
 import { useFolderTrust } from './hooks/useFolderTrust.js';
 import { useMcpApproval } from './hooks/useMcpApproval.js';
 import { useIdeTrustListener } from './hooks/useIdeTrustListener.js';
@@ -2541,6 +2545,8 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const {
     streamingState,
+    turnCancellationRevision,
+    turnHasError,
     submitQuery,
     initError,
     pendingHistoryItems: pendingLlmHistoryItems,
@@ -4295,25 +4301,27 @@ export const AppContainer = (props: AppContainerProps) => {
     history: historyManager.history,
     sessionStats,
   });
+  const permissionDialogVisible =
+    isMcpApprovalDialogOpen ||
+    isFolderTrustDialogOpen ||
+    isTrustDialogOpen ||
+    !!shellConfirmationRequest ||
+    !!confirmationRequest ||
+    !!loopDetectionConfirmationRequest;
   const dialogsVisible =
+    permissionDialogVisible ||
     showWelcomeBackDialog ||
     shouldShowIdePrompt ||
     shouldShowCommandMigrationNudge ||
-    isFolderTrustDialogOpen ||
-    isMcpApprovalDialogOpen ||
-    !!shellConfirmationRequest ||
-    !!confirmationRequest ||
     confirmUpdateExtensionRequests.length > 0 ||
     !!providerUpdateRequest ||
     settingInputRequests.length > 0 ||
     pluginChoiceRequests.length > 0 ||
-    !!loopDetectionConfirmationRequest ||
     isThemeDialogOpen ||
     isSettingsDialogOpen ||
     isStatusLineDialogOpen ||
     isMemoryDialogOpen ||
     isModelDialogOpen ||
-    isTrustDialogOpen ||
     activeArenaDialog !== null ||
     isPermissionsDialogOpen ||
     isAuthDialogOpen ||
@@ -4339,6 +4347,24 @@ export const AppContainer = (props: AppContainerProps) => {
     bgTasksDialogOpen ||
     showWorktreeExitDialog ||
     !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
+  const blockedKind = programStatusBlockedKind({
+    auth: isAuthDialogOpen || isAuthenticating,
+    question: pendingToolCalls.some(
+      (call) =>
+        call.status === 'awaiting_approval' &&
+        call.confirmationDetails.type === 'ask_user_question',
+    ),
+    permission:
+      streamingState === StreamingState.WaitingForConfirmation ||
+      permissionDialogVisible,
+    dialog: dialogsVisible || isFeedbackDialogOpen,
+  });
+  useProgramStatus(
+    streamingState,
+    blockedKind,
+    turnHasError,
+    turnCancellationRevision,
+  );
   dialogsVisibleRef.current = dialogsVisible;
 
   const shouldShowStickyTodos =

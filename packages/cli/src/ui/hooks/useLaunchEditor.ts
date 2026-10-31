@@ -1,7 +1,12 @@
+import { isTerminalEditorCommand } from '../../utils/terminal-editor.js';
+import { appEvents, AppEvent } from '../../utils/events.js';
 import { useCallback } from 'react';
 import { useStdin } from 'ink';
 import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
-import { getEditorExecutable } from '@qwen-code/qwen-code-core/utils/editor.js';
+import {
+  getEditorExecutable,
+  isTerminalEditor,
+} from '@qwen-code/qwen-code-core/utils/editor.js';
 import { spawnSync } from 'child_process';
 import { useSettings } from '../contexts/SettingsContext.js';
 
@@ -61,8 +66,12 @@ export function useLaunchEditor() {
       }
 
       // Temporarily disable raw mode for editor
+      const terminalEditor = preferredEditor
+        ? isTerminalEditor(preferredEditor)
+        : isTerminalEditorCommand(editorCommand);
       const wasRaw = stdin?.isRaw ?? false;
       try {
+        if (terminalEditor) appEvents.emit(AppEvent.TerminalReleased);
         setRawMode?.(false);
 
         // On Windows, .cmd and .bat files need shell: true
@@ -81,6 +90,7 @@ export function useLaunchEditor() {
         }
       } finally {
         if (wasRaw) setRawMode?.(true);
+        if (terminalEditor) appEvents.emit(AppEvent.TerminalAcquired);
       }
     },
     [settings.merged.general?.preferredEditor, setRawMode, stdin],

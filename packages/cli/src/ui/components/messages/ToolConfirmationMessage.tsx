@@ -24,7 +24,11 @@ import type { EditorType } from '@qwen-code/qwen-code-core/utils/editor.js';
 import { IdeClient } from '@qwen-code/qwen-code-core/ide/ide-client.js';
 import { buildHumanReadableRuleLabel } from '@qwen-code/qwen-code-core/permissions/rule-parser.js';
 import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
-import { isEditorAvailable } from '@qwen-code/qwen-code-core/utils/editor.js';
+import { appEvents, AppEvent } from '../../../utils/events.js';
+import {
+  isEditorAvailable,
+  isTerminalEditor,
+} from '@qwen-code/qwen-code-core/utils/editor.js';
 import type { RadioSelectItem } from '../shared/RadioButtonSelect.js';
 import { RadioButtonSelect } from '../shared/RadioButtonSelect.js';
 import { MaxSizedBox, MINIMUM_MAX_HEIGHT } from '../shared/MaxSizedBox.js';
@@ -132,7 +136,20 @@ export const ToolConfirmationMessage: React.FC<
     // call the trust gate refused, and an unhandled rejection trips the
     // process-level handler (llm.tsx), which shows a "file a bug report"
     // banner and opens the debug console over a correctly-refused action.
-    void Promise.resolve(onConfirm(outcome)).catch(() => {});
+    const terminalHandoff =
+      outcome === ToolConfirmationOutcome.ModifyWithEditor &&
+      confirmationDetails.type === 'edit' &&
+      preferredEditor !== undefined &&
+      isTerminalEditor(preferredEditor);
+    const confirm = async () => {
+      if (terminalHandoff) appEvents.emit(AppEvent.TerminalReleased);
+      try {
+        await onConfirm(outcome);
+      } finally {
+        if (terminalHandoff) appEvents.emit(AppEvent.TerminalAcquired);
+      }
+    };
+    void confirm().catch(() => {});
 
     if (
       confirmationDetails.type === 'edit' &&

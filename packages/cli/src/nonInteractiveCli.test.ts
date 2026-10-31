@@ -469,7 +469,11 @@ describe('runNonInteractive', () => {
   });
 
   afterEach(() => {
+    const stdout = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]))
+      .join('');
     vi.restoreAllMocks();
+    expect(stdout).not.toContain('\x1b]7501;');
   });
 
   const bothLoops = [
@@ -586,6 +590,43 @@ describe('runNonInteractive', () => {
           repositoryRoot: '/test/project',
           gitTimeout: undefined,
         });
+      }
+    },
+  );
+
+  it.each([OutputFormat.TEXT, OutputFormat.JSON, OutputFormat.STREAM_JSON])(
+    'keeps %s stdout free of program status on a TTY',
+    async (format) => {
+      const tty = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: true,
+        configurable: true,
+      });
+      setupMetricsMock();
+      vi.mocked(mockConfig.getOutputFormat).mockReturnValue(format);
+      mockLlmClient.sendMessageStream.mockImplementation(async function* () {
+        yield { type: LlmEventType.Content, value: 'Hello' };
+      });
+      try {
+        await runNonInteractive(
+          mockConfig,
+          mockSettings,
+          'hello',
+          'status-isolation',
+        );
+        const stdout = processStdoutSpy.mock.calls
+          .map((call) => String(call[0]))
+          .join('');
+        expect(stdout).not.toContain('\x1b]7501;');
+        if (format === OutputFormat.JSON)
+          expect(() => JSON.parse(stdout)).not.toThrow();
+        if (format === OutputFormat.STREAM_JSON) {
+          for (const line of stdout.trim().split('\n'))
+            expect(() => JSON.parse(line)).not.toThrow();
+        }
+      } finally {
+        if (tty) Object.defineProperty(process.stdout, 'isTTY', tty);
+        else Reflect.deleteProperty(process.stdout, 'isTTY');
       }
     },
   );
