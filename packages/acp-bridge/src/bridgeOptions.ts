@@ -306,7 +306,11 @@ export interface BridgeOptions {
   runtimeEpochSource?: BridgeRuntimeEpochSource;
   /** Daemon-global admission for the process-wide MCP OAuth callback port. */
   acquireMcpAuthentication?: BridgeMcpAuthenticationAdmission;
-  /** How long to wait for the child's `initialize` reply before giving up. */
+  /**
+   * How long to wait for the child's `initialize` reply before giving up.
+   * The channel spawn that precedes the handshake gets its own budget of the
+   * same length, and one absolute deadline bounds startup at twice this value.
+   */
   initializeTimeoutMs?: number;
   /**
    * How long to wait for `session/load` and `session/resume`. Defaults to

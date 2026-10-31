@@ -11,7 +11,7 @@ import type { AcpChannel } from './channel.js';
 import { BridgeTimeoutError } from './status.js';
 
 describe('channel startup', () => {
-  it('uses the remaining factory budget for initialize', async () => {
+  it('gives initialize its own budget after a slow channel factory', async () => {
     vi.useFakeTimers();
     let finishInitialize!: () => void;
     const initializing = new Promise<void>((resolve) => {
@@ -38,18 +38,22 @@ describe('channel startup', () => {
 
     try {
       const preheat = bridge.preheat().catch((error: unknown) => error);
+      // The factory spends 30 ms of its own 50 ms budget before the handshake
+      // starts. Regression for #14977: `initialize` used to inherit the 20 ms
+      // the factory left, so a cold spawn could starve it down to the 1 ms
+      // floor and no retry could ever succeed.
       await vi.advanceTimersByTimeAsync(30);
       releaseFactory(handle.channel);
       await vi.advanceTimersByTimeAsync(0);
       expect(handle.agent.initializeCalls).toHaveLength(1);
-      await vi.advanceTimersByTimeAsync(19);
+      await vi.advanceTimersByTimeAsync(49);
       expect(signal?.aborted).toBe(false);
       expect(handle.killed).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
 
       const error = await preheat;
       expect(error).toBeInstanceOf(BridgeTimeoutError);
-      expect(error).toMatchObject({ label: 'initialize', timeoutMs: 20 });
+      expect(error).toMatchObject({ label: 'initialize', timeoutMs: 50 });
       expect(signal?.reason).toBe(error);
       expect(handle.killed).toBe(true);
       expect(bridge.isChannelLive()).toBe(false);
