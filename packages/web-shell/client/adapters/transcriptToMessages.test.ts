@@ -582,6 +582,164 @@ describe('transcriptBlocksToDaemonMessages', () => {
     ]);
   });
 
+  it('attributes a peer notification to its teammate author', () => {
+    const messages = transcriptBlocksToDaemonMessages([
+      textBlock(
+        'peer-1',
+        'user',
+        '[team] correctness: the workspace is empty PEERMARK-9902',
+        1,
+        false,
+        {
+          meta: {
+            source: 'background_notification',
+            qwenDiscreteMessage: true,
+            backgroundTask: {
+              taskId: 'teammate-message-2',
+              status: 'message',
+              kind: 'peer',
+            },
+          },
+          agent: {
+            agentName: '/root/correctness',
+            depth: 1,
+            kind: 'teammate',
+          },
+        },
+      ),
+    ]);
+
+    expect(messages).toEqual([
+      {
+        id: 'peer-1',
+        role: 'system',
+        content: '[team] correctness: the workspace is empty PEERMARK-9902',
+        variant: 'info',
+        source: 'background_notification',
+        data: {
+          taskId: 'teammate-message-2',
+          status: 'message',
+          kind: 'peer',
+        },
+        teammate: { name: 'correctness' },
+        timestamp: 1,
+      },
+    ]);
+  });
+
+  it('attributes a teammate roster change delivered as background_task_completed', () => {
+    // Real peer frames carry `_meta.source: 'background_task_completed'`, so
+    // the attribution must live on that push site too, not only on the
+    // 'background_notification' one.
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: {
+              type: 'text',
+              text: 'teammate correctness joined the team',
+            },
+            _meta: {
+              source: 'background_task_completed',
+              qwenDiscreteMessage: true,
+              backgroundTask: {
+                taskId: 'teammate-roster-1',
+                status: 'joined',
+                kind: 'peer',
+              },
+              agent: {
+                agentName: '/root/correctness',
+                depth: 1,
+                kind: 'teammate',
+              },
+            },
+          },
+        },
+      }),
+    );
+    expect(state.blocks[0]).toMatchObject({ kind: 'status' });
+    const messages = transcriptBlocksToDaemonMessages(state.blocks);
+
+    expect(messages[0]).toMatchObject({
+      role: 'system',
+      content: 'teammate correctness joined the team',
+      source: 'background_task_completed',
+      teammate: { name: 'correctness' },
+    });
+  });
+
+  it('names the teammate on the turn-started marker via task-id correlation', () => {
+    // The turn-started marker carries no identity of its own; the display
+    // frame that precedes it does, keyed by the same background task id. In a
+    // live session the consumed display row is suppressed, so this marker is
+    // the row the user actually sees.
+    const updates = [
+      {
+        text: 'report text',
+        meta: {
+          source: 'background_task_completed',
+          qwenDiscreteMessage: true,
+          backgroundTask: {
+            taskId: 'teammate-message-2',
+            status: 'message',
+            kind: 'peer',
+          },
+          agent: {
+            agentName: '/root/correctness',
+            depth: 1,
+            kind: 'teammate',
+          },
+        },
+      },
+      {
+        text: '',
+        meta: {
+          source: 'background_notification_turn_started',
+          backgroundTurn: {
+            turnId: 'automatic-1',
+            taskId: 'teammate-message-2',
+            kind: 'peer',
+            startedAt: 2,
+          },
+        },
+      },
+    ];
+    const state = reduceDaemonTranscriptEvents(
+      createDaemonTranscriptState(),
+      updates.flatMap(({ text, meta }, index) =>
+        normalizeDaemonEvent({
+          id: index + 1,
+          v: 1,
+          type: 'session_update',
+          data: {
+            update: {
+              sessionUpdate: 'agent_message_chunk',
+              content: { type: 'text', text },
+              _meta: meta,
+            },
+          },
+        }),
+      ),
+    );
+    expect(state.blocks.map((block) => block.kind)).toEqual([
+      'status',
+      'status',
+    ]);
+    const messages = transcriptBlocksToDaemonMessages(state.blocks);
+
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      role: 'system',
+      source: 'background_notification_turn_started',
+      teammate: { name: 'correctness' },
+    });
+  });
+
   it('keeps vision bridge notices separate from assistant output', () => {
     const notice = {
       status: 'skipped',

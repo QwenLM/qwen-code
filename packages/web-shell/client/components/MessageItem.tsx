@@ -309,6 +309,7 @@ export const MessageItem = memo(function MessageItem({
             variant={message.variant}
             source={message.source}
             data={message.data}
+            teammate={message.teammate}
             images={message.images}
             files={message.files}
             onShowContextDetail={onShowContextDetail}

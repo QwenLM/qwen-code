@@ -89,6 +89,18 @@ describe('agent identity projection', () => {
     expect(events[0]).not.toHaveProperty('agent');
   });
 
+  it('accepts a teammate identity, the Agent Team producer kind', () => {
+    const teammate = {
+      agentName: '/root/correctness',
+      depth: 1,
+      kind: 'teammate',
+    } as const;
+    const events = normalizeDaemonEvent(
+      text('x', { agent: teammate }) as never,
+    );
+    expect(events[0]).toMatchObject({ agent: teammate });
+  });
+
   it('survives a nested path two levels deep', () => {
     const deep = {
       agentName: '/root/security/deps',
@@ -97,6 +109,30 @@ describe('agent identity projection', () => {
     };
     const events = normalizeDaemonEvent(text('x', { agent: deep }) as never);
     expect(events[0]).toMatchObject({ agent: deep });
+  });
+});
+
+describe('agent identity on user chunks', () => {
+  it('extracts a replayed peer notice identity from a flat user_message_chunk', () => {
+    // The REST transcript wraps no `update` object; the identity rides
+    // `_meta` and must survive to `user.text.delta` for the block reducer.
+    const events = normalizeDaemonEvent({
+      id: 41,
+      v: 1,
+      type: 'session_update',
+      data: {
+        sessionUpdate: 'user_message_chunk',
+        content: { type: 'text', text: 'teammate security joined the team' },
+        _meta: {
+          source: 'background_notification',
+          agent: SECURITY,
+        },
+      },
+    } as never);
+    expect(events[0]).toMatchObject({
+      type: 'user.text.delta',
+      agent: SECURITY,
+    });
   });
 });
 

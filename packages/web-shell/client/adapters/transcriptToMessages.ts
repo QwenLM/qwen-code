@@ -573,6 +573,27 @@ export function transcriptBlocksToDaemonMessages(
     ),
   );
   const completedTaskIds = new Set<string>();
+  // Teammate identity by background task id, built over the whole block list
+  // before any row is projected: on the live wire the turn-started marker can
+  // arrive before the display frame carrying the identity, so filling this
+  // inside the loop leaves the marker row — the row the user actually sees —
+  // anonymous.
+  const teammateByTask = new Map<string, { name: string }>();
+  for (const scan of blocks) {
+    const scanTeammate = teammateOfAgent(
+      'agent' in scan ? scan.agent : undefined,
+    );
+    if (!scanTeammate) continue;
+    const scanTaskId = getString(
+      getRecord(
+        scan.kind === 'status'
+          ? scan.data
+          : getRecord((scan as { meta?: unknown }).meta)?.['backgroundTask'],
+      ),
+      'taskId',
+    );
+    if (scanTaskId) teammateByTask.set(scanTaskId, scanTeammate);
+  }
 
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
@@ -585,6 +606,9 @@ export function transcriptBlocksToDaemonMessages(
     );
     const backgroundTurn = parseDaemonBackgroundTurn(
       block.backgroundTurn ?? blockMeta?.['backgroundTurn'],
+    );
+    const blockTeammate = teammateOfAgent(
+      (block as DaemonTextTranscriptBlock).agent,
     );
     const promptId = backgroundTurn?.turnId ?? block.promptId;
     if (
@@ -607,6 +631,9 @@ export function transcriptBlocksToDaemonMessages(
       !backgroundResultMarkers.has(backgroundTurn.turnId)
     ) {
       backgroundResultMarkers.add(backgroundTurn.turnId);
+      const turnTeammate = teammateByTask.get(
+        (backgroundTurn as { taskId?: string }).taskId ?? '',
+      );
       messages.push({
         id: `background-turn:${backgroundTurn.turnId}`,
         role: 'system',
@@ -617,6 +644,7 @@ export function transcriptBlocksToDaemonMessages(
           ...backgroundTurn,
           backgroundTask: backgroundTasksByExecution.get(backgroundTurn.turnId),
         },
+        ...(turnTeammate ? { teammate: turnTeammate } : {}),
         backgroundTurn,
         timestamp: backgroundTurn.startedAt,
         sourceBlockIds: [block.id],
@@ -660,6 +688,7 @@ export function transcriptBlocksToDaemonMessages(
           ...task,
           awaitingProcessing,
         },
+        ...(blockTeammate ? { teammate: blockTeammate } : {}),
         timestamp: blockTime,
         sourceBlockIds: [block.id],
       });
@@ -695,6 +724,7 @@ export function transcriptBlocksToDaemonMessages(
             variant: 'info',
             source: 'background_notification',
             data: getBackgroundNotificationData(textBlock),
+            ...(blockTeammate ? { teammate: blockTeammate } : {}),
             timestamp: blockTime,
             sourceBlockIds: [block.id],
           });
@@ -784,6 +814,7 @@ export function transcriptBlocksToDaemonMessages(
             variant: 'info',
             source: 'background_notification',
             data: notice.data,
+            ...(blockTeammate ? { teammate: blockTeammate } : {}),
             timestamp: blockTime,
             sourceBlockIds: [block.id],
           });
@@ -1890,6 +1921,19 @@ function getToolCallRawInput(
     getRecord(toolCall['input']) ??
     getRecord(toolCall['args'])
   );
+}
+
+/**
+ * Teammate (Agent Team peer) author of a projected notification, from the
+ * daemon-minted identity. Peer reports and roster changes carry
+ * `_meta.agent.kind === 'teammate'`; tasks and subagents stay unchipped.
+ */
+function teammateOfAgent(
+  agent: DaemonTextTranscriptBlock['agent'],
+): { name: string } | undefined {
+  if (!agent || agent.kind !== 'teammate') return undefined;
+  const name = agent.agentName.split('/').filter(Boolean).pop();
+  return name ? { name } : undefined;
 }
 
 function isBackgroundAgentBlock(
