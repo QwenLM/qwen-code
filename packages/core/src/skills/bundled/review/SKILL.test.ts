@@ -987,6 +987,23 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'at high effort the incremental check below scopes the delta',
     );
+    // Review R1-1: the rationale must mark the prose-steals-target half as
+    // PRE-FIX behavior — the parser preference in this same PR closed it,
+    // and a prompt describing it as live re-derives a closed bug.
+    expect(body).toContain('Before the PR-shape preference in parse-args');
+    expect(body).toContain(
+      'this paragraph must not be read as describing current behavior',
+    );
+    // Review R1-5: a bare number promoted from inside a sentence may be a
+    // count wearing a PR id's shape, and the promoted target enables
+    // --comment. The warning is the ask-before-running signal.
+    expect(body).toContain('A promoted-number warning is ask-before-running');
+    expect(body).toContain('never post on it silently');
+    // Review R1-2: the restart cost belongs to a SURVIVING interrupted
+    // attempt only; after a completed round the refusal costs nothing.
+    expect(body).toContain(
+      'after a completed round the state is cleaned up and the refusal',
+    );
     // The resolved invocation keeps the flags the input already carries,
     // so the parser still sees them — but carrying a flag is NOT posting
     // authority (see the hard-boundary pins below).

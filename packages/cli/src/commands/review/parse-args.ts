@@ -893,6 +893,24 @@ export function parseReviewArgs(
   // disclosed as an extra.
   const prIdx = targetTokens.findIndex(isPrShapedToken);
   if (prIdx > 0) {
+    // A bare number promoted from INSIDE a sentence may be a count, not a
+    // PR id — the classifier cannot tell them apart, and the promoted
+    // target also flips --comment from ignored to effective (review R1-5
+    // on #15998). Warn when non-PR tokens FOLLOW the number in the original
+    // order (the mid-sentence shape); the skill treats this warning as
+    // ask-before-running. A number at the end of the input is the canonical
+    // prose-rescue shape and stays silent.
+    const promotedShape = classifyToken(targetTokens[prIdx]);
+    if (
+      promotedShape !== null &&
+      promotedShape !== 'invalid-url' &&
+      promotedShape.type === 'pr-number' &&
+      targetTokens.slice(prIdx + 1).some((t) => !isPrShapedToken(t))
+    ) {
+      warnings.push(
+        `Bare number ${promotedShape.number} was promoted to the PR target from inside a sentence — a count is indistinguishable from a PR id, and the promoted target enables \`--comment\`; confirm the intended PR before running.`,
+      );
+    }
     const [prToken] = targetTokens.splice(prIdx, 1);
     targetTokens.unshift(prToken);
   }

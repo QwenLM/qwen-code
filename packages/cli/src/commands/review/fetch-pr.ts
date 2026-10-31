@@ -1139,15 +1139,31 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
       writeStdoutLine(
         JSON.stringify({ resumed: false, resumeRefused: outcome.reason }),
       );
+      // The re-review guidance covers the refusals a re-review-after-update
+      // actually reaches: head-moved when an interrupted attempt survived,
+      // and no-report/worktree-gone after a completed round cleaned up its
+      // own state (review R1-2/R1-3 on #15998). The restart-cost sentence
+      // belongs to head-moved alone — recordRestart runs only there. Other
+      // refusals (dirty worktree, tampered diff, effort/model mismatch) are
+      // interruption-state problems, not re-review intent, and get no
+      // guidance they would misread.
+      const reReviewGuidance =
+        outcome.reason === 'head-moved'
+          ? ' The PR head moved since the interrupted run (new or rewritten' +
+            ' commits), so this fresh run IS the re-review — at high effort' +
+            ' its incremental check scopes the delta when the recorded anchor' +
+            ' survives. After future updates use a plain `/review <n>` without' +
+            ' --resume; this refusal spends the one head-movement restart.'
+          : outcome.reason === 'no-report' || outcome.reason === 'worktree-gone'
+            ? ' No resumable state was found (a completed round cleans up' +
+              ' after itself), so this fresh run IS the re-review — at high' +
+              ' effort its incremental check scopes the delta. After future' +
+              ' updates use a plain `/review <n>` without --resume; this' +
+              ' refusal costs nothing.'
+            : '';
       writeStderrLine(
         `Cannot resume PR #${prNumber} (${outcome.reason}); starting a fresh review.` +
-          (outcome.reason === 'head-moved'
-            ? ' The PR gained commits since the interrupted run, so this fresh' +
-              ' run IS the re-review — at high effort its incremental check' +
-              ' scopes the delta (lower efforts review the full diff).' +
-              ' After future updates use a plain `/review <n>` without' +
-              ' --resume; this refusal spends the one head-movement restart.'
-            : ''),
+          reReviewGuidance,
       );
     }
 

@@ -5224,12 +5224,20 @@ describe('fetch-pr --resume', () => {
     );
     // The refusal teaches the right invocation for next time: this fresh
     // run IS the re-review, and a plain run is the path that keeps the
-    // restart bound unspent.
-    expect(
-      producerMocks.writeStderrLine.mock.calls
-        .map((c) => String(c[0]))
-        .join('\n'),
-    ).toContain('After future updates use a plain `/review <n>` without');
+    // restart bound unspent. The cause wording covers rewritten history
+    // too (head-moved is a SHA inequality), and the delta promise is
+    // conditional on the anchor surviving (review R1-3 on #15998).
+    const headMovedStderr = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(headMovedStderr).toContain(
+      'After future updates use a plain `/review <n>` without --resume',
+    );
+    expect(headMovedStderr).toContain('new or rewritten commits');
+    expect(headMovedStderr).toContain('when the recorded anchor survives');
+    expect(headMovedStderr).toContain(
+      'this refusal spends the one head-movement restart',
+    );
   });
 
   it('falls through when the diff bytes changed — the content key', async () => {
@@ -5246,6 +5254,15 @@ describe('fetch-pr --resume', () => {
     expect(lines).toEqual([
       { resumed: false, resumeRefused: 'diff-hash-mismatch' },
     ]);
+    // Review R1-4 on #15998: an interruption-state refusal must NOT carry
+    // the re-review guidance — dropping the reason gate would tell a user
+    // with a tampered diff that the PR gained commits and a restart was
+    // spent. Both sentences must stay absent.
+    const stderr = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(stderr).not.toContain('IS the re-review');
+    expect(stderr).not.toContain('After future updates');
   });
 
   it('falls through when there is no previous report at all', async () => {
@@ -5256,6 +5273,19 @@ describe('fetch-pr --resume', () => {
     expect(reportWritten()).toBe(true);
     const lines = await stdoutJsonLines();
     expect(lines).toEqual([{ resumed: false, resumeRefused: 'no-report' }]);
+    // Review R1-2/R1-3 on #15998: this is the refusal a re-review after a
+    // COMPLETED round actually reaches (cleanup removed the report), so the
+    // guidance must print here — but without the restart-cost sentence,
+    // which belongs to head-moved alone.
+    const stderr = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(stderr).toContain('IS the re-review');
+    expect(stderr).toContain(
+      'After future updates use a plain `/review <n>` without --resume',
+    );
+    expect(stderr).toContain('this refusal costs nothing');
+    expect(stderr).not.toContain('head-movement restart');
   });
 
   it('without --resume the flag path never runs', async () => {
@@ -5451,6 +5481,15 @@ describe('fetch-pr --resume', () => {
     expect(lines).toEqual([
       { resumed: false, resumeRefused: 'worktree-dirty' },
     ]);
+    // Review R1-4 on #15998: a dirty worktree is the user's own tree to
+    // fix, not a re-review — the guidance (and its restart-cost claim)
+    // must stay absent, or the user is sent to the PR instead of their
+    // worktree and told a restart was spent when none was.
+    const stderr = producerMocks.writeStderrLine.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(stderr).not.toContain('IS the re-review');
+    expect(stderr).not.toContain('After future updates');
   });
 
   it('falls through when the captured diff is gone', async () => {

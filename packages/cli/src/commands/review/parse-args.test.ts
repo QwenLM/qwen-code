@@ -627,6 +627,42 @@ describe('parseReviewArgs', () => {
     expect(got.warnings.some((w) => w.includes('Ignoring extra'))).toBe(false);
   });
 
+  it('warns when a bare number is promoted from inside a sentence, not at its end', () => {
+    // Review R1-5 on #15998: a count inside a sentence is indistinguishable
+    // from a PR id, and the promoted target flips --comment from ignored to
+    // effective — the warning is the skill's ask-before-running signal.
+    const midSentence = parseReviewArgs('review the last 3 commits --comment');
+    expect(midSentence.target).toEqual({ type: 'pr-number', number: 3 });
+    expect(midSentence.comment.effective).toBe(true);
+    expect(
+      midSentence.warnings.some((w) =>
+        w.includes('Bare number 3 was promoted to the PR target'),
+      ),
+    ).toBe(true);
+    const chinese = parseReviewArgs('重新评审 3 个提交');
+    expect(chinese.target).toEqual({ type: 'pr-number', number: 3 });
+    expect(
+      chinese.warnings.some((w) => w.includes('was promoted to the PR target')),
+    ).toBe(true);
+    // The canonical prose-rescue shape (number at the end) stays silent —
+    // one extra warning there would tax every intended re-review.
+    const canonical = parseReviewArgs('有更新了，重新评审 6711');
+    expect(
+      canonical.warnings.some((w) =>
+        w.includes('was promoted to the PR target'),
+      ),
+    ).toBe(false);
+    // A PR URL after the number confirms the target; no warning either.
+    const urlConfirmed = parseReviewArgs(
+      '重新评审 6711 https://github.com/QwenLM/qwen-code/pull/6711',
+    );
+    expect(
+      urlConfirmed.warnings.some((w) =>
+        w.includes('was promoted to the PR target'),
+      ),
+    ).toBe(false);
+  });
+
   it('extracts host/owner/repo/number from a PR URL', () => {
     const got = parseReviewArgs('https://github.com/QwenLM/qwen-code/pull/42');
     expect(got.target).toEqual({
