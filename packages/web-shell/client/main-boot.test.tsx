@@ -46,6 +46,9 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 vi.mock('./components/WorkspaceSessionProvider', () => ({
   WorkspaceSessionProvider: () => null,
 }));
+vi.mock('./ManagedAgentWebShell', () => ({
+  ManagedAgentWebShell: () => null,
+}));
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => testState.daemonBaseUrl,
   getAllowedDaemonOrigin: (value: string) => value,

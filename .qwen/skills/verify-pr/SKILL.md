@@ -22,6 +22,13 @@ Two entry paths share the contract below.
 - **Maintainer round on a workstation** — `/verify-pr <n>`, starting with
   `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` (the
   preflight requires the repository explicitly; `origin` is not a fallback).
+  It writes the round's coordinates (`repo`, `pr`, `baseRefOid`, `headRefOid`)
+  to `context.json` and refuses a tree that is not a clean checkout of the PR
+  head — when it passes, the current tree is the head side of the A/B, so stay
+  on the PR branch and keep it clean. The gate attests the source only:
+  `dist/` and `node_modules/` are gitignored, so reuse the install and build
+  only after establishing they were produced for this head, and otherwise
+  refresh them (the local install strategy below).
   This round executes untrusted PR code, so it needs an isolation boundary
   (see _Local invocation_).
 
@@ -140,8 +147,15 @@ trigger the sandboxed `@qwen-code /verify` lane instead.
 
 Run `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` on the host
 before anything else: it fetches the metadata snapshot, resolves and verifies
-both OIDs against this clone, creates `tmp/pr<n>-verify-<ts>/`, and reports the
-isolation signals it can see. It does not gate on them — resolving metadata
+both OIDs against this clone, refuses a tree that is not a clean, fully
+materialised checkout of the PR head (a wrong HEAD names the `git checkout`
+to run; uncommitted changes name the entries and a stash form that clears
+them; index flags that hide tracked state — a sparse checkout's
+skip-worktree, assume-unchanged — are refused too; the script never stashes
+for you),
+creates `tmp/pr<n>-verify-<ts>/` with a `context.json` holding `repo`, `pr`,
+`baseRefOid` and `headRefOid`, and reports the isolation signals it can see.
+It does not gate on them — resolving metadata
 needs `gh`, which the boundary excludes, so this path always runs on the host.
 The boundary check belongs inside: run
 `node scripts/verify-pr-prepare.mjs --require-isolation` as the round's first
@@ -243,12 +257,21 @@ calls a day per PR — and the round is the expensive part. Repo-wide watching i
 a different probe (`qwen review watch-repo`, event `pr_pushed`); `--watch` stays
 per-PR because a round is per-PR.
 
-**Do not assume `HEAD^1`/`HEAD^2` locally.** Those hold only for a merge-ref
-checkout; on a plain PR-head checkout `HEAD^1` is just the head's parent and
-`HEAD^2` usually does not exist, so the A/B would silently compare the wrong
-base. Resolve `baseRefOid` and `headRefOid` explicitly from `gh pr view` and
-use those OIDs throughout; if either is not present locally, report
-`inconclusive` rather than substituting a parent.
+**Local coordinates come from `context.json`, never from `HEAD`.**
+`verify-pr-prepare.mjs` writes `repo`, `pr`, `baseRefOid` and `headRefOid`
+into the round's `tmp/pr<n>-verify-<ts>/context.json`, and only passes when
+the current tree is a clean checkout of `headRefOid` — so the current tree
+**is** the head side of the A/B: reuse the tree instead of checking out a
+second head tree. Reusing its install and build is a separate question:
+they are gitignored, so a clean checkout can still carry artifacts from an
+earlier commit — reuse them only after establishing they were built for
+this head, and otherwise follow the local install strategy below. Read
+both OIDs from that file throughout the round. `HEAD^1`/`HEAD^2` hold only
+on the CI merge-ref checkout; on a
+plain PR-head checkout `HEAD^1` is just the head's parent and `HEAD^2`
+usually does not exist, so deriving the base from them would silently
+compare the wrong commit. If an OID the round needs is not present locally,
+report `inconclusive` rather than substituting a parent.
 
 **Local follow-up rounds: check the prior round before scoping.**
 The CI follow-up trigger (`previous-report.md` next to the context file)
@@ -501,13 +524,13 @@ Run the identical scenario against the PR build and a control build that
 differs only by the change under test; the verdict is the pair of counts.
 
 - Base side: `git worktree add tmp/base-tree <base>` where `<base>` is
-  `HEAD^1` **only on the CI merge-ref checkout**; in local mode it is the
-  resolved `baseRefOid` from the metadata snapshot, because a plain PR-head
-  checkout's `HEAD^1` is the previous PR commit and would attribute earlier
-  commits of this PR to the change under test. (Keep scratch worktrees
-  under `tmp/` and `git worktree remove --force` them once the A/B cells are
-  captured — the workflow sweeps leftover `tmp/` worktrees as a backstop, but
-  never rely on it), then rebuild **only the
+  `HEAD^1` on the CI merge-ref checkout, else the `baseRefOid` from the
+  round's `context.json` — never a plain PR-head checkout's `HEAD^1`, which
+  is the previous PR commit and would attribute earlier commits of this PR
+  to the change under test (the local-coordinates rule above). (Keep scratch
+  worktrees under `tmp/` and `git worktree remove --force` them once the A/B
+  cells are captured — the workflow sweeps leftover `tmp/` worktrees as a
+  backstop, but never rely on it), then rebuild **only the
   affected workspace or file** — e.g. `npm run build -w packages/<ws>` inside
   the base tree wired to the already-installed root `node_modules`, or
   recompile the single changed module. A full base `pnpm install` rarely fits the
@@ -536,7 +559,12 @@ differs only by the change under test; the verdict is the pair of counts.
   The control must differ by nothing else — name the exact commit/hunk it
   represents.
 - **Local runs start with no pre-built tree — pick the install strategy by
-  verification level before spending the clock.** A dist-level harness needs
+  verification level before spending the clock.** A tree left clean at the
+  head by an earlier round is not pre-built _for this head_ until you can
+  show its artifacts were produced for it; when you cannot, treat it as
+  unbuilt and rebuild the affected workspace before measuring — a stale
+  `dist/` under a clean head is the one staleness the prepare gate cannot
+  see. A dist-level harness needs
   a full `npm ci` at head (the `prepare` build included; measured ~8 min
   warm-cache on a 12-core aarch64 box). A prototype/source-level harness
   whose bundler compiles the TS sources directly (e.g.
@@ -1563,10 +1591,23 @@ reviewer's attention; `blocked` = the central claim failed its A/B or a
 regression reproduced; `inconclusive` = budget or environment prevented the
 central claim from being tested — say why.
 
+For `findings`, the published headline follows the counts, not the word
+alone: `findings` with `fail: 0` is published as passed with findings
+(`blocked` is published as not passed at any count). A defect you reproduced
+at head is therefore a failed assertion attributed to `pr`, never an
+expected-red pass — that rule covers control cells, which exist to fail, not
+head behaviour the PR got wrong. Measured example: a round reproduced a
+regression, asserted that the head showed it, and published `blocked` over
+4382 passes and 0 failures. The CI publisher runs `verify-pr-check.mjs` before
+it trusts any verdict, so run it on the artifact dir before you finish, in
+either path.
+
 ### report.md structure
 
 1. **Verdict line first**, with assertion totals and the verified head OID
-   (`git rev-parse HEAD^2` — not the snapshot's, which may have drifted).
+   (`git rev-parse HEAD^2` in the lane — not the metadata snapshot's, which
+   may have drifted; the `headRefOid` from `context.json` locally, which
+   prepare pinned to the clean tree the round verified).
 2. **中文摘要** in a collapsed `<details>` block, **immediately after the
    verdict**: verdict, A/B 结论, findings, 未覆盖范围. Collapsed, so it costs a
    reader who does not want it exactly one line; placed here rather than at
@@ -1657,8 +1698,11 @@ defect.
   the verdict cannot be `merge-ready` — and the publisher enforces exactly
   that. When the unexpected failure is in the harness itself (a flaky probe,
   a broken A/B control cell) rather than in the PR's code, the verdict is
-  `inconclusive`, not `findings` — `findings` stamps ❌ on the PR for a
-  problem it did not cause.
+  `inconclusive`, not `findings` — the failure is not the PR's. CI refuses
+  `findings` only when the failures ledger below names no `pr` cause, and
+  publishes the round as inconclusive under an untrusted-verdict note.
+  Without a ledger it cannot tell, and stamps ❌ on the PR for a problem it
+  did not cause.
   **Attribute every failure to a cause, and name the host as its own.**
   `assertions.json` carries `failures: [{ id, attribution }]`, one
   entry per failed assertion, with `attribution` one of `pr`, `harness` or

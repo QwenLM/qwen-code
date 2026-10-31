@@ -588,6 +588,7 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           breakdown={itemForDisplay.breakdown}
           builtinTools={itemForDisplay.builtinTools}
           mcpTools={itemForDisplay.mcpTools}
+          instructionFiles={itemForDisplay.instructionFiles}
           memoryFiles={itemForDisplay.memoryFiles}
           skills={itemForDisplay.skills}
           isEstimated={itemForDisplay.isEstimated}

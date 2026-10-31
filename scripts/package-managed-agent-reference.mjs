@@ -37,11 +37,10 @@ const VERSION_PATTERN = new RegExp(
   `^(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)\\.(?:0|[1-9]\\d*)-${PRERELEASE_IDENTIFIER}(?:\\.${PRERELEASE_IDENTIFIER})*$`,
 );
 const REVISION_PATTERN = /^[0-9a-f]{40}$/;
-const MAIN_SOURCE_ROOT = 'packages/managed-agent-server/src/main/java';
-const PERSISTENCE = 'com.alibaba.qwen.code.managedagent.persistence';
+const MAIN_SOURCE_ROOT = 'packages/managed-agent-server/server/src/main/java';
+const PERSISTENCE = 'com.alibaba.qwen.code.managedagent.maintenance';
 const PREFLIGHT = 'com.alibaba.qwen.code.managedagent.preflight';
-const WORKSPACE_RUNTIME =
-  'com.alibaba.qwen.code.managedagent.workspace.runtime';
+const WORKSPACE_RUNTIME = 'com.alibaba.qwen.code.managedagent.maintenance';
 
 // The offline maintenance entry points, each a main class in the server jar.
 // bin/qwen-managed-agent-admin runs them through Spring Boot's
@@ -226,6 +225,64 @@ async function verifyChecksums(directory, checksumFile) {
   }
 }
 
+// What the archive ships from the repository, and under which name.
+export const DOCUMENTATION = Object.freeze([
+  ['docs/users/managed-agent-reference-deployment.md', 'docs/deployment.md'],
+  [
+    'docs/users/managed-agent-reference-deployment.zh-CN.md',
+    'docs/deployment.zh-CN.md',
+  ],
+  [
+    'docs/users/managed-agent-configuration-reference.md',
+    'docs/configuration.md',
+  ],
+  [
+    'docs/users/managed-agent-configuration-reference.zh-CN.md',
+    'docs/configuration.zh-CN.md',
+  ],
+  ['packages/managed-agent-server/README.md', 'docs/server-reference.md'],
+  [
+    'docs/users/hosted-workspace-recovery.md',
+    'docs/hosted-workspace-recovery.md',
+  ],
+  [
+    'docs/users/hosted-workspace-recovery.zh-CN.md',
+    'docs/hosted-workspace-recovery.zh-CN.md',
+  ],
+  ['LICENSE', 'LICENSE'],
+]);
+
+/**
+ * `text`, a document shipped from `source`, with each link to another shipped
+ * document pointed at the name the archive gives it: the archive renames the
+ * documents, so a link written against the repository would name a file the
+ * archive does not have. Every other link is left as written: a URL or an
+ * anchor names no shipped path, and an absolute path is the reader's own.
+ */
+export function shippedDocumentLinks(
+  text,
+  source,
+  documentation = DOCUMENTATION,
+) {
+  const shipped = new Map(documentation);
+  const directory = path.posix.dirname(shipped.get(source));
+  return text.replace(
+    /\]\(([^()\s#]+)(#[^()\s]*)?\)/g,
+    (link, target, anchor = '') => {
+      // path.posix.join would read it as relative.
+      if (target.startsWith('/')) {
+        return link;
+      }
+      const renamed = shipped.get(
+        path.posix.join(path.posix.dirname(source), target),
+      );
+      return renamed === undefined
+        ? link
+        : `](${path.posix.relative(directory, renamed)}${anchor})`;
+    },
+  );
+}
+
 async function copy(root, stage, source, destination) {
   const target = path.join(stage, destination);
   await mkdir(path.dirname(target), { recursive: true });
@@ -375,7 +432,7 @@ export async function createReferenceDistribution({
   const serverPom = path.join(root, 'packages/managed-agent-server/pom.xml');
   const serverVersion = await pomVersion(
     serverPom,
-    'qwen-managed-agent-server',
+    'qwen-managed-agent-parent',
   );
   const packageJson = JSON.parse(
     await readFile(path.join(root, 'package.json')),
@@ -397,7 +454,7 @@ export async function createReferenceDistribution({
   const applicationConfiguration = await readFile(
     path.join(
       root,
-      'packages/managed-agent-server/src/main/resources/application.yml',
+      'packages/managed-agent-server/server/src/main/resources/application.yml',
     ),
     'utf8',
   );
@@ -432,14 +489,14 @@ export async function createReferenceDistribution({
     {
       name: 'qwen-managed-agent-server',
       version: serverVersion,
-      source: `packages/managed-agent-server/target/qwen-managed-agent-server-${serverVersion}-exec.jar`,
+      source: `packages/managed-agent-server/server/target/qwen-managed-agent-server-${serverVersion}-exec.jar`,
       destination: `lib/${serverJar}`,
       role: 'control-plane',
     },
     {
       name: 'qwen-managed-agent-operator-recovery',
       version: serverVersion,
-      source: `packages/managed-agent-server/target/${recoveryJar}`,
+      source: `packages/managed-agent-server/server/target/${recoveryJar}`,
       destination: `lib/${recoveryJar}`,
       role: 'operator-recovery',
     },
@@ -483,25 +540,20 @@ export async function createReferenceDistribution({
       `bin/${file}`,
     );
   }
-  const documentation = [
-    ['docs/users/managed-agent-reference-deployment.md', 'docs/deployment.md'],
-    [
-      'docs/users/managed-agent-reference-deployment.zh-CN.md',
-      'docs/deployment.zh-CN.md',
-    ],
-    ['packages/managed-agent-server/README.md', 'docs/server-reference.md'],
-    [
-      'docs/users/hosted-workspace-recovery.md',
-      'docs/hosted-workspace-recovery.md',
-    ],
-    [
-      'docs/users/hosted-workspace-recovery.zh-CN.md',
-      'docs/hosted-workspace-recovery.zh-CN.md',
-    ],
-    ['LICENSE', 'LICENSE'],
-  ];
-  for (const [source, destination] of documentation) {
-    await copy(root, stage, source, destination);
+  for (const [source, destination] of DOCUMENTATION) {
+    if (!source.endsWith('.md')) {
+      await copy(root, stage, source, destination);
+      continue;
+    }
+    const target = path.join(stage, destination);
+    await mkdir(path.dirname(target), { recursive: true });
+    await writeFile(
+      target,
+      shippedDocumentLinks(
+        await readFile(path.join(root, source), 'utf8'),
+        source,
+      ),
+    );
   }
 
   const serverLauncher = path.join(stage, 'bin/qwen-managed-agent-server');
@@ -588,6 +640,8 @@ export async function createReferenceDistribution({
     documentation: {
       deployment: 'docs/deployment.md',
       deploymentChinese: 'docs/deployment.zh-CN.md',
+      configuration: 'docs/configuration.md',
+      configurationChinese: 'docs/configuration.zh-CN.md',
       serverReference: 'docs/server-reference.md',
       operatorRecovery: 'docs/hosted-workspace-recovery.md',
     },

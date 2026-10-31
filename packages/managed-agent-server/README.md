@@ -1,6 +1,8 @@
 # Qwen Managed Agent Server
 
-The application lives in `packages/managed-agent-server`, alongside the Java SDK. Runtime Broker sources, resources and tests are part of this Maven module; see [Runtime Broker internals](docs/runtime-broker.md). Install the Java SDK before building this application; no separate Broker artifact is needed.
+The application lives in `packages/managed-agent-server`, alongside the Java SDK. It builds as one Maven reactor with six production modules and a verification module. The executable remains one Spring Boot service. Install the Java SDK before building the reactor; see [Runtime Broker internals](docs/runtime-broker.md).
+
+Every configuration property, with its environment variable and default, is listed in the [configuration reference](../../docs/users/managed-agent-configuration-reference.md). It is generated from this module's configuration metadata and the descriptions in `configuration-descriptions.json`; a new property needs a description there, and a settings class declared outside `ManagedAgentProperties` needs `@NestedConfigurationProperty` on its field, or the metadata leaves it out.
 
 Standalone Spring Boot control plane for the Qwen Code Hosted Harness. It has
 no DataWorks dependency. The default loopback listen address keeps the
@@ -91,20 +93,32 @@ adoption only. Linux operators may explicitly enable
 trusted-host contract. Missing or conflicting physical identity markers
 remain closed to execution; startup does not re-register or repair them.
 
-## Java package layout
+## Maven modules and Java packages
 
-Business components live in `managedagent.session`, `workspace`, `artifact`,
-`channel`, `automation`, `catalog` and `event`. Controllers and HTTP filters
-remain in `managedagent.api`; shared contracts and application errors live in
-`managedagent.model` and `exception`. The shared SQL aggregate remains in
-`managedagent.persistence` so its transaction and locking helpers stay
-package-private. Broker providers, HTTP adapters and credential protection live
-in `runtimebroker.provisioning`, `transport` and `security` respectively. The
-separate `maintenance` configuration remains outside the server's component scan.
+| Module           | Responsibility                                                                          | Internal dependencies      |
+| ---------------- | --------------------------------------------------------------------------------------- | -------------------------- |
+| `contracts`      | Service and repository interfaces, shared values, settings views and protocol rules     | None                       |
+| `control-plane`  | Session, Workspace, catalog, lifecycle, Channel, automation and extension orchestration | `contracts`                |
+| `runtime-broker` | Runtime execution, binding, leases, cancellation and recovery coordination              | `contracts`                |
+| `persistence`    | JDBC/memory repositories, schema and atomic database operations                         | `contracts`                |
+| `adapters`       | Harness SDK, Runtime providers, HTTP clients, OSS, MQ, Git and filesystem operations    | `contracts`                |
+| `server`         | HTTP endpoints, Spring assembly, startup and maintenance entry points                   | All five modules           |
+| `verification`   | Unit, integration, architecture and packaging tests; not published                      | All six production modules |
 
-These are packages in one Maven module. See the package-boundary design:
-[English](../../docs/design/2026-10-19-managed-agent-package-boundaries.md) |
-[简体中文](../../docs/design/2026-10-19-managed-agent-package-boundaries.zh-CN.md).
+The parent coordinate is `com.alibaba:qwen-managed-agent-parent`. All modules share its version; the server keeps `com.alibaba:qwen-managed-agent-server`. Each production Java package belongs to one module. Keep implementation modules independent of one another: their collaboration uses contracts injected by server configuration. SQL helpers sharing a connection remain in `managedagent.persistence` or `runtimebroker.persistence`. The Broker service lives in `runtimebroker.service`; physical clients and providers live in the adapter module. Maintenance applications retain their separate component scan.
+
+Only `server` creates executable JARs. Its ordinary library JAR and the existing `exec` and maintenance classifiers are under `server/target/`. Dependencies are ordinary JARs nested under `BOOT-INF/lib` in executable artifacts. Install the reactor before using the server POM directly or embedding the library in another Maven project:
+
+```bash
+mvn -pl server -am -DskipTests install
+mvn -f server/pom.xml spring-boot:run
+```
+
+Embedding imports `ManagedAgentConfiguration`; internal callbacks additionally import `ManagedAgentInternalConfiguration`. The standalone application also enables the public web configuration. Add the ordinary server artifact as the dependency; Maven resolves the other five modules transitively. The verification module is never installed or deployed. The standalone application YAML is excluded from the ordinary library JAR.
+
+Server configuration accessors use Lombok through the server POM's annotation processor; enable annotation processing when compiling through an IDE. Keep accessors with normalization, copying or fallback logic explicit. Lombok is excluded from executable and maintenance JARs and is not a runtime dependency of embedding applications.
+
+See the complete Maven boundary design: [English](../../docs/design/2026-10-29-managed-agent-maven-modules.md) | [简体中文](../../docs/design/2026-10-29-managed-agent-maven-modules.zh-CN.md).
 
 ## Integration status
 
@@ -119,10 +133,10 @@ results below do not establish completion of later slices.
 
 ## API contract
 
-`src/main/resources/openapi/managed-agent-public-api.openapi.json` is the
+`contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json` is the
 single source for the public and WebShell routes. `ManagedAgentApiContractTest`
 compares the mapped routes, the `ApiModels` records and real responses with it;
-`src/test/resources/openapi/contract-known-gaps.txt` lists the differences that
+`verification/src/test/resources/openapi/contract-known-gaps.txt` lists the differences that
 a later slice still has to close; none remain after D4. The WebShell client types are generated from the
 same file by `npm run generate:managed-agent-api` in `packages/web-shell`.
 The test-tree `SurfaceRegistry` names every mounted route, internal ones
@@ -218,19 +232,12 @@ alone cannot authorize it.
 O3 requires O2 publication to be configured, including
 `qwen.managed-agent.tool-publication.verification-bytes-per-second` and
 `qwen.managed-agent.tool-publication.max-verification-timeout`. These required
-O2 verification settings are separate from the O3 content-read timeout below.
+O2 verification settings are separate from the O3 content-read timeout,
+`artifacts.read-timeout`.
 
-All settings below use the `qwen.managed-agent.artifacts` prefix:
-
-| Setting                      | Default | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ---------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`                    | `false` | Enable projection and public reads when O2 object storage is configured. Receipt sources are recorded even while disabled.                                                                                                                                                                                                                                                                                                            |
-| `publish-original`           | `false` | Approve original stream representations for current Workspace readers.                                                                                                                                                                                                                                                                                                                                                                |
-| `publish-preview`            | `false` | Additionally approve bounded previews for every Session reader; requires original publication approval.                                                                                                                                                                                                                                                                                                                               |
-| `max-concurrent-reads`       | `4`     | Maximum simultaneous content responses per server process.                                                                                                                                                                                                                                                                                                                                                                            |
-| `read-timeout`               | `2m`    | Elapsed-time budget checked between stream chunks, capped by the fixed two-minute output read lease; storage requests also use the storage client's timeouts.                                                                                                                                                                                                                                                                         |
-| `read-revalidation-interval` | `5s`    | How often an in-flight download re-runs the access check (workspace grant, read policy, session lifecycle); `PT0S` re-verifies every chunk. A revocation lands at the first chunk boundary after the window's end; chunks written inside the window still reach the client — up to 1 MiB for a Range request, and up to a full `read-timeout`'s worth of a streaming download. Once the re-check denies, no further chunk is written. |
-| `projection-interval`        | `1s`    | Cadence of the tool-result projection pass (claim processing). Bound through a `@Scheduled` placeholder, so a suffix-less number binds as milliseconds — unlike the typed settings above.                                                                                                                                                                                                                                             |
+The O3 settings use the `qwen.managed-agent.artifacts` prefix; the
+[configuration reference](../../docs/users/managed-agent-configuration-reference.md#qwenmanaged-agentartifacts)
+lists each with its default and limits.
 
 A product can replace `ManagedArtifactPolicy` for narrower publication or
 actor rules. Published previews persist in shared events. Policy changes do
@@ -335,7 +342,8 @@ export QWEN_MANAGED_AGENT_HARNESS_TOKEN='replace-me'
 export QWEN_MANAGED_AGENT_CAPABILITY_DIGEST='sha256:replace-with-64-hex-characters'
 export QWEN_MANAGED_AGENT_WORKSPACE_ID='local-dev-workspace'
 
-mvn spring-boot:run
+mvn -pl server -am -DskipTests install
+mvn -f server/pom.xml spring-boot:run
 ```
 
 Instead of the token and digest, `QWEN_MANAGED_AGENT_HARNESS_CREDENTIALS_FILE`
@@ -357,15 +365,10 @@ refuses, by file and line, any line it might read differently from systemd or
 a shell, such as a continuation, a carriage return from CRLF line endings, a
 `;` comment, an unterminated quote or text after a closing quote.
 
-Create a Session:
-
-```bash
-curl -sS http://127.0.0.1:8080/v1/agents/sessions \
-  -H 'Content-Type: application/json' \
-  -H 'X-Qwen-Tenant-Id: demo' \
-  -H 'Idempotency-Key: create-1' \
-  -d '{"agent_id":"qwen-code","input":[{"type":"input_text","text":"hello"}]}'
-```
+Create a Session and read its events as in
+[Run a first Session](../../docs/users/managed-agent-reference-deployment.md#run-a-first-session);
+the requests are the same against this development server. The Session
+examples below use the same `default` tenant.
 
 The returned `id` is an RFC UUID and is the canonical identity used by
 the public API, Hosted Harness transcript, and Runtime Broker. The server does
@@ -395,32 +398,32 @@ not carry the operation id yet. See the
 curl -sS -X PATCH \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID \
   -H 'Content-Type: application/json' \
-  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'X-Qwen-Tenant-Id: default' \
   -H 'Idempotency-Key: rename-1' \
   -d '{"title":"investigate checkout failure"}'
 
 curl -sS -X POST \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/close \
-  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'X-Qwen-Tenant-Id: default' \
   -H 'Idempotency-Key: close-1'
 
 curl -sS \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/operations/$OPERATION_ID \
-  -H 'X-Qwen-Tenant-Id: demo'
+  -H 'X-Qwen-Tenant-Id: default'
 
 curl -sS -X POST \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/archive \
-  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'X-Qwen-Tenant-Id: default' \
   -H 'Idempotency-Key: archive-1'
 
 curl -sS -X POST \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID/unarchive \
-  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'X-Qwen-Tenant-Id: default' \
   -H 'Idempotency-Key: unarchive-1'
 
 curl -sS -X DELETE \
   http://127.0.0.1:8080/v1/agents/sessions/$SESSION_ID \
-  -H 'X-Qwen-Tenant-Id: demo' \
+  -H 'X-Qwen-Tenant-Id: default' \
   -H 'Idempotency-Key: delete-1'
 ```
 
@@ -671,18 +674,9 @@ chains stay the authority; the ledger locates, leases and indexes. The
 land. Design:
 [managed automation runtime](../../docs/design/2026-10-07-managed-automation-runtime.md).
 
-All settings below use the `qwen.managed-agent.automation` prefix:
-
-| Setting              | Default | Meaning                                                                                                                                                                                                              |
-| -------------------- | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`            | `false` | Run the scanner and admit the mutation routes (`QWEN_MANAGED_AGENT_AUTOMATION_ENABLED`); the read routes answer either way.                                                                                          |
-| `scan-delay`         | `10s`   | Fixed delay between scanner ticks.                                                                                                                                                                                   |
-| `lease`              | `60s`   | How long one scanner holds a definition; a stalled scanner yields it afterwards, and the fence it held no longer writes.                                                                                             |
-| `late-tolerance`     | `5m`    | A slot older than this when the scanner sees it is late and follows the definition's catch-up policy (`none`, `latest`, `bounded`).                                                                                  |
-| `lookback`           | `24h`   | Slots older than this are neither fired nor recorded; it bounds every catch-up by age.                                                                                                                               |
-| `max-slots-per-tick` | `1000`  | Slots **returned** per definition per tick: the walk itself follows the lookback window (its minutes are enumerated regardless), and the result set's surplus is cut at the oldest end and logged.                   |
-| `concurrency`        | `4`     | Non-terminal runs an `allow` definition may hold at once; beyond it an occurrence is recorded `skipped` with reason `count_limit`.                                                                                   |
-| `scanner-threads`    | `4`     | Definition rows one tick works at once on its bounded pool; the tick joins them before returning. A row leases from its claim time, never from the tick's start, so a long tick hands out no already-expired leases. |
+The settings use the `qwen.managed-agent.automation` prefix; the
+[configuration reference](../../docs/users/managed-agent-configuration-reference.md#qwenmanaged-agentautomation)
+lists each with its default and limits.
 
 ## Full WebShell dual-path development entry
 
@@ -719,7 +713,8 @@ source <printed spring.env path>
 export SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'
 export SPRING_DATASOURCE_USERNAME='qwen'
 export SPRING_DATASOURCE_PASSWORD='replace-me'
-mvn -f packages/managed-agent-server/pom.xml spring-boot:run
+mvn -f packages/managed-agent-server/pom.xml -pl server -am -DskipTests install
+mvn -f packages/managed-agent-server/server/pom.xml spring-boot:run
 ```
 
 The daemon, Harness and Java URLs print at startup with the `spring.env`
@@ -1148,30 +1143,14 @@ The YAML-only ring, the retirement query, the operator-recovery ring and the
 single-key-pair CSI/migration entries are normative in [Rotate the Runtime credential key](../../docs/users/managed-agent-reference-deployment.md#rotate-the-runtime-credential-key),
 with the rationale in the [rotation design](../../docs/design/2026-10-15-runtime-credential-key-rotation.md).
 
-Two optional knobs change how the Broker listens and how long it waits for a
-dispatched v3 execution's result:
+Two optional settings change how the Broker listens and how long it waits for
+a dispatched v3 execution's result: `runtime-broker.allow-non-loopback` and
+`runtime-broker.v3-result-window`. Read their entries in the
+[configuration reference](../../docs/users/managed-agent-configuration-reference.md#qwenmanaged-agentruntime-broker)
+before changing either.
 
-```bash
-# Default false: the Broker refuses to bind a non-loopback address. This face
-# is plaintext HTTP with one global bearer token and no per-tenant
-# authorization, so set it only behind a layer that terminates TLS and
-# authorizes callers — restricting the network alone still puts that token on
-# the wire, and whoever reads it owns every execution the Broker admits.
-export QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK='false'
-# Default 30m, minimum 1s: how long the Broker keeps polling the worker for
-# a dispatched v3 execution's result. When the window lapses the execution
-# is marked UNKNOWN instead of polling on, so a value shorter than your
-# longest tool call degrades that call to UNKNOWN. A suffix-less number
-# binds as seconds: startup refuses a value below the 1s floor but accepts
-# a stale milliseconds-style override (1800000 becomes 1800000 seconds),
-# so always write the suffix. Raising it above 30m buys nothing on the
-# shipped path: the TypeScript client stops observing a v3 execution at
-# its own fixed 30-minute deadline.
-export QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW='30m'
-```
-
-The same unit rule applies to every `qwen.managed-agent.*` duration setting: a
-suffix-less number binds as seconds except for `runtime-broker.retention.max-age`,
+Every `qwen.managed-agent.*` duration setting binds a suffix-less number as
+seconds except for `runtime-broker.retention.max-age`,
 which binds as days, and the millisecond-bound settings below.
 Millisecond-bound settings — `auth.allowed-drift` (so
 a stale `300000` keeps meaning five minutes instead of widening the
@@ -1268,7 +1247,7 @@ Sessions. Persisted bound Sessions use the private Workspace execution path
 below.
 
 Managed Server and Runtime Broker share the single 38-table baseline in
-[`src/main/resources/db/managed-schema/V1__managed_schema.sql`](src/main/resources/db/managed-schema/V1__managed_schema.sql).
+[`persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql`](persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql).
 Until the first formal Managed Agent release, schema changes update this V1 baseline
 in place. Do not add V2+ migrations or increment the database schema version before
 that release. Recreate development catalogs when the baseline changes; pre-release
@@ -1290,15 +1269,10 @@ The former separate Broker `schema.sql` has been removed.
 
 Runtime JDBC retention is disabled by default. It removes old terminal
 executions, Sessions and bindings in bounded batches on a dedicated scheduler;
-it does not stop workers or delete Workspace files. Configure
-`qwen.managed-agent.runtime-broker.retention` with these environment variables:
-
-| Variable                                          | Default | Meaning                                                                                                                               |
-| ------------------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_ENABLED`    | `false` | Enable cleanup when the Runtime Broker is also enabled                                                                                |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_MAX_AGE`    | `30d`   | Minimum age of eligible terminal records; must be at least 1ms; unit-less values use days; explicit units such as `12h` are preserved |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_BATCH_SIZE` | `100`   | Per-tick bound on scanned bindings, scanned children and total deleted rows; 1–1000                                                   |
-| `QWEN_MANAGED_AGENT_RUNTIME_RETENTION_SCAN_DELAY` | `1m`    | Positive delay between ticks, at least 1ms                                                                                            |
+it does not stop workers or delete Workspace files. Its settings use the
+`qwen.managed-agent.runtime-broker.retention` prefix; the
+[configuration reference](../../docs/users/managed-agent-configuration-reference.md#qwenmanaged-agentruntime-brokerretention)
+lists them with their environment variables, defaults and limits.
 
 Recovery records, Workspace holders and CSI retirement keep their bindings.
 Child Session lineage also keeps a binding until its canonical parent child_run
@@ -1431,8 +1405,9 @@ crash. Database credentials come from `W1_JDBC_URL`, `W1_JDBC_USER` and
 `W1_JDBC_PASSWORD` environment variables:
 
 ```bash
-mvn -q -DskipTests compile exec:java \
-  -Dexec.mainClass=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain \
+mvn -q -pl server -am -DskipTests -Dgpg.skip=true install
+mvn -q -pl server exec:java \
+  -Dexec.mainClass=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceStorageRegistrationMain \
   -Dexec.args='register tenant-a storage-a /absolute/canonical/workspace-a <operation-uuid> --offline-confirmed'
 ```
 
@@ -1443,7 +1418,7 @@ wraps. The same entry is available from a shipped Spring Boot fat jar, without t
 
 ```bash
 java -cp /path/to/app.jar \
-  -Dloader.main=com.alibaba.qwen.code.managedagent.persistence.WorkspaceStorageRegistrationMain \
+  -Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceStorageRegistrationMain \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   register tenant-a storage-a /absolute/canonical/workspace-a '<operation-uuid>' --offline-confirmed
 ```
@@ -1542,7 +1517,7 @@ networks whose peers you trust.
 
 ## Managed Session Store verification
 
-Unit and H2 contract tests run with the normal Maven test phase. `mvn verify`
+Run Maven from the parent directory. Unit and H2 tests run in `verification` with the normal test phase; all original profile names and test families remain available from the parent reactor. Focused commands such as `mvn -Dtest=ModuleArchitectureTest,ManagedAgentEmbeddingTest test` build required production modules first. Test reports are under `verification/target/{surefire-reports,failsafe-reports}` and aggregate coverage under `verification/target/site/jacoco-aggregate`. Do not run the verification POM alone against stale installed same-version artifacts. `mvn clean verify` checks the compiled module boundaries, the existing test families and packaged server artifacts. The embedding-host fixture is under `verification/src/test/embedding-host`; after installing the production reactor, run its normal and `embedded` profiles to verify an independent host. `mvn verify`
 additionally runs the SpotBugs high-confidence gate (Maven 3.8.9+): a new
 warning fails the build, and a false positive goes into
 `spotbugs-excludes.xml` with a justification in the PR. To run the static
@@ -1639,7 +1614,7 @@ QWEN_MANAGED_HOOK_CGROUP_ROOT=/sys/fs/cgroup/your-delegated-root \
   -Dmysql.user=root -Dmysql.password= verify
 ```
 
-Missing Linux/MySQL/cgroup prerequisites are not acceptance. This selector verifies only the extension class; it does not establish that the complete Hosted profile passed. Evidence is saved before forced fixture teardown under `target/failsafe-reports/hosted-extension-evidence/` and is included in the existing CI report upload. The interrupted MCP case leaves its public Turn `RUNNING` with durable `ma_turn.error_code = hosted_runtime_recovery_blocked` and ordinary execution `UNKNOWN`, rejects new input and close with `409 turn_active`, and does not replay the physical effect; successful cleanup is established by the separate healthy-close case. This gate uses a controlled loopback model and local stdio transport, so it does not establish upstream-model, remote transport, reboot, cross-machine, SSH MCP/Hook, or production acceptance. See the complete [English design](../../docs/design/2026-10-16-managed-extension-acceptance.md) and [Chinese design](../../docs/design/2026-10-16-managed-extension-acceptance.zh-CN.md).
+Missing Linux/MySQL/cgroup prerequisites are not acceptance. This selector verifies only the extension class; it does not establish that the complete Hosted profile passed. Evidence is saved before forced fixture teardown under `verification/target/failsafe-reports/hosted-extension-evidence/` and is included in the existing CI report upload. The interrupted MCP case leaves its public Turn `RUNNING` with durable `ma_turn.error_code = hosted_runtime_recovery_blocked` and ordinary execution `UNKNOWN`, rejects new input and close with `409 turn_active`, and does not replay the physical effect; successful cleanup is established by the separate healthy-close case. This gate uses a controlled loopback model and local stdio transport, so it does not establish upstream-model, remote transport, reboot, cross-machine, SSH MCP/Hook, or production acceptance. See the complete [English design](../../docs/design/2026-10-16-managed-extension-acceptance.md) and [Chinese design](../../docs/design/2026-10-16-managed-extension-acceptance.zh-CN.md).
 
 ## Real-model end-to-end check
 
@@ -1823,10 +1798,37 @@ redrive restates the active attachment instead of wedging the Turn:
 npm run test:e2e:managed-harness-restart-approval-load-reply-lost
 ```
 
+A crash between the main stream's durable Finished marker and the assistant
+commit (B3a) holds the replacement inside that window via a test-gated Harness
+hook (`QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT`, never set in production), set
+only on the generation that must crash. Once its post-tool round records
+Finished, the hook holds before the assistant commit and the runner kills it
+there; the next generation must reissue the saved request deep-equal and
+project one terminal with the recovered answer, rather than compensate an
+already-committed output:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-finished-before-commit
+```
+
+A crash in the mixed-sibling approval gap (A3's native half) approves a two-call
+batch one sibling at a time and holds the replacement on the first approval it
+asks after the earlier sibling is decided, via a test-gated Harness hook
+(`QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL`, never set in production) set only on
+the generation that must crash. The runner kills it there; the next generation
+must re-hang the original pending Action with its original deadline, require that
+sibling's own Allow rather than inherit the earlier one, leave the decided sibling
+un-re-asked, and settle both calls once each in their original order:
+
+```bash
+npm run test:e2e:managed-harness-restart-approval-sibling-approval
+```
+
 They write their evidence under `.qwen/investigations/g3-step3-implementation/`;
 `G3_VERIFY_REPORT_DIR` overrides the directory. The remaining rows stay
-focused or integration tested for now: mixed calls and rewritten inputs
-across a replacement, Hook/MCP/child uncertainty, the attempt and stream
+focused or integration tested for now: the rewritten-input and Hook-no-rerun half
+of mixed calls (a commandStep follow-up, since a native continuation refuses
+Hook/MCP sessions), Hook/MCP/child uncertainty, the attempt and stream
 identities plus the live SSE view, the round and cost budgets, and the
 mixed-version reader/bundle closure (#14481).
 
