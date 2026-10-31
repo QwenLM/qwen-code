@@ -3685,7 +3685,7 @@ try {
               mysqlPort,
               `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(siblingApprovalOptions!.continuationRef.resourceId)}`,
             ),
-          );
+          ) as SavedApprovalPlan;
           if (
             siblingPlan.stage !== 'approval' ||
             siblingPlan.approvalOrdinal !== 1 ||
@@ -3695,6 +3695,29 @@ try {
             throw new Error(
               `Sibling-approval crash plan is not the pending second sibling: ${JSON.stringify(siblingPlan)}`,
             );
+          }
+          // The per-call Action ID may be null before the crash, so anchor each
+          // member to the first approval's saved call identities and reject any
+          // Action ID that is already present on the wrong member.
+          const expectedActionIds = [originalApprovalId!, siblingApprovalId!];
+          for (const [
+            ordinal,
+            originalCall,
+          ] of originalApprovalPlan!.calls.entries()) {
+            const siblingCall = siblingPlan.calls[ordinal];
+            if (
+              !siblingCall ||
+              siblingCall.runtimeCallId !== originalCall.runtimeCallId ||
+              siblingCall.partIndex !== originalCall.partIndex ||
+              siblingCall.prepareKey !== originalCall.prepareKey ||
+              siblingCall.requestDigest !== originalCall.requestDigest ||
+              (siblingCall.actionId != null &&
+                siblingCall.actionId !== expectedActionIds[ordinal])
+            ) {
+              throw new Error(
+                `Sibling-approval crash plan changed call/action binding at ordinal ${ordinal}: ${JSON.stringify(siblingCall)} != ${JSON.stringify(originalCall)}`,
+              );
+            }
           }
           saveEvidence('sibling-approval-barrier.json', {
             fault: approvalFault,
