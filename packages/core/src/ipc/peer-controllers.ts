@@ -168,7 +168,8 @@ export type PeerControllerErrorCode =
   | 'duplicate-label'
   | 'too-many'
   | 'invalid-registry'
-  | 'unsafe-path';
+  | 'unsafe-path'
+  | 'registry-changed';
 
 export class PeerControllerError extends Error {
   constructor(
@@ -180,13 +181,16 @@ export class PeerControllerError extends Error {
   }
 }
 
-/** The registry changed between a mutation's read and its write. */
-class RegistryChangedError extends Error {
-  constructor() {
+/**
+ * The registry changed between a mutation's read and its write. The
+ * mutation is redone, and only the last attempt's error reaches a caller.
+ */
+class RegistryChangedError extends PeerControllerError {
+  constructor(filePath: string) {
     super(
-      'The controller registry kept changing while this write was in progress; nothing was saved. Try again.',
+      `${filePath} kept changing while this write was in progress; nothing was saved. Try again.`,
+      'registry-changed',
     );
-    this.name = 'RegistryChangedError';
   }
 }
 
@@ -437,7 +441,7 @@ async function writeRegistry(
 ): Promise<void> {
   await assertWritablePath(filePath);
   if (readRegistryTextSync(filePath) !== basis) {
-    throw new RegistryChangedError();
+    throw new RegistryChangedError(filePath);
   }
   await atomicWriteJSON(filePath, registry, {
     mode: REGISTRY_FILE_MODE,

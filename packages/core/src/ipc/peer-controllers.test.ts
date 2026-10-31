@@ -75,19 +75,20 @@ const registryJson = (controllers: unknown, extra: object = {}) =>
   });
 
 /**
- * Lands `rivalWrite` after the next mutation has read the registry but
- * before it commits, as a waiter that took over a stalled holder's lock
- * would. The mutation reads synchronously as soon as it holds the lock
- * and then waits on I/O, so a `setImmediate` queued at lock time runs in
- * between.
+ * Lands `rivalWrite` after each of the next `reads` mutation attempts has
+ * read the registry but before it commits, as a waiter that took over a
+ * stalled holder's lock would. The mutation reads synchronously as soon
+ * as it holds the lock and then waits on I/O, so a `setImmediate` queued
+ * at lock time runs in between.
  */
-function landWriteAfterNextRead(rivalWrite: () => void) {
+function landWriteAfterReads(rivalWrite: () => void, reads = 1) {
   const realLock = lockfile.lock.bind(lockfile);
+  let left = reads;
   return vi
     .spyOn(lockfile, 'lock')
-    .mockImplementationOnce(async (file, options) => {
+    .mockImplementation(async (file, options) => {
       const release = await realLock(file, options);
-      setImmediate(rivalWrite);
+      if (left-- > 0) setImmediate(rivalWrite);
       return release;
     });
 }
@@ -291,13 +292,39 @@ describe('addPeerController', () => {
       tokenHash: 'a'.repeat(64),
       createdAt: 1,
     };
-    const lockSpy = landWriteAfterNextRead(() =>
+    const lockSpy = landWriteAfterReads(() =>
       writeFileSync(registryPath, registryJson([rival])),
     );
     try {
       const added = await add('voice');
       expect((await readRaw()).controllers).toEqual([rival, added.record]);
       expect(lockSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      lockSpy.mockRestore();
+    }
+  });
+
+  it('gives up, saving nothing, when the registry keeps changing', async () => {
+    // A rival lands a fresh write inside each of five attempts, more than
+    // the redo bound allows.
+    const rivals: PeerControllerRecord[] = [];
+    const lockSpy = landWriteAfterReads(() => {
+      rivals.push({
+        id: `c_0000000${rivals.length}`,
+        label: `rival ${rivals.length}`,
+        tokenHash: 'a'.repeat(64),
+        createdAt: 1,
+      });
+      writeFileSync(registryPath, registryJson(rivals));
+    }, 5);
+    try {
+      const failure = await add('voice').catch((error: unknown) => error);
+      // The CLI reports a PeerControllerError as it stands instead of
+      // blaming the file.
+      expect(failure).toBeInstanceOf(PeerControllerError);
+      expect(failure).toMatchObject({ code: 'registry-changed' });
+      expect(lockSpy).toHaveBeenCalledTimes(3);
+      expect((await readRaw()).controllers).toEqual(rivals);
     } finally {
       lockSpy.mockRestore();
     }
@@ -453,7 +480,7 @@ describe('removePeerController', () => {
     const first = await add('one');
     const second = await add('two');
     // The rival revokes "two" while this call is revoking "one".
-    const lockSpy = landWriteAfterNextRead(() =>
+    const lockSpy = landWriteAfterReads(() =>
       writeFileSync(registryPath, registryJson([first.record])),
     );
     try {

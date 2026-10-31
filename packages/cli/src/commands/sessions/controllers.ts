@@ -75,9 +75,10 @@ async function handleAdd(argv: AddArgs): Promise<void> {
   try {
     added = await addPeerController(argv.label ?? '');
   } catch (error) {
-    // A PeerControllerError is a decision this command made about the
-    // user's input, so it is reported as it stands; anything else is an
-    // I/O failure worth naming the file for.
+    // A PeerControllerError explains itself (a refused label, an unusable
+    // registry, or one that kept changing under the write), so it is
+    // reported as it stands; anything else is an I/O failure worth naming
+    // the file for.
     writeStderrLine(
       error instanceof PeerControllerError
         ? `Error: ${error.message}`
