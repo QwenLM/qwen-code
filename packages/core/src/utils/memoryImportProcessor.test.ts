@@ -5,7 +5,9 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import {
   processImports,
@@ -593,6 +595,177 @@ Inner content
       // Same file reached via different relative segments.
       const dotPath = path.join('.', '..', path.basename(allowed), 'file.md');
       expect(valid(dotPath, [allowed])).toBe(true);
+    });
+
+    function makeSymlinkFixture() {
+      const root = fsSync.mkdtempSync(
+        path.join(fsSync.realpathSync(os.tmpdir()), 'qwen-import-'),
+      );
+      const allowedDir = path.join(root, 'allowed');
+      const outsideDir = path.join(root, 'outside');
+      fsSync.mkdirSync(allowedDir);
+      fsSync.mkdirSync(outsideDir);
+      fsSync.writeFileSync(path.join(allowedDir, 'real.md'), 'ok');
+      fsSync.writeFileSync(path.join(outsideDir, 'sensitive.md'), 'secret');
+      return {
+        root,
+        allowedDir,
+        outsideDir,
+        dispose: () => fsSync.rmSync(root, { recursive: true, force: true }),
+      };
+    }
+
+    function createSymlink(
+      target: string,
+      linkPath: string,
+      type: 'dir' | 'file',
+    ): boolean {
+      try {
+        fsSync.symlinkSync(target, linkPath, type);
+        return true;
+      } catch (error: unknown) {
+        if (
+          process.platform === 'win32' &&
+          error &&
+          typeof error === 'object' &&
+          'code' in error &&
+          error.code === 'EPERM'
+        ) {
+          return false;
+        }
+        throw error;
+      }
+    }
+
+    it('should reject paths that escape allowed directories through symbolic links', (ctx) => {
+      const fixture = makeSymlinkFixture();
+      try {
+        if (
+          !createSymlink(
+            fixture.outsideDir,
+            path.join(fixture.allowedDir, 'sym_outside'),
+            'dir',
+          )
+        ) {
+          // A bare `return` would report as a pass with no assertion executed.
+          ctx.skip();
+          return;
+        }
+        expect(
+          validateImportPath('real.md', fixture.allowedDir, [
+            fixture.allowedDir,
+          ]),
+        ).toBe(true);
+        expect(
+          validateImportPath('sym_outside/sensitive.md', fixture.allowedDir, [
+            fixture.allowedDir,
+          ]),
+        ).toBe(false);
+      } finally {
+        fixture.dispose();
+      }
+    });
+
+    it('should reject dangling symbolic links that point outside allowed directories', (ctx) => {
+      const fixture = makeSymlinkFixture();
+      try {
+        if (
+          !createSymlink(
+            path.join(fixture.outsideDir, 'missing.md'),
+            path.join(fixture.allowedDir, 'dangling.md'),
+            'file',
+          )
+        ) {
+          ctx.skip();
+          return;
+        }
+        expect(
+          validateImportPath('dangling.md', fixture.allowedDir, [
+            fixture.allowedDir,
+          ]),
+        ).toBe(false);
+      } finally {
+        fixture.dispose();
+      }
+    });
+
+    it('should allow imports under an allowed directory reached through a symbolic link', (ctx) => {
+      const fixture = makeSymlinkFixture();
+      try {
+        const realDir = path.join(fixture.root, 'real');
+        fsSync.mkdirSync(realDir);
+        fsSync.writeFileSync(path.join(realDir, 'file.md'), 'ok');
+        if (!createSymlink(realDir, path.join(fixture.root, 'link'), 'dir')) {
+          ctx.skip();
+          return;
+        }
+        expect(
+          validateImportPath(
+            path.join(fixture.root, 'link', 'file.md'),
+            fixture.root,
+            [realDir],
+          ),
+        ).toBe(true);
+        // The mirror direction: the root is spelled through the link while the
+        // import uses the real path. The root has to be canonicalized too, or
+        // every import under a symlinked project root is rejected.
+        expect(
+          validateImportPath(path.join(realDir, 'file.md'), fixture.root, [
+            path.join(fixture.root, 'link'),
+          ]),
+        ).toBe(true);
+      } finally {
+        fixture.dispose();
+      }
+    });
+
+    it('should reject a relative link target that climbs out through a symlink', async (ctx) => {
+      const fixture = makeSymlinkFixture();
+      try {
+        // `sub/..` looks like it stays in the project, but the kernel expands
+        // `sub` first, so the read lands one level above the project root.
+        fsSync.writeFileSync(
+          path.join(fixture.root, 'secret.md'),
+          'OUTSIDE-SECRET-MARKER',
+        );
+        if (
+          !createSymlink(
+            fixture.outsideDir,
+            path.join(fixture.allowedDir, 'sub'),
+            'dir',
+          ) ||
+          !createSymlink(
+            './sub/../secret.md',
+            path.join(fixture.allowedDir, 'note.md'),
+            'file',
+          )
+        ) {
+          ctx.skip();
+          return;
+        }
+        expect(
+          validateImportPath('note.md', fixture.allowedDir, [
+            fixture.allowedDir,
+          ]),
+        ).toBe(false);
+
+        // The guard's verdict is what keeps the bytes out of the output, so
+        // pin the read as well: every read answers the marker, which must not
+        // reach either format.
+        serve('OUTSIDE-SECRET-MARKER');
+        for (const format of ['tree', 'flat'] as const) {
+          const { content } = await processImports(
+            '@note.md',
+            fixture.allowedDir,
+            undefined,
+            fixture.allowedDir,
+            format,
+          );
+          expect(content).not.toContain('OUTSIDE-SECRET-MARKER');
+        }
+      } finally {
+        fixture.dispose();
+      }
     });
   });
 });
