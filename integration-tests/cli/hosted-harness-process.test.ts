@@ -379,7 +379,7 @@ describe(
           {
             failed: {
               type: 'turn_error',
-              data: { code: 'hosted_turn_failed' },
+              data: { code: 'model_request_failed' },
             },
             cancelled: {
               type: 'turn_complete',

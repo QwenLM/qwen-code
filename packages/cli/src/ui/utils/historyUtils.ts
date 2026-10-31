@@ -180,7 +180,7 @@ export function realUserPromptTexts(history: readonly HistoryItem[]): string[] {
         typeof item.text === 'string' &&
         item.text.trim() !== '',
     )
-    .map((item) => item.text);
+    .map((item) => item.recallText ?? item.text);
 }
 
 /**

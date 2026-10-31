@@ -56,6 +56,9 @@ vi.mock('@opentui/core', () => ({
 vi.mock('@opentui/react', async () => {
   const React = await import('react');
   return {
+    useAppContext: (
+      await import('../../test-utils/opentui-catalog.js')
+    ).catalogAppContext(mocks.state.keyboardHandlers),
     useKeyboard: (handler: (key: unknown) => void) => {
       const ref = React.useRef(handler);
       ref.current = handler;

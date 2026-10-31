@@ -6,6 +6,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
+import { fileURLToPath } from 'node:url';
 
 // Use vi.hoisted to define mock functions before vi.mock is hoisted
 const { mockSpawn, mockExecSync, clipboardMockState, mockDebugLogger } =
@@ -167,6 +168,38 @@ function createMockChild(
 }
 
 /**
+ * Create a mock child process that emits stdout data as separate byte chunks.
+ * A pipe delivers data at arbitrary byte offsets, so a payload split inside a
+ * multi-byte UTF-8 sequence is the case this exists for.
+ */
+function createChunkedMockChild(chunks: Buffer[], exitCode: number = 0) {
+  const stdout = new EventEmitter() as EventEmitter & {
+    pipe: (dest: EventEmitter) => EventEmitter;
+  };
+  stdout.pipe = (dest: EventEmitter) => dest;
+  const stderr = new EventEmitter();
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: typeof stdout;
+    stderr: typeof stderr;
+    kill: ReturnType<typeof vi.fn>;
+    killed: boolean;
+  };
+  child.stdout = stdout;
+  child.stderr = stderr;
+  child.kill = vi.fn();
+  child.killed = false;
+
+  process.nextTick(() => {
+    for (const chunk of chunks) {
+      stdout.emit('data', chunk);
+    }
+    child.emit('close', exitCode);
+  });
+
+  return child;
+}
+
+/**
  * Create a mock child process that fails to spawn.
  *
  * Emits `close` after `error`, because that is what Node does: a child that
@@ -283,6 +316,7 @@ describe('clipboardUtils', () => {
   let cleanupOldClipboardImages: (dir?: string) => Promise<void>;
   let writeOsc52: (text: string) => boolean;
   let isWaylandSession: () => boolean;
+  let readClipboardText: () => Promise<string | null>;
 
   beforeEach(async () => {
     // Clean up /tmp/test directory from previous runs to ensure
@@ -309,6 +343,7 @@ describe('clipboardUtils', () => {
     cleanupOldClipboardImages = mod.cleanupOldClipboardImages;
     writeOsc52 = mod.writeOsc52;
     isWaylandSession = mod.isWaylandSession;
+    readClipboardText = mod.readClipboardText;
     mod.resetLinuxClipboardTool();
     // Set up Wayland env as default
     vi.stubEnv('WAYLAND_DISPLAY', 'wayland-0');
@@ -385,6 +420,396 @@ describe('clipboardUtils', () => {
 
       const result = await clipboardHasImage();
       expect(result).toBe(false);
+    });
+  });
+
+  describe('readClipboardText', () => {
+    // The file's `beforeEach` only clears call history, not implementations, so
+    // the clipboard simulator below has to be withdrawn by hand. Left in place
+    // it would answer every later test's spawn too, and those tests would pass
+    // or fail on the order they ran in rather than on their own setup.
+    afterEach(() => {
+      mockSpawn.mockReset();
+    });
+
+    /**
+     * Answer the way a real clipboard does: the enumeration query reports the
+     * types on offer, and an individual read only succeeds for a type that was
+     * actually listed. Payloads are keyed by the exact reported name, so asking
+     * for a normalised name that was never offered — or reading the `TARGETS`
+     * atom as if it were content — comes back empty.
+     */
+    function mockClipboard(types: string[], payloads: Record<string, string>) {
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('--list-types')) {
+          return createMockChild(
+            types.join('\n'),
+            types.length ? 0 : 1,
+            types.length ? '' : 'Nothing is copied',
+          );
+        }
+        const requested =
+          args[args.indexOf(args.includes('-t') ? '-t' : '--type') + 1];
+        if (requested === 'TARGETS') {
+          return createMockChild(types.join('\n'), 0);
+        }
+        const payload = payloads[requested] ?? '';
+        return createMockChild(payload, payload ? 0 : 1);
+      });
+    }
+
+    /** Type names the reader actually asked for, in order. */
+    function requestedTypes(): string[] {
+      return mockSpawn.mock.calls
+        .map(([, args]) => args as string[])
+        .filter(
+          (args) => !args.includes('--list-types') && !args.includes('TARGETS'),
+        )
+        .map(
+          (args) =>
+            args[args.indexOf(args.includes('-t') ? '-t' : '--type') + 1],
+        );
+    }
+
+    // fileURLToPath follows host semantics; on Windows these URIs have no
+    // drive letter and the production catch keeps the raw URI instead, so the
+    // expectation is derived rather than hardcoded POSIX.
+    const fileUriToPath = (uri: string): string => {
+      try {
+        return fileURLToPath(uri);
+      } catch {
+        return uri;
+      }
+    };
+
+    const cases: Array<{
+      name: string;
+      tool: 'wl-paste' | 'xclip';
+      types: string[];
+      payloads: Record<string, string>;
+      expected: string | null;
+      reads: string[];
+    }> = [
+      {
+        name: 'reads the text offer back under the exact name it was given',
+        tool: 'wl-paste',
+        types: ['image/png', 'text/plain;charset=utf-8'],
+        payloads: { 'text/plain;charset=utf-8': 'prose' },
+        expected: 'prose',
+        reads: ['text/plain;charset=utf-8'],
+      },
+      {
+        name: 'prefers text over the uri-list offered alongside it',
+        tool: 'wl-paste',
+        types: ['text/uri-list', 'text/plain'],
+        payloads: {
+          'text/uri-list': 'https://not-this',
+          'text/plain': 'the prose',
+        },
+        expected: 'the prose',
+        reads: ['text/plain'],
+      },
+      {
+        name: 'reads a uri-list, in its CRLF form, when there is no plain text',
+        tool: 'wl-paste',
+        types: ['text/uri-list'],
+        payloads: {
+          'text/uri-list': 'https://a.example\r\nhttps://b.example\r\n',
+        },
+        expected: 'https://a.example\nhttps://b.example',
+        reads: ['text/uri-list'],
+      },
+      {
+        name: 'converts file:// URIs in a uri-list to local paths',
+        tool: 'wl-paste',
+        types: ['text/uri-list'],
+        payloads: {
+          'text/uri-list': 'file:///a/shot.png\r\nfile:///a/My%20Shot.png\r\n',
+        },
+        expected: [
+          fileUriToPath('file:///a/shot.png'),
+          fileUriToPath('file:///a/My%20Shot.png'),
+        ].join('\n'),
+        reads: ['text/uri-list'],
+      },
+      {
+        name: 'converts every file: URI spelling and leaves remote hosts raw',
+        tool: 'wl-paste',
+        types: ['text/uri-list'],
+        payloads: {
+          'text/uri-list':
+            'File:///a/shot.png\r\nfile:/a/two.png\r\nfile://attacker.example.com/share/shot.png\r\n',
+        },
+        // The remote line is hardcoded: on Windows fileURLToPath would turn
+        // it into a UNC path, which the conversion must never produce.
+        expected: [
+          fileUriToPath('File:///a/shot.png'),
+          fileUriToPath('file:/a/two.png'),
+          'file://attacker.example.com/share/shot.png',
+        ].join('\n'),
+        reads: ['text/uri-list'],
+      },
+      {
+        name: 'drops uri-list comment lines',
+        tool: 'wl-paste',
+        types: ['text/uri-list'],
+        payloads: {
+          'text/uri-list': '# a comment\r\nfile:///a/shot.png\r\n',
+        },
+        expected: fileUriToPath('file:///a/shot.png'),
+        reads: ['text/uri-list'],
+      },
+      {
+        name: 'maps X11 atoms onto text without reading TARGETS as content',
+        tool: 'xclip',
+        types: ['TARGETS', 'TIMESTAMP', 'UTF8_STRING', 'STRING'],
+        payloads: {
+          TARGETS: 'UTF8_STRING\nSTRING',
+          UTF8_STRING: 'x11 prose',
+          STRING: 'fallback',
+        },
+        expected: 'x11 prose',
+        reads: ['UTF8_STRING'],
+      },
+      {
+        name: 'falls through to the next text atom when the first is empty',
+        tool: 'xclip',
+        types: ['UTF8_STRING', 'STRING'],
+        payloads: { UTF8_STRING: '', STRING: 'from STRING' },
+        expected: 'from STRING',
+        reads: ['UTF8_STRING', 'STRING'],
+      },
+      {
+        // ICCCM leaves the advertisement order to the selection owner; the
+        // legacy STRING atom is Latin-1, so a co-offered UTF-8 representation
+        // of the same selection is always the better read.
+        name: 'prefers a UTF-8 offer over the legacy STRING atom listed before it',
+        tool: 'xclip',
+        types: ['TARGETS', 'STRING', 'UTF8_STRING'],
+        payloads: { STRING: 'latin', UTF8_STRING: 'utf8' },
+        expected: 'utf8',
+        reads: ['UTF8_STRING'],
+      },
+      {
+        name: 'asks for nothing when the clipboard holds only an image',
+        tool: 'wl-paste',
+        types: ['image/png'],
+        payloads: { 'image/png': 'binary' },
+        expected: null,
+        reads: [],
+      },
+      {
+        name: 'asks for nothing when no listed type is text',
+        tool: 'wl-paste',
+        types: ['application/x-ole-meta', 'image/bmp'],
+        payloads: { 'application/x-ole-meta': 'blob' },
+        expected: null,
+        reads: [],
+      },
+      {
+        name: 'falls back to any other text type when no plain text is offered',
+        tool: 'wl-paste',
+        types: ['text/html', 'text/uri-list'],
+        payloads: {
+          'text/html': '<b>markup</b>',
+          'text/uri-list': 'https://ignored',
+        },
+        expected: '<b>markup</b>',
+        reads: ['text/html'],
+      },
+      {
+        name: 'treats a whitespace-only selection as nothing to paste',
+        tool: 'wl-paste',
+        types: ['text/plain'],
+        payloads: { 'text/plain': '  \n' },
+        expected: null,
+        reads: ['text/plain'],
+      },
+      {
+        name: 'returns nothing for a whitespace-only plain read instead of falling through to markup',
+        tool: 'wl-paste',
+        types: ['text/plain', 'text/html'],
+        payloads: { 'text/plain': '  \n', 'text/html': '<b>markup</b>' },
+        expected: null,
+        reads: ['text/plain'],
+      },
+      {
+        // A blank-line copy reads as only the line terminator: that is
+        // nothing to paste, not a reason to keep looking at the same
+        // selection's markup.
+        name: 'returns nothing for a terminator-only plain read instead of falling through to markup',
+        tool: 'wl-paste',
+        types: ['text/plain', 'text/html'],
+        payloads: { 'text/plain': '\n', 'text/html': '<b>markup</b>' },
+        expected: null,
+        reads: ['text/plain'],
+      },
+      {
+        name: 'keeps looking when a uri-list offer holds only comment lines',
+        tool: 'wl-paste',
+        types: ['text/uri-list', 'text/html'],
+        payloads: {
+          'text/uri-list': '# nothing but a comment\r\n',
+          'text/html': '<b>markup</b>',
+        },
+        expected: '<b>markup</b>',
+        reads: ['text/uri-list', 'text/html'],
+      },
+    ];
+
+    it.each(cases)('$name', async (testCase) => {
+      if (testCase.tool === 'xclip') {
+        setupX11Env();
+      }
+      mockExecSync.mockReturnValue(Buffer.from(`/usr/bin/${testCase.tool}`));
+      mockClipboard(testCase.types, testCase.payloads);
+
+      await expect(readClipboardText()).resolves.toBe(testCase.expected);
+      expect(requestedTypes()).toEqual(testCase.reads);
+    });
+
+    it('decodes a legacy STRING offer as Latin-1 when UTF-8 decoding fails', async () => {
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        const requested = args[args.indexOf('-t') + 1];
+        if (requested === 'TARGETS') {
+          return createMockChild('STRING\n', 0);
+        }
+        // ICCCM defines STRING as Latin-1: 'café' on the wire is 63 61 66 E9,
+        // which a UTF-8 decode would corrupt into U+FFFD.
+        return createChunkedMockChild([Buffer.from('caf\u00e9', 'latin1')]);
+      });
+
+      await expect(readClipboardText()).resolves.toBe('caf\u00e9');
+      expect(requestedTypes()).toEqual(['STRING']);
+    });
+
+    it('keeps valid UTF-8 that contains U+FFFD instead of retrying as Latin-1', async () => {
+      setupX11Env();
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        const requested = args[args.indexOf('-t') + 1];
+        if (requested === 'TARGETS') {
+          return createMockChild('STRING\n', 0);
+        }
+        // A genuinely well-formed UTF-8 payload may carry a replacement
+        // character — common when copying terminal output or a log line.
+        // Only invalid bytes justify the Latin-1 retry.
+        return createChunkedMockChild([
+          Buffer.from('caf\u00e9 \uFFFD', 'utf8'),
+        ]);
+      });
+
+      await expect(readClipboardText()).resolves.toBe('caf\u00e9 \uFFFD');
+      expect(requestedTypes()).toEqual(['STRING']);
+    });
+
+    it('decodes stdout as one byte stream when a chunk splits a character', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      // The split lands inside the three-byte 中: decoding each chunk on
+      // arrival would splice U+FFFD into the payload at the boundary.
+      const payload = `${'a'.repeat(100)}中文😀${'b'.repeat(100)}`;
+      const bytes = Buffer.from(payload, 'utf8');
+      const splitAt = 101;
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('--list-types')) {
+          return createMockChild('text/plain\n', 0);
+        }
+        return createChunkedMockChild([
+          bytes.subarray(0, splitAt),
+          bytes.subarray(splitAt),
+        ]);
+      });
+
+      const result = await readClipboardText();
+
+      expect(result).toBe(payload);
+      expect(result).not.toContain(String.fromCharCode(0xfffd));
+    });
+
+    it('discards a read that grows past the size cap', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      // One byte past the 16 MiB cap readStdout enforces: the read resolves
+      // to nothing and the child is killed rather than accumulated whole.
+      // The child is created at spawn time — an eagerly created mock emits
+      // before readStdout's handlers are attached and the test would pass
+      // through the timeout path without ever witnessing the cap.
+      let bigChild: ReturnType<typeof createChunkedMockChild> | undefined;
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('--list-types')) {
+          return createMockChild('text/plain\n', 0);
+        }
+        bigChild = createChunkedMockChild([
+          Buffer.from('x'.repeat(16 * 1024 * 1024 + 1)),
+        ]);
+        return bigChild;
+      });
+
+      await expect(readClipboardText()).resolves.toBeNull();
+      expect(bigChild?.kill).toHaveBeenCalled();
+    });
+
+    it('stops reading offered types after the first over-cap read', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      // Both offers are conversions of the same oversized selection: after
+      // the first read breaches the cap, reading the second would stream
+      // another 16 MiB into the same discard.
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('--list-types')) {
+          return createMockChild('text/plain\nUTF8_STRING\n', 0);
+        }
+        return createChunkedMockChild([
+          Buffer.from('x'.repeat(16 * 1024 * 1024 + 1)),
+        ]);
+      });
+
+      await expect(readClipboardText()).resolves.toBeNull();
+      expect(requestedTypes()).toEqual(['text/plain']);
+    });
+
+    it('ignores chunks that arrive after a read was abandoned on timeout', async () => {
+      mockExecSync.mockReturnValue(Buffer.from('/usr/bin/wl-paste'));
+      // The child ignores SIGTERM, which a wedged clipboard owner may do: the
+      // timeout settles the read, and a chunk arriving afterwards must
+      // neither accumulate nor re-enter the over-cap kill branch.
+      const hanging = createHangingChild();
+      hanging.kill = vi.fn(); // no close follows — the child outlives the read
+      mockSpawn.mockImplementation((_cmd: string, args: string[]) => {
+        if (args.includes('--list-types')) {
+          return createMockChild('text/plain\n', 0);
+        }
+        return hanging;
+      });
+
+      await expect(readClipboardText()).resolves.toBeNull();
+      expect(hanging.kill).toHaveBeenCalledTimes(1);
+
+      hanging.stdout.emit(
+        'data',
+        Buffer.from('x'.repeat(16 * 1024 * 1024 + 1)),
+      );
+      expect(hanging.kill).toHaveBeenCalledTimes(1);
+    }, 10000);
+
+    it('stays quiet when no clipboard tool is reachable', async () => {
+      mockExecSync.mockImplementation(() => {
+        throw new Error('command not found');
+      });
+
+      await expect(readClipboardText()).resolves.toBeNull();
+      expect(mockSpawn).not.toHaveBeenCalled();
+    });
+
+    it('does not touch the tools off Linux', async () => {
+      Object.defineProperty(process, 'platform', {
+        value: 'darwin',
+        configurable: true,
+        writable: true,
+      });
+
+      await expect(readClipboardText()).resolves.toBeNull();
+      expect(mockSpawn).not.toHaveBeenCalled();
     });
   });
 
@@ -774,6 +1199,15 @@ describe('clipboardUtils', () => {
           ['-selection', 'clipboard', '-t', 'TARGETS', '-o'],
           { stdio: ['ignore', 'pipe', 'pipe'] },
         );
+      });
+
+      it('should detect the BMP flavour the shared image-type set defines', async () => {
+        mockExecSync.mockReturnValue(Buffer.from('/usr/bin/xclip'));
+        // TARGETS reporting image/bmp (what WSL2 exposes) must count as an
+        // image on X11 exactly as it does on Wayland — one set decides both.
+        mockSpawn.mockReturnValue(createMockChild('TARGETS\nimage/bmp\n', 0));
+
+        await expect(clipboardHasImage()).resolves.toBe(true);
       });
 
       it('should return false when xclip reports no image types', async () => {

@@ -14,15 +14,23 @@ import { AUTHENTICATED_REQUEST } from '../auth.js';
 import { tagListener } from '../local-control/listener-identity.js';
 import {
   InvalidLocalControlTargetError,
+  LocalControlBindError,
   type LocalControlService,
 } from '../local-control/service.js';
 import { registerWorkspaceLocalControlRoutes } from './workspace-local-control.js';
-import { writeStdoutLineSafe } from '../../utils/stdioHelpers.js';
+import {
+  writeStderrLineSafe,
+  writeStdoutLineSafe,
+} from '../../utils/stdioHelpers.js';
 
 vi.mock('../../utils/stdioHelpers.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../utils/stdioHelpers.js')>();
-  return { ...actual, writeStdoutLineSafe: vi.fn() };
+  return {
+    ...actual,
+    writeStderrLineSafe: vi.fn(),
+    writeStdoutLineSafe: vi.fn(),
+  };
 });
 
 /** Marks the request bearer-authenticated the way `bearerAuth` does after
@@ -95,9 +103,8 @@ describe('Local Control routes', () => {
   });
 
   it('rejects runtime enable when the primary bind is not loopback', async () => {
-    // The `--local-control` CLI flag refuses non-loopback binds for this
-    // reason; the runtime enable route must enforce the same precondition
-    // instead of 500ing with EADDRINUSE from the LAN listen.
+    // The runtime route preserves the same documented deployment boundary as
+    // the `--local-control` CLI flag.
     const app = express();
     const enable = vi.fn();
     registerWorkspaceLocalControlRoutes(app, {
@@ -163,6 +170,125 @@ describe('Local Control routes', () => {
 
     expect(response.status).toBe(400);
     expect(response.body.code).toBe('invalid_local_control_target');
+  });
+
+  it.each(['stderr', 'daemon', 'broken-daemon'])(
+    'logs unexpected enable failures with %s logging',
+    async (logging) => {
+      const app = express();
+      const bindCause = Object.assign(
+        new Error('listen EACCES: permission denied'),
+        { code: 'EACCES' },
+      );
+      const failure = new LocalControlBindError(
+        'bind_denied',
+        'EACCES',
+        'Local Control does not have permission to bind the selected address. Check system network permissions and try again.',
+        bindCause,
+      );
+      const daemonLog = logging === 'stderr' ? undefined : { error: vi.fn() };
+      if (logging === 'broken-daemon') {
+        daemonLog!.error.mockImplementation(() => {
+          throw new Error('Log sink closed');
+        });
+      }
+      registerWorkspaceLocalControlRoutes(app, {
+        service: {
+          enable: vi.fn(async () => {
+            throw failure;
+          }),
+        } as unknown as LocalControlService,
+        daemonLog,
+        mutate: () => (_req, _res, next) => next(),
+        safeBody: () => ({}),
+      });
+      vi.mocked(writeStderrLineSafe).mockClear();
+
+      const response = await request(app).post(
+        '/workspace/local-control/enable',
+      );
+
+      expect(response.status).toBe(403);
+      expect(response.body).toEqual({
+        error: failure.message,
+        code: 'bind_denied',
+      });
+      const diagnostic = `Local Control enable failed (EACCES): ${failure.message}`;
+      if (daemonLog) {
+        expect(daemonLog.error).toHaveBeenCalledExactlyOnceWith(
+          diagnostic,
+          failure,
+          {
+            route: 'POST /workspace/local-control/enable',
+            errno: 'EACCES',
+          },
+        );
+      }
+      if (logging === 'daemon') {
+        expect(writeStderrLineSafe).not.toHaveBeenCalled();
+      } else {
+        expect(writeStderrLineSafe).toHaveBeenCalledWith(
+          `qwen serve: ${diagnostic}`,
+        );
+      }
+    },
+  );
+
+  it.each([
+    {
+      errno: 'EADDRINUSE',
+      code: 'address_in_use',
+      message:
+        'The selected Local Control address is already in use. Release the conflicting listener and try again.',
+    },
+    {
+      errno: 'EADDRNOTAVAIL',
+      code: 'invalid_address',
+      message:
+        'The selected Local Control address is no longer available. Refresh the network selection and try again.',
+    },
+  ] as const)('maps $errno to the typed $code response', async (entry) => {
+    const app = express();
+    const failure = new LocalControlBindError(
+      entry.code,
+      entry.errno,
+      entry.message,
+      Object.assign(new Error(`listen ${entry.errno}`), {
+        code: entry.errno,
+      }),
+    );
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        enable: vi.fn(async () => {
+          throw failure;
+        }),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+    });
+
+    const response = await request(app).post('/workspace/local-control/enable');
+
+    expect(response.status).toBe(409);
+    expect(response.body).toEqual({ error: entry.message, code: entry.code });
+  });
+
+  it('keeps the generic code for non-bind enable failures', async () => {
+    const app = express();
+    registerWorkspaceLocalControlRoutes(app, {
+      service: {
+        enable: vi.fn(async () => {
+          throw new Error('Unexpected setup failure');
+        }),
+      } as unknown as LocalControlService,
+      mutate: () => (_req, _res, next) => next(),
+      safeBody: () => ({}),
+    });
+
+    const response = await request(app).post('/workspace/local-control/enable');
+
+    expect(response.status).toBe(500);
+    expect(response.body.code).toBe('local_control_enable_failed');
   });
 
   it('keeps serving status when the pairing URL exceeds the QR capacity', async () => {

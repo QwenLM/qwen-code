@@ -13,11 +13,23 @@ import type {
   ExtensionUpdateAction,
   ExtensionUpdateStatus,
 } from '../state/extensions.js';
-import type { ConfirmationRequest, HistoryItem } from '../types.js';
+import type {
+  ConfirmationRequest,
+  HistoryItem,
+  HistoryItemWithoutId,
+} from '../types.js';
+import { ToolCallStatus } from '../types.js';
+import { SUPERSEDED_FINDINGS_MESSAGE } from '../utils/findings-coalescing.js';
 import type { OpenTuiCommandHost } from './commands-context.js';
 import type { OpenTuiStreamEvent } from './event-adapter.js';
 import { handleBranchSession, handleResumeSession } from './session-switch.js';
 import { OpenTuiAppHost, type OpenTuiAppHostDeps } from './opentui-host.js';
+import {
+  foldLiveEvent,
+  rewindBoundaryHistory,
+  snapshotCanonicalHistory,
+  type LiveHistoryItem,
+} from './live-session-model.js';
 
 vi.mock('./session-switch.js', () => ({
   handleResumeSession: vi.fn(async () => {}),
@@ -42,6 +54,7 @@ function makeHost(
   sessionStats: SessionStatsState = {
     sessionId: 'sess-1',
   } as SessionStatsState,
+  startupHistory?: HistoryItem[],
 ): Harness {
   const onChange = vi.fn();
   const transcriptReset = vi.fn();
@@ -58,6 +71,7 @@ function makeHost(
     config: { getSessionId: () => 'sess-1' } as unknown as Config,
     settings: { merged: {} } as unknown as LoadedSettings,
     logger: null as unknown as Logger,
+    startupHistory,
     transcript: {
       reset: transcriptReset,
       clear: transcriptClear,
@@ -111,6 +125,25 @@ describe('OpenTuiAppHost — history parity with useHistory', () => {
     expect(dupId).toBe(502);
     host.addItem({ type: 'user', text: 'yo' } as never, 500);
     expect(host.getHistory()).toHaveLength(2);
+  });
+
+  it('shares the startup canonical snapshot and keeps new source IDs beyond restored rows', () => {
+    const initial: HistoryItem[] = [
+      { id: 500, type: 'user', text: 'resumed', promptId: 'old-prompt' },
+    ];
+    const { host, transcriptAppend } = makeHost(undefined, initial);
+    expect(host.getHistory()).toBe(initial);
+    const first = host.addItem(
+      { type: 'info', text: 'new command output' },
+      100,
+    );
+    expect(first).toBe(501);
+    host.loadHistory([{ id: 900, type: 'user', text: 'branch' }]);
+    const second = host.addItem({ type: 'info', text: 'branch output' }, 100);
+    expect(second).toBe(901);
+    expect(
+      transcriptAppend.mock.calls.map(([event]) => event.historyId),
+    ).toEqual([501, 901]);
   });
 
   it('updateItem merges by id and ignores unknown ids', () => {
@@ -266,6 +299,24 @@ describe('OpenTuiAppHost — forwarded shell actions', () => {
     expect(h.presentAction).toHaveBeenCalledWith('install this extension?');
   });
 
+  it('forwards owned confirmation lifetime options unchanged', async () => {
+    const h = makeHost();
+    const signal = new AbortController().signal;
+    const isCurrent = () => true;
+    const onConfirm = vi.fn();
+    h.host.addConfirmUpdateExtensionRequest({
+      prompt: 'owned',
+      signal,
+      isCurrent,
+      onConfirm,
+    });
+    expect(h.presentAction).toHaveBeenCalledWith('owned', {
+      signal,
+      isCurrent,
+    });
+    await vi.waitFor(() => expect(onConfirm.mock.calls).toEqual([[true]]));
+  });
+
   it('a rejected consent bridge still settles as a denial', async () => {
     const h = makeHost();
     h.presentAction.mockRejectedValueOnce(new Error('renderer blew up'));
@@ -303,10 +354,12 @@ describe('OpenTuiAppHost — transcript and session switch delegation', () => {
 describe('OpenTuiAppHost — transcript projection (U-28/U-29)', () => {
   it('projects each recorded item into a transcript append', () => {
     const { host, transcriptAppend } = makeHost();
-    host.addItem({ type: 'info', text: 'Done.' } as never, 1000);
+    const id = host.addItem({ type: 'info', text: 'Done.' } as never, 1000);
     expect(transcriptAppend).toHaveBeenCalledWith({
       type: 'info',
       text: 'Done.',
+      historyId: id,
+      canonicalHistoryItem: host.getHistory()[0],
     });
   });
 
@@ -318,15 +371,103 @@ describe('OpenTuiAppHost — transcript projection (U-28/U-29)', () => {
     expect(transcriptAppend).not.toHaveBeenCalled();
   });
 
-  it('updateItem is a flag flip the transcript does not replay', () => {
+  it('updates the same projected invocation when it reaches the model', () => {
     const { host, transcriptAppend } = makeHost();
     const id = host.addItem(
       { type: 'user', text: '/x', sentToModel: false } as never,
       1,
     );
+    const initial = transcriptAppend.mock.calls[0][0] as OpenTuiStreamEvent;
     transcriptAppend.mockClear();
-    host.updateItem(id, { sentToModel: true } as never);
-    expect(transcriptAppend).not.toHaveBeenCalled();
+    host.updateItem(id, { sentToModel: true, promptId: 'turn-1' });
+    expect(transcriptAppend).toHaveBeenCalledExactlyOnceWith({
+      type: 'canonical-history-replace',
+      item: host.getHistory()[0],
+      events: [
+        {
+          type: 'user',
+          historyId: id,
+          canonicalHistoryItem: host.getHistory()[0],
+          text: '/x',
+          sentToModel: true,
+          promptId: 'turn-1',
+        },
+      ],
+    });
+    const updated = foldLiveEvent(
+      foldLiveEvent([], initial),
+      transcriptAppend.mock.calls[0][0] as OpenTuiStreamEvent,
+    );
+    expect(updated).toHaveLength(1);
+    expect(updated[0]).toMatchObject({
+      kind: 'user',
+      text: '/x',
+      sentToModel: true,
+      promptId: 'turn-1',
+    });
+    expect(snapshotCanonicalHistory(updated)).toEqual(host.getHistory());
+    expect(host.getHistory()).toHaveLength(1);
+  });
+
+  it('preserves equal-text model invocations as distinct projected rewind boundaries', () => {
+    const { host, transcriptAppend } = makeHost();
+    const first = host.addItem(
+      { type: 'user', text: '/repeat', sentToModel: false },
+      1,
+    );
+    host.updateItem(first, { sentToModel: true, promptId: 'turn-1' });
+    const second = host.addItem(
+      { type: 'user', text: '/repeat', sentToModel: false },
+      1,
+    );
+    host.updateItem(second, { sentToModel: true, promptId: 'turn-2' });
+    expect([first, second]).toEqual([2, 3]);
+    expect(host.getHistory()).toEqual([
+      {
+        id: first,
+        type: 'user',
+        text: '/repeat',
+        sentToModel: true,
+        promptId: 'turn-1',
+      },
+      {
+        id: second,
+        type: 'user',
+        text: '/repeat',
+        sentToModel: true,
+        promptId: 'turn-2',
+      },
+    ]);
+    const live = transcriptAppend.mock.calls.reduce<readonly LiveHistoryItem[]>(
+      (items, [event]) => foldLiveEvent(items, event),
+      [],
+    );
+    expect(
+      live.map((item) => ({
+        historyId: item.historyId,
+        promptId: item.kind === 'user' ? item.promptId : undefined,
+      })),
+    ).toEqual([
+      { historyId: first, promptId: 'turn-1' },
+      { historyId: second, promptId: 'turn-2' },
+    ]);
+    expect(
+      rewindBoundaryHistory(live).map((item) =>
+        item.type === 'user' ? item.promptId : undefined,
+      ),
+    ).toEqual(['turn-1', 'turn-2']);
+  });
+
+  it('still suppresses consecutive unqualified slash echoes', () => {
+    const { host, transcriptAppend } = makeHost();
+    host.addItem({ type: 'user', text: '/local', sentToModel: false }, 1);
+    const duplicate = host.addItem(
+      { type: 'user', text: '/local', sentToModel: false },
+      1,
+    );
+    expect(duplicate).toBe(3);
+    expect(host.getHistory()).toHaveLength(1);
+    expect(transcriptAppend).toHaveBeenCalledTimes(1);
   });
 
   it('loadHistory replaces history without touching the transcript', () => {
@@ -371,11 +512,18 @@ describe('OpenTuiAppHost — transcript projection (U-28/U-29)', () => {
     expect(transcriptClear).toHaveBeenCalledTimes(1);
   });
 
-  it('no-op kinds (tool_group, help) never append', () => {
+  it('retains zero-render kinds without adding a visible row', () => {
     const { host, transcriptAppend } = makeHost();
     host.addItem({ type: 'tool_group', tools: [] } as never, 1);
     host.addItem({ type: 'help', timestamp: new Date() } as never, 1);
-    expect(transcriptAppend).not.toHaveBeenCalled();
+    const items = transcriptAppend.mock.calls.reduce<
+      readonly LiveHistoryItem[]
+    >(
+      (history, [event]) => foldLiveEvent(history, event as OpenTuiStreamEvent),
+      [],
+    );
+    expect(items.filter((item) => !item.canonicalOnly)).toEqual([]);
+    expect(snapshotCanonicalHistory(items)).toEqual(host.getHistory());
   });
 });
 
@@ -414,4 +562,48 @@ describe('OpenTuiAppHost — satisfies the OpenTuiCommandHost surface', () => {
     expect(stats).toBeDefined();
     expect(extMap).toBeInstanceOf(Map);
   });
+});
+
+it('keeps coalesced previous findings and the committed new group in canonical snapshots', () => {
+  const { host, transcriptAppend } = makeHost();
+  let live: readonly LiveHistoryItem[] = [];
+  transcriptAppend.mockImplementation((event: OpenTuiStreamEvent) => {
+    live = foldLiveEvent(live, event);
+  });
+  const group = (id: string): HistoryItemWithoutId => ({
+    type: 'tool_group',
+    tools: [
+      {
+        callId: id,
+        name: 'report_findings',
+        description: 'Report findings',
+        status: ToolCallStatus.Success,
+        confirmationDetails: undefined,
+        resultDisplay: {
+          type: 'findings_list',
+          findings: [
+            {
+              id,
+              severity: 'Critical',
+              file: 'owned.ts',
+              summary: 'owned',
+              shortSummary: 'owned',
+              failureScenario: 'owned',
+            },
+          ],
+        },
+      },
+    ],
+  });
+  const first = host.addItem(group('first'), 1000);
+  const second = host.addItem(group('second'), 1000);
+  expect(host.getHistory().map((item) => item.id)).toEqual([first, second]);
+  expect(snapshotCanonicalHistory(live)).toEqual(host.getHistory());
+  const old = snapshotCanonicalHistory(live)[0];
+  expect(old.type === 'tool_group' && old.tools[0].resultDisplay).toBe(
+    SUPERSEDED_FINDINGS_MESSAGE,
+  );
+  expect(live.every((item) => item.canonicalHistoryItem !== undefined)).toBe(
+    true,
+  );
 });

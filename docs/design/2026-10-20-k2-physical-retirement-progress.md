@@ -15,6 +15,8 @@ remains in history. Its node-source coordinator, inventory extension and compani
 migration are withdrawn. #14761 is closed and is not a dependency. Existing
 private Session retirement and recovery retain their semantics.
 
+The [2026-10-24 scope decision](2026-10-23-csi-evidence-source.md) removes complete CSI auditing from the first-release prerequisites. This maintenance contract remains bounded DELETE attempts with retained ownership; platform-managed reclamation and cross-Workspace reuse require a separate follow-up design.
+
 ## Problem and trust boundary
 
 Normal Session close settles work, revokes the logical context and releases its

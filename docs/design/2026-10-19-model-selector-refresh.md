@@ -14,7 +14,7 @@ Add `POST /workspaces/:workspace/models/reload` and the matching workspace SDK m
 
 The session action captures the current workspace/session before awaiting the host. Reload that runtime, then read the existing live-session context and map its authoritative model list. Before a session exists, read workspace providers instead; deferred reload is acceptable only in that state. Do not create or replay a session. Refresh the provider cache and model-list metadata, including the retained model's context limit, while preserving the current selection and other session state. Reject degraded or empty welcome catalogs without replacing the previous list. Compare semantic workspace/session ownership, and prevent an older same-session load from replacing a completed refresh.
 
-Render a refresh button next to the selector's search/list, including the reasoning submenu. Keep the old list while loading, prevent duplicate requests, and display a localized failure message with retry. Share the same action between the main composer, split panes, and main-model dialog. Non-workspace session contexts and older daemons do not expose the button.
+Render a refresh icon button beside the selector's search input, including the reasoning submenu. The model dialog keeps the same icon after the list so keyboard focus still opens on the model rows. Keep the old list while loading, prevent duplicate requests, and display a localized failure message with retry. Share the same action between the main composer, split panes, and main-model dialog. Non-workspace session contexts and older daemons do not expose the button.
 
 ## Implementation boundaries
 

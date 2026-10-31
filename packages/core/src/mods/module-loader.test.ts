@@ -68,6 +68,84 @@ describe('confined Mod module graphs', () => {
     );
   });
 
+  it('compiles .tsx and .jsx against the h and Fragment globals', async () => {
+    await write(
+      'row.tsx',
+      'export const Row = (p: { n: number }) => <>{p.n}</>;',
+    );
+    await write(
+      'cell.jsx',
+      'export const Cell = (Text) => <Text bold>x</Text>;',
+    );
+    await write('alt.tsx', 'export const Alt = (Box) => <Box gap={1} />;');
+    const graph = await compileModModules(
+      input(
+        'import { Row } from "./row.js"; import { Cell } from "./cell.jsx"; import { Alt } from "./alt.jsx"; export const view = (Box: any) => <Box flexDirection="row">hi <Row n={1} /></Box>; export { Cell, Alt };',
+        'entry.tsx',
+      ),
+    );
+    expect(graph.imports.get(path.join(root, 'entry.tsx'))).toEqual(
+      new Map([
+        ['./row.js', path.join(root, 'row.tsx')],
+        ['./cell.jsx', path.join(root, 'cell.jsx')],
+        ['./alt.jsx', path.join(root, 'alt.tsx')],
+      ]),
+    );
+    // The emitted calls, with TypeScript's line breaks folded.
+    const out = (file: string) =>
+      graph.modules.get(path.join(root, file))?.replace(/\s+/g, ' ');
+    expect(out('entry.tsx')).toContain(
+      'h(Box, { flexDirection: "row" }, "hi ", h(Row, { n: 1 }))',
+    );
+    expect(out('row.tsx')).toContain('h(Fragment, null, p.n)');
+    expect(out('cell.jsx')).toContain('h(Text, { bold: true }, "x")');
+    expect(out('alt.tsx')).toContain('h(Box, { gap: 1 })');
+  });
+
+  it('tries the suffixes in Claude Code’s order', async () => {
+    for (const file of ['pick.tsx', 'pick.jsx', 'pick.js', 'sub.tsx'])
+      await write(file, `export const from = ${JSON.stringify(file)};`);
+    const order = async () =>
+      (
+        await compileModModules(input('import "./pick"; import "./sub.js";'))
+      ).imports.get(path.join(root, 'entry.ts'));
+    expect(await order()).toEqual(
+      new Map([
+        ['./pick', path.join(root, 'pick.tsx')],
+        ['./sub.js', path.join(root, 'sub.tsx')],
+      ]),
+    );
+    await write('pick.ts', 'export const from = "pick.ts";');
+    await write('sub.ts', 'export const from = "sub.ts";');
+    expect(await order()).toEqual(
+      new Map([
+        ['./pick', path.join(root, 'pick.ts')],
+        ['./sub.js', path.join(root, 'sub.ts')],
+      ]),
+    );
+  });
+
+  it('keeps JSX out of .ts and .js, lets an author pragma win and says where JSX fails', async () => {
+    await expect(
+      compileModModules(input('export const v = <Text />;')),
+    ).rejects.toThrow(
+      /^Invalid Mod TypeScript: entry\.ts: .+ \(line 1, column \d+\)\.$/,
+    );
+    const plain = await compileModModules(
+      input('export const v = 1;', 'entry.js'),
+    );
+    expect([...plain.modules.values()][0]).toBe('export const v = 1;');
+    const pragma = await compileModModules(
+      input('/** @jsx other */\nexport const v = (T) => <T />;', 'entry.jsx'),
+    );
+    expect([...pragma.modules.values()][0]).toContain('other(T, null)');
+    await expect(
+      compileModModules(input('\nexport const v = <Text>;', 'entry.jsx')),
+    ).rejects.toThrow(
+      "Invalid Mod JSX: entry.jsx: JSX element 'Text' has no corresponding closing tag. (line 2, column 19).",
+    );
+  });
+
   it('erases type-only imports without reading them or author build configuration', async () => {
     const probe = vi.spyOn(fs, 'lstat');
     const graph = await compileModModules(
@@ -164,7 +242,7 @@ describe('confined Mod module graphs', () => {
     ['const p = require("fs");', /require/],
     ['import p = require("./a.js");', /require/],
     ['import "./a.json";', /extension/],
-    ['import "./a.tsx";', /extension/],
+    ['import "./a.vue";', /extension/],
     ['import "../outside.js";', /inside/],
     ['export const broken: =;', /Invalid Mod TypeScript/],
   ])(

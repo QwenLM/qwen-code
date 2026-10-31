@@ -234,6 +234,67 @@ describe('Web Shell pairing', () => {
     ).toBe(204);
   });
 
+  it('names a paired device and lists it without exposing its credential', async () => {
+    const { app, issue, exchange } = setup();
+    const paired = await exchange(codeOf(await issue()));
+    expect(paired.status).toBe(200);
+    expect(paired.body.deviceId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/u,
+    );
+    const listed = await request(app)
+      .get('/web-shell/devices')
+      .set('Host', authority)
+      .set('Origin', origin)
+      .set('Authorization', 'Bearer runtime-secret');
+    expect(listed.status).toBe(200);
+    expect(listed.headers['cache-control']).toBe('no-store');
+    expect(listed.body.devices).toEqual([
+      { id: paired.body.deviceId, createdAt: expect.any(Number) },
+    ]);
+    expect(JSON.stringify(listed.body)).not.toContain(paired.body.token);
+  });
+
+  it('revokes one paired device without touching the others', async () => {
+    const { app, issue, exchange } = setup();
+    const first = await exchange(codeOf(await issue()));
+    const second = await exchange(codeOf(await issue()));
+    const probe = (token: string) =>
+      request(app)
+        .post('/probe')
+        .set('Host', authority)
+        .set('Origin', origin)
+        .set('Authorization', `Bearer ${token}`);
+    const revoke = (deviceId: string) =>
+      request(app)
+        .delete(`/web-shell/devices/${deviceId}`)
+        .set('Host', authority)
+        .set('Origin', origin)
+        .set('Authorization', 'Bearer runtime-secret');
+    expect((await probe(first.body.token)).status).toBe(204);
+    const revoked = await revoke(first.body.deviceId);
+    expect(revoked.status).toBe(200);
+    expect(revoked.body).toEqual({ revoked: true });
+    expect((await probe(first.body.token)).status).toBe(401);
+    expect((await probe(second.body.token)).status).toBe(204);
+    expect((await revoke(first.body.deviceId)).status).toBe(404);
+  });
+
+  it('requires a credential to list or revoke devices', async () => {
+    const { app, issue, exchange } = setup();
+    const paired = await exchange(codeOf(await issue()));
+    expect(
+      (await request(app).get('/web-shell/devices').set('Host', authority))
+        .status,
+    ).toBe(401);
+    expect(
+      (
+        await request(app)
+          .delete(`/web-shell/devices/${paired.body.deviceId}`)
+          .set('Host', authority)
+      ).status,
+    ).toBe(401);
+  });
+
   it('expires invitations without expiring connected devices or invalidating in-progress scans', async () => {
     const now = vi.spyOn(Date, 'now').mockReturnValue(1000);
     const { credentials, issue, exchange } = setup();
@@ -439,7 +500,9 @@ describe('Web Shell pairing', () => {
     for (let index = 0; index < 64; index++) await issue();
     expect((await exchange(codeOf(first))).status).toBe(401);
     for (let index = 0; index < 128; index++)
-      expect(credentials.addWebShellToken(`device-${index}`)).toBe(true);
+      expect(
+        credentials.addWebShellToken(`device-${index}`, `device-${index}`),
+      ).toBe(true);
     expect((await exchange(codeOf(await issue()))).status).toBe(409);
     expect(credentials.verify('device-0', { kind: 'primary' })).toBe(true);
   });

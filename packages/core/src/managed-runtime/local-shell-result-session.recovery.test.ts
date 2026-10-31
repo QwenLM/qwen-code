@@ -340,10 +340,11 @@ it('recovers a null-manifest cancellation under a new activation without relaxin
       },
     },
   });
-  const journal = await LocalJsonlManagedSessionJournalStore.read(
-    f.transcriptPath,
-    f.key,
-  );
+  const journal = await LocalJsonlManagedSessionJournalStore.read({
+    transcriptPath: f.transcriptPath,
+    runtimeBaseDir: f.lease.runtimeBaseDir,
+    sessionKey: f.key,
+  });
   expect(journal.events.filter((e) => e.kind === 'tool.receipt')).toHaveLength(
     1,
   );
