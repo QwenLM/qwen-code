@@ -85,6 +85,7 @@ So this slice builds one member-to-lead **command channel** for those calls. The
      - After 64 attempts the relay gives up. Before the handover the outbound becomes `cancelled`, as H4d-b's give-up does. After it, if the lead holds a receipt, the give-up copies its reply as `answered` does; otherwise the outbound becomes `unknown`.
      - A deterministic refusal by the lead's authority, met after `execute` has committed anything, is part of its reply (decision 3), never an error the relay retries.
      - Every step is replay-safe by the command id, as H4d-b's are by the message id.
+     - The command-operation route answers malformed `reply` documents with 400 `invalid_command_operation`. After parsing, `answered` uses the same error classification as the other command verbs: state conflicts answer 409 `session_command_conflict`, missing or invalid persisted command records answer 409 `session_command_record`, and store, transport or writes-stopped failures answer 503 `session_command_failed` and log the store failure. Successful and identical replayed answers remain 202.
    - **The close hold.** An owed command never holds a member's settlement or close: the child result relay's owed-outbox check reads `session_message` only, and stays that way.
    - **Latency.** A command takes one relay pass: a scan delay (2 s) and three Harness calls. A kick on the outbound commit, like `ActionResponseCoordinator.dispatch`, would remove the scan delay; it is left to open question 2.
 
