@@ -7039,6 +7039,7 @@ export function WebShellSidebar({
             >
               <button
                 className={styles.newChatButton}
+                data-web-shell-new-task-button
                 type="button"
                 title={t('sidebar.newTask')}
                 aria-label={t('sidebar.newTask')}
@@ -7239,6 +7240,7 @@ export function WebShellSidebar({
                       className={styles.projectsHeaderToggle}
                       type="button"
                       aria-expanded={pinnedExpanded}
+                      data-web-shell-pinned-header
                       onClick={() => setPinnedExpanded((expanded) => !expanded)}
                     >
                       <span>{t('sidebar.pinnedSessions')}</span>

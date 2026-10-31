@@ -463,6 +463,15 @@ import {
 } from './utils/copyCommand';
 import { getShadowAwareActiveElement, isEditableTarget } from './utils/dom';
 import {
+  isOverviewCheckboxChord,
+  modifierDigit,
+  pressNavigationDigit,
+  pressNewTask,
+  pressOverviewRowCheckbox,
+  pressPaneMaximizeToggle,
+  pressSelectedRowsSplit,
+} from './utils/viewNavHotkeys';
+import {
   invokeSlashCommandHandler,
   SLASH_COMMAND_PATTERN,
 } from './utils/slash-command-action';
@@ -20094,8 +20103,55 @@ export function App({
     // non-QWERTY layouts; ISO keyboards report the key that types "\" as
     // IntlBackslash. Capture phase, so the chords also work while the
     // composer has focus.
+    //
+    // The same listener hosts the remaining navigation chords
+    // (utils/viewNavHotkeys): Cmd/Ctrl+1..9 — the Nth approval-card option,
+    // Session Overview row, Pinned row, or split pane + composer;
+    // Option+Shift+1..9 — the Nth Overview row's checkbox (macOS);
+    // Cmd/Ctrl+Shift+\ — "Open in Split" for the selected rows;
+    // Cmd/Ctrl+Shift+F — maximize/restore the focused pane; Cmd/Ctrl+T —
+    // New task / workspace picker.
+    const shellHotkeyTargetsClear = (
+      event: KeyboardEvent,
+      opts: { composerExempt?: boolean } = {},
+    ): boolean => {
+      // Covering surfaces keep the keyboard: a shell modal or a host
+      // interaction block (both in modalDialogOpen), the docked fullscreen
+      // artifact panel, a component-owned modal (dialog, confirm, drawer),
+      // and the web terminal.
+      if (modalDialogOpen || artifactPanelFullscreen) return false;
+      if (isWebTerminalTarget(event)) return false;
+      // Other editable targets — Session Overview search, session rename,
+      // settings inputs, the Live shortcut recorder — must not have the view
+      // yanked away while the user is typing, matching the codebase's
+      // isEditableTarget convention. The composer stays exempt for the
+      // chords that produce no text there; the checkbox chord
+      // (Option+Shift+1..9) types printable characters on macOS (US
+      // layout), so it is deliberately not exempt (issue #13175).
+      // Shadow-DOM portal hosts retarget the event to the host element, so
+      // resolve the real target.
+      const target = (event.composedPath()[0] ??
+        event.target) as HTMLElement | null;
+      if (
+        isEditableTarget(target) &&
+        !(
+          opts.composerExempt &&
+          target?.closest('[data-web-shell-composer-editor]')
+        )
+      ) {
+        return false;
+      }
+      if (hasOpenModalSurface(portalRoot)) return false;
+      return true;
+    };
     const onViewShortcut = (e: KeyboardEvent) => {
       if (e.repeat || e.isComposing) return;
+      // Option+Shift+1..9 has no modifier key, so it runs before the
+      // Cmd/Ctrl gate below and is exempt from it.
+      if (isOverviewCheckboxChord(e) && shellHotkeyTargetsClear(e)) {
+        pressOverviewRowCheckbox(e);
+        return;
+      }
       if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
       let open: (() => void) | undefined;
       if (e.shiftKey && e.code === 'KeyO') {
@@ -20108,30 +20164,38 @@ export function App({
       ) {
         if (splitViewHotkeyAvailable) open = openSplitViewFromSidebar;
       }
-      if (!open) return;
-      // Covering surfaces keep the keyboard: a shell modal or a host
-      // interaction block (both in modalDialogOpen), the docked fullscreen
-      // artifact panel, a component-owned modal (dialog, confirm, drawer),
-      // and the web terminal.
-      if (modalDialogOpen || artifactPanelFullscreen) return;
-      if (isWebTerminalTarget(e)) return;
-      // Other editable targets — Session Overview search, session rename,
-      // settings inputs, the Live shortcut recorder — must not have the view
-      // yanked away while the user is typing, matching the codebase's
-      // isEditableTarget convention. The composer stays exempt: the chords
-      // produce no text there (issue #13175). Shadow-DOM portal hosts
-      // retarget the event to the host element, so resolve the real target.
-      const target = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
-      if (
-        isEditableTarget(target) &&
-        !target?.closest('[data-web-shell-composer-editor]')
-      ) {
+      if (open) {
+        if (!shellHotkeyTargetsClear(e, { composerExempt: true })) return;
+        e.preventDefault();
+        e.stopPropagation();
+        open();
         return;
       }
-      if (hasOpenModalSurface(portalRoot)) return;
-      e.preventDefault();
-      e.stopPropagation();
-      open();
+      // The remaining chords act on the rendered surface; the module
+      // decides whether each one consumes the event.
+      if (e.shiftKey && e.code === 'KeyF') {
+        if (shellHotkeyTargetsClear(e, { composerExempt: true }))
+          pressPaneMaximizeToggle(e);
+        return;
+      }
+      if (
+        e.shiftKey &&
+        (e.code === 'Backslash' || e.code === 'IntlBackslash')
+      ) {
+        if (shellHotkeyTargetsClear(e, { composerExempt: true }))
+          pressSelectedRowsSplit(e);
+        return;
+      }
+      if (!e.shiftKey && e.code === 'KeyT') {
+        if (shellHotkeyTargetsClear(e, { composerExempt: true }))
+          pressNewTask(e);
+        return;
+      }
+      if (modifierDigit(e) > 0) {
+        if (shellHotkeyTargetsClear(e, { composerExempt: true }))
+          pressNavigationDigit(e);
+        return;
+      }
     };
     window.addEventListener('keydown', onViewShortcut, true);
     return () => window.removeEventListener('keydown', onViewShortcut, true);
