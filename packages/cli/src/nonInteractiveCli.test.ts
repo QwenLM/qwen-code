@@ -1356,6 +1356,48 @@ describe('runNonInteractive', () => {
     expect(mockLlmClient.sendMessageStream).not.toHaveBeenCalled();
   });
 
+  // The refusal envelope is an error, so the exit status must agree with it
+  // instead of reporting success for a turn that produced no answer.
+  it('exits non-zero for a turn the client refused', async () => {
+    vi.mocked(mockConfig.getOutputFormat).mockReturnValue(
+      OutputFormat.STREAM_JSON,
+    );
+    setupMetricsMock();
+    mockLlmClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents([
+        {
+          type: LlmEventType.UserPromptSubmitBlocked,
+          value: { reason: 'policy', originalPrompt: 'run it' },
+        },
+        {
+          type: LlmEventType.Finished,
+          value: { reason: undefined, usageMetadata: { totalTokenCount: 1 } },
+        },
+      ]),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'run it',
+      'refused-turn',
+    );
+
+    expect(exitCode).toBe(1);
+    const stdout = processStdoutSpy.mock.calls
+      .map((call) => String(call[0]))
+      .join('');
+    const result = stdout
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line))
+      .find((frame: { type?: string }) => frame.type === 'result');
+    expect(result.is_error).toBe(true);
+    expect(result.error.message).toBe(
+      'Blocked by a UserPromptSubmit hook: policy',
+    );
+  });
+
   it('runs resume with the exact permit scheduled by Core', async () => {
     setupMetricsMock();
     mockGetCommands.mockReturnValue([goalCommand]);

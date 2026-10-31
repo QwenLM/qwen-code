@@ -45,6 +45,7 @@ import type {
   Usage,
 } from '../types.js';
 import { functionResponsePartsToString } from '../nonInteractiveHelpers.js';
+import { sanitizeTerminalLine } from '../../ui/utils/textUtils.js';
 import { projectHeadlessToolResultContent } from './headless-tool-result-text-projection.js';
 import { observeHeadlessToolResultProjection } from '../tool-result-boundary-diagnostics.js';
 
@@ -126,7 +127,7 @@ export interface JsonOutputAdapterInterface extends MessageEmitter {
   ): void;
   processEvent(event: ServerLlmStreamEvent): void;
   finalizeAssistantMessage(): CLIAssistantMessage;
-  emitResult(options: ResultOptions): void;
+  emitResult(options: ResultOptions): CLIResultMessage;
 
   startSubagentAssistantMessage?(parentToolUseId: string): void;
   processSubagentToolCall?(
@@ -161,6 +162,36 @@ export abstract class BaseJsonOutputAdapter {
 
   // Last assistant message for result generation
   protected lastAssistantMessage: CLIAssistantMessage | null = null;
+
+  /**
+   * Set when the client refuses the turn before sending it
+   * (`SessionTokenLimitExceeded`, `UserPromptSubmitBlocked`). Such a stream
+   * carries no content, so without this the terminal `result` would fall back
+   * to `lastAssistantMessage` and replay the previous turn's answer as a
+   * success (#15704). `buildResultMessage` consumes it, so one turn cannot
+   * leak its refusal into the next — a shared adapter serves many prompts in
+   * stream-json input mode.
+   *
+   * `producedText` is sampled when the latch is set, not read at result time.
+   * Refusals fire at the head of a send, so text already streamed belongs to
+   * this turn and is the answer an error envelope would drop; text that
+   * arrives after the latch belongs to a later turn (a drain item) and must
+   * not turn the refused prompt back into a success. `startAssistantMessage`
+   * is a per-round boundary and does not reset either field.
+   */
+  protected preSendRefusal: {
+    message: string;
+    producedText: boolean;
+  } | null = null;
+
+  /**
+   * Set once the turn streams assistant text. A refusal can fire mid-turn
+   * (the hook runs on `ToolResult` sends, the token gate reads the previous
+   * request's count), and converting such a turn to the error envelope would
+   * drop the text it already produced. Scoped to the turn: reset when the
+   * result ends it, in `buildResultMessage`.
+   */
+  protected turnProducedText = false;
 
   // Track permission denials (execution denied tool calls)
   protected permissionDenials: CLIPermissionDenial[] = [];
@@ -645,6 +676,9 @@ export abstract class BaseJsonOutputAdapter {
       }
       return;
     }
+    // A discarded attempt's text is not the turn's answer any more, so a
+    // refusal that lands after this retry must not sample it as delivered.
+    this.turnProducedText = false;
     this.startAssistantMessageInternal(this.mainAgentMessageState);
   }
 
@@ -675,6 +709,9 @@ export abstract class BaseJsonOutputAdapter {
 
     switch (event.type) {
       case LlmEventType.Content:
+        if (event.value.length > 0) {
+          this.turnProducedText = true;
+        }
         this.appendText(state, event.value, null);
         break;
       case LlmEventType.Citation:
@@ -720,9 +757,32 @@ export abstract class BaseJsonOutputAdapter {
           fallbackIndex: event.fallbackIndex,
         });
         break;
+      case LlmEventType.SessionTokenLimitExceeded:
+        // The client refused the send, so no content follows and the terminal
+        // `result` must report the refusal rather than the previous answer.
+        this.latchPreSendRefusal(event.value.message);
+        break;
+      case LlmEventType.UserPromptSubmitBlocked:
+        // The reason is model-generated for prompt/HTTP-backed hooks and is
+        // written as one stderr line in text mode, so keep ESC/OSC bytes out
+        // of it and flatten TAB/CR/LF instead of letting them start a second
+        // line the reader would take for genuine output.
+        this.latchPreSendRefusal(
+          `Blocked by a UserPromptSubmit hook: ${sanitizeTerminalLine(event.value.reason)}`,
+        );
+        break;
       default:
         break;
     }
+  }
+
+  /**
+   * Latches the refusal for this turn, sampling whether the turn had already
+   * streamed text. The first refusal wins: later ones describe the same
+   * refused turn.
+   */
+  protected latchPreSendRefusal(message: string): void {
+    this.preSendRefusal ??= { message, producedText: this.turnProducedText };
   }
 
   // ========== Subagent APIs ==========
@@ -1257,9 +1317,32 @@ export abstract class BaseJsonOutputAdapter {
     options: ResultOptions,
     lastAssistantMessage: CLIAssistantMessage | null,
   ): CLIResultMessage {
-    const usage = options.usage ?? createExtendedUsage();
+    // A turn the client refused before sending has nothing of its own to
+    // report, and `lastAssistantMessage` still holds the previous turn's
+    // message. Convert the would-be success into the matching error result so
+    // the refused turn is not reported as an answer (#15704). A turn that
+    // already streamed text keeps its success envelope, and an error the
+    // caller classified keeps its subtype but reports the real refusal.
+    const refusal = this.preSendRefusal;
+    this.preSendRefusal = null;
+    // The result ends the turn; the next prompt starts a fresh text tally.
+    this.turnProducedText = false;
+    let resultOptions = options;
+    if (refusal !== null) {
+      if (options.isError) {
+        resultOptions = { ...options, errorMessage: refusal.message };
+      } else if (!refusal.producedText) {
+        resultOptions = {
+          ...options,
+          isError: true,
+          subtype: 'error_during_execution',
+          errorMessage: options.errorMessage ?? refusal.message,
+        };
+      }
+    }
+    const usage = resultOptions.usage ?? createExtendedUsage();
     const resultText =
-      options.summary ??
+      resultOptions.summary ??
       (lastAssistantMessage
         ? extractTextFromBlocks(lastAssistantMessage.message.content)
         : '');
@@ -1267,19 +1350,19 @@ export abstract class BaseJsonOutputAdapter {
     const baseUuid = randomUUID();
     const baseSessionId = this.getSessionId();
 
-    if (options.isError) {
-      const errorMessage = options.errorMessage ?? 'Unknown error';
+    if (resultOptions.isError) {
+      const errorMessage = resultOptions.errorMessage ?? 'Unknown error';
       return {
         type: 'result',
         subtype:
-          (options.subtype as CLIResultMessageError['subtype']) ??
+          (resultOptions.subtype as CLIResultMessageError['subtype']) ??
           'error_during_execution',
         uuid: baseUuid,
         session_id: baseSessionId,
         is_error: true,
-        duration_ms: options.durationMs,
-        duration_api_ms: options.apiDurationMs,
-        num_turns: options.numTurns,
+        duration_ms: resultOptions.durationMs,
+        duration_api_ms: resultOptions.apiDurationMs,
+        num_turns: resultOptions.numTurns,
         usage,
         permission_denials: [...this.permissionDenials],
         error: { message: errorMessage },
@@ -1296,9 +1379,9 @@ export abstract class BaseJsonOutputAdapter {
       // `JSON.stringify` (for `result`) and the top-level
       // `structured_result` field render as a JSON-safe `null` instead
       // of being silently omitted.
-      const hasStructured = 'structuredResult' in options;
+      const hasStructured = 'structuredResult' in resultOptions;
       const normalizedStructured = hasStructured
-        ? (options.structuredResult ?? null)
+        ? (resultOptions.structuredResult ?? null)
         : undefined;
       const finalResult = hasStructured
         ? JSON.stringify(normalizedStructured)
@@ -1309,20 +1392,21 @@ export abstract class BaseJsonOutputAdapter {
       } = {
         type: 'result',
         subtype:
-          (options.subtype as CLIResultMessageSuccess['subtype']) ?? 'success',
+          (resultOptions.subtype as CLIResultMessageSuccess['subtype']) ??
+          'success',
         uuid: baseUuid,
         session_id: baseSessionId,
         is_error: false,
-        duration_ms: options.durationMs,
-        duration_api_ms: options.apiDurationMs,
-        num_turns: options.numTurns,
+        duration_ms: resultOptions.durationMs,
+        duration_api_ms: resultOptions.apiDurationMs,
+        num_turns: resultOptions.numTurns,
         result: finalResult,
         usage,
         permission_denials: [...this.permissionDenials],
       };
 
-      if (options.stats) {
-        success.stats = options.stats;
+      if (resultOptions.stats) {
+        success.stats = resultOptions.stats;
       }
       if (hasStructured) {
         success.structured_result = normalizedStructured;
