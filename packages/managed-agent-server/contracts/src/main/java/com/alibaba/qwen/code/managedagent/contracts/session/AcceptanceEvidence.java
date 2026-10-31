@@ -30,7 +30,7 @@ public interface AcceptanceEvidence {
      *
      * @return false when the row is no longer parked
      */
-    public default boolean settle(AgentStateStore store, ParkedOperation parked,
+    public default boolean settle(SessionLifecycleStore store, ParkedOperation parked,
             AcceptanceVerdict verdict, long retryAt) {
         return store.settleParkedOperation(parked, verdict, retryAt);
     }
