@@ -1263,16 +1263,28 @@ results in both directions.
 - Give the mutation matrix a tree of its own — never the tree a live cell
   is measured on. Restoring the source after each row is not enough: a
   build inside a row propagates the mutant into `dist/`, and a daemon
-  started mid-row loads it. Gate every daemon or dist-level harness launch
-  on a scripted `dist`-versus-source anchor check that covers every PR
-  anchor plus a control proving the check can report a mismatch, and
-  refuse the launch when it fails. Never hand-patch `dist/` to repair a
-  contaminated build; rebuild from source you have verified clean.
-  Measured example: a round interleaved its mutation matrix with 80 live
-  daemon cells on one tree, then hand-patched the mutant it found in
-  `dist/`; the patched build still carried the mutant expression, so every
-  live cell and the whole matrix were withdrawn and the round shipped as
-  `inconclusive`.
+  started mid-row loads it. Isolate every artifact a launch resolves, not
+  just the checkout: `cp -al` the round's `node_modules` into the matrix
+  tree and assert each `@qwen-code/*` link resolves inside it (a nested
+  tree without its own `node_modules` walks up to the round's), build the
+  sandbox image under a per-tree tag and export `QWEN_SANDBOX_IMAGE` for
+  that tree's cells only (the tag in `packages/cli/package.json` is one
+  shared name any tree's build retags), and give Java rows their own
+  `-Dmaven.repo.local` copied from the warmed repository. Before the
+  matrix starts, record a sha256 manifest of each measurement arm's
+  clean `dist/`, and gate every daemon or dist-level harness launch
+  outside the row that produced it on a scripted comparison against that
+  manifest — never against the matrix tree's live source, which mid-row
+  is the mutant and agrees with its own build. Prove the gate live by
+  requiring it to refuse a known-mutant build, not merely to report a
+  fabricated mismatch. Never hand-patch `dist/` to repair a contaminated
+  build; rebuild from source you have verified clean and re-record the
+  manifest from that build — a hand-patch that restores only the visible
+  sites leaves the rest of the build mutant. Measured example: a round
+  interleaved its mutation matrix with 80 live daemon cells on one tree,
+  then hand-patched the mutant it found in `dist/`; the patched build
+  still carried the mutant expression, so every live cell and the whole
+  matrix were withdrawn and the round shipped as `inconclusive`.
 - Stop processes only by the PIDs you recorded. After every batch, list
   orphaned (ppid 1) processes under the rig path and expect zero.
 - Restore the tree and tear the rig down before exiting. `process.exit()`
