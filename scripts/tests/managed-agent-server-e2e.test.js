@@ -589,11 +589,18 @@ describe('managed-agent-server e2e runner', () => {
     // Two siblings settle once each under their original identities: the
     // count, both Action rows, the pending sibling's own decision, the second
     // file effect and the order-sensitive final plan are all pinned.
-    // R1-7: anchor the count ternary to expectedExecutions specifically — the
-    // bare ternary also matches expectedOriginalPlanCalls, so narrowing one
-    // while dropping the other must not stay green.
+    // R1-7 / F1: anchor each count ternary to its own site. The bare `? 2 : 1`
+    // matches both expectedExecutions and expectedOriginalPlanCalls, so each is
+    // pinned separately and narrowing either one (2 -> 1) reds here at unit
+    // speed, not only at the real-stack barrier.
     expect(source).toMatch(
       /const expectedExecutions =[\s\S]*?approvalFault === 'sibling-approval'\s*\?\s*2\s*:\s*1/,
+    );
+    // `\s*`, not `[\s\S]*?`: the gap here is whitespace-only, so a tight anchor
+    // cannot span past this site to the expectedExecutions ternary and mask a
+    // narrowed count (the spanning form stays green under `? 2` -> `? 1`).
+    expect(source).toMatch(
+      /const expectedOriginalPlanCalls =\s*approvalFault === 'sibling-approval'\s*\?\s*2\s*:\s*1/,
     );
     // R1-7: pin the per-call identity loop itself (match by prepare key, not
     // the pre-PR single-execution shape), so reverting it reds here at unit
