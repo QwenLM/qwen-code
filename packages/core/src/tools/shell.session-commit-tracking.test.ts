@@ -462,6 +462,59 @@ describe.skipIf(process.platform === 'win32')(
       await expectOtherRepoCommitBlocked(runShellCommand);
     });
 
+    it('registers a commit after an absolute `cd` into the same repo root (issue #12514)', async () => {
+      // #12514-A: `cdTargetMayChangeRepo` returns true for ANY target starting
+      // with '/', with no reference to the shell cwd. So the
+      // product-recommended spelling `cd /abs/path/to/this/repo && git commit`
+      // latched `cwdShifted`, `attributableInCwd` went false,
+      // `trackSessionCommit` never ran and `sessionCommitShas` stayed empty —
+      // which is why the agent's own next `git commit --amend` was hard-blocked
+      // by the guard (reported by bainmariehk, 2026-10-07).
+      await expectRegisters(`cd ${repoDir} && ${COMMIT_FEATURE}`, false);
+    });
+
+    it('registers a commit after an absolute `cd` into a subdirectory of the same repo (issue #12514)', async () => {
+      // #12514-A, subdirectory arm: an absolute target inside the cwd tree must
+      // count as in-repo, not only an exact-equal path. `git` resolves the
+      // toplevel from any subdirectory, so the commit still lands in our repo
+      // and must still be registered (and carry the trailer).
+      const subDir = path.join(repoDir, 'sub');
+      fs.mkdirSync(subDir, { recursive: true });
+      const preHead = headSha();
+      fs.writeFileSync(path.join(subDir, 'feature.txt'), 'work\n');
+      await runShellCommand(
+        `cd ${subDir} && git add feature.txt && git commit -m "feature"`,
+      );
+      expectFeatureCommitLanded(preHead);
+      expect(amendVerdict()).toBeNull();
+    });
+
+    it('keeps the cwd-shift latch for an absolute `cd` into a sibling directory that shares the repo path prefix (issue #12514)', async () => {
+      // Guards the obvious wrong fix: a bare `target.startsWith(cwd)` without a
+      // separator boundary. `<repo>-sibling` shares the repo path as a *string*
+      // prefix but is a different repository, so admitting it would stamp our
+      // trailer onto a foreign repo's commit — the corruption `cwdShifted`
+      // exists to prevent.
+      const siblingDir = `${repoDir}-sibling`;
+      tempDirs.push(siblingDir);
+      fs.mkdirSync(siblingDir, { recursive: true });
+      initRepo(siblingDir, { subject: 'sibling seed' });
+      fs.writeFileSync(path.join(siblingDir, 'work.txt'), 'sibling work\n');
+      const repoHeadBefore = headSha();
+
+      await runShellCommand(
+        `cd ${siblingDir} && git add work.txt && git commit -m "sibling work"`,
+      );
+
+      // The commit really landed — in the SIBLING repository.
+      expect(lastLog('%s', siblingDir)).toBe('sibling work');
+      expect(headSha()).toBe(repoHeadBefore);
+      expect(lastLog('%B', siblingDir)).not.toContain(
+        'Co-authored-by: Qwen-Coder',
+      );
+      expect(amendVerdict()?.blocked).toBe(true);
+    });
+
     // R1-11: `COMMIT_RECOGNITION_LEADING_NOISE` feeds the one helper both
     // recognisers call, so a row per token pins registration and the trailer
     // rewrite at once. Each token leads the segment carrying `git commit`
