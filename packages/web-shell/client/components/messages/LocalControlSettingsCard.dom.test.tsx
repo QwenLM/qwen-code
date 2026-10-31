@@ -380,6 +380,10 @@ describe('LocalControlSettingsCard', () => {
     expect(container.textContent).toContain(
       'is not an IPv4 address this host can expose right now',
     );
+    // The refused automatic pick is gone, not retained as an "explicit pick"
+    // row the way a refused CLI grant is: its absence from the lone fresh
+    // candidate must leave nothing to choose.
+    expect(container.querySelector('[aria-label="Local network"]')).toBe(null);
 
     // After the refusal the card follows the fresh candidate list instead of
     // looping on the gone address — but the lone surviving candidate is an
