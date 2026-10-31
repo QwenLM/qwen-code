@@ -100,6 +100,7 @@ import { shellQuotePath } from './lib/shell-quote.js';
 import {
   untrustedGitfile,
   RESIDUE_PATH_CAP,
+  checkoutFilterCommands,
   describeFilterScreen,
   discardWorktree,
   exposeDependencies,
@@ -814,7 +815,23 @@ export function runScratchTree(args: ScratchTreeArgs): ScratchTreeReport {
     if (untrusted !== null) {
       throw new Error(`refusing to create a scratch tree: ${untrusted}`);
     }
-    git(worktree, 'worktree', 'add', '--detach', tree, headSha);
+    git(
+      worktree,
+      'worktree',
+      'add',
+      '--no-checkout',
+      '--detach',
+      tree,
+      headSha,
+    );
+    // Conditional user includes can activate only in the new gitdir.
+    const destinationFilters = checkoutFilterCommands(tree);
+    if (destinationFilters.length > 0) {
+      throw new Error(
+        `refusing to check out a scratch tree with unscreened filters: ${describeFilterScreen(destinationFilters)}`,
+      );
+    }
+    git(tree, 'checkout', '--force', '--detach', headSha);
   } catch (e) {
     // Not `unavailable()`: the residue was already measured, and a report whose
     // note names contaminated paths while its `sharedTreeResidue` field says

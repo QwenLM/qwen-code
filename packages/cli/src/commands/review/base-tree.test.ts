@@ -46,7 +46,13 @@ import {
   dropBuiltTree,
   runIdentity,
 } from './lib/base-tree-trust.js';
-import { adminEntryOf, plantAdminEntry } from './lib/test-utils.js';
+import {
+  adminEntryOf,
+  isolateHostGitConfig,
+  plantAdminEntry,
+} from './lib/test-utils.js';
+import { shellQuotePath } from './lib/shell-quote.js';
+import { filterScreenForTree } from './lib/worktree.js';
 import {
   clearReviewWorktreeLease,
   createReviewWorktreeLease,
@@ -137,6 +143,7 @@ describe('runBaseTree', () => {
   let baseSha: string;
   let headSha: string;
   let home: string;
+  let gitIsolation: ReturnType<typeof isolateHostGitConfig>;
 
   const git = (cwd: string, ...args: string[]) =>
     execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
@@ -206,6 +213,7 @@ describe('runBaseTree', () => {
   };
 
   beforeEach(() => {
+    gitIsolation = isolateHostGitConfig();
     home = mkdtempSync(join(tmpdir(), 'qwen-base-tree-home-'));
     vi.stubEnv('QWEN_HOME', home);
     init();
@@ -259,7 +267,7 @@ describe('runBaseTree', () => {
   };
 
   /**
-   * Commit a new merge base whose `secret.txt` is under filter `driver`, and
+   * Commit a new merge base whose `secret.txt` uses a trusted user driver, and
    * point the lease and the plan at it. The blob is whatever `clean` makes of
    * the file, so `git add` runs `clean` once, here.
    */
@@ -268,8 +276,8 @@ describe('runBaseTree', () => {
     clean: string,
     smudge: string,
   ): void => {
-    git(repo, 'config', `filter.${driver}.clean`, clean);
-    git(repo, 'config', `filter.${driver}.smudge`, smudge);
+    git(repo, 'config', '--global', `filter.${driver}.clean`, clean);
+    git(repo, 'config', '--global', `filter.${driver}.smudge`, smudge);
     writeFileSync(
       join(repo, '.gitattributes'),
       `secret.txt filter=${driver}\n`,
@@ -390,6 +398,7 @@ describe('runBaseTree', () => {
     vi.unstubAllEnvs();
     rmSync(home, { recursive: true, force: true });
     rmSync(repo, { recursive: true, force: true });
+    gitIsolation.dispose();
   });
 
   itWhereContainmentExists(
@@ -2504,6 +2513,180 @@ describe('runBaseTree', () => {
     },
   );
 
+  itWhereContainmentExists.each([
+    { round: 'R8-1', delivery: 'direct' },
+    { round: 'R8-2', delivery: 'transitive' },
+  ])(
+    '$round: sees a normalized rewrite with a $delivery repo-local include of global config',
+    ({ delivery }) => {
+      const build = vi.fn(() => okBuild);
+      expect(run({}, build).available).toBe(true);
+      expect(run({}, build).note).toContain('reusing it');
+      const canary = join(home, 'included-clean-ran');
+      const globalConfig = join(home, '.gitconfig');
+      const filterConfig =
+        delivery === 'direct' ? globalConfig : join(home, 'filters.inc');
+      git(
+        repo,
+        'config',
+        '--file',
+        filterConfig,
+        'filter.evil.clean',
+        `touch ${shellQuotePath(canary)} && tr A-Z a-z`,
+      );
+      if (delivery === 'transitive') {
+        git(
+          repo,
+          'config',
+          '--file',
+          globalConfig,
+          'include.path',
+          filterConfig,
+        );
+      }
+      git(repo, 'config', 'include.path', globalConfig);
+      writeFileSync(join(tree(), '.gitattributes'), 'a.txt filter=evil\n');
+      writeFileSync(join(tree(), 'a.txt'), 'BEFORE\n');
+      const stale = new Date(Date.now() + 60_000);
+      utimesSync(join(tree(), 'a.txt'), stale, stale);
+
+      withHome(home, () => {
+        expect.soft(filterScreenForTree(tree())).toMatchObject({
+          filters: [],
+          exempt: expect.arrayContaining(['filter.evil.clean']),
+          reachedExempt: ['filter.evil.clean'],
+          unread: [],
+          dangling: [],
+        });
+        expect(existsSync(canary)).toBe(false);
+        const second = run({}, build);
+        expect.soft(second.available).toBe(false);
+        expect
+          .soft(second.note)
+          .toContain('no longer holds exactly what this run recorded');
+        expect.soft(existsSync(canary)).toBe(false);
+        expect(build).toHaveBeenCalledTimes(1);
+        expect(readFileSync(join(tree(), 'a.txt'), 'utf8')).toBe('BEFORE\n');
+      });
+    },
+  );
+
+  itWhereContainmentExists(
+    'R8-1: measures a tree when its included global filter is required but unavailable',
+    () => {
+      const build = vi.fn(() => okBuild);
+      expect(run({}, build).available).toBe(true);
+      expect(run({}, build).note).toContain('reusing it');
+      const globalConfig = join(home, '.gitconfig');
+      git(
+        repo,
+        'config',
+        '--file',
+        globalConfig,
+        'filter.lfs.clean',
+        shellQuotePath(join(home, 'missing-filter-binary')),
+      );
+      git(
+        repo,
+        'config',
+        '--file',
+        globalConfig,
+        'filter.lfs.required',
+        'true',
+      );
+      git(repo, 'config', 'include.path', globalConfig);
+      writeFileSync(join(tree(), '.gitattributes'), 'a.txt filter=lfs\n');
+      const stale = new Date(Date.now() + 60_000);
+      utimesSync(join(tree(), 'a.txt'), stale, stale);
+
+      withHome(home, () => {
+        expect(filterScreenForTree(tree())?.reachedExempt).toEqual([
+          'filter.lfs.clean',
+        ]);
+        const second = run({}, build);
+        expect.soft(second.available).toBe(true);
+        expect.soft(second.note).toContain('reusing it');
+        expect
+          .soft(second.note)
+          .not.toContain('its tracked state could not be read');
+        expect(build).toHaveBeenCalledTimes(1);
+      });
+    },
+  );
+
+  itWhereContainmentExists(
+    'blanks a global filter reintroduced by repo-local include during status (R8-1)',
+    () => {
+      const home = mkdtempSync(join(tmpdir(), 'qwen-base-tree-home-'));
+      const globalConfig = join(home, '.gitconfig');
+      const canary = join(repo, 'reintroduced-global-clean-ran');
+      writeFileSync(
+        globalConfig,
+        `[filter "evil"]\n\tclean = touch ${canary} && tr A-Z a-z\n`,
+      );
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      expect(run({}, build).note).toContain('reusing it');
+
+      git(repo, 'config', 'include.path', globalConfig);
+      writeFileSync(join(tree(), '.gitattributes'), '* filter=evil\n');
+      writeFileSync(join(tree(), 'a.txt'), 'BEFORE\n');
+      const t = new Date(Date.now() + 5000);
+      utimesSync(join(tree(), 'a.txt'), t, t);
+
+      withHome(home, () => {
+        const result = run({}, build);
+        expect(result.available).toBe(false);
+        expect(result.note).toContain(
+          'no longer holds exactly what this run recorded',
+        );
+        expect(builds).toEqual([tree()]);
+        expect(existsSync(canary)).toBe(false);
+      });
+    },
+  );
+
+  itWhereContainmentExists(
+    'disables a required missing filter reintroduced by repo-local include (R8-1)',
+    () => {
+      const home = mkdtempSync(join(tmpdir(), 'qwen-base-tree-home-'));
+      const globalConfig = join(home, '.gitconfig');
+      const builds: string[] = [];
+      const build = (w: string) => {
+        builds.push(w);
+        return okBuild;
+      };
+      expect(run({}, build).available).toBe(true);
+      expect(run({}, build).note).toContain('reusing it');
+
+      writeFileSync(
+        globalConfig,
+        '[filter "missing"]\n' +
+          '\tclean = qwen-definitely-missing-filter\n' +
+          '\trequired = true\n',
+      );
+      git(repo, 'config', 'include.path', globalConfig);
+      writeFileSync(join(tree(), '.gitattributes'), '* filter=missing\n');
+      writeFileSync(join(tree(), 'a.txt'), 'changed\n');
+      const t = new Date(Date.now() + 5000);
+      utimesSync(join(tree(), 'a.txt'), t, t);
+
+      withHome(home, () => {
+        const result = run({}, build);
+        expect(result.available).toBe(false);
+        expect(result.note).toContain(
+          'no longer holds exactly what this run recorded',
+        );
+        expect(result.note).not.toContain('tracked state could not be read');
+        expect(builds).toEqual([tree()]);
+      });
+    },
+  );
+
   itWhereContainmentExists(
     'settles a tree whose filter lives only in GLOBAL config, so the config-blind measurement can certify it (R7-1)',
     () => {
@@ -2607,6 +2790,87 @@ describe('runBaseTree', () => {
     },
   );
 
+  itWhereContainmentExists.each([true, false])(
+    'screens a destination-only conditional filter before base checkout (repository-owned: %s)',
+    (controlled) => {
+      const canary = join(gitIsolation.home, 'destination-filter-ran');
+      const payload = join(
+        controlled ? repo : gitIsolation.home,
+        'destination-driver.cfg',
+      );
+      git(
+        repo,
+        'config',
+        '--file',
+        payload,
+        'filter.destination.smudge',
+        `touch ${shellQuotePath(canary)}; cat`,
+      );
+      if (controlled) git(repo, 'add', 'destination-driver.cfg');
+      const common = git(repo, 'rev-parse', '--absolute-git-dir');
+      git(
+        repo,
+        'config',
+        '--global',
+        `includeIf.gitdir:${common}/worktrees/${basename(tree())}.path`,
+        payload,
+      );
+      git(
+        repo,
+        'config',
+        'include.path',
+        join(gitIsolation.home, '.gitconfig'),
+      );
+      writeFileSync(
+        join(repo, '.git', 'info', 'attributes'),
+        '* filter=destination\n',
+      );
+      expect(filterScreenForTree(worktree)?.filters).toEqual([]);
+
+      const build = vi.fn(() => okBuild);
+      const report = run({}, build);
+      expect.soft(existsSync(canary)).toBe(!controlled);
+      expect.soft(report.available).toBe(!controlled);
+      expect(build).toHaveBeenCalledTimes(controlled ? 0 : 1);
+      if (controlled) {
+        expect(report.note).toContain('filter.destination.smudge');
+        expect(existsSync(join(tree(), 'a.txt'))).toBe(false);
+        git(tree(), 'checkout', '--force', '--detach', baseSha);
+        expect(existsSync(canary)).toBe(true);
+      }
+    },
+  );
+
+  it.each(['local', 'global-include'])(
+    'refuses a repository-delivered %s filter before the first base checkout',
+    (origin) => {
+      const canary = join(repo, 'checkout-filter-ran');
+      const command = `touch ${shellQuotePath(canary)}; cat`;
+      if (origin === 'local') {
+        git(repo, 'config', 'filter.evil.smudge', command);
+      } else {
+        const payload = join(repo, 'filters.cfg');
+        git(repo, 'config', '--file', payload, 'filter.evil.smudge', command);
+        git(repo, 'add', 'filters.cfg');
+        git(repo, 'config', '--global', 'include.path', payload);
+      }
+      writeFileSync(
+        join(repo, '.git', 'info', 'attributes'),
+        '* filter=evil\n',
+      );
+      const build = vi.fn(() => okBuild);
+      const report = run({}, build);
+      expect(report.available).toBe(false);
+      expect(report.note).toContain('filter.evil.smudge');
+      expect(build).not.toHaveBeenCalled();
+      expect(existsSync(tree())).toBe(false);
+      expect(existsSync(canary)).toBe(false);
+      rmSync(join(worktree, 'a.txt'));
+      git(worktree, 'checkout-index', '--force', '--', 'a.txt');
+      expect(existsSync(canary)).toBe(true);
+    },
+  );
+
   itWhereContainmentExists(
     'blanks the filters on the POST-BUILD refresh too, so certifying runs none (R5-6, R5-8)',
     () => {
@@ -2616,8 +2880,13 @@ describe('runBaseTree', () => {
       // naming any driver the repository's config defines, and a clean
       // filter would then run on the host inside the certification itself.
       const canary = join(repo, 'post-build-clean-ran');
-      git(repo, 'config', 'filter.evil.clean', `sh -c "touch ${canary}; cat"`);
       const r = run({}, (w) => {
+        git(
+          repo,
+          'config',
+          'filter.evil.clean',
+          `sh -c "touch ${canary}; cat"`,
+        );
         writeFileSync(join(w, '.gitattributes'), '* filter=evil\n');
         const t = new Date(Date.now() + 5_000);
         utimesSync(join(w, 'a.txt'), t, t);
@@ -2679,9 +2948,9 @@ describe('runBaseTree', () => {
         writeFileSync(join(repo, '.git', `inc-${i}.cfg`), '');
         lines += `[include]\n\tpath = inc-${i}.cfg\n`;
       }
-      writeFileSync(config, readFileSync(config, 'utf8') + lines);
       const builds: string[] = [];
       const r = run({}, (w) => {
+        writeFileSync(config, readFileSync(config, 'utf8') + lines);
         builds.push(w);
         return okBuild;
       });
@@ -2703,16 +2972,16 @@ describe('runBaseTree', () => {
   );
 
   itWhereContainmentExists(
-    'certifies — and reuses — a tree whose tracked files are under a content filter (R5-6, R5-8)',
+    'certifies and reuses a tree whose tracked files use a user-global content filter (R5-6, R5-8)',
     () => {
-      // git-lfs `--local`, git-crypt: `worktree add` smudges, so the working
+      // A user-global driver smudges during checkout, so the working
       // bytes are not the cleaned blob, and a file checked out in the second
       // the index was written is racily clean — the blanked `status` must
       // re-hash it and cannot run the filter that would make them agree.
       // Unsettled, every such tree read as dirty and the lane was dead.
       const rot = 'tr A-Za-z N-ZA-Mn-za-m';
-      git(repo, 'config', 'filter.rot.clean', rot);
-      git(repo, 'config', 'filter.rot.smudge', rot);
+      git(repo, 'config', '--global', 'filter.rot.clean', rot);
+      git(repo, 'config', '--global', 'filter.rot.smudge', rot);
       writeFileSync(join(repo, '.gitattributes'), 'secret.txt filter=rot\n');
       writeFileSync(join(repo, 'secret.txt'), 'plain text\n');
       git(repo, 'add', '.gitattributes', 'secret.txt');
@@ -2811,10 +3080,15 @@ describe('runBaseTree', () => {
       // filter could be defined where the screen never looked.
       const canary = join(repo, 'settle-clean-ran');
       commitFilteredBase('evil', `sh -c "touch ${canary}; cat"`, 'cat');
-      rmSync(canary, { force: true }); // the commit's own clean ran it
-      fanOutIncludes();
-      const r = run({}, () => okBuild);
+      const onSettleWindow = vi.fn(() => {
+        rmSync(canary, { force: true });
+        fanOutIncludes();
+        const later = new Date(Date.now() + 5_000);
+        utimesSync(join(tree(), 'secret.txt'), later, later);
+      });
+      const r = run({ onSettleWindow }, () => okBuild);
       expect(r.available).toBe(false);
+      expect(onSettleWindow).toHaveBeenCalledOnce();
       expect(existsSync(canary)).toBe(false);
     },
     15_000,
