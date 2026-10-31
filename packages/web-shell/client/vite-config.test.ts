@@ -170,28 +170,6 @@ describe('Web Shell standalone session development proxy', () => {
   });
 });
 
-describe('Web Shell PR watches development proxy', () => {
-  // Without its own entry the SPA fallback answers `GET /autofix-pr/watches`
-  // with index.html and the page fails JSON parsing in dev. The
-  // workspace-qualified form is already reached by the `/workspace` prefix.
-  it('proxies the primary watches route to the daemon', () => {
-    const proxy = loadConfig().server?.proxy;
-    const options = proxy?.['/autofix-pr'] as ProxyOptions | undefined;
-    expect(options).toBeDefined();
-    expect(options).toBe(proxy?.['/goals']);
-    const request = {
-      method: 'GET',
-      url: '/autofix-pr/watches',
-      headers: { accept: '*/*' },
-    } as unknown as IncomingMessage;
-
-    // An API fetch must NOT bypass to the shell; undefined means "proxy it".
-    expect(
-      options?.bypass?.(request, {} as unknown as ServerResponse, options),
-    ).toBeUndefined();
-  });
-});
-
 describe('Web Shell Java Managed Agent development proxy', () => {
   it('proxies Java WebShell metadata and public artifact bytes', () => {
     const proxy = loadConfig().server?.proxy;
@@ -245,14 +223,21 @@ describe('Web Shell client source proxy bypass', () => {
 });
 
 describe('Web Shell daemon API proxy coverage', () => {
-  it.each(['/standalone', '/live'])('proxies %s API routes', (prefix) => {
+  // Without its own entry the SPA fallback answers these with index.html in
+  // dev and the page fails JSON parsing on open.
+  it.each([
+    { prefix: '/standalone', url: '/standalone/status' },
+    { prefix: '/live', url: '/live/status' },
+    // The only unqualified route in this namespace is the watches listing.
+    { prefix: '/autofix-pr', url: '/autofix-pr/watches' },
+  ])('proxies $prefix API routes', ({ prefix, url }) => {
     const proxy = loadConfig().server?.proxy?.[prefix];
     expect(proxy).not.toBeTypeOf('string');
     expect(proxy).toBeDefined();
     const options = proxy as ProxyOptions;
     const request = {
       method: 'GET',
-      url: `${prefix}/status`,
+      url,
       headers: { accept: '*/*' },
     } as unknown as IncomingMessage;
 
