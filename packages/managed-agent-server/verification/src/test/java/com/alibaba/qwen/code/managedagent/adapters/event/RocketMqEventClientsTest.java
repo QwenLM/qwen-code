@@ -11,13 +11,20 @@ import org.apache.rocketmq.client.apis.message.Message;
 import org.apache.rocketmq.client.apis.producer.Producer;
 import org.apache.rocketmq.client.apis.producer.ProducerBuilder;
 import org.apache.rocketmq.client.java.exception.BadRequestException;
+import org.apache.rocketmq.client.java.exception.ForbiddenException;
 import org.apache.rocketmq.client.java.exception.InternalErrorException;
+import org.apache.rocketmq.client.java.exception.LiteSubscriptionQuotaExceededException;
+import org.apache.rocketmq.client.java.exception.LiteTopicQuotaExceededException;
 import org.apache.rocketmq.client.java.exception.ProxyTimeoutException;
 import org.apache.rocketmq.client.java.exception.StatusChecker;
+import org.apache.rocketmq.client.java.exception.TooManyRequestsException;
+import org.apache.rocketmq.client.java.exception.UnauthorizedException;
 import org.apache.rocketmq.client.java.rpc.Context;
 import org.apache.rocketmq.client.java.rpc.RpcFuture;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+
+import java.util.List;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -27,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.RETURNS_SELF;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -125,6 +133,66 @@ public class RocketMqEventClientsTest {
         verify(producer).close();
     }
 
+    // Throttling, lite-topic quota and ACL refusals are the same shape of
+    // answer — the broker refused the write, the topic's type is fine — and
+    // each is its own ClientException sibling. The sharpest is 42901: the
+    // probe writes into a lite topic that already exists, so "create it as a
+    // LITE topic" is a no-op remedy for an exhausted quota.
+    @Test
+    public void throttlingQuotaAndAclRefusalsNameTheBrokersLimits()
+            throws Exception {
+        List<ClientException> refusals = List.of(
+                new TooManyRequestsException(42900, "req-4", "too many requests"),
+                new LiteTopicQuotaExceededException(42901, "req-5",
+                        "lite topic quota exceeded"),
+                new LiteSubscriptionQuotaExceededException(42902, "req-6",
+                        "lite subscription quota exceeded"),
+                new UnauthorizedException(40100, "req-7", "unauthorized"),
+                new ForbiddenException(40300, "req-8", "forbidden"));
+        for (ClientException refusal : refusals) {
+            when(producer.send(any(Message.class))).thenThrow(refusal);
+
+            IllegalStateException failure = assertThrows(
+                    IllegalStateException.class,
+                    () -> new RocketMqEventClients(provider)
+                            .producer(settings));
+
+            assertTrue(failure.getMessage().contains("quota, flow control and"
+                    + " ACL state"), failure.getMessage());
+            assertFalse(failure.getMessage().contains("mqadmin updateTopic"),
+                    failure.getMessage());
+            assertFalse(failure.getMessage().contains("refused a LiteTopic"
+                    + " message"), failure.getMessage());
+            assertSame(refusal, failure.getCause());
+        }
+        verify(producer, times(refusals.size())).close();
+    }
+
+    // 50400 PROXY_TIMEOUT is the proxy failing to get an answer from the
+    // broker, so the message must not claim the broker is reachable, and the
+    // hint has to name the proxy-to-broker path rather than only the store.
+    @Test
+    public void aProxyTimeoutDoesNotClaimTheBrokerIsReachable()
+            throws Exception {
+        when(producer.send(any(Message.class))).thenThrow(
+                new ProxyTimeoutException(50400, "req-9",
+                        "access broker timeout"));
+
+        IllegalStateException failure = assertThrows(
+                IllegalStateException.class,
+                () -> new RocketMqEventClients(provider).producer(settings));
+
+        assertFalse(failure.getMessage().contains("is reachable"),
+                failure.getMessage());
+        assertTrue(failure.getMessage().contains("could not write the probe"
+                + " message to topic " + TOPIC), failure.getMessage());
+        assertTrue(failure.getMessage().contains("proxy-to-broker path"),
+                failure.getMessage());
+        assertFalse(failure.getMessage().contains("mqadmin updateTopic"),
+                failure.getMessage());
+        verify(producer).close();
+    }
+
     // A NORMAL topic refuses the LITE message with 40014, which the client
     // maps to BadRequestException. That one really is a misconfiguration
     // and keeps the fail-fast remedy.
@@ -169,6 +237,13 @@ public class RocketMqEventClientsTest {
         assertEquals(ProxyTimeoutException.class, refusalType(50400, future));
         assertEquals(ProxyTimeoutException.class, refusalType(50401, future));
         assertEquals(ProxyTimeoutException.class, refusalType(50402, future));
+        assertEquals(TooManyRequestsException.class, refusalType(42900, future));
+        assertEquals(LiteTopicQuotaExceededException.class,
+                refusalType(42901, future));
+        assertEquals(LiteSubscriptionQuotaExceededException.class,
+                refusalType(42902, future));
+        assertEquals(UnauthorizedException.class, refusalType(40100, future));
+        assertEquals(ForbiddenException.class, refusalType(40300, future));
     }
 
     private static Class<?> refusalType(int code, RpcFuture<?, ?> future) {

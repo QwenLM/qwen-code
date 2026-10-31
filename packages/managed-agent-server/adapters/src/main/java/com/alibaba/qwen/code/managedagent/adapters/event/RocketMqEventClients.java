@@ -10,8 +10,13 @@ import org.apache.rocketmq.client.apis.ClientServiceProvider;
 import org.apache.rocketmq.client.apis.consumer.ConsumeResult;
 import org.apache.rocketmq.client.apis.consumer.LitePushConsumer;
 import org.apache.rocketmq.client.apis.producer.Producer;
+import org.apache.rocketmq.client.java.exception.ForbiddenException;
 import org.apache.rocketmq.client.java.exception.InternalErrorException;
+import org.apache.rocketmq.client.java.exception.LiteSubscriptionQuotaExceededException;
+import org.apache.rocketmq.client.java.exception.LiteTopicQuotaExceededException;
 import org.apache.rocketmq.client.java.exception.ProxyTimeoutException;
+import org.apache.rocketmq.client.java.exception.TooManyRequestsException;
+import org.apache.rocketmq.client.java.exception.UnauthorizedException;
 public final class RocketMqEventClients {
     public static final String CAPABILITY_PROBE_LITE = "capability-probe";
     private final ClientServiceProvider provider;
@@ -139,19 +144,30 @@ public final class RocketMqEventClients {
                     .setBody("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8))
                     .build());
         } catch (InternalErrorException | ProxyTimeoutException unavailable) {
-            // The broker answered and refused the write itself — a full
-            // disk, a stopped or timed-out store, an HA failover — so the
-            // topic's message type is not in question. The two are siblings
-            // under ClientException, not parent and child, so naming only one
-            // would leave the persistence timeouts on the topic remedy. A
-            // type conflict arrives as a BadRequestException instead; naming
-            // mqadmin here would send an operator to reconfigure a topic
-            // that is already correct.
+            // The write failed below the topic's message type — a full disk,
+            // a stopped or timed-out store, an HA failover, or a proxy that
+            // never got an answer. 50400 proves only that the proxy answered,
+            // so this must not claim the broker is reachable. These types are
+            // siblings under ClientException, not parent and child, so naming
+            // one leaves the others on the topic remedy. A type conflict
+            // arrives as a BadRequestException instead; naming mqadmin here
+            // would send an operator to reconfigure a correct topic.
             throw new IllegalStateException("the event-transport broker"
-                    + " is reachable but could not write the probe message"
-                    + " to topic " + topic + ": check the broker's disk"
-                    + " space, message store and HA state, not the topic's"
+                    + " could not write the probe message to topic " + topic
+                    + ": check the broker's disk space, message store and HA"
+                    + " state, and the proxy-to-broker path, not the topic's"
                     + " message type", unavailable);
+        } catch (TooManyRequestsException | LiteTopicQuotaExceededException
+                | LiteSubscriptionQuotaExceededException
+                | UnauthorizedException | ForbiddenException refused) {
+            // Flow control, lite-topic quota and ACL refusals are the broker
+            // saying no for its own reasons, so mqadmin updateTopic would be
+            // a no-op. 42901 is the sharpest case: the probe's lite topic
+            // already exists, and an exhausted quota is not a missing one.
+            throw new IllegalStateException("the event-transport broker"
+                    + " answered and refused the probe message to topic "
+                    + topic + ": check the broker's quota, flow control and"
+                    + " ACL state, not the topic's message type", refused);
         } catch (ClientException | RuntimeException failure) {
             throw new IllegalStateException("the event-transport topic "
                     + topic + " refused a LiteTopic message: create it as a"
