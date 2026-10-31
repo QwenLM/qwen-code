@@ -15,7 +15,10 @@ import {
   OpenTuiDiffDialog,
   OpenTuiSubagentListDialog,
 } from '../src/ui/opentui/dialogs-misc.js';
-import { OpenTuiSkillsDialog } from '../src/ui/opentui/dialogs-stats-skills.js';
+import {
+  OpenTuiSkillsDialog,
+  OpenTuiStatsDialog,
+} from '../src/ui/opentui/dialogs-stats-skills.js';
 import { OpenTuiSessionPicker } from '../src/ui/opentui/session-picker.js';
 import { dialogAreaWidth } from '../src/ui/opentui/dialogs-shared.js';
 import type { LoadedSettings } from '../src/config/settings.js';
@@ -69,6 +72,7 @@ async function boundedDialogs() {
     for (const region of [1, 2, 3, 4, 5, 6, 7, 8, 12, 15, 40]) {
       for (const Dialog of [
         OpenTuiSkillsDialog,
+        OpenTuiStatsDialog,
         OpenTuiDiffDialog,
         OpenTuiSubagentListDialog,
       ]) {
@@ -110,7 +114,69 @@ async function boundedDialogs() {
       }
     }
   }
-  console.log('PASS: 132 native short/narrow dialog cases');
+  console.log('PASS: 176 native short/narrow dialog cases');
+}
+
+async function statsReachesTail() {
+  // A one-row viewport leaves a child's margin out of the content height, so
+  // the stats body's three title margins once measured it three rows short
+  // and the Tokens section never painted at any scroll offset; the titles now
+  // space themselves with a box and the last Session row is reachable. Near
+  // 40 columns the body's value column wraps beside its fixed labels and the
+  // scrollbox measures the wrapped body unreliably (the range overshoots or
+  // falls short, worse after a resize), a residual of the narrow-body layout:
+  // that width is checked offset by offset, on fresh renders, from three rows.
+  for (const [width, regions] of [
+    [100, [1, 3, 9, 10, 15]],
+    [40, [3, 9, 10, 15]],
+  ] as const) {
+    for (const region of regions) {
+      const label = `OpenTuiStatsDialog ${width} columns, ${region} rows`;
+      const setup = await render(
+        <box
+          height={region}
+          width={dialogAreaWidth(width)}
+          marginLeft={2}
+          overflow="hidden"
+          flexDirection="column"
+        >
+          <OpenTuiStatsDialog
+            config={config}
+            onClose={noop}
+            availableTerminalHeight={region}
+          />
+        </box>,
+        { width, height: 50 },
+      );
+      try {
+        await act(async () => setup.waitForVisualIdle());
+        const scroller = body(setup);
+        let reached = false;
+        for (let offset = 0; offset <= scroller.scrollHeight; offset += 1) {
+          scroller.scrollTo(offset);
+          await setup.renderOnce();
+          if (setup.captureCharFrame().includes('Output:')) {
+            reached = true;
+            break;
+          }
+        }
+        assert(reached, `${label}: last row unreachable`);
+        if (width === 100) {
+          scroller.scrollTo(scroller.scrollHeight);
+          await setup.renderOnce();
+          assert(
+            setup.captureCharFrame().includes('Output:'),
+            `${label}: range overshoots the last row`,
+          );
+        }
+      } finally {
+        await destroy(setup);
+      }
+    }
+  }
+  console.log(
+    'PASS: native stats body reaches its last row at one-row budgets',
+  );
 }
 
 async function scrollAndResizeDialogs() {
@@ -251,6 +317,7 @@ async function main() {
       fixtureRows.map((row) => row.name).join('\n') + '\n',
     );
     await boundedDialogs();
+    await statsReachesTail();
     await scrollAndResizeDialogs();
     await pickerResize();
   } finally {

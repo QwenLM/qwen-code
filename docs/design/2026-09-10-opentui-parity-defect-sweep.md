@@ -2450,12 +2450,41 @@ frame's own border strokes, so a frame whose natural height exceeds the region
 still paints its bottom border past it, over whatever mounts below. That is why
 the sized bodies that can produce such a height — the diff dialog's
 fourteen-row scroll region, the subagents dialog's twelve-row one, the
-skills dialog's twelve-row one and the theme dialog's preview pane — now
-window themselves from the region budget, leaving the unshrinkable frame's natural height no taller than the
+skills dialog's twelve-row one, the theme dialog's preview pane and, since
+#13080, the stats dialog's tab body — now window themselves from the region
+budget, leaving the unshrinkable frame's natural height no taller than the
 region at every budget. A structural test pins each frame's flush opening and
 its refusal to shrink, the misc dialog's tests pin the diff and subagents
 windowed heights at the boundary, and the frames test pins the skills
-scrollbox's windowed heights.
+and stats scrollboxes' windowed heights.
+
+The stats body joined that list last (#13080). The standalone `/stats` popup
+showed only what fit above the region's clip, so the Tokens and Models
+sections were unreachable on a short terminal; its tab body is now a scrollbox
+windowed from the region minus `STATS_FIXED_ROWS`, the eight rows of border,
+vertical padding, tab bar, spacer and footer hint with its margin that ink's
+`SESSION_CHROME_ROWS` charges too, and up, down, page up and page down move
+it. The frame takes the short-scroll dialogs' layout (2026-10-13): a region of
+eight rows or fewer sheds the padding, the tab bar and the hint and keeps only
+the border from three rows, so the body keeps content rows instead of the
+frame overpainting the region, and Tab and Escape keep working unadvertised.
+The tab labels and the footer hint are clipped to one row at the content
+width, the labels from the right, so the flat charge holds at every width
+where either run would have wrapped — measured on the native renderer, the
+frame overpainted the region in 37 of the 44 width-and-region cases the
+dialog-layout script sweeps before, and in none after, and the script now
+sweeps the stats frame beside its siblings. The section titles space
+themselves with a box rather than a margin: with a one-row viewport the
+renderer leaves a child's margin out of the content height, so three margins
+measured the body three rows short and the Tokens section never painted at
+any scroll offset; the script checks that the last Session row is reachable at
+one-row budgets. One residual stands: near 40 columns the body's value column
+wraps beside its fixed 28-column labels and the scrollbox measures the wrapped
+body unreliably — the scroll range overshoots into blank rows or falls short
+of the last row, and worse after a resize, when the last row can be out of
+reach at any offset. That narrow-body layout is the ink port's and out of
+scope here; the script checks the tail at 40 columns on fresh renders only. The Settings embed passes no budget and keeps the unscrolled body
+and its own up key.
 
 The auth wizard took the same rule a round later, from the other direction. A
 short region measured one row taller than its main view, and the first repair

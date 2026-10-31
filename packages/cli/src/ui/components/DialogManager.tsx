@@ -526,7 +526,11 @@ export const DialogManager = ({
   }
   if (uiState.isStatsDialogOpen) {
     return (
-      <StatsDialog onClose={uiActions.closeStatsDialog} width={mainAreaWidth} />
+      <StatsDialog
+        onClose={uiActions.closeStatsDialog}
+        width={mainAreaWidth}
+        sessionAvailableHeight={constrainedDialogHeight}
+      />
     );
   }
   if (uiState.isMcpDialogOpen) {
