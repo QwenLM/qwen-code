@@ -181,11 +181,36 @@ cross-cutting "how the system works today" tour.
    gate makes every caller enumerable, and a bridge would keep the chain alive.
    Update all callers in the same change.
 
-3. Split `AgentStateStore` into role interfaces (for example
-   `SessionAdmissionStore`, `SessionQueryStore`, `EventProjectionStore`).
-   The implementation may remain one class in this step; consumers inject
-   only the role they use. Interface segregation first, implementation split
-   later (P1).
+3. Split `AgentStateStore` into role interfaces. Landed (2026-10-31) as six
+   roles — `SessionAdmissionStore`, `SessionLifecycleStore`,
+   `SessionQueryStore`, `SessionPolicyStore`, `EventProjectionStore`,
+   `TurnExecutionStore` — with `AgentStateStore` kept as a composite that
+   extends them, so implementations and tests keep the whole surface and
+   nested records/constants resolve through inheritance (imports of nested
+   types must name the owning role). A role-composition pin keeps the
+   composite empty and owns no surface of its own. Consumer audit
+   (call-level, corrected after review): 18 single-role consumers inject
+   their role directly — lifecycle (`RenameEvidence`, `TurnInputEvidence`,
+   `ChildLifecycleAdmissions`, `ActionResponseCoordinator`,
+   `ContextCompressionCoordinator`, `ContextCompressionService`,
+   `ManagedTaskCancelService`, `OperationReconciler`), query
+   (`ManagedRuntimeCoordinator`,
+   `SessionRecoveryService`, `ManagedExtensionCommandVerifier`,
+   `ManagedSessionStore`), policy (`ManagedMcpManagementService`,
+   `ManagedExtensionManagementService`), event projection
+   (`MessageMaterializer`, `ReplayFloorAdvancer`, `ManagedToolResultStore`),
+   and turn execution (`SessionWorktreeService`). Most of the remaining
+   consumers span roles or forward the store into multi-role dependencies
+   (Harness and broker wiring) and keep the composite.
+   Four more are single-role but stay on the composite as deferred
+   migrations, recorded here for P1: `ChildWorkspaceService`,
+   `WorkspaceRuntimeResolver` and `ManagedAutomationService` (query), and
+   `TaskCancelCoordinator` (lifecycle) — their `this(...)` calls are
+   constructor delegation within the same class, not forwarding.
+   `AcceptanceEvidence.settle` now takes `SessionLifecycleStore` directly,
+   which also let `OperationReconciler` narrow. Narrower
+   injection spreads further as P1 splits the implementation along the same
+   seams. Interface segregation first, implementation split later (P1).
 
 4. Add a pin test in `verification`, in the style of `SurfaceRegistryGateTest`:
    assert that `AgentStateStore` (and its successor role interfaces) declare

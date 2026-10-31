@@ -3,7 +3,7 @@ package com.alibaba.qwen.code.managedagent.persistence;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedConfigInstall;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedToolStageRecords;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -28,10 +28,10 @@ import java.util.Set;
 public final class ManagedExtensionCommandVerifier implements RuntimeExtensionCommandVerifier {
     private final JdbcTemplate jdbc;
     private final ManagedExtensionRecordStore records;
-    private final AgentStateStore sessions;
+    private final SessionQueryStore sessions;
     private final ObjectMapper json;
 
-    public ManagedExtensionCommandVerifier(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ManagedExtensionRecordStore records, AgentStateStore sessions, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
+    public ManagedExtensionCommandVerifier(@Qualifier("managedJdbcTemplate") JdbcTemplate jdbc, ManagedExtensionRecordStore records, SessionQueryStore sessions, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.jdbc = jdbc;
         this.records = records;
         this.sessions = sessions;
