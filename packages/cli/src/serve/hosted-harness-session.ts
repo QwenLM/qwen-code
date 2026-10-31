@@ -738,6 +738,7 @@ interface HostedSession {
   lifecycle?: ManagedSessionLifecycleAuthority;
   lifecycleKind?: 'close' | 'delete';
   cleanupBlocked?: boolean;
+  cleanupRetry?: Promise<void>;
   recoveryCleanupOnly?: boolean;
   lifecycleProtocolVersion?: 1 | 2;
   /** Fetched Workspace instructions; undefined until the first fetch. */
@@ -2537,18 +2538,33 @@ async function retryHostedCleanup(
   options: HostedWorkspaceBrokerOptions,
 ): Promise<void> {
   if (unsettledPromptId(session)) return;
+  // A load can overlap the wake pump's retry. Re-read the debt with each
+  // caller's authority after the previous attempt settles.
+  const retry = (session.cleanupRetry ?? Promise.resolve())
+    .catch(() => undefined)
+    .then(async () => {
+      if (unsettledPromptId(session)) return;
+      try {
+        if (hasHostedCleanupDebt(session.managed))
+          await reconcileHostedTurnCleanup(session.managed, options);
+        if (session.cleanupBlocked) liftRecoveryBlock(session);
+        session.cleanupBlocked = false;
+      } catch (cause) {
+        if (!session.blocked) {
+          session.cleanupBlocked = true;
+          session.blocked = true;
+          session.monitorWake?.kick();
+        }
+        throw cause;
+      }
+    });
+  session.cleanupRetry = retry;
   try {
-    if (hasHostedCleanupDebt(session.managed))
-      await reconcileHostedTurnCleanup(session.managed, options);
-    if (session.cleanupBlocked) liftRecoveryBlock(session);
-    session.cleanupBlocked = false;
-  } catch (cause) {
-    if (!session.blocked) {
-      session.cleanupBlocked = true;
-      session.blocked = true;
-      session.monitorWake?.kick();
+    await retry;
+  } finally {
+    if (session.cleanupRetry === retry) {
+      session.cleanupRetry = undefined;
     }
-    throw cause;
   }
 }
 
