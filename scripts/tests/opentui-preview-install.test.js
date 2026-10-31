@@ -93,7 +93,14 @@ function fixture() {
     TMP: path.join(root, 'tmp'),
     TEMP: path.join(root, 'tmp'),
     ...(windows
-      ? { SystemRoot: process.env.SystemRoot, ComSpec: process.env.ComSpec }
+      ? {
+          SystemRoot: process.env.SystemRoot,
+          ComSpec: process.env.ComSpec,
+          // PowerShell writes its own startup cache under these. Keep it out of
+          // the home tree whose contents the assertions attribute to installers.
+          APPDATA: path.join(root, 'appdata', 'Roaming'),
+          LOCALAPPDATA: path.join(root, 'appdata', 'Local'),
+        }
       : { LC_ALL: 'C' }),
   };
   const initialPath = process.env.PATH;
@@ -115,16 +122,10 @@ function fixture() {
   const oldTree = tree(live);
   const launch = () => {
     const result = windows
-      ? checked(
-          powershell,
-          [
-            '-NoProfile',
-            '-NonInteractive',
-            '-Command',
-            `& ${psQuote(entry(live))}; exit $LASTEXITCODE`,
-          ],
-          { env },
-        )
+      ? // A .cmd cannot be spawned directly; route it through cmd.exe. Going via
+        // PowerShell's `&` plus `exit $LASTEXITCODE` returns before the batch
+        // child writes its output and leaves the process holding qwen.cmd.
+        checked(entry(live), [], { env, shell: true })
       : checked(entry(live), [], { env });
     expect(result.status).toBe(0);
     return result.stdout.trim();
