@@ -967,8 +967,9 @@ least one test that imports it.
   (`../escape` has two dots and a slash). Likewise a mode-000 fixture
   violates read and execute at once, so dropping either check survived 990
   unit tests.
-- Runner hygiene (time caps, PID-only kills, restoring the tree, syntax
-  checks that do not execute) is in **Rig hygiene (local rounds)** below.
+- Runner hygiene (time caps, PID-only kills, restoring the tree, a tree of
+  its own apart from every live cell, syntax checks that do not execute)
+  is in **Rig hygiene (local rounds)** below.
 
 **A test that can skip is coverage only where it executes.** A test gated on
 a capability (`assumeTrue`, `it.skipIf`, a platform filter) passes vacuously
@@ -1259,6 +1260,19 @@ results in both directions.
 - Run scenarios that kill processes, revoke grants or wedge a shared
   resource alone on their arm; three runs that overlapped a concurrent
   revocation probe had to be set aside and repeated.
+- Give the mutation matrix a tree of its own — never the tree a live cell
+  is measured on. Restoring the source after each row is not enough: a
+  build inside a row propagates the mutant into `dist/`, and a daemon
+  started mid-row loads it. Gate every daemon or dist-level harness launch
+  on a scripted `dist`-versus-source anchor check that covers every PR
+  anchor plus a control proving the check can report a mismatch, and
+  refuse the launch when it fails. Never hand-patch `dist/` to repair a
+  contaminated build; rebuild from source you have verified clean.
+  Measured example: a round interleaved its mutation matrix with 80 live
+  daemon cells on one tree, then hand-patched the mutant it found in
+  `dist/`; the patched build still carried the mutant expression, so every
+  live cell and the whole matrix were withdrawn and the round shipped as
+  `inconclusive`.
 - Stop processes only by the PIDs you recorded. After every batch, list
   orphaned (ppid 1) processes under the rig path and expect zero.
 - Restore the tree and tear the rig down before exiting. `process.exit()`

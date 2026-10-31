@@ -4992,6 +4992,13 @@ describe('qwen-triage verify hardening round 2', () => {
       'fresh database, storage and workspace per scenario and per arm',
     );
     expect(flat).toContain('orphaned (ppid 1) processes');
+    // PR #13748 local round (2026-10-31): the mutation matrix and 80 live
+    // daemon cells shared one tree; a hand-patched dist still carried the
+    // mutant expression, and the whole round was withdrawn as inconclusive.
+    expect(flat).toContain('Give the mutation matrix a tree of its own');
+    expect(flat).toContain('propagates the mutant into `dist/`');
+    expect(flat).toContain('refuse the launch when it fails');
+    expect(flat).toContain('Never hand-patch `dist/`');
     expect(flat).toContain('`process.exit()` skips `finally`');
     expect(flat).toContain('with `node --check`, never `import()`');
     expect(flat).toContain('Do not edit a shell runner while it executes');
