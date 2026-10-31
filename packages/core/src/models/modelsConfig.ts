@@ -21,7 +21,9 @@ import { createDebugLogger } from '../utils/debugLogger.js';
 
 import {
   ModelRegistry,
+  isBaseUrlAllowed,
   resolveModelSelectionAuthType,
+  type AllowlistDroppedModel,
 } from './modelRegistry.js';
 import {
   type ModelProvidersConfig,
@@ -64,6 +66,24 @@ export interface ModelsConfigOptions {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Maps custom provider ids to their SDK protocol (AuthType). */
   providerProtocolConfig?: ProviderProtocolConfig;
+  /**
+   * Managed endpoint allowlist (`model.allowedBaseUrls`). When an array is
+   * provided (including an empty one), only models whose resolved baseUrl
+   * matches an entry register; `undefined` keeps today's unfiltered
+   * behavior. See {@link ModelRegistry}.
+   */
+  allowedModelBaseUrls?: readonly string[];
+  /**
+   * Whether the hard-coded qwen-oauth built-ins are disabled by the operator
+   * scope setting model.qwenOAuthBuiltinsDisabled. See {@link ModelRegistry}.
+   */
+  qwenOAuthBuiltinsDisabled?: boolean;
+  /**
+   * True when the effective allowlist was set ONLY in workspace scope (no
+   * operator scope): the built-in qwen-oauth models then register without
+   * the allowlist filter. See {@link ModelRegistry}.
+   */
+  allowedBaseUrlsWorkspaceOnly?: boolean;
   /** Generation config from CLI/settings */
   generationConfig?: Partial<ContentGeneratorConfig>;
   /** Source tracking for generation config */
@@ -87,6 +107,14 @@ export interface ModelsConfigOptions {
  */
 export class ModelsConfig {
   private readonly modelRegistry: ModelRegistry;
+
+  /**
+   * Boot-frozen managed endpoint allowlist (`model.allowedBaseUrls`).
+   * `undefined` means no policy. The registry applies it at registration;
+   * the preserve/capture paths below reuse it so an off-list baseUrl cannot
+   * survive through a refresh or reappear as a runtime model snapshot.
+   */
+  private readonly allowedModelBaseUrls?: readonly string[];
 
   // Current selection state
   private currentAuthType: AuthType | undefined;
@@ -163,7 +191,13 @@ export class ModelsConfig {
     this.modelRegistry = new ModelRegistry(
       options.modelProvidersConfig,
       options.providerProtocolConfig,
+      options.allowedModelBaseUrls,
+      options.qwenOAuthBuiltinsDisabled,
+      options.allowedBaseUrlsWorkspaceOnly,
     );
+    // Boot-frozen managed endpoint allowlist, reused by the preserve/capture
+    // paths below (the registry applies it at registration).
+    this.allowedModelBaseUrls = options.allowedModelBaseUrls;
     this.onModelChange = options.onModelChange;
 
     // Initialize generation config
@@ -800,6 +834,15 @@ export class ModelsConfig {
       return;
     }
 
+    // Managed endpoint allowlist (issue #12805): the UPDATE branch below
+    // would otherwise rewrite an active snapshot to an off-list endpoint
+    // with no policy check — the capture gate in
+    // detectAndCaptureRuntimeModel covers only the CREATE branch. Both
+    // branches share this predicate; no policy keeps today's behavior.
+    if (!this.isPolicyBaseUrlAllowed(baseUrl)) {
+      return;
+    }
+
     // Check if model exists in registry - if so, don't create RuntimeModelSnapshot
     if (this.modelRegistry.hasModel(currentAuthType, model, baseUrl)) {
       return;
@@ -1054,6 +1097,21 @@ export class ModelsConfig {
   }
 
   /**
+   * Managed endpoint allowlist check for the preserve/capture paths: the
+   * resolved selection is already gated at resolution time (resolveModelConfig),
+   * but a credential preserved across an auth refresh or captured as a
+   * runtime model snapshot must not keep an off-list baseUrl either. A
+   * missing baseUrl is not judged here — its protocol default was already
+   * checked when the selection was resolved. No policy (undefined) keeps
+   * today's behavior.
+   */
+  private isPolicyBaseUrlAllowed(baseUrl: string | undefined): boolean {
+    if (this.allowedModelBaseUrls === undefined) return true;
+    if (baseUrl === undefined || baseUrl.trim().length === 0) return true;
+    return isBaseUrlAllowed(baseUrl, this.allowedModelBaseUrls);
+  }
+
+  /**
    * Sync state after auth refresh with fallback strategy:
    * 1. If modelId can be found in modelRegistry, use the config from modelRegistry.
    * 2. Otherwise, if existing credentials exist in resolved generationConfig from other sources
@@ -1164,7 +1222,13 @@ export class ModelsConfig {
           this.generationConfigSources['apiKey'] = savedApiKeySource;
         }
       }
-      if (savedBaseUrl) {
+      // Restore the previously-resolved baseUrl only when it still passes
+      // the managed allowlist: applyResolvedModelDefaults installs the
+      // registry (on-list) endpoint, and re-applying an off-list
+      // cli/env/settings baseUrl on top of it would re-admit an endpoint
+      // the policy excluded (issue #12805). An off-list saved baseUrl is
+      // dropped, keeping the registry endpoint.
+      if (savedBaseUrl && this.isPolicyBaseUrlAllowed(savedBaseUrl)) {
         this._generationConfig.baseUrl = savedBaseUrl;
         if (savedBaseUrlSource) {
           this.generationConfigSources['baseUrl'] = savedBaseUrlSource;
@@ -1192,6 +1256,10 @@ export class ModelsConfig {
     // 3. Either:
     //    a. We have manual credentials (set via updateCredentials), OR
     //    b. We have existing credentials
+    // 4. The preserved baseUrl passes the managed endpoint allowlist — a
+    //    policy set at boot overrides manually-entered credentials, so an
+    //    off-list baseUrl cannot survive the refresh (the resolved selection
+    //    is already gated at resolution time; this is the preserve path).
     // Note: Even if authType hasn't changed, switching to a different provider model (that exists in registry)
     // will use provider config (Step 1), not preserve old credentials. This ensures credentials change when
     // switching providers, independent of authType changes.
@@ -1200,7 +1268,8 @@ export class ModelsConfig {
       !isAuthTypeChange &&
       (modelId === undefined ||
         !this.modelRegistry.hasModel(authType, modelId)) &&
-      (this.hasManualCredentials || hasExistingCredentials);
+      (this.hasManualCredentials || hasExistingCredentials) &&
+      this.isPolicyBaseUrlAllowed(this._generationConfig.baseUrl);
 
     if (shouldPreserveCredentials) {
       this.currentRegistryBaseUrl = undefined;
@@ -1284,6 +1353,13 @@ export class ModelsConfig {
       this._generationConfig.apiKey && this._generationConfig.baseUrl;
 
     if (!hasValidCredentials) {
+      return undefined;
+    }
+
+    // A managed endpoint allowlist blocks capturing runtime models whose
+    // baseUrl is off-list: the snapshot would re-admit a model the registry
+    // filtered — with its credential — into the picker and persistence.
+    if (!this.isPolicyBaseUrlAllowed(baseUrl)) {
       return undefined;
     }
 
@@ -1501,6 +1577,9 @@ export class ModelsConfig {
    * @param modelProvidersConfig - The updated model providers configuration
    * @param providerProtocolConfig - Updated provider->protocol map; `undefined`
    *   preserves the existing map (see {@link ModelRegistry.reloadModels}).
+   *
+   * The managed endpoint allowlist is boot-frozen and is preserved across
+   * reloads (see {@link ModelRegistry.reloadModels}).
    */
   reloadModelProvidersConfig(
     modelProvidersConfig?: ModelProvidersConfig,
@@ -1519,5 +1598,14 @@ export class ModelsConfig {
 
   getProviderProtocolConfig(): ProviderProtocolConfig {
     return this.modelRegistry.getProviderProtocolConfig();
+  }
+
+  /**
+   * The models the managed allowlist filter dropped at registration (id +
+   * the resolved baseUrl it was judged against); empty when no policy is in
+   * force or nothing was dropped.
+   */
+  getAllowlistDroppedModels(): AllowlistDroppedModel[] {
+    return this.modelRegistry.getAllowlistDroppedModels();
   }
 }

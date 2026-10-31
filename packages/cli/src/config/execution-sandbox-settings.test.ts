@@ -15,7 +15,11 @@ import {
   selectOperatorExecutionSandbox,
   validateExecutionSandboxSelection,
 } from './execution-sandbox-settings.js';
-import { createMinimalSettings, loadSettings } from './settings.js';
+import {
+  createMinimalSettings,
+  getSettingsWarnings,
+  loadSettings,
+} from './settings.js';
 import { loadServeFastPathSettings } from '../serve/fast-path-settings.js';
 
 const restricted = { filesystem: 'read-only', network: 'closed' } as const;
@@ -200,6 +204,50 @@ describe('operator execution sandbox policy', () => {
     expect(
       createMinimalSettings().merged.privacy?.usageStatisticsEnabled,
     ).toBeUndefined();
+  });
+  it('bare mode keeps the operator model controls of a normal load (R5-13)', () => {
+    write(user, {
+      model: {
+        allowedBaseUrls: ['https://corp.example'],
+        qwenOAuthBuiltinsDisabled: true,
+      },
+    });
+    for (const merged of normalAndBareMerged()) {
+      expect(merged.model?.allowedBaseUrls).toEqual(['https://corp.example']);
+      expect(merged.model?.qwenOAuthBuiltinsDisabled).toBe(true);
+    }
+  });
+  it('bare mode resolves each model control with normal scope precedence (R5-13)', () => {
+    write(defaults, { model: { qwenOAuthBuiltinsDisabled: true } });
+    write(user, {
+      model: {
+        allowedBaseUrls: ['https://user.example'],
+        qwenOAuthBuiltinsDisabled: false,
+      },
+    });
+    write(system, { model: { allowedBaseUrls: ['https://system.example'] } });
+    for (const merged of normalAndBareMerged()) {
+      // System wins for the list it sets; User wins over SystemDefaults for
+      // the control System leaves unset.
+      expect(merged.model?.allowedBaseUrls).toEqual(['https://system.example']);
+      expect(merged.model?.qwenOAuthBuiltinsDisabled).toBe(false);
+    }
+  });
+  it('bare mode adds no model key when no scope sets a model control (R5-13)', () => {
+    write(user, { privacy: { usageStatisticsEnabled: false } });
+    expect(createMinimalSettings().merged.model).toBeUndefined();
+  });
+  it('bare mode attributes a user-set builtins disable to User scope (R5-16)', () => {
+    // Each scope's controls sit in that scope's slot, so the warning names
+    // the scope that set them instead of always blaming System.
+    write(user, { model: { qwenOAuthBuiltinsDisabled: true } });
+    expect(
+      getSettingsWarnings(createMinimalSettings()).some((w) =>
+        w.includes(
+          'model.qwenOAuthBuiltinsDisabled is set in User scope settings',
+        ),
+      ),
+    ).toBe(true);
   });
   it('does not migrate or repair project files on the host under confinement', () => {
     write(user, { tools: { executionSandbox: restricted } });

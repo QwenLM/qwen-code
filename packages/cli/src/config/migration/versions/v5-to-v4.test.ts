@@ -137,17 +137,26 @@ describe('V5ToV4Migration', () => {
       expect(warnings[0]).toContain('anthropic');
     });
 
-    it('treats a wrapped config with missing models as an empty array', () => {
+    it('omits the key for a wrapped config without a models field', () => {
       const input = {
         $version: 5,
         modelProviders: {
           openai: { protocol: 'openai' },
+          anthropic: { protocol: 'anthropic', models: [{ id: 'claude-3' }] },
         },
       };
       const { settings } = migration.migrate(input, 'user') as {
         settings: Record<string, unknown>;
       };
-      expect(settings['modelProviders']).toEqual({ openai: [] });
+      // An absent key, not `[]`: an empty list under qwen-oauth used to be
+      // the built-ins pin, and `[]` would survive the removal route as a
+      // zombie entry (issue #12805).
+      const modelProviders = settings['modelProviders'] as Record<
+        string,
+        unknown
+      >;
+      expect(modelProviders).not.toHaveProperty('openai');
+      expect(modelProviders).toEqual({ anthropic: [{ id: 'claude-3' }] });
     });
 
     it('leaves already-array values untouched', () => {

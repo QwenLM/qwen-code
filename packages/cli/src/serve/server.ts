@@ -462,6 +462,25 @@ export { getActiveSseCount } from './routes/sse-events.js';
  */
 let warnedDefaultTrust = false;
 
+/**
+ * Map a failure to resolve the Live provider credential into the client-
+ * facing readiness message (issue #12805). Operator-actionable policy
+ * rejections (e.g. the managed endpoint allowlist) reach the client
+ * verbatim; the disabled sentinel gets settings-facing wording; anything
+ * else degrades to a generic message so an unexpected error (stack text, a
+ * credential fragment) never surfaces in `/live/status`. Credential-safe:
+ * both endpoint paths (route-derived and free-standing) reject userinfo and
+ * credential queries before the allowlist check.
+ */
+export function liveProviderReadinessMessage(error: unknown): string {
+  if (error instanceof LiveProviderConfigError) {
+    return error.message === 'Live Voice is disabled.'
+      ? 'Live Voice is disabled in settings.'
+      : error.message;
+  }
+  return 'Live provider configuration is incomplete.';
+}
+
 function loadServeChannelWebhookConfigs(
   sources: readonly ChannelWebhookConfigSource[],
 ): Record<string, { webhooks?: ReturnType<typeof parseChannelWebhookConfig> }> {
@@ -1767,11 +1786,7 @@ export function createServeApp(
           return {
             state: 'unavailable',
             blocker: 'provider_config',
-            message:
-              error instanceof LiveProviderConfigError &&
-              error.message === 'Live Voice is disabled.'
-                ? 'Live Voice is disabled in settings.'
-                : 'Live provider configuration is incomplete.',
+            message: liveProviderReadinessMessage(error),
           };
         }
       },

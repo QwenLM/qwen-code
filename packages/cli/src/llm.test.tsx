@@ -1827,7 +1827,127 @@ describe('llm.tsx main function', () => {
       undefined,
       { workflowAncestorTrustProvider: expect.any(Function) },
       expect.any(Function),
+      // allowedBaseUrlsWorkspaceOnly: the bare stub carries no allowlist
+      // (and no trust), so the workspace-only exemption is false
+      false,
     );
+  });
+
+  // A trusted LoadedSettings whose model.allowedBaseUrls is set only in
+  // workspace scope: isAllowedBaseUrlsWorkspaceOnly() is true for it.
+  const workspaceOnlyAllowlistSettings = () => {
+    const list = ['https://corp-llm.example/v1'];
+    return {
+      errors: [],
+      isTrusted: true,
+      merged: { model: { allowedBaseUrls: list }, security: { auth: {} } },
+      system: { settings: {} },
+      systemDefaults: { settings: {} },
+      user: { settings: {} },
+      workspace: { settings: { model: { allowedBaseUrls: list } } },
+      setValue: vi.fn(),
+      forScope: () => ({ settings: {}, originalSettings: {}, path: '' }),
+      migrationWarnings: [],
+      getSystemHooks: () => undefined,
+      getUserHooks: () => undefined,
+      getProjectHooks: () => undefined,
+    };
+  };
+
+  it('hands the workspace-only exemption to the sandbox partial config (R5-17)', async () => {
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { loadSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    vi.mocked(parseArguments).mockResolvedValue({} as unknown as CliArgs);
+    vi.mocked(loadSettings).mockReturnValue(
+      workspaceOnlyAllowlistSettings() as never,
+    );
+    vi.mocked(loadSandboxConfig).mockResolvedValue({
+      command: 'sandbox-exec',
+    } as never);
+    // Stop right after the partial config: the auth probe fails and exits.
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      getModelsConfig: () => {
+        throw new Error('stop after partial config');
+      },
+    } as unknown as Config);
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) throw error;
+    } finally {
+      processExitSpy.mockRestore();
+    }
+
+    expect(vi.mocked(loadCliConfig).mock.calls[0]?.[11]).toBe(true);
+  });
+
+  it('hands the workspace-only exemption to the main loadCliConfig call (R5-17)', async () => {
+    const originalArgv = process.argv;
+    process.argv = ['node', 'script.js', '--bare'];
+    const { loadCliConfig, parseArguments } = await import(
+      './config/config.js'
+    );
+    const { createMinimalSettings } = await import('./config/settings.js');
+    const { loadSandboxConfig } = await import('./config/sandboxConfig.js');
+    const { relaunchAppInChildProcess } = await import('./utils/relaunch.js');
+    const nonInteractiveModule = await import('./nonInteractiveCli.js');
+    const processExitSpy = vi
+      .spyOn(process, 'exit')
+      .mockImplementation((code) => {
+        throw new MockProcessExitError(code);
+      });
+    vi.mocked(parseArguments).mockResolvedValue({
+      bare: true,
+    } as unknown as CliArgs);
+    vi.mocked(createMinimalSettings).mockReturnValue(
+      workspaceOnlyAllowlistSettings() as never,
+    );
+    vi.mocked(loadSandboxConfig).mockResolvedValue(undefined);
+    vi.mocked(relaunchAppInChildProcess).mockResolvedValue(undefined);
+    vi.mocked(loadCliConfig).mockResolvedValue({
+      isInteractive: () => false,
+      getQuestion: () => 'bare prompt',
+      getSandbox: () => false,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getDebugMode: () => false,
+      getListExtensions: () => false,
+      getMcpServers: () => ({}),
+      getTopTierMcpServers: () => undefined,
+      getModelProvidersConfig: () => undefined,
+      initialize: vi.fn().mockResolvedValue(undefined),
+      waitForMcpReady: vi.fn().mockResolvedValue(undefined),
+      getIdeMode: () => false,
+      getExperimentalZedIntegration: () => false,
+      getScreenReader: () => false,
+      getMemoryFileCount: () => 0,
+      getProjectRoot: () => '/',
+      getOutputFormat: () => OutputFormat.TEXT,
+      getWarnings: () => [],
+      isSafeMode: () => false,
+      getModelsConfig: () => ({ getCurrentAuthType: () => null }),
+      getSessionId: () => 'test-session-id',
+    } as unknown as Config);
+    vi.spyOn(nonInteractiveModule, 'runNonInteractive').mockResolvedValue(0);
+
+    try {
+      await main();
+    } catch (error) {
+      if (!(error instanceof MockProcessExitError)) throw error;
+    } finally {
+      process.argv = originalArgv;
+      processExitSpy.mockRestore();
+    }
+
+    expect(vi.mocked(loadCliConfig).mock.calls.at(-1)?.[11]).toBe(true);
   });
 
   describe('registerLspHotReload', () => {

@@ -8,10 +8,14 @@ import { describe, it, expect, beforeEach, vi } from 'vitest';
 import {
   ModelRegistry,
   QWEN_OAUTH_MODELS,
+  isBaseUrlAllowed,
   modelRegistryKey,
   resolveProviderProtocol,
+  scrubBaseUrlForMessage,
 } from './modelRegistry.js';
 import { AuthType } from '../core/contentGenerator.js';
+import { DEFAULT_OPENAI_BASE_URL } from '../core/openaiContentGenerator/constants.js';
+import { getDefaultBaseUrlForProtocol } from '../providers/provider-config.js';
 import type {
   ModelConfig,
   ModelProvidersConfig,
@@ -1082,5 +1086,652 @@ describe('providerProtocol mapping (custom provider ids)', () => {
     const models = registry.getModelsForAuthType(AuthType.USE_OPENAI);
     expect(models).toHaveLength(1);
     expect(models[0].label).toBe('From A');
+  });
+});
+
+describe('ModelRegistry managed allowlist (model.allowedBaseUrls)', () => {
+  const CORP = 'https://corp.example';
+  const externalCustom = () =>
+    ({
+      custom: [
+        {
+          id: 'ext',
+          baseUrl: 'https://external-llm.example/v1',
+          envKey: 'EXT_KEY',
+        },
+      ],
+    }) as ModelProvidersConfig;
+
+  it('rejects a custom provider with an external baseUrl when an allowlist is set', () => {
+    const registry = new ModelRegistry(externalCustom(), { custom: 'openai' }, [
+      CORP,
+    ]);
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+    expect(
+      debugLoggerWarnSpy.mock.calls.some((call) =>
+        String(call[0]).includes('not in the model.allowedBaseUrls'),
+      ),
+    ).toBe(true);
+  });
+
+  it('registers the same custom provider when its baseUrl is on the allowlist', () => {
+    const registry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}/v1`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [CORP],
+    );
+    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ext']);
+  });
+
+  it('keeps today behavior when no allowlist is provided', () => {
+    const registry = new ModelRegistry(externalCustom(), { custom: 'openai' });
+    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ext']);
+  });
+
+  it('does not treat a sibling domain as a path prefix of an allowlist entry', () => {
+    const registry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: 'https://corp.example.evil.com/v1' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [CORP],
+    );
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
+  it('matches hosts case-insensitively and ignores trailing slashes', () => {
+    const registry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: 'https://CORP.Example/V1/' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      ['https://corp.example/'],
+    );
+    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ext']);
+  });
+
+  it('ignores a trailing slash on the ENTRY side and keeps path boundaries', () => {
+    // The strip is symmetric — an entry written `…/v1/` covers the same
+    // path without the slash (the earlier direction, target `…/V1/` against
+    // entry `…/`, is covered by the case-insensitivity test above).
+    const trailingEntry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}/v1`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [`${CORP}/v1/`],
+    );
+    expect(idsOf(trailingEntry, AuthType.USE_OPENAI)).toEqual(['ext']);
+
+    // A path prefix that is not a path boundary still must not match:
+    // entry `/v1` covers `/v1/…` but not `/v1beta`.
+    const boundary = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}/v1beta`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [`${CORP}/v1`],
+    );
+    expect(boundary.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
+  it('matches allowlist paths case-sensitively while hosts stay case-insensitive', () => {
+    // Hosts compare case-insensitively, but the path is case-sensitive:
+    // /V1 is a different endpoint path than /v1.
+    const mismatch = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: 'https://corp.example/V1' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      ['https://corp.example/v1'],
+    );
+    expect(mismatch.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+
+    // A byte-identical URL still matches.
+    const match = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: 'https://corp.example/v1' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      ['https://corp.example/v1'],
+    );
+    expect(idsOf(match, AuthType.USE_OPENAI)).toEqual(['ext']);
+  });
+
+  it('never matches across a scheme mismatch in either direction', () => {
+    // The matcher compares protocol first, so an http:// entry can never
+    // cover an https:// endpoint (and vice versa) — scheme sensitivity must
+    // survive a refactor that weakens the origin/host comparison.
+    const httpEntry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: 'https://corp.example/v1' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      ['http://corp.example/v1'],
+    );
+    expect(httpEntry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+
+    const httpsEntry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: 'http://corp.example/v1' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      ['https://corp.example/v1'],
+    );
+    expect(httpsEntry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
+  it('an empty allowlist registers no models, including the qwen-oauth built-ins', () => {
+    const registry = new ModelRegistry(
+      { openai: [{ id: 'llm', baseUrl: CORP }] },
+      undefined,
+      [],
+    );
+    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual([]);
+    expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual([]);
+  });
+
+  it('does not register the qwen-oauth built-ins when an allowlist is set', () => {
+    // Documented managed semantics, not a sentinel artifact: the built-in
+    // qwen-oauth models resolve their baseUrl to the dynamic
+    // 'DYNAMIC_QWEN_OAUTH_BASE_URL' placeholder, so no allowlist entry can
+    // ever match them. Setting model.allowedBaseUrls intentionally disables
+    // the personal Qwen login provider (its endpoint is discovered at login
+    // and cannot be listed); a deployment that needs it leaves the key unset.
+    const registry = new ModelRegistry(undefined, undefined, [CORP]);
+    expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual([]);
+  });
+
+  it('exempts the built-ins when the allowlist is workspace-scoped only', () => {
+    // A workspace list still narrows configured provider endpoints, but the
+    // built-in qwen-oauth models register without the filter — their login
+    // endpoint cannot be listed, and disabling personal Qwen login is an
+    // operator decision (issue #12805).
+    const registry = new ModelRegistry(
+      undefined,
+      undefined,
+      [CORP],
+      false,
+      true,
+    );
+    expectHardCodedQwenCount(registry);
+    // Exempt models are not recorded as drops.
+    expect(registry.getAllowlistDroppedModels()).toEqual([]);
+
+    // The exemption is qwen-oauth-only: an external endpoint is still judged
+    // against the same workspace list.
+    const narrowed = new ModelRegistry(
+      externalCustom(),
+      { custom: 'openai' },
+      [CORP],
+      false,
+      true,
+    );
+    expect(narrowed.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+    expectHardCodedQwenCount(narrowed);
+    expect(narrowed.getAllowlistDroppedModels()).toEqual([
+      {
+        id: 'ext',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://external-llm.example/v1',
+      },
+    ]);
+  });
+
+  it('fails closed for a model whose protocol default endpoint is not listed', () => {
+    // openai protocol default baseUrl is the external DashScope endpoint.
+    const registry = new ModelRegistry({ openai: [{ id: 'llm' }] }, undefined, [
+      CORP,
+    ]);
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
+  it('keeps the qwen-oauth built-ins for an explicit empty list (retired pin)', () => {
+    // `[]` under qwen-oauth is an empty provider list, not a switch: only
+    // the operator-scoped model.qwenOAuthBuiltinsDisabled disables the
+    // built-ins (issue #12805, the migration and the provider-removal
+    // route synthesize `[]` without operator intent).
+    const registry = new ModelRegistry({ 'qwen-oauth': [] });
+    expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual(['coder-model']);
+  });
+
+  it('keeps the qwen-oauth built-ins when the key is missing', () => {
+    const registry = new ModelRegistry();
+    expectHardCodedQwenCount(registry);
+  });
+
+  it('keeps the qwen-oauth built-ins for a non-empty list (hard-coded wins)', () => {
+    const registry = new ModelRegistry({
+      'qwen-oauth': [{ id: 'custom-qwen' }],
+    });
+    expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual(['coder-model']);
+  });
+
+  it('reloadModels preserves the boot-time allowlist on a providers-only reload', () => {
+    const registry = new ModelRegistry(externalCustom(), { custom: 'openai' }, [
+      CORP,
+    ]);
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+
+    // A providers-only reload must not drop the policy: an allowed model
+    // still registers after the reload.
+    registry.reloadModels(
+      { custom: [{ id: 'ok', baseUrl: `${CORP}/v1` }] } as ModelProvidersConfig,
+      { custom: 'openai' },
+    );
+    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ok']);
+  });
+
+  it('reloadModels keeps the boot-time allowlist — reloading providers cannot widen it', () => {
+    const registry = new ModelRegistry(externalCustom(), { custom: 'openai' }, [
+      CORP,
+    ]);
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+
+    // The policy is boot-frozen (like providerProtocol): re-registering the
+    // external endpoint through a providers-only reload must not escape the
+    // boot-time allowlist.
+    registry.reloadModels(externalCustom(), { custom: 'openai' });
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
+  it('reloadModels keeps the boot-time builtins decision (no pin via [] anymore)', () => {
+    // The disable decision is boot-frozen (like the allowlist): a
+    // providers-only reload cannot re-enable the built-ins, and `[]` under
+    // qwen-oauth no longer means anything (retired pin, issue #12805).
+    const disabled = new ModelRegistry(undefined, undefined, undefined, true);
+    expect(idsOf(disabled, AuthType.QWEN_OAUTH)).toEqual([]);
+    disabled.reloadModels({ 'qwen-oauth': [] });
+    expect(idsOf(disabled, AuthType.QWEN_OAUTH)).toEqual([]);
+
+    // Not disabled: `[]` is just an empty provider list, so the hard-coded
+    // built-ins survive a reload that carries only it.
+    const enabled = new ModelRegistry();
+    enabled.reloadModels({ 'qwen-oauth': [] });
+    expectHardCodedQwenCount(enabled);
+  });
+
+  it('reloadModels refreshes the dropped-models record', () => {
+    // The drop record must follow the reloaded registration, or user-visible
+    // channels (advisor errors, warnings) keep naming boot-time drops for a
+    // config that no longer produced them (issue #12805).
+    const registry = new ModelRegistry(
+      { custom: [{ id: 'on', baseUrl: CORP, envKey: 'CORP_KEY' }] },
+      { custom: 'openai' },
+      [CORP],
+    );
+    expect(registry.getAllowlistDroppedModels()).toEqual([
+      {
+        id: 'coder-model',
+        authType: AuthType.QWEN_OAUTH,
+        baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+      },
+    ]);
+    registry.reloadModels(
+      {
+        custom: [
+          {
+            id: 'off',
+            baseUrl: 'https://external-llm.example/v1',
+            envKey: 'CORP_KEY',
+          },
+        ],
+      },
+      { custom: 'openai' },
+    );
+    expect(registry.getAllowlistDroppedModels()).toEqual([
+      {
+        id: 'coder-model',
+        authType: AuthType.QWEN_OAUTH,
+        baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+      },
+      {
+        id: 'off',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://external-llm.example/v1',
+      },
+    ]);
+  });
+
+  it('matches an explicit default port as absent (URL origin semantics)', () => {
+    // new URL() elides explicit default ports from the origin, so
+    // https://corp.example:443/v1 is the same endpoint as https://corp.example.
+    const registry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}:443/v1`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [CORP],
+    );
+    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ext']);
+
+    // A non-default port is a different endpoint and must not match.
+    const offPort = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}:8443/v1`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [CORP],
+    );
+    expect(offPort.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
+  it('fails closed (no models, no throw) for a non-array allowlist value', () => {
+    // A hand-edited settings value that is not an array must not crash the
+    // constructor with a raw TypeError; it blocks every model instead.
+    let registry!: ModelRegistry;
+    expect(
+      () =>
+        (registry = new ModelRegistry(
+          { openai: [{ id: 'llm', baseUrl: CORP }] },
+          undefined,
+          'https://corp.example' as unknown as readonly string[],
+        )),
+    ).not.toThrow();
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+    expect(
+      debugLoggerWarnSpy.mock.calls.some((call) =>
+        String(call[0]).includes('model.allowedBaseUrls is not an array'),
+      ),
+    ).toBe(true);
+  });
+
+  it('warns and skips degenerate entries instead of matching everything', () => {
+    // 'https://' has no host — the old string fallback let it match every
+    // https URL (silent fail-open). It must be skipped with a warning.
+    const registry = new ModelRegistry(
+      {
+        custom: [
+          {
+            id: 'ext',
+            baseUrl: 'https://external-llm.example/v1',
+            envKey: 'EXT_KEY',
+          },
+          { id: 'ok', baseUrl: `${CORP}/v1`, envKey: 'CORP_KEY' },
+        ],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [CORP, 'https://', 'mailto:', '', 'not a url', 42 as unknown as string],
+    );
+    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ok']);
+    expect(
+      debugLoggerWarnSpy.mock.calls.some((call) =>
+        String(call[0]).includes('is not a URL with a host'),
+      ),
+    ).toBe(true);
+    // 'mailto:' parses with an empty hostname — the parse-ok branch of
+    // parseUrlForMatch must reject it too, not only the throw branch
+    // that 'https://' hits (issue #12805).
+    expect(
+      debugLoggerWarnSpy.mock.calls.some((call) =>
+        String(call[0]).includes('entry "mailto:" is not a URL with a host'),
+      ),
+    ).toBe(true);
+    expect(
+      debugLoggerWarnSpy.mock.calls.some((call) =>
+        String(call[0]).includes('is not a non-empty string'),
+      ),
+    ).toBe(true);
+  });
+
+  it('keeps query/fragment entries but warns they match the whole prefix', () => {
+    // Matching is URL-semantic and ignores query/fragment on both sides, so
+    // an entry that carries one allows every endpoint under the same
+    // origin+path — warn, but keep the entry (it still confines by
+    // host+path; rejecting it would also break an all-invalid list's
+    // fail-closed shape).
+    const registry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}/v1`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [`${CORP}/v1?q=1`],
+    );
+    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ext']);
+    expect(
+      debugLoggerWarnSpy.mock.calls.some((call) =>
+        String(call[0]).includes('carries a query/fragment'),
+      ),
+    ).toBe(true);
+
+    // A fragment-only entry behaves the same way. Both constructions
+    // validate their list (the spy is cleared per test, not per
+    // construction), so two entries carrying a query/fragment warn twice.
+    const fragment = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}/v1`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [`${CORP}/v1#f`],
+    );
+    expect(idsOf(fragment, AuthType.USE_OPENAI)).toEqual(['ext']);
+    expect(
+      debugLoggerWarnSpy.mock.calls.filter((call) =>
+        String(call[0]).includes('carries a query/fragment'),
+      ).length,
+    ).toBe(2);
+  });
+
+  it('matches a whitespace-padded allowlist entry against the exact baseUrl', () => {
+    const registry = new ModelRegistry(
+      {
+        custom: [{ id: 'ext', baseUrl: `${CORP}/v1`, envKey: 'CORP_KEY' }],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [`  ${CORP}  `],
+    );
+    expect(idsOf(registry, AuthType.USE_OPENAI)).toEqual(['ext']);
+  });
+
+  it('isBaseUrlAllowed fails closed for empty, non-string, and non-array inputs', () => {
+    expect(isBaseUrlAllowed(undefined, [CORP])).toBe(false);
+    expect(isBaseUrlAllowed('', [CORP])).toBe(false);
+    expect(isBaseUrlAllowed(`${CORP}/v1`, undefined)).toBe(false);
+    expect(
+      isBaseUrlAllowed(`${CORP}/v1`, null as unknown as readonly string[]),
+    ).toBe(false);
+    expect(isBaseUrlAllowed(`${CORP}/v1`, [`${CORP}/`])).toBe(true);
+    expect(isBaseUrlAllowed(`${CORP}/v1`, ['https://other.example'])).toBe(
+      false,
+    );
+    // A degenerate entry must match nothing even when a raw-list consumer
+    // receives it unvalidated — the matcher itself is the chokepoint
+    // (issue #12805: the previous string-normalized fallback turned
+    // `https://` into a match-everything wildcard).
+    expect(isBaseUrlAllowed('https://anything.example/v1', ['https://'])).toBe(
+      false,
+    );
+    expect(isBaseUrlAllowed('https://anything.example/v1', ['not a url'])).toBe(
+      false,
+    );
+    // Trailing slash on the entry side is ignored (symmetric with the
+    // target side covered above).
+    expect(isBaseUrlAllowed(`${CORP}`, [`${CORP}/`])).toBe(true);
+  });
+
+  it('keeps the built-ins when the disabled flag is an explicit false', () => {
+    // The operator key is a plain boolean (issue #12805): false means
+    // "not disabled", so the built-ins register even alongside an empty
+    // qwen-oauth provider list.
+    const registry = new ModelRegistry(
+      { 'qwen-oauth': [] },
+      undefined,
+      undefined,
+      false,
+    );
+    expectHardCodedQwenCount(registry);
+  });
+
+  it('suppresses the built-ins on an explicit true even without a merged pin', () => {
+    const registry = new ModelRegistry(undefined, undefined, undefined, true);
+    expect(idsOf(registry, AuthType.QWEN_OAUTH)).toEqual([]);
+  });
+
+  it('records each allowlist drop with the judged baseUrl', () => {
+    const registry = new ModelRegistry(externalCustom(), { custom: 'openai' }, [
+      CORP,
+    ]);
+    // The off-list provider entry plus the built-in qwen-oauth model, whose
+    // dynamic endpoint can never match an allowlist entry.
+    expect(registry.getAllowlistDroppedModels()).toEqual([
+      {
+        id: 'coder-model',
+        authType: AuthType.QWEN_OAUTH,
+        baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+      },
+      {
+        id: 'ext',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://external-llm.example/v1',
+      },
+    ]);
+  });
+
+  it('stamps the judged baseUrl on resolved models (protocol default)', () => {
+    // Pair assertion: a model without an explicit baseUrl is judged against
+    // its protocol default endpoint, and the resolved model carries exactly
+    // that baseUrl — the same value the allowlist saw.
+    const registry = new ModelRegistry(
+      { openai: [{ id: 'llm', name: 'llm' }] },
+      undefined,
+      [OPENAI_URL],
+    );
+    const model = registry.getModel(AuthType.USE_OPENAI, 'llm');
+    expect(model?.baseUrl).toBe(OPENAI_URL);
+  });
+  it('stamps no baseUrl on baseUrl-less anthropic/gemini/responses models (R1-3)', () => {
+    // The allowlist judges the protocol-table endpoint, but the registered
+    // model keeps the pre-allowlist stamp: the table's Anthropic value
+    // (`https://api.anthropic.com/v1`) would make the SDK dial
+    // `/v1/v1/messages`, and any stamp shadows MissingBaseUrlError and the
+    // SDK/env fallbacks (issue #12805).
+    const registry = new ModelRegistry(
+      {
+        anthropic: [{ id: 'claude' }],
+        gemini: [{ id: 'gem' }],
+        openai: [{ id: 'resp-model', wireApi: 'responses' }],
+      } as ModelProvidersConfig,
+      undefined,
+      [
+        getDefaultBaseUrlForProtocol(AuthType.USE_ANTHROPIC),
+        getDefaultBaseUrlForProtocol(AuthType.USE_GEMINI),
+        getDefaultBaseUrlForProtocol(AuthType.USE_OPENAI_RESPONSES),
+      ],
+    );
+    // Registered: the allowlist judged (and admitted) the table endpoints.
+    expect(registry.getModel(AuthType.USE_ANTHROPIC, 'claude')?.baseUrl).toBe(
+      '',
+    );
+    expect(registry.getModel(AuthType.USE_GEMINI, 'gem')?.baseUrl).toBe('');
+    expect(
+      registry.getModel(AuthType.USE_OPENAI_RESPONSES, 'resp-model')?.baseUrl,
+    ).toBe('');
+    // Same stamp without any policy.
+    const unmanaged = new ModelRegistry({ anthropic: [{ id: 'claude' }] });
+    expect(unmanaged.getModel(AuthType.USE_ANTHROPIC, 'claude')?.baseUrl).toBe(
+      '',
+    );
+  });
+
+  it('pins the OpenAI protocol-table default to the SDK default (R5-25)', () => {
+    // The registry stamps DEFAULT_OPENAI_BASE_URL while both gates judge the
+    // protocol table; the two literals must stay byte-equal.
+    expect(getDefaultBaseUrlForProtocol(AuthType.USE_OPENAI)).toBe(
+      DEFAULT_OPENAI_BASE_URL,
+    );
+  });
+
+  it('scrubs userinfo credentials from the drop record and warning (R5-27)', () => {
+    const registry = new ModelRegistry(
+      {
+        custom: [
+          {
+            id: 'gw',
+            baseUrl: 'https://team:sk-live-abc123@gw-legacy.corp.example/v1',
+          },
+        ],
+      } as ModelProvidersConfig,
+      { custom: 'openai' },
+      [CORP],
+    );
+    const dropped = registry
+      .getAllowlistDroppedModels()
+      .find((entry) => entry.id === 'gw');
+    expect(dropped?.baseUrl).toContain('gw-legacy.corp.example/v1');
+    expect(dropped?.baseUrl).not.toContain('sk-live-abc123');
+    const warned = debugLoggerWarnSpy.mock.calls
+      .map((call) => String(call[0]))
+      .filter((message) => message.includes('"gw"'));
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toContain('gw-legacy.corp.example/v1');
+    expect(warned[0]).not.toContain('sk-live-abc123');
+    // The Qwen OAuth sentinel is recorded verbatim — the built-in remedy
+    // branch compares against it.
+    expect(
+      registry
+        .getAllowlistDroppedModels()
+        .find((entry) => entry.id === 'coder-model')?.baseUrl,
+    ).toBe('DYNAMIC_QWEN_OAUTH_BASE_URL');
+  });
+
+  it('reloadModels preserves the workspace-only built-ins exemption (R5-24)', () => {
+    const registry = new ModelRegistry(
+      externalCustom(),
+      { custom: 'openai' },
+      [CORP],
+      false,
+      true,
+    );
+    expectHardCodedQwenCount(registry);
+    registry.reloadModels(externalCustom(), { custom: 'openai' });
+    // The exemption survives the reload, and the external endpoint is still
+    // judged against the boot list.
+    expectHardCodedQwenCount(registry);
+    expect(registry.getModelsForAuthType(AuthType.USE_OPENAI)).toEqual([]);
+  });
+
+  it('fails startup on a malformed off-list entry instead of dropping it (R5-26)', () => {
+    // Validation runs before the policy decision: an id-less entry the
+    // allowlist would also drop must still refuse startup with its own error.
+    expect(
+      () =>
+        new ModelRegistry(
+          {
+            openai: [{ id: '', baseUrl: 'https://external-llm.example/v1' }],
+          },
+          undefined,
+          [CORP],
+        ),
+    ).toThrow('missing required field: id');
+  });
+});
+
+describe('scrubBaseUrlForMessage (R2-18)', () => {
+  it.each([
+    ['user:pass@corp.example/v1', '***@corp.example/v1'],
+    ['//user:pass@corp.example', '//***@corp.example'],
+    ['sk-abc123:tok@gw.corp.example/v1', '***@gw.corp.example/v1'],
+    ['https://user:sk@', 'https://***@'],
+    ['ftp://user:pass@host/v1', 'ftp://***@host/v1'],
+  ])('masks the userinfo of a non-http(s) shape %j', (input, expected) => {
+    expect(scrubBaseUrlForMessage(input)).toBe(expected);
+  });
+
+  it('echoes clean http(s) URLs verbatim and strips userinfo from parseable ones', () => {
+    expect(scrubBaseUrlForMessage('https://corp.example/v1?x=a@b')).toBe(
+      'https://corp.example/v1?x=a@b',
+    );
+    expect(scrubBaseUrlForMessage('https://user:pass@corp.example/v1')).toBe(
+      'https://corp.example/v1',
+    );
+  });
+
+  it('keeps values that carry no userinfo, including the Qwen OAuth sentinel', () => {
+    expect(scrubBaseUrlForMessage('DYNAMIC_QWEN_OAUTH_BASE_URL')).toBe(
+      'DYNAMIC_QWEN_OAUTH_BASE_URL',
+    );
+    expect(scrubBaseUrlForMessage('corp.example/v1')).toBe('corp.example/v1');
   });
 });

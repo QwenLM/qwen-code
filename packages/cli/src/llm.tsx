@@ -63,6 +63,7 @@ import {
   createMinimalSettings,
   getSettingsWarnings,
   getOperatorTrustSettings,
+  isAllowedBaseUrlsWorkspaceOnly,
   loadSettings,
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
@@ -760,6 +761,7 @@ export async function main() {
             }
           : undefined,
         buildEnabledSkillNamesProvider(settings),
+        isAllowedBaseUrlsWorkspaceOnly(settings),
       );
 
       if (!settings.merged.security?.auth?.useExternal) {
@@ -1108,6 +1110,7 @@ export async function main() {
           }
         : undefined,
       buildEnabledSkillNamesProvider(settings),
+      isAllowedBaseUrlsWorkspaceOnly(settings),
     );
     markAcpStartup('configConstructionEnd');
     profileCheckpoint('after_load_cli_config');

@@ -196,6 +196,27 @@ export interface CliGenerationConfigInputs {
    * Injectable env for testability. Defaults to process.env at callsites.
    */
   env?: Record<string, string | undefined>;
+  /**
+   * Managed endpoint allowlist (`model.allowedBaseUrls`). `undefined` = no
+   * policy. When defined, the resolver fails closed with a FatalConfigError
+   * that names the setting when the resolved endpoint is off-list
+   * (issue #12805).
+   */
+  allowedBaseUrls?: readonly string[] | undefined;
+  /**
+   * Operator-scope Qwen OAuth builtins disable
+   * (`model.qwenOAuthBuiltinsDisabled` in System/User/SystemDefaults;
+   * workspace-scope values are stripped from the merge). When true, Qwen
+   * OAuth resolution fails closed instead of falling back to the default
+   * built-in model (issue #12805).
+   */
+  qwenOAuthBuiltinsDisabled?: boolean | undefined;
+  /**
+   * True when the allowlist was set ONLY in workspace scope: it still
+   * narrows configured provider endpoints, but must not fail closed for
+   * the Qwen OAuth dynamic endpoint (issue #12805).
+   */
+  allowedBaseUrlsWorkspaceOnly?: boolean | undefined;
 }
 
 export interface ResolvedCliGenerationConfig {
@@ -416,6 +437,9 @@ export function resolveCliGenerationConfig(
     },
     modelProvider,
     env: filteredEnv,
+    allowedBaseUrls: inputs.allowedBaseUrls,
+    qwenOAuthBuiltinsDisabled: inputs.qwenOAuthBuiltinsDisabled,
+    allowedBaseUrlsWorkspaceOnly: inputs.allowedBaseUrlsWorkspaceOnly,
   };
 
   const resolved = resolveModelConfig(configSources);

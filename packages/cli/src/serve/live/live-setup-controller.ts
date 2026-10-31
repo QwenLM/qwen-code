@@ -17,6 +17,7 @@ import {
   findLiveRealtimeRoute,
   listLiveRealtimeRoutes,
   LiveProviderConfigError,
+  liveEndpointPolicyError,
   normalizeLiveRealtimeEndpoint,
   readLiveVoiceConfiguration,
   resolveLiveProviderCredential,
@@ -220,10 +221,17 @@ export class LiveSetupController {
     const endpoint = route
       ? (route.baseUrl ?? '')
       : configuredEndpoint(settings);
-    const endpointError =
-      !route && effectiveEndpoint(endpoint) === undefined
+    // The free-standing endpoint is also judged against the managed
+    // allowlist here, as the dial path does (issue #12805) — a route's
+    // refusal reaches the card through keyError below.
+    const freeStandingEndpoint = route
+      ? undefined
+      : effectiveEndpoint(endpoint);
+    const endpointError = route
+      ? undefined
+      : freeStandingEndpoint === undefined
         ? INVALID_ENDPOINT
-        : undefined;
+        : liveEndpointPolicyError(settings, freeStandingEndpoint);
     let keyConfigured: boolean;
     let keyError: string | undefined;
     if (route) {

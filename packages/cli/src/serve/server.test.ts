@@ -38,6 +38,7 @@ import {
   computeKeepaliveIntervalMs,
   detectFromLoopback,
   listWorkspaceSessionsForResponse,
+  liveProviderReadinessMessage,
   PromptDeadlineExceededError,
   resolvePromptDeadlineMs,
 } from './server.js';
@@ -233,6 +234,7 @@ import {
 } from './virtual-subagent-sessions.js';
 import type { ConversationWorkspace } from './conversations/conversation-workspace.js';
 import { LiveHostCoordinator } from './live/live-host-coordinator.js';
+import { LiveProviderConfigError } from './live/provider-credentials.js';
 import type { LiveSessionCoordinator } from './live/live-session-coordinator.js';
 import {
   LIVE_HOST_BUNDLE_ID,
@@ -47469,6 +47471,32 @@ describe('Live Appshot server integration', () => {
     },
   );
 
+  describe('liveProviderReadinessMessage', () => {
+    it('maps the disabled sentinel to settings-facing wording', () => {
+      expect(
+        liveProviderReadinessMessage(
+          new LiveProviderConfigError('Live Voice is disabled.'),
+        ),
+      ).toBe('Live Voice is disabled in settings.');
+    });
+
+    it('passes operator-actionable policy rejections verbatim', () => {
+      const message =
+        "Live Voice endpoint 'wss://dashscope.aliyuncs.com/api-ws/v1/realtime' is not in the managed allowlist 'model.allowedBaseUrls'. Ask the operator to add it to the allowlist or configure a different endpoint.";
+      expect(
+        liveProviderReadinessMessage(new LiveProviderConfigError(message)),
+      ).toBe(message);
+    });
+
+    it('never surfaces a non-policy error in the client status', () => {
+      const message = liveProviderReadinessMessage(
+        new Error('sk-live-fragment leaked'),
+      );
+      expect(message).toBe('Live provider configuration is incomplete.');
+      expect(message).not.toContain('sk-live-fragment');
+    });
+  });
+
   it('does not initialize Live dependencies when disabled at daemon startup', async () => {
     const tmp = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-live-disabled-host-'),
@@ -47547,11 +47575,15 @@ describe('Live Appshot server integration', () => {
         available: false,
         state: 'unavailable',
         blocker: 'provider_config',
+        // The credential-resolver sentinel is mapped to settings-facing
+        // wording before it reaches the client (issue #12805).
+        message: 'Live Voice is disabled in settings.',
       });
       const coordinator = app.locals['liveCoordinator'] as LiveHostCoordinator;
       expect(coordinator.getStatus()).toMatchObject({
         available: false,
         blocker: 'provider_config',
+        message: 'Live Voice is disabled in settings.',
         requirements: {
           provider: 'unavailable',
           appshot: 'unavailable',

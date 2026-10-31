@@ -63,7 +63,15 @@ import {
   stripAnsiAndControl,
   type OutputStyleDefinition,
   validateModelProvidersConfig,
+  isBaseUrlAllowed,
+  assertAllowedBaseUrlsSetting,
+  DYNAMIC_QWEN_OAUTH_BASE_URL,
 } from '@qwen-code/qwen-code-core';
+import {
+  findUnregisteredAllowlistDrop,
+  formatAuxModelSelectorForDisplay,
+  publishableSelectorBaseUrl,
+} from '../utils/aux-model-selector.js';
 import {
   AGENT_HOST_SESSION_SOURCE_TYPE,
   AGENT_SESSION_SOURCE_TYPE,
@@ -1304,17 +1312,72 @@ function resolveAdvisorModel(
   return trimmed;
 }
 
+/**
+ * When the managed endpoint allowlist (`model.allowedBaseUrls`) is why the
+ * advisor model is unavailable, say so and name the setting — the previous
+ * message never did, and it interpolated the raw selector (credentials and
+ * all) into stderr (issue #12805). The raw advisor selector can be
+ * endpoint-qualified (`modelId\0baseUrl`, the ACP form); display rendering
+ * delegates to `formatAuxModelSelectorForDisplay` (aux-model-selector.ts),
+ * whose publishability gate is fail-closed on credential-bearing and folded
+ * suffixes; the endpoint echo below uses the same gate on the bare suffix.
+ * Exported so the /advisor command path reuses the same hint instead of
+ * re-implementing the predicate.
+ */
+export function buildAdvisorAllowlistHint(
+  config: Config,
+  rawModel: string,
+): string | undefined {
+  const policy = config.getAllowedModelBaseUrls();
+  if (!policy) {
+    return undefined;
+  }
+  const endpointIndex = rawModel.indexOf('\0');
+  const modelId = (
+    endpointIndex < 0 ? rawModel : rawModel.slice(0, endpointIndex)
+  ).trim();
+  const endpoint =
+    endpointIndex < 0
+      ? undefined
+      : rawModel.slice(endpointIndex + 1) || undefined;
+  if (endpoint !== undefined && !isBaseUrlAllowed(endpoint, policy)) {
+    // Fail closed on the echo the same way the display form does: an
+    // unpublishable suffix (credential-bearing or folded) is redacted
+    // rather than emitted (issue #12805).
+    const endpointDisplay = publishableSelectorBaseUrl(endpoint);
+    return `Model endpoint '${endpointDisplay ?? '(redacted)'}' is not in the managed allowlist 'model.allowedBaseUrls'. Ask the operator to add it to the allowlist or choose a model on an allowed endpoint.`;
+  }
+  // Drop records name routes, and the selector may be authType-qualified
+  // (`openai:ext-model` — the form the picker persists and /advisor
+  // writes) and endpoint-qualified; the shared predicate matches both and
+  // ignores an id whose selected route is registered (issue #12805).
+  const dropped = findUnregisteredAllowlistDrop(config, rawModel);
+  if (dropped) {
+    // Built-in Qwen OAuth models are dropped with the non-URL sentinel:
+    // their endpoint is discovered dynamically at login, so "allow its
+    // endpoint" is an impossible remedy — say what actually re-enables it.
+    if (dropped.baseUrl === DYNAMIC_QWEN_OAUTH_BASE_URL) {
+      return `Model '${modelId}' is a built-in Qwen OAuth (personal Qwen login) model: its endpoint is discovered dynamically at login and cannot be listed in the managed allowlist 'model.allowedBaseUrls'. Removing model.allowedBaseUrls is the only way to re-enable it, or choose a model on an allowed endpoint.`;
+    }
+    return `Model '${modelId}' was excluded from the model registry by the managed allowlist 'model.allowedBaseUrls'. Ask the operator to allow its endpoint or choose a model on an allowed endpoint.`;
+  }
+  return undefined;
+}
+
 function formatUnavailableAdvisorModelMessage(
   modelName: string,
   availableModelIds: string[],
+  allowlistHint: string | undefined,
 ): string {
   const availableModelsLine =
     availableModelIds.length === 0
       ? 'No models are configured.'
       : `Configured models: ${availableModelIds.join(', ')}.`;
+  const allowlistLine = allowlistHint ? `${allowlistHint}\n` : '';
   return (
     `Advisor model '${modelName}' is not configured.\n` +
     `${availableModelsLine}\n` +
+    allowlistLine +
     'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /advisor without arguments to choose from configured models.'
   );
 }
@@ -1336,11 +1399,28 @@ function validateCliAdvisorModel(
     modelName,
     startupContext,
   );
+  // A model the managed allowlist dropped is unavailable even when the
+  // current-model escape hatch in checkAdvisorModelAvailability would
+  // re-admit it (a dropped default model is still the "current" model at
+  // boot): the operator's lockdown is policy, not a registry gap
+  // (issue #12805). The remedy list is the advisor-eligible one, minus the
+  // dropped id the escape hatch re-added.
+  const dropped = findUnregisteredAllowlistDrop(config, modelName);
+  if (dropped) {
+    throw new FatalConfigError(
+      formatUnavailableAdvisorModelMessage(
+        formatAuxModelSelectorForDisplay(modelName),
+        availability.availableModelIds.filter((id) => id !== dropped.id),
+        buildAdvisorAllowlistHint(config, modelName),
+      ),
+    );
+  }
   if (!availability.available) {
     throw new FatalConfigError(
       formatUnavailableAdvisorModelMessage(
-        modelName,
+        formatAuxModelSelectorForDisplay(modelName),
         availability.availableModelIds,
+        buildAdvisorAllowlistHint(config, modelName),
       ),
     );
   }
@@ -1783,6 +1863,17 @@ export async function loadCliConfig(
     onManagedEngineQuarantine?: ConfigParameters['onManagedEngineQuarantine'];
   },
   enabledSkillNamesProvider?: () => ReadonlySet<string>,
+  /**
+   * True when `model.allowedBaseUrls` is set ONLY in workspace scope (no
+   * operator scope): the list still narrows configured provider endpoints,
+   * but the Qwen OAuth built-ins must be exempt from the filter — their
+   * dynamic endpoint cannot be listed, and disabling personal Qwen login
+   * is an operator decision (issue #12805). The merged settings view alone
+   * cannot carry this (a workspace list is dropped when any operator scope
+   * sets one), so the caller computes it from LoadedSettings — see
+   * `isAllowedBaseUrlsWorkspaceOnly`.
+   */
+  allowedBaseUrlsWorkspaceOnly?: boolean,
 ): Promise<Config> {
   assertKnownOmniSettingKeys(settings);
   const agentHostReadOnly = hostPolicy?.agentHostReadOnly === true;
@@ -2271,6 +2362,24 @@ export async function loadCliConfig(
     );
   }
 
+  // Managed endpoint allowlist + qwen-oauth builtins pin (issue #12805).
+  // The merge gives the system scope senior priority, so a system-defined
+  // list cannot be overridden or widened by user/workspace settings; a
+  // lower-scope list applies only when the system scope defines none
+  // (self-restriction). A non-array value is a startup error, not a silent
+  // no-policy: degenerate per-entry values are warned-and-skipped by the
+  // registry, but a mistyped list key must not start the session unmanaged.
+  const allowedModelBaseUrls = assertAllowedBaseUrlsSetting(
+    settings.model?.allowedBaseUrls,
+  );
+  // Operator-scope Qwen OAuth builtins disable (issue #12805): honored only
+  // from System, User, or SystemDefaults settings — a workspace-scope value
+  // is stripped from the merge (WORKSPACE_RESTRICTED_SETTINGS), so the
+  // merged view cannot carry it. Strict `=== true` treats any non-boolean
+  // value as unset, like the schema default.
+  const qwenOAuthBuiltinsDisabled =
+    settings.model?.qwenOAuthBuiltinsDisabled === true;
+
   // Unified resolution of generation config with source attribution. Note the
   // up-front provider validation above is what classifies invalid configuration;
   // this call's own settings reads must not re-wrap a resolver
@@ -2286,6 +2395,9 @@ export async function loadCliConfig(
     settings,
     selectedAuthType,
     env: process.env as Record<string, string | undefined>,
+    allowedBaseUrls: allowedModelBaseUrls,
+    qwenOAuthBuiltinsDisabled,
+    allowedBaseUrlsWorkspaceOnly,
   });
 
   const { model: resolvedModel } = resolvedCliConfig;
@@ -2815,6 +2927,9 @@ export async function loadCliConfig(
     includePartialMessages,
     modelProvidersConfig,
     providerProtocolConfig,
+    allowedModelBaseUrls,
+    qwenOAuthBuiltinsDisabled,
+    allowedBaseUrlsWorkspaceOnly,
     generationConfigSources: resolvedCliConfig.sources,
     generationConfig: resolvedCliConfig.generationConfig,
     initialModelRegistryBaseUrl: resolvedCliConfig.registryBaseUrl,

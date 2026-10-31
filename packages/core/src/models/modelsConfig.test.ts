@@ -7,7 +7,8 @@
 import { describe, it, expect, vi } from 'vitest';
 import { ModelsConfig } from './modelsConfig.js';
 import type { ModelsConfigOptions } from './modelsConfig.js';
-import { AuthType } from '../core/contentGenerator.js';
+import { AuthType, validateModelConfig } from '../core/contentGenerator.js';
+import { MissingBaseUrlError } from './modelConfigErrors.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import type { ModelConfig, ModelProvidersConfig } from './types.js';
 import type { ConfigSource, ConfigSources } from '../utils/configResolver.js';
@@ -1712,6 +1713,35 @@ describe('ModelsConfig', () => {
       expect(snapshot?.baseUrl).toBe('https://initial.example.com/v1');
     });
 
+    it('does not rewrite an active runtime snapshot to an off-list endpoint', () => {
+      // The capture gate covers the UPDATE branch as well (issue #12805):
+      // an off-list updateCredentials must not re-point the active snapshot,
+      // and no policy keeps today's behavior (the test above pins it).
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        allowedModelBaseUrls: ['https://initial.example.com/v1'],
+      });
+      modelsConfig.updateCredentials({
+        model: 'on-list-model',
+        apiKey: 'sk-key',
+        baseUrl: 'https://initial.example.com/v1',
+      });
+      expect(modelsConfig.getActiveRuntimeModelSnapshotId()).toBe(
+        '$runtime|openai|on-list-model',
+      );
+
+      modelsConfig.updateCredentials({
+        model: 'off-list-model',
+        apiKey: 'sk-off-list',
+        baseUrl: 'https://off-list.example.com/v1',
+      });
+
+      const snapshot = modelsConfig.getActiveRuntimeModelSnapshot();
+      expect(snapshot?.modelId).toBe('on-list-model');
+      expect(snapshot?.apiKey).toBe('sk-key');
+      expect(snapshot?.baseUrl).toBe('https://initial.example.com/v1');
+    });
+
     it('should enforce per-authType snapshot limit', () => {
       const modelsConfig = new ModelsConfig({
         initialAuthType: AuthType.USE_OPENAI,
@@ -2168,6 +2198,216 @@ describe('ModelsConfig', () => {
       modelsConfig.reloadModelProvidersConfig(idealab(), { idealab: 'openai' });
 
       expect(openaiIds(modelsConfig)).toContain('qwen3.7-max');
+    });
+  });
+
+  describe('managed allowlist preserve/capture gates (model.allowedBaseUrls)', () => {
+    const CORP = 'https://corp.example';
+    const OFF_LIST = 'https://off-list.example.com/v1';
+    // Manual off-list credentials + a registry whose only entry is on-list.
+    const manualOffList = (
+      allowedModelBaseUrls?: readonly string[],
+    ): ModelsConfig => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        modelProvidersConfig: {
+          openai: [entry('on-list', 'On List', `${CORP}/v1`, 'OPENAI_API_KEY')],
+        },
+        allowedModelBaseUrls,
+        generationConfig: {
+          model: 'off-list-model',
+          apiKey: 'manual-key',
+          baseUrl: OFF_LIST,
+        },
+      });
+      modelsConfig.updateCredentials({
+        apiKey: 'manual-key',
+        baseUrl: OFF_LIST,
+        model: 'off-list-model',
+      });
+      return modelsConfig;
+    };
+
+    it('does not preserve manual credentials on an off-list baseUrl', () => {
+      const gc = refreshOpenAI(manualOffList([CORP]), 'off-list-model');
+
+      // The preserved baseUrl is off-list, so the refresh must fall through
+      // to the registry default instead of keeping the manual endpoint.
+      expect(gc.model).toBe('on-list');
+      expect(gc.baseUrl).toBe(`${CORP}/v1`);
+    });
+
+    it('keeps preserving off-list credentials when no allowlist is set', () => {
+      // undefined = no policy: today's behavior is unchanged.
+      const gc = refreshOpenAI(manualOffList(), 'off-list-model');
+
+      expect(gc.model).toBe('off-list-model');
+      expect(gc.baseUrl).toBe(OFF_LIST);
+    });
+
+    it('does not capture a runtime model whose baseUrl is off-list', () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        allowedModelBaseUrls: [CORP],
+        generationConfig: {
+          model: 'gpt-4-turbo',
+          apiKey: 'sk-test-key',
+          baseUrl: OFF_LIST,
+        },
+        generationConfigSources: {
+          model: { kind: 'cli', detail: '--model' },
+          apiKey: { kind: 'cli', detail: '--openaiApiKey' },
+          baseUrl: { kind: 'cli', detail: '--openaiBaseUrl' },
+        },
+      });
+
+      expect(modelsConfig.detectAndCaptureRuntimeModel()).toBeUndefined();
+      expect(modelsConfig.getActiveRuntimeModelSnapshot()).toBeUndefined();
+    });
+
+    it('still captures a runtime model whose baseUrl is on-list', () => {
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_OPENAI,
+        allowedModelBaseUrls: [CORP],
+        generationConfig: {
+          model: 'gpt-4-turbo',
+          apiKey: 'sk-test-key',
+          baseUrl: `${CORP}/v1`,
+        },
+        generationConfigSources: {
+          model: { kind: 'cli', detail: '--model' },
+          apiKey: { kind: 'cli', detail: '--openaiApiKey' },
+          baseUrl: { kind: 'cli', detail: '--openaiBaseUrl' },
+        },
+      });
+
+      expect(modelsConfig.detectAndCaptureRuntimeModel()).toBe(
+        '$runtime|openai|gpt-4-turbo',
+      );
+    });
+
+    it('keeps MissingBaseUrlError for a baseUrl-less anthropic model (R1-3)', () => {
+      // The registry must not stamp the protocol-table placeholder on an
+      // anthropic model without baseUrl: the selection keeps an empty
+      // baseUrl and validation still names the missing setting.
+      const modelsConfig = new ModelsConfig({
+        initialAuthType: AuthType.USE_ANTHROPIC,
+        modelProvidersConfig: {
+          anthropic: [entry('claude', 'Claude', undefined, 'ANTHROPIC_KEY')],
+        },
+      });
+      modelsConfig.syncAfterAuthRefresh(AuthType.USE_ANTHROPIC, 'claude');
+      const gc = currentGenerationConfig(modelsConfig);
+      expect(gc.baseUrl || undefined).toBeUndefined();
+      expect(
+        validateModelConfig(
+          { ...gc, authType: modelsConfig.getCurrentAuthType() },
+          true,
+        ).errors.some((error) => error instanceof MissingBaseUrlError),
+      ).toBe(true);
+    });
+
+    it('drops an off-list cli baseUrl on the registry-found refresh branch (R5-28)', () => {
+      const build = (allowedModelBaseUrls?: readonly string[]) =>
+        new ModelsConfig({
+          initialAuthType: AuthType.USE_OPENAI,
+          modelProvidersConfig: {
+            openai: [
+              entry('on-list', 'On List', `${CORP}/v1`, 'OPENAI_API_KEY'),
+            ],
+          },
+          allowedModelBaseUrls,
+          generationConfig: {
+            model: 'on-list',
+            apiKey: 'sk-test-key',
+            baseUrl: OFF_LIST,
+          },
+          generationConfigSources: {
+            model: { kind: 'cli', detail: '--model' },
+            apiKey: { kind: 'cli', detail: '--openaiApiKey' },
+            baseUrl: { kind: 'cli', detail: '--openaiBaseUrl' },
+          },
+        });
+
+      // Under a policy the saved off-list endpoint is not restored over the
+      // registry (on-list) endpoint.
+      expect(refreshOpenAI(build([CORP]), 'on-list').baseUrl).toBe(
+        `${CORP}/v1`,
+      );
+      // No policy: the cli endpoint survives the refresh as before.
+      expect(refreshOpenAI(build(), 'on-list').baseUrl).toBe(OFF_LIST);
+    });
+
+    it('delegates getAllowlistDroppedModels to the registry', () => {
+      const modelsConfig = new ModelsConfig({
+        modelProvidersConfig: {
+          openai: [
+            entry('ext', 'External', 'https://external-llm.example/v1'),
+            entry('on-list', 'On List', `${CORP}/v1`),
+          ],
+        },
+        allowedModelBaseUrls: [CORP],
+      });
+
+      // The off-list provider entry plus the built-in qwen-oauth model, whose
+      // dynamic endpoint can never match an allowlist entry.
+      expect(modelsConfig.getAllowlistDroppedModels()).toEqual([
+        {
+          id: 'coder-model',
+          authType: AuthType.QWEN_OAUTH,
+          baseUrl: 'DYNAMIC_QWEN_OAUTH_BASE_URL',
+        },
+        {
+          id: 'ext',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://external-llm.example/v1',
+        },
+      ]);
+    });
+
+    it('exempts the qwen-oauth built-ins for a workspace-scoped allowlist', () => {
+      // A workspace list narrows configured providers but must not disable
+      // personal Qwen login (operator decision, issue #12805).
+      const modelsConfig = new ModelsConfig({
+        allowedModelBaseUrls: [CORP],
+        allowedBaseUrlsWorkspaceOnly: true,
+      });
+      expect(
+        modelsConfig
+          .getAvailableModelsForAuthType(AuthType.QWEN_OAUTH)
+          .map((m) => m.id),
+      ).toEqual(['coder-model']);
+
+      // Without the flag the same list excludes the built-ins.
+      const operatorList = new ModelsConfig({
+        allowedModelBaseUrls: [CORP],
+      });
+      expect(
+        operatorList.getAvailableModelsForAuthType(AuthType.QWEN_OAUTH),
+      ).toEqual([]);
+    });
+
+    it('suppresses the built-ins on qwenOAuthBuiltinsDisabled (plain boolean)', () => {
+      // The operator key is a boolean, not the retired `[]` pin: true
+      // disables the built-ins, false keeps them even with an empty
+      // qwen-oauth provider list (issue #12805).
+      const disabled = new ModelsConfig({
+        modelProvidersConfig: { 'qwen-oauth': [] },
+        qwenOAuthBuiltinsDisabled: true,
+      });
+      expect(
+        disabled.getAvailableModelsForAuthType(AuthType.QWEN_OAUTH),
+      ).toEqual([]);
+
+      const kept = new ModelsConfig({
+        modelProvidersConfig: { 'qwen-oauth': [] },
+        qwenOAuthBuiltinsDisabled: false,
+      });
+      expect(
+        kept
+          .getAvailableModelsForAuthType(AuthType.QWEN_OAUTH)
+          .map((m) => m.id),
+      ).toEqual(['coder-model']);
     });
   });
 });

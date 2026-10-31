@@ -534,6 +534,7 @@ import {
   type AvailableModel,
   type ResolvedModelConfig,
   type RuntimeModelSnapshot,
+  type AllowlistDroppedModel,
 } from '../models/index.js';
 import { resolveModelId } from '../utils/modelId.js';
 import type { WebSearchSettings } from '../tools/web-search.js';
@@ -1633,6 +1634,26 @@ export interface ConfigParameters {
   modelProvidersConfig?: ModelProvidersConfig;
   /** Maps custom provider ids to their SDK protocol (AuthType) */
   providerProtocolConfig?: ProviderProtocolConfig;
+  /**
+   * Managed endpoint allowlist (`model.allowedBaseUrls`). Only models whose
+   * resolved baseUrl matches an entry register; `undefined` disables the
+   * filter.
+   */
+  allowedModelBaseUrls?: readonly string[];
+  /**
+   * Whether the built-in Qwen OAuth (personal Qwen login) models are
+   * disabled by `model.qwenOAuthBuiltinsDisabled` in System, User, or
+   * SystemDefaults settings (issue #12805). `undefined`/`false` = enabled.
+   */
+  qwenOAuthBuiltinsDisabled?: boolean;
+  /**
+   * True when the allowlist above was set ONLY in workspace scope (no
+   * operator scope). The list still narrows configured provider endpoints,
+   * but the registry must exempt the Qwen OAuth built-ins from the filter —
+   * their dynamic endpoint cannot be listed, and disabling personal login
+   * is an operator decision (issue #12805).
+   */
+  allowedBaseUrlsWorkspaceOnly?: boolean;
   /** Agent and multi-agent collaboration settings */
   agents?: AgentsCollabSettings;
   /** General-purpose worktree settings (Phase D-2). */
@@ -2945,6 +2966,9 @@ export class Config {
   private modelsConfig!: ModelsConfig;
   private readonly modelProvidersConfig?: ModelProvidersConfig;
   private readonly providerProtocolConfig?: ProviderProtocolConfig;
+  private readonly allowedModelBaseUrls?: readonly string[];
+  private readonly qwenOAuthBuiltinsDisabled?: boolean;
+  private readonly allowedBaseUrlsWorkspaceOnly?: boolean;
   private readonly sandbox: SandboxConfig | undefined;
   private targetDir: string;
   private workspaceContext: WorkspaceContext;
@@ -3700,6 +3724,9 @@ export class Config {
     this.ideMode = params.ideMode ?? false;
     this.modelProvidersConfig = params.modelProvidersConfig;
     this.providerProtocolConfig = params.providerProtocolConfig;
+    this.allowedModelBaseUrls = params.allowedModelBaseUrls;
+    this.qwenOAuthBuiltinsDisabled = params.qwenOAuthBuiltinsDisabled;
+    this.allowedBaseUrlsWorkspaceOnly = params.allowedBaseUrlsWorkspaceOnly;
     this.cliVersion = params.cliVersion;
 
     this.chatRecordingEnabled = params.chatRecording ?? true;
@@ -3847,6 +3874,9 @@ export class Config {
       initialAuthType: this.initialAuthType,
       modelProvidersConfig: this.modelProvidersConfig,
       providerProtocolConfig: this.providerProtocolConfig,
+      allowedModelBaseUrls: this.allowedModelBaseUrls,
+      qwenOAuthBuiltinsDisabled: this.qwenOAuthBuiltinsDisabled,
+      allowedBaseUrlsWorkspaceOnly: this.allowedBaseUrlsWorkspaceOnly,
       generationConfig: {
         model: params.model,
         ...(params.generationConfig || {}),
@@ -5869,6 +5899,9 @@ export class Config {
    * @param modelProvidersConfig - The updated model providers configuration
    * @param providerProtocolConfig - Updated provider->protocol map; `undefined`
    *   preserves the existing map (see {@link ModelRegistry.reloadModels}).
+   *
+   * The managed endpoint allowlist is boot-frozen and is preserved across
+   * reloads (see {@link ModelRegistry.reloadModels}).
    */
   reloadModelProvidersConfig(
     modelProvidersConfig?: ModelProvidersConfig,
@@ -7735,6 +7768,25 @@ export class Config {
    */
   getAllConfiguredModels(authTypes?: AuthType[]): AvailableModel[] {
     return this.modelsConfig.getAllConfiguredModels(authTypes);
+  }
+
+  /**
+   * The managed endpoint allowlist (`model.allowedBaseUrls`) in effect at boot,
+   * or undefined when no policy is configured. Exposed so the advisor-model
+   * availability check can name the setting in its error message (issue #12805,
+   * review R1-16: the error never named the setting).
+   */
+  getAllowedModelBaseUrls(): readonly string[] | undefined {
+    return this.allowedModelBaseUrls;
+  }
+
+  /**
+   * Models dropped from the registry by the managed endpoint allowlist, with
+   * the resolved baseUrl each was judged against. Read-only diagnostics view;
+   * empty when no policy dropped anything.
+   */
+  getAllowlistDroppedModels(): AllowlistDroppedModel[] {
+    return this.modelsConfig.getAllowlistDroppedModels();
   }
 
   /**

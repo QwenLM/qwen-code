@@ -11,6 +11,12 @@
 import type { Argv, CommandModule } from 'yargs';
 import { AuthType } from '@qwen-code/qwen-code-core/core/contentGenerator.js';
 import { isTlsVerificationDisabled } from '@qwen-code/qwen-code-core/utils/runtimeFetchOptions.js';
+import {
+  assertAllowedBaseUrlsSetting,
+  isBaseUrlAllowed,
+  scrubBaseUrlForMessage,
+} from '@qwen-code/qwen-code-core/models/modelRegistry.js';
+import { FatalConfigError } from '@qwen-code/qwen-code-core/utils/errors.js';
 import { loadSettings } from '../config/settings.js';
 import {
   collectProviderModelsForProtocol,
@@ -79,6 +85,14 @@ export function resolveEndpoint(
 ): BatchEndpoint {
   let settings = options.settings ?? loadSettings().merged;
   const batch = settings.batch;
+  // The batch.model narrowing below replaces the whole model object; capture
+  // the managed allowlist first (same startup shape check as an interactive
+  // load), or the gate silently stops applying to the batch upload endpoint
+  // (issue #12805). Batch is OpenAI-key-only, so the Qwen OAuth builtins
+  // disable has nothing to act on here.
+  const allowedBaseUrls = assertAllowedBaseUrlsSetting(
+    settings.model?.allowedBaseUrls,
+  );
   if (batch?.model || batch?.authType || batch?.baseUrl) {
     if (!batch.model?.trim()) {
       throw new Error('Set batch.model to a modelProviders model ID.');
@@ -154,9 +168,22 @@ export function resolveEndpoint(
   for (const warning of warnings ?? []) {
     warn(warning);
   }
+  // Managed endpoint allowlist (issue #12805): judge the URL batch actually
+  // dials. Batch falls back to DashScope, not the resolver's OpenAI protocol
+  // default, so the resolver's gate would judge a different endpoint than
+  // the wire uses; the gate runs here, on the dialed endpoint, instead.
+  const dialedBaseUrl = (baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, '');
+  if (
+    allowedBaseUrls !== undefined &&
+    !isBaseUrlAllowed(dialedBaseUrl, allowedBaseUrls)
+  ) {
+    throw new FatalConfigError(
+      `Batch endpoint '${scrubBaseUrlForMessage(dialedBaseUrl)}' is not in the managed allowlist 'model.allowedBaseUrls'. Ask the operator to add it to the allowlist, or select a batch model on an allowed endpoint.`,
+    );
+  }
   return {
     apiKey,
-    baseUrl: (baseUrl || DEFAULT_BASE_URL).replace(/\/+$/, ''),
+    baseUrl: dialedBaseUrl,
     model,
     generationConfig,
   };

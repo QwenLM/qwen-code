@@ -17,6 +17,8 @@ import {
   checkAdvisorModelAvailability,
   isAdvisorModelEligible,
 } from '../../config/advisor-model.js';
+import { buildAdvisorAllowlistHint } from '../../config/config.js';
+import { findUnregisteredAllowlistDrop } from '../../utils/aux-model-selector.js';
 import {
   BTW_MAX_INPUT_LENGTH,
   buildBtwCacheSafeParams,
@@ -127,6 +129,7 @@ function formatAdvisorError(error: unknown): string {
 function unavailableModelMessage(
   modelName: string,
   availableModelIds: string[],
+  allowlistHint?: string,
 ): string {
   const configured =
     availableModelIds.length > 0
@@ -134,11 +137,17 @@ function unavailableModelMessage(
           models: availableModelIds.join(', '),
         })
       : t('No models are configured.');
-  return [
-    `Advisor model '${modelName}' is not configured.`,
-    configured,
+  const lines = [`Advisor model '${modelName}' is not configured.`, configured];
+  // The managed allowlist is the actual cause when it dropped the model —
+  // name it here, like the startup validation path does (issue #12805),
+  // instead of pointing at modelProviders/env for a policy exclusion.
+  if (allowlistHint) {
+    lines.push(allowlistHint);
+  }
+  lines.push(
     'Configure models in settings.modelProviders, or run /advisor without arguments to choose a model.',
-  ].join('\n');
+  );
+  return lines.join('\n');
 }
 
 async function setAdvisorModel(
@@ -164,11 +173,22 @@ async function setAdvisorModel(
 
   if (model) {
     const availability = checkAdvisorModelAvailability(config, model);
-    if (!availability.available) {
+    // Same drop-precedence rule as the startup check (issue #12805): the
+    // availability escape hatch re-admits a dropped model that is the
+    // current runtime model, but enabling and persisting it would make every
+    // later launch refuse to start. The escape hatch stays display-only.
+    const dropped = findUnregisteredAllowlistDrop(config, model);
+    if (dropped || !availability.available) {
       return {
         type: 'message',
         messageType: 'error',
-        content: unavailableModelMessage(model, availability.availableModelIds),
+        content: unavailableModelMessage(
+          model,
+          dropped
+            ? availability.availableModelIds.filter((id) => id !== dropped.id)
+            : availability.availableModelIds,
+          buildAdvisorAllowlistHint(config, model),
+        ),
       };
     }
   }

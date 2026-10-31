@@ -54,7 +54,9 @@ import * as jsoncEditor from '../utils/jsonc-editor.js';
 // These imports will get the versions from the vi.mock('./settings.js', ...) factory.
 import {
   getSettingsWarnings,
+  isAllowedBaseUrlsWorkspaceOnly,
   loadSettings,
+  readModelPolicyOptions,
   getUserSettingsPath,
   getSystemSettingsPath,
   getSystemDefaultsPath,
@@ -5152,6 +5154,425 @@ describe('Settings Loading and Merging', () => {
       } finally {
         delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
       }
+    });
+  });
+
+  describe('model.allowedBaseUrls scope handling', () => {
+    it('should let the system-scope allowlist win over a user-scope list', () => {
+      const systemSettingsPath = '/mock/system/settings.json';
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;
+      try {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify({
+                model: {
+                  allowedBaseUrls: [
+                    'https://user-llm.example/v1',
+                    'https://external-llm.example/v1',
+                  ],
+                },
+              });
+            if (p === systemSettingsPath)
+              return JSON.stringify({
+                model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+              });
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.merged.model?.allowedBaseUrls).toEqual([
+          'https://corp-llm.example/v1',
+        ]);
+      } finally {
+        delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      }
+    });
+
+    it('should apply a user-scope allowlist when the system scope defines none', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              model: { allowedBaseUrls: ['https://my-gateway.example/v1'] },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.model?.allowedBaseUrls).toEqual([
+        'https://my-gateway.example/v1',
+      ]);
+    });
+
+    it('never lets a workspace replace a user-scope allowlist', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              model: { allowedBaseUrls: ['*'] },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.model?.allowedBaseUrls).toEqual([
+        'https://corp-llm.example/v1',
+      ]);
+      expect(
+        getSettingsWarnings(settings).some(
+          (w) =>
+            w.includes('model.allowedBaseUrls') &&
+            w.includes('User scope settings also set it'),
+        ),
+      ).toBe(true);
+    });
+
+    it('honors a workspace allowlist when no higher scope sets one', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              model: {
+                allowedBaseUrls: ['https://workspace-llm.example/v1'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.model?.allowedBaseUrls).toEqual([
+        'https://workspace-llm.example/v1',
+      ]);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('model.allowedBaseUrls'),
+        ),
+      ).toBe(false);
+    });
+
+    it('treats a workspace-scope empty qwen-oauth list as inert (no disable, no strip)', () => {
+      // The retired pin (issue #12805): `[]` under qwen-oauth no longer
+      // disables personal Qwen login — only model.qwenOAuthBuiltinsDisabled
+      // in an operator scope can. Nothing to strip, nothing to warn.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              modelProviders: { 'qwen-oauth': [] },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.modelProviders?.['qwen-oauth']).toEqual([]);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('disabling the built-in Qwen OAuth'),
+        ),
+      ).toBe(false);
+    });
+
+    it('treats a workspace-scope empty provider on a qwen-oauth id as inert too', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              providerProtocol: { 'corp-qwarn': 'qwen-oauth' },
+              modelProviders: { 'corp-qwarn': [] },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.modelProviders?.['corp-qwarn']).toEqual([]);
+      expect(settings.merged.providerProtocol?.['corp-qwarn']).toBe(
+        'qwen-oauth',
+      );
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('disabling the built-in Qwen OAuth'),
+        ),
+      ).toBe(false);
+    });
+
+    it('keeps an operator-scope empty qwen-oauth list without a disable warning', () => {
+      // The empty list is an ordinary (empty) provider list in any scope —
+      // the disable decision moved to model.qwenOAuthBuiltinsDisabled
+      // (issue #12805), so no pin warning is expected.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              modelProviders: { 'qwen-oauth': [] },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.modelProviders?.['qwen-oauth']).toEqual([]);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('disabling the built-in Qwen OAuth'),
+        ),
+      ).toBe(false);
+    });
+
+    it('warns with the operator scope that disables the built-ins (new key)', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              model: { qwenOAuthBuiltinsDisabled: true },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.model?.qwenOAuthBuiltinsDisabled).toBe(true);
+      expect(
+        getSettingsWarnings(settings).some(
+          (w) =>
+            w.includes(
+              'model.qwenOAuthBuiltinsDisabled is set in User scope settings',
+            ) && w.includes('disabling the built-in Qwen OAuth'),
+        ),
+      ).toBe(true);
+    });
+
+    it('names the System scope when System disables the built-ins', () => {
+      const systemSettingsPath = '/mock/system/settings.json';
+      process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'] = systemSettingsPath;
+      try {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === systemSettingsPath)
+              return JSON.stringify({
+                model: { qwenOAuthBuiltinsDisabled: true },
+              });
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(settings.merged.model?.qwenOAuthBuiltinsDisabled).toBe(true);
+        expect(
+          getSettingsWarnings(settings).some((w) =>
+            w.includes(
+              'model.qwenOAuthBuiltinsDisabled is set in System scope settings',
+            ),
+          ),
+        ).toBe(true);
+      } finally {
+        delete process.env['QWEN_CODE_SYSTEM_SETTINGS_PATH'];
+      }
+    });
+
+    it('names the SystemDefaults scope when SystemDefaults disables the built-ins (R5-14)', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === getSystemDefaultsPath())
+            return JSON.stringify({
+              model: { qwenOAuthBuiltinsDisabled: true },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.model?.qwenOAuthBuiltinsDisabled).toBe(true);
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes(
+            'model.qwenOAuthBuiltinsDisabled is set in SystemDefaults scope settings',
+          ),
+        ),
+      ).toBe(true);
+    });
+
+    it('strips a workspace-scope qwenOAuthBuiltinsDisabled and warns it is ignored', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              model: { qwenOAuthBuiltinsDisabled: true },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.model?.qwenOAuthBuiltinsDisabled).toBeUndefined();
+      expect(
+        getSettingsWarnings(settings).some(
+          (w) =>
+            w.includes(
+              'model.qwenOAuthBuiltinsDisabled in workspace settings',
+            ) && w.includes('is ignored'),
+        ),
+      ).toBe(true);
+      // No disable warning: the merged value is undefined.
+      expect(
+        getSettingsWarnings(settings).some((w) =>
+          w.includes('disabling the built-in Qwen OAuth'),
+        ),
+      ).toBe(false);
+    });
+  });
+
+  describe('isAllowedBaseUrlsWorkspaceOnly', () => {
+    it('is true when only a trusted workspace sets the allowlist', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              model: {
+                allowedBaseUrls: ['https://workspace-llm.example/v1'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(isAllowedBaseUrlsWorkspaceOnly(settings)).toBe(true);
+    });
+
+    it('is false when an operator scope also sets the allowlist', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+            });
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              model: {
+                allowedBaseUrls: ['https://workspace-llm.example/v1'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(isAllowedBaseUrlsWorkspaceOnly(settings)).toBe(false);
+    });
+
+    it.each([
+      ['System', () => getSystemSettingsPath()],
+      ['SystemDefaults', () => getSystemDefaultsPath()],
+    ])(
+      'is false when the %s scope also sets the allowlist (R5-15)',
+      (_scope, operatorPath) => {
+        (mockFsExistsSync as Mock).mockReturnValue(true);
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === operatorPath())
+              return JSON.stringify({
+                model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+              });
+            if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+              return JSON.stringify({
+                model: {
+                  allowedBaseUrls: ['https://workspace-llm.example/v1'],
+                },
+              });
+            return '{}';
+          },
+        );
+
+        const settings = loadSettings(MOCK_WORKSPACE_DIR);
+        expect(isAllowedBaseUrlsWorkspaceOnly(settings)).toBe(false);
+      },
+    );
+
+    it('readModelPolicyOptions carries the list with its exemption (R5-1)', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              model: {
+                allowedBaseUrls: ['https://workspace-llm.example/v1'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      expect(readModelPolicyOptions(loadSettings(MOCK_WORKSPACE_DIR))).toEqual({
+        allowedModelBaseUrls: ['https://workspace-llm.example/v1'],
+        qwenOAuthBuiltinsDisabled: false,
+        allowedBaseUrlsWorkspaceOnly: true,
+      });
+    });
+
+    it('is false when the workspace does not set the allowlist', () => {
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === USER_SETTINGS_PATH)
+            return JSON.stringify({
+              model: { allowedBaseUrls: ['https://corp-llm.example/v1'] },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(isAllowedBaseUrlsWorkspaceOnly(settings)).toBe(false);
+    });
+
+    it('is false when the workspace is untrusted', () => {
+      // The workspace file still loads into the workspace scope when
+      // untrusted (only the merge drops it), so the trust check — not
+      // the merged value — is what keeps an untrusted list from
+      // exempting the built-ins (issue #12805).
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: false,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({
+              model: {
+                allowedBaseUrls: ['https://workspace-llm.example/v1'],
+              },
+            });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(isAllowedBaseUrlsWorkspaceOnly(settings)).toBe(false);
     });
   });
 

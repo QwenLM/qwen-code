@@ -11,7 +11,11 @@ import {
 } from '@qwen-code/qwen-code-core';
 import { getPersistScopeForModelSelection } from '../config/modelProvidersScope.js';
 import { publicProviderBaseUrl } from '../utils/acpModelUtils.js';
-import { SettingScope, type LoadedSettings } from '../config/settings.js';
+import {
+  SettingScope,
+  readModelPolicyOptions,
+  type LoadedSettings,
+} from '../config/settings.js';
 import {
   isSelectableVoiceModel,
   resolveVoiceTransport,
@@ -151,6 +155,10 @@ export function createVoiceModelSource(
       | ModelProvidersConfig
       | undefined,
     providerProtocolConfig: settings.merged.providerProtocol,
+    // Managed model policy (issue #12805): voice models resolve through
+    // the same registry, so the same policy governs them — the allowlist
+    // with its workspace-only exemption and the operator builtins disable.
+    ...readModelPolicyOptions(settings),
   });
 }
 

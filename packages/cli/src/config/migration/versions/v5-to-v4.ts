@@ -109,7 +109,18 @@ export class V5ToV4Migration implements SettingsMigration {
           );
         }
 
-        providers[key] = Array.isArray(value.models) ? value.models : [];
+        // A wrapped entry without a `models` field migrates to an ABSENT
+        // key, not `[]`: an empty model list under the qwen-oauth provider
+        // used to disable the built-in Qwen OAuth models, and the removal
+        // route keeps the key (the settings writer merges per key, so
+        // `[]` survives as a zombie entry that a later read could mistake
+        // for a deliberate empty list) — omitting the key migrates both
+        // the meaning and the shape away from the retired pin.
+        if (Array.isArray(value.models)) {
+          providers[key] = value.models;
+        } else {
+          delete providers[key];
+        }
       }
     }
 

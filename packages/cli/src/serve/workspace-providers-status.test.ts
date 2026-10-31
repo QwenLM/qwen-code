@@ -949,6 +949,37 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     ).toBe(false);
   });
 
+  it('keeps the Qwen OAuth built-ins under a workspace-only allowlist (R5-1)', async () => {
+    // The daemon registry must apply the workspace-only exemption the
+    // session applies, or it drops built-ins the session keeps (issue
+    // #12805); the off-list provider is still narrowed by the same list.
+    const provider = createWorkspaceProvidersStatusProvider({
+      env: {},
+      workspaceTrusted: true,
+    });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'qwen-oauth' } },
+      modelProviders: {
+        openai: [{ id: 'ext', baseUrl: 'https://external-llm.example/v1' }],
+      },
+    });
+    await fs.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fs.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({
+        model: { allowedBaseUrls: ['https://corp.example'] },
+      }),
+      'utf8',
+    );
+
+    const result = await provider(workspace, false);
+    const models = result.providers.flatMap((p) =>
+      p.models.map((m) => m.baseModelId),
+    );
+    expect(models).toContain('coder-model');
+    expect(models).not.toContain('ext');
+  });
+
   it('sanitizes credentials from provider warning URLs', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({

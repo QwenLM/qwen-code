@@ -15,6 +15,7 @@ import type { ModelGenerationConfig } from './types.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfig } from '../core/contentGenerator.js';
 import { DEFAULT_QWEN_MODEL, MAINLINE_CODER_MODEL } from '../config/models.js';
+import { FatalConfigError } from '../utils/errors.js';
 
 const TIMEOUT_ENV = 'QWEN_CODE_API_TIMEOUT_MS';
 // Every original input spells out cli/settings/env; they default to {} here.
@@ -770,6 +771,310 @@ describe('modelConfigResolver', () => {
 
       expect(result.config.contextWindowSize).toBe(32_000);
       expect(result.sources['contextWindowSize'].kind).toBe('settings');
+    });
+  });
+
+  describe('managed allowlist gate (model.allowedBaseUrls)', () => {
+    const CORP = 'https://corp.example';
+
+    const expectFatal = (fn: () => unknown, ...fragments: string[]): void => {
+      let error: unknown;
+      try {
+        fn();
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(FatalConfigError);
+      for (const fragment of fragments) {
+        expect(String((error as Error).message)).toContain(fragment);
+      }
+    };
+
+    it('fails closed when the resolved model endpoint is off the allowlist', () => {
+      expectFatal(
+        () =>
+          resolve({
+            env: { MY_CUSTOM_KEY: 'provider-key' },
+            modelProvider: {
+              id: 'provider-model',
+              name: 'Provider Model',
+              envKey: 'MY_CUSTOM_KEY',
+              baseUrl: 'https://external-llm.example/v1',
+              generationConfig: {},
+            },
+            allowedBaseUrls: [CORP],
+          }),
+        'model.allowedBaseUrls',
+        'https://external-llm.example/v1',
+      );
+    });
+
+    it('judges a model without baseUrl against the protocol default endpoint', () => {
+      // No explicit baseUrl anywhere: the SDK would dial the protocol
+      // default, so the gate must judge that URL, not undefined.
+      expectFatal(
+        () =>
+          resolve({
+            env: { OPENAI_API_KEY: 'key', OPENAI_MODEL: 'some-model' },
+            allowedBaseUrls: [CORP],
+          }),
+        'model.allowedBaseUrls',
+        'https://api.openai.com/v1',
+      );
+    });
+
+    it('resolves normally when the endpoint is on the allowlist', () => {
+      const result = resolve({
+        env: { MY_CUSTOM_KEY: 'provider-key' },
+        modelProvider: {
+          id: 'provider-model',
+          name: 'Provider Model',
+          envKey: 'MY_CUSTOM_KEY',
+          baseUrl: `${CORP}/v1`,
+          generationConfig: {},
+        },
+        allowedBaseUrls: [CORP],
+      });
+      expect(result.config.baseUrl).toBe(`${CORP}/v1`);
+      expect(result.config.model).toBe('provider-model');
+    });
+
+    it('does not gate when no allowlist is provided', () => {
+      const result = resolve({
+        env: { OPENAI_API_KEY: 'key', OPENAI_MODEL: 'some-model' },
+      });
+      expect(result.config.model).toBe('some-model');
+    });
+
+    it('fails closed for Qwen OAuth when model.qwenOAuthBuiltinsDisabled is set', () => {
+      expectFatal(
+        () => oauth({ qwenOAuthBuiltinsDisabled: true }),
+        'disabled by operator settings',
+        'model.qwenOAuthBuiltinsDisabled',
+      );
+    });
+
+    it('cannot re-admit a Qwen OAuth model via --model while operator-disabled', () => {
+      expectFatal(
+        () =>
+          oauth({
+            cli: { model: 'coder-model' },
+            qwenOAuthBuiltinsDisabled: true,
+          }),
+        'model.qwenOAuthBuiltinsDisabled',
+      );
+    });
+
+    it('fails closed for Qwen OAuth when an operator-scope allowlist is set', () => {
+      // The Qwen OAuth endpoint is discovered at login and cannot be listed,
+      // so an operator-scope model.allowedBaseUrls excludes personal Qwen
+      // login — fail closed instead of dialing the unlisted endpoint.
+      expectFatal(
+        () => oauth({ allowedBaseUrls: [CORP] }),
+        'discovered dynamically at login',
+        'model.allowedBaseUrls',
+      );
+    });
+
+    it('keeps Qwen OAuth usable when the allowlist is workspace-scoped only', () => {
+      // A workspace list narrows configured providers but must not disable
+      // personal Qwen login (operator decision, issue #12805).
+      const result = oauth({
+        allowedBaseUrls: [CORP],
+        allowedBaseUrlsWorkspaceOnly: true,
+      });
+      expect(result.config.model).toBe(DEFAULT_QWEN_MODEL);
+    });
+
+    it('judges an explicit baseUrl even before an auth type is selected', () => {
+      // A CLI-provided baseUrl must be gated even when no auth type is
+      // known yet (issue #12805: the gate used to be unreachable until
+      // authType was selected). Auth env vars are read only once an auth
+      // type is known (upstream design), so the explicit baseUrl sources
+      // available pre-auth are the CLI and settings — use the CLI here.
+      expectFatal(
+        () =>
+          resolve({
+            authType: undefined,
+            cli: { baseUrl: 'https://external-llm.example/v1' },
+            allowedBaseUrls: [CORP],
+          }),
+        'model.allowedBaseUrls',
+        'https://external-llm.example/v1',
+      );
+    });
+
+    it('scrubs userinfo credentials from the off-list endpoint error', () => {
+      // A credential-bearing baseUrl must reach stderr without its
+      // userinfo (issue #12805).
+      let error: unknown;
+      try {
+        resolve({
+          env: { MY_CUSTOM_KEY: 'provider-key' },
+          modelProvider: {
+            id: 'provider-model',
+            name: 'Provider Model',
+            envKey: 'MY_CUSTOM_KEY',
+            baseUrl: 'https://user:pass@external-llm.example/v1',
+            generationConfig: {},
+          },
+          allowedBaseUrls: [CORP],
+        });
+      } catch (e) {
+        error = e;
+      }
+      expect(error).toBeInstanceOf(FatalConfigError);
+      const message = String((error as Error).message);
+      expect(message).toContain('external-llm.example/v1');
+      expect(message).not.toContain('user:pass');
+
+      // A value that does not parse as a URL gets any userinfo-shaped
+      // prefix masked, so a malformed endpoint cannot echo a live secret.
+      let malformed: unknown;
+      try {
+        resolve({
+          env: { MY_CUSTOM_KEY: 'provider-key' },
+          modelProvider: {
+            id: 'provider-model',
+            name: 'Provider Model',
+            envKey: 'MY_CUSTOM_KEY',
+            baseUrl: 'https://user:sk@',
+            generationConfig: {},
+          },
+          allowedBaseUrls: [CORP],
+        });
+      } catch (e) {
+        malformed = e;
+      }
+      expect(malformed).toBeInstanceOf(FatalConfigError);
+      const masked = String((malformed as Error).message);
+      expect(masked).toContain('***@');
+      expect(masked).not.toContain('user:sk');
+    });
+
+    it.each([
+      'user:pass@external-llm.example/v1',
+      '//user:pass@external-llm.example/v1',
+    ])(
+      'scrubs a scheme-less or protocol-relative credential shape %j (R2-18)',
+      (baseUrl) => {
+        // Shape-independent: a value that is not a clean http(s) URL gets its
+        // userinfo-shaped prefix masked instead of being echoed verbatim.
+        expectFatal(
+          () =>
+            resolve({
+              env: { MY_CUSTOM_KEY: 'provider-key' },
+              modelProvider: {
+                id: 'provider-model',
+                name: 'Provider Model',
+                envKey: 'MY_CUSTOM_KEY',
+                baseUrl,
+                generationConfig: {},
+              },
+              allowedBaseUrls: [CORP],
+            }),
+          'external-llm.example/v1',
+        );
+        let error: unknown;
+        try {
+          resolve({
+            env: { MY_CUSTOM_KEY: 'provider-key' },
+            modelProvider: {
+              id: 'provider-model',
+              name: 'Provider Model',
+              envKey: 'MY_CUSTOM_KEY',
+              baseUrl,
+              generationConfig: {},
+            },
+            allowedBaseUrls: [CORP],
+          });
+        } catch (e) {
+          error = e;
+        }
+        expect(String((error as Error).message)).not.toContain('user:pass');
+      },
+    );
+
+    it('still gates configured endpoints when the list is workspace-scoped only (R5-21)', () => {
+      // The workspace-only flag exempts only the Qwen OAuth dynamic endpoint;
+      // an off-list provider endpoint is refused by the same list.
+      expectFatal(
+        () =>
+          resolve({
+            env: { MY_CUSTOM_KEY: 'provider-key' },
+            modelProvider: {
+              id: 'provider-model',
+              name: 'Provider Model',
+              envKey: 'MY_CUSTOM_KEY',
+              baseUrl: 'https://external-llm.example/v1',
+              generationConfig: {},
+            },
+            allowedBaseUrls: [CORP],
+            allowedBaseUrlsWorkspaceOnly: true,
+          }),
+        'model.allowedBaseUrls',
+        'https://external-llm.example/v1',
+      );
+      // The operator disable wins over the workspace-only exemption.
+      expectFatal(
+        () =>
+          oauth({
+            allowedBaseUrls: [CORP],
+            allowedBaseUrlsWorkspaceOnly: true,
+            qwenOAuthBuiltinsDisabled: true,
+          }),
+        'model.qwenOAuthBuiltinsDisabled',
+      );
+    });
+
+    it('names the workspace file and the baseUrl source in the remedy (R5-22)', () => {
+      const offListEnv = {
+        OPENAI_API_KEY: 'key',
+        OPENAI_MODEL: 'some-model',
+        OPENAI_BASE_URL: 'https://external-llm.example/v1',
+      };
+      expectFatal(
+        () =>
+          resolve({
+            env: offListEnv,
+            allowedBaseUrls: [CORP],
+            allowedBaseUrlsWorkspaceOnly: true,
+          }),
+        'model.allowedBaseUrls',
+        'https://external-llm.example/v1',
+        "this workspace's settings (.qwen/settings.json)",
+        'OPENAI_BASE_URL',
+      );
+      let operator: unknown;
+      try {
+        resolve({ env: offListEnv, allowedBaseUrls: [CORP] });
+      } catch (e) {
+        operator = e;
+      }
+      const message = String((operator as Error).message);
+      expect(message).toContain('system or user settings');
+      expect(message).not.toContain('.qwen/settings.json');
+    });
+
+    it('fails closed for an auth type with no protocol default and no baseUrl (R5-23)', () => {
+      expectFatal(
+        () =>
+          resolve({
+            authType: AuthType.USE_VERTEX_AI,
+            env: { GOOGLE_API_KEY: 'key' },
+            allowedBaseUrls: [CORP],
+          }),
+        'has no protocol default endpoint',
+        'model.allowedBaseUrls',
+      );
+      // An explicit on-list baseUrl gives the gate something to judge.
+      const result = resolve({
+        authType: AuthType.USE_VERTEX_AI,
+        env: { GOOGLE_API_KEY: 'key' },
+        cli: { baseUrl: `${CORP}/v1` },
+        allowedBaseUrls: [CORP],
+      });
+      expect(result.config.baseUrl).toBe(`${CORP}/v1`);
     });
   });
 });

@@ -388,6 +388,14 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     warningSet.add(`Warning: ${warning}`);
   }
 
+  // Scope objects are always present on a production LoadedSettings; the
+  // optional chaining keeps this helper total for partial loaded-settings
+  // shapes (e.g. tests that stub loadSettings with a minimal object).
+  const systemSettings = loadedSettings.system?.settings ?? ({} as Settings);
+  const systemDefaultsSettings =
+    loadedSettings.systemDefaults?.settings ?? ({} as Settings);
+  const userSettings = loadedSettings.user?.settings ?? ({} as Settings);
+
   for (const scope of [SettingScope.User, SettingScope.Workspace]) {
     const settingsFile = loadedSettings.forScope(scope);
     if (settingsFile.rawJson === undefined) {
@@ -452,9 +460,9 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
     // warning — it lost nothing.
     for (const entry of WORKSPACE_TIGHTEN_ONLY_SETTINGS) {
       const verdict = tightenOnlyVerdict(entry, workspaceFile.settings, {
-        system: loadedSettings.system.settings,
-        systemDefaults: loadedSettings.systemDefaults.settings,
-        user: loadedSettings.user.settings,
+        system: systemSettings,
+        systemDefaults: systemDefaultsSettings,
+        user: userSettings,
       });
       if (verdict === undefined || verdict.kept) continue;
       const key = `${entry.section}.${entry.key}`;
@@ -468,6 +476,21 @@ export function getSettingsWarnings(loadedSettings: LoadedSettings): string[] {
         );
       }
     }
+  }
+  // model.qwenOAuthBuiltinsDisabled disables the built-in Qwen OAuth
+  // (personal Qwen login) models. It is an operator decision: workspace-
+  // scope attempts are stripped from the merge (with the generic
+  // WORKSPACE_RESTRICTED_SETTINGS warning above), so the disable must never
+  // be silent — name the operator scope that set it (issue #12805).
+  if (loadedSettings.merged.model?.qwenOAuthBuiltinsDisabled === true) {
+    const pinningScope = [
+      { name: 'System', settings: systemSettings },
+      { name: 'User', settings: userSettings },
+      { name: 'SystemDefaults', settings: systemDefaultsSettings },
+    ].find((scope) => scope.settings.model?.qwenOAuthBuiltinsDisabled === true);
+    warningSet.add(
+      `Warning: model.qwenOAuthBuiltinsDisabled is set in ${pinningScope?.name ?? 'operator'} scope settings, disabling the built-in Qwen OAuth (personal Qwen login) models. Remove it in that scope to re-enable personal Qwen login.`,
+    );
   }
   // Core falls back to unlimited for an invalid value instead of refusing to
   // start; say so, since the user asked for a limit.
@@ -572,6 +595,55 @@ function stripWorkspaceOverrides(
       higherScopes.some((scope) => isSettingDefined(scope, ref)),
     ),
   );
+}
+
+/**
+ * True when the effective `model.allowedBaseUrls` was set ONLY in workspace
+ * scope (a trusted workspace defines it and no operator scope — System,
+ * User, or SystemDefaults — does). A workspace list still narrows the
+ * configured provider endpoints, but it must not fail closed for the Qwen
+ * OAuth dynamic endpoint: disabling personal Qwen login is an operator
+ * decision (issue #12805). Callers use this to thread the flag through to
+ * ModelRegistry / ModelConfigResolver.
+ */
+export function isAllowedBaseUrlsWorkspaceOnly(
+  loadedSettings: LoadedSettings,
+): boolean {
+  if (!loadedSettings.isTrusted) {
+    return false;
+  }
+  const ref: SettingKeyRef = { section: 'model', key: 'allowedBaseUrls' };
+  if (!isSettingDefined(loadedSettings.workspace.settings, ref)) {
+    return false;
+  }
+  return (
+    !isSettingDefined(loadedSettings.system.settings, ref) &&
+    !isSettingDefined(loadedSettings.user.settings, ref) &&
+    !isSettingDefined(loadedSettings.systemDefaults.settings, ref)
+  );
+}
+
+/**
+ * The managed model policy (issue #12805) as `ModelsConfig` options, read
+ * from one LoadedSettings: the allowlist travels with its workspace-only
+ * exemption and the operator builtins disable, so a site that builds a
+ * registry cannot pass the list without the rest (a site that passed only
+ * the list dropped the built-ins a workspace-only list must keep).
+ * `allowedModelBaseUrls` is `undefined` when no policy is set — never
+ * coerced to `[]`.
+ */
+export function readModelPolicyOptions(loadedSettings: LoadedSettings): {
+  allowedModelBaseUrls: readonly string[] | undefined;
+  qwenOAuthBuiltinsDisabled: boolean;
+  allowedBaseUrlsWorkspaceOnly: boolean;
+} {
+  const model = loadedSettings.merged.model;
+  return {
+    allowedModelBaseUrls: model?.allowedBaseUrls,
+    qwenOAuthBuiltinsDisabled: model?.qwenOAuthBuiltinsDisabled === true,
+    allowedBaseUrlsWorkspaceOnly:
+      isAllowedBaseUrlsWorkspaceOnly(loadedSettings),
+  };
 }
 
 type TightenOnlyEntry = (typeof WORKSPACE_TIGHTEN_ONLY_SETTINGS)[number];
@@ -1028,6 +1100,11 @@ export function createMinimalSettings(): LoadedSettings {
         }
       : {}),
     ...(operator.privacy ? { privacy: operator.privacy } : {}),
+    // Bare mode must keep the operator's model controls in force — the
+    // managed allowlist and the Qwen OAuth builtins disable (issue #12805).
+    ...(operator.modelByScope.system
+      ? { model: operator.modelByScope.system }
+      : {}),
   };
   const emptySettingsFile: SettingsFile = {
     path: '',
@@ -1035,14 +1112,26 @@ export function createMinimalSettings(): LoadedSettings {
     originalSettings: {},
     rawJson: '{}',
   };
+  // The User and SystemDefaults model controls go into their own slots, so
+  // the normal merge decides precedence and scope attribution stays true.
+  const modelScopeFile = (
+    model: Settings['model'] | undefined,
+  ): SettingsFile =>
+    model
+      ? {
+          ...emptySettingsFile,
+          settings: { model },
+          originalSettings: { model },
+        }
+      : emptySettingsFile;
   return new LoadedSettings(
     {
       ...emptySettingsFile,
       settings: operatorSettings,
       originalSettings: operatorSettings,
     },
-    emptySettingsFile,
-    emptySettingsFile,
+    modelScopeFile(operator.modelByScope.systemDefaults),
+    modelScopeFile(operator.modelByScope.user),
     emptySettingsFile,
     false,
     new Set(),

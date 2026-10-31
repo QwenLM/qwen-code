@@ -13,6 +13,7 @@ import {
 import type { Settings } from '../config/settingsSchema.js';
 import {
   buildWorkspaceVoiceSettingsWrites,
+  createVoiceModelSource,
   hasConfiguredBatchVoiceTranscriptionModel,
   listAvailableVoiceModels,
   transcribeWorkspaceVoiceAudio,
@@ -65,6 +66,28 @@ describe('voice service', () => {
     } else {
       process.env['DASHSCOPE_API_KEY'] = originalDashscopeKey;
     }
+  });
+
+  it('builds the voice registry under the full model policy (R5-1)', () => {
+    // A workspace-only allowlist narrows providers but keeps the built-in
+    // Qwen OAuth models — the same registry a session builds (issue #12805).
+    const settings = makeSettings({
+      user: {
+        modelProviders: {
+          openai: [{ id: 'ext', baseUrl: 'https://external-llm.example/v1' }],
+        },
+      },
+      workspace: { model: { allowedBaseUrls: ['https://corp.example'] } },
+    });
+    const ids = (
+      createVoiceModelSource(settings) as {
+        getAllConfiguredModels(): Array<{ id: string }>;
+      }
+    )
+      .getAllConfiguredModels()
+      .map((model) => model.id);
+    expect(ids).toContain('coder-model');
+    expect(ids).not.toContain('ext');
   });
 
   it('builds settings writes using voice and model persistence scopes', () => {

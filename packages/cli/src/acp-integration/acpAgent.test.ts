@@ -1056,6 +1056,7 @@ vi.mock('../config/settings.js', () => ({
     return { security: { folderTrust: { enabled } } };
   },
   SettingScope: { User: 'User', Workspace: 'Workspace' },
+  isAllowedBaseUrlsWorkspaceOnly: vi.fn(() => false),
   loadSettings: vi.fn(),
   reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
 }));
@@ -1274,6 +1275,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import { AgentSideConnection, RequestError } from '@agentclientprotocol/sdk';
 import {
+  isAllowedBaseUrlsWorkspaceOnly,
   loadSettings,
   reloadEnvironment,
   SettingScope,
@@ -4808,6 +4810,31 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('passes the workspace-only allowlist exemption to loadCliConfig (R5-1)', async () => {
+    // Omitting it fails personal Qwen login closed with an operator-scope
+    // error for a repository's own model.allowedBaseUrls (issue #12805).
+    const innerConfig = await setupSessionMocks('exemption-session');
+    vi.mocked(loadCliConfig).mockResolvedValue(
+      innerConfig as unknown as Config,
+    );
+    vi.mocked(isAllowedBaseUrlsWorkspaceOnly).mockReturnValue(true);
+    try {
+      const { agent, agentPromise } = await bootAcpAgent();
+      await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+      expect(vi.mocked(loadCliConfig).mock.calls[0]![11]).toBe(true);
+      // Derived from the session's own LoadedSettings.
+      expect(vi.mocked(isAllowedBaseUrlsWorkspaceOnly)).toHaveBeenCalledWith(
+        vi.mocked(loadSettings).mock.results.at(-1)?.value,
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    } finally {
+      vi.mocked(isAllowedBaseUrlsWorkspaceOnly).mockReturnValue(false);
+    }
   });
 
   it.each([undefined, 'legacy'] as const)(
@@ -17870,6 +17897,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         toolInvocationGuard: expect.any(Function),
       }),
       expect.any(Function),
+      // allowedBaseUrlsWorkspaceOnly (issue #12805): no workspace-only list.
+      false,
     );
 
     mockConnectionState.resolve();
@@ -34435,6 +34464,16 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       ).toHaveBeenCalledWith(discoveryConfig),
     );
     expect(discoveryConfigSessionContext).toBe('workspace-mcp-discovery');
+    // The discovery config is a real loadCliConfig call: it carries the
+    // workspace-only allowlist exemption like a session does (R5-1).
+    expect(
+      vi
+        .mocked(loadCliConfig)
+        .mock.calls.find(
+          (call) => call[1]?.sessionId === 'workspace-mcp-discovery',
+        )?.[11],
+    ).toBe(false);
+    expect(vi.mocked(isAllowedBaseUrlsWorkspaceOnly)).toHaveBeenCalled();
     const ancestorTrustProvider =
       vi.mocked(loadCliConfig).mock.calls[0]?.[9]
         ?.workflowAncestorTrustProvider;
