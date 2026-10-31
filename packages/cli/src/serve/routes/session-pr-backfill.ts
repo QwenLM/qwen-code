@@ -182,16 +182,20 @@ interface CommandMention {
 // bare-number alternative closes its token against filename characters
 // (`(?!\w)`-class): `/review <file-path>` is another documented invocation
 // form, so `/review 001_init.sql` must not forge PR 1. A glued `--flag` is
-// the one exception (`-(?!-)`): users type `/verify-pr 15979--publish`
-// without the space and the skill still runs, so the badge must bind too;
-// a single `-` keeps rejecting date-style file names (`2026-08-25-notes.md`).
-// The URL alternative keeps `(?!\d)`: it rejects 10+-digit numbers instead
-// of truncating them to a 9-digit prefix. The bare-number alternative comes
-// first: `/review 42 and fix #7` names 42. Bare session git branches are NOT
-// a source: they bind the workspace's current branch PR onto every session —
-// measured pure noise, removed with cleanup.
+// the one exception: users type `/verify-pr 15979--publish` without the
+// space and the skill still runs, so the badge must bind too. The exception
+// admits only a FLAG-SHAPED tail — `--`, a letter-led name of word/dash
+// characters, an optional `=value`, then whitespace or end — so a single
+// `-` (date-style `2026-08-25-notes.md`) and double-dash file names
+// (`42--diff.patch`, `2026--08-25-notes.md`), digit tails (`42--45`) and a
+// lone `--` all stay rejected. The URL alternative keeps `(?!\d)`: it
+// rejects 10+-digit numbers instead of truncating them to a 9-digit prefix.
+// The bare-number alternative comes first: `/review 42 and fix #7` names 42.
+// Bare session git branches are NOT a source: they bind the workspace's
+// current branch PR onto every session — measured pure noise, removed with
+// cleanup.
 const PR_COMMAND_PATTERN =
-  /^\s*\/(review|verify-pr)(?:[ \t]+#?(\d{1,9})(?![\w./]|-(?!-))|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
+  /^\s*\/(review|verify-pr)(?:[ \t]+#?(\d{1,9})(?![\w./]|-(?!-[A-Za-z][\w-]*(?:=[^\s]*)?(?=[ \t\r\n]|$)))|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
 
 // `/verify-pr --repo <owner>/<repo>` scopes the number to another repository;
 // a bare number beside it must never bind this workspace's same-numbered PR.
@@ -202,12 +206,16 @@ const PR_COMMAND_PATTERN =
 // through to this workspace's PR. `--assets-repo` is a different flag of the
 // same command and must not count as one. `/review` takes no `--repo`, so a
 // stray occurrence in its prompt reads as a qualifier too — the safer
-// reading, and never a binding this workspace's number. The prefix admits a
-// digit as well: the number token accepts a glued `--flag`, so `77--repo`
-// must count as a qualifier token too — otherwise its missing or next-line
-// value would read as no qualifier and bind this workspace's PR 77.
+// reading, and never a binding this workspace's number. A digit prefix is
+// admitted only for the command's own glued qualifier: the number token
+// accepts `77--repo`, so that spelling must count too — otherwise its
+// missing or next-line value would read as no qualifier and bind this
+// workspace's PR 77. The digit arm therefore requires a flag boundary
+// (whitespace, `=`, or end) after `--repo`; a digit elsewhere in the prose
+// (`docs/a1--repo.md`, a quoted `"77--repo"`) is not a qualifier and must
+// not decline a legitimate bare binding.
 const REPO_FLAG_PATTERN =
-  /(?:^|[^-\w]|\d)--repo(?![\w-])|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?/g;
+  /(?:^|[^-\w])--repo(?![\w-])|\d--repo(?=[ \t\r\n=]|$)|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?/g;
 const REPO_VALUE_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?[^\s"']+/g;
 const REPO_FORM_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?([^\s"']+)/;
 

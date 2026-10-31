@@ -2811,6 +2811,63 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toBeNull();
   });
 
+  it('binds a live /verify-pr whose glued --repo uses the = spelling', async () => {
+    // The flag-shaped tail admits `=value` so a glued qualifier keeps both
+    // of its readable spellings.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(78, 'fix/78')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr 78--repo=o/r',
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.map((entry) => entry.number),
+    ).toEqual([78]);
+  });
+
+  it('binds a bare number when prose merely mentions a digit-glued --repo', async () => {
+    // The digit prefix on the flag detector serves the command's own glued
+    // qualifier; a digit elsewhere in the prompt (a file name, a quoted
+    // example) must not turn a legitimate bare binding into a decline.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'fix/42')],
+    });
+
+    const resultA = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/review 42 docs/a1--repo.md',
+    );
+    const resultB = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_B,
+      '/verify-pr 42 the "77--repo" token must decline',
+    );
+
+    expect(resultA).toMatchObject({ scanned: 1, bound: 1 });
+    expect(resultB).toMatchObject({ scanned: 1, bound: 1 });
+    for (const sessionId of [SESSION_A, SESSION_B]) {
+      expect(
+        (
+          await readSessionPrs(
+            sessionService.getPrSessionPathForArchiveState(sessionId, 'active'),
+          )
+        )?.map((entry) => entry.number),
+      ).toEqual([42]);
+    }
+  });
+
   it('reports a /review declined by a --repo in its later prose', async () => {
     // The qualifier is read off the whole prompt, so a pasted command in the
     // body counts. Declining is right, but the decline has to be counted —
@@ -3850,6 +3907,53 @@ describe('backfillWorkspaceSessionPrs', () => {
         sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
       ),
     ).toBeNull();
+  });
+
+  it('does not bind double-dash file names or a bare double-dash tail', async () => {
+    // The glued exception is for flag-shaped tails only: a `--`-separated
+    // file name, a digit-only tail, or a lone `--` is not a flag and must
+    // not reopen the file-path forgery class.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review 42--diff.patch');
+    await appendUserText(SESSION_A, '/review 2026--08-25-notes.md');
+    await appendUserText(SESSION_A, '/review 3--implementation.md');
+    await appendUserText(SESSION_A, '/review 42--');
+    await appendUserText(SESSION_A, '/review 42--45');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'fix/42'), pr(2026, 'fix/2026'), pr(3, 'fix/3')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('binds a transcript bare number beside prose mentioning digit-glued --repo', async () => {
+    // The sweep shares the flag detector: prose digits must not decline a
+    // legitimate bare binding here either.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/review 42 docs/a1--repo.md');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(42, 'fix/42')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.map((entry) => entry.number),
+    ).toEqual([42]);
   });
 
   it('rejects foreign-repo and zero /review numbers', async () => {
