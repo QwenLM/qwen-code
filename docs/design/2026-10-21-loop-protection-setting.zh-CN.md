@@ -70,7 +70,7 @@
 
 ### 遥测
 
-`loop_detected` 和 `StopFailure` hook 仍然表示“turn 已停止”。新增的 `loop_protection` 事件记录每个受管控的决策：`reminded`、`stopped`，或 `off` 下的 `observed`，并带上循环类型、原因和模式。`reminded` 在提醒发出时记录，所以被重试丢弃、或在同一批中被停止截断的提醒不计入；`stopped` 每个 turn 只记录一次。预算停止和 provider id 熔断器不受管控，不产生决策事件。
+`loop_detected` 和 `StopFailure` hook 仍然表示“turn 已停止”。新增的 `loop_protection` 事件记录每个受管控的决策：`reminded`、`stopped`，或 `off` 下的 `observed`，并带上循环类型、原因和模式。`reminded` 在模型接受承载该提醒的请求时记录，所以被重试丢弃、在同一批中被停止截断、或只由未真正送达模型的发送承载的提醒都不计入——最后一种情况下该提醒保持可用，由真正送达模型的那次发送计入；`stopped` 每个 turn 只记录一次。预算停止和 provider id 熔断器不受管控，不产生决策事件。
 
 ### 提示文案
 
