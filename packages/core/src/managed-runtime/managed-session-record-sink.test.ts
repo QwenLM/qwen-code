@@ -466,6 +466,26 @@ describe('managed session record sink', () => {
     await harness.close();
   });
 
+  it('round-trips marked memory snapshots through the managed projection', async () => {
+    const harness = await createHarness();
+    const snapshot = record({
+      type: 'system',
+      subtype: 'memory_catalog_snapshot',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            text: 'full catalog',
+            partMetadata: { 'qwen-code:memory-catalog-snapshot': true },
+          },
+        ],
+      },
+    });
+    await harness.sink.write(snapshot);
+    expect(await harness.sink.project()).toEqual([snapshot]);
+    await harness.close();
+  });
+
   it('carries the record shapes the projection can reproduce', async () => {
     const harness = await createHarness();
     expect(harness.sink.canCarry(record({ type: 'user' }))).toBe(true);

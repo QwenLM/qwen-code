@@ -14,6 +14,7 @@ import {
   DEFAULT_WEB_SEARCH_TIMEOUT_MS,
   WebSearchTool,
   evaluateWebSearchGate,
+  normalizeWebSearchAllowedHosts,
   resolveWebSearchMaxPerSession,
   resolveWebSearchTimeoutMs,
 } from './web-search.js';
@@ -58,6 +59,7 @@ interface ConfigOverrides {
     apiKeyEnv?: string;
     timeoutMs?: number;
     maxPerSession?: number;
+    allowedHosts?: string[];
   };
   /** Session web_search counter; one shared object per config, as on Config. */
   sessionUsage?: { calls: number };
@@ -2007,5 +2009,122 @@ describe('WebSearchTool session budget', () => {
         String(result.returnDisplay).startsWith('Skipped:'),
       ),
     ).toHaveLength(1);
+  });
+});
+
+describe('evaluateWebSearchGate allowedHosts', () => {
+  const GATEWAY = 'https://llm-gw.example.com/dashscope/v1';
+
+  it('accepts a listed host on the env-declared backend', () => {
+    const backend = passedBackend(
+      makeConfig({
+        settings: envSettings({
+          baseUrl: GATEWAY,
+          allowedHosts: ['llm-gw.example.com'],
+        }),
+      }),
+    );
+    expect(backend.baseUrl).toBe(GATEWAY);
+  });
+
+  it('accepts a subdomain of a listed suffix', () => {
+    const backend = passedBackend(
+      makeConfig({
+        settings: envSettings({
+          baseUrl: GATEWAY,
+          allowedHosts: ['example.com'],
+        }),
+      }),
+    );
+    expect(backend.baseUrl).toBe(GATEWAY);
+  });
+
+  it('accepts a listed host declared through modelProviders', () => {
+    const backend = passedBackend(
+      makeConfig({
+        settings: {
+          enabled: true,
+          model: 'qwen3.6-plus',
+          allowedHosts: ['llm-gw.example.com'],
+        },
+        models: [
+          {
+            id: 'qwen3.6-plus',
+            authType: 'openai',
+            envKey: TEST_ENV_KEY,
+            baseUrl: GATEWAY,
+          },
+        ],
+      }),
+    );
+    expect(backend.baseUrl).toBe(GATEWAY);
+  });
+
+  it('names the new knob when a custom host is not listed', () => {
+    const gate = rejectedGate(
+      makeConfig({ settings: envSettings({ baseUrl: GATEWAY }) }),
+    );
+    expect(gate.notice).toContain('tools.webSearch.allowedHosts');
+    expect(gate.notice).toContain('WEB_SEARCH_ALLOWED_HOSTS');
+  });
+
+  it('still rejects plaintext even when the host is listed', () => {
+    const gate = rejectedGate(
+      makeConfig({
+        settings: envSettings({
+          baseUrl: 'http://llm-gw.example.com/v1',
+          allowedHosts: ['llm-gw.example.com'],
+        }),
+      }),
+    );
+    expect(gate.notice).toContain('https://');
+  });
+
+  it('ignores a dotless entry instead of trusting a whole TLD', () => {
+    const gate = rejectedGate(
+      makeConfig({
+        settings: envSettings({ baseUrl: GATEWAY, allowedHosts: ['com'] }),
+      }),
+    );
+    expect(gate.notice).toContain('not a DashScope-compatible endpoint');
+  });
+
+  it('never widens automatic derivation', () => {
+    // The list expresses trust for an explicitly configured backend. A host
+    // nobody declared must not be adopted by derivation, or it would receive
+    // the main provider's key.
+    const gate = rejectedGate(
+      makeConfig({
+        settings: { allowedHosts: ['llm-gw.example.com'] },
+        models: [
+          {
+            id: 'main-model',
+            authType: 'openai',
+            envKey: TEST_ENV_KEY,
+            baseUrl: GATEWAY,
+          },
+        ],
+        primaryModel: 'main-model',
+      }),
+    );
+    expect(gate.silent).toBe(true);
+    expect(gate.notice).toContain('no backend could be derived automatically');
+  });
+});
+
+describe('normalizeWebSearchAllowedHosts', () => {
+  it('trims, lower-cases and de-duplicates', () => {
+    expect(
+      normalizeWebSearchAllowedHosts([
+        '  LLM-GW.Example.com ',
+        'llm-gw.example.com',
+        '',
+        'com',
+      ]),
+    ).toEqual(['llm-gw.example.com']);
+  });
+
+  it('treats undefined as empty', () => {
+    expect(normalizeWebSearchAllowedHosts(undefined)).toEqual([]);
   });
 });

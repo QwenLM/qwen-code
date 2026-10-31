@@ -21,6 +21,7 @@ import {
   resolveReasoningForModel,
 } from './reasoning-overrides.js';
 import type { AvailableModel } from '../models/types.js';
+import { QWENCLOUD_MAAS_HOSTS } from './dashscope-source-config.js';
 
 const route: ContentGeneratorConfig = {
   model: 'alias',
@@ -483,6 +484,24 @@ describe('reasoning declarations', () => {
         { canDisable: false },
       );
       expect(resolved).toBeDefined();
+      expect(resolved).toMatchObject({ profile: 'dashscope-effort' });
+    },
+  );
+
+  // Same derived-from-the-leaf shape as the telemetry pin: the gate must keep
+  // admitting every host the attribution leaf owns, including its
+  // `token-plan.` form, without restating the literals here (#15107).
+  it.each(QWENCLOUD_MAAS_HOSTS.flatMap((host) => [host, `token-plan.${host}`]))(
+    'admits QwenCloud host %s as a DashScope endpoint',
+    (host) => {
+      const resolved = resolveReasoningCapabilities(
+        {
+          ...route,
+          model: 'qwen3.8-max',
+          baseUrl: `https://${host}/compatible-mode/v1`,
+        },
+        { canDisable: false },
+      );
       expect(resolved).toMatchObject({ profile: 'dashscope-effort' });
     },
   );

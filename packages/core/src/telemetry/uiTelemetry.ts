@@ -19,6 +19,7 @@ import type {
 } from './types.js';
 import { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 import { isInternalPromptId } from '../utils/internalPromptIds.js';
+import { outputIncludesThoughts, outputTokenCount } from './gen-ai-usage.js';
 
 export { MAIN_SOURCE } from '../utils/subagentNameContext.js';
 
@@ -244,6 +245,9 @@ const createInitialSkillMetrics = (): SkillMetrics => ({
   byName: {},
 });
 
+/** Shortest generation window that counts toward output speed. */
+const MIN_THROUGHPUT_WINDOW_MS = 100;
+
 const createInitialGenerationMetrics = (): GenerationMetrics => ({
   timedRequests: 0,
   totalTtftMs: 0,
@@ -257,32 +261,23 @@ const getEventTotalTokenCount = (event: ApiResponseEvent): number => {
     event.input_token_count > 0
       ? event.input_token_count
       : event.cached_content_token_count;
-  const thoughtsIncludedInOutput =
-    event.auth_type === 'openai' || event.auth_type === 'qwen-oauth';
   return (
     input +
     event.output_token_count +
-    (thoughtsIncludedInOutput ? 0 : event.thoughts_token_count)
+    (outputIncludesThoughts(event.auth_type) ? 0 : event.thoughts_token_count)
   );
 };
 
-const getEventBillableOutputTokens = (event: ApiResponseEvent): number => {
-  const candidates = event.output_token_count;
-  const thoughts = event.thoughts_token_count;
-  const derived = event.total_token_count - event.input_token_count;
-  if (
-    event.total_token_count > 0 &&
-    derived >= candidates &&
-    derived <= candidates + thoughts
-  ) {
-    return derived;
-  }
-  return event.auth_type === 'openai' ||
-    event.auth_type === 'openai-responses' ||
-    event.auth_type === 'qwen-oauth'
-    ? candidates
-    : candidates + thoughts;
-};
+const getEventBillableOutputTokens = (event: ApiResponseEvent): number =>
+  outputTokenCount(
+    {
+      input: event.input_token_count,
+      output: event.output_token_count,
+      thoughts: event.thoughts_token_count,
+      total: event.total_token_count,
+    },
+    event.auth_type,
+  );
 
 const getLegacySubagentId = (
   event: { prompt_id?: string; subagent_name?: string },
@@ -400,6 +395,7 @@ export class UiTelemetryService extends EventEmitter {
     this.emit('update', {
       metrics: this.#metrics,
       lastPromptTokenCount: this.#lastPromptTokenCount,
+      event,
     });
   }
 
@@ -706,27 +702,28 @@ export class UiTelemetryService extends EventEmitter {
     }
 
     const ttftMs = event.ttft_ms;
+    const generationDurationMs = event.generation_ms;
+    // Events recorded before `generation_ms` existed also predate counting
+    // tool-call preparations as visible output, so their TTFT can span a
+    // whole tool-call-only request. Leave them out of timing entirely.
     if (
       ttftMs === undefined ||
       !Number.isFinite(ttftMs) ||
       ttftMs < 0 ||
+      generationDurationMs === undefined ||
+      !Number.isFinite(generationDurationMs) ||
+      generationDurationMs < 0 ||
       isInternalPromptId(event.prompt_id)
     ) {
       return;
     }
 
-    // Events recorded before `generation_ms` existed fall back to everything
-    // after the first visible output.
-    const generationDurationMs =
-      event.generation_ms !== undefined &&
-      Number.isFinite(event.generation_ms) &&
-      event.generation_ms >= 0
-        ? event.generation_ms
-        : Math.max(0, event.duration_ms - ttftMs);
     const accumulateGeneration = (generation: GenerationMetrics) => {
       generation.timedRequests++;
       generation.totalTtftMs += ttftMs;
-      if (generationDurationMs > 0) {
+      // A window this short means the output arrived in a burst, so dividing
+      // the whole response's tokens by it reads as thousands of tokens/s.
+      if (generationDurationMs >= MIN_THROUGHPUT_WINDOW_MS) {
         generation.totalGenerationDurationMs += generationDurationMs;
         generation.totalThroughputOutputTokens += event.output_token_count;
       }

@@ -25,6 +25,13 @@ import {
   HOSTED_STORE_PREFIX,
 } from './scratch-dir.js';
 
+import {
+  PROVIDER_MEDIA_MYSQL_PREFIX,
+  PROVIDER_MEDIA_HARNESS_PREFIX,
+  PROVIDER_MEDIA_FIXTURES_PREFIX,
+  PROVIDER_MEDIA_PROBE_PREFIX,
+} from './helpers/provider-media-process-cleanup.mjs';
+
 // The env keys globalSetup's setup() writes, saved so a case can restore the
 // suite-wide values after re-importing the module and running its lifecycle.
 const SETUP_ENV_KEYS = [
@@ -155,6 +162,10 @@ describe('globalSetup hermetic qwen home', () => {
     ['per-agent ACP home', ACP_HOME_PREFIX],
     ['Hosted process root', HOSTED_HOME_PREFIX],
     ['Hosted Session Store root', HOSTED_STORE_PREFIX],
+    ['provider media MySQL root', PROVIDER_MEDIA_MYSQL_PREFIX],
+    ['provider media harness root', PROVIDER_MEDIA_HARNESS_PREFIX],
+    ['provider media fixture root', PROVIDER_MEDIA_FIXTURES_PREFIX],
+    ['provider media probe root', PROVIDER_MEDIA_PROBE_PREFIX],
   ])(
     'sweeps a stale %s a torn-down run left behind',
     async (_label, prefix) => {

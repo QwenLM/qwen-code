@@ -329,6 +329,25 @@ describe('isValidSessionId', () => {
 });
 
 describe('parseArguments', () => {
+  it.each(['on', 'off'] as const)(
+    'accepts explicit workflow mode %s',
+    async (mode) => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--workflow-mode',
+        mode,
+        '-p',
+        'ordinary',
+      ];
+      expect(await parseArguments()).toMatchObject({ workflowMode: mode });
+    },
+  );
+
+  it('preserves an absent workflow mode as undefined', async () => {
+    process.argv = ['node', 'script.js', '-p', 'ordinary'];
+    expect((await parseArguments()).workflowMode).toBeUndefined();
+  });
   const originalArgv = process.argv;
 
   afterEach(() => {
@@ -1457,6 +1476,7 @@ describe('parseArguments', () => {
 
 describe('loadCliConfig', () => {
   const originalArgv = process.argv;
+  let originalDebugLogFile: string | undefined;
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -1479,11 +1499,21 @@ describe('loadCliConfig', () => {
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
     resetMcpApprovalsForTesting();
+    originalDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
   });
 
   afterEach(() => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
+    // vi.unstubAllEnvs cannot undo the direct `QWEN_DEBUG_LOG_FILE = '1'`
+    // assignment that loadCliConfig makes under --debug; a leaked '1' enables
+    // the debug logger's fire-and-forget writes for the rest of the file,
+    // and they land after the QWEN_HOME pin's afterAll sweep in test-setup.
+    if (originalDebugLogFile === undefined) {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+    } else {
+      process.env['QWEN_DEBUG_LOG_FILE'] = originalDebugLogFile;
+    }
     resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
   });
@@ -2988,7 +3018,7 @@ describe('loadCliConfig', () => {
   });
 
   it.each([undefined, false, true])(
-    'passes only the resolved Generated UI opt-in as a runtime candidate: %s',
+    'passes the resolved Generated UI setting, on by default, as a runtime candidate: %s',
     async (enabled) => {
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();
@@ -2996,7 +3026,7 @@ describe('loadCliConfig', () => {
       expect(mockConfigConstructorParams).toHaveBeenCalledWith(
         expect.objectContaining({
           bundledGeneratedUi: expect.objectContaining({
-            enabled: enabled === true,
+            enabled: enabled !== false,
           }),
         }),
       );
@@ -3012,6 +3042,7 @@ describe('loadCliConfig', () => {
         bundledGeneratedUi: {
           enabled: true,
           unavailableReason: 'unsupported-runtime',
+          explicit: true,
         },
       }),
     );
@@ -4081,6 +4112,39 @@ describe('loadCliConfig', () => {
         tools: { webSearch: { maxPerSession: 10 } },
       });
       expect(config.getWebSearchSettings()).toEqual({ maxPerSession: 10 });
+    });
+
+    it('lets WEB_SEARCH_ALLOWED_HOSTS override tools.webSearch.allowedHosts', async () => {
+      vi.stubEnv(
+        'WEB_SEARCH_ALLOWED_HOSTS',
+        ' gw.example.com , other.example.net ,',
+      );
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'gw.example.com',
+        'other.example.net',
+      ]);
+    });
+
+    it('falls back to tools.webSearch.allowedHosts when the env var is empty', async () => {
+      vi.stubEnv('WEB_SEARCH_ALLOWED_HOSTS', '   ');
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['settings.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()?.allowedHosts).toEqual([
+        'settings.example.com',
+      ]);
+    });
+
+    it('passes an allowedHosts-only setting through without other web search keys', async () => {
+      const config = await loadWithSettings({
+        tools: { webSearch: { allowedHosts: ['gw.example.com'] } },
+      });
+      expect(config.getWebSearchSettings()).toEqual({
+        allowedHosts: ['gw.example.com'],
+      });
     });
 
     // Both modes must turn the tool off explicitly: leaving the settings

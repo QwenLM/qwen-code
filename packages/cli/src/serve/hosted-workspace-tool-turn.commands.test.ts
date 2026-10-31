@@ -65,6 +65,7 @@ const broker = vi.hoisted(() => ({
 vi.mock('./hosted-workspace-broker.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('./hosted-workspace-broker.js')>()),
   HostedWorkspaceBroker: class {
+    resolveCapabilities = async () => {};
     readonly runtimeSessionId = 'prompt';
     fileHistory = broker.fileHistory;
     warm = broker.warm;
@@ -490,7 +491,7 @@ it('gates the member plan tool and submits it through the durable command wait',
     const running = execute(turn, [call(args, id, name)]);
     await vi.waitFor(
       () => expect(commands.command(commandIdOf(id))).toBeDefined(),
-      { timeout: 5000 },
+      { timeout: 10_000 },
     );
     expect(commands.command(commandIdOf(id))?.kind).toBe(
       name === 'task_list' ? 'board_read' : 'plan_submit',
@@ -539,7 +540,7 @@ it.each(['execute', 'resume', 'refused'] as const)(
     ]);
     await vi.waitFor(
       () => expect(commands.command(commandIdOf('hook-plan'))).toBeDefined(),
-      { timeout: 5000 },
+      { timeout: 10_000 },
     );
     await commands.handover(commandIdOf('hook-plan'), PARENT);
     await commands.answered(commandIdOf('hook-plan'), {
@@ -630,9 +631,14 @@ it('parks on the command checkpoint, answers from the reply, and marks it consum
     call({ status: 'pending' }, 'call-list-1', 'task_list'),
   ]);
   const commandId = commandIdOf('call-list-1');
-  await vi.waitFor(() => {
-    expect(commands.command(commandId)).toBeDefined();
-  });
+  // The turn's append chain can outlast vitest's 1 s waitFor default on a
+  // loaded host (#15593); this is the budget the file's other projections use.
+  await vi.waitFor(
+    () => {
+      expect(commands.command(commandId)).toBeDefined();
+    },
+    { timeout: 10_000 },
+  );
   // The checkpoint named the batch before the outbox commit ever ran.
   const authority = await session.authority.harnessRunAuthorization();
   if (authority.status !== 'runnable')

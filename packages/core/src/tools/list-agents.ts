@@ -5,6 +5,7 @@
  */
 
 import type { Config } from '../config/config.js';
+import { peerMessagingOffReason } from '../ipc/peer-messaging-guidance.js';
 import {
   advertisablePeerAddress,
   listMessageablePeers,
@@ -49,11 +50,15 @@ class ListAgentsInvocation extends BaseToolInvocation<
         status: entry.status,
         can_message:
           !entry.resumeBlockedReason &&
+          !entry.messagesBlockedReason &&
           (entry.status === 'running' ||
             entry.status === 'paused' ||
             entry.status === 'completed'),
-        ...(entry.resumeBlockedReason
-          ? { resume_blocked_reason: entry.resumeBlockedReason }
+        ...(entry.resumeBlockedReason || entry.messagesBlockedReason
+          ? {
+              resume_blocked_reason:
+                entry.resumeBlockedReason ?? entry.messagesBlockedReason,
+            }
           : {}),
       }));
 
@@ -127,7 +132,7 @@ class ListAgentsInvocation extends BaseToolInvocation<
         'No ordinary background subagents are available in this session' +
         (self
           ? ', and no other Qwen Code session on this machine is reachable. '
-          : '. ') +
+          : `. Other Qwen Code sessions cannot be discovered from this session (${peerMessagingOffReason(this.config)}). `) +
         'Named Agent Team teammates are not listed here; their results are ' +
         'delivered automatically through team messaging, so do not use ' +
         'list_agents to wait for a teammate.' +

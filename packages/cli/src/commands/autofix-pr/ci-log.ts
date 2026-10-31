@@ -9,18 +9,22 @@
 // preview in the shell tool's output.
 
 import type { CommandModule } from 'yargs';
-import { writeFileSync } from 'node:fs';
+import { atomicWriteFileSync } from '@qwen-code/qwen-code-core/utils/atomicFileWrite.js';
 import { join } from 'node:path';
 import { stripVTControlCharacters } from 'node:util';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { ensureAuthenticated, gh, setGhHost } from '../review/lib/gh.js';
 import {
-  assertOwnedBySession,
+  assertWatching,
+  NO_FOLLOW,
+  TASK_OPTION,
+  taskArg,
   assertPositiveInteger,
   autofixPrPaths,
-  repoRoot,
+  resolveWatchRoot,
   requireState,
 } from './state.js';
+import { assertNoFixInFlight } from './fix.js';
 
 const FAILED_JOB_CONCLUSIONS = new Set(['failure', 'timed_out']);
 
@@ -72,14 +76,20 @@ function jobLog(repo: string, jobId: number): string {
  * minutes: the jobs left after it are listed, their logs not read. */
 const CI_LOG_BUDGET_MS = 8 * 60_000;
 
-export function runCiLog(prNumber: number, runId: number, limit: number): void {
+export function runCiLog(
+  prNumber: number,
+  runId: number,
+  limit: number,
+  task?: string,
+): void {
   // `slice(-0)` and `slice(NaN)` both keep the whole log.
   assertPositiveInteger(limit, '--lines');
   assertPositiveInteger(runId, 'run id');
-  const root = repoRoot();
+  const root = resolveWatchRoot(prNumber);
   const paths = autofixPrPaths(root, prNumber);
   const state = requireState(paths.statePath, prNumber);
-  assertOwnedBySession(state);
+  assertWatching(state, task);
+  assertNoFixInFlight(paths, prNumber);
   setGhHost(state.host);
   ensureAuthenticated();
   // From the start: listing the jobs of a large run takes its time too.
@@ -139,7 +149,7 @@ export function runCiLog(prNumber: number, runId: number, limit: number): void {
     'tmp',
     `autofix-pr-${prNumber}-ci-${runId}.log`,
   );
-  writeFileSync(path, text);
+  atomicWriteFileSync(path, text, NO_FOLLOW);
   writeStdoutLine(JSON.stringify({ path, jobs }));
 }
 
@@ -163,8 +173,14 @@ export const ciLogCommand: CommandModule = {
         type: 'number',
         default: 200,
         describe: 'Lines to keep from the end of each failed job',
-      }),
+      })
+      .option('task', TASK_OPTION),
   handler: (argv) => {
-    runCiLog(Number(argv['pr']), Number(argv['run-id']), Number(argv['lines']));
+    runCiLog(
+      Number(argv['pr']),
+      Number(argv['run-id']),
+      Number(argv['lines']),
+      taskArg(argv),
+    );
   },
 };

@@ -17,6 +17,7 @@ import {
 } from '../core/turn.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
+import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
 import { supportsOpenAIPrefixCaching } from '../core/openaiContentGenerator/prefix-caching.js';
@@ -243,6 +244,37 @@ export function computeThresholds(
   const hard = Math.min(window, Math.max(hardEdge, auto + HARD_BUFFER));
 
   return { warn, auto, hard, effectiveWindow };
+}
+
+/**
+ * Whether a prompt of `promptTokens` sits below the compaction warning tier
+ * for this config's window. Memory extraction cadence (#13004) only *arms* a
+ * skip below this tier: a skip armed on an earlier turn can still be pending
+ * when compaction fires, and compaction does not flush it.
+ *
+ * Callers pass the next prompt's known base — the chat's last API-reported
+ * prompt count plus its retained output tokens — because both compaction gates
+ * measure at least that much, and comparing the bare prompt count would report
+ * "below warn" for a turn whose own output budget already reaches the auto
+ * tier. What remains between this tier and `auto` is {@link WARN_BUFFER}, the
+ * reserve for the next user message and the estimate's error.
+ */
+export function isBelowCompactionWarn(
+  config: Config,
+  promptTokens: number,
+): boolean {
+  // A count of 0 means this chat has no API report yet — an un-keyed read
+  // adopts the active route, so a zero is this chat's own last report rather
+  // than a value borrowed from another route — not an empty prompt: fail
+  // closed so no turn is skipped.
+  if (promptTokens <= 0) return false;
+  const window =
+    config.getContentGeneratorConfig()?.contextWindowSize ??
+    DEFAULT_TOKEN_LIMIT;
+  return (
+    promptTokens <
+    computeThresholds(window, config.getAutoCompactThreshold()).warn
+  );
 }
 
 export type CompactTrigger = 'manual' | 'auto';
@@ -673,15 +705,16 @@ export class ChatCompressionService {
       lastCurated.parts?.some((part) => !!part.functionCall)
         ? curatedHistory.slice(0, -1)
         : curatedHistory;
-    const sideQueryHistory = pendingToolResult
-      ? [...sideQueryBase, opts.pendingUserMessage!]
-      : sideQueryBase;
-    const pendingToolResultTokenCount = pendingToolResult
-      ? estimateContentTokens(
-          [opts.pendingUserMessage!],
-          slimmingConfig.imageTokenEstimate,
-        )
-      : 0;
+    const pendingHistory = pendingToolResult ? [opts.pendingUserMessage!] : [];
+    // Keep raw pending input intact for replay and compression checkpoints.
+    const visiblePendingHistory = config.getAutoMemoryContext?.()
+      ? pendingHistory
+      : withoutAutoMemorySnapshots(pendingHistory);
+    const sideQueryHistory = [...sideQueryBase, ...visiblePendingHistory];
+    const pendingToolResultTokenCount = estimateContentTokens(
+      visiblePendingHistory,
+      slimmingConfig.imageTokenEstimate,
+    );
 
     // Lazy: the cold fallback input is slimmed on demand. The original
     // history keeps its media: the shared request needs it for cache-prefix
@@ -1473,6 +1506,22 @@ export class ChatCompressionService {
       // takeover resumes that exact summary instead of generating another one.
       await opts.onPreparedCompaction?.(candidate);
       await firePostCompact(config, candidate, signal, compactTrigger);
+
+      // #13004: this shrink lands below whatever a parked cadence snapshot
+      // holds, and a turn that ends without reaching scheduleExtract (e.g.
+      // cancelled) lets no shrink guard observe it — the flush would replay
+      // the stale snapshot into a cursor no live history matches. Drop it
+      // here, at the point the shrink is decided.
+      // Only the session's own chat may: `compress()` runs per chat, while a
+      // forked chat shares this Config instance and a subagent's derived
+      // Config shares the session id and manager — neither history is the one
+      // the parked snapshot was cut from.
+      if (!chat.isForkedChat) {
+        config
+          .getMemoryManager?.()
+          ?.invalidatePendingExtract(config.getSessionId(), config);
+      }
+
       return { newHistory: candidate.newHistory, info: candidate.info };
     }
   }

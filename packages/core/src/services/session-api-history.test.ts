@@ -36,6 +36,7 @@ import {
   replaceImagePayloadsInPlace,
 } from './image-payload-references.js';
 import { getStartupContextLength } from '../core/environmentContext.js';
+import { AUTO_MEMORY_SNAPSHOT_METADATA } from '../memory/request-context.js';
 import {
   countApiUserPrompts,
   findApiRewindCutPoint,
@@ -757,6 +758,24 @@ describe('trailingSystemNotifications provenance signal', () => {
     };
   }
 
+  /** The record `recordMemoryCatalogSnapshot` persists. */
+  function snapshotRecord(text: string): ChatRecord {
+    seq += 1;
+    return {
+      ...base,
+      uuid: `s${seq}`,
+      parentUuid: null,
+      type: 'system',
+      subtype: 'memory_catalog_snapshot',
+      message: {
+        role: 'user',
+        parts: [
+          { text, partMetadata: { [AUTO_MEMORY_SNAPSHOT_METADATA]: true } },
+        ],
+      },
+    };
+  }
+
   it('reports 0 for a real user prompt even when its text is a bare envelope', () => {
     // The whole point of the signal: this record is shape-identical to a cold
     // notification, and only its `provenance: 'real_user'` says otherwise.
@@ -838,6 +857,25 @@ describe('trailingSystemNotifications provenance signal', () => {
     ];
     const built = buildSessionHistoryFromConversation({ messages });
     expect(built.apiHistory).toEqual([notificationRecord().message]);
+    expect(built.trailingSystemNotifications).toBe(1);
+  });
+
+  it('keeps flags aligned when a replayed snapshot appends a tail entry', () => {
+    // The snapshot tail is a model entry, so `appendAutoMemorySnapshot` pushes
+    // a new user entry and the accumulator must allocate a flag slot for it.
+    // `stripThoughtsFromHistory` re-pairs the flags by index, so a missing slot
+    // shifts the cold notification's `true` onto the snapshot entry and the
+    // notification tail counts as 0 instead of 1.
+    const messages = [
+      modelRecord('earlier answer'),
+      snapshotRecord('catalog A'),
+      notificationRecord(),
+    ];
+    const built = buildSessionHistoryFromConversation(
+      { messages },
+      { stripThoughtsFromHistory: true },
+    );
+    expect(built.apiHistory).toHaveLength(3);
     expect(built.trailingSystemNotifications).toBe(1);
   });
 

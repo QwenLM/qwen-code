@@ -8,6 +8,8 @@ import {
   getToolOutputProvenance,
   measureToolOutput,
 } from '../tools/tool-output-size.js';
+import { enforceFunctionResponseBudget } from '../tools/tool-response-finalizer.js';
+import { buildTranscriptMarker } from '../tools/agent/transcript-marker.js';
 import * as outputTruncation from '../tools/truncation.js';
 import * as sizeLoggers from '../telemetry/loggers.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -1324,6 +1326,7 @@ describe('CoreToolScheduler', () => {
 
   function createSchedulerForLegacyToolTests(options: {
     toolsByName: Map<string, MockTool>;
+    onPermissionPromptTerminalSequence?: (terminalSequence: string) => void;
     approvalMode?: ApprovalMode;
     getPermissionsDeny?: () => string[] | undefined;
     messageBus?: { request: ReturnType<typeof vi.fn> };
@@ -1469,6 +1472,8 @@ describe('CoreToolScheduler', () => {
         chatRecordingService: options.chatRecordingService,
         onToolResultFullTurnModel: options.onToolResultFullTurnModel,
         isToolExecutionAllowed: options.isToolExecutionAllowed,
+        onPermissionPromptTerminalSequence:
+          options.onPermissionPromptTerminalSequence,
       },
     );
 
@@ -4090,6 +4095,84 @@ describe('CoreToolScheduler', () => {
       expectSpilled(responseText(call), BODY);
     });
 
+    // With no saved output file, the part's non-enumerable recovery handle
+    // is the only carrier of its remediation text. Provenance re-stamps and
+    // hook context append both copy parts before the send-boundary budget.
+    it.each([
+      { budget: 660, hookEvent: undefined },
+      { budget: 1000, hookEvent: undefined },
+      { budget: 660, hookEvent: 'PreToolUse' },
+      { budget: 660, hookEvent: 'PostToolUse' },
+    ])(
+      'delivers the producer recovery text to a $budget-char send-boundary slot ($hookEvent)',
+      async ({ budget, hookEvent }) => {
+        // Wording mirrors `subagentTerminalReason(TIMEOUT)`: this is the line
+        // the parent model has to read to avoid re-issuing the same call.
+        const reason =
+          "Subagent did not complete (terminate mode: TIMEOUT). It ran out of time, so re-running the same call will time out again; raise the agent's `runConfig.max_time_minutes` instead.";
+        const marker = buildTranscriptMarker('/tmp/subagent-transcript.jsonl');
+        const recoveryText = `${reason}\n\n${marker}`;
+        const { calls } = await runLoneTool(
+          toolReturning(
+            'agentTool',
+            {
+              returnDisplay: 'x',
+              llmContent: `${recoveryText}\n\n${'a'.repeat(4_000)}`,
+              recoveryText,
+              ...(hookEvent ? { persistedOutputFiles: [] } : {}),
+              outputBudgetApplied: true,
+            },
+            { maxOutputChars: 30_000 },
+          ),
+          'c-recovery',
+          'p-recovery',
+          {
+            waitForCompletion: true,
+            truncateToolOutputThreshold: 25_000,
+            ...(hookEvent
+              ? {
+                  disableHooks: false,
+                  messageBus: hookBusAdding(hookEvent, {
+                    hookEventName: hookEvent,
+                    additionalContext: 'hook recovery context',
+                  }),
+                  toolOutputBatchBudget: 660,
+                }
+              : {}),
+          },
+        );
+        if (hookEvent) {
+          expect(responseText(calls[0])).toContain(reason);
+          expect(responseText(calls[0])).toContain(marker);
+          expect(responseText(calls[0])).toContain('hook recovery context');
+        }
+
+        // `llm-chat.ts`'s own send-boundary shape: one part per entry, no
+        // `persistedOutputFiles`, so nothing downstream can rebuild the handle.
+        const entries = (calls[0]?.response.responseParts ?? []).map(
+          (part) => ({
+            callId: 'send-boundary-test',
+            toolName: 'tool-response-batch',
+            responseParts: [part],
+          }),
+        );
+        const sent = enforceFunctionResponseBudget(
+          entries,
+          budget,
+          true,
+          false,
+        );
+        const output = sent[0]?.responseParts[0]?.functionResponse?.response?.[
+          'output'
+        ] as string;
+
+        expect(output).toContain(reason);
+        expect(output).toContain(
+          'The full output is in /tmp/subagent-transcript.jsonl.',
+        );
+      },
+    );
+
     it('skips the error gate while error.message is still the sized body', async () => {
       const call = await runBudgetedTool(BODY, true, { message: BODY });
 
@@ -4851,6 +4934,41 @@ describe('CoreToolScheduler', () => {
     });
     expect(runSideQueryMock).not.toHaveBeenCalled();
     expect(hookSystem.firePermissionDeniedEvent).not.toHaveBeenCalled();
+  });
+
+  it('hands its owner the terminal sequence of the permission prompt hook', async () => {
+    const onConfirm = vi.fn().mockResolvedValue(undefined);
+    const tool = new MockTool({
+      name: 'needs-approval',
+      kind: Kind.Edit,
+      getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+      getConfirmationDetails: async () =>
+        execDetails('Confirm', 'needs-approval', 'needs-approval', onConfirm),
+    });
+    const onPermissionPromptTerminalSequence = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName: toolMap(tool),
+      approvalMode: ApprovalMode.DEFAULT,
+      messageBus: hookBus(async (request) =>
+        hookResponse(
+          `${request.eventName}-hook`,
+          request.eventName === 'Notification'
+            ? { terminalSequence: '\u0007' }
+            : {},
+        ),
+      ),
+      disableHooks: false,
+      onPermissionPromptTerminalSequence,
+    });
+
+    await scheduleBatch(
+      scheduler,
+      toolRequest('prompted', tool.name, {}, 'prompt-prompted'),
+    );
+
+    await vi.waitFor(() =>
+      expect(onPermissionPromptTerminalSequence).toHaveBeenCalledWith('\u0007'),
+    );
   });
 
   it('marks invalid PermissionRequest rewrites as pre-execution span failures', async () => {
@@ -13844,6 +13962,36 @@ describe('Fire hook functions integration', () => {
           ? refused.response.executionStatus
           : undefined,
       ).toBe('not_started');
+      expect(
+        completed
+          .filter((c) => c.request.callId !== '2')
+          .every((c) => c.status === 'success'),
+      ).toBe(true);
+    });
+
+    it('fails a call its owner refuses as execution-denied, without running it', async () => {
+      const log: string[] = [];
+      const { scheduler, onAllToolCallsComplete } = createScheduler(
+        toolMap(loggingTool(log, 'Agent', 'agent', undefined, { prefix: '' })),
+        {
+          refuseToolCall: (request) =>
+            request.callId === '2' ? 'Not in this session.' : undefined,
+        },
+      );
+
+      await scheduleBatch(scheduler, ...agentCalls());
+
+      expect(log).not.toContain('start:B');
+      const completed = firstBatch(onAllToolCallsComplete);
+      const refused = completed.find((c) => c.request.callId === '2');
+      expect(refused?.status).toBe('error');
+      expect(
+        refused && 'response' in refused ? refused.response : {},
+      ).toMatchObject({
+        errorType: ToolErrorType.EXECUTION_DENIED,
+        executionStatus: 'not_started',
+        error: new Error('Not in this session.'),
+      });
       expect(
         completed
           .filter((c) => c.request.callId !== '2')

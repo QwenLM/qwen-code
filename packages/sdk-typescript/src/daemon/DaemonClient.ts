@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import type {
+  ManagedPackagePreparationRequest,
+  ManagedPackagePreparation,
+} from './managed-extension-package-types.js';
 import {
   validateStartupConfigRequest,
   assertStartupConfigApplied,
@@ -82,6 +86,8 @@ import type {
   DaemonSessionListPageOptions,
   DaemonSessionCatalogRequest,
   DaemonSessionCatalogResult,
+  DaemonSessionLiveStateBatchRequest,
+  DaemonSessionLiveStateBatchResult,
   DaemonSessionSearchOptions,
   DaemonSessionSearchResult,
   DaemonWorkspaceSessionInfo,
@@ -134,6 +140,8 @@ import type {
   DaemonGitHubPullRequestList,
   DaemonGitHubPullRequestCreateResult,
   DaemonWorkspaceMcpStatus,
+  DaemonWorkspaceDirectories,
+  DaemonWorkspaceDirectoriesMutation,
   DaemonWorkspaceMcpConfigStatus,
   DaemonMcpConfigMutationResult,
   DaemonWorkspaceMcpInitializeResult,
@@ -164,6 +172,7 @@ import type {
   DaemonWorkspaceCapability,
   DaemonWorkspaceRemovalResult,
   DaemonWorkspaceUpdate,
+  DaemonGitCloneJob,
   HeartbeatResult,
   GoalControlRequest,
   GoalStateResponse,
@@ -205,6 +214,7 @@ import type {
   DaemonMcpManageAction,
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
+  DaemonSessionBtwStreamEvent,
   DaemonSessionAttachmentData,
   DaemonSessionAttachmentReference,
   DaemonSessionGenerationEvent,
@@ -287,7 +297,7 @@ import type {
   DaemonWorkspaceTrustStatusV2,
   DaemonUnarchiveSessionsResult,
 } from './types.js';
-import { parseSseStream } from './sse.js';
+import { parseSseStream, SseFramingError } from './sse.js';
 import {
   DaemonStandaloneCreationOutcomeUnknownError,
   STANDALONE_SESSION_OPTIONS_CAPABILITY,
@@ -1273,6 +1283,45 @@ export class DaemonClient {
     return new WorkspaceDaemonClient(this, urlEncode(workspaceCwd));
   }
 
+  /**
+   * Issue a native REST request for a daemon route without ACP translation.
+   * HTTP status and response-body handling belong to the caller. The timeout
+   * covers the connection through response headers, not a streaming body;
+   * pass a signal to cancel body consumption, or `0` to disable the timer.
+   */
+  async requestRest(
+    path: string,
+    init: RequestInit = {},
+    timeoutMs?: number,
+  ): Promise<Response> {
+    if (
+      !/^\/(?![/\\\t\r\n])/.test(path) ||
+      new URL(path, 'http://daemon.invalid').origin !== 'http://daemon.invalid'
+    ) {
+      throw new Error('Daemon REST requests require an absolute route path');
+    }
+    const base = new URL(`${this.baseUrl}/`, 'http://daemon.invalid');
+    if (
+      !new URL(
+        `${this.baseUrl}${path}`,
+        'http://daemon.invalid',
+      ).pathname.startsWith(base.pathname)
+    ) {
+      throw new Error('Daemon REST requests must stay within the base path');
+    }
+    const headers = new Headers(this.headers());
+    new Headers(init.headers).forEach((value, name) =>
+      headers.set(name, value),
+    );
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${path}`,
+      { ...init, headers },
+      undefined,
+      timeoutMs,
+      'rest',
+    );
+  }
+
   // -- Lifecycle / discovery ---------------------------------------------
 
   async health(): Promise<{ status: string }> {
@@ -1897,6 +1946,67 @@ export class DaemonClient {
       `/session/${urlEncode(sessionId)}/resources`,
       'GET /session/:id/resources',
       { clientId, mode: 'rest' },
+    );
+  }
+
+  async prepareManagedPackage(
+    request: ManagedPackagePreparationRequest,
+    options?: { clientId?: string; signal?: AbortSignal },
+  ): Promise<ManagedPackagePreparation> {
+    return this.jsonRequest(
+      '/workspace/extensions/managed-packages/prepare',
+      'Prepare Managed extension package',
+      {
+        method: 'POST',
+        body: request,
+        clientId: options?.clientId,
+        signal: options?.signal,
+        timeoutMs: 10 * 60_000,
+        mode: 'rest',
+      },
+    );
+  }
+
+  async readPreparedManagedPackage(
+    archiveUrl: string,
+    signal?: AbortSignal,
+  ): Promise<Blob> {
+    if (
+      !/^\/workspace\/extensions\/managed-packages\/[0-9a-f-]{36}\/archive$/.test(
+        archiveUrl,
+      )
+    )
+      throw new Error('Invalid Managed package preparation reference');
+    return this.fetchWithTimeout(
+      `${this.baseUrl}${archiveUrl}`,
+      { method: 'GET', headers: this.headers({}), signal },
+      async (response) => {
+        if (!response.ok)
+          throw await this.failOnError(
+            response,
+            'Read prepared Managed package',
+          );
+        const limit = 100 * 1024 * 1024;
+        const reader = response.body?.getReader();
+        if (!reader) throw new Error('Managed package stream is missing');
+        const chunks: Array<Uint8Array<ArrayBuffer>> = [];
+        let length = 0;
+        try {
+          for (;;) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            length += value.length;
+            if (length > limit)
+              throw new Error('Managed package exceeds 100 MiB');
+            chunks.push(new Uint8Array(value));
+          }
+        } finally {
+          await reader.cancel();
+        }
+        return new Blob(chunks, { type: 'application/octet-stream' });
+      },
+      undefined,
+      'rest',
     );
   }
 
@@ -3527,6 +3637,28 @@ export class DaemonClient {
     return this.workspaceByCwd(workspaceCwd).getSessionLiveState(opts);
   }
 
+  /**
+   * Read complete memory-only snapshots for selected workspaces in one native
+   * REST request. Callers pre-flight `workspace_session_live_state_batch` once
+   * and use the single-workspace route on older daemons.
+   */
+  getSessionsLiveState(
+    request: DaemonSessionLiveStateBatchRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonSessionLiveStateBatchResult> {
+    return this.jsonRequest<DaemonSessionLiveStateBatchResult>(
+      '/sessions/live-state',
+      'POST /sessions/live-state',
+      {
+        method: 'POST',
+        body: request,
+        mode: 'rest',
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs,
+      },
+    );
+  }
+
   async listSessionGroups(
     workspaceCwd: string,
   ): Promise<DaemonSessionGroupCatalog> {
@@ -4501,6 +4633,151 @@ export class DaemonClient {
       parseSessionGenerationEvent,
       false,
     );
+  }
+
+  /**
+   * Stream answer snapshots; reconnects resume the same model request.
+   * Callers must preflight `capabilities.features` for `session_btw_stream`.
+   */
+  async *streamSessionBtw(
+    sessionId: string,
+    question: string,
+    opts?: { signal?: AbortSignal; clientId?: string },
+  ): AsyncGenerator<DaemonSessionBtwStreamEvent> {
+    opts?.signal?.throwIfAborted();
+    const requestId = createStandaloneSessionId();
+    const url = `${this.baseUrl}/session/${urlEncode(sessionId)}/btw/stream`;
+    let resume = false;
+    let terminal = false;
+    let retryDelay = 1_000;
+    let reconnectDeadline: number | undefined;
+    let lastReconnectError: unknown;
+    try {
+      while (true) {
+        opts?.signal?.throwIfAborted();
+        if (reconnectDeadline !== undefined && Date.now() >= reconnectDeadline)
+          throw lastReconnectError;
+        const connection = new AbortController();
+        const signal = opts?.signal
+          ? composeAbortSignals([opts.signal, connection.signal])
+          : connection.signal;
+        let timer: ReturnType<typeof setTimeout>;
+        const armTimeout = () => {
+          clearTimeout(timer);
+          timer = setTimeout(
+            () => {
+              connection.abort(
+                new DOMException('BTW connection timed out', 'TimeoutError'),
+              );
+            },
+            Math.min(
+              45_000,
+              reconnectDeadline === undefined
+                ? 45_000
+                : Math.max(1, reconnectDeadline - Date.now()),
+            ),
+          );
+        };
+        armTimeout();
+        try {
+          const res = await this._fetch(url, {
+            method: 'POST',
+            headers: this.headers(
+              {
+                'Content-Type': 'application/json',
+                Accept: 'text/event-stream',
+              },
+              opts?.clientId,
+            ),
+            body: JSON.stringify({
+              question,
+              requestId,
+              ...(resume ? { resume: true } : {}),
+            }),
+            signal,
+          });
+          if (!res.ok)
+            throw await this.failOnError(res, 'POST /session/:id/btw/stream');
+          resume = true;
+          if (!res.body)
+            throw new SseFramingError('BTW response body is missing');
+          const body = res.body.pipeThrough(
+            new TransformStream<Uint8Array, Uint8Array>({
+              transform(chunk, controller) {
+                armTimeout();
+                controller.enqueue(chunk);
+              },
+            }),
+          );
+          for await (const raw of parseSseStream(body, signal)) {
+            const event = raw as unknown as Record<string, unknown>;
+            if (
+              !event ||
+              typeof event !== 'object' ||
+              Array.isArray(event) ||
+              event['v'] !== 1 ||
+              event['requestId'] !== requestId ||
+              !(
+                ((event['type'] === 'answer' || event['type'] === 'done') &&
+                  typeof event['answer'] === 'string') ||
+                (event['type'] === 'error' &&
+                  typeof event['code'] === 'string' &&
+                  typeof event['message'] === 'string')
+              )
+            ) {
+              throw new SseFramingError('Invalid BTW stream event');
+            }
+            reconnectDeadline = undefined;
+            armTimeout();
+            retryDelay = 1_000;
+            terminal = event['type'] === 'done' || event['type'] === 'error';
+            yield event as unknown as DaemonSessionBtwStreamEvent;
+            if (terminal) return;
+          }
+          throw new Error('BTW stream ended before completion');
+        } catch (error) {
+          opts?.signal?.throwIfAborted();
+          if (
+            error instanceof SseFramingError ||
+            (error instanceof DaemonHttpError &&
+              error.status !== 408 &&
+              error.status !== 429 &&
+              error.status < 500) ||
+            (reconnectDeadline !== undefined && Date.now() >= reconnectDeadline)
+          )
+            throw error;
+          lastReconnectError = error;
+          reconnectDeadline ??= Date.now() + 60_000;
+        } finally {
+          clearTimeout(timer!);
+          connection.abort();
+        }
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => {
+            clearTimeout(timer);
+            reject(opts?.signal?.reason);
+          };
+          const timer = setTimeout(
+            () => {
+              opts?.signal?.removeEventListener('abort', onAbort);
+              resolve();
+            },
+            Math.min(retryDelay, Math.max(0, reconnectDeadline! - Date.now())),
+          );
+          opts?.signal?.addEventListener('abort', onAbort, { once: true });
+          if (opts?.signal?.aborted) onAbort();
+        });
+        retryDelay = Math.min(retryDelay * 2, 5_000);
+      }
+    } finally {
+      if (!terminal) {
+        void this._fetch(`${url}/${urlEncode(requestId)}`, {
+          method: 'DELETE',
+          headers: this.headers({}, opts?.clientId),
+          signal: abortTimeout(5_000),
+        }).catch(() => undefined);
+      }
+    }
   }
 
   async btwSession(
@@ -6297,17 +6574,37 @@ export class DaemonClient {
     );
   }
 
-  async setSessionConfigOption(
+  setSessionConfigOption(
     sessionId: string,
     configId: 'reasoning_effort',
     value: ReasoningSelection,
+    clientOrOptions?: string | { clientId?: string; persist?: boolean },
+  ): Promise<DaemonSessionConfigOptionResult>;
+  setSessionConfigOption(
+    sessionId: string,
+    configId: 'workflow_mode',
+    value: 'on' | 'off',
+    clientOrOptions?: string | { clientId?: string },
+  ): Promise<DaemonSessionConfigOptionResult>;
+  async setSessionConfigOption(
+    sessionId: string,
+    configId: 'reasoning_effort' | 'workflow_mode',
+    value: ReasoningSelection | 'on' | 'off',
     clientOrOptions?: string | { clientId?: string; persist?: boolean },
   ): Promise<DaemonSessionConfigOptionResult> {
     const options =
       typeof clientOrOptions === 'string'
         ? { clientId: clientOrOptions }
         : clientOrOptions;
-    return await this.jsonRequest<DaemonSessionConfigOptionResult>(
+    if (
+      configId === 'workflow_mode' &&
+      ((value !== 'on' && value !== 'off') || options?.persist !== undefined)
+    ) {
+      throw new Error(
+        'Workflow mode requires on/off and does not accept persist',
+      );
+    }
+    const result = await this.jsonRequest<DaemonSessionConfigOptionResult>(
       `/session/${urlEncode(sessionId)}/config-option`,
       'POST /session/:id/config-option',
       {
@@ -6322,6 +6619,11 @@ export class DaemonClient {
         clientId: options?.clientId,
       },
     );
+    // ACP returns configOptions only; a successful Workflow mode write has
+    // already committed the session state before acknowledging the request.
+    return configId === 'workflow_mode' && this.transport.type !== 'rest'
+      ? { ...result, persisted: result.persisted ?? true }
+      : result;
   }
 
   async setSessionLanguage(
@@ -7073,6 +7375,59 @@ export class DaemonClient {
     );
   }
 
+  /** Starts an asynchronous clone of `url` into a new `target` directory. */
+  async startGitWorkspaceClone(input: {
+    url: string;
+    target: string;
+  }): Promise<{ jobId: string }> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspaces`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }),
+        body: JSON.stringify({ kind: 'git', ...input }),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'POST /workspaces { kind: "git" }');
+        }
+        return (await res.json()) as { jobId: string };
+      },
+    );
+  }
+
+  async getGitWorkspaceCloneJob(jobId: string): Promise<DaemonGitCloneJob> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace-git-clone-jobs/${urlEncode(jobId)}`,
+      { method: 'GET', headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'GET /workspace-git-clone-jobs/:jobId',
+          );
+        }
+        return (await res.json()) as DaemonGitCloneJob;
+      },
+    );
+  }
+
+  async cancelGitWorkspaceClone(jobId: string): Promise<DaemonGitCloneJob> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/workspace-git-clone-jobs/${urlEncode(jobId)}`,
+      { method: 'DELETE', headers: this.headers() },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'DELETE /workspace-git-clone-jobs/:jobId',
+          );
+        }
+        return (await res.json()) as DaemonGitCloneJob;
+      },
+    );
+  }
+
   // -- Lifecycle / disposal ------------------------------------------------
 
   /**
@@ -7249,6 +7604,28 @@ export class WorkspaceDaemonClient {
 
   workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return this.get('/mcp', 'GET /workspaces/:workspace/mcp');
+  }
+
+  directories(): Promise<DaemonWorkspaceDirectories> {
+    return this.get('/directories', 'GET /workspaces/:workspace/directories');
+  }
+
+  addDirectory(path: string): Promise<DaemonWorkspaceDirectoriesMutation> {
+    return this.post(
+      '/directories',
+      'POST /workspaces/:workspace/directories',
+      { path },
+    );
+  }
+
+  removeDirectory(path: string): Promise<DaemonWorkspaceDirectoriesMutation> {
+    const query = new URLSearchParams({ path });
+    return this.client.workspaceJsonRequest<DaemonWorkspaceDirectoriesMutation>(
+      this.workspaceSelector,
+      `/directories?${query.toString()}`,
+      'DELETE /workspaces/:workspace/directories',
+      { method: 'DELETE', mode: 'rest' },
+    );
   }
 
   mcpConfig(): Promise<DaemonWorkspaceMcpConfigStatus> {

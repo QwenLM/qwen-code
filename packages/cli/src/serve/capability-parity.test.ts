@@ -34,11 +34,12 @@ import {
 const REPO = resolve(import.meta.dirname, '../../../..');
 const MANAGED_SURFACE_FILE = resolve(
   REPO,
-  'packages/managed-agent-server/src/test/resources/capability-parity/managed-surface.txt',
+  'packages/managed-agent-server/verification/src/test/resources/capability-parity/managed-surface.txt',
 );
 const ROUTE_METHODS: ReadonlySet<string> = new Set([
   'GET',
   'POST',
+  'PUT',
   'PATCH',
   'DELETE',
 ]);
