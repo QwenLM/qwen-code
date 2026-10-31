@@ -130,6 +130,15 @@ export function useScopedSessions(
     loading: scoped.loading,
     error: scoped.error,
     reload: reloadScoped,
+    // Page-completeness markers, mirrored from the primary branch so a
+    // workspace-locked split call site can read them off the union without a
+    // TS2339: the prune guard needs them to tell "not in this page" from
+    // "gone".
+    nextCursor: scoped.nextCursor,
+    liveMergeFailed: scoped.liveMergeFailed,
+    truncated: scoped.truncated,
+    // Same reason: a stale-retained scoped page is not proof of absence.
+    stale: scoped.stale,
     deleteSession,
     deleteSessions,
     releaseSession: primaryReleaseSessionAction ? releaseSession : undefined,

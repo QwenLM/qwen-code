@@ -57,6 +57,7 @@ import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import * as fsSync from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { Mutex } from 'async-mutex';
 import lockfile from 'proper-lockfile';
 import { Storage } from '../config/storage.js';
 import { atomicWriteJSON } from '../utils/atomicFileWrite.js';
@@ -497,6 +498,24 @@ function readPeerControllerRegistryStrictSync(
   return { schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION, controllers };
 }
 
+// One `Mutex` per registry lock path. Writers in this process queue in
+// memory so only one reaches for the `proper-lockfile` lock at a time;
+// the file lock still guards writers in other processes. Without it,
+// same-process writers stampede the file lock and the last one exhausts
+// its retry budget whenever the holder's write is slow — an fsync on a
+// busy disk (#15581). Mirrors mailbox.ts's `withInboxLock`. Entries are
+// never evicted; there is one registry path per Qwen home.
+const registryLocks = new Map<string, Mutex>();
+
+function getRegistryLock(lockPath: string): Mutex {
+  let lock = registryLocks.get(lockPath);
+  if (!lock) {
+    lock = new Mutex();
+    registryLocks.set(lockPath, lock);
+  }
+  return lock;
+}
+
 async function withRegistryLock<T>(
   filePath: string,
   mutate: () => Promise<T>,
@@ -510,17 +529,19 @@ async function withRegistryLock<T>(
     await fs.realpath(directory),
     path.basename(filePath),
   );
-  const release = await lockfile.lock(lockPath, LOCK_OPTIONS);
-  try {
-    return await mutate();
-  } finally {
+  return getRegistryLock(lockPath).runExclusive(async () => {
+    const release = await lockfile.lock(lockPath, LOCK_OPTIONS);
     try {
-      await release();
-    } catch {
-      // A completed registry mutation must not be reported as failed merely
-      // because a stale-lock takeover already removed the lock.
+      return await mutate();
+    } finally {
+      try {
+        await release();
+      } catch {
+        // A completed registry mutation must not be reported as failed
+        // merely because a stale-lock takeover already removed the lock.
+      }
     }
-  }
+  });
 }
 
 /** Every grant this Qwen home holds, newest last. */

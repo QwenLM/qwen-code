@@ -1,3 +1,6 @@
+import { DaemonConnectionBanner } from './components/DaemonConnectionBanner.js';
+import { useDaemonAvailability } from './daemon/availability-context.js';
+import { isDaemonUnavailableError } from './daemon/availability.js';
 import {
   beginLocalCommand,
   finishLocalCommand,
@@ -68,6 +71,7 @@ import {
   useWorkspace,
   useWorkspaceActions,
   useWorkspaceEventSignals,
+  type DaemonContextMemoryDetail,
   type DaemonSessionActions,
   type DaemonSessionNotice,
   type DaemonSessionOwnerSnapshot,
@@ -147,7 +151,10 @@ import { useModelRefresh } from './hooks/useModelRefresh';
 import { MonitorDetailsProvider } from './monitorDetailsContext';
 import { WorkflowDetailsProvider } from './workflowDetailsContext';
 import { findMonitorTaskForTool } from './utils/monitorTasks';
-import { isComposerTask } from './utils/composerTasks';
+import {
+  hasActiveBackgroundAgent,
+  isComposerTask,
+} from './utils/composerTasks';
 import {
   getTaskActivityKey,
   hasActiveTaskActivity,
@@ -306,6 +313,10 @@ import {
   useArtifactWorkspaceTarget,
 } from './components/artifacts/useArtifactWorkspaceTarget';
 import {
+  readContextInstructionFile,
+  type ContextInstructionFileContent,
+} from './components/artifacts/readContextInstructionFile';
+import {
   getArtifactsByTurn,
   getFileChangesByTurn,
   getScheduledTasksByTurn,
@@ -333,6 +344,9 @@ import { ShadowDomBoundary } from './components/ShadowDomBoundary';
 import {
   McpAppHostContext,
   McpAppMessagesContext,
+  McpAppModelContextContext,
+  GENERATED_UI_CONTEXT_TAG_KIND,
+  type McpAppModelContext,
   McpAppVisibilityContext,
 } from './mcpAppHostContext';
 import { GeneratedUiRuntimeProvider } from './generated-ui/GeneratedUiRuntimeProvider';
@@ -436,6 +450,7 @@ import {
   languageSettingToWebShellLanguage,
   languageLabel,
   normalizeLanguage,
+  WEB_SHELL_LANGUAGES,
   type WebShellLanguage,
 } from './i18n';
 import { CapacityRecoveryDialog } from './components/workspaces/CapacityRecoveryDialog';
@@ -547,6 +562,7 @@ import {
 import {
   WebShellCustomizationProvider,
   type WebShellCustomization,
+  type WebShellWorkspaceDirectoryPicker,
   type WebShellAssistantFeedbackOptions,
   type WebShellComposerApi,
   type WebShellComposerInput,
@@ -607,6 +623,29 @@ function isWebTerminalTarget(event: Event): boolean {
   const target = event.composedPath()[0] ?? event.target;
   return (
     target instanceof Element && target.closest('[data-web-terminal]') !== null
+  );
+}
+
+// Open content of the shell's modal primitives (ui/dialog, ui/alert-dialog,
+// ui/drawer). Matching the primitives rather than ARIA roles skips non-modal
+// popovers that carry role="dialog" (session/workspace details tooltips) and
+// the inline tool-approval card's role="alertdialog". Every ui/drawer in the
+// shell is modal: DrawerContent always mounts its overlay, both for the
+// floating artifact panel (narrow viewport or split view, fullscreen or not)
+// and for the composer's mobile add menu.
+const OPEN_MODAL_SURFACE_SELECTOR =
+  '[data-slot="dialog-content"][data-state="open"], ' +
+  '[data-slot="alert-dialog-content"][data-state="open"], ' +
+  '[data-slot="drawer-content"][data-state="open"]';
+
+// Modal confirms owned by a component (the Session Overview archive/delete
+// AlertDialog) are not in the shell's own dialog state. They portal into
+// the shell portal root, which a shadowDom `portals` embedding places inside
+// a shadow root that document.querySelector cannot see, so query it too.
+function hasOpenModalSurface(portalRoot: HTMLElement | null): boolean {
+  return (
+    document.querySelector(OPEN_MODAL_SURFACE_SELECTOR) !== null ||
+    (portalRoot?.querySelector(OPEN_MODAL_SURFACE_SELECTOR) ?? null) !== null
   );
 }
 
@@ -1304,9 +1343,9 @@ export interface WebShellSidebarOptions {
   showLive?: boolean;
   /** Hide or replace the complete sidebar branding row. */
   branding?: false | WebShellSidebarBranding;
-  /** Customize the primary navigation area (new task button, custom entries). */
+  /** Customize the primary navigation area (new session button, custom entries). */
   primaryNav?: WebShellSidebarPrimaryNavOptions;
-  /** Whether to hide the "Projects" header row (with search and add workspace). Defaults to false (shown). */
+  /** Whether to hide the "Workspaces" header row (with search and add workspace). Defaults to false (shown). */
   hideProjectHeader?: boolean;
   /** Customize which action buttons appear on session rows. */
   sessionActions?: WebShellSidebarSessionActionsOptions;
@@ -1410,7 +1449,7 @@ export interface WebShellProps {
    */
   onThemeResolved?: (theme: WebShellTheme) => void;
   /** UI language for the web-shell. Defaults to `?language=` or browser language. */
-  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn';
+  language?: 'en' | 'zh-CN' | 'zh' | 'zh-cn' | 'ru' | 'ru-ru';
   /** Called when `/language ui` changes the web-shell UI language. */
   onLanguageChange?: (language: WebShellLanguage) => void;
   /**
@@ -1477,6 +1516,8 @@ export interface WebShellProps {
   ) => void;
   /** Open a workspace file in the embedding host instead of WebShell preview. */
   onWorkspaceFileOpen?: (path: string) => void;
+  /** Select a directory on the connected daemon. Overrides native picking without registering or trusting the path. */
+  onPickWorkspaceDirectory?: WebShellWorkspaceDirectoryPicker;
   /** Open a completed Insight report in a host-native surface. */
   onInsightReportOpen?: (path: string) => void;
   /** Open context usage details in the host instead of the built-in panel. */
@@ -1942,6 +1983,19 @@ function resolveSidebarOptions(sidebar: WebShellProps['sidebar']): {
     lockedWorkspace: options.lockedWorkspace,
     workspaceOverview: options.workspaceOverview,
   };
+}
+
+// One availability rule for the two footer items the view navigation hotkeys
+// govern (#13175): the rail table and the chord gates both read this
+// predicate, so a key never opens a view the sidebar withholds, and an edit
+// in one place cannot leave the other reading stale.
+function isSidebarFooterItemAvailable(
+  item: 'sessionsOverview' | 'splitView',
+  projectFeaturesAvailable: boolean,
+  isLargeScreen: boolean,
+): boolean {
+  if (item === 'sessionsOverview') return projectFeaturesAvailable;
+  return projectFeaturesAvailable && isLargeScreen;
 }
 
 function readSidebarCollapsed(defaultCollapsed: boolean): boolean {
@@ -2833,11 +2887,12 @@ function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
 
 function serializeModelSwitchSummary(
   summary: ModelSwitchSummary,
+  displayName: string,
   t: (key: string, vars?: Record<string, string | number>) => string,
 ): string {
   return t('model.usingModel', {
     isRuntime: summary.isRuntime ? 1 : 0,
-    modelId: summary.modelId,
+    modelId: displayName,
   });
 }
 
@@ -3476,6 +3531,7 @@ export function App({
   onRightPanelOpen,
   onFileReviewOpen,
   onWorkspaceFileOpen,
+  onPickWorkspaceDirectory,
   onInsightReportOpen,
   onContextUsageOpen,
   messageTurnOutputs,
@@ -3539,6 +3595,8 @@ export function App({
   managedModeRef.current = managedMode;
   const [managedNavigationTarget, setManagedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
+  const [archivedSessionsTarget, setArchivedSessionsTarget] =
+    useState<HTMLElement | null>(null);
   const [managedArchivedNavigationTarget, setManagedArchivedNavigationTarget] =
     useState<HTMLDivElement | null>(null);
   const [managedArchivedStatus, setManagedArchivedStatus] = useState({
@@ -3707,7 +3765,7 @@ export function App({
       if (
         target instanceof Element &&
         target.closest(
-          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+          '[data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
         )
       ) {
         return;
@@ -3741,7 +3799,7 @@ export function App({
       if (
         el instanceof Element &&
         el.closest(
-          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+          '[data-web-shell-dialog], [data-web-shell-sidebar-more], [data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
         )
       ) {
         return;
@@ -4018,6 +4076,9 @@ export function App({
       ).origin,
     [workspace.baseUrl],
   );
+  const daemonAvailable = useDaemonAvailability() === 'available';
+  const daemonAvailableRef = useRef(daemonAvailable);
+  daemonAvailableRef.current = daemonAvailable;
   const sessionCatalogController = useSessionCatalogController(
     workspace.client,
   );
@@ -4324,6 +4385,17 @@ export function App({
     ordinaryWorkspaces.length > 0 ||
     (workspace.capabilities?.workspaces === undefined &&
       Boolean(workspace.capabilities?.workspaceCwd));
+  const archiveManagementAvailable = Boolean(
+    sidebarOptions.enabled &&
+      (connection.capabilities?.features?.includes('session_archive') ||
+        (!lockedWorkspaceCwd &&
+          workspace.capabilities?.features?.includes(
+            STANDALONE_SESSIONS_CAPABILITY,
+          )) ||
+        managedAgentProvider?.lifecycle),
+  );
+  const settingsAvailable =
+    projectFeaturesAvailable || archiveManagementAvailable;
   const externalManagedAgentAvailable = managedAgentProvider !== undefined;
   // The daemon lists the `/autofix-pr` watches of its workspaces' clones.
   const prWatchesAvailable =
@@ -5206,6 +5278,14 @@ export function App({
       SESSION_ATTACHMENT_LIST_FEATURE,
     ) === true;
   useEffect(() => {
+    if (!daemonAvailable) {
+      if (logicalSessionKey) {
+        attachmentRetryCountRef.current.delete(logicalSessionKey);
+      }
+      setSessionAttachmentsLoading(false);
+      setSessionAttachmentsError(undefined);
+      return;
+    }
     const attachmentsSupported =
       connection.capabilities?.features.includes(
         SESSION_ATTACHMENT_LIST_FEATURE,
@@ -5322,6 +5402,7 @@ export function App({
     connection.loadingTranscript,
     connection.status,
     attachmentRefreshNonce,
+    daemonAvailable,
     environmentPanelOpen,
     logicalSessionKey,
     transcriptRevision,
@@ -7966,6 +8047,48 @@ export function App({
     },
     [],
   );
+  const openMemoryFilePreview = useCallback(
+    async (file: DaemonContextMemoryDetail, fileWorkspaceCwd: string) => {
+      const absolutePath = file.absolutePath;
+      if (!absolutePath) return;
+      let result: ContextInstructionFileContent;
+      try {
+        const client = workspace.client;
+        if (!client) {
+          throw new Error('The workspace for this file is not available.');
+        }
+        result = await readContextInstructionFile(
+          client,
+          workspace.capabilities,
+          fileWorkspaceCwd,
+          absolutePath,
+        );
+      } catch (err) {
+        pushToast('error', err instanceof Error ? err.message : String(err));
+        return;
+      }
+      if (result.truncated) {
+        pushToast('warning', t('contextUsage.previewTruncated'));
+      }
+      const tab: ArtifactPanelTab = {
+        id: `memory-file:${absolutePath}`,
+        kind: 'file',
+        title: file.path,
+        workspacePath: absolutePath,
+        previewContent: result.content,
+        previewOnly: true,
+        ...(fileWorkspaceCwd ? { workspaceCwd: fileWorkspaceCwd } : {}),
+      };
+      setArtifactPanelTabs((tabs) =>
+        tabs.some((item) => item.id === tab.id)
+          ? tabs.map((item) => (item.id === tab.id ? tab : item))
+          : [...tabs, tab],
+      );
+      setActiveArtifactPanelTabId(tab.id);
+      setArtifactPanelOpen(true);
+    },
+    [workspace, pushToast, t],
+  );
   const closeArtifactPanel = useCallback(() => {
     setArtifactPanelOpen(false);
     // Reset fullscreen in the same commit: while it stays true the covered
@@ -8400,6 +8523,7 @@ export function App({
     connection.capabilities?.features.includes(SESSION_AGENTS_FEATURE) === true;
   useEffect(() => {
     if (
+      !daemonAvailable ||
       connection.status !== 'connected' ||
       connection.loadingTranscript ||
       !connection.sessionId ||
@@ -8439,7 +8563,9 @@ export function App({
           timer = setTimeout(refresh, SESSION_AGENTS_REFRESH_INTERVAL_MS);
         }
       } catch (error) {
-        if (disposed || !owner.isCurrent()) return;
+        if (disposed || !owner.isCurrent() || isDaemonUnavailableError(error)) {
+          return;
+        }
         if (consecutiveFailures === 0) {
           console.warn('[web-shell] failed to refresh session agents:', error);
         }
@@ -8465,6 +8591,7 @@ export function App({
     connection.sessionId,
     connection.status,
     environmentNeedsAgents,
+    daemonAvailable,
     logicalSessionKey,
     sessionAgentsSupported,
     sessionOwnerGuard,
@@ -8526,6 +8653,7 @@ export function App({
   );
   useEffect(() => {
     if (
+      !daemonAvailable ||
       connection.status !== 'connected' ||
       connection.loadingTranscript ||
       !connection.sessionId ||
@@ -8567,6 +8695,7 @@ export function App({
     };
   }, [
     agentTraceActivityKey,
+    daemonAvailable,
     connection.loadingTranscript,
     connection.sessionId,
     connection.status,
@@ -8716,9 +8845,21 @@ export function App({
       return changed ? next : tabs;
     });
   }, [backgroundTasks, connection.sessionId]);
+  // Host-provided footers render their own task list from composer tasks
+  // plus background agents (foreground agents are transcript-only; terminal
+  // background agents keep reaching hosts, matching the design doc).
+  const footerHostTasks = useMemo(
+    () =>
+      sessionTasks.filter(
+        (task) =>
+          isComposerTask(task) ||
+          (task.kind === 'agent' && task.isBackgrounded === true),
+      ),
+    [sessionTasks],
+  );
   const footerTasks = useMemo(
-    () => (renderFooter ? backgroundTasks.map(mapToWebShellTaskInfo) : []),
-    [backgroundTasks, renderFooter],
+    () => (renderFooter ? footerHostTasks.map(mapToWebShellTaskInfo) : []),
+    [footerHostTasks, renderFooter],
   );
   const statusBarRef = useRef<StatusBarHandle>(null);
   const messageListRef = useRef<MessageListHandle | null>(null);
@@ -9181,7 +9322,7 @@ export function App({
     logicalSessionKey,
     sessionWriteBlocked,
   ]);
-  const connected = connection.status === 'connected';
+  const connected = connection.status === 'connected' && daemonAvailable;
   const workspaceEventSignals = useWorkspaceEventSignals();
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [composerSkillsOpen, setComposerSkillsOpen] = useState(false);
@@ -10072,7 +10213,10 @@ export function App({
     if (
       !projectFeaturesAvailable &&
       activePanel !== 'status' &&
-      !(activePanel === 'settings' && initialConnectionsSettingsCategory)
+      !(
+        activePanel === 'settings' &&
+        (settingsAvailable || initialConnectionsSettingsCategory)
+      )
     ) {
       setActivePanel(null);
     }
@@ -10109,6 +10253,7 @@ export function App({
     modelDialogMode,
     projectFeaturesAvailable,
     initialConnectionsSettingsCategory,
+    settingsAvailable,
     workspaceContextActive,
   ]);
   const handleUseSkill = useCallback(
@@ -10225,14 +10370,17 @@ export function App({
         (sidebarOptions.footer !== false &&
           sidebarOptions.footer?.items?.some((item) => {
             if (item === 'collapse') return false;
-            if (item === 'settings' || item === 'sessionsOverview') {
-              return projectFeaturesAvailable;
+            if (item === 'settings') return settingsAvailable;
+            if (item === 'sessionsOverview' || item === 'splitView') {
+              return isSidebarFooterItemAvailable(
+                item,
+                projectFeaturesAvailable,
+                isLargeScreen,
+              );
             }
             if (item === 'workspacesOverview') return !lockedWorkspaceCwd;
             if (item === 'localFiles' || item === 'desktopRelay')
               return isPageOriginDaemon(workspace.baseUrl);
-            if (item === 'splitView')
-              return projectFeaturesAvailable && isLargeScreen;
             if (item === 'update') {
               return (
                 !isDesktopShell() &&
@@ -10432,15 +10580,17 @@ export function App({
           : page;
     const allowed =
       page === 'chat' ||
-      (projectFeaturesAvailable &&
-        (page !== 'live' || liveSidebarEnabled) &&
-        (page !== 'pr-watches' || prWatchesAvailable) &&
-        (page === 'settings'
-          ? hostSidebar?.footer !== false &&
-            (hostSidebar?.footer?.items?.includes('settings') ?? true)
-          : (hostSidebar?.primaryNav?.items?.some(
-              (item) => item === primaryItem,
-            ) ?? true)));
+      (page === 'settings'
+        ? settingsAvailable &&
+          hostSidebar?.footer !== false &&
+          (hostSidebar?.footer?.items?.includes('settings') ?? true)
+        : projectFeaturesAvailable &&
+          (page !== 'live' || liveSidebarEnabled) &&
+          (page !== 'pr-watches' || prWatchesAvailable) &&
+          (hostSidebar?.primaryNav?.items?.some(
+            (item) => item === primaryItem,
+          ) ??
+            true));
     if (navigationAppliedRef.current === navigation.revision && allowed) return;
     navigationAppliedRef.current = navigation.revision;
     navigationSettledRef.current = false;
@@ -10469,6 +10619,7 @@ export function App({
   }, [
     navigation,
     projectFeaturesAvailable,
+    settingsAvailable,
     hostSidebar?.footer,
     hostSidebar?.primaryNav?.items,
     liveSidebarEnabled,
@@ -12543,7 +12694,11 @@ export function App({
       view: 'log',
     });
   }, [connection.sessionId, gitDiffWorkspaceCwd, sessionWorktree]);
-  const dialogOpen =
+  // Every modal the shell itself tracks, plus host-registered interaction
+  // blocks. View navigation hotkeys gate on this rather than dialogOpen,
+  // because dialogOpen also counts activePanel and the Session Overview is
+  // itself a panel.
+  const modalDialogOpen =
     capacityRecovery !== undefined ||
     showResumeDialog ||
     showDeleteDialog ||
@@ -12564,7 +12719,9 @@ export function App({
     showAddWorkspaceDialog ||
     managedWorkspaceCreationOpen ||
     scratchOutcomeUnknown !== 'clear' ||
-    externalInteractionBlockCount > 0 ||
+    externalInteractionBlockCount > 0;
+  const dialogOpen =
+    modalDialogOpen ||
     // The Settings / Daemon Status panel replaces the chat surface, so — like a
     // modal — it must suppress chat-only global shortcuts (Ctrl+L/O/Y, the
     // Shift+Tab mode cycle, the btw hotkey). Escape is intercepted earlier and
@@ -12823,6 +12980,7 @@ export function App({
         : undefined,
     connected,
     writeBlocked:
+      !daemonAvailable ||
       sessionWriteBlocked ||
       standaloneWriterBlocked ||
       connection.runtimeStopped,
@@ -12902,6 +13060,9 @@ export function App({
       }
       return sendPrompt(text, undefined, undefined, {
         source: 'mcp-app',
+        ...(submission.inputAnnotations
+          ? { inputAnnotations: submission.inputAnnotations }
+          : {}),
         isCurrent,
         beforeAdmission: async () => {
           assertCurrent();
@@ -12914,6 +13075,12 @@ export function App({
               throw new DOMException('Session client changed', 'AbortError');
             }
             submission.onDispatched();
+            // A card's values attached to the composer are now sent with
+            // this message; keep the next message from repeating them.
+            for (const annotation of submission.inputAnnotations ?? []) {
+              if (annotation.reference.kind === GENERATED_UI_CONTEXT_TAG_KIND)
+                editorRef.current?.removeTag(annotation.reference.id);
+            }
           } catch (error) {
             throw new PromptDispatchCancelledError('Cancelled before sending', {
               cause: error,
@@ -12926,12 +13093,41 @@ export function App({
     },
     [getComposerWorkspaceCwd, isGoalGateBlocked, sendPrompt, t],
   );
+  const mcpAppModelContext = useMemo<McpAppModelContext | undefined>(
+    () =>
+      connection.sessionId
+        ? {
+            sessionId: connection.sessionId,
+            attach: ({ id, title, text }) => {
+              if (connectionRef.current.sessionId !== connection.sessionId)
+                return;
+              // One removable tag per card, replaced as its values change and
+              // sent with whatever the user types next.
+              editorRef.current?.addTags(
+                [
+                  {
+                    id,
+                    kind: GENERATED_UI_CONTEXT_TAG_KIND,
+                    // Tags with a kind display their value.
+                    value: t('mcpApp.generatedUi.contextTag', { title }),
+                    serialized: text,
+                    removable: true,
+                  },
+                ],
+                { placement: 'top' },
+              );
+            },
+          }
+        : undefined,
+    [connection.sessionId, t],
+  );
   const mcpAppMessages = useMcpAppMessages({
     enabled: connection.status === 'connected' && !connection.runtimeStopped,
     sessionId: connection.sessionId,
     clientId: connection.clientId,
     captureOwner: () => sessionOwnerGuard.capture({ includeRecovery: true }),
     submit: submitMcpAppMessage,
+    translate: t,
   });
 
   const enqueuePrompt = useCallback(
@@ -13099,6 +13295,14 @@ export function App({
           previous.includes(retry) ? previous : [...previous, retry],
         );
       }
+      if (
+        notice.category === 'connection' &&
+        notice.operation === 'stream' &&
+        !daemonAvailable
+      ) {
+        dismissNotice(notice.id);
+        continue;
+      }
       if (shouldToastNotice(notice)) {
         pushToast(
           toastToneFromNotice(notice),
@@ -13111,7 +13315,7 @@ export function App({
       }
       dismissNotice(notice.id);
     }
-  }, [dismissNotice, notices, pushToast, t]);
+  }, [dismissNotice, notices, pushToast, t, daemonAvailable]);
 
   const onBugReportRef = useRef(onBugReport);
   onBugReportRef.current = onBugReport;
@@ -13516,6 +13720,7 @@ export function App({
     ),
     activePanel === 'live' ||
       (activePanel === 'settings' && !liveSidebarEnabled),
+    t,
   );
   // Do not expose workflow surfaces until settings have loaded successfully.
   // The resource keeps stale data when a reload fails, so the error check is
@@ -15715,6 +15920,32 @@ export function App({
   const workspaceAddLocationIsConnected =
     workspaceAddSelectedLocation ===
     (workspace.baseUrl || window.location.origin);
+  const workspacePickerTarget = useMemo(
+    () => ({
+      client: workspace.client,
+      baseUrl: workspace.baseUrl,
+      status: workspace.status,
+    }),
+    [workspace.client, workspace.baseUrl, workspace.status],
+  );
+  let workspaceDirectoryPicker: WebShellWorkspaceDirectoryPicker | undefined;
+  if (workspaceAddLocationIsConnected) {
+    if (onPickWorkspaceDirectory) {
+      if (workspace.status === 'connected') {
+        workspaceDirectoryPicker = onPickWorkspaceDirectory;
+      }
+    } else if (
+      nativeDirectoryPickerSupported &&
+      (!workspace.baseUrl ||
+        new URL(workspace.baseUrl, window.location.origin).origin ===
+          window.location.origin)
+    ) {
+      workspaceDirectoryPicker = async () => {
+        const result = await workspaceActions.pickWorkspaceDirectory();
+        return result.selected ? result.path : undefined;
+      };
+    }
+  }
   const changeWorkspaceAddLocation = useCallback((origin: string) => {
     setWorkspaceAddLocation(origin);
     return true;
@@ -17921,6 +18152,7 @@ export function App({
           trackSendFailure?: boolean;
         },
       ) => {
+        if (!daemonAvailableRef.current) return false;
         const admissionAttachment = {
           current: sessionOwnerGuard.capture(),
         };
@@ -18219,8 +18451,9 @@ export function App({
                     }),
                     t('language.usage'),
                     t('language.options'),
-                    '  - en: English',
-                    '  - zh-CN: 中文',
+                    ...WEB_SHELL_LANGUAGES.map(
+                      (l) => `  - ${l}: ${languageLabel(l)}`,
+                    ),
                   ].join('\n'),
                 },
               ]);
@@ -18238,22 +18471,20 @@ export function App({
                       t('language.usage'),
                       '',
                       t('language.options'),
-                      '  - en: English',
-                      '  - zh-CN: 中文',
+                      ...WEB_SHELL_LANGUAGES.map(
+                        (l) => `  - ${l}: ${languageLabel(l)}`,
+                      ),
                     ].join('\n'),
                   },
                 ]);
                 return true;
               }
-              const normalizedArg = languageArg.toLowerCase();
-              const valid = ['en', 'zh', 'zh-cn', 'zh_cn'].includes(
-                normalizedArg,
-              );
-              if (!valid) {
+              const nextLanguage =
+                languageSettingToWebShellLanguage(languageArg);
+              if (nextLanguage === undefined) {
                 pushToast('error', t('language.invalid'));
                 return true;
               }
-              const nextLanguage = normalizeLanguage(languageArg);
               const owner = { current: sessionOwnerGuard.capture() };
               const previousLanguage = selectedLanguage;
               // The daemon sync is what keeps the agent answering in the
@@ -19153,6 +19384,10 @@ export function App({
             inputAnnotations: metadata?.inputAnnotations,
           },
         );
+      } else if (!daemonAvailableRef.current) {
+        // Local slash commands above stay reachable during an outage; only
+        // network submissions are gated.
+        return false;
       } else if (text.startsWith('!')) {
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
@@ -19814,6 +20049,100 @@ export function App({
     return () => window.removeEventListener('keydown', onGlobalShortcut, true);
   }, [interactionBlocked, handleClearScreen, handleRetry, store, t]);
 
+  // The sidebar footer buttons for Session Overview and Split View; the view
+  // hotkeys below run these same callbacks.
+  const openSessionsOverviewFromSidebar = useCallback(() => {
+    closeMobileDrawer();
+    openPanel('sessions');
+  }, [closeMobileDrawer, openPanel]);
+  const openSplitViewFromSidebar = useCallback(() => {
+    closeMobileDrawer();
+    openSplitView();
+  }, [closeMobileDrawer, openSplitView]);
+  // The sidebar buttons' own availability gates, passed to WebShellSidebar
+  // below and shared with the view hotkeys; the rail table reads the same
+  // predicate, so button and chord cannot drift apart.
+  const canOpenSessionsOverview = isSidebarFooterItemAvailable(
+    'sessionsOverview',
+    projectFeaturesAvailable,
+    isLargeScreen,
+  );
+  const canOpenSplitView = isSidebarFooterItemAvailable(
+    'splitView',
+    projectFeaturesAvailable,
+    isLargeScreen,
+  );
+  // Each chord is live only while the sidebar offers its button (sidebar
+  // enabled, item in the resolved footer, the button's availability gate),
+  // so a key never opens what the host's chrome withholds and an inert chord
+  // leaves the key to the browser.
+  const sidebarFooterItems =
+    sidebarOptions.enabled && sidebarOptions.footer !== false
+      ? (sidebarOptions.footer?.items ?? [])
+      : [];
+  const sessionsOverviewHotkeyAvailable =
+    canOpenSessionsOverview && sidebarFooterItems.includes('sessionsOverview');
+  const splitViewHotkeyAvailable =
+    canOpenSplitView && sidebarFooterItems.includes('splitView');
+
+  useEffect(() => {
+    // View navigation hotkeys (#13175): Cmd/Ctrl+Shift+O presses the Session
+    // Overview button, Cmd/Ctrl+\ the Split View button. Match the physical
+    // key (e.code) rather than the produced character so the chords work on
+    // non-QWERTY layouts; ISO keyboards report the key that types "\" as
+    // IntlBackslash. Capture phase, so the chords also work while the
+    // composer has focus.
+    const onViewShortcut = (e: KeyboardEvent) => {
+      if (e.repeat || e.isComposing) return;
+      if (!(e.metaKey || e.ctrlKey) || e.altKey) return;
+      let open: (() => void) | undefined;
+      if (e.shiftKey && e.code === 'KeyO') {
+        if (sessionsOverviewHotkeyAvailable) {
+          open = openSessionsOverviewFromSidebar;
+        }
+      } else if (
+        !e.shiftKey &&
+        (e.code === 'Backslash' || e.code === 'IntlBackslash')
+      ) {
+        if (splitViewHotkeyAvailable) open = openSplitViewFromSidebar;
+      }
+      if (!open) return;
+      // Covering surfaces keep the keyboard: a shell modal or a host
+      // interaction block (both in modalDialogOpen), the docked fullscreen
+      // artifact panel, a component-owned modal (dialog, confirm, drawer),
+      // and the web terminal.
+      if (modalDialogOpen || artifactPanelFullscreen) return;
+      if (isWebTerminalTarget(e)) return;
+      // Other editable targets — Session Overview search, session rename,
+      // settings inputs, the Live shortcut recorder — must not have the view
+      // yanked away while the user is typing, matching the codebase's
+      // isEditableTarget convention. The composer stays exempt: the chords
+      // produce no text there (issue #13175). Shadow-DOM portal hosts
+      // retarget the event to the host element, so resolve the real target.
+      const target = (e.composedPath()[0] ?? e.target) as HTMLElement | null;
+      if (
+        isEditableTarget(target) &&
+        !target?.closest('[data-web-shell-composer-editor]')
+      ) {
+        return;
+      }
+      if (hasOpenModalSurface(portalRoot)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      open();
+    };
+    window.addEventListener('keydown', onViewShortcut, true);
+    return () => window.removeEventListener('keydown', onViewShortcut, true);
+  }, [
+    artifactPanelFullscreen,
+    modalDialogOpen,
+    openSessionsOverviewFromSidebar,
+    openSplitViewFromSidebar,
+    portalRoot,
+    sessionsOverviewHotkeyAvailable,
+    splitViewHotkeyAvailable,
+  ]);
+
   const resetEscapeState = useCallback(() => {
     escArmedActionRef.current = null;
     setEscapeHintVisible(false);
@@ -20048,11 +20377,16 @@ export function App({
         .then((result) => {
           if (!owner.isCurrent()) return;
           const summary = getModelSwitchSummary(result);
-          setPendingModel(summary?.modelId ?? modelId);
+          setPendingModel(modelId);
           if (summary) {
+            const displayName = getModelDisplayName(
+              connectionRef.current.models?.find(
+                (model) => model.id === modelId,
+              )?.label || summary.modelId,
+            );
             store.dispatch({
               type: 'debug',
-              text: serializeModelSwitchSummary(summary, t),
+              text: serializeModelSwitchSummary(summary, displayName, t),
               source: 'model_switch_summary',
               data: summary,
             });
@@ -20713,6 +21047,7 @@ export function App({
             workspace.baseUrl,
             workspace.token,
             legacyWorkspaceContextCwd,
+            workspace.client,
           )
         : undefined,
     [
@@ -20720,6 +21055,7 @@ export function App({
       legacyWorkspaceContextCwd,
       workspace.baseUrl,
       workspace.token,
+      workspace.client,
     ],
   );
   // The session an @-mention goes to, with the workspace it lives in: a new
@@ -20826,6 +21162,7 @@ export function App({
     cwd: legacyWorkspaceContextCwd,
     baseUrl: workspace.baseUrl,
     token: workspace.token,
+    client: workspace.client,
     sessionApi: sessionAgentsApi,
     ensureSession: ensureAgentMentionSession,
     onSubmit: handleEditorSubmit,
@@ -20975,7 +21312,7 @@ export function App({
       gitStatusWorkspaceCwdRef.current = gitStatusTarget;
       setSelectedWorkspaceGitStatus(undefined);
     }
-    if (!workspaceGitStatusEnabled) return;
+    if (!workspaceGitStatusEnabled || !daemonAvailable) return;
     let cancelled = false;
     const fetchStatus = () => {
       const git = workspace.client.workspaceByCwd(activeWorkspaceCwd);
@@ -20993,8 +21330,10 @@ export function App({
             );
           }
         })
-        .catch(() => {
-          if (!cancelled) setSelectedWorkspaceGitStatus(undefined);
+        .catch((err) => {
+          if (!cancelled && !isDaemonUnavailableError(err)) {
+            setSelectedWorkspaceGitStatus(undefined);
+          }
         });
       // Fresh path: resolves when the daemon's recomputation lands, so the
       // enriched counters fill in without depending on SSE — the
@@ -21014,7 +21353,9 @@ export function App({
             }
           })
           .catch((err) => {
-            console.warn('[web-shell] git status fresh path failed:', err);
+            if (!cancelled && !isDaemonUnavailableError(err)) {
+              console.warn('[web-shell] git status fresh path failed:', err);
+            }
           });
       }
     };
@@ -21039,6 +21380,7 @@ export function App({
     connection.gitBranch,
     connection.sessionId,
     workspaceGitStatusEnabled,
+    daemonAvailable,
     isKnownLiveWorkspaceCwd,
     workspace.client,
     sessionWorktree,
@@ -21444,6 +21786,7 @@ export function App({
     onSelectTab: selectArtifactPanelTab,
     onCloseTab: closeArtifactPanelTab,
     onOpenFilePreview: openFilePreview,
+    onOpenMemoryFile: openMemoryFilePreview,
     onOpenFiles: filesAvailable ? openFilesPanel : undefined,
     onReferenceFile:
       workspaceContextActive && !dialogOpen && mainView === 'chat'
@@ -21589,6 +21932,7 @@ export function App({
       <BrandProvider value={resolvedBrand}>
       <I18nProvider language={selectedLanguage}>
         <McpAppMessagesContext.Provider value={mcpAppMessages.context}>
+        <McpAppModelContextContext.Provider value={mcpAppModelContext}>
         <McpAppHostContext.Provider value={workspace.baseUrl}>
           {/* prettier-ignore */}
           <WebShellPortalRootContext.Provider value={portalRoot}>
@@ -22009,19 +22353,9 @@ export function App({
                 }
                 onSuggest={suggestWorkspacePathsForLocation}
                 gitClone={gitCloneControls}
-                onPick={
-                  workspaceAddLocationIsConnected &&
-                  nativeDirectoryPickerSupported &&
-                  (!workspace.baseUrl ||
-                    new URL(workspace.baseUrl, window.location.origin)
-                      .origin === window.location.origin)
-                    ? async () => {
-                        const result =
-                          await workspaceActions.pickWorkspaceDirectory();
-                        return result.selected ? result.path : undefined;
-                      }
-                    : undefined
-                }
+                onPick={workspaceDirectoryPicker}
+                pickerTarget={workspacePickerTarget}
+                pickerUsesHostUi={Boolean(onPickWorkspaceDirectory)}
                 persistenceSupported={
                   workspaceAddLocationIsConnected &&
                   persistentWorkspaceRegistrationSupported
@@ -22201,16 +22535,11 @@ export function App({
                         },
                       }
                     : {})}
-                  onOpenSessions={() => {
-                    closeMobileDrawer();
-                    openPanel('sessions');
-                  }}
-                  canOpenSessionsOverview={projectFeaturesAvailable}
-                  onOpenSplitView={() => {
-                    closeMobileDrawer();
-                    openSplitView();
-                  }}
-                  canOpenSplitView={isLargeScreen && projectFeaturesAvailable}
+                  onOpenSessions={openSessionsOverviewFromSidebar}
+                  canOpenSettings={settingsAvailable}
+                  canOpenSessionsOverview={canOpenSessionsOverview}
+                  onOpenSplitView={openSplitViewFromSidebar}
+                  canOpenSplitView={canOpenSplitView}
                   theme={selectedTheme}
                   onThemeChange={(theme) => {
                     handleThemeChange(theme);
@@ -22253,6 +22582,7 @@ export function App({
                       <div ref={setManagedNavigationTarget} />
                     ) : undefined
                   }
+                  archivedSessionsTarget={archivedSessionsTarget}
                   managedArchivedSessions={
                     managedAgentProvider?.lifecycle
                       ? {
@@ -22603,6 +22933,11 @@ export function App({
                     )}
                 </div>
               )}
+              {!artifactPanelFullscreen &&
+                (managedMode ||
+                  !(artifactPanelOpen && useFloatingArtifactPanel)) && (
+                  <DaemonConnectionBanner />
+                )}
               <div
                 ref={contextBodyRef}
                 data-testid="context-body"
@@ -22661,7 +22996,8 @@ export function App({
                   </button>
                 )}
               {activePanel &&
-                (projectFeaturesAvailable || activePanel === 'status') && (
+                (projectFeaturesAvailable || activePanel === 'status' ||
+                  (activePanel === 'settings' && settingsAvailable)) && (
                 <section
                   className={styles.panelHost}
                   role="region"
@@ -22824,12 +23160,17 @@ export function App({
                         connections={
                           standalone ? <DaemonConnectionsSettings /> : undefined
                         }
+                        archivedSessions={
+                          archiveManagementAvailable ? (
+                            <div ref={setArchivedSessionsTarget} data-web-shell-archived-sessions />
+                          ) : undefined
+                        }
                         workspaceDirectoriesSection={
                           workspaceDirectoriesSupported ? (
                             <WorkspaceDirectoriesSection />
                           ) : undefined
                         }
-                        modelManagementSectionProps={{
+                        modelManagementSectionProps={projectFeaturesAvailable ? {
                           ...modelManagementPolicy,
                           providers: providersState.providers,
                           configurations: modelConfigurations.models,
@@ -22857,7 +23198,7 @@ export function App({
                               'builtin:model-management';
                             setShowAuthDialog(true);
                           },
-                        }}
+                        } : undefined}
                         onSubDialog={(key, scope) => {
                           if (!isSettingVisible(key, settingsPresentation)) return;
                           settingsDialogKeyRef.current = key;
@@ -23653,6 +23994,11 @@ export function App({
                                 onShowContextDetail={
                                   contextUsageAvailable
                                     ? openCurrentContextUsagePanel
+                                    : undefined
+                                }
+                                onOpenMemoryFile={
+                                  contextUsageAvailable
+                                    ? openMemoryFilePreview
                                     : undefined
                                 }
                                 loadingTranscript={connection.loadingTranscript}
@@ -24662,11 +25008,22 @@ export function App({
                           ref={statusBarRef}
                           onOpenTasks={() => openTasksPanel()}
                           onReturnToInput={handleReturnToEditor}
+                          // The pill filters composer tasks itself; it also
+                          // counts background agents, which the
+                          // pre-filtered list would have dropped. The full
+                          // snapshot reaches the pill only while a
+                          // background agent is still running in the
+                          // shipped entry, where the environment panel
+                          // replaces the footer task list; the empty chat
+                          // and headerless embeds keep the pre-filtered
+                          // composer tasks, so agents never reach them.
                           tasks={
                             isChatEmptyState ||
                             !environmentTasksReplacementEnabled
                               ? backgroundTasks
-                              : []
+                              : hasActiveBackgroundAgent(sessionTasks)
+                                ? sessionTasks
+                                : []
                           }
                           hideSettings={
                             hideSettings || !workspaceContextActive
@@ -24971,6 +25328,7 @@ export function App({
         </CompactModeContext.Provider>
         </WebShellPortalRootContext.Provider>
         </McpAppHostContext.Provider>
+        </McpAppModelContextContext.Provider>
         </McpAppMessagesContext.Provider>
       </I18nProvider>
       </BrandProvider>

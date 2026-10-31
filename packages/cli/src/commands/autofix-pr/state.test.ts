@@ -13,6 +13,7 @@ import {
   readdirSync,
   readFileSync,
   readlinkSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -33,9 +34,83 @@ import {
   stateDefect,
   writeState,
   assertOwnedBySession,
+  parseWorktreePaths,
+  vouchedScanRoots,
   withWatchLock,
   type AutofixPrState,
 } from './state.js';
+
+describe('vouchedScanRoots', () => {
+  const git = (cwd: string, ...args: string[]) =>
+    execFileSync('git', args, {
+      cwd,
+      encoding: 'utf8',
+      env: { ...process.env, GIT_CONFIG_GLOBAL: '/dev/null' },
+    }).trim();
+  let dir: string;
+  let bare: string;
+  let wt: string;
+  let foreign: string;
+
+  beforeEach(() => {
+    dir = realpathSync(mkdtempSync(join(tmpdir(), 'autofix-vouch-')));
+    const src = join(dir, 'src');
+    git(dir, 'init', '-q', '-b', 'main', src);
+    git(
+      src,
+      '-c',
+      'user.email=a@b',
+      '-c',
+      'user.name=a',
+      'commit',
+      '-q',
+      '--allow-empty',
+      '-m',
+      'one',
+    );
+    bare = join(dir, 'bare.git');
+    git(dir, 'clone', '-q', '--bare', src, bare);
+    wt = join(dir, 'wt');
+    git(bare, 'worktree', 'add', '-q', '--detach', wt);
+    foreign = join(dir, 'foreign');
+    git(dir, 'init', '-q', '-b', 'main', foreign);
+  });
+
+  afterEach(() => {
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('vouches genuine worktrees of a bare clone, not a foreign repository', () => {
+    // A bare clone's main entry has no `.git` child; the anchor must resolve
+    // to the bare dir itself, and a foreign repo at a stale path is not read.
+    const vouched = vouchedScanRoots([bare, wt, foreign]);
+    expect(vouched).toContain(bare);
+    expect(vouched).toContain(wt);
+    expect(vouched).not.toContain(foreign);
+  });
+
+  it('does not fail open to unvouched siblings when the anchor is unavailable', () => {
+    const missing = join(dir, 'does-not-exist');
+    const vouched = vouchedScanRoots([missing, foreign]);
+    expect(vouched).toEqual([missing]);
+  });
+});
+
+describe('parseWorktreePaths', () => {
+  it('keeps a newline-bearing path one record, fabricating no extra root', () => {
+    const evil = '/tmp/repo/evil\nworktree /tmp/injected-root';
+    const out =
+      `worktree /tmp/repo\0HEAD ${'a'.repeat(40)}\0branch refs/heads/main\0\0` +
+      `worktree ${evil}\0HEAD ${'b'.repeat(40)}\0detached\0\0`;
+    expect(parseWorktreePaths(out)).toEqual(['/tmp/repo', evil]);
+  });
+
+  it('parses ordinary worktrees and tolerates a stripped trailing NUL', () => {
+    const out = `worktree /tmp/repo\0HEAD ${'a'.repeat(40)}\0branch refs/heads/main\0`;
+    expect(parseWorktreePaths(out)).toEqual(['/tmp/repo']);
+    expect(parseWorktreePaths('')).toEqual([]);
+  });
+});
 
 describe('isBranchName', () => {
   it('accepts what git accepts as a branch name', () => {

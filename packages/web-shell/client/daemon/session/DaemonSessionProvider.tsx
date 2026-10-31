@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDaemonClient, findDaemonAvailability } from '../availability.js';
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../availability-context.js';
 import {
   restoreLocalDeletionBlocks,
   removeDeletedMessageBlocks,
@@ -23,7 +28,7 @@ import {
 } from 'react';
 import {
   DAEMON_APPROVAL_MODES,
-  DaemonClient,
+  type DaemonClient,
   DaemonCapabilityMissingError,
   DaemonHttpError,
   DaemonSessionClient,
@@ -943,6 +948,10 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     children,
   } = props;
   const workspace = useOptionalDaemonWorkspace();
+  const availability = useDaemonAvailability();
+  const availabilityController = useDaemonAvailabilityController();
+  const availabilityRef = useRef(availabilityController);
+  availabilityRef.current = availabilityController;
   const resolvedBaseUrl = baseUrl ?? workspace?.baseUrl;
   const resolvedToken = token ?? workspace?.token;
   const sessionContextResolution = useMemo(() => {
@@ -1937,7 +1946,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       }
       const client =
         workspaceClientRef.current ??
-        new DaemonClient({ baseUrl: resolvedBaseUrl!, token: resolvedToken });
+        createDaemonClient({ baseUrl: resolvedBaseUrl!, token: resolvedToken });
       let session: DaemonSessionClient | undefined;
       let capabilities:
         | Awaited<ReturnType<DaemonClient['capabilities']>>
@@ -2010,6 +2019,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       let stopPersistenceUnconfirmed = false;
 
       while (!disposed && !abort.signal.aborted) {
+        try {
+          if (availabilityRef.current) {
+            await availabilityRef.current.waitUntilAvailable(abort.signal);
+          }
+        } catch {
+          return;
+        }
+        if (disposed || abort.signal.aborted) return;
+        const availabilityGeneration = availabilityRef.current?.getGeneration();
         const skipMetadataRefreshThisIteration = skipMetadataRefresh;
         skipMetadataRefresh = false;
         let loadingRequestedSession = false;
@@ -2418,6 +2436,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 error: undefined,
                 errorStatus: undefined,
                 missingSession: false,
+                sessionArchived: undefined,
                 loadingTranscript: true,
               }));
             }
@@ -4491,6 +4510,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               error: undefined,
               errorStatus: undefined,
               missingSession: false,
+              sessionArchived: undefined,
             }));
             return;
           }
@@ -4502,6 +4522,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             return;
           }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
+            void availabilityRef.current?.check();
             nextSseConnectReason = 'stream_end';
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
@@ -4553,6 +4574,11 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             continue;
           }
           if (disposed || abort.signal.aborted) return;
+          availabilityRef.current?.reportFailure(
+            error,
+            undefined,
+            availabilityGeneration,
+          );
           // The loop threw, so the in-try post-loop flush was skipped. Apply
           // buffered transcript events now: leaving them with a scheduled timer
           // would let it fire after a reconnect reset and dispatch stale events.
@@ -4767,9 +4793,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 reason: isAuthFailure ? 'auth-failed' : 'deleted',
               });
             }
-            // Auth failures (401/403) and terminal session errors (404/410)
-            // must clear the session — the server-side state is gone or
-            // inaccessible, so delta resume is impossible.
+            // Auth failures (401/403) and terminal session errors (404/410, and
+            // 409 session_archived) must clear the session — the server-side
+            // state is gone or inaccessible, so delta resume is impossible.
             session = undefined;
             sessionRef.current = undefined;
             if (isAuthFailure) {
@@ -4825,6 +4851,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // but they also must not clear one confirmed by load/heartbeat.
               missingSession:
                 missingLoadedSession || current.missingSession === true,
+              sessionArchived: isSessionArchivedHttpError(error) || undefined,
               capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp: undefined,
@@ -4897,6 +4924,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               current.errorStatus,
             ),
             missingSession: false,
+            sessionArchived: undefined,
             loadingTranscript: undefined,
           }));
         }
@@ -5004,9 +5032,15 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           token: resolvedToken,
           sessionId: session.sessionId,
           clientId: session.clientId,
-        }).catch((err) =>
-          console.warn('[DaemonSessionProvider] detach failed:', err),
-        );
+        }).catch((err) => {
+          const state = findDaemonAvailability(
+            resolvedBaseUrl!,
+            resolvedToken,
+          )?.getSnapshot();
+          if (state === undefined || state === 'available') {
+            console.warn('[DaemonSessionProvider] detach failed:', err);
+          }
+        });
       }
       if (ownsCurrentSession && (!keepSessionForNextEffect || isUnmounting)) {
         sessionRef.current = undefined;
@@ -5050,6 +5084,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
 
   useEffect(() => {
     if (
+      availability !== 'available' ||
       !heartbeatSupportedRef.current ||
       connection.status !== 'connected' ||
       heartbeatIntervalMs <= 0 ||
@@ -5213,6 +5248,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     heartbeatIntervalMs,
     invalidateGeneratedUi,
     trajectoryLiveStore,
+    availability,
   ]);
 
   const settleAdmittedPrompt = useCallback(
@@ -5296,7 +5332,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         ) => {
           const client =
             workspaceClientRef.current ??
-            new DaemonClient({
+            createDaemonClient({
               baseUrl: resolvedBaseUrl!,
               token: resolvedToken,
             });
@@ -5337,7 +5373,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         createDetachedStandaloneSession: (overrides) => {
           const client =
             workspaceClientRef.current ??
-            new DaemonClient({
+            createDaemonClient({
               baseUrl: resolvedBaseUrl!,
               token: resolvedToken,
             });
@@ -5811,9 +5847,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const generatedUi = appSession?.session?.generatedUi;
   const generatedUiClientId = appSession?.clientId;
   const generatedUiEventEpoch = appSession?.eventEpoch;
-  const generatedUiRecoveryGeneration = appSession
-    ? sessionRecoveryGenerationRef.current.get(appSession)
-    : undefined;
   const generatedUiOwnerSource = useMemo<
     McpAppGeneratedUiOwnerSource | undefined
   >(() => {
@@ -5840,10 +5873,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         const owner = ownerGuardValue.capture({ includeRecovery: true });
         return {
           isCurrent: () =>
+            // owner.isCurrent() already rejects a recovery that started after
+            // this capture. Comparing with the generation seen at render as
+            // well rejected every attach during a turn: sending a prompt
+            // advances the generation without changing the capability receipt.
             owner.isCurrent() &&
             !manualSessionClearRef.current &&
-            sessionRecoveryGenerationRef.current.get(appSession) ===
-              generatedUiRecoveryGeneration &&
             generatedUiScopeRef.current === generatedUiScope &&
             sessionRef.current === appSession &&
             appSession.clientId === generatedUiClientId &&
@@ -5864,7 +5899,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     generatedUi,
     generatedUiClientId,
     generatedUiEventEpoch,
-    generatedUiRecoveryGeneration,
     generatedUiScope,
     ownerGuardValue,
   ]);
@@ -6781,8 +6815,23 @@ function bumpSessionEventSignals(
 }
 
 function isTerminalSessionHttpError(error: unknown): boolean {
+  if (isSessionArchivedHttpError(error)) return true;
   const status = extractHttpStatus(error);
   return status !== undefined && TERMINAL_SESSION_HTTP_STATUSES.has(status);
+}
+
+/**
+ * The daemon answers 409 `{ code: 'session_archived' }` for every active-route
+ * load/resume/attach of an archived session. A plain 409 (for example a
+ * session-writer conflict) stays retriable: that conflict can clear on its own.
+ * An archived session will not, so retrying loops forever on an empty
+ * transcript — treat the error as terminal and park with a visible error
+ * instead of reconnecting.
+ */
+export function isSessionArchivedHttpError(error: unknown): boolean {
+  if (!(error instanceof DaemonHttpError) || error.status !== 409) return false;
+  const body = isRecord(error.body) ? error.body : undefined;
+  return body?.['code'] === 'session_archived';
 }
 
 function isAuthFailureHttpError(error: unknown): boolean {
