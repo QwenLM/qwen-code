@@ -32,6 +32,7 @@ export const MUST_TRANSLATE_KEYS = [
   'Processing summary...',
   'Project summary generated and saved successfully!',
   'Saved to: {{filePath}}',
+  'Saved in {{path}}',
   'Stopped because',
   'Set UI language',
   'Usage: /language ui [{{options}}]',
