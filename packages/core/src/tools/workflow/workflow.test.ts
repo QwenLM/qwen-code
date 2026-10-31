@@ -71,6 +71,7 @@ const live = () => new AbortController().signal;
 const CANCELLED_BEFORE_START = {
   llmContent: 'Workflow was cancelled before it could start.',
   returnDisplay: 'Workflow cancelled.',
+  interruptedBeforeCompletion: true,
 };
 const runIdOf = (scriptPath: string) =>
   scriptPath.match(/(wf_[0-9a-f]+)\.js$/)![1];

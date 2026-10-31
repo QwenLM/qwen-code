@@ -629,6 +629,13 @@ export interface ToolResult {
   outputBudgetApplied?: boolean;
 
   /**
+   * Set by a producer that knows its own work was cut short but reports that
+   * outcome as an ordinary result instead of throwing. The scheduler uses it to
+   * tell the model the call was interrupted rather than completed.
+   */
+  interruptedBeforeCompletion?: boolean;
+
+  /**
    * Markdown string for user display.
    * This provides a user-friendly summary or visualization of the result.
    * NOTE: This might also be considered UI-specific and could potentially be

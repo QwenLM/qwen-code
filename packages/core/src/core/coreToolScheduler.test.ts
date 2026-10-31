@@ -11225,6 +11225,17 @@ describe('CoreToolScheduler telemetry spans', () => {
       'The tool had already completed',
       'User intentionally cancelled this tool call. Stop',
     ],
+    [
+      'tells the model a returned interruption result never completed',
+      {
+        llmContent:
+          'Command was cancelled by user before it could complete. There was no output before it was cancelled.',
+        returnDisplay: 'Command cancelled by user.',
+        interruptedBeforeCompletion: true,
+      },
+      'User intentionally cancelled this tool call.',
+      'had already completed',
+    ],
   ])('%s', async (_title, outcome, notice, wrongNotice) => {
     const { call } = await runAbortedDuringExecution({}, outcome);
 
@@ -11232,6 +11243,31 @@ describe('CoreToolScheduler telemetry spans', () => {
     const responseText = JSON.stringify(completedCall.response.responseParts);
     expect(responseText).toContain(notice);
     expect(responseText).not.toContain(wrongNotice);
+  });
+
+  // The notice says the call did not finish; the producer's own text says how
+  // far it got. Replacing the whole payload with the notice loses the partial
+  // output the model needs to decide what remains.
+  it('keeps the partial output a cancelled producer reported', async () => {
+    const { call } = await runAbortedDuringExecution(
+      {},
+      {
+        llmContent:
+          'Command was cancelled by user before it could complete. Below is the output before it was cancelled:\nstart',
+        returnDisplay: 'Command cancelled by user.',
+        interruptedBeforeCompletion: true,
+      },
+    );
+
+    const completedCall = expectSettled(call, 'cancelled', 'cancelled');
+    const responseText = JSON.stringify(completedCall.response.responseParts);
+    expect(responseText).toContain(
+      'User intentionally cancelled this tool call.',
+    );
+    expect(responseText).toContain(
+      'Below is the output before it was cancelled',
+    );
+    expect(responseText).toContain('start');
   });
 
   // A post-execution cancellation drops the model-visible output, but the

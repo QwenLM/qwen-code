@@ -3431,6 +3431,11 @@ export class ShellToolInvocation extends BaseToolInvocation<
       },
       ...(persistedOutputFiles !== undefined ? { persistedOutputFiles } : {}),
       ...(outputBudgetApplied ? { outputBudgetApplied } : {}),
+      // A user cancel kills the process group but returns a normal result, so
+      // tell the scheduler its work did not finish.
+      ...(result.aborted && !wasTimeout && !wasPromoteRefused
+        ? { interruptedBeforeCompletion: true }
+        : {}),
       ...executionError,
     };
   }
