@@ -13,11 +13,11 @@
 // push moves the head GitHub reports, as it does on GitHub. A GraphQL answer
 // holds exactly the fields its query selects, so a field a query drops is
 // missing as it would be. Anything this file does not know — a command, a
-// flag, a path, a jq expression, a `--json` field, a GraphQL field, a host
-// other than the world's — fails the call with exit 2 and is logged as
-// unsupported, and so does a crash while answering. The test checks the log:
-// some helpers take a failed call for "no answer" and go on, so the exit
-// code alone would not show it.
+// flag, a path, a jq expression, a `--json` field, a GraphQL field or
+// alias, a host other than the world's — fails the call with exit 2 and is
+// logged as unsupported, and so does a crash while answering. The test
+// checks the log: some helpers take a failed call for "no answer" and go
+// on, so the exit code alone would not show it.
 
 import { execFileSync } from 'node:child_process';
 import {
@@ -220,9 +220,11 @@ function addComment(prefix, body) {
 
 // --- graphql ----------------------------------------------------------------
 
-// A query's selection set: `{ key, fields }` per field (`key` is its alias,
-// or its name; `fields` null for a leaf), `{ on, fields }` per inline
-// fragment. Arguments and variable definitions are skipped.
+// A query's selection set: `{ key, alias, fields }` per field (`key` is its
+// alias, or its name; `alias` the field and arguments behind an alias, as
+// `comments(first:1)`; `fields` null for a leaf), `{ on, fields }` per inline
+// fragment. Variable definitions are skipped, and so are the arguments of a
+// field without an alias.
 function selection(query) {
   const tokens = query.match(/\.\.\.|\$?\w+|[^\s\w]/g) ?? [];
   let at = tokens.indexOf('{');
@@ -231,6 +233,7 @@ function selection(query) {
   const syntax = () => unsupported('GraphQL syntax');
   if (at === -1) syntax();
   const skipArguments = () => {
+    const from = at;
     let depth = 0;
     do {
       if (at >= tokens.length) syntax();
@@ -238,6 +241,7 @@ function selection(query) {
       else if (tokens[at] === ')') depth -= 1;
       at += 1;
     } while (depth > 0);
+    return tokens.slice(from, at).join('');
   };
   const set = () => {
     at += 1;
@@ -253,15 +257,25 @@ function selection(query) {
         continue;
       }
       const key = tokens[at];
-      at += tokens[at + 1] === ':' ? 3 : 1;
-      if (tokens[at] === '(') skipArguments();
-      fields.push({ key, fields: tokens[at] === '{' ? set() : null });
+      const aliased = tokens[at + 1] === ':';
+      const name = aliased ? tokens[at + 2] : key;
+      at += aliased ? 3 : 1;
+      const argsText = tokens[at] === '(' ? skipArguments() : '';
+      fields.push({
+        key,
+        ...(aliased ? { alias: `${name}${argsText}` } : {}),
+        fields: tokens[at] === '{' ? set() : null,
+      });
     }
     at += 1;
     return fields;
   };
   return set();
 }
+
+// The aliases rendered below, by what they stand for: a thread's root is its
+// first comment.
+const ALIASES = { root: 'comments(first:1)' };
 
 // What the query asked for, and nothing else.
 function project(value, fields, path) {
@@ -277,6 +291,10 @@ function project(value, fields, path) {
       continue;
     }
     if (!(field.key in value)) unsupported(`GraphQL field ${path}${field.key}`);
+    // The fake answers an alias as the one field and arguments it renders.
+    if (field.alias !== undefined && ALIASES[field.key] !== field.alias) {
+      unsupported(`GraphQL alias ${path}${field.key}: ${field.alias}`);
+    }
     const v = value[field.key] ?? null;
     // GitHub refuses an object field without a selection, and a selection
     // on a scalar.
@@ -301,9 +319,10 @@ function graphql(fields, typed) {
   const commit = tree
     .find((field) => field.key === 'repository')
     ?.fields?.some((field) => field.key === 'object');
-  // The paging queries: every list the world holds fits on one page.
+  // Every list the world holds fits on one page, so no paging query is
+  // answered either.
   if (!commit && !tree.some((field) => field.key === 'viewer')) {
-    unsupported('a paging query');
+    unsupported('a query other than the PR query or the commit checks query');
   }
   if (fields.owner !== world.owner || fields.name !== world.repo) {
     unsupported('another repository');
