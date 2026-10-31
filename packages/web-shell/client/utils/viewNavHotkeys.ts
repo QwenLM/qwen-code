@@ -68,21 +68,40 @@ function pickVisiblePanel(panels: NodeListOf<Element>): Element | null {
 }
 
 /**
- * The Pinned section's header button: the first `aria-expanded` button
- * whose label (its first child span) reads "Pinned" or "置顶" and which
- * is visible. The Web Shell ships only English and Simplified Chinese, so
- * matching the exact label covers every locale.
+ * The Pinned section's header button: the visible button carrying
+ * `data-web-shell-pinned-header`. WebShellSidebar renders exactly one,
+ * and the mark — not the rendered label — identifies it, so the lookup
+ * survives any active locale (`ru` is user-selectable and currently
+ * reads the English label through the i18n fallback).
  */
 function findPinnedHeader(): HTMLButtonElement | null {
-  const headers = document.querySelectorAll('button[aria-expanded]');
+  const headers = document.querySelectorAll<HTMLElement>(
+    'button[data-web-shell-pinned-header]',
+  );
   for (const header of Array.from(headers)) {
-    const label = header.firstElementChild;
-    const text = label instanceof HTMLSpanElement ? label.textContent : null;
-    if (text !== 'Pinned' && text !== '置顶') continue;
     if (!isVisible(header)) continue;
     return header as HTMLButtonElement;
   }
   return null;
+}
+
+/**
+ * Marks the option a hotkey focus lands on, for the focus ring. WKWebView
+ * does not match :focus-visible on programmatic focus during keydown, so
+ * ToolApproval.module.css also matches the mark; the mark is removed when
+ * the option loses focus, so the ring follows the focus like
+ * :focus-visible does.
+ */
+function markHotkeyFocused(option: HTMLElement): void {
+  document
+    .querySelectorAll('[data-web-shell-hotkey-focused]')
+    .forEach((el) => el.removeAttribute('data-web-shell-hotkey-focused'));
+  option.setAttribute('data-web-shell-hotkey-focused', '');
+  option.addEventListener(
+    'blur',
+    () => option.removeAttribute('data-web-shell-hotkey-focused'),
+    { once: true },
+  );
 }
 
 /**
@@ -144,7 +163,11 @@ export function pressNavigationDigit(e: KeyboardEvent): boolean {
             (child): child is HTMLElement => child instanceof HTMLButtonElement,
           )
         : [];
-      options[n - 1]?.focus();
+      const option = options[n - 1];
+      if (option) {
+        markHotkeyFocused(option);
+        option.focus();
+      }
       return true;
     }
   }
@@ -222,10 +245,10 @@ export function pressPaneMaximizeToggle(e: KeyboardEvent): boolean {
 /**
  * Cmd/Ctrl+Shift+\ — "Open in Split" for the selected Session Overview
  * rows. While the Overview table is visible the key is consumed: the
- * bulk-actions group (the first DIV child of the Overview footer with
- * four or more direct button children) gets its last button — "Open in
- * Split" — clicked; with no rows selected there is no group and the key
- * is swallowed.
+ * footer's "Open in Split" button (SessionOverviewPanel marks it with
+ * data-web-shell-session-split-button and renders it only while a
+ * selection is active) is clicked; with no rows selected there is no
+ * button and the key is swallowed.
  */
 export function pressSelectedRowsSplit(e: KeyboardEvent): boolean {
   const viewport = document.querySelector(
@@ -233,18 +256,9 @@ export function pressSelectedRowsSplit(e: KeyboardEvent): boolean {
   );
   if (!isVisible(viewport)) return false;
   consume(e);
-  const footer = document.querySelector('[data-web-shell-session-footer]');
-  if (!footer) return true;
-  for (const child of Array.from(footer.children)) {
-    if (child.tagName !== 'DIV') continue;
-    const buttons = Array.from(child.children).filter(
-      (button): button is HTMLElement => button instanceof HTMLButtonElement,
-    );
-    if (buttons.length >= 4) {
-      buttons[buttons.length - 1].click();
-      break;
-    }
-  }
+  document
+    .querySelector<HTMLElement>('[data-web-shell-session-split-button]')
+    ?.click();
   return true;
 }
 

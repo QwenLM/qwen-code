@@ -7240,6 +7240,7 @@ export function WebShellSidebar({
                       className={styles.projectsHeaderToggle}
                       type="button"
                       aria-expanded={pinnedExpanded}
+                      data-web-shell-pinned-header
                       onClick={() => setPinnedExpanded((expanded) => !expanded)}
                     >
                       <span>{t('sidebar.pinnedSessions')}</span>

@@ -86,15 +86,21 @@ function makeOverviewRows(
   return { clicks, checkboxClicks };
 }
 
-// Overview footer with a bulk-actions group: a DIV child with four or more
-// direct button children, the last of which is "Open in Split".
-function makeBulkGroup(n: number): number[] {
+// Overview footer with a bulk-actions group: a DIV child of the footer
+// with button children. SessionOverviewPanel marks "Open in Split" with
+// data-web-shell-session-split-button; the fixture marks the last button
+// the same way (markLast: false reproduces an unmarked group, as when the
+// panel renders no split button).
+function makeBulkGroup(n: number, opts: { markLast?: boolean } = {}): number[] {
   const clicks: number[] = [];
   const footer = document.createElement('div');
   footer.setAttribute('data-web-shell-session-footer', '');
   const group = document.createElement('div');
   for (let i = 0; i < n; i++) {
     const button = document.createElement('button');
+    if (i === n - 1 && opts.markLast !== false) {
+      button.setAttribute('data-web-shell-session-split-button', '');
+    }
     button.addEventListener('click', () => clicks.push(i + 1));
     group.appendChild(button);
   }
@@ -176,20 +182,26 @@ function makeApprovalPanels(
   });
 }
 
-// The Pinned section: a header button (first child span label) whose
-// wrapper's next sibling is the row list.
+// The Pinned section: a header button whose wrapper's next sibling is the
+// row list. WebShellSidebar marks the header with
+// data-web-shell-pinned-header; the fixture does the same (marked: false
+// reproduces an unmarked section).
 function makePinned(opts: {
   label?: string | null;
   expanded?: boolean;
   rows?: number;
   visible?: boolean;
   headerVisible?: boolean;
+  marked?: boolean;
 }): { rowClicks: number[]; headerClicks: number[]; section: Element } {
   const rowClicks: number[] = [];
   const headerClicks: number[] = [];
   const section = document.createElement('div');
   const wrapper = document.createElement('div');
   const header = document.createElement('button');
+  if (opts.marked !== false) {
+    header.setAttribute('data-web-shell-pinned-header', '');
+  }
   header.setAttribute(
     'aria-expanded',
     opts.expanded === false ? 'false' : 'true',
@@ -347,7 +359,7 @@ describe('pressOverviewRowCheckbox (Option+Shift+1..9)', () => {
 });
 
 describe('pressSelectedRowsSplit (Cmd/Ctrl+Shift+\\)', () => {
-  it('clicks the last button of the bulk group (Open in Split)', () => {
+  it('clicks the marked button (Open in Split)', () => {
     makeOverviewRows(3);
     const clicks = makeBulkGroup(4);
     let event = press({ code: 'Backslash', metaKey: true, shiftKey: true });
@@ -358,32 +370,44 @@ describe('pressSelectedRowsSplit (Cmd/Ctrl+Shift+\\)', () => {
     expect(clicks).toEqual([4, 4]);
   });
 
-  it('swallows the key while the table is visible but no group exists', () => {
+  it('clicks the marked button, not merely the last one', () => {
+    // A fifth button joins the group after "Open in Split" — the mark
+    // keeps the click on the right button.
+    makeOverviewRows(3);
+    const clicks = makeBulkGroup(4);
+    const footer = document.querySelector('[data-web-shell-session-footer]')!;
+    const group = footer.firstElementChild!;
+    let extraClicked = 0;
+    const extra = document.createElement('button');
+    extra.addEventListener('click', () => extraClicked++);
+    group.appendChild(extra);
+    const event = press({ code: 'Backslash', metaKey: true, shiftKey: true });
+    expect(pressSelectedRowsSplit(event)).toBe(true);
+    expect(clicks).toEqual([4]);
+    expect(extraClicked).toBe(0);
+  });
+
+  it('swallows the key while the table is visible but no button is marked', () => {
     makeOverviewRows(3); // no footer at all
     let event = press({ code: 'Backslash', metaKey: true, shiftKey: true });
     expect(pressSelectedRowsSplit(event)).toBe(true);
     expect(event.defaultPrevented).toBe(true);
 
-    // A footer whose group has fewer than four buttons is not the group.
+    // A group without the mark (no selection renders no split button)
+    // leaves the key swallowed.
     document.querySelector('[data-web-shell-session-footer]')?.remove();
-    const clicks = makeBulkGroup(3);
+    const clicks = makeBulkGroup(3, { markLast: false });
     event = press({ code: 'Backslash', metaKey: true, shiftKey: true });
     expect(pressSelectedRowsSplit(event)).toBe(true);
     expect(event.defaultPrevented).toBe(true);
     expect(clicks).toEqual([]);
   });
 
-  it('picks the first DIV child with four or more direct buttons', () => {
+  it('ignores unmarked DIVs before the marked group', () => {
     makeOverviewRows(3);
     const groupClicks = makeBulkGroup(4);
     const footer = document.querySelector('[data-web-shell-session-footer]')!;
-    // A 3-button DIV before the group is not the group.
-    const small = document.createElement('div');
-    for (let i = 0; i < 3; i++) {
-      small.appendChild(document.createElement('button'));
-    }
-    footer.insertBefore(small, footer.firstChild);
-    // A 4-button DIV before the group wins over the real one.
+    // An unmarked 4-button DIV before the group does not win the click.
     const early = document.createElement('div');
     const earlyClicks: number[] = [];
     for (let i = 0; i < 4; i++) {
@@ -394,8 +418,8 @@ describe('pressSelectedRowsSplit (Cmd/Ctrl+Shift+\\)', () => {
     footer.insertBefore(early, footer.firstChild);
     const event = press({ code: 'Backslash', metaKey: true, shiftKey: true });
     expect(pressSelectedRowsSplit(event)).toBe(true);
-    expect(earlyClicks).toEqual([4]);
-    expect(groupClicks).toEqual([]);
+    expect(earlyClicks).toEqual([]);
+    expect(groupClicks).toEqual([4]);
   });
 
   it('leaves the key unconsumed while the table is hidden', () => {
@@ -639,6 +663,35 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
       expect(clicks).toBe(0);
     });
 
+    it('marks the focused option for the ring and clears it on blur', () => {
+      const panes = makePanes(2);
+      const [panel] = makeApprovalPanels(
+        [{ visible: true, pane: 1, buttons: 3 }],
+        panes,
+      );
+      const options = panel.querySelectorAll('[role="radiogroup"] > button');
+      paneComposer(panes[0]).focus();
+      const first = press({ code: 'Digit1', key: '1', metaKey: true });
+      expect(pressNavigationDigit(first)).toBe(true);
+      expect(options[0].hasAttribute('data-web-shell-hotkey-focused')).toBe(
+        true,
+      );
+      // Moving the chord to another option clears the previous mark.
+      const second = press({ code: 'Digit2', key: '2', ctrlKey: true });
+      expect(pressNavigationDigit(second)).toBe(true);
+      expect(options[0].hasAttribute('data-web-shell-hotkey-focused')).toBe(
+        false,
+      );
+      expect(options[1].hasAttribute('data-web-shell-hotkey-focused')).toBe(
+        true,
+      );
+      // Losing focus (a pointer click elsewhere) removes the ring.
+      options[1].blur();
+      expect(options[1].hasAttribute('data-web-shell-hotkey-focused')).toBe(
+        false,
+      );
+    });
+
     it('swallows extra digits and cards without an option group', () => {
       const panes = makePanes(2);
       makeApprovalPanels([{ visible: true, pane: 1, buttons: 2 }], panes);
@@ -831,24 +884,38 @@ describe('pressNavigationDigit (Cmd/Ctrl+1..9)', () => {
       expect(document.activeElement).toBe(paneComposer(panes[1]));
     });
 
-    it('recognizes the Simplified Chinese label and rejects other sections', () => {
+    it('finds the marked header whatever the locale label reads', () => {
       const panes = makePanes(2);
-      const zh = makePinned({ label: '置顶', expanded: true, rows: 6 });
+      // ru is user-selectable and currently reads the English label
+      // through the i18n fallback; a future ru translation must keep
+      // working, so the lookup keys off the mark, not the label.
+      const ru = makePinned({ label: 'Закреплённые', expanded: true, rows: 6 });
       const event = press({ code: 'Digit1', key: '1', metaKey: true });
       expect(pressNavigationDigit(event)).toBe(true);
+      expect(ru.rowClicks).toEqual([1]);
+      ru.section.remove();
+
+      const zh = makePinned({ label: '置顶', expanded: true, rows: 6 });
+      const zhEvent = press({ code: 'Digit1', key: '1', metaKey: true });
+      expect(pressNavigationDigit(zhEvent)).toBe(true);
       expect(zh.rowClicks).toEqual([1]);
       zh.section.remove();
 
-      const other = makePinned({ label: 'Recent', expanded: true, rows: 6 });
+      const other = makePinned({
+        label: 'Recent',
+        expanded: true,
+        rows: 6,
+        marked: false,
+      });
       const event2 = press({ code: 'Digit1', key: '1', metaKey: true });
       expect(pressNavigationDigit(event2)).toBe(true);
       expect(other.rowClicks).toEqual([]);
       expect(document.activeElement).toBe(paneComposer(panes[0]));
     });
 
-    it('treats a section without a span label as absent', () => {
+    it('treats an unmarked section as absent', () => {
       const panes = makePanes(2);
-      makePinned({ label: null, expanded: true, rows: 6 });
+      makePinned({ label: 'Pinned', expanded: true, rows: 6, marked: false });
       const event = press({ code: 'Digit1', key: '1', metaKey: true });
       expect(pressNavigationDigit(event)).toBe(true);
       expect(document.activeElement).toBe(paneComposer(panes[0]));

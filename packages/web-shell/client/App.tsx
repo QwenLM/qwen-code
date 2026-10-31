@@ -20062,7 +20062,10 @@ export function App({
     // Cmd/Ctrl+Shift+\ — "Open in Split" for the selected rows;
     // Cmd/Ctrl+Shift+F — maximize/restore the focused pane; Cmd/Ctrl+T —
     // New task / workspace picker.
-    const shellHotkeyTargetsClear = (event: KeyboardEvent): boolean => {
+    const shellHotkeyTargetsClear = (
+      event: KeyboardEvent,
+      opts: { composerExempt?: boolean } = {},
+    ): boolean => {
       // Covering surfaces keep the keyboard: a shell modal or a host
       // interaction block (both in modalDialogOpen), the docked fullscreen
       // artifact panel, a component-owned modal (dialog, confirm, drawer),
@@ -20072,14 +20075,20 @@ export function App({
       // Other editable targets — Session Overview search, session rename,
       // settings inputs, the Live shortcut recorder — must not have the view
       // yanked away while the user is typing, matching the codebase's
-      // isEditableTarget convention. The composer stays exempt: the chords
-      // produce no text there (issue #13175). Shadow-DOM portal hosts
-      // retarget the event to the host element, so resolve the real target.
+      // isEditableTarget convention. The composer stays exempt for the
+      // chords that produce no text there; the checkbox chord
+      // (Option+Shift+1..9) types printable characters on macOS (US
+      // layout), so it is deliberately not exempt (issue #13175).
+      // Shadow-DOM portal hosts retarget the event to the host element, so
+      // resolve the real target.
       const target = (event.composedPath()[0] ??
         event.target) as HTMLElement | null;
       if (
         isEditableTarget(target) &&
-        !target?.closest('[data-web-shell-composer-editor]')
+        !(
+          opts.composerExempt &&
+          target?.closest('[data-web-shell-composer-editor]')
+        )
       ) {
         return false;
       }
@@ -20107,7 +20116,7 @@ export function App({
         if (splitViewHotkeyAvailable) open = openSplitViewFromSidebar;
       }
       if (open) {
-        if (!shellHotkeyTargetsClear(e)) return;
+        if (!shellHotkeyTargetsClear(e, { composerExempt: true })) return;
         e.preventDefault();
         e.stopPropagation();
         open();
@@ -20116,22 +20125,26 @@ export function App({
       // The remaining chords act on the rendered surface; the module
       // decides whether each one consumes the event.
       if (e.shiftKey && e.code === 'KeyF') {
-        if (shellHotkeyTargetsClear(e)) pressPaneMaximizeToggle(e);
+        if (shellHotkeyTargetsClear(e, { composerExempt: true }))
+          pressPaneMaximizeToggle(e);
         return;
       }
       if (
         e.shiftKey &&
         (e.code === 'Backslash' || e.code === 'IntlBackslash')
       ) {
-        if (shellHotkeyTargetsClear(e)) pressSelectedRowsSplit(e);
+        if (shellHotkeyTargetsClear(e, { composerExempt: true }))
+          pressSelectedRowsSplit(e);
         return;
       }
       if (!e.shiftKey && e.code === 'KeyT') {
-        if (shellHotkeyTargetsClear(e)) pressNewTask(e);
+        if (shellHotkeyTargetsClear(e, { composerExempt: true }))
+          pressNewTask(e);
         return;
       }
       if (modifierDigit(e) > 0) {
-        if (shellHotkeyTargetsClear(e)) pressNavigationDigit(e);
+        if (shellHotkeyTargetsClear(e, { composerExempt: true }))
+          pressNavigationDigit(e);
         return;
       }
     };

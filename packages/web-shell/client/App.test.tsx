@@ -50863,7 +50863,9 @@ describe('App view navigation hotkeys — surface chords', () => {
           <button type="button">Archive</button>
           <button type="button">Delete</button>
           <button type="button">Open in Tab</button>
-          <button type="button">Open in Split</button>
+          <button type="button" data-web-shell-session-split-button>
+            Open in Split
+          </button>
         </div>
       </div>`);
     setWidth(
@@ -50976,6 +50978,35 @@ describe('App view navigation hotkeys — surface chords', () => {
     expect(document.activeElement).toBe(
       host.querySelector('[role="radiogroup"] > button'),
     );
+  });
+
+  it('leaves the checkbox chord to the composer editor', async () => {
+    renderViewApp();
+    await flush();
+    const host = fixture(
+      '<div data-web-shell-session-table-viewport>' +
+        '<table><tbody><tr><td><input type="checkbox" /></td></tr>' +
+        '</tbody></table></div>' +
+        '<div data-web-shell-composer-editor><div class="cm-editor">' +
+        '<div class="cm-content" contenteditable="true"></div></div></div>',
+    );
+    setWidth(
+      host.querySelector('[data-web-shell-session-table-viewport]')!,
+      800,
+    );
+    const content = host.querySelector('.cm-content')!;
+    content.focus();
+    const event = await pressChord(
+      { code: 'Digit2', key: '2', altKey: true, shiftKey: true },
+      content,
+    );
+    // Option+Shift+digit types printable characters on macOS (US
+    // layout), so the chord must not fire while the composer is focused.
+    expect(event.defaultPrevented).toBe(false);
+    expect(
+      (host.querySelector('input[type="checkbox"]') as HTMLInputElement)
+        .checked,
+    ).toBe(false);
   });
 
   it('ignores auto-repeat on the surface chords', async () => {

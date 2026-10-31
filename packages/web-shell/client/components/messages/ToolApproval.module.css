@@ -258,11 +258,13 @@
   appearance: none;
 }
 
-/* :focus, not :focus-visible: the view hotkey (Cmd/Ctrl+1–9) focuses an
-   option programmatically during the keydown, and WKWebView does not
-   match :focus-visible on that path — the ring would be invisible
-   exactly when the chord acts. */
-.option:focus {
+/* The ring follows :focus-visible, so pointer focus stays ringless. The
+   view hotkey (Cmd/Ctrl+1–9) focuses an option programmatically during
+   the keydown, and WKWebView does not match :focus-visible on that path —
+   pressNavigationDigit marks the option with data-web-shell-hotkey-
+   focused (removed on blur) and the ring matches the mark too. */
+.option:focus-visible,
+.option[data-web-shell-hotkey-focused] {
   outline: 2px solid var(--agent-blue-500);
   outline-offset: 2px;
 }
