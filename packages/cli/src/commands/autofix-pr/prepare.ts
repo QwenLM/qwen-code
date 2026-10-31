@@ -50,7 +50,7 @@ import {
   type AutofixPrState,
 } from './state.js';
 import { assertNoFixInFlight, clearAbandonedFix } from './fix.js';
-import { networkGit } from './worktree.js';
+import { checkoutHoldsWork, isAncestor, networkGit } from './worktree.js';
 
 export interface PrView {
   number: number;
@@ -314,49 +314,6 @@ function parseWorktrees(fields: string[], branch: string): string[] {
 }
 
 /**
- * Whether a checkout holds work git reports, or null when git cannot read it.
- * The flags override `status.showUntrackedFiles` and submodule `ignore`
- * settings, as this directory's other scans do. Only `.qwen` is the watch's:
- * anything beside its `tmp` directory under there is the user's work.
- */
-function checkoutHoldsWork(path: string): boolean | null {
-  const status = gitOpt(
-    '--no-optional-locks',
-    '-C',
-    path,
-    'status',
-    '--porcelain',
-    '--untracked-files=normal',
-    '--ignore-submodules=none',
-  );
-  if (status === null) return null;
-  const lines = status.split('\n').filter((line) => line !== '');
-  const onlyWatchDir = (line: string) =>
-    line.startsWith('??') && isUnderQwen(line.slice(3));
-  if (lines.some((line) => !onlyWatchDir(line))) return true;
-  if (lines.length === 0) return false;
-  // Only `.qwen` is untracked: ask what it holds besides the watch's `tmp`.
-  const userFiles = gitOpt(
-    '--no-optional-locks',
-    '-C',
-    path,
-    'ls-files',
-    '--others',
-    '--exclude-standard',
-    '--',
-    '.qwen',
-    ':(exclude).qwen/tmp',
-  );
-  if (userFiles === null) return null;
-  return userFiles.trim() !== '';
-}
-
-/** A porcelain path at or under `.qwen`. */
-function isUnderQwen(file: string): boolean {
-  return file === '.qwen' || file.startsWith('.qwen/');
-}
-
-/**
  * The clone's remote for the PR's repository and the target its head is
  * pushed to, from `git remote -v` — never from a state file, which the code
  * a round runs can reach.
@@ -393,6 +350,8 @@ export interface PrepareArgs {
   host?: string;
   /** Move a watch another session owns to this one (`--take-over`). */
   takeOver?: boolean;
+  /** Fix in the user's own checkout of the head branch (`--in-place`). */
+  inPlace?: boolean;
 }
 
 /**
@@ -497,12 +456,220 @@ function reconcileHistory(
   };
 }
 
+/**
+ * `prepare --in-place`: the user's own checkout of the PR head branch is
+ * the workspace — no worktree and no branch of the watch's own. Every
+ * precondition is checked before anything is written; the checkout is
+ * never repaired into shape, and nothing it holds is ever discarded.
+ */
+function runInPlacePrepare(
+  args: PrepareArgs,
+  owner: string,
+  repoName: string,
+  host: string,
+): void {
+  const prNumber = args.pr;
+  // A watch of this PR in either mode is cleaned up first: an in-place
+  // start is always fresh (once-shaped), and a mode conversion goes the
+  // same way.
+  const found = findWatchRoot(prNumber);
+  if (found !== null) {
+    throw new Error(
+      `PR #${prNumber} already has a watch in this clone (${found}); run \`qwen autofix-pr cleanup ${prNumber}\` first.`,
+    );
+  }
+  // The checkout the session sits in.
+  const checkout = git('rev-parse', '--show-toplevel');
+  const sessionDir = realpathNearestExisting(process.cwd());
+  const checkoutReal = realpathNearestExisting(checkout);
+  if (process.env['QWEN_CODE_SERVE'] === '1') {
+    // The daemon runs the fix agent's commands only inside the session's
+    // directory: for a checkout toplevel that means the session root.
+    if (!isWithinRoot(checkoutReal, sessionDir)) {
+      throw new Error(
+        `--in-place needs the session opened at the checkout root (${checkout}): the daemon runs the fix agent's commands only inside the session's working directory (${sessionDir}).`,
+      );
+    }
+  } else if (!isWithinRoot(sessionDir, checkoutReal)) {
+    throw new Error(
+      `run --in-place from inside the checkout of the PR's head branch (${checkout}).`,
+    );
+  }
+
+  ensureAuthenticated();
+  const pr = JSON.parse(
+    gh('pr', 'view', String(prNumber), '-R', args.repo, '--json', PR_FIELDS),
+  ) as PrView;
+  const repo = JSON.parse(
+    gh(
+      'repo',
+      'view',
+      args.repo,
+      '--json',
+      'viewerPermission,defaultBranchRef',
+    ),
+  ) as RepoView;
+  const viewer = currentUser();
+  const refusal = eligibilityError(pr, repo, viewer);
+  if (refusal) throw new Error(refusal);
+  const canPush = authorCanPush(args.repo, pr.author?.login ?? '', viewer);
+  const { remote, pushTarget } = remotesFor(
+    host,
+    owner,
+    repoName,
+    pr.headRepositoryOwner!.login,
+    pr.headRepository!.name,
+  );
+
+  // The head branch is checked out, tracks the push target, and is clean.
+  const head = gitOpt('-C', checkout, 'symbolic-ref', '-q', 'HEAD');
+  if (head !== `refs/heads/${pr.headRefName}`) {
+    throw new Error(
+      `--in-place needs the PR's head branch ${pr.headRefName} checked out in ${checkout} (it has ${head ? `branch ${head.replace(/^refs\/heads\//, '')}` : 'a detached HEAD'}); switch to it yourself first.`,
+    );
+  }
+  // The push target must be a named remote: git can only track
+  // `<remote>/<branch>`, never a URL, so a URL push target (no remote of
+  // this clone serves the head repository) has no representable upstream.
+  const remoteNames = (gitOpt('remote') ?? '')
+    .split('\n')
+    .filter((name) => name !== '');
+  if (!remoteNames.includes(pushTarget)) {
+    throw new Error(
+      `--in-place needs a named git remote whose fetch and push URLs both serve ${pr.headRepositoryOwner!.login}/${pr.headRepository!.name}; add one (git remote add <name> <url>) and set ${pr.headRefName}'s upstream to <name>/${pr.headRefName}.`,
+    );
+  }
+  const upstream = gitOpt(
+    'for-each-ref',
+    '--format=%(upstream:short)',
+    `refs/heads/${pr.headRefName}`,
+  );
+  if (upstream !== `${pushTarget}/${pr.headRefName}`) {
+    throw new Error(
+      `the branch ${pr.headRefName} must track ${pushTarget}/${pr.headRefName} for --in-place (it tracks ${upstream || 'nothing'}); set its upstream first.`,
+    );
+  }
+  const holds = checkoutHoldsWork(checkout);
+  if (holds === null) {
+    throw new Error(
+      `git cannot read ${checkout}; --in-place needs a readable, clean checkout.`,
+    );
+  }
+  if (holds) {
+    throw new Error(
+      `${checkout} has uncommitted changes; commit or stash them before starting --in-place.`,
+    );
+  }
+  const paths = autofixPrPaths(checkout, prNumber);
+  // The PR head, fetched into the watch's private ref without moving any
+  // branch; the local tip is at it or behind it — never ahead, never
+  // diverged. A behind branch is left for the first round's sync to
+  // fast-forward. Not FETCH_HEAD: the user's concurrent fetches (an IDE's
+  // autofetch, another terminal) rewrite it in this shared checkout.
+  networkGit([
+    '-C',
+    checkout,
+    'fetch',
+    '--quiet',
+    '--no-recurse-submodules',
+    remote,
+    `+refs/pull/${prNumber}/head:${paths.headRef}`,
+  ]);
+  const headSha = git('-C', checkout, 'rev-parse', `${paths.headRef}^{commit}`);
+  const localSha = git(
+    '-C',
+    checkout,
+    'rev-parse',
+    `refs/heads/${pr.headRefName}`,
+  );
+  if (localSha !== headSha && !isAncestor(checkout, localSha, headSha)) {
+    throw new Error(
+      `${pr.headRefName} has commits the PR does not have; reconcile it with the PR head ${headSha.slice(0, 12)} first — an in-place watch never discards or rewrites your commits.`,
+    );
+  }
+
+  mkdirSync(dirname(paths.lockPath), { recursive: true });
+  const state = withWatchLock(paths, prNumber, () => {
+    // Another start may have raced the check above.
+    if (readState(paths.statePath)) {
+      throw new Error(
+        `PR #${prNumber} already has a watch in this clone; run \`qwen autofix-pr cleanup ${prNumber}\` first.`,
+      );
+    }
+    let history: AutofixPrHistory | null = null;
+    try {
+      history = readHistory(
+        historyPath(paths, { host, owner, repo: repoName }),
+      );
+    } catch {
+      // An unreadable history is ignored; cleanup replaces it.
+    }
+    if (history && !sameRepository(history, { host, owner, repo: repoName })) {
+      history = null;
+    }
+    history = reconcileHistory(
+      prNumber,
+      { host, owner, repo: repoName },
+      history,
+      checkout,
+    );
+    const next: AutofixPrState = {
+      version: 1,
+      sessionId: currentSessionId(),
+      host,
+      owner,
+      repo: repoName,
+      prNumber,
+      remote,
+      pushTarget,
+      headRefName: pr.headRefName,
+      baseRefName: pr.baseRefName,
+      branch: pr.headRefName,
+      worktreePath: checkout,
+      inPlace: true,
+      viewer,
+      prAuthor: pr.author?.login ?? '',
+      authorCanPush: canPush,
+      lastKnownHeadSha: headSha,
+      preparedAt: new Date().toISOString(),
+      pushedShas: [],
+      handledCommentIds: history?.handledCommentIds ?? [],
+      postedCommentIds: history?.postedCommentIds ?? [],
+      ...(history
+        ? {
+            handledChecks: history.handledChecks,
+            rerunChecks: history.rerunChecks,
+            handledConflictSha: history.handledConflictSha ?? null,
+            pendingPosts: history.pendingPosts ?? [],
+            deferredRuns: history.deferredRuns ?? [],
+            heldChecks: history.heldChecks ?? [],
+          }
+        : {}),
+    };
+    writeAnchor({ host, owner, repo: repoName }, prNumber, repoRoot());
+    writeState(paths.statePath, next);
+    return next;
+  });
+  report(state, {
+    resumed: false,
+    inPlace: true,
+    url: pr.url,
+    isDraft: pr.isDraft,
+    isCrossRepository: pr.isCrossRepository,
+    ...localCopy(state),
+  });
+}
+
 export function runPrepare(args: PrepareArgs): void {
   if (!isOwnerRepo(args.repo)) {
     throw new TypeError(`--repo must be <owner>/<repo>, got ${args.repo}`);
   }
   const [owner, repoName] = args.repo.split('/');
   const host = resolveGhHost(args.host) ?? 'github.com';
+  if (args.inPlace) {
+    runInPlacePrepare(args, owner, repoName, host);
+    return;
+  }
   // Resume the watch wherever the clone holds it; a fresh one roots at the
   // session's own worktree. assertSessionCanRunWorktree below still refuses a
   // resolved worktree outside the session's working directory.
@@ -531,7 +698,14 @@ export function runPrepare(args: PrepareArgs): void {
       );
     }
   };
+  // An in-place watch is never resumed or converted: cleanup, then a fresh
+  // prepare in the mode the user asks for. Checked again under the lock —
+  // an in-place start may land during the gh calls above.
+  const inPlaceMismatch = `PR #${args.pr} here is an in-place watch (the user's own checkout); run \`qwen autofix-pr cleanup ${args.pr}\` first, then prepare again (with --in-place to keep fixing in your checkout).`;
   let existing = readState(paths.statePath);
+  if (existing?.inPlace) {
+    throw new Error(inPlaceMismatch);
+  }
   let tookOver = false;
   let recreated = false;
   let wasEnded: AutofixPrState['ended'];
@@ -670,6 +844,9 @@ export function runPrepare(args: PrepareArgs): void {
     // What was read before the lock may have moved since: another session
     // took the watch over, or a helper recorded more. Read it again.
     existing = readState(paths.statePath);
+    if (existing?.inPlace) {
+      throw new Error(inPlaceMismatch);
+    }
     if (existing) {
       sameWatch(existing);
       // The state written below names this session.
@@ -869,6 +1046,12 @@ export const prepareCommand: CommandModule = {
         default: false,
         describe:
           'Move a watch of this PR that another session owns to this session',
+      })
+      .option('in-place', {
+        type: 'boolean',
+        default: false,
+        describe:
+          "Fix in the user's own checkout of the PR head branch: attended, one round per start, nothing ever discarded",
       }),
   handler: (argv) => {
     const host = (argv as { host?: string }).host;
@@ -878,6 +1061,7 @@ export const prepareCommand: CommandModule = {
       repo: String(argv['repo']),
       host,
       takeOver: Boolean(argv['takeOver']),
+      inPlace: Boolean(argv['inPlace']),
     });
   },
 };
