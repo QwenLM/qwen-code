@@ -828,14 +828,33 @@ function evaluateGitSafety(args: string[]): ShellCommandSafety {
   if (subcommand === 'remote') {
     const action = rest.find((arg) => !arg.startsWith('-'))?.toLowerCase();
     if (!action) return invokesHelper ? 'unknown' : 'read-only';
-    if (['show', 'get-url'].includes(action))
-      return rest.some((arg) =>
+    if (['show', 'get-url'].includes(action)) {
+      const mutates = rest.some((arg) =>
         /^(?:add|remove|rm|rename|set-branches|set-head|set-url|update|prune)$/i.test(
           arg,
         ),
-      ) || invokesHelper
-        ? 'unknown'
-        : 'read-only';
+      );
+      if (mutates || invokesHelper) return 'unknown';
+      // `git remote show` queries the remote over the network
+      // (git-upload-pack) unless `-n` is given, so without that flag it has a
+      // network side effect and must not auto-run as read-only — the argument
+      // can be any URL. `get-url` never connects. A quote or backslash left in
+      // an argument means its text is not yet the word bash hands git (`\--`
+      // reaches git as the `--` terminator), so `-n` cannot be placed by it.
+      // git ends option parsing at `--end-of-options` just as at `--`, so a
+      // `-n` after either one is a remote name, not the flag.
+      const end = rest.findIndex(
+        (arg) => arg === '--' || arg === '--end-of-options',
+      );
+      const showOptions = end < 0 ? rest : rest.slice(0, end);
+      if (
+        action === 'show' &&
+        (!showOptions.includes('-n') || rest.some((arg) => /["'\\]/.test(arg)))
+      ) {
+        return 'unknown';
+      }
+      return 'read-only';
+    }
     if (WRITE_GIT_REMOTE_ACTION.test(action)) return 'write';
     if (action === 'prune')
       return rest.some((arg) => ['-n', '--dry-run'].includes(arg))

