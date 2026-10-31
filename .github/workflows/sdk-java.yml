@@ -291,7 +291,7 @@ jobs:
           # above: an entry the prune cannot delete must not abort the step
           # before Maven, which would then re-resolve from the network.
           if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -links +1 -delete 2>/dev/null || true
+            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
           fi
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
@@ -944,7 +944,7 @@ jobs:
           # above: an entry the prune cannot delete must not abort the step
           # before Maven, which would then re-resolve from the network.
           if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -links +1 -delete 2>/dev/null || true
+            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
           fi
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
@@ -1855,7 +1855,7 @@ jobs:
           # above: an entry the prune cannot delete must not abort the step
           # before Maven, which would then re-resolve from the network.
           if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -links +1 -delete 2>/dev/null || true
+            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
           fi
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
@@ -2149,7 +2149,7 @@ jobs:
           # above: an entry the prune cannot delete must not abort the step
           # before Maven, which would then re-resolve from the network.
           if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
-            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -links +1 -delete 2>/dev/null || true
+            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
           fi
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked

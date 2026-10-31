@@ -117,23 +117,24 @@ the bound.
 Both Maven runs already resolve from a job-local repository, so they touch no
 host-shared state. Only the cache write-back mutates `~/.m2`, so only the
 write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
-and runs before the acquisition; it then drops the two in-house fixed-release
+and runs before the acquisition; it then drops the in-house fixed-release
 coordinates from the job-local copy, so the unlocked `mvn install` writes
 fresh inodes instead of rewriting the host cache through a hardlink. Maven
 maintains tracking markers (`resolver-status.properties`, `*.lastUpdated`,
 `_remote.repositories`), version metadata and checksums (`maven-metadata-*.xml*`).
-The seed drops those hardlinks too, along with `*.tmp`, `*.part` and
+The seed drops those entries too, along with `*.tmp`, `*.part` and
 `*.part.lock` residue, so each job resolves this state locally. This does not
 assume every Resolver version writes through an existing inode.
-Only entries the seed created are dropped,
-and a missing host cache stays quiet while a real copy failure warns, so the
-warning still means the seed failed. The Maven runs run unlocked; the
-write-back holds one acquisition, and its `mkdir` and bounded `find`/`cp`
-children drop fd 9 so a survivor cannot retain the lock. The write-back
-publishes artifacts only: the resolver markers and version metadata record
-this run's resolution outcomes and are not copied into the shared cache. A
-hold now measures the copy instead of the suite, and the fast tier's budget
-is again far above one hold.
+The prune clears inherited mutable state as well: `RUNNER_TEMP` survives
+across jobs on the pool, so a previous job's single-link markers go the same
+way as the hardlinks this seed created. A missing host cache stays quiet
+while a real copy failure warns, so the warning still means the seed failed.
+The Maven runs run unlocked; the write-back holds one acquisition, and its
+`mkdir` and bounded `find`/`cp` children drop fd 9 so a survivor cannot
+retain the lock. The write-back publishes artifacts only: the resolver
+markers and version metadata record this run's resolution outcomes and are
+not copied into the shared cache. A hold now measures the copy instead of
+the suite, and the fast tier's budget is again far above one hold.
 
 The test job follows the same rule. Its suite was the other long hold: on
 2026-10-22, run 39771949573's fast-tier job failed at its 5400-second budget
@@ -334,7 +335,7 @@ order this section exists to prevent.
   line ending in `|| mvn_status=$?` with a named stage, the tolerated-skip
   arms exercised with both a green and a red status (the red ones assert the
   stage annotation and the 300 s budget), their write-back children's fd 9
-  close, the two in-house coordinates' and the tracking-marker, version
+  close, the in-house coordinates' and the tracking-marker, version
   metadata and `*.tmp` names' absence from every seeded job-local repository
   and from both write-back prunes, the seed prune staying best-effort behind
   its `2>/dev/null || true` while still de-aliasing what it can delete, the
@@ -342,9 +343,11 @@ order this section exists to prevent.
   seed-drop/prune sets agreeing at every site. The fault arms cover a missing
   `flock`, a broken `mkdir`, a stray queue file, a lock path that is a
   directory, a timed-out `flock`, an unexpected `flock` status, an unusable
-  host cache, a missing job-local repository, and a seeded entry the prune
-  cannot delete, which must still reach Maven. The `.size-baseline` entry is
-  re-measured to the workflow's size after the last edit.
+  host cache, a missing job-local repository, a seeded entry the prune
+  cannot delete, which must still reach Maven, and inherited single-link
+  resolver state in a reused job-local repository, which the prune must
+  clear. The `.size-baseline` entry is re-measured to the workflow's size
+  after the last edit.
 - Real-host soak is CI itself: the first pool runs after merge either
   acquire in ticket order or time out with an attributable ticket number.
 
@@ -355,7 +358,7 @@ order this section exists to prevent.
   its 310-minute ceiling. The test job passes its tier and the MariaDB site
   defaults to normal. Both sites run their Maven suites from a job-local
   repository before the acquisition. Every job that seeds a job-local
-  repository drops the two in-house fixed-release coordinates from the copy
+  repository drops the in-house fixed-release coordinates from the copy
   before running Maven.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`

@@ -1090,7 +1090,7 @@ describe('SDK Java self-hosted workflow guards', () => {
     // copy. The prune stays best-effort: `bash -e` would otherwise abort the
     // leg before Maven on an entry it cannot delete.
     const deAlias =
-      "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \\) -links +1 -delete 2>/dev/null || true";
+      "find \"${RUNNER_TEMP}/m2-repo\" \\( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \\) -delete 2>/dev/null || true";
     let from = 0;
     for (const seed of seeds) {
       const seedAt = workflow.indexOf(seed, from);
@@ -1204,6 +1204,84 @@ describe('SDK Java self-hosted workflow guards', () => {
       }
     },
   );
+
+  // RUNNER_TEMP survives across jobs on the pool, so the job-local repository
+  // can already hold a previous job's mutable resolver state at nlink 1 when
+  // the seed runs. The de-alias must clear that inherited state too, not just
+  // the nlink-2 hardlinks this seed created: an inherited *.lastUpdated makes
+  // Maven abort with "resolution will not be reattempted" before it downloads
+  // anything. A `-links +1` filter would skip every inherited entry.
+  it('clears inherited single-link resolver state from the job-local repository', () => {
+    const run = step(job('test'), 'Run Java SDK tests (self-hosted)');
+    const body = run.slice(
+      run.indexOf('if [ -d "${HOME}/.m2/repository" ]; then'),
+      run.indexOf('# The suite resolves from the job-local copy above'),
+    );
+    const dir = mkdtempSync(join(tmpdir(), 'sdk-java-seed-inherited-'));
+    const home = join(dir, 'home');
+    const runnerTemp = join(dir, 'runner-temp');
+    const hostCache = join(home, '.m2', 'repository');
+    const jobLocal = join(runnerTemp, 'm2-repo');
+    // A previous job's failed resolution left these markers directly in the
+    // job-local repository, plain files at nlink 1 — not seed hardlinks.
+    const inherited = [
+      join(jobLocal, 'com', 'acme', 'lib', '1.0', 'resolver-status.properties'),
+      join(jobLocal, 'com', 'acme', 'lib', '1.0', 'x.jar.lastUpdated'),
+    ];
+    for (const path of inherited) {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, 'stale-prior-job\n');
+      expect(statSync(path).nlink, path).toBe(1);
+    }
+    // The host cache seeds a marker of its own; after `cp -aln` into the
+    // existing destination it is an nlink-2 alias nested under m2-repo/.
+    const hostMarker = join(
+      hostCache,
+      'com',
+      'example',
+      'lib-1.0.jar.lastUpdated',
+    );
+    const hostJar = join(hostCache, 'com', 'example', 'lib-1.0.jar');
+    mkdirSync(dirname(hostMarker), { recursive: true });
+    writeFileSync(hostMarker, 'host\n');
+    writeFileSync(hostJar, 'jar\n');
+    try {
+      const result = spawnSync('bash', ['-e', '-c', body], {
+        encoding: 'utf8',
+        timeout: 15_000,
+        env: {
+          ...process.env,
+          HOME: home,
+          RUNNER_TEMP: runnerTemp,
+        },
+      });
+      expect(result.error, body).toBeUndefined();
+      expect(result.status, body + result.stderr).toBe(0);
+      for (const path of inherited) {
+        expect(
+          existsSync(path),
+          `${path}: inherited single-link marker survived the seed prune`,
+        ).toBe(false);
+      }
+      // The seeded alias is de-aliased in the same pass, and deleting a
+      // job-local link never removes the host peer.
+      expect(
+        existsSync(
+          join(
+            jobLocal,
+            'repository',
+            'com',
+            'example',
+            'lib-1.0.jar.lastUpdated',
+          ),
+        ),
+      ).toBe(false);
+      expect(existsSync(hostMarker)).toBe(true);
+      expect(existsSync(hostJar)).toBe(true);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
   it.skipIf(process.platform !== 'linux')(
     'publishes the delta but not resolver markers or version metadata',
