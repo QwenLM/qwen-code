@@ -69,16 +69,16 @@ exclusion; zero `TODO`/`FIXME` markers in production code.
 
 **D1. God classes.** The largest production classes:
 
-| Class                              | Module         | Lines | Notes                                                              |
-| ---------------------------------- | -------------- | ----- | ------------------------------------------------------------------ |
-| `ManagedAgentStore`                | persistence    | 7,751 | 300+ methods, 7 public setters                                     |
-| `RuntimeBrokerService`             | runtime-broker | 6,417 | 230+ methods; cooldown extracted to `ExecutionObservationCooldown` |
-| `ManagedSessionStore`              | persistence    | 3,931 |                                                                    |
-| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                    |
-| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                                    |
-| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                                    |
-| `ManagedAgentService`              | control-plane  | 2,120 |                                                                    |
-| `HarnessCoordinator`               | control-plane  | 1,770 |                                                                    |
+| Class                              | Module         | Lines | Notes                                                                                                        |
+| ---------------------------------- | -------------- | ----- | ------------------------------------------------------------------------------------------------------------ |
+| `ManagedAgentStore`                | persistence    | 7,751 | 300+ methods, 7 public setters                                                                               |
+| `RuntimeBrokerService`             | runtime-broker | 6,329 | 230+ methods; cooldown and hold inventory extracted (`ExecutionObservationCooldown`, `RuntimeHoldInventory`) |
+| `ManagedSessionStore`              | persistence    | 3,931 |                                                                                                              |
+| `WorkspaceCsiApplicationInventory` | persistence    | 3,319 |                                                                                                              |
+| `ToolPublicationDataStore`         | persistence    | 2,709 |                                                                                                              |
+| `QwenHostedHarnessConnector`       | adapters       | 2,328 |                                                                                                              |
+| `ManagedAgentService`              | control-plane  | 2,120 |                                                                                                              |
+| `HarnessCoordinator`               | control-plane  | 1,770 |                                                                                                              |
 
 `ManagedAgentStore` mixes session admission, turns, events, item/message
 projection, worktrees, MCP management, definition pins, skills, and extension
@@ -232,8 +232,17 @@ cross-cutting "how the system works today" tour.
   moves. This is the lowest-risk, highest-readability split. The observation
   cooldown is the first seam extracted (2026-10-31,
   `ExecutionObservationCooldown`): it owns the only state it touches and has
-  no lifecycle of its own; recovery scanning, cancellation and tool holds
-  follow as separate slices. Known coverage gap carried into the next slice:
+  no lifecycle of its own. The tool-hold inventory followed the same day
+  (`RuntimeHoldInventory`): the durable pagination and RELEASED filter move
+  verbatim, while the service keeps the admission, tenant resolution and
+  error-mapping boundary. Recovery scanning was investigated next and proved
+  entangled — `scanExecutions` drives `reconcileInContext`, and the
+  background-process settle family owns the `SessionContext` in-memory index
+  and the CAS settle loop — so extracting it now would create a collaborator
+  with a dozen injected callbacks rather than a clean seam; it waits for the
+  reconciliation path to become its own collaborator. Cancellation follows
+  the same rule: extract only where the seam is clean. Known coverage gap
+  carried into the reconciliation slice:
   the stamp-before-in-flight-slot-drop ordering in `lookupOnce` has no test
   pinning it (a pre-existing gap, identical at the base); pin it when the
   reconciliation path becomes its own collaborator and the ordering is a
