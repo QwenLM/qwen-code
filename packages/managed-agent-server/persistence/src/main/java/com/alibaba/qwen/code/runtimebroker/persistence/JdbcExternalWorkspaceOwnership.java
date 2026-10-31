@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.runtimebroker.persistence;
 
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.HarnessOwnership;
 import com.alibaba.qwen.code.runtimebroker.JsonCodec;
 import com.alibaba.qwen.code.runtimebroker.RuntimeAdmission;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
@@ -33,7 +34,9 @@ public final class JdbcExternalWorkspaceOwnership {
         boolean matches(RuntimeBindingRecord binding, RuntimeSessionRecord session) {
             return holderKey(binding, session).equals(holder) && binding.getBindingId().equals(bindingId)
                     && Long.valueOf(binding.getGeneration()).equals(generation)
-                    && session.getRuntimeSessionId().equals(sessionId);
+                    && (HarnessOwnership.sharesRuntimeSessions(binding.getRequest())
+                            ? sessionId == null
+                            : session.getRuntimeSessionId().equals(sessionId));
         }
     }
 
@@ -50,7 +53,8 @@ public final class JdbcExternalWorkspaceOwnership {
             statement.setString(1, JdbcRuntimeBindingRepository.storageAliasKey(tenant, storage));
             try (var row = statement.executeQuery()) {
                 if (!row.next() || !tenant.equals(row.getString("tenant_id")) || !storage.equals(row.getString("storage_id"))
-                        || !"EXTERNAL".equals(row.getString("storage_kind"))
+                        || !java.util.Set.of("EXTERNAL", "EPHEMERAL")
+                                .contains(row.getString("storage_kind"))
                         || !"REGISTERED".equals(row.getString("registration_state"))) {
                     throw unavailable();
                 }
@@ -60,7 +64,12 @@ public final class JdbcExternalWorkspaceOwnership {
                 } catch (RuntimeException invalid) {
                     throw unavailable();
                 }
-                if (!storage.equals(registration.tenantWorkspaceId())
+                if (!registration.storageKind().equals(
+                                row.getString("storage_kind"))
+                        || registration.ephemeral()
+                                && !tenant.equals(
+                                        registration.ephemeralTenantId())
+                        || !storage.equals(registration.tenantWorkspaceId())
                         || !registration.ownerKey().equals(row.getString("physical_key"))
                         || registration.registrationRevision() != row.getLong("registration_revision")) {
                     throw unavailable();
@@ -72,7 +81,8 @@ public final class JdbcExternalWorkspaceOwnership {
             statement.setString(1, registration.ownerKey());
             try (var row = statement.executeQuery()) {
                 if (!row.next() || !registration.ownerKey().equals(row.getString("physical_key"))
-                        || !"EXTERNAL".equals(row.getString("storage_kind"))
+                        || !registration.storageKind().equals(
+                                row.getString("storage_kind"))
                         || !tenant.equals(row.getString("tenant_id")) || !storage.equals(row.getString("storage_id"))
                         || !registration.mountRoot().equals(row.getString("mount_root"))
                         || registration.registrationRevision() != row.getLong("mount_revision")
@@ -87,7 +97,10 @@ public final class JdbcExternalWorkspaceOwnership {
                 Owner owner = new Owner(registration, row.getString("holder_key"), row.getString("binding_id"),
                         generation, row.getString("runtime_session_id"));
                 if (!owner.empty() && (owner.holder() == null || owner.bindingId() == null
-                        || owner.generation() == null || owner.sessionId() == null)) {
+                        || owner.generation() == null
+                        || owner.sessionId() == null
+                                && !HarnessOwnership.sharesRuntimeSessions(
+                                        binding.getRequest()))) {
                     throw unavailable();
                 }
                 return owner;
@@ -106,11 +119,15 @@ public final class JdbcExternalWorkspaceOwnership {
         }
         var boot = new TreeMap<String, Object>(ManagedContextProtocol.boot(binding.getRequest(), seed));
         boot.remove("token");
-        boot.put("storage", new TreeMap<>(Map.of("kind", "external", "physicalKey", registration.physicalKey(),
-                "aliasPath", registration.aliasPath(), "mountRoot", registration.mountRoot(),
-                "registrationRevision", registration.registrationRevision())));
-        String identity = DigestUtils.sha256Hex(JsonCodec.encode(new TreeMap<>(Map.of("version", 1,
-                "providerId", registration.providerId(), "isolationKey", binding.getRequest().getIsolationKey(), "boot", boot))));
+        boot.put("storage", new TreeMap<>(registration.bootStorage(seed)));
+        Map<String, Object> identityFields = new TreeMap<>();
+        identityFields.put("version", 1);
+        identityFields.put("providerId", registration.providerId());
+        identityFields.put(
+                "isolationKey", binding.getRequest().getIsolationKey());
+        identityFields.put("boot", boot);
+        String identity = DigestUtils.sha256Hex(
+                JsonCodec.encode(identityFields));
         if (!handle.getValue().equals(Map.of("providerId", registration.providerId(),
                 "provisionRequestId", seed.getProvisionRequestId(), "identity", identity,
                 "provider", Map.of("requestId", seed.getProvisionRequestId())))) {
@@ -142,10 +159,19 @@ public final class JdbcExternalWorkspaceOwnership {
 
     public static ContextBinding savedContext(Connection connection, RuntimeBindingRecord binding,
             boolean acquiring) throws SQLException {
+        return savedContext(connection, binding,
+                binding.getRequest().getIsolationKey(), acquiring);
+    }
+
+    public static ContextBinding savedContext(Connection connection,
+            RuntimeBindingRecord binding, String harness, boolean acquiring)
+            throws SQLException {
         var scope = binding.getRequest().getScope();
-        String harness = binding.getRequest().getIsolationKey();
+        if (harness == null) {
+            throw unavailable();
+        }
         if (acquiring) {
-            requireExecutionGrant(connection, binding);
+            requireExecutionGrant(connection, binding, harness);
         }
         try (var statement = connection.prepareStatement("SELECT * FROM ma_session WHERE tenant_id = ? AND session_id = ? FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
@@ -172,7 +198,9 @@ public final class JdbcExternalWorkspaceOwnership {
         }
     }
 
-    private static void requireExecutionGrant(Connection connection, RuntimeBindingRecord binding) throws SQLException {
+    private static void requireExecutionGrant(Connection connection,
+            RuntimeBindingRecord binding, String harnessSessionId)
+            throws SQLException {
         var scope = binding.getRequest().getScope();
         try (var statement = connection.prepareStatement("SELECT w.workspace_generation, w.storage_id FROM ma_workspace w"
                 + " JOIN ma_session s ON s.tenant_id = w.tenant_id AND s.workspace_id = w.workspace_id"
@@ -181,7 +209,8 @@ public final class JdbcExternalWorkspaceOwnership {
                 + " AND s.session_id = ? AND w.state = 'ACTIVE' AND a.role IN ('OPERATOR', 'OWNER') FOR UPDATE")) {
             JdbcRepositorySupport.setIdentity(statement, 1, scope.getTenantId());
             JdbcRepositorySupport.setIdentity(statement, 2, scope.getWorkspaceId());
-            JdbcRepositorySupport.setIdentity(statement, 3, binding.getRequest().getIsolationKey());
+            JdbcRepositorySupport.setIdentity(
+                    statement, 3, harnessSessionId);
             try (var row = statement.executeQuery()) {
                 if (!row.next() || !scope.getWorkspaceGeneration().equals(Long.toString(row.getLong("workspace_generation")))
                         || !binding.getRequest().getStorageId().equals(row.getString("storage_id")) || row.next()) {
@@ -203,7 +232,11 @@ public final class JdbcExternalWorkspaceOwnership {
                 if (!row.next() || !binding.getBindingId().equals(session.getBindingId())
                         || binding.getGeneration() != session.getRuntimeGeneration()
                         || !scope.equals(session.getSession().getScope())
-                        || !session.getSession().getHarnessSessionId().equals(binding.getRequest().getIsolationKey())
+                        || !HarnessOwnership.sharesRuntimeSessions(
+                                        binding.getRequest())
+                                && !session.getSession().getHarnessSessionId()
+                                        .equals(binding.getRequest()
+                                                .getIsolationKey())
                         || !session.getSession().getHarnessSessionId().equals(row.getString("harness_session_id"))
                         || !session.getSession().getTurnKind().equals(row.getString("turn_kind"))
                         || !scope.getTenantId().equals(row.getString("tenant_id"))
@@ -243,7 +276,10 @@ public final class JdbcExternalWorkspaceOwnership {
                 while (row.next()) {
                     if (!binding.getBindingId().equals(row.getString("binding_id"))
                             || binding.getGeneration() != row.getLong("runtime_generation")
-                            || !session.getRuntimeSessionId().equals(row.getString("runtime_session_id"))) {
+                            || !HarnessOwnership.sharesRuntimeSessions(
+                                            binding.getRequest())
+                                    && !session.getRuntimeSessionId().equals(
+                                            row.getString("runtime_session_id"))) {
                         throw busy();
                     }
                 }
@@ -260,7 +296,11 @@ public final class JdbcExternalWorkspaceOwnership {
                 statement.setString(1, holderKey(binding, session));
                 JdbcRepositorySupport.setIdentity(statement, 2, binding.getBindingId());
                 statement.setLong(3, binding.getGeneration());
-                JdbcRepositorySupport.setIdentity(statement, 4, session.getRuntimeSessionId());
+                JdbcRepositorySupport.setIdentity(statement, 4,
+                        HarnessOwnership.sharesRuntimeSessions(
+                                binding.getRequest())
+                                        ? null
+                                        : session.getRuntimeSessionId());
                 statement.setString(5, owner.registration().ownerKey());
                 if (statement.executeUpdate() != 1) {
                     throw unavailable();
@@ -343,8 +383,13 @@ public final class JdbcExternalWorkspaceOwnership {
         if (!binding.getBindingId().equals(owner.bindingId()) || !Long.valueOf(binding.getGeneration()).equals(owner.generation())) {
             throw busy();
         }
-        String expected = ManagedSchemaKeys.key("external-workspace-holder/1", binding.getBindingId(),
-                Long.toString(binding.getGeneration()), owner.sessionId());
+        String expected = HarnessOwnership.sharesRuntimeSessions(
+                        binding.getRequest())
+                ? sharedHolderKey(binding)
+                : ManagedSchemaKeys.key("external-workspace-holder/1",
+                        binding.getBindingId(),
+                        Long.toString(binding.getGeneration()),
+                        owner.sessionId());
         if (!expected.equals(owner.holder())) {
             throw unavailable();
         }
@@ -352,6 +397,12 @@ public final class JdbcExternalWorkspaceOwnership {
     }
 
     public static void requireDrainMembers(Connection connection, Owner owner, RuntimeBindingRecord binding) throws SQLException {
+        if (HarnessOwnership.sharesRuntimeSessions(binding.getRequest())) {
+            throw new RuntimeBrokerException(409,
+                    "external_workspace_recovery_required",
+                    "A resident Workspace requires explicit physical runtime recovery",
+                    false);
+        }
         if (hasHolder(connection, owner, binding)) {
             var session = JdbcRuntimeSessionRepository.selectSession(connection, binding.getRequest().getScope(), owner.sessionId(), true);
             if (session == null) {
@@ -375,8 +426,17 @@ public final class JdbcExternalWorkspaceOwnership {
     }
 
     private static String holderKey(RuntimeBindingRecord binding, RuntimeSessionRecord session) {
+        if (HarnessOwnership.sharesRuntimeSessions(binding.getRequest())) {
+            return sharedHolderKey(binding);
+        }
         return ManagedSchemaKeys.key("external-workspace-holder/1", binding.getBindingId(),
                 Long.toString(binding.getGeneration()), session.getRuntimeSessionId());
+    }
+
+    private static String sharedHolderKey(RuntimeBindingRecord binding) {
+        return ManagedSchemaKeys.key("external-workspace-shared/1",
+                binding.getBindingId(),
+                Long.toString(binding.getGeneration()));
     }
 
     private static RuntimeBrokerException unavailable() {

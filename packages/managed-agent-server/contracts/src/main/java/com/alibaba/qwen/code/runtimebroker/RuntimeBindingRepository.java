@@ -144,6 +144,17 @@ public interface RuntimeBindingRepository {
 
     public RuntimeBindingRecord findActive(RuntimeProvisionRequest request);
 
+    /**
+     * Returns the durable generation that most recently represented this
+     * request, including a released generation. Trusted saved-runtime
+     * recovery uses this to distinguish "never provisioned" from "the
+     * original generation was retired"; normal admission uses
+     * {@link #findActive(RuntimeProvisionRequest)}.
+     */
+    public default RuntimeBindingRecord findLatestForRequest(RuntimeProvisionRequest request) {
+        return findActive(request);
+    }
+
     public List<RuntimeBindingRecord> findActiveByIsolationKey(RuntimeScope scope,
             String isolationKey);
 

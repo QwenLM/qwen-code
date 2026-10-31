@@ -42,8 +42,11 @@ public final class WorkspaceExecutionProfile {
                         .equals(request.getProvisionerKind())
                 && request.isManagedContext()
                 && CAPABILITY_DIGEST.equals(request.getScope().getCapabilityDigest())
-                && admitsIsolationClass(request.getScope().getIsolationClass())
-                && request.getIsolationKey() != null && !request.getIsolationKey().trim().isEmpty()
+                && ("session".equals(request.getScope().getIsolationClass())
+                        && request.getIsolationKey() != null
+                        && !request.getIsolationKey().trim().isEmpty()
+                        || "workspace".equals(request.getScope().getIsolationClass())
+                                && request.getIsolationKey() == null)
                 && request.getScope().getWorkspaceId().equals(request.getStorageId());
     }
 }

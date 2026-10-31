@@ -34,6 +34,7 @@ import com.alibaba.qwen.code.runtimebroker.StoreFailureException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRecord;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
 import com.alibaba.qwen.code.runtimebroker.ToolHoldRow;
+import com.alibaba.qwen.code.runtimebroker.VerifiedDispatchPayload;
 import com.alibaba.qwen.code.runtimebroker.protocol.ExternalRuntimeKinds;
 import com.alibaba.qwen.code.runtimebroker.protocol.ProviderRuntimeProtocol;
 import com.alibaba.qwen.code.runtimebroker.transport.CsiFileHistoryProtocol;
@@ -1078,6 +1079,22 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         return warm(harnessSessionId, null);
     }
 
+    /** 只读查询可信会话对应的当前 Workspace 绑定，不分配也不预热运行时。 */
+    public CompletionStage<RuntimeBindingRecord> findBindingForHarnessSession(
+            String tenantId, String harnessSessionId) {
+        requireOpen();
+        String harnessId = BrokerValues.requireId(
+                harnessSessionId, "harnessSessionId");
+        return resolveScope(harnessId, false, null).thenApply(scope -> {
+            if (!scope.getTenantId().equals(tenantId)) {
+                throw conflict("runtime_session_conflict",
+                        "Harness Session belongs to another tenant");
+            }
+            return bindingRepository.findLatestForRequest(
+                    provisionRequest(scope, harnessId));
+        });
+    }
+
     public CompletionStage<RuntimeScope> capabilities(
             String harnessSessionId, RuntimeLifecycleAuthority authority) {
         requireOpen();
@@ -1820,6 +1837,10 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                                     && !"run_shell_command".equals(toolName) && !"monitor".equals(toolName)) {
                             throw invalid("runtime_payload_invalid", "Tool payload is invalid");
                         }
+                        VerifiedDispatchPayload verifiedPayload =
+                                VerifiedDispatchPayload.verify(
+                                        payloadJson,
+                                        record.getRequestDigest());
                         if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                                 && (v3 || record.getReference().containsKey("runtimeProtocol")
                                         || !Set.of("read_file", "write_file", "edit", "glob").contains(toolName))) {
@@ -1886,7 +1907,8 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                                             if (family != null) {
                                                 admitBackgroundProcess(context, current, family);
                                             }
-                                            beginDispatch(context, current, payload, grant);
+                                            beginDispatch(context, current, payload,
+                                                    grant, verifiedPayload);
                                             ToolExecutionRecord latest = executionRepository
                                                     .findByExecutionCallId(executionId);
                                             return latest == null ? current : latest;
@@ -1896,7 +1918,8 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                                     });
                         }
                         if (shouldDriveDispatch(record)) {
-                            beginDispatch(context, record, payload);
+                            beginDispatch(context, record, payload, null,
+                                    verifiedPayload);
                         }
                         ToolExecutionRecord latest = executionRepository.findByExecutionCallId(executionId);
                         return CompletableFuture.completedFuture(latest == null ? record : latest);
@@ -4651,6 +4674,34 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         return recoverBinding(bindingId, expectedGeneration, false);
     }
 
+    /** 已核原 endpoint 的宿主专用入口；快照版本过期或工具未决时不得进入恢复。 */
+    public CompletionStage<RuntimeBindingRecord> recoverExternalWorkspaceBinding(
+            String bindingId, long expectedGeneration, long expectedVersion) {
+        if (expectedVersion < 0) {
+            return failed(conflict("runtime_broker_recovery_blocked",
+                    "Invalid recovery snapshot"));
+        }
+        return recoverBinding(
+                bindingId, expectedGeneration, false, expectedVersion);
+    }
+
+    private boolean externalRecoveryEligible(RuntimeBindingRecord binding) {
+        return binding != null
+                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                        .isExternalWorkspaceRequest(binding.getRequest())
+                && "workspace".equals(
+                        binding.getRequest().getScope().getIsolationClass())
+                && (binding.getState() == RuntimeBindingRecord.State.READY
+                        || binding.getState()
+                                == RuntimeBindingRecord.State.RECOVERY_BLOCKED)
+                && !binding.isDrainRequested() && binding.getLease() != null
+                && binding.getProvisionSeed() != null
+                && binding.getProvisionSeed().matches(binding.getLease())
+                && !retirementOwns(binding)
+                && !executionRepository.hasActiveByBinding(
+                        binding.getBindingId(), binding.getGeneration());
+    }
+
     /**
      * Close owns retirement after journal settlement. Observing its retired
      * registration as journal loss would erase the clean-stop boundary. One
@@ -4670,11 +4721,24 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     }
 
     private CompletionStage<RuntimeBindingRecord> recoverBinding(String bindingId, long expectedGeneration, boolean lookupOnly) {
+        return recoverBinding(
+                bindingId, expectedGeneration, lookupOnly, null);
+    }
+
+    private CompletionStage<RuntimeBindingRecord> recoverBinding(
+            String bindingId, long expectedGeneration, boolean lookupOnly,
+            Long expectedVersion) {
         requireOpen();
         RuntimeBindingRecord record = bindingRepository.findById(bindingId);
         if (record == null || record.getGeneration() != expectedGeneration
                 || !provisioner.supportsKind(record.getRequest().getProvisionerKind())) {
             return failed(conflict("runtime_broker_recovery_blocked", "Saved Runtime recovery is unavailable"));
+        }
+        if (expectedVersion != null
+                && (record.getVersion() != expectedVersion
+                        || !externalRecoveryEligible(record))) {
+            return failed(conflict("runtime_broker_recovery_blocked",
+                    "Recovery snapshot is stale or unsettled"));
         }
         if (!lookupOnly && record.getState() != RuntimeBindingRecord.State.LOST && retirementOwns(record)) {
             return CompletableFuture.completedFuture(record);
@@ -4701,6 +4765,32 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         CompletionStage<RuntimeBindingRecord> operation = safeStage(() -> {
             if (claimed == null || claimed.getGeneration() != expectedGeneration) {
                 return failed(unavailable("runtime_reconcile_in_progress", "Another Broker owns Runtime recovery"));
+            }
+            // claimOperation 的原子版本递增必须紧接快照；恢复期间若有变更，
+            // 不能把这个绑定重新放回 READY。
+            if (expectedVersion != null
+                    && (claimed.getVersion() != expectedVersion + 1
+                            || !externalRecoveryEligible(claimed))) {
+                return failed(conflict("runtime_broker_recovery_blocked",
+                        "Recovery snapshot was fenced"));
+            }
+            if (expectedVersion != null) {
+                // 与工具 admission 共用 binding 行 CAS。先关闭新写，
+                // 再检查抢先进入的未决工具；失败时保持 BLOCKED。
+                RuntimeBindingRecord fenced =
+                        bindingRepository.compareAndSet(
+                                claimed,
+                                claimed.withState(
+                                        RuntimeBindingRecord.State.RECOVERY_BLOCKED,
+                                        claimed.getLease(),
+                                        clock.instant()));
+                if (fenced == null
+                        || executionRepository.hasActiveByBinding(
+                                fenced.getBindingId(),
+                                fenced.getGeneration())) {
+                    return failed(conflict("runtime_broker_recovery_blocked",
+                            "Recovery admission is unsettled"));
+                }
             }
             if (!lookupOnly && claimed.getState() != RuntimeBindingRecord.State.LOST && retirementOwns(claimed)) {
                 return CompletableFuture.completedFuture(claimed);
@@ -4952,17 +5042,18 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
 
     private void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared) {
-        beginDispatch(context, prepared, null);
+        beginDispatch(context, prepared, null, null, null);
     }
 
     private void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload) {
-        beginDispatch(context, prepared, payload, null);
+        beginDispatch(context, prepared, payload, null, null);
     }
 
     private void beginDispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
-            RuntimePublicationGrant grant) {
+            RuntimePublicationGrant grant,
+            VerifiedDispatchPayload verifiedPayload) {
         if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(context.binding().getRequest())
                 && (!"deferred".equals(prepared.getReference().get("dispatchMode"))
                         || prepared.getReference().containsKey("runtimeProtocol") || grant != null
@@ -4994,7 +5085,8 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         }
         CompletionStage<Void> operation;
         try {
-            operation = dispatch(context, prepared, payload, grant);
+            operation = dispatch(
+                    context, prepared, payload, grant, verifiedPayload);
         } catch (RuntimeException | Error exception) {
             dispatches.remove(prepared.getExecutionCallId(), created);
             created.completeExceptionally(exception);
@@ -5016,13 +5108,106 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
 
     private CompletionStage<Void> dispatch(SessionContext context,
             ToolExecutionRecord prepared, Map<String, Object> payload,
-            RuntimePublicationGrant grant) {
-        ToolExecutionRecord claimed = executionRepository.claimDispatch(
-                prepared.getExecutionCallId(), brokerOwnerId,
-                dispatchLeaseDuration);
+            RuntimePublicationGrant grant,
+            VerifiedDispatchPayload verifiedPayload) {
+        ToolExecutionRecord claimed = claimDispatchForPayload(
+                context, prepared, verifiedPayload);
         if (claimed == null
-                || claimed.getState()
-                        != ToolExecutionRecord.State.DISPATCHING) {
+                && com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                        .isExternalWorkspaceRequest(
+                                context.binding().getRequest())
+                && HarnessOwnership.sharesRuntimeSessions(
+                        context.binding().getRequest())) {
+            return awaitSharedDispatch(context, prepared, payload, grant,
+                    verifiedPayload);
+        }
+        return dispatchClaimed(context, claimed, payload, grant);
+    }
+
+    private ToolExecutionRecord claimDispatchForPayload(
+            SessionContext context, ToolExecutionRecord prepared,
+            VerifiedDispatchPayload payload) {
+        if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                .isExternalWorkspaceRequest(
+                        context.binding().getRequest())
+                || !HarnessOwnership.sharesRuntimeSessions(
+                        context.binding().getRequest())) {
+            return executionRepository.claimDispatch(
+                    prepared.getExecutionCallId(), brokerOwnerId,
+                    dispatchLeaseDuration);
+        }
+        return executionRepository.claimValidatedDispatch(
+                prepared.getExecutionCallId(), brokerOwnerId,
+                dispatchLeaseDuration, payload);
+    }
+
+    private CompletionStage<Void> awaitSharedDispatch(
+            SessionContext context, ToolExecutionRecord prepared,
+            Map<String, Object> payload, RuntimePublicationGrant grant,
+            VerifiedDispatchPayload verifiedPayload) {
+        // 一个等待请求只维护一个 Future；UNKNOWN 长期占槽也不会形成递归链。
+        CompletableFuture<Void> queued = new CompletableFuture<>();
+        Runnable tick = new Runnable() {
+            @Override
+            public void run() {
+                if (queued.isDone()) {
+                    return;
+                }
+                try {
+                    requireOpen();
+                    ToolExecutionRecord waiting =
+                            executionRepository.findByExecutionCallId(
+                                    prepared.getExecutionCallId());
+                    if (waiting == null || !waiting.sameIdentity(prepared)
+                            || waiting.getState()
+                                    != ToolExecutionRecord.State.PREPARED) {
+                        queued.complete(null);
+                        return;
+                    }
+                    ToolExecutionRecord next;
+                    context.lock();
+                    try {
+                        requireReadySessionRecord(context);
+                        bindingRepository.requireHarnessAdmission(
+                                context.binding().getRequest(),
+                                context.session().getScope(),
+                                context.session().getHarnessSessionId(),
+                                null);
+                        next = claimDispatchForPayload(
+                                context, prepared, verifiedPayload);
+                    } finally {
+                        context.unlock();
+                    }
+                    if (next == null) {
+                        scheduler.schedule(
+                                this, 250, TimeUnit.MILLISECONDS);
+                    } else {
+                        dispatchClaimed(
+                                context, next, payload, grant)
+                                .whenComplete((ignored, error) -> {
+                                    if (error == null) {
+                                        queued.complete(null);
+                                    } else {
+                                        queued.completeExceptionally(
+                                                unwrap(error));
+                                    }
+                                });
+                    }
+                } catch (RuntimeException | Error error) {
+                    queued.completeExceptionally(error);
+                }
+            }
+        };
+        scheduler.schedule(tick, 250, TimeUnit.MILLISECONDS);
+        return queued;
+    }
+
+    private CompletionStage<Void> dispatchClaimed(
+            SessionContext context, ToolExecutionRecord claimed,
+            Map<String, Object> payload,
+            RuntimePublicationGrant grant) {
+        if (claimed == null || claimed.getState()
+                != ToolExecutionRecord.State.DISPATCHING) {
             return CompletableFuture.completedFuture(null);
         }
         ToolExecutionRecord executing = enterExecuting(claimed);

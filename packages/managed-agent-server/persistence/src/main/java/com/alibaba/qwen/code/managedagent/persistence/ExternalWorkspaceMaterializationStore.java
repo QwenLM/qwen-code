@@ -1,6 +1,5 @@
 package com.alibaba.qwen.code.managedagent.persistence;
 
-import com.alibaba.qwen.code.managedagent.contracts.persistence.ExternalStorageRegistration;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedschema.ManagedSchemaTime;
@@ -67,26 +66,32 @@ public final class ExternalWorkspaceMaterializationStore {
             }
             var registrations = jdbc.queryForList("SELECT registration_json FROM ma_storage"
                     + " WHERE alias_key = ? AND tenant_id = ? AND storage_id = ?"
-                    + " AND storage_kind = 'EXTERNAL' AND registration_state = 'REGISTERED' FOR UPDATE",
+                    + " AND storage_kind IN ('EXTERNAL', 'EPHEMERAL')"
+                    + " AND registration_state = 'REGISTERED' FOR UPDATE",
                     String.class, aliasKey, tenant, registeredAliasId);
             if (registrations.size() != 1) {
                 throw conflict("external_workspace_conflict");
             }
-            var registration = decode(registrations.getFirst(), ExternalStorageRegistration.class);
-            String physical = registration.identity().ownerKey();
-            long revision = registration.identity().registrationRevision();
-            if (!registeredAliasId.equals(registration.alias().tenantWorkspaceId())
+            var registration =
+                    com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry.decodeRegistration(
+                            registrations.getFirst());
+            String physical = registration.ownerKey();
+            long revision = registration.registrationRevision();
+            if (registration.ephemeral() && !tenant.equals(registration.ephemeralTenantId())
+                    || !registeredAliasId.equals(registration.tenantWorkspaceId())
                     || jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ?"
-                            + " AND tenant_key = ? AND storage_key = ? AND physical_key = ? AND registration_revision = ?",
+                            + " AND tenant_key = ? AND storage_key = ? AND physical_key = ?"
+                            + " AND registration_revision = ? AND storage_kind = ?",
                             Long.class, aliasKey, JdbcRuntimeBindingRepository.storageFenceKey(tenant),
-                            JdbcRuntimeBindingRepository.storageFenceKey(registeredAliasId), physical, revision) != 1
+                            JdbcRuntimeBindingRepository.storageFenceKey(registeredAliasId), physical,
+                            revision, registration.storageKind()) != 1
                     || jdbc.queryForList("SELECT storage_key FROM ma_storage_owner WHERE storage_key = ? AND physical_key = ?"
-                            + " AND tenant_id = ? AND storage_id = ? AND storage_kind = 'EXTERNAL'"
+                            + " AND tenant_id = ? AND storage_id = ? AND storage_kind = ?"
                             + " AND mount_revision = ? AND mount_root = ? AND mount_state = 'UNVERIFIED'"
                             + " AND holder_key IS NULL AND binding_id IS NULL AND runtime_generation IS NULL"
                             + " AND runtime_session_id IS NULL AND maintenance_id IS NULL AND maintenance_generation IS NULL FOR UPDATE",
-                            String.class, physical, physical, tenant, registeredAliasId, revision,
-                            registration.alias().mountRoot()).size() != 1
+                            String.class, physical, physical, tenant, registeredAliasId,
+                            registration.storageKind(), revision, registration.mountRoot()).size() != 1
                     || !jdbc.queryForList("SELECT workspace_id FROM ma_workspace WHERE tenant_id = ?"
                             + " AND (workspace_id = ? OR storage_id = ?)", tenant, registeredAliasId, registeredAliasId).isEmpty()
                     || !jdbc.queryForList("SELECT binding_id FROM ma_runtime_binding WHERE storage_alias_key = ?"
