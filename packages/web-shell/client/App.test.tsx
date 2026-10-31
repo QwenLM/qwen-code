@@ -32749,18 +32749,19 @@ describe('App session callbacks', () => {
   it('cancels a pending btw with Ctrl+C from another editable target', async () => {
     const hold = deferred<void>();
     let signal: AbortSignal | undefined;
-    mockSessionActions.btwSessionStream.mockImplementationOnce(
-      async function* (_question?: unknown, opts?: { signal?: AbortSignal }) {
-        signal = opts?.signal;
-        yield {
-          v: 1,
-          type: 'answer',
-          requestId: 'btw-request',
-          answer: 'Working on it',
-        } as const;
-        await hold.promise;
-      },
-    );
+    mockSessionActions.btwSessionStream.mockImplementationOnce(async function* (
+      _question?: unknown,
+      opts?: { signal?: AbortSignal },
+    ) {
+      signal = opts?.signal;
+      yield {
+        v: 1,
+        type: 'answer',
+        requestId: 'btw-request',
+        answer: 'Working on it',
+      } as const;
+      await hold.promise;
+    });
     const { container } = renderApp();
     await flush();
     testState.prompt = '/btw slow answer';
