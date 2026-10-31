@@ -13777,12 +13777,14 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         label: 'Qwen4 A',
         authType: AuthType.USE_OPENAI,
         baseUrl: maasA,
+        registryBaseUrl: maasA,
       },
       {
         id: 'qwen4-plus',
         label: 'Qwen4 B',
         authType: AuthType.USE_OPENAI,
         baseUrl: maasB,
+        registryBaseUrl: maasB,
       },
     ]);
     Object.assign(innerConfig, {
@@ -13808,7 +13810,12 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       })) as NewSessionResponse;
       // The duplicate endpoints make the selected route opaque; the declared
       // high-only, non-disableable capability must survive the routing rather
-      // than being replaced by the tiered manifest.
+      // than being replaced by the tiered manifest. Pin the opaque selector
+      // first so the reasoning assertions provably exercise the routed branch.
+      expect(
+        response.configOptions?.find((entry) => entry.id === 'model')
+          ?.currentValue,
+      ).toMatch(/^qwen-route:v1:/);
       const option = response.configOptions?.find(
         (entry) => entry.id === 'reasoning_effort',
       );

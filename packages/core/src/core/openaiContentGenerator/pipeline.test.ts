@@ -1605,6 +1605,35 @@ describe('ContentGenerationPipeline', () => {
       expect(wire.reasoning_effort).toBeUndefined();
     });
 
+    it.each([
+      [
+        'a toggle-only declaration',
+        {
+          thinking: true,
+          toggleOnly: true,
+          disableField: 'enable_thinking',
+        },
+        false,
+      ],
+      ['no declaration', undefined, true],
+    ] as const)(
+      'disables a qwen4 route with %s using the knob it reads',
+      async (_label, capability, tiered) => {
+        const wire = await deepSeekWire(
+          { baseUrl: DASHSCOPE_URL, reasoning: false },
+          capability,
+          'qwen4-plus',
+        );
+        if (tiered) {
+          expect(wire.reasoning_effort).toBe('none');
+          expect(wire.enable_thinking).toBeUndefined();
+        } else {
+          expect(wire.enable_thinking).toBe(false);
+          expect(wire.reasoning_effort).toBeUndefined();
+        }
+      },
+    );
+
     it('uses the requested wire model for DeepSeek aliases and avoids leaking its knobs', async () => {
       const legacy = await deepSeekWire(
         {

@@ -333,7 +333,6 @@ import {
   resolveReasoningForModel,
 } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
 import { getDeepSeekReasoningState } from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
-import { isTieredEffortQwenPrefix } from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
 import {
   applyReasoningSelection,
@@ -344,6 +343,7 @@ import {
   getDefaultReasoningConfig,
   getGptReasoningOverrideState,
   getModelConfiguration,
+  hasTieredManifestReasoning,
   isReasoningSelectionSupported,
   PERSIST_REASONING_SELECTION_META_KEY,
   parseReasoningSelection,
@@ -17676,7 +17676,7 @@ class QwenAgent implements Agent {
       (currentModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
         !modelReasoning?.profile &&
         !deepSeekState &&
-        !isTieredEffortQwenPrefix(reasoningModel)) ||
+        !hasTieredManifestReasoning(reasoningModel)) ||
       !isReasoningSelectionSupported(
         reasoningModel,
         REASONING_EFFORT_DEFAULT,
@@ -17851,7 +17851,7 @@ class QwenAgent implements Agent {
       // selectors neither hide the controls nor replace a declaration.
       if (reasoning) return reasoning;
       const wireModel = getRequestModel(generation ?? {});
-      return isTieredEffortQwenPrefix(wireModel)
+      return hasTieredManifestReasoning(wireModel)
         ? getModelConfiguration(wireModel)?.reasoning
         : undefined;
     }

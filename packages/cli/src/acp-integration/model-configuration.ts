@@ -325,6 +325,21 @@ export function getModelConfiguration(
         : undefined;
 }
 
+/**
+ * Routed (opaque) selectors keep their effort controls when the manifest
+ * carries a tiered contract for the model: the new Qwen prefixes and the
+ * stable tiered family they inherit their ladder from. Toggle-only manifest
+ * entries stay on the generic route guard.
+ */
+export function hasTieredManifestReasoning(
+  modelId: string | undefined,
+): boolean {
+  if (!modelId) return false;
+  if (isTieredEffortQwenPrefix(modelId)) return true;
+  const entry = MODEL_CONFIGURATIONS[modelId]?.reasoning;
+  return !!entry && !entry.toggleOnly;
+}
+
 export function getConfiguredModelReasoning(
   config: Config,
   modelId = config.getModel?.(),
@@ -673,10 +688,11 @@ export function buildModelReasoningRoutePreview(
     model === generation.model && generation.thinkingMandatory === true;
   // The new tiered Qwen families resolve no core capability without a
   // declaration; on routed (opaque) selectors the manifest fallback is their
-  // known contract, so the controls must survive the route guard. The prefix
-  // only ever maps to the tiered (non-toggle) manifest entry.
+  // known contract, so the controls must survive the route guard. The same
+  // holds for the stable tiered family the new prefixes inherit from. Both
+  // only ever map to tiered (non-toggle) manifest entries.
   const qwenManifest =
-    reasoning === undefined && isTieredEffortQwenPrefix(model)
+    reasoning === undefined && hasTieredManifestReasoning(model)
       ? (getModelConfiguration(model)?.reasoning as
           | ResolvedReasoning
           | undefined)

@@ -819,7 +819,7 @@ describe('model configuration manifest', () => {
     ).toBeUndefined();
   });
 
-  it('keeps display aligned with the wire for a declared new-alias route', () => {
+  it('does not re-tier the display for a declared new-alias route', () => {
     const generation = {
       model: 'deepseek-v4.1-flash-custom',
       authType: 'openai',
@@ -841,8 +841,10 @@ describe('model configuration manifest', () => {
         },
       }),
     } as unknown as Config;
-    // The wire ships the declared route's static tier verbatim; the display
-    // must not normalize it to a different tier.
+    // The display reports the configured tier as the user set it. The
+    // declared-capability wire path separately drops an out-of-ladder tier
+    // (pinned by the sibling pipeline test); the built-in normalizer must
+    // not re-tier the display into a tier the user did not choose.
     expect(getReasoningForDisplay(config, generation)).toEqual({
       effort: 'xhigh',
     });
