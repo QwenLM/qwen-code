@@ -254,7 +254,10 @@ public class HarnessPoolConnector implements HarnessConnector {
             List<Member> candidates = accepting.stream()
                     .filter(value -> value.reachable && !value.quiescing).toList();
             if (candidates.isEmpty()) {
-                if (member == null || !member.reachable) {
+                // A released placement's owner has let the Session go and can answer its calls
+                // hosted_session_not_found, which a caller may take for the Session having ended
+                // (#15795). A quiescing owner still holds the Session until its release commits.
+                if (member == null || !member.reachable || "RELEASED".equals(placement.state())) {
                     throw unavailable();
                 }
             } else {

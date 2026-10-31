@@ -101,10 +101,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     // a larger generation answers runtime_broker_runtime_lost and the next
     // reclaim resumes where this one stopped.
     private static final int MAX_RECOVERY_PASSES = 16;
-    // An UNKNOWN record the Runtime just answered for is not asked again
-    // inside this window; sequential observations share the one lookup.
-    static final Duration UNKNOWN_LOOKUP_COOLDOWN =
-            Duration.ofSeconds(1);
     /**
      * Floor for {@code v3ResultWindow}: refuses sub-second durations. The
      * managed-agent-server property declares {@code @DurationUnit(SECONDS)},
@@ -150,8 +146,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
     private final ConcurrentMap<String,
             CompletableFuture<ExecutionReconciliation>> reconciliations =
                     new ConcurrentHashMap<>();
-    private final ConcurrentMap<String, CooledObservation>
-            unknownLookupCooldowns = new ConcurrentHashMap<>();
+    private final ExecutionObservationCooldown observationCooldown;
 
     /**
      * H4b: the live physical Runtime binding of a Harness Session — how
@@ -334,6 +329,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
         this.executionIdSupplier = executionIdSupplier;
         this.scheduler = scheduler;
         this.renewalScheduler = renewalScheduler;
+        this.observationCooldown = new ExecutionObservationCooldown(clock, scheduler);
     }
 
     public boolean supportsDrainedStop() {
@@ -2571,30 +2567,10 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
             boolean takeover, boolean cooled) {
         String executionId = unknown.getExecutionCallId();
         if (cooled) {
-            CooledObservation cooledObservation =
-                    unknownLookupCooldowns.get(executionId);
-            if (cooledObservation != null
-                    && clock.instant().isBefore(cooledObservation.deadline())) {
-                ExecutionReconciliation cached =
-                        cooledObservation.reconciliation();
-                if (cached.getRecord().getState()
-                        != ToolExecutionRecord.State.UNKNOWN) {
-                    // The cached lookup settled or abandoned the record:
-                    // replay it whole. Pairing its terminal answer with this
-                    // caller's pre-settlement UNKNOWN snapshot would report
-                    // a settled execution as unknown.
-                    return CompletableFuture.completedFuture(cached);
-                }
-                // Both records are UNKNOWN here; serve the fresher of the
-                // caller's snapshot and the lookup's own re-read (a cancel
-                // can land between them), with the cached worker answer.
-                ToolExecutionRecord freshest =
-                        cached.getRecord().getVersion() > unknown.getVersion()
-                                ? cached.getRecord() : unknown;
-                return CompletableFuture.completedFuture(
-                        new ExecutionReconciliation(freshest,
-                                cached.getOutcome(),
-                                cached.getRuntimeState()));
+            ExecutionReconciliation cached =
+                    observationCooldown.cooled(executionId, unknown);
+            if (cached != null) {
+                return CompletableFuture.completedFuture(cached);
             }
         }
         CompletableFuture<ExecutionReconciliation> created =
@@ -2663,7 +2639,7 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                         // through to the worker. A failed lookup cools as
                         // UNRESOLVED: the Runtime was just unreachable, and
                         // hammering it changes nothing.
-                        stampUnknownLookupCooldown(executionId,
+                        observationCooldown.stamp(executionId,
                                 error == null ? reconciled
                                         : new ExecutionReconciliation(unknown,
                                                 ExecutionReconciliation.Outcome
@@ -2677,35 +2653,6 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
                     }
                 });
         return created;
-    }
-
-    // A lookup that just ran is the freshest answer any sequential observer
-    // can act on; without the cooldown every observation fans through to the
-    // worker (issue #13183 saw hundreds of status calls per execution).
-    private void stampUnknownLookupCooldown(String executionId,
-            ExecutionReconciliation reconciliation) {
-        Instant deadline = clock.instant().plus(UNKNOWN_LOOKUP_COOLDOWN);
-        CooledObservation observation = new CooledObservation(reconciliation,
-                deadline);
-        unknownLookupCooldowns.put(executionId, observation);
-        try {
-            // The eviction consults the same clock as the deadline check, so
-            // a service clock that moves differently from the scheduler's
-            // wall time can never evict an entry its reads still consider
-            // fresh.
-            scheduler.schedule(() -> {
-                if (!clock.instant().isBefore(observation.deadline())) {
-                    unknownLookupCooldowns.remove(executionId, observation);
-                }
-            }, UNKNOWN_LOOKUP_COOLDOWN.toMillis(), TimeUnit.MILLISECONDS);
-        } catch (RuntimeException ignored) {
-            // A closing service keeps no cooldown state.
-            unknownLookupCooldowns.remove(executionId, observation);
-        }
-    }
-
-    private record CooledObservation(ExecutionReconciliation reconciliation,
-            Instant deadline) {
     }
 
     private static Map<String, Object> projectV3Status(Map<String, Object> response) {

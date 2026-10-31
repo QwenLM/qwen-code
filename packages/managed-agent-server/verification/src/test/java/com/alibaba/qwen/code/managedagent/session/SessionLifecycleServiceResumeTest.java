@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -31,7 +32,6 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.time.ZoneOffset;
-import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -60,9 +60,14 @@ class SessionLifecycleServiceResumeTest {
         var transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         String sessionId = transactions.execute(ignored ->
-                store.insertWorkspaceSessionCommand(TENANT, "owner", "create",
-                        "digest", "qwen-code", null, null, List.of(), null,
-                        new WorkspaceSelection("workspace", ".")).sessionId());
+                store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(TENANT)
+                        .actorId("owner")
+                        .idempotencyKey("create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build()).sessionId());
         // The first close runs v1 and fails terminally: the Session parks in
         // CLOSING and the fence row keeps the claim released.
         String firstOperation = store.beginWorkspaceLifecycle(TENANT,
@@ -122,9 +127,14 @@ class SessionLifecycleServiceResumeTest {
         var transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         String sessionId = transactions.execute(ignored ->
-                store.insertWorkspaceSessionCommand(TENANT, "owner", "create",
-                        "digest", "qwen-code", null, null, List.of(), null,
-                        new WorkspaceSelection("workspace", ".")).sessionId());
+                store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(TENANT)
+                        .actorId("owner")
+                        .idempotencyKey("create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build()).sessionId());
         // The first delete runs v1 against the ACTIVE Session and fails
         // terminally: the Session parks in DELETING and the fence row keeps
         // the claim released.
@@ -195,9 +205,14 @@ class SessionLifecycleServiceResumeTest {
         var transactions = new TransactionTemplate(
                 new DataSourceTransactionManager(dataSource));
         String sessionId = transactions.execute(ignored ->
-                store.insertWorkspaceSessionCommand(TENANT, "owner", "create",
-                        "digest", "qwen-code", null, null, List.of(), null,
-                        new WorkspaceSelection("workspace", ".")).sessionId());
+                store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(TENANT)
+                        .actorId("owner")
+                        .idempotencyKey("create")
+                        .requestDigest("digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build()).sessionId());
         // The first close runs v1, persists its effects receipt — the fence
         // moves to DRAINING — and only then fails terminally.
         String firstOperation = store.beginWorkspaceLifecycle(TENANT,

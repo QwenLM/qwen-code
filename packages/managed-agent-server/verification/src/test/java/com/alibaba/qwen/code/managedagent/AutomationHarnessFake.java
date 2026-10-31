@@ -93,6 +93,8 @@ public final class AutomationHarnessFake {
     public final Set<String> crashedRuns = new HashSet<>();
     /** A test seam: thrown once by the next reconcile_run, then cleared. */
     public volatile RuntimeException failNextReconcile;
+    /** Runs once as the next reconcile_run arrives: a Session ending then. */
+    public Runnable beforeReconcile;
     /**
      * A test seam: the next define_schedule commits (its operation, too)
      * and then has its answer lost once.
@@ -331,6 +333,11 @@ public final class AutomationHarnessFake {
                 }
             }
             case "reconcile_run" -> {
+                Runnable arrival = beforeReconcile;
+                if (arrival != null) {
+                    beforeReconcile = null;
+                    arrival.run();
+                }
                 RuntimeException failure = failNextReconcile;
                 if (failure != null) {
                     failNextReconcile = null;

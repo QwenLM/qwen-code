@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.ReplayCursorExpired;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
@@ -480,17 +481,28 @@ public class ManagedAgentService implements com.alibaba.qwen.code.managedagent.c
         boolean approvalSelectionSupported = harness.supportsApprovalSelection()
                 && ("qwen-code".equals(agentId) || harness.supportsAgentDefinitionApprovalSelection());
         try {
-            admission = worktreePlan == null ? store.insertWorkspaceSessionCommand(tenantId,
-                    actorId, idempotencyKey, requestDigest, agentId, agentRevision,
-                    effectiveTitle, input, payloadDigest, selection, approvalMode,
-                    approvalSelectionSupported,
-                    planMode, harness.supportsPlanMode(), additions, harness.supportsPublicChildAgents(), modelId, extensionPins,
-                    extensionLifecycleProfiles)
-                    : store.insertWorkspaceSessionCommand(tenantId,
-                            actorId, idempotencyKey, requestDigest, agentId, agentRevision,
-                            effectiveTitle, input, payloadDigest, selection, approvalMode,
-                            approvalSelectionSupported, planMode, harness.supportsPlanMode(), additions,
-                            harness.supportsPublicChildAgents(), modelId, extensionPins, extensionLifecycleProfiles, worktreePlan);
+            admission = store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                    .tenantId(tenantId)
+                    .actorId(actorId)
+                    .idempotencyKey(idempotencyKey)
+                    .requestDigest(requestDigest)
+                    .agentId(agentId)
+                    .requestedRevision(agentRevision)
+                    .title(effectiveTitle)
+                    .input(input)
+                    .payloadDigest(payloadDigest)
+                    .selection(selection)
+                    .requestedApprovalMode(approvalMode)
+                    .approvalSelectionSupported(approvalSelectionSupported)
+                    .requestedPlanMode(planMode)
+                    .planModeSupported(harness.supportsPlanMode())
+                    .skills(additions)
+                    .publicChildrenSupported(harness.supportsPublicChildAgents())
+                    .modelId(modelId)
+                    .extensionPins(extensionPins)
+                    .extensionLifecycleProfiles(extensionLifecycleProfiles)
+                    .worktree(worktreePlan)
+                    .build());
         } catch (DuplicateKeyException error) {
             admission = store.replayWorkspaceSessionCommand(tenantId,
                     actorId, idempotencyKey, requestDigest);

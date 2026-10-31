@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.workspace.runtime;
 
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionQueryStore;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ChildWorkspaceProvider;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.ResidentWorkspaceCatalog;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.RuntimeWarmer;
@@ -26,7 +26,7 @@ import java.util.concurrent.CompletionStage;
 
 public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
     private final RuntimeBrokerOperations service;
-    private final AgentStateStore store;
+    private final SessionQueryStore store;
     private final WorkspaceRuntimeResolver workspaces;
     private final ChildWorkspaceProvider childWorkspaces;
     private final ResidentWorkspaceCatalog residents;
@@ -37,7 +37,7 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
     private final WorkspacePhysicalTransport extensionTransport;
     private final java.util.Set<String> retired = java.util.concurrent.ConcurrentHashMap.newKeySet();
     private static final java.util.Set<String> LIFECYCLE_FENCED = java.util.Set.of("CLOSING", "CLOSED", "ARCHIVING", "ARCHIVED", "DELETING", "DELETED");
-    public ManagedRuntimeCoordinator(RuntimeBrokerOperations service, AgentStateStore store, WorkspaceRuntimeResolver workspaces,
+    public ManagedRuntimeCoordinator(RuntimeBrokerOperations service, SessionQueryStore store, WorkspaceRuntimeResolver workspaces,
             ChildWorkspaceProvider childWorkspaces, ResidentWorkspaceCatalog residents, boolean resident,
             SshWorkspaceService ssh, RuntimeProvisioner localProvisioner, RuntimeBindingRepository extensionBindings,
             WorkspacePhysicalTransport extensionTransport) {
@@ -52,7 +52,7 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
         this.extensionBindings = extensionBindings;
         this.extensionTransport = extensionTransport;
     }
-    public static HarnessSessionResolver resolver(AgentStateStore store, WorkspaceRuntimeResolver workspaces,
+public static HarnessSessionResolver resolver(SessionQueryStore store, WorkspaceRuntimeResolver workspaces,
             ManagedAgentSettings properties, String workspaceId, String workspaceCwd,
             com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore workspaceExecutionStore) {
         var broker = properties.getRuntimeBroker();

@@ -11,6 +11,7 @@ import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtension
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionRecords;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.WorkspaceCsiRegistration;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceToolProfiles;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
@@ -408,113 +409,28 @@ public class ManagedAgentStore implements AgentStateStore {
 
     @Override
     @Transactional
-    public Admission insertWorkspaceSessionCommand(String tenantId,
-            String actorId, String idempotencyKey, String requestDigest,
-            String agentId, String requestedRevision, String title,
-            List<Map<String, Object>> input, String payloadDigest,
-            WorkspaceSelection selection) {
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey,
-                requestDigest, agentId, requestedRevision, title, input,
-                payloadDigest, selection, null);
-    }
-
-    @Override
-    @Transactional
-    public Admission insertWorkspaceSessionCommand(String tenantId,
-            String actorId, String idempotencyKey, String requestDigest,
-            String agentId, String requestedRevision, String title,
-            List<Map<String, Object>> input, String payloadDigest,
-            WorkspaceSelection selection, String requestedApprovalMode) {
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey,
-                requestDigest, agentId, requestedRevision, title, input, payloadDigest,
-                selection, requestedApprovalMode, false);
-    }
-
-    @Override
-    @Transactional
-    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId,
-            String requestedRevision, String title, List<Map<String, Object>> input,
-            String payloadDigest, WorkspaceSelection selection, String requestedApprovalMode,
-            boolean approvalSelectionSupported) {
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
-                agentId, requestedRevision, title, input, payloadDigest, selection,
-                requestedApprovalMode, approvalSelectionSupported, null, false);
-    }
-
-    @Override
-    @Transactional
-    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId,
-            String requestedRevision, String title, List<Map<String, Object>> input,
-            String payloadDigest, WorkspaceSelection selection, String requestedApprovalMode,
-            boolean approvalSelectionSupported, Boolean requestedPlanMode, boolean planModeSupported) {
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
-                agentId, requestedRevision, title, input, payloadDigest, selection, requestedApprovalMode,
-                approvalSelectionSupported, requestedPlanMode, planModeSupported, List.of());
-    }
-
-    @Override
-    @Transactional
-    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId,
-            String requestedRevision, String title, List<Map<String, Object>> input,
-            String payloadDigest, WorkspaceSelection selection, String requestedApprovalMode,
-            boolean approvalSelectionSupported, Boolean requestedPlanMode, boolean planModeSupported,
-            List<Map<String, Object>> skills) {
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
-                agentId, requestedRevision, title, input, payloadDigest, selection, requestedApprovalMode,
-                approvalSelectionSupported, requestedPlanMode, planModeSupported, skills, false);
-    }
-
-    @Override
-    @Transactional
-    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
-            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
-            String requestedApprovalMode, boolean approvalSelectionSupported, Boolean requestedPlanMode,
-            boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported) {
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
-                agentId, requestedRevision, title, input, payloadDigest, selection, requestedApprovalMode,
-                approvalSelectionSupported, requestedPlanMode, planModeSupported, skills, publicChildrenSupported, null);
-    }
-
-    @Override
-    @Transactional
-    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
-            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
-            String requestedApprovalMode, boolean approvalSelectionSupported, Boolean requestedPlanMode,
-            boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId) {
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest, agentId, requestedRevision,
-                title, input, payloadDigest, selection, requestedApprovalMode, approvalSelectionSupported,
-                requestedPlanMode, planModeSupported, skills, publicChildrenSupported, modelId, null, Set.of());
-    }
-
-    @Override
-    @Transactional
-    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
-            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
-            String requestedApprovalMode, boolean approvalSelectionSupported, Boolean requestedPlanMode,
-            boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
-            List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins,
-            Set<String> extensionLifecycleProfiles) {
-        return insertWorkspaceSessionCommand(tenantId, actorId, idempotencyKey, requestDigest,
-                agentId, requestedRevision, title, input, payloadDigest, selection, requestedApprovalMode,
-                approvalSelectionSupported, requestedPlanMode, planModeSupported, skills, publicChildrenSupported,
-                modelId, extensionPins, extensionLifecycleProfiles, null);
-    }
-
-    @Override
-    @Transactional
-    public Admission insertWorkspaceSessionCommand(String tenantId, String actorId,
-            String idempotencyKey, String requestDigest, String agentId, String requestedRevision,
-            String title, List<Map<String, Object>> input, String payloadDigest, WorkspaceSelection selection,
-            String requestedApprovalMode, boolean approvalSelectionSupported, Boolean requestedPlanMode,
-            boolean planModeSupported, List<Map<String, Object>> skills, boolean publicChildrenSupported, String modelId,
-            List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins,
-            Set<String> extensionLifecycleProfiles, SessionWorktreeStore.Plan worktree) {
+    public Admission insertWorkspaceSessionCommand(SessionCreationCommand command) {
+        String tenantId = command.tenantId();
+        String actorId = command.actorId();
+        String idempotencyKey = command.idempotencyKey();
+        String requestDigest = command.requestDigest();
+        String agentId = command.agentId();
+        String requestedRevision = command.requestedRevision();
+        String title = command.title();
+        List<Map<String, Object>> input = command.input();
+        String payloadDigest = command.payloadDigest();
+        WorkspaceSelection selection = command.selection();
+        String requestedApprovalMode = command.requestedApprovalMode();
+        boolean approvalSelectionSupported = command.approvalSelectionSupported();
+        Boolean requestedPlanMode = command.requestedPlanMode();
+        boolean planModeSupported = command.planModeSupported();
+        List<Map<String, Object>> skills = command.skills();
+        boolean publicChildrenSupported = command.publicChildrenSupported();
+        String modelId = command.modelId();
+        List<com.alibaba.qwen.code.managedagent.contracts.extensions.ManagedExtensionPackages.Pin> extensionPins =
+                command.extensionPins();
+        Set<String> extensionLifecycleProfiles = command.extensionLifecycleProfiles();
+        SessionWorktreeStore.Plan worktree = command.worktree();
         if (!input.isEmpty() && !workspaceFilesEnabled) {
             throw workspaceExecutionUnavailable();
         }
