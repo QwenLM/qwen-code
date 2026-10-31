@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent.session;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
+import com.alibaba.qwen.code.managedagent.model.ApiModels.PublicEvent;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.WebShellEvent;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.EventRecord;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayWindow;
@@ -17,6 +18,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.List;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -512,7 +514,9 @@ class ManagedEventStreamServiceTest {
         ManagedAgentService agentService = new ManagedAgentService(store,
                 null, null, null, mock(ManagedWorkspaceRegistry.class), new com.alibaba.qwen.code.managedagent.harness.SdkHarnessRules());
         when(store.requireSession("tenant", "session")).thenReturn(SESSION);
-        List<EventRecord> records = List.of(event(1, false),
+        List<EventRecord> records = List.of(
+                new EventRecord("tenant", "session", 1, "event-1", null,
+                        "session.created", java.util.Map.of(), false, "source-1", 1234),
                 new EventRecord("tenant", "session", 2, "event-2", "turn",
                         "turn.completed", java.util.Map.of(), true, "source-2", 1),
                 event(3, true));
@@ -523,13 +527,19 @@ class ManagedEventStreamServiceTest {
             initialRead.countDown();
             return reconcile ? records : List.of();
         });
-        AtomicInteger sent = new AtomicInteger();
+        List<Object> payloads = new CopyOnWriteArrayList<>();
+        List<String> metadata = new CopyOnWriteArrayList<>();
         AtomicBoolean failed = new AtomicBoolean();
         CountDownLatch stopped = new CountDownLatch(1);
         SseEmitter emitter = new SseEmitter() {
             @Override
             public void send(SseEventBuilder builder) {
-                sent.incrementAndGet();
+                var frame = builder.build();
+                metadata.add(frame.stream().map(DataWithMediaType::getData)
+                        .filter(String.class::isInstance).map(String.class::cast)
+                        .collect(java.util.stream.Collectors.joining()));
+                frame.stream().map(DataWithMediaType::getData)
+                        .filter(data -> !(data instanceof String)).forEach(payloads::add);
                 when(store.requireSession("tenant", "session")).thenReturn(
                         new SessionRecord("tenant", "session", "qwen-code",
                                 null, "DELETED", null, null, 0,
@@ -562,7 +572,26 @@ class ManagedEventStreamServiceTest {
                 hub.publish(records);
             }
             assertThat(stopped.await(2, TimeUnit.SECONDS)).isTrue();
-            assertThat(sent.get()).isEqualTo(3);
+            assertThat(payloads).hasSize(3);
+            assertThat(metadata).hasSize(records.size());
+            for (int index = 0; index < records.size(); index++) {
+                assertThat(metadata.get(index)).contains(
+                        "id:" + records.get(index).sequence() + "\n",
+                        "event:" + records.get(index).type() + "\n");
+            }
+            if (webShell) {
+                assertThat(payloads).allSatisfy(payload -> assertThat(payload).isInstanceOf(WebShellEvent.class));
+                assertThat(payloads).extracting(payload -> ((WebShellEvent) payload).createdAt())
+                        .containsExactly(1234L, 1L, 1L);
+                assertThat(payloads).extracting(payload -> ((WebShellEvent) payload).sequence())
+                        .containsExactly(1L, 2L, 3L);
+            } else {
+                assertThat(payloads).allSatisfy(payload -> assertThat(payload).isInstanceOf(PublicEvent.class));
+                assertThat(payloads).extracting(payload -> ((PublicEvent) payload).createdAt())
+                        .containsExactly(1L, 0L, 0L);
+                assertThat(payloads).extracting(payload -> ((PublicEvent) payload).sequence())
+                        .containsExactly(1L, 2L, 3L);
+            }
             assertThat(failed).isFalse();
             executor.shutdown();
             assertThat(executor.awaitTermination(1, TimeUnit.SECONDS)).isTrue();

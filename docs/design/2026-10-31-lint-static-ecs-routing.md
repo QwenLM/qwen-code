@@ -19,6 +19,14 @@ assigned from a single resolved fleet ladder:
 | `ubuntu_runner` | same-repo heads, `OWNER` / `MEMBER` / `COLLABORATOR` authors, `merge_group`, `push` — else hosted | `test`, `integration_no_ak`, `integration_cli`, `web_shell_e2e_smoke` |
 | `lint_runner`   | every `pull_request`, untrusted forks included; otherwise identical to `ubuntu_runner`            | `lint_and_static`                                                     |
 
+`classify_pr`'s OWN runner is unconditional ECS (kill-switch excepted) for
+every event it accepts. The gate executes only trusted base-SHA code with a
+read-only token — strictly less exposure than the lint lane — and keeping it
+on hosted for untrusted forks queued the entire fork CI chain (classify is
+the `needs` prerequisite of every Linux lane) behind the scarce hosted pool.
+The association gate survives where it bounds heavy PR-code execution:
+`ubuntu_runner`, read by the test and integration lanes.
+
 Fallback priority: `MAINTAINER_ECS_RUNNER_DISABLED=true` overrides everything,
 including manual dispatch. `LINUX_RUNNER_FLEET=hosted` forces pull requests,
 merge groups and pushes to hosted, but a `workflow_dispatch` run whose
@@ -123,7 +131,9 @@ minutes, test 120, web-shell smoke 60, no-AK integration 30.
 ## Tests
 
 `.github/scripts/ci-runner-routing.test.mjs` (in `HELPER_TESTS`, so it gates
-every full-profile PR) pins: the producer binding
+every full-profile PR) pins: the gate's unconditional ECS routing across the
+full association matrix (kill-switch reverting it, no association clause
+creeping back), the producer binding
 (`classify_pr.outputs.lint_runner` ← `pick_runner`), the full association /
 event matrix against the real selector shell, the single-lane scope of
 `lint_runner` (a superset must update this record), the run-unique HOME
@@ -138,12 +148,14 @@ why the load-bearing HOME guard lives in the routing battery.
 ## Decision record and open questions
 
 - Acceptance: jinjing reviewed and accepted the shared-pool code-execution
-  risk on 2026-10-31, with Lint & Static as the sole default-routing change —
-  noting that the association gate is not enforceable against a fork that
-  rewrites the workflow YAML, so the acceptance covers the residual surface
-  above, not a one-lane fence. A second maintainer's confirmation is welcome
-  (triage stage-3 deferred on exactly this); it is a human decision, not a
-  code change.
+  risk on 2026-10-31 for Lint & Static, and later the same day extended the
+  default ECS routing to the classify_pr gate (a strict subset of the lint
+  exposure: trusted base-SHA code, read-only token) so fork PRs no longer
+  queue behind hosted at the prerequisite job — noting that the association
+  gate is not enforceable against a fork that rewrites the workflow YAML, so
+  the acceptance covers the residual surface above, not a one-lane fence. A
+  second maintainer's confirmation is welcome (triage stage-3 deferred on
+  exactly this); it is a human decision, not a code change.
 - The PR's own CI exercises the routing plumbing on the pool (the author is a
   collaborator, so both outputs agree on that run); the fork divergence is
   proven by the routing battery, and its first live end-to-end witness is the
