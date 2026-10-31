@@ -35,6 +35,7 @@ import {
   estimateContentTokens,
   estimatePromptTokens,
 } from './tokenEstimation.js';
+import { markCompressedHistory } from '../core/environmentContext.js';
 import {
   buildStateReminderParts,
   composePostCompactHistory,
@@ -1348,6 +1349,7 @@ export class ChatCompressionService {
             ],
           },
         ];
+        markCompressedHistory(extraHistory);
       }
 
       // Best-effort token math using model-reported token counts when

@@ -23,6 +23,7 @@ import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { markCompressedHistory } from '../core/environmentContext.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
 
@@ -909,5 +910,8 @@ export async function composePostCompactHistory(
     out.push({ role: 'model', parts: ackParts });
   }
 
+  // Freeze the 2-entry prefix now, so a later real prompt that happens to
+  // look like a legacy attachment block is not counted as part of it.
+  markCompressedHistory(out);
   return out;
 }

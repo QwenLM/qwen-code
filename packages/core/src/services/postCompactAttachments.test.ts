@@ -597,7 +597,7 @@ describe('buildFileRestorationBlocks', () => {
     );
     expect(
       getStartupContextLength(compacted, { includeCompressed: true }),
-    ).toBe(4);
+    ).toBe(2);
   });
 
   it('produces one extra user message per embedded small file with its full content', async () => {
@@ -862,18 +862,39 @@ describe('composePostCompactHistory', () => {
       [fileReadCall(path), { role: 'user', parts: [image] }],
       'Summary.',
     );
-    expect(result.map((entry) => entry.role)).toEqual([
-      'user',
-      'model',
-      'user',
-    ]);
-    expect(result[2]?.parts).toContainEqual(image);
+    expect(result.map((entry) => entry.role)).toEqual(['user', 'model']);
+    expect(result[0]?.parts).toContainEqual(image);
     expect(
-      result[2]?.parts?.some((part) =>
+      result[0]?.parts?.some((part) =>
         part.text?.includes('Restored file contents.'),
       ),
     ).toBe(true);
     expect(detectTurnInterruption(result)).toEqual({ kind: 'none' });
+  });
+
+  it('does not count later attachment-shaped input as part of the prefix', async () => {
+    const image = { inlineData: { mimeType: 'image/png', data: 'AA==' } };
+    const compacted = await composePostCompactHistory(
+      [{ role: 'user', parts: [image] }],
+      'Summary.',
+      { maxFiles: 0 },
+    );
+    const input: Content = {
+      role: 'user',
+      parts: [
+        {
+          text: 'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+        },
+      ],
+    };
+    const history = [...compacted, input];
+    expect(getStartupContextLength(history, { includeCompressed: true })).toBe(
+      2,
+    );
+    expect(detectTurnInterruption(history)).toEqual({
+      kind: 'interrupted_prompt',
+      parts: input.parts,
+    });
   });
 
   it('returns summary + ack only when history has no files or images', async () => {
@@ -1486,7 +1507,7 @@ describe('composePostCompactHistory — subagent snapshot', () => {
     expect(flat).toContain('agent-1');
     expect(flat).toContain('Run the bookmark-app E2E');
     expect(getStartupContextLength(result, { includeCompressed: true })).toBe(
-      3,
+      2,
     );
     expect(flat).toContain('agent-2');
     expect(flat).toContain('Refactor session manager');
