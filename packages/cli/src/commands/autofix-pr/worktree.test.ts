@@ -21,7 +21,9 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { unsavedWork } from './cleanup.js';
 import { autofixPrPaths } from './state.js';
 import {
+  checkoutHoldsWork,
   requireWorktree,
+  untrustedCheckoutGit,
   untrustedGitfile,
   untrustedSubmodules,
 } from './worktree.js';
@@ -375,4 +377,76 @@ describe('untrustedGitfile (real git)', () => {
       }
     },
   );
+
+  describe('in place', () => {
+    it('trusts the main worktree and a linked worktree of the clone', () => {
+      expect(untrustedCheckoutGit(root, root)).toBeNull();
+      expect(untrustedCheckoutGit(worktree, root)).toBeNull();
+    });
+
+    it('refuses a checkout whose .git is not the git directory of this clone', () => {
+      const fake = join(root, 'fake-repo');
+      git(root, 'init', '-q', '-b', 'main', fake);
+      expect(untrustedCheckoutGit(fake, root)).toMatch(
+        /not the git directory of this clone/,
+      );
+      const plain = join(root, 'plain');
+      mkdirSync(plain);
+      expect(untrustedCheckoutGit(plain, root)).toMatch(/no \.git of its own/);
+    });
+
+    it('requireWorktree accepts the main worktree on the watch branch', () => {
+      const paths = {
+        ...autofixPrPaths(root, 7),
+        worktreePath: root,
+        branch: 'main',
+      };
+      expect(() =>
+        requireWorktree(paths, 7, root, false, root, true),
+      ).not.toThrow();
+    });
+
+    it('requireWorktree never switches the checkout back, even with switchBack', () => {
+      const paths = autofixPrPaths(root, 7);
+      // root sits on main, the watch branch is the worktree's: the refusal
+      // is the user's to answer, not a switch --discard-changes.
+      expect(() =>
+        requireWorktree(
+          { ...paths, worktreePath: root },
+          7,
+          root,
+          true,
+          root,
+          true,
+        ),
+      ).toThrow(/branch main checked out/);
+      expect(git(root, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+    });
+
+    it('checkoutHoldsWork does not count C-quoted watch files as user work', () => {
+      // A tracked file inside the watch's own directory stops git
+      // collapsing it to an ASCII entry; a non-ASCII sibling is C-quoted
+      // in porcelain v1, and the quote must not read as the user's work.
+      const watchDir = join(root, '.qwen', 'tmp', 'autofix-pr-99');
+      mkdirSync(watchDir, { recursive: true });
+      writeFileSync(join(watchDir, '.gitkeep'), '');
+      git(root, 'add', '.qwen/tmp/autofix-pr-99/.gitkeep');
+      git(
+        root,
+        '-c',
+        'user.email=a@b',
+        '-c',
+        'user.name=a',
+        'commit',
+        '-q',
+        '-m',
+        'keep',
+      );
+      writeFileSync(join(watchDir, '评审.md'), 'x');
+      expect(checkoutHoldsWork(root)).toBe(false);
+      // A non-ASCII file of the user's own, outside .qwen, still counts.
+      writeFileSync(join(root, '用户.md'), 'y');
+      expect(checkoutHoldsWork(root)).toBe(true);
+    });
+  });
 });
