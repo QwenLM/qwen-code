@@ -114,27 +114,35 @@ function runConclusion(run) {
     : 'SUCCESS';
 }
 
+// A run with no job is one GitHub could not start, which this file does
+// not model.
+function runsOn(sha) {
+  const runs = world.runs.filter((run) => run.sha === sha);
+  if (runs.some((run) => run.jobs.length === 0)) {
+    unsupported('a run with no job');
+  }
+  return runs;
+}
+
 function contextNodes(sha) {
-  return world.runs
-    .filter((run) => run.sha === sha)
-    .flatMap((run) =>
-      run.jobs.map((job) => ({
-        __typename: 'CheckRun',
-        name: job.name,
-        status: job.status,
-        conclusion: job.conclusion ?? null,
-        detailsUrl: `${repoUrl}/actions/runs/${run.id}/job/${job.id}`,
-        databaseId: job.id,
-        checkSuite: {
-          status: runStatus(run),
-          app: { databaseId: ACTIONS_APP },
-          workflowRun: {
-            event: 'pull_request',
-            workflow: { databaseId: run.workflowId },
-          },
+  return runsOn(sha).flatMap((run) =>
+    run.jobs.map((job) => ({
+      __typename: 'CheckRun',
+      name: job.name,
+      status: job.status,
+      conclusion: job.conclusion ?? null,
+      detailsUrl: `${repoUrl}/actions/runs/${run.id}/job/${job.id}`,
+      databaseId: job.id,
+      checkSuite: {
+        status: runStatus(run),
+        app: { databaseId: ACTIONS_APP },
+        workflowRun: {
+          event: 'pull_request',
+          workflow: { databaseId: run.workflowId },
         },
-      })),
-    );
+      },
+    })),
+  );
 }
 
 function rollup(sha) {
@@ -150,19 +158,17 @@ function rollup(sha) {
 }
 
 function suiteNodes(sha) {
-  return world.runs
-    .filter((run) => run.sha === sha)
-    .map((run) => ({
-      databaseId: run.id + 1_000_000,
-      conclusion: runConclusion(run),
-      app: { databaseId: ACTIONS_APP },
-      workflowRun: {
-        databaseId: run.id,
-        url: `${repoUrl}/actions/runs/${run.id}`,
-        event: 'pull_request',
-        workflow: { databaseId: run.workflowId, name: run.workflow },
-      },
-    }));
+  return runsOn(sha).map((run) => ({
+    databaseId: run.id + 1_000_000,
+    conclusion: runConclusion(run),
+    app: { databaseId: ACTIONS_APP },
+    workflowRun: {
+      databaseId: run.id,
+      url: `${repoUrl}/actions/runs/${run.id}`,
+      event: 'pull_request',
+      workflow: { databaseId: run.workflowId, name: run.workflow },
+    },
+  }));
 }
 
 function findRun(id) {
@@ -275,7 +281,7 @@ function selection(query) {
 
 // The aliases rendered below, by what they stand for: a thread's root is its
 // first comment.
-const ALIASES = { root: 'comments(first:1)' };
+const ALIASES = new Map([['root', 'comments(first:1)']]);
 
 // What the query asked for, and nothing else.
 function project(value, fields, path) {
@@ -291,9 +297,13 @@ function project(value, fields, path) {
       continue;
     }
     if (!(field.key in value)) unsupported(`GraphQL field ${path}${field.key}`);
-    // The fake answers an alias as the one field and arguments it renders.
-    if (field.alias !== undefined && ALIASES[field.key] !== field.alias) {
-      unsupported(`GraphQL alias ${path}${field.key}: ${field.alias}`);
+    // An alias is answered only as the field and arguments it renders, and
+    // a key rendered for an alias only through that alias: GitHub has no
+    // `root` field.
+    if ((field.alias ?? null) !== (ALIASES.get(field.key) ?? null)) {
+      unsupported(
+        `GraphQL alias ${path}${field.key}: ${field.alias ?? 'none'}`,
+      );
     }
     const v = value[field.key] ?? null;
     // GitHub refuses an object field without a selection, and a selection

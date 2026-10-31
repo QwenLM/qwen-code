@@ -120,7 +120,7 @@ interface World {
     comments: Comment[];
   }>;
   nextId: number;
-  /** The next POST reaches GitHub, and its answer is lost. */
+  /** The next comment POST reaches GitHub, and its answer is lost. */
   loseNextAnswer?: boolean;
 }
 
@@ -316,13 +316,16 @@ describe.skipIf(process.platform === 'win32')(
       // Section 5), the user's files never do.
       const status = run(clone, 'status', '--porcelain=v1', '-uall')
         .split('\n')
-        .filter((line) => !line.startsWith('?? .qwen/'))
+        .filter((line) => !line.startsWith('?? .qwen/tmp/'))
         .join('\n');
       return [
         run(clone, 'symbolic-ref', 'HEAD'),
         run(clone, 'rev-parse', 'HEAD'),
         status,
         readFileSync(join(clone, 'sum.js'), 'utf8'),
+        // The watch's branch and worktree go with its cleanup.
+        run(clone, 'for-each-ref', '--format=%(refname)', 'refs/heads'),
+        run(clone, 'worktree', 'list', '--porcelain'),
       ].join('\n');
     }
 
@@ -757,6 +760,8 @@ describe.skipIf(process.platform === 'win32')(
       expect(await cli('status', '7')).toMatchObject([
         { watches: [{ pushes: 0, needsHuman: [{ sha: head }] }] },
       ]);
+      // The user stops the watch (the skill's Section "Stop").
+      expect(await cli('cleanup', '7')).toMatchObject([{ removed: true }]);
 
       expect(writes()).toEqual([
         'run rerun 11 --failed -R o/r',
@@ -880,6 +885,7 @@ describe.skipIf(process.platform === 'win32')(
       expect(await cli('status', '7')).toMatchObject([
         { watches: [{ pushes: 3, needsHuman: [{ sha: fourth }] }] },
       ]);
+      expect(await cli('cleanup', '7')).toMatchObject([{ removed: true }]);
 
       // A summary per push, and the one that leaves the check for a person.
       expect(writes()).toEqual(
@@ -891,6 +897,95 @@ describe.skipIf(process.platform === 'win32')(
         [head, second],
         [second, third],
         [third, fourth],
+      ]);
+      expect(checkoutState()).toBe(checkoutBefore);
+    });
+
+    it('leaves a conflict for a person once per head, including a head the watch pushed before GitHub computed it', async () => {
+      const head = prHead();
+      updateWorld((world) => {
+        world.pr.mergeable = 'CONFLICTING';
+      });
+      const { worktree } = await prepare();
+      const { gate: gateCommand, task: id } = await schedule();
+      const leftForAPerson = (handled: string[]) => ({
+        summary: {
+          body: 'The merge with main conflicts; a person has to resolve it.',
+          handled,
+        },
+        handledConflict: true,
+        needsHuman: ['conflict: resolve the merge with main'],
+      });
+
+      // The start's round: the fix agent cannot resolve the conflict.
+      await cli('sync', '7', '--task', id);
+      expect((await snapshot('--task', id)).events).toEqual([
+        { type: 'conflict' },
+      ]);
+      expect(
+        await cli('reply', '7', writePlan(leftForAPerson([])), '--task', id),
+      ).toMatchObject([{ posted: [{ kind: 'summary' }] }]);
+      expect(await gate(gateCommand)).toEqual([]);
+
+      // A member's comment wakes a round, which pushes; GitHub has not
+      // computed the new head's mergeability when the round replies.
+      updateWorld((world) => {
+        world.comments.push({
+          id: 'IC_3',
+          databaseId: 603,
+          author: 'alice',
+          authorAssociation: 'MEMBER',
+          body: 'Please add a doc comment.',
+        });
+      });
+      expect(await gate(gateCommand)).toMatchObject([
+        { action: 'fix', events: [{ type: 'issue_comment', id: 'IC_3' }] },
+      ]);
+      await cli('sync', '7', '--task', id);
+      expect((await snapshot('--task', id)).events).toMatchObject([
+        { type: 'issue_comment', id: 'IC_3' },
+      ]);
+      const second = agentCommits(
+        worktree,
+        '/** Adds a and b. */\nexport const sum = (a, b) => a + b + 1;\n',
+        'Document sum',
+      );
+      await cli('sync', '7', '--task', id);
+      expect(await cli('push', '7', '--task', id)).toMatchObject([
+        { pushed: true, sha: second },
+      ]);
+      updateWorld((world) => {
+        world.pr.mergeable = 'UNKNOWN';
+      });
+      expect(
+        await cli(
+          'reply',
+          '7',
+          writePlan(leftForAPerson(['IC_3'])),
+          '--task',
+          id,
+        ),
+      ).toMatchObject([{ posted: [{ kind: 'summary' }] }]);
+      // Computed since: still conflicting, and still left for a person.
+      updateWorld((world) => {
+        world.pr.mergeable = 'CONFLICTING';
+      });
+      expect(await gate(gateCommand)).toEqual([]);
+
+      // Someone else's push is a head no round answered.
+      const theirs = pushFromElsewhere('README.md', 'Add a readme');
+      const [woke] = await gate(gateCommand);
+      expect(woke['events']).toContainEqual({ type: 'conflict' });
+      expect(await cli('cleanup', '7')).toMatchObject([{ removed: true }]);
+
+      expect(writes()).toEqual(
+        Array(2).fill(
+          'api --method POST repos/o/r/issues/7/comments --input -',
+        ),
+      );
+      expectPushes([
+        [head, second],
+        [second, theirs],
       ]);
       expect(checkoutState()).toBe(checkoutBefore);
     });
