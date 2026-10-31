@@ -617,29 +617,13 @@ describe('post-merge push lane', () => {
   it('keeps test on the association-gated output', () => {
     // Nothing else reads test's runs-on: switching it to lint_runner would
     // hand every untrusted fork the pool while the timeout pins above stayed
-    // green (both lanes price 120/60 on ECS). Pin the expression, not an
-    // equality with lint_and_static — the two are meant to differ.
+    // green — timeoutMinutesOn derives each lane's output from its own
+    // runs-on, so it cannot catch a lane pointed at the wrong output. Pin the
+    // expression, not an equality with lint_and_static — the two are meant
+    // to differ.
     expect(String(ci.jobs.test['runs-on'])).toBe(
       '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
     );
-  });
-
-  it('isolates HOME in every lane routed past the association gate', () => {
-    // lint_runner admits untrusted forks, and the pool shares one HOME across
-    // ~27 runner registrations: a fork's `pnpm install` can write
-    // ~/.gitconfig, ~/.npmrc or ~/.cache/qwen-code/npm, and the next trusted
-    // job on that host inherits it. Any job reading lint_runner must pin its
-    // own HOME under runner.temp; the ubuntu_runner lanes need no such pin
-    // because the association clause keeps untrusted forks off the pool.
-    const ungated = Object.keys(ci.jobs).filter((job) =>
-      String(ci.jobs[job]['runs-on'] ?? '').includes('lint_runner'),
-    );
-    expect(ungated).toContain('lint_and_static');
-    for (const job of ungated) {
-      const env = ci.jobs[job].env ?? {};
-      expect(env.HOME, job).toBe('${{ runner.temp }}/qwen-ci-home');
-      expect(env.USERPROFILE, job).toBe('${{ runner.temp }}/qwen-ci-home');
-    }
   });
 
   it('lint_and_static keeps the minimal token its required-check role needs', () => {

@@ -426,6 +426,104 @@ describe('ci.yml lint_runner routing', () => {
       /needs\.classify_pr\.outputs\.lint_runner/,
     );
   });
+
+  it('keeps both outputs on one fleet ladder', () => {
+    // The lint arm assigns from the same resolved fleet labels as
+    // ubuntu_runner; a fleet value neither models must not split them when
+    // the trust clause is satisfied (a second literal ladder drifts silently
+    // because the timeout reads lint_runner and still reports a pool ceiling).
+    for (const fleet of ['', 'x64', 'arm64', 'future-fleet']) {
+      const out = runPickRunnerOutputs({
+        ecsDisabled: false,
+        sameRepo: true,
+        assoc: 'NONE',
+        eventName: 'pull_request',
+        fleet,
+      });
+      assert.equal(out.lintRunner, out.ubuntuRunner, `fleet='${fleet}'`);
+    }
+  });
+});
+
+describe('ci.yml lint HOME isolation', () => {
+  // This guard lives in the routing battery (HELPER_TESTS) because it gates
+  // every full-profile PR; the scripts/tests vitest suites only run after the
+  // merge queue. lint_runner admits untrusted forks to a pool where
+  // RUNNER_TEMP survives across jobs, so the isolated HOME must be run-unique
+  // and cleared before use — a fixed path hands a fork's ~/.npmrc to the next
+  // job on the registration. The ubuntu_runner lanes' association clause is
+  // throughput policy, not an enforceable boundary (a pull_request run
+  // executes the PR's own YAML); their pre-existing HOME properties are
+  // separately owned.
+  const ungated = Object.entries(ciDoc.jobs).filter(([, job]) =>
+    /outputs\.lint_runner/.test(String(job['runs-on'] ?? '')),
+  );
+
+  it('scopes the ungated routing to the single recorded lane', () => {
+    // The decision record scopes the boundary change to Lint & Static alone;
+    // a superset must force a deliberate record update, not pass silently.
+    assert.deepEqual(
+      ungated.map(([id]) => id),
+      ['lint_and_static'],
+    );
+  });
+
+  it('publishes a run-unique HOME from the first step, not job env', () => {
+    for (const [id, job] of ungated) {
+      // jobs.<job_id>.env cannot read the runner context — GitHub rejects the
+      // whole workflow file (actionlint 1.7.12 witnesses it).
+      assert.equal(job.env?.HOME, undefined, `${id} job-level HOME`);
+      assert.equal(
+        job.env?.USERPROFILE,
+        undefined,
+        `${id} job-level USERPROFILE`,
+      );
+      const steps = job.steps ?? [];
+      assert.equal(steps[0]?.name, 'Create isolated HOME', id);
+      const run = String(steps[0]?.run ?? '');
+      assert.ok(
+        run.includes('GITHUB_RUN_ID') && run.includes('GITHUB_RUN_ATTEMPT'),
+        `${id} HOME path must be run-unique`,
+      );
+      assert.ok(
+        run.includes('rm -rf') && run.indexOf('rm -rf') < run.indexOf('mkdir'),
+        `${id} must clear the path before creating it`,
+      );
+      assert.ok(
+        run.includes('HOME=') &&
+          run.includes('USERPROFILE=') &&
+          run.includes('GITHUB_ENV'),
+        `${id} must publish HOME/USERPROFILE via GITHUB_ENV`,
+      );
+      // Content-verified caches (linter archives, corepack) stay shared and
+      // warm outside the per-job HOME; dropping either reds this.
+      assert.ok(
+        run.includes('XDG_CACHE_HOME=') &&
+          run.includes('COREPACK_HOME=') &&
+          run.includes('RUNNER_TOOL_CACHE'),
+        `${id} must re-point verified caches at the shared tool cache`,
+      );
+    }
+  });
+
+  it('reclaims the isolated HOME before the failure collector', () => {
+    for (const [id, job] of ungated) {
+      const steps = job.steps ?? [];
+      const names = steps.map((s) => s.name);
+      const clean = steps.find((s) => s.name === 'Clean isolated HOME');
+      assert.ok(clean, `${id} cleanup step missing`);
+      assert.equal(clean.if, '${{ always() }}', id);
+      assert.ok(
+        names.indexOf('Clean isolated HOME') <
+          names.indexOf('Upload disk-pressure samples'),
+        `${id} collector must stay last`,
+      );
+      // The constructed path, never $HOME: a failed init must not aim the
+      // removal at the account's real home.
+      assert.ok(String(clean.run).includes('qwen-lint-home-'), id);
+      assert.ok(!String(clean.run).includes('"$HOME"'), id);
+    }
+  });
 });
 
 describe('ci.yml web_shell_e2e_smoke runner routing', () => {

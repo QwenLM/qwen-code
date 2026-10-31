@@ -209,6 +209,11 @@ jobs:
           case "${AUTHOR_ASSOCIATION}" in
             OWNER|MEMBER|COLLABORATOR) trusted_author=true ;;
           esac
+          # Resolve fleet labels once; both outputs assign from this.
+          fleet_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+          if [[ "${LINUX_RUNNER_FLEET}" == "arm64" ]]; then
+            fleet_runner='["self-hosted", "linux", "arm64"]'
+          fi
           # Dispatch input wins over the fleet variable; MAINTAINER_ECS_RUNNER_
           # DISABLED=true still hard-forces hosted runners everywhere.
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
@@ -223,21 +228,15 @@ jobs:
           elif [[ "${ECS_DISABLED}" == "true" || "${LINUX_RUNNER_FLEET}" == "hosted" ]]; then
             ubuntu_runner='["ubuntu-latest"]'
           elif [[ "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ]]; then
-            if [[ "${LINUX_RUNNER_FLEET}" == "arm64" ]]; then
-              ubuntu_runner='["self-hosted", "linux", "arm64"]'
-            else
-              ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
-            fi
+            ubuntu_runner="${fleet_runner}"
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
+          # Lint & Static routes every pull request to the fleet (maintainer
+          # decision 2026-10-31); non-PR events inherit ubuntu_runner unchanged.
           lint_runner="${ubuntu_runner}"
           if [[ "${EVENT_NAME}" == "pull_request" && "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" ]]; then
-            if [[ "${LINUX_RUNNER_FLEET}" == "arm64" ]]; then
-              lint_runner='["self-hosted", "linux", "arm64"]'
-            else
-              lint_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
-            fi
+            lint_runner="${fleet_runner}"
           fi
           echo "lint_runner=${lint_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected lint runner: ${lint_runner}"
@@ -656,7 +655,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       # The test step's side lane (.github/scripts/ci/run-unit-test-lanes.sh)
@@ -988,23 +987,21 @@ jobs:
     timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''90'' || ''45'') }}'
     env:
       LINT_BASE_SHA: "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}"
-      # This lane executes PR code for EVERY pull request, untrusted forks
-      # included, on a pool that shares one HOME across ~27 registrations
-      # (docs/design/autofix-gate-runner-isolation.md). A per-job HOME keeps a
-      # fork's ~/.gitconfig, ~/.npmrc and ~/.cache/qwen-code/npm out of the
-      # next trusted job's reach. Cost: cold npm and pnpm caches — the 90/45
-      # ceiling above already prices cold installs.
-      HOME: '${{ runner.temp }}/qwen-ci-home'
-      USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
     permissions:
       contents: 'read'
       pull-requests: 'read'
     steps:
-      # The steps below write $HOME before anything would create it (git
-      # safe.directory, npm config); an isolated HOME that does not exist yet
-      # fails those writes instead of isolating them.
+      # Untrusted fork code runs here; job env cannot read the runner context
+      # and RUNNER_TEMP survives across jobs, so publish a run-unique HOME via
+      # GITHUB_ENV. Rationale: docs/design/2026-10-31-lint-static-ecs-routing.md.
       - name: 'Create isolated HOME'
-        run: 'mkdir -p "${HOME}" "${USERPROFILE}"'
+        run: |-
+          home="${RUNNER_TEMP}/qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf -- "$home"
+          mkdir -p "$home" "${RUNNER_TOOL_CACHE}/qwen-ci-cache"
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "$home" "$home" >> "${GITHUB_ENV}"
+          # Content-verified caches (SHA-256) stay shared and warm.
+          printf 'XDG_CACHE_HOME=%s\nCOREPACK_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" "${RUNNER_TOOL_CACHE}/qwen-ci-cache/node/corepack" >> "${GITHUB_ENV}"
 
       # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
       # verify) may leave root-owned, read-only files anywhere in the workspace.
@@ -1344,7 +1341,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Configure npm for rate limiting'
@@ -1524,6 +1521,12 @@ jobs:
             node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} &&
               echo "::warning::helper tests failed once and the retry absorbed it; attempt-1 failures: $(grep -E '^not ok' "${RUNNER_TEMP}/helper-attempt1.log" | head -5 | paste -sd ';' -) — count this toward the #12772 helper-battery recurrence threshold"
           }
+
+      # Reclaim the run-unique HOME (constructed path, never $HOME) before the
+      # failure collector, which must stay last.
+      - name: 'Clean isolated HOME'
+        if: '${{ always() }}'
+        run: 'rm -rf -- "${RUNNER_TEMP}/qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
 
       # State-at-failure dump for the 19 substantive steps after install: the
       # install sampler is reaped by that step's `trap … EXIT`, so a death in
@@ -1745,7 +1748,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Configure npm for rate limiting'
@@ -2147,7 +2150,7 @@ jobs:
           # so create the directory through the Node the preflight verified.
           node -e "require('node:fs').mkdirSync(process.argv[1], { recursive: true })" "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Configure npm for rate limiting'
@@ -2424,7 +2427,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Disk floor gate (self-hosted)'
@@ -2651,7 +2654,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       # Same pre-install admission check as the test job (#10035): this job
