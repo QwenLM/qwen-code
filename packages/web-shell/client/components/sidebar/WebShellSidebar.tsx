@@ -1,3 +1,4 @@
+import { useDaemonAvailability } from '../../daemon/availability-context.js';
 import {
   Fragment,
   useCallback,
@@ -304,7 +305,7 @@ export type WebShellSidebarPrimaryNavItem =
   | 'managed';
 
 export interface WebShellSidebarPrimaryNavOptions {
-  /** Built-in primary nav entries to show. Embedded hosts default to New task only. */
+  /** Built-in primary nav entries to show. Embedded hosts default to New session only. */
   items?: readonly WebShellSidebarPrimaryNavItem[];
   /** Additional custom content rendered after the built-in nav buttons. */
   render?: () => ReactNode;
@@ -382,6 +383,7 @@ export interface WebShellSidebarSessionActionsOptions {
    * (details/group/archive are dropdown-only).
    * Recent sessions use dedicated Pin and Archive buttons instead of this
    * layout; the items policy still controls whether those actions are enabled.
+   * Archived rows use Export and Restore inline, independently of this option.
    */
   inlineItems?: readonly WebShellSidebarSessionInlineActionItem[];
 }
@@ -565,7 +567,7 @@ interface WebShellSidebarProps {
   showSessionSourceSwitch?: boolean;
   /** Show Live conversations and, in rail layout, the Live entry. Defaults to false. */
   showLive?: boolean;
-  /** Whether to hide the "Projects" header row (with search and add workspace). Defaults to false (shown). */
+  /** Whether to hide the "Workspaces" header row (with search and add workspace). Defaults to false (shown). */
   hideProjectHeader?: boolean;
   /** Customize which action buttons appear on session rows. */
   sessionActions?: WebShellSidebarSessionActionsOptions;
@@ -1350,6 +1352,7 @@ export function WebShellSidebar({
       ? sessionSource
       : 'default'
     : undefined;
+  const daemonAvailable = useDaemonAvailability() === 'available';
   const [archiveSessionSource, setArchiveSessionSource] =
     useState<SidebarSessionSource>('default');
   const archiveSourceType = sourceMetadataEnabled
@@ -2880,7 +2883,7 @@ export function WebShellSidebar({
   // without a source switch.
   const channelCatalogPollInFlightRef = useRef(false);
   useEffect(() => {
-    if (!channelGroupingEnabled) return;
+    if (!daemonAvailable || !channelGroupingEnabled) return;
     // Back off on the channels hook's OWN failures too — a persistently
     // failing channels endpoint must not be re-requested every 2s.
     const pollInterval =
@@ -2896,6 +2899,7 @@ export function WebShellSidebar({
     }, pollInterval);
     return () => window.clearInterval(intervalId);
   }, [
+    daemonAvailable,
     channelCatalogError,
     channelGroupingEnabled,
     error,
@@ -4909,11 +4913,11 @@ export function WebShellSidebar({
         const showArchivedRename = standalone
           ? sessionActionItems.has('rename')
           : canRenameSession(session);
-        const hasArchivedActions =
-          showArchivedExport ||
-          showArchivedUnarchive ||
-          showArchivedDelete ||
-          showArchivedRename;
+        const showArchivedMore = showArchivedRename || showArchivedDelete;
+        const archivedActionCount =
+          Number(showArchivedExport) +
+          Number(showArchivedUnarchive) +
+          Number(showArchivedMore);
         return withDetails(
           <div
             className={cx(
@@ -4950,9 +4954,7 @@ export function WebShellSidebar({
               )}
               style={
                 {
-                  '--session-actions-width': hasArchivedActions
-                    ? '26px'
-                    : '0px',
+                  '--session-actions-width': `${archivedActionCount * 26}px`,
                 } as CSSProperties
               }
             >
@@ -4960,83 +4962,93 @@ export function WebShellSidebar({
               {gitIcon && (
                 <span className={styles.sessionGitIcon}>{gitIcon}</span>
               )}
-              {hasArchivedActions && (
+              {archivedActionCount > 0 && (
                 <div
                   className={styles.sessionActions}
                   onClick={(event) => event.stopPropagation()}
                   onKeyDown={(event) => event.stopPropagation()}
                 >
-                  <SessionMenu onOpenChange={handleSessionMenuOpenChange}>
-                    <DropdownMenuTrigger asChild>
-                      <button
-                        className={styles.sessionActionButton}
-                        type="button"
-                        aria-label={t('sidebar.moreActions')}
-                        title={t('sidebar.moreActions')}
-                      >
-                        <EllipsisVerticalIcon />
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent
-                      align="end"
-                      className="w-auto min-w-40"
-                      style={SESSION_MENU_PORTAL_STYLE}
-                      onPointerDownOutside={handleSessionMenuPointerDownOutside}
-                      onCloseAutoFocus={handleSessionMenuCloseAutoFocus}
+                  {showArchivedExport && (
+                    <button
+                      className={styles.sessionActionButton}
+                      type="button"
+                      disabled={exporting}
+                      aria-label={t('sidebar.export')}
+                      title={t('sidebar.export')}
+                      onClick={() => {
+                        if (standalone) standalone.onExport();
+                        else handleExportSession(session);
+                      }}
                     >
-                      <DropdownMenuGroup>
-                        {showArchivedRename && (
-                          <DropdownMenuItem
-                            disabled={busy}
-                            onSelect={() => {
-                              if (standalone) standalone.onRename();
-                              else handleRenameFromMenu(session);
-                            }}
-                          >
-                            <PencilIcon />
-                            {t('sidebar.rename')}
-                          </DropdownMenuItem>
-                        )}
-                        {showArchivedExport && (
-                          <DropdownMenuItem
-                            disabled={exporting}
-                            onSelect={() => {
-                              if (standalone) standalone.onExport();
-                              else handleExportSession(session);
-                            }}
-                          >
-                            <DownloadIcon />
-                            {t('sidebar.export')}
-                          </DropdownMenuItem>
-                        )}
-                        {showArchivedUnarchive && (
-                          <DropdownMenuItem
-                            disabled={busy}
-                            onSelect={() => {
-                              if (standalone) standalone.onUnarchive?.();
-                              else handleUnarchive(session);
-                            }}
-                          >
-                            <ArchiveRestoreIcon />
-                            {t('sidebar.unarchive')}
-                          </DropdownMenuItem>
-                        )}
-                        {showArchivedDelete && (
-                          <DropdownMenuItem
-                            variant="destructive"
-                            disabled={busy}
-                            onSelect={() => {
-                              if (standalone) standalone.onDelete();
-                              else handleDeleteSession(session);
-                            }}
-                          >
-                            <Trash2Icon />
-                            {t('sidebar.delete')}
-                          </DropdownMenuItem>
-                        )}
-                      </DropdownMenuGroup>
-                    </DropdownMenuContent>
-                  </SessionMenu>
+                      <DownloadIcon size={16} strokeWidth={1.2} />
+                    </button>
+                  )}
+                  {showArchivedUnarchive && (
+                    <button
+                      className={styles.sessionActionButton}
+                      type="button"
+                      disabled={busy}
+                      aria-label={t('sidebar.unarchive')}
+                      title={t('sidebar.unarchive')}
+                      onClick={() => {
+                        if (standalone) standalone.onUnarchive?.();
+                        else handleUnarchive(session);
+                      }}
+                    >
+                      <ArchiveRestoreIcon size={16} strokeWidth={1.2} />
+                    </button>
+                  )}
+                  {showArchivedMore && (
+                    <SessionMenu onOpenChange={handleSessionMenuOpenChange}>
+                      <DropdownMenuTrigger asChild>
+                        <button
+                          className={styles.sessionActionButton}
+                          type="button"
+                          aria-label={t('sidebar.moreActions')}
+                          title={t('sidebar.moreActions')}
+                        >
+                          <EllipsisVerticalIcon />
+                        </button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent
+                        align="end"
+                        className="w-auto min-w-40"
+                        style={SESSION_MENU_PORTAL_STYLE}
+                        onPointerDownOutside={
+                          handleSessionMenuPointerDownOutside
+                        }
+                        onCloseAutoFocus={handleSessionMenuCloseAutoFocus}
+                      >
+                        <DropdownMenuGroup>
+                          {showArchivedRename && (
+                            <DropdownMenuItem
+                              disabled={busy}
+                              onSelect={() => {
+                                if (standalone) standalone.onRename();
+                                else handleRenameFromMenu(session);
+                              }}
+                            >
+                              <PencilIcon />
+                              {t('sidebar.rename')}
+                            </DropdownMenuItem>
+                          )}
+                          {showArchivedDelete && (
+                            <DropdownMenuItem
+                              variant="destructive"
+                              disabled={busy}
+                              onSelect={() => {
+                                if (standalone) standalone.onDelete();
+                                else handleDeleteSession(session);
+                              }}
+                            >
+                              <Trash2Icon />
+                              {t('sidebar.delete')}
+                            </DropdownMenuItem>
+                          )}
+                        </DropdownMenuGroup>
+                      </DropdownMenuContent>
+                    </SessionMenu>
+                  )}
                 </div>
               )}
             </div>
@@ -6922,7 +6934,7 @@ export function WebShellSidebar({
                           if (
                             target instanceof Element &&
                             target.closest(
-                              '[data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel]',
+                              '[data-web-shell-local-files-panel], [data-web-shell-desktop-relay-panel], [data-web-shell-update-manual]',
                             )
                           )
                             event.preventDefault();
@@ -7371,50 +7383,6 @@ export function WebShellSidebar({
                   <div className={styles.workspacePicker}>
                     <div className={styles.workspaceList}>
                       {!channelView && managedWorkspaces}
-                      {standaloneSessionsVisible &&
-                        onLoadStandaloneSession &&
-                        onStandaloneNotice && (
-                          <StandaloneRecents
-                            archiveState="active"
-                            currentSessionId={connection.sessionId}
-                            currentSessionReady={
-                              connection.status === 'connected' &&
-                              !connection.error &&
-                              !connection.loadingTranscript &&
-                              !connection.catchingUp
-                            }
-                            refreshKey={standaloneRefreshKey}
-                            searchQuery={searchQuery}
-                            renderSession={(session, standalone) =>
-                              renderSessionRow(session, {
-                                isArchived: standalone.isArchived,
-                                standalone,
-                              })
-                            }
-                            onNewSession={
-                              onNewStandaloneSession
-                                ? () => {
-                                    void Promise.resolve(
-                                      onNewStandaloneSession(),
-                                    ).then((created) => {
-                                      if (created) handleStandaloneMutation();
-                                    });
-                                  }
-                                : undefined
-                            }
-                            onLoadSession={onLoadStandaloneSession}
-                            onRenameSession={(sessionId, displayName) =>
-                              onSessionRenameConfirmed?.(
-                                undefined,
-                                sessionId,
-                                displayName,
-                              )
-                            }
-                            onMutated={handleStandaloneMutation}
-                            onError={onError}
-                            onNotice={onStandaloneNotice}
-                          />
-                        )}
                       {orderedProjectWorkspaces.map((ws) => (
                         <Fragment key={ws.id}>
                           <WorkspaceSection
@@ -7824,6 +7792,51 @@ export function WebShellSidebar({
                   />
                 )}
               </div>
+              {!liveView &&
+                standaloneSessionsVisible &&
+                onLoadStandaloneSession &&
+                onStandaloneNotice && (
+                  <StandaloneRecents
+                    archiveState="active"
+                    currentSessionId={connection.sessionId}
+                    currentSessionReady={
+                      connection.status === 'connected' &&
+                      !connection.error &&
+                      !connection.loadingTranscript &&
+                      !connection.catchingUp
+                    }
+                    refreshKey={standaloneRefreshKey}
+                    searchQuery={searchQuery}
+                    renderSession={(session, standalone) =>
+                      renderSessionRow(session, {
+                        isArchived: standalone.isArchived,
+                        standalone,
+                      })
+                    }
+                    onNewSession={
+                      onNewStandaloneSession
+                        ? () => {
+                            void Promise.resolve(onNewStandaloneSession()).then(
+                              (created) => {
+                                if (created) handleStandaloneMutation();
+                              },
+                            );
+                          }
+                        : undefined
+                    }
+                    onLoadSession={onLoadStandaloneSession}
+                    onRenameSession={(sessionId, displayName) =>
+                      onSessionRenameConfirmed?.(
+                        undefined,
+                        sessionId,
+                        displayName,
+                      )
+                    }
+                    onMutated={handleStandaloneMutation}
+                    onError={onError}
+                    onNotice={onStandaloneNotice}
+                  />
+                )}
               {!sectionView &&
                 !hideProjectHeader &&
                 workspaceQualifiedRestCoreEnabled && (

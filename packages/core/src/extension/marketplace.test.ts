@@ -352,14 +352,37 @@ describe('parseInstallSource', () => {
     it('should throw error for non-existent path that is not valid format', async () => {
       statMissing();
 
-      await expect(
-        parseInstallSource('invalid-format-no-slash'),
-      ).rejects.toThrow('Install source not found: invalid-format-no-slash');
+      await expect(parseInstallSource('invalid package name')).rejects.toThrow(
+        'Install source not found: invalid package name',
+      );
     });
 
     // The colon after C should not be treated as plugin separator.
     it('should handle Windows drive letter correctly', () =>
       local('C:\\path\\to\\extension'));
+  });
+
+  describe('unscoped npm package parsing', () => {
+    it.each([
+      'some-package',
+      'some-package@1.2.0',
+      'some-package@latest',
+      'some-package@beta',
+    ])('parses %s', async (source) => {
+      await expectParsed(source, { source, type: 'npm' });
+    });
+    it('preserves plugin selectors', () =>
+      expectParsed('some-package:my-plugin', {
+        source: 'some-package',
+        type: 'npm',
+        pluginName: 'my-plugin',
+      }));
+    it('keeps an existing bare local path local', () =>
+      expectParsed(
+        'some-package',
+        { source: 'some-package', type: 'local' },
+        true,
+      ));
   });
 
   describe('scoped npm package parsing', () => {

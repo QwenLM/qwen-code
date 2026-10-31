@@ -193,6 +193,19 @@ describe('bundled autofix-pr skill', () => {
       '**Only a start or a resume asks the user anything.**',
     );
     expect(body).toContain('merge, never rebase');
+    // A failed check on a branch behind its base: the round snapshot says
+    // so, and the brief merges the base before fixing anything else.
+    expect(body).toContain(
+      '`baseBehind: true` means a check fails while the branch is behind its base',
+    );
+    expect(body).toContain('When the snapshot says `baseBehind: true`');
+    expect(body).toContain('already fixed needs no code change');
+    // A failure that survives the merge is not presumed the PR's defect:
+    // it goes through the same classification as any failed check.
+    expect(body).toContain('handle the rest as failed checks');
+    expect(body).toContain(
+      'the base merged when the snapshot said `baseBehind: true`',
+    );
     expect(body).toContain('Never list an `untrusted_comment` id');
     // A bot's PR conversation comment is dropped, not listed as untrusted.
     expect(body).toContain(
@@ -319,6 +332,43 @@ describe('bundled autofix-pr skill', () => {
     expect(body).toContain('whose `## Never` it is told to follow too');
   });
 
+  it('draws the line at ready to merge: no approval, no review state, no merge, no auto-merge', () => {
+    const { body } = loadSkill();
+    expect(body).toContain(
+      'The watch gets the PR ready to merge and keeps it there',
+    );
+    expect(body).toContain(
+      'It never approves a PR, changes its review state, merges or closes it, or turns on auto-merge',
+    );
+    expect(body).toContain(
+      "It combines with the repository's auto-merge, which merges once those requirements are met.",
+    );
+    // The start confirmation says it too, not the opening paragraph alone.
+    const confirm =
+      /\n5\. \*\*Confirm\*\*([\s\S]*?)\n6\. /.exec(body)?.[1] ?? '';
+    expect(confirm).toContain('it gets the PR ready to merge, and no further');
+    expect(confirm).toContain("merging stays the user's");
+  });
+
+  it('reports a round that pushed nothing but left something for a person', () => {
+    const { body } = loadSkill();
+    expect(body).toContain(
+      'With nothing pushed, post one anyway when `needsHuman` is not empty',
+    );
+    // What keeps the report from repeating is the helper's, not the round's.
+    expect(body).toContain(
+      'a summary that answers no comments goes out once per head, and a later round posts one again only when it leaves something new for a person',
+    );
+    // A report that never reached the PR is not spent: the round runs again.
+    expect(body).toContain(
+      'One that never reached the PR is still owed, so a failed `reply` is run again with the same plan.',
+    );
+    expect(body).toContain(
+      'Omit it (`null`) only when nothing was pushed, no review or issue comment was answered, and `needsHuman` is empty.',
+    );
+    expect(body).toContain('and the summary reports them on the PR');
+  });
+
   it("lists every item step 3 sets aside under the brief's own items, which the after-fix turn answers from", () => {
     const { body } = loadSkill();
     const ciLogs = /3\. \*\*CI logs\.\*\*([^\n]*)/.exec(body)?.[1] ?? '';
@@ -382,5 +432,23 @@ describe('bundled autofix-pr skill', () => {
     const { body } = loadSkill();
     expect(body).toContain('`subagent_type` = `general-purpose`');
     expect(BuiltinAgentRegistry.isBuiltinAgent('general-purpose')).toBe(true);
+  });
+
+  it("keeps the brief's Events scoping consistent with the fields its instructions name", () => {
+    const { body } = loadSkill();
+    // The brief is the skill's only ```markdown block.
+    const template = body.split('```markdown')[1]?.split('```')[0] ?? '';
+    const named = [
+      ...template.matchAll(/the snapshot says `(\w+): true`/g),
+    ].map((match) => match[1]);
+    // The stale-base hint is a top-level snapshot field, not an event: the
+    // scoping sentence must exempt the fields the instructions name, or the
+    // brief forbids the very merge it commands.
+    expect(named).toContain('baseBehind');
+    const scoping = /Nothing else in that file is yours to act on([^\n]*)/.exec(
+      template,
+    );
+    expect(scoping).not.toBeNull();
+    expect(scoping![1]).toContain('beyond the fields these instructions name');
   });
 });

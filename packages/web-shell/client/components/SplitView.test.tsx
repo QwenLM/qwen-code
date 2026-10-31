@@ -9,26 +9,30 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import { I18nProvider } from '../i18n';
+import { MAX_SPLIT_PANES } from '../utils/splitUrl';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 let connectionState: any;
 let sessionsState: any[];
-// Live sessions the mock daemon returns per non-primary workspace cwd, keyed by
-// cwd — drives `useOtherWorkspaceSessions` (via the mocked `useWorkspace`).
+// Sessions per secondary workspace cwd, keyed by cwd — drives the
+// workspace-locked branch of the mocked `useScopedSessions`.
 let otherWorkspaceSessions: Record<string, any[]>;
-// Stable client object (assigned once per test) so the other-workspace hook's
-// load callback keeps a stable identity and its effect doesn't loop.
+// Stable client object (assigned once per test) so the prune effect, which
+// depends on its identity, doesn't re-fire on every render.
 let workspaceClient: {
-  listWorkspaceSessionsPage: ReturnType<typeof vi.fn>;
-  workspaceByCwd: ReturnType<typeof vi.fn>;
+  getStandaloneSession: ReturnType<typeof vi.fn>;
 };
 // Stable across renders (assigned once per test) so SplitView's reload effects,
 // which depend on `reload`'s identity, don't re-fire on every render.
 let reloadMock: ReturnType<typeof vi.fn>;
 let waitingSessions: Set<string>;
+// Session ids whose pane provider is parked on the terminal session_archived
+// answer (409) — drives the mocked `useSession` per pane.
+let terminalArchived: Set<string>;
 const scrollPaneIntoView = vi.fn();
 const confirmApproval = vi.fn();
 const PaneSessionContext = React.createContext<string | undefined>(undefined);
@@ -53,7 +57,27 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   useWorkspace: () => ({
     client: workspaceClient,
     capabilities: connectionState.capabilities,
+    workspaceCwd: connectionState.workspaceCwd,
   }),
+  // Per-pane connection state (each pane's DaemonSessionProvider). A test can
+  // park a pane on the daemon's terminal session_archived answer (409): add
+  // the id to `terminalArchived` and re-render. The parked shape is the one
+  // the real provider emits (pinned in DaemonSessionProvider.test.tsx).
+  useSession: () => {
+    const sessionId = React.useContext(PaneSessionContext);
+    const archived = sessionId !== undefined && terminalArchived.has(sessionId);
+    return {
+      connection: archived
+        ? {
+            status: 'disconnected',
+            sessionId: undefined,
+            error: `Session "${sessionId}" is archived. Unarchive it before loading.`,
+            errorStatus: 409,
+            sessionArchived: true,
+          }
+        : { status: 'connected', sessionId, error: undefined },
+    };
+  },
   // Stateful, like the real hook: reload() re-renders with the CURRENT module
   // store. This lets a test prove the picker renders sessions that appeared
   // only after the reload — not merely that reload() was called.
@@ -68,16 +92,49 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   },
 }));
 
+// Catalog-store push simulator: once the primary list has settled, a test can
+// push an updated page (the daemon invalidation after an archive/delete) and
+// every mounted hook re-renders with it.
+let pushSettledPrimarySessions: ((next: any[]) => void) | undefined;
+// Page-completeness markers the settle page reports. The mock returns these
+// straight through (undefined by default = a complete page), so a test can
+// mark the settled page truncated / cursor-pending / merge-degraded and prove
+// the prune guard waits for a complete page.
+let primaryPageMeta: {
+  truncated?: boolean;
+  nextCursor?: string;
+  liveMergeFailed?: boolean;
+  stale?: boolean;
+  error?: unknown;
+} = {};
+
 vi.mock('../hooks/useScopedSessions', () => ({
   useScopedSessions: (workspaceCwd: string | undefined) => {
+    const [settled, setSettled] = React.useState(false);
     const [sessions, setSessions] = React.useState<any[]>(() =>
       workspaceCwd ? [] : sessionsState,
     );
     React.useEffect(() => {
-      if (!workspaceCwd) return;
+      // Mirror the catalog store: the page (and thus `data`) exists only once
+      // the first fetch has settled — that is the readiness signal the prune
+      // effect waits for.
+      let cancelled = false;
       void Promise.resolve().then(() => {
-        setSessions([...(otherWorkspaceSessions[workspaceCwd] ?? [])]);
+        if (cancelled) return;
+        if (workspaceCwd) {
+          setSessions([...(otherWorkspaceSessions[workspaceCwd] ?? [])]);
+        }
+        setSettled(true);
+        if (!workspaceCwd) {
+          pushSettledPrimarySessions = (next: any[]) => {
+            sessionsState = next;
+            setSessions([...next]);
+          };
+        }
       });
+      return () => {
+        cancelled = true;
+      };
     }, [workspaceCwd]);
     const reload = React.useCallback(async () => {
       reloadMock();
@@ -87,9 +144,77 @@ vi.mock('../hooks/useScopedSessions', () => ({
       setSessions([...next]);
       return next;
     }, [workspaceCwd]);
-    return { sessions, reload };
+    return {
+      sessions,
+      reload,
+      data: settled ? sessions : undefined,
+      // Completeness markers (undefined by default = a complete page).
+      nextCursor: primaryPageMeta.nextCursor,
+      liveMergeFailed: primaryPageMeta.liveMergeFailed,
+      truncated: primaryPageMeta.truncated,
+      // A page retained after a failed refresh is not a fresh answer.
+      stale: primaryPageMeta.stale,
+      error: primaryPageMeta.error,
+    };
   },
 }));
+
+// The other-workspace fan-out, mocked as a stateful seam: SplitView-level
+// cases drive what the fan-out reports (queried / not-ready cwds) instead of
+// the real catalog store — which page state makes a cwd not-ready is pinned
+// in the hook's own suite against the real store.
+let otherWorkspaceState: {
+  sessions: Record<string, any[]>;
+  loading: boolean;
+  queriedCwds: string[];
+  notReadyCwds: string[];
+} = {
+  sessions: {},
+  loading: false,
+  queriedCwds: [],
+  notReadyCwds: [],
+};
+let forceOtherWorkspace: (() => void) | undefined;
+let reloadOtherMock: ReturnType<typeof vi.fn>;
+
+vi.mock('../hooks/useOtherWorkspaceSessions', () => ({
+  useOtherWorkspaceSessions: (enabled = true) => {
+    const [, force] = React.useReducer((n: number) => n + 1, 0);
+    forceOtherWorkspace = force;
+    const reload = React.useCallback(async () => {
+      reloadOtherMock();
+    }, []);
+    // Stable while the test leaves `sessions` alone, like the real hook's
+    // memoized list; replacing it (setOtherWorkspace) yields a new identity.
+    const sessions = React.useMemo(
+      () => (enabled ? Object.values(otherWorkspaceState.sessions).flat() : []),
+      // eslint-disable-next-line react-hooks/exhaustive-deps -- module test state: replacing `sessions` is the change signal
+      [enabled, otherWorkspaceState.sessions],
+    );
+    if (!enabled) {
+      // A disabled fan-out certifies nothing about the other workspaces.
+      return {
+        sessions,
+        loading: false,
+        queriedCwds: [],
+        notReadyCwds: [],
+        reload,
+      };
+    }
+    return {
+      sessions,
+      loading: otherWorkspaceState.loading,
+      queriedCwds: otherWorkspaceState.queriedCwds,
+      notReadyCwds: otherWorkspaceState.notReadyCwds,
+      reload,
+    };
+  },
+}));
+
+function setOtherWorkspace(partial: Partial<typeof otherWorkspaceState>): void {
+  Object.assign(otherWorkspaceState, partial);
+  act(() => forceOtherWorkspace?.());
+}
 
 vi.mock('./ChatPane', () => ({
   ChatPane: (props: any) => {
@@ -182,17 +307,31 @@ beforeEach(() => {
     { sessionId: 's4', workspaceCwd: '/w', displayName: 'Four' },
   ];
   otherWorkspaceSessions = {};
-  workspaceClient = {
-    listWorkspaceSessionsPage: vi.fn(async (cwd: string) => ({
-      sessions: otherWorkspaceSessions[cwd] ?? [],
-    })),
-    workspaceByCwd: vi.fn((cwd: string) => ({
-      listWorkspaceSessionsPage: vi.fn(async () => ({
-        sessions: otherWorkspaceSessions[cwd] ?? [],
-      })),
-    })),
+  otherWorkspaceState = {
+    sessions: {},
+    loading: false,
+    queriedCwds: [],
+    notReadyCwds: [],
   };
+  terminalArchived = new Set();
+  primaryPageMeta = {};
+  workspaceClient = {
+    // A workspace session id is not a standalone session: the prune probe
+    // gets a not-found and the pane is pruned (override per test otherwise).
+    getStandaloneSession: vi.fn(async () => {
+      throw new DaemonHttpError(
+        404,
+        {
+          error: 'standalone session not found',
+          code: 'standalone_session_not_found',
+        },
+        'standalone session not found',
+      );
+    }),
+  };
+  pushSettledPrimarySessions = undefined;
   reloadMock = vi.fn();
+  reloadOtherMock = vi.fn();
 });
 
 // Flush the other-workspace hook's async fan-out (Promise.allSettled + the
@@ -200,6 +339,16 @@ beforeEach(() => {
 async function flushAsync(): Promise<void> {
   await act(async () => {
     await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+}
+
+// Push an updated settled primary list (the daemon catalog invalidation after
+// an archive/delete) and let the reconcile effect react to it.
+async function pushCatalog(next: any[]): Promise<void> {
+  await act(async () => {
+    pushSettledPrimarySessions?.(next);
     await Promise.resolve();
     await Promise.resolve();
   });
@@ -225,6 +374,16 @@ function render(props: Record<string, unknown> = {}): void {
   );
 }
 
+function rerender(props: Record<string, unknown> = {}): void {
+  act(() =>
+    root!.render(
+      <I18nProvider language="en">
+        <SplitView onExit={() => {}} {...props} />
+      </I18nProvider>,
+    ),
+  );
+}
+
 function panes(): HTMLElement[] {
   return Array.from(container!.querySelectorAll('[data-testid="chat-pane"]'));
 }
@@ -232,6 +391,11 @@ function titles(): string[] {
   return Array.from(
     container!.querySelectorAll('[data-testid="pane-title"]'),
   ).map((el) => el.textContent ?? '');
+}
+function sessionDetails(): string[] {
+  return Array.from(
+    container!.querySelectorAll('[data-testid="chat-pane"]'),
+  ).map((el) => el.getAttribute('data-session-details') ?? '(none)');
 }
 function pickerOptions(): string[] {
   return Array.from(container!.querySelectorAll('[role="option"] button')).map(
@@ -793,6 +957,30 @@ describe('SplitView', () => {
     render({ sessionIds: sessionsState.map((s) => s.sessionId) });
     // Eight requested, but only six live panes mount.
     expect(panes()).toHaveLength(6);
+    // At the cap there is no room left, so the entry point is disabled.
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    expect(addButton.disabled).toBe(true);
+  });
+
+  it('keeps the add button enabled one below MAX_PANES', () => {
+    sessionsState = Array.from({ length: MAX_SPLIT_PANES + 2 }, (_, i) => ({
+      sessionId: `x${i}`,
+      workspaceCwd: '/w',
+      displayName: `Pane ${i}`,
+    }));
+    // One slot spare and a session left to add, so the entry point must work.
+    render({
+      sessionIds: sessionsState
+        .slice(0, MAX_SPLIT_PANES - 1)
+        .map((session) => session.sessionId),
+    });
+    expect(panes()).toHaveLength(MAX_SPLIT_PANES - 1);
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    expect(addButton.disabled).toBe(false);
   });
 
   it('isolates a crashing pane so the rest of the split survives', () => {
@@ -1086,6 +1274,45 @@ describe('SplitView', () => {
     expect(hiddenSlots()).toHaveLength(0);
   });
 
+  it('keeps the add button enabled when the catalog has no other sessions', () => {
+    sessionsState = [
+      { sessionId: 's3', workspaceCwd: '/w', displayName: 'Three' },
+    ];
+    render({ sessionIds: ['s3'] });
+    const addButton = container!.querySelector(
+      'button[aria-haspopup="listbox"]',
+    ) as HTMLButtonElement;
+    // The cached catalog is not authoritative: another session may exist
+    // elsewhere, so an empty list must not disable the entry point.
+    expect(addButton.disabled).toBe(false);
+    openPicker();
+    expect(pickerOptions()).toEqual([]);
+    expect(container!.querySelector('[role="listbox"]')?.textContent).toContain(
+      'No other sessions',
+    );
+  });
+
+  it('picks up a session created elsewhere after opening the empty picker', () => {
+    sessionsState = [
+      { sessionId: 's3', workspaceCwd: '/w', displayName: 'Three' },
+    ];
+    render({ sessionIds: ['s3'] });
+    openPicker();
+    expect(pickerOptions()).toEqual([]);
+    // A session is created elsewhere while the picker was open.
+    sessionsState = [
+      ...sessionsState,
+      { sessionId: 's6', workspaceCwd: '/w', displayName: 'Six' },
+    ];
+    act(() =>
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
+      ),
+    );
+    openPicker();
+    expect(pickerOptions()).toEqual(['Six']);
+  });
+
   it('reloads the session list when the picker opens (never a stale list)', () => {
     render({ sessionIds: ['s1'] });
     // `useSessions` only fetches on mount; nothing reloads until the user acts.
@@ -1118,6 +1345,11 @@ describe('SplitView', () => {
     );
     openPicker();
     expect(pickerOptions()).toEqual(['Two', 'Three', 'Four', 'Five']);
+    // The empty row is `role="presentation"`, so only a text read sees it: a
+    // populated picker must not keep advertising "No other sessions".
+    expect(
+      container!.querySelector('[role="listbox"]')?.textContent,
+    ).not.toContain('No other sessions');
   });
 
   it('mirrors the live pane set up to the parent as panes change', () => {
@@ -1160,9 +1392,15 @@ describe('SplitView', () => {
 
   it('offers other trusted workspaces’ sessions in the picker, tagged by workspace', async () => {
     connectionState.capabilities = MULTI_WORKSPACE_CAPS;
-    otherWorkspaceSessions['/wsB'] = [
-      { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
-    ];
+    setOtherWorkspace({
+      sessions: {
+        '/wsB': [
+          { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+        ],
+      },
+      queriedCwds: ['/wsB'],
+      notReadyCwds: [],
+    });
     render({ sessionIds: ['s1'] });
     await flushAsync(); // let the other-workspace fan-out resolve
     openPicker();
@@ -1181,9 +1419,15 @@ describe('SplitView', () => {
 
   it('attaches an added other-workspace pane under its own workspace cwd', async () => {
     connectionState.capabilities = MULTI_WORKSPACE_CAPS;
-    otherWorkspaceSessions['/wsB'] = [
-      { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
-    ];
+    setOtherWorkspace({
+      sessions: {
+        '/wsB': [
+          { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+        ],
+      },
+      queriedCwds: ['/wsB'],
+      notReadyCwds: [],
+    });
     // Uncontrolled (no `sessionIds`) so the picker mounts panes locally; the
     // seed is the current session s3.
     render();
@@ -1243,9 +1487,6 @@ describe('SplitView', () => {
 
   it('remounts a deep-linked pane under its workspace once the session list resolves', async () => {
     connectionState.capabilities = MULTI_WORKSPACE_CAPS;
-    otherWorkspaceSessions['/wsB'] = [
-      { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
-    ];
     // Deep-link straight to an other-workspace session (b1) — the pane mounts
     // before the other-workspace fan-out has resolved, so its workspace is not
     // yet known.
@@ -1257,6 +1498,15 @@ describe('SplitView', () => {
     // Before the fan-out resolves the pane can't be pinned to a workspace.
     expect(workspaceOf()).toBeNull();
 
+    setOtherWorkspace({
+      sessions: {
+        '/wsB': [
+          { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+        ],
+      },
+      queriedCwds: ['/wsB'],
+      notReadyCwds: [],
+    });
     await flushAsync();
 
     // Once `workspaceCwdById` populates, the pane key flips from `b1:` to
@@ -1265,12 +1515,12 @@ describe('SplitView', () => {
     expect(workspaceOf()).toBe('/wsB');
   });
 
-  it('never fans out to other workspaces on a single-workspace daemon', async () => {
-    // Default capabilities carry no `workspaces`, so the other-workspace hook
-    // must not touch the daemon and the picker stays untagged.
+  it('keeps the picker untagged on a single-workspace daemon', async () => {
+    // Default capabilities carry no `workspaces`, so the picker stays
+    // untagged. That the fan-out never queries the daemon then is pinned in
+    // the hook's own suite.
     render({ sessionIds: ['s1'] });
     await flushAsync();
-    expect(workspaceClient.listWorkspaceSessionsPage).not.toHaveBeenCalled();
     openPicker();
     expect(pickerOptions()).toEqual(['Two', 'Three', 'Four']);
   });
@@ -1286,19 +1536,22 @@ describe('SplitView', () => {
 
   it('re-queries other workspaces when the picker opens', async () => {
     connectionState.capabilities = MULTI_WORKSPACE_CAPS;
-    otherWorkspaceSessions['/wsB'] = [
-      { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
-    ];
+    setOtherWorkspace({
+      sessions: {
+        '/wsB': [
+          { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+        ],
+      },
+      queriedCwds: ['/wsB'],
+      notReadyCwds: [],
+    });
     render({ sessionIds: ['s1'] });
     await flushAsync();
-    const before = workspaceClient.listWorkspaceSessionsPage.mock.calls.length;
     openPicker();
     await flushAsync();
     // Opening the picker reloads the other-workspace list so it never offers a
     // stale set (mirrors the primary `reload()` on picker open).
-    expect(
-      workspaceClient.listWorkspaceSessionsPage.mock.calls.length,
-    ).toBeGreaterThan(before);
+    expect(reloadOtherMock).toHaveBeenCalledTimes(1);
   });
 
   it.each([undefined, false, true])(
@@ -1335,5 +1588,862 @@ describe('SplitView', () => {
     expect(
       container!.querySelectorAll('[data-testid="host-from-props"]'),
     ).toHaveLength(2);
+  });
+
+  describe('prunes panes whose session left the active catalog', () => {
+    it('prunes the archived pane and keeps the rest (uncontrolled)', async () => {
+      render(); // seeds the current session (s3)
+      await flushAsync();
+      openPicker();
+      const option = Array.from(
+        container!.querySelectorAll<HTMLButtonElement>(
+          '[role="option"] button',
+        ),
+      ).find((button) => button.textContent === 'One')!;
+      act(() => option.click());
+      expect(titles()).toEqual(['Three', 'One']);
+      // The daemon archives session s1 (a non-current pane): the catalog
+      // invalidation drops it from the settled active list. The current
+      // session (s3) is exempt from pruning — archiving it keeps its pane
+      // (showing the terminal error the provider reports) rather than closing
+      // the pane the user is looking at.
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's1'));
+      expect(titles()).toEqual(['Three']);
+    });
+
+    it('reports the pruned pane set to the parent (controlled)', async () => {
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s1', 's2'], onPanesChange });
+      await flushAsync();
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's2'));
+      expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
+    });
+
+    it('exits the split when the last pane leaves the active catalog', async () => {
+      // The seed pane is the current session, which is exempt from pruning —
+      // close it first, leaving a non-current pane as the last one.
+      const onExit = vi.fn();
+      render({ onExit });
+      await flushAsync();
+      openPicker();
+      const option = Array.from(
+        container!.querySelectorAll<HTMLButtonElement>(
+          '[role="option"] button',
+        ),
+      ).find((button) => button.textContent === 'One')!;
+      act(() => option.click());
+      // Close the seed (current) pane: one pane remains, so no exit yet.
+      act(() => {
+        const close = container!.querySelector('[data-testid="pane-close"]');
+        close!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      });
+      expect(titles()).toEqual(['One']);
+      expect(onExit).not.toHaveBeenCalled();
+      // The last remaining pane is a non-current session: archiving it prunes
+      // it and the split exits to the session overview.
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's1'));
+      expect(onExit).toHaveBeenCalledTimes(1);
+    });
+
+    it('waits for the active list to settle before pruning', async () => {
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s9'], onPanesChange });
+      // Before the first settled page an unknown id must not be pruned.
+      expect(onPanesChange).not.toHaveBeenCalled();
+      await flushAsync();
+      expect(onPanesChange).toHaveBeenLastCalledWith([]);
+    });
+
+    it('keeps a pane whose session is listed by another workspace', async () => {
+      connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+      setOtherWorkspace({
+        sessions: {
+          '/wsB': [
+            { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+          ],
+        },
+        queriedCwds: ['/wsB'],
+        notReadyCwds: [],
+      });
+      render({ sessionIds: ['s1', 'b1'] });
+      await flushAsync();
+      expect(titles()).toEqual(['One', 'Beta']);
+      expect(panes()).toHaveLength(2);
+    });
+
+    it('does not prune a pane while other-workspace lists are still loading', async () => {
+      connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+      const onPanesChange = vi.fn();
+      // b1 is not in the primary list: while the /wsB page is still in flight
+      // the pane must not be pruned on that gap alone.
+      setOtherWorkspace({
+        sessions: {},
+        loading: true,
+        queriedCwds: ['/wsB'],
+        notReadyCwds: [],
+      });
+      render({ sessionIds: ['s1', 'b1'], onPanesChange });
+      await flushAsync();
+      expect(onPanesChange).not.toHaveBeenCalled();
+      setOtherWorkspace({
+        sessions: {
+          '/wsB': [
+            { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+          ],
+        },
+        loading: false,
+        queriedCwds: ['/wsB'],
+        notReadyCwds: [],
+      });
+      await flushAsync();
+      // Settled and present: still nothing to prune.
+      expect(onPanesChange).not.toHaveBeenCalled();
+      expect(titles()).toEqual(['One', 'Beta']);
+    });
+
+    it('prunes a pane whose other-workspace session left that list', async () => {
+      connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+      const onPanesChange = vi.fn();
+      setOtherWorkspace({
+        sessions: {
+          '/wsB': [
+            { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+          ],
+        },
+        queriedCwds: ['/wsB'],
+        notReadyCwds: [],
+      });
+      render({ sessionIds: ['s1', 'b1'], onPanesChange });
+      await flushAsync();
+      // b1 vanishes from the /wsB list (archived there): the page settled
+      // complete, so its workspace can prove absence — prune.
+      setOtherWorkspace({
+        sessions: { '/wsB': [] },
+        queriedCwds: ['/wsB'],
+        notReadyCwds: [],
+      });
+      await flushAsync();
+      expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
+    });
+
+    it('keeps a pane the standalone probe confirms alive', async () => {
+      connectionState.capabilities = {
+        features: ['standalone_sessions_v1'],
+        workspaceCwd: '/w',
+      };
+      workspaceClient.getStandaloneSession.mockResolvedValue({
+        sessionId: 'st1',
+      });
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['st1'], onPanesChange });
+      await flushAsync();
+      expect(workspaceClient.getStandaloneSession).toHaveBeenCalledWith('st1');
+      expect(onPanesChange).not.toHaveBeenCalled();
+      expect(panes()).toHaveLength(1);
+    });
+
+    it('prunes a pane whose standalone probe answers not-found', async () => {
+      connectionState.capabilities = {
+        features: ['standalone_sessions_v1'],
+        workspaceCwd: '/w',
+      };
+      // The default probe mock answers 404 standalone_session_not_found.
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['st1'], onPanesChange });
+      await flushAsync();
+      expect(onPanesChange).toHaveBeenLastCalledWith([]);
+    });
+
+    it('joins an in-flight probe when another commit lands mid-probe', async () => {
+      // A commit landing while the probe is still in flight must join the
+      // running request, not fire a duplicate.
+      connectionState.capabilities = {
+        features: ['standalone_sessions_v1'],
+        workspaceCwd: '/w',
+      };
+      let settleProbe: (() => void) | undefined;
+      const probeGate = new Promise<void>((resolve) => {
+        settleProbe = resolve;
+      });
+      workspaceClient.getStandaloneSession = vi.fn(() => probeGate);
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['st1'], onPanesChange });
+      await flushAsync();
+      expect(workspaceClient.getStandaloneSession).toHaveBeenCalledTimes(1);
+      // A second catalog commit lands mid-probe.
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's4'));
+      expect(workspaceClient.getStandaloneSession).toHaveBeenCalledTimes(1);
+      act(() => settleProbe!());
+      await flushAsync();
+      // Resolved alive: the pane is kept and nothing was reported.
+      expect(onPanesChange).not.toHaveBeenCalled();
+      expect(panes()).toHaveLength(1);
+    });
+
+    it('keeps a pane and stops re-probing on a deterministic standalone conflict', async () => {
+      // A 409 standalone_session_conflict is deterministic (the daemon knows
+      // the id but refuses to serve it standalone): the pane is kept and the
+      // verdict is cached, so later commits must not re-probe it.
+      connectionState.capabilities = {
+        features: ['standalone_sessions_v1'],
+        workspaceCwd: '/w',
+      };
+      workspaceClient.getStandaloneSession = vi.fn(async () => {
+        throw new DaemonHttpError(
+          409,
+          {
+            error: 'standalone session conflict',
+            code: 'standalone_session_conflict',
+          },
+          'standalone session conflict',
+        );
+      });
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['st1'], onPanesChange });
+      await flushAsync();
+      expect(onPanesChange).not.toHaveBeenCalled();
+      expect(panes()).toHaveLength(1);
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's4'));
+      expect(workspaceClient.getStandaloneSession).toHaveBeenCalledTimes(1);
+    });
+
+    it('keeps a pane when the standalone probe fails transiently', async () => {
+      connectionState.capabilities = {
+        features: ['standalone_sessions_v1'],
+        workspaceCwd: '/w',
+      };
+      workspaceClient.getStandaloneSession.mockRejectedValue(
+        new Error('network down'),
+      );
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['st1'], onPanesChange });
+      await flushAsync();
+      expect(onPanesChange).not.toHaveBeenCalled();
+      expect(panes()).toHaveLength(1);
+      // A transient failure records no verdict: the next commit must re-probe
+      // (caching the failure as 'alive' would make the pane unprunable).
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's4'));
+      expect(workspaceClient.getStandaloneSession).toHaveBeenCalledTimes(2);
+      expect(panes()).toHaveLength(1);
+    });
+
+    // --- Page-completeness guards (R1-1): an absence from an incomplete page
+    // is not proof a session is gone, so the prune must wait. Each case below
+    // marks the settled page incomplete and asserts the prune does NOT fire.
+
+    it('does not prune while the settled page is truncated (bounded)', async () => {
+      primaryPageMeta = { truncated: true };
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s1', 's2'], onPanesChange });
+      await flushAsync();
+      // s2 leaves the (bounded) page, but the page was truncated: a session can
+      // simply have fallen off it. Absence is not proof of removal.
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's2'));
+      expect(onPanesChange).not.toHaveBeenCalled();
+    });
+
+    it('does not prune while the settled page has a nextCursor', async () => {
+      primaryPageMeta = { nextCursor: 'cursor-2' };
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s1', 's2'], onPanesChange });
+      await flushAsync();
+      // A nextCursor means more results exist beyond this page: absence is not
+      // proof of removal.
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's2'));
+      expect(onPanesChange).not.toHaveBeenCalled();
+    });
+
+    it('does not prune while the settled page liveMergeFailed', async () => {
+      primaryPageMeta = { liveMergeFailed: true };
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s1', 's2'], onPanesChange });
+      await flushAsync();
+      // A merge that failed partway is missing sessions for a reason other than
+      // archiving: absence is not proof of removal.
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's2'));
+      expect(onPanesChange).not.toHaveBeenCalled();
+    });
+
+    it('prunes a stale primary pane while a stopped-workspace pane stays resolvable', async () => {
+      // /wsB is non-primary but untrusted: the fan-out never queries it, so a
+      // session there could still be a live pane — but that may only protect
+      // b1's pane, not block the prune of a primary-workspace pane whose
+      // absence the (complete) primary page does prove.
+      connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+      setOtherWorkspace({
+        sessions: {
+          '/wsB': [
+            { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+          ],
+        },
+        queriedCwds: ['/wsB'],
+        notReadyCwds: [],
+      });
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s1', 's2', 'b1'], onPanesChange });
+      await flushAsync();
+      expect(titles()).toEqual(['One', 'Two', 'Beta']);
+      // The daemon flips /wsB untrusted: the fan-out stops querying it and the
+      // merged list loses b1. Its absence from our list proves nothing (we no
+      // longer cover that workspace), but s2 left the complete primary page:
+      // it is pruned, while b1's pane — title and session details — survives.
+      connectionState.capabilities = {
+        ...MULTI_WORKSPACE_CAPS,
+        workspaces: [
+          { id: 'w0', cwd: '/w', primary: true, trusted: true },
+          { id: 'w1', cwd: '/wsB', primary: false, trusted: false },
+        ],
+      };
+      setOtherWorkspace({ sessions: {}, queriedCwds: [], notReadyCwds: [] });
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's2'));
+      expect(onPanesChange).toHaveBeenLastCalledWith(['s1', 'b1']);
+      // The parent acks the prune by re-seeding the pane set without s2.
+      act(() => {
+        root!.render(
+          <I18nProvider language="en">
+            <SplitView
+              sessionIds={['s1', 'b1']}
+              onPanesChange={onPanesChange}
+              onExit={() => {}}
+            />
+          </I18nProvider>,
+        );
+      });
+      await flushAsync();
+      // b1's pane — title and session details — survives from the last-seen
+      // summary even though its workspace is no longer advertised.
+      expect(titles()).toEqual(['One', 'Beta']);
+      expect(sessionDetails()).toEqual(['s1', 'b1']);
+    });
+
+    it('keeps panes whose workspace stopped being advertised', async () => {
+      // The daemon stops advertising /wsB (draining/transitioning/blocked
+      // filters internal entries out of capabilities): the fan-out drops its
+      // snapshot in the same update, so b1's absence from the merged list
+      // proves nothing — outside the coverage, the pane is a probe candidate,
+      // never a direct prune.
+      connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+      setOtherWorkspace({
+        sessions: {
+          '/wsB': [
+            { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+          ],
+        },
+        queriedCwds: ['/wsB'],
+        notReadyCwds: [],
+      });
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s1', 'b1'], onPanesChange });
+      await flushAsync();
+      connectionState.capabilities = {
+        features: [],
+        workspaceCwd: '/w',
+        workspaces: [{ id: 'w0', cwd: '/w', primary: true, trusted: true }],
+      };
+      setOtherWorkspace({ sessions: {}, queriedCwds: [], notReadyCwds: [] });
+      await pushCatalog(sessionsState);
+      expect(onPanesChange).not.toHaveBeenCalled();
+      expect(panes()).toHaveLength(2);
+    });
+
+    it('does not prune a fan-out pane whose cwd is not-ready', async () => {
+      // Readiness is positive proof per cwd: a not-ready workspace cannot
+      // prove absence. Which page states make a cwd not-ready (truncated,
+      // nextCursor, liveMergeFailed, stale, errored, never landed) is pinned
+      // in the hook's own suite against the real catalog store.
+      connectionState.capabilities = MULTI_WORKSPACE_CAPS;
+      setOtherWorkspace({
+        sessions: {
+          '/wsB': [
+            { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+          ],
+        },
+        queriedCwds: ['/wsB'],
+        notReadyCwds: [],
+      });
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s1', 'b1'], onPanesChange });
+      await flushAsync();
+      setOtherWorkspace({
+        sessions: { '/wsB': [] },
+        queriedCwds: ['/wsB'],
+        notReadyCwds: ['/wsB'],
+      });
+      await flushAsync();
+      expect(onPanesChange).not.toHaveBeenCalled();
+      expect(panes()).toHaveLength(2);
+    });
+
+    it.each([
+      ['stale (mid-revalidation)', { stale: true }],
+      ['errored (retained after a failed refresh)', { error: new Error('x') }],
+    ])('does not prune while the settled page is %s', async (_label, meta) => {
+      // A retained page is not a fresh answer from the daemon: absence from
+      // it proves nothing. Stale-without-error is the common state — the
+      // store marks the page stale at the start of every refresh.
+      primaryPageMeta = meta;
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s1', 's2'], onPanesChange });
+      await flushAsync();
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's2'));
+      expect(onPanesChange).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['a nextCursor', { nextCursor: 'cursor-2' }],
+      ['truncated', { truncated: true }],
+      ['liveMergeFailed', { liveMergeFailed: true }],
+      ['stale', { stale: true }],
+      ['errored', { error: new Error('refresh failed') }],
+    ])(
+      'prunes a terminal-archived pane while the page has %s',
+      async (_label, meta) => {
+        // List-based inference is off the table, but a pane whose own
+        // provider parked on the daemon's terminal session_archived answer
+        // (409) is an authoritative per-pane signal: prune it.
+        primaryPageMeta = meta;
+        const onPanesChange = vi.fn();
+        render({ sessionIds: ['s1', 's2'], onPanesChange });
+        await flushAsync();
+        await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's2'));
+        expect(onPanesChange).not.toHaveBeenCalled();
+        terminalArchived.add('s2');
+        rerender({ sessionIds: ['s1', 's2'], onPanesChange });
+        expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
+      },
+    );
+
+    it('prunes a terminal-archived pane in an uncontrolled split', async () => {
+      primaryPageMeta = { nextCursor: 'cursor-2' };
+      render(); // seeds the current session (s3)
+      await flushAsync();
+      openPicker();
+      const option = Array.from(
+        container!.querySelectorAll<HTMLButtonElement>(
+          '[role="option"] button',
+        ),
+      ).find((button) => button.textContent === 'One')!;
+      act(() => option.click());
+      expect(titles()).toEqual(['Three', 'One']);
+      terminalArchived.add('s1');
+      rerender();
+      expect(titles()).toEqual(['Three']);
+    });
+
+    it('drops the terminal mark when the pane un-parks', async () => {
+      // A parent that does not apply the prune keeps the pane mounted. Once
+      // its provider leaves the parked state (the session was restored), a
+      // later incomplete-page commit must not prune it on a sticky mark.
+      primaryPageMeta = { nextCursor: 'cursor-2' };
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s1', 's2'], onPanesChange });
+      await flushAsync();
+      terminalArchived.add('s2');
+      rerender({ sessionIds: ['s1', 's2'], onPanesChange });
+      expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
+      terminalArchived.delete('s2');
+      rerender({ sessionIds: ['s1', 's2'], onPanesChange });
+      onPanesChange.mockClear();
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's4'));
+      expect(onPanesChange).not.toHaveBeenCalled();
+    });
+
+    it('prunes a terminal-archived pane on a complete page despite a cached alive verdict', async () => {
+      // An archived standalone session's probe can have answered alive before
+      // the archive. The pane's own terminal answer supersedes the cached
+      // verdict instead of short-circuiting on it.
+      connectionState.capabilities = {
+        features: ['standalone_sessions_v1'],
+        workspaceCwd: '/w',
+      };
+      workspaceClient.getStandaloneSession.mockResolvedValue({
+        sessionId: 'st1',
+      });
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s1', 'st1'], onPanesChange });
+      await flushAsync();
+      expect(workspaceClient.getStandaloneSession).toHaveBeenCalledTimes(1);
+      expect(onPanesChange).not.toHaveBeenCalled();
+      terminalArchived.add('st1');
+      rerender({ sessionIds: ['s1', 'st1'], onPanesChange });
+      await flushAsync();
+      expect(onPanesChange).toHaveBeenLastCalledWith(['s1']);
+    });
+
+    it('never prunes the current session parked on its terminal answer', async () => {
+      // The provider clears `connection.sessionId` when the current session
+      // parks on session_archived: the seed pane keeps its exemption through
+      // the park, on an incomplete page and on a complete one.
+      primaryPageMeta = { nextCursor: 'cursor-2' };
+      const onPanesChange = vi.fn();
+      const onExit = vi.fn();
+      render({ sessionIds: ['s3', 's1'], onPanesChange, onExit });
+      await flushAsync();
+      terminalArchived.add('s3');
+      connectionState = {
+        ...connectionState,
+        sessionId: undefined,
+        status: 'disconnected',
+        errorStatus: 409,
+        sessionArchived: true,
+      };
+      rerender({ sessionIds: ['s3', 's1'], onPanesChange, onExit });
+      await flushAsync();
+      expect(onPanesChange).not.toHaveBeenCalled();
+      primaryPageMeta = {};
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's3'));
+      expect(onPanesChange).not.toHaveBeenCalled();
+      expect(onExit).not.toHaveBeenCalled();
+      expect(panes()).toHaveLength(2);
+    });
+
+    it('prunes a ready fan-out pane while a sibling workspace is not ready', async () => {
+      // Readiness is per-cwd: /wsB not being ready must not shield c1 in the
+      // (ready, empty) /wsC — a fan-out-wide "any not-ready blocks everything"
+      // gate would keep the pruned pane open.
+      connectionState.capabilities = {
+        features: [],
+        workspaceCwd: '/w',
+        workspaces: [
+          { id: 'w0', cwd: '/w', primary: true, trusted: true },
+          {
+            id: 'w1',
+            cwd: '/wsB',
+            displayName: 'Payments API',
+            primary: false,
+            trusted: true,
+          },
+          {
+            id: 'w2',
+            cwd: '/wsC',
+            displayName: 'Ledger API',
+            primary: false,
+            trusted: true,
+          },
+        ],
+      };
+      setOtherWorkspace({
+        sessions: {
+          '/wsB': [
+            { sessionId: 'b1', workspaceCwd: '/wsB', displayName: 'Beta' },
+          ],
+          '/wsC': [
+            { sessionId: 'c1', workspaceCwd: '/wsC', displayName: 'Gamma' },
+          ],
+        },
+        queriedCwds: ['/wsB', '/wsC'],
+        notReadyCwds: [],
+      });
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s1', 'b1', 'c1'], onPanesChange });
+      await flushAsync();
+      // /wsB goes not-ready while /wsC settles empty: c1 is provably gone
+      // (pruned), b1 is not provably gone (kept).
+      setOtherWorkspace({
+        sessions: { '/wsC': [] },
+        queriedCwds: ['/wsB', '/wsC'],
+        notReadyCwds: ['/wsB'],
+      });
+      await flushAsync();
+      expect(onPanesChange).toHaveBeenLastCalledWith(['s1', 'b1']);
+    });
+
+    it('does not resurrect a pane the parent closed while a probe is in flight (controlled)', async () => {
+      connectionState.capabilities = {
+        features: ['standalone_sessions_v1'],
+        workspaceCwd: '/w',
+      };
+      // stale1 is absent from the catalog; defer its probe so the prop can move
+      // while it is in flight.
+      let settleProbe: ((reject: boolean) => void) | undefined;
+      const probeGate = new Promise<void>((resolve, reject) => {
+        settleProbe = (doReject) =>
+          doReject
+            ? reject(
+                new DaemonHttpError(
+                  404,
+                  {
+                    error: 'standalone session not found',
+                    code: 'standalone_session_not_found',
+                  },
+                  'standalone session not found',
+                ),
+              )
+            : resolve();
+      });
+      workspaceClient.getStandaloneSession = vi.fn(() => probeGate);
+      // A stateful parent: what it holds after the round is the truth — a
+      // report that resurrects a closed pane sticks, because nothing stale is
+      // left to re-trigger the reconcile afterwards.
+      let parentIds: string[] = ['stale1', 's2', 's3'];
+      function Parent() {
+        const [ids, setIds] = React.useState<string[]>(['stale1', 's2', 's3']);
+        parentIds = ids;
+        return (
+          <SplitView
+            sessionIds={ids}
+            onPanesChange={setIds}
+            onExit={() => {}}
+          />
+        );
+      }
+      container = document.createElement('div');
+      document.body.appendChild(container);
+      root = createRoot(container);
+      act(() => {
+        root!.render(
+          <I18nProvider language="en">
+            <Parent />
+          </I18nProvider>,
+        );
+      });
+      await flushAsync();
+      // The probe for stale1 is in flight. The user closes the s3 pane with a
+      // real (un-act()ed) click: the prop render commits and paneIdsRef —
+      // which tracks the prop-derived pane set in controlled mode — refreshes
+      // before the probe's continuation microtask runs.
+      const closes = container!.querySelectorAll('[data-testid="pane-close"]');
+      closes[2].dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      settleProbe!(true);
+      await flushAsync();
+      // s3 must stay closed: a stale state mirror (the pre-fix read) would
+      // have reported ['s2', 's3'], resurrecting the pane the user just
+      // closed — permanently.
+      expect(parentIds).toEqual(['s2']);
+    });
+
+    it('skips the standalone probe when the capability is absent', async () => {
+      // Default capabilities carry no standalone_sessions_v1: the gate must skip
+      // the probe entirely (no getStandaloneSession call) and prune the stale
+      // pane directly.
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['st1'], onPanesChange });
+      await flushAsync();
+      expect(workspaceClient.getStandaloneSession).not.toHaveBeenCalled();
+      expect(onPanesChange).toHaveBeenLastCalledWith([]);
+    });
+
+    it('never prunes the current session, even if it leaves the catalog', async () => {
+      // connectionState.sessionId is 's3': the seed pane is the current
+      // session, whose workspace the connection already knows. If it leaves
+      // the catalog (archived), the provider shows the terminal error —
+      // closing the pane the user is looking at is not the reconcile's job.
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s3'], onPanesChange });
+      await flushAsync();
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's3'));
+      expect(onPanesChange).not.toHaveBeenCalled();
+      expect(panes()).toHaveLength(1);
+      // The kept seed pane stays resolvable: title and session-details target
+      // both survive via the last-seen summary fallback.
+      expect(titles()).toEqual(['Three']);
+      expect(sessionDetails()).toEqual(['s3']);
+    });
+
+    it('does not re-probe an id the probe already answered absent', async () => {
+      // The absent verdict is deterministic (a workspace id is never a
+      // standalone session), so a stale id that survives a round — e.g. the
+      // parent does not apply the controlled prune — must not be re-probed
+      // on every catalog commit (that would repeat the same 404 forever).
+      connectionState.capabilities = {
+        features: ['standalone_sessions_v1'],
+        workspaceCwd: '/w',
+      };
+      workspaceClient.getStandaloneSession = vi.fn(async () => {
+        throw new DaemonHttpError(
+          404,
+          {
+            error: 'standalone session not found',
+            code: 'standalone_session_not_found',
+          },
+          'standalone session not found',
+        );
+      });
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['st1'], onPanesChange });
+      await flushAsync();
+      expect(onPanesChange).toHaveBeenLastCalledWith([]);
+      // Second catalog commit with the same absence: the verdict is cached,
+      // so the prune is reported again without a second probe round trip.
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's4'));
+      expect(workspaceClient.getStandaloneSession).toHaveBeenCalledTimes(1);
+      expect(onPanesChange).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not re-probe a live standalone pane on later commits', async () => {
+      // A live standalone pane is kept-but-stale (it never appears in a
+      // workspace list): its successful probe is the definitive answer, so
+      // later catalog commits must not re-probe it.
+      connectionState.capabilities = {
+        features: ['standalone_sessions_v1'],
+        workspaceCwd: '/w',
+      };
+      workspaceClient.getStandaloneSession = vi.fn(async () => ({
+        sessionId: 'st1',
+      }));
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['st1'], onPanesChange });
+      await flushAsync();
+      // A live standalone pane: kept, and the verdict is recorded.
+      expect(onPanesChange).not.toHaveBeenCalled();
+      expect(panes()).toHaveLength(1);
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's4'));
+      expect(workspaceClient.getStandaloneSession).toHaveBeenCalledTimes(1);
+      expect(panes()).toHaveLength(1);
+    });
+
+    it('re-probes a pane after a retryable standalone conflict', async () => {
+      // A pending deletion journal answers 409 standalone_session_conflict
+      // with retryable: true — "ask again". No verdict is cached: the next
+      // commit re-probes, and once the journal clears the 404 prunes.
+      connectionState.capabilities = {
+        features: ['standalone_sessions_v1'],
+        workspaceCwd: '/w',
+      };
+      const retryableConflict = new DaemonHttpError(
+        409,
+        {
+          error: 'standalone session conflict',
+          code: 'standalone_session_conflict',
+          retryable: true,
+        },
+        'standalone session conflict',
+      );
+      workspaceClient.getStandaloneSession.mockRejectedValueOnce(
+        retryableConflict,
+      );
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['st1'], onPanesChange });
+      await flushAsync();
+      expect(onPanesChange).not.toHaveBeenCalled();
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's4'));
+      await flushAsync();
+      expect(workspaceClient.getStandaloneSession).toHaveBeenCalledTimes(2);
+      expect(onPanesChange).toHaveBeenLastCalledWith([]);
+    });
+
+    it.each([
+      [
+        'a 200 summary marked archived',
+        () =>
+          workspaceClient.getStandaloneSession.mockResolvedValue({
+            sessionId: 'st1',
+            isArchived: true,
+          }),
+      ],
+      [
+        'a 409 session_archived',
+        () =>
+          workspaceClient.getStandaloneSession.mockRejectedValue(
+            new DaemonHttpError(
+              409,
+              { error: 'session archived', code: 'session_archived' },
+              'session archived',
+            ),
+          ),
+      ],
+    ])(
+      'prunes a pane whose standalone probe answers %s',
+      async (_label, arrange) => {
+        connectionState.capabilities = {
+          features: ['standalone_sessions_v1'],
+          workspaceCwd: '/w',
+        };
+        arrange();
+        const onPanesChange = vi.fn();
+        render({ sessionIds: ['st1'], onPanesChange });
+        await flushAsync();
+        expect(onPanesChange).toHaveBeenLastCalledWith([]);
+      },
+    );
+
+    it('neither probes nor prunes an unknown-workspace pane while a fan-out workspace is not ready', async () => {
+      // Cold mount: b1 lives in /wsB, whose page has not landed, so its cwd
+      // is unknown. The probe cannot settle it — a live workspace session
+      // answers not-found too — so it waits for the fan-out.
+      connectionState.capabilities = {
+        ...MULTI_WORKSPACE_CAPS,
+        features: ['standalone_sessions_v1'],
+      };
+      setOtherWorkspace({
+        sessions: {},
+        queriedCwds: ['/wsB'],
+        notReadyCwds: ['/wsB'],
+      });
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['b1'], onPanesChange });
+      await flushAsync();
+      await pushCatalog(sessionsState.filter((s) => s.sessionId !== 's4'));
+      expect(workspaceClient.getStandaloneSession).not.toHaveBeenCalled();
+      expect(onPanesChange).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ['truncated', { truncated: true }],
+      ['cursor-pending', { nextCursor: 'cursor-2' }],
+      ['liveMergeFailed', { liveMergeFailed: true }],
+      ['stale', { stale: true }],
+      ['errored', { error: new Error('refresh failed') }],
+    ])(
+      'does not prune an unknown-workspace pane while the page is %s',
+      async (_label, meta) => {
+        // deep1 was never listed, so it has no known workspace: the page
+        // completeness check is the only thing between it and a prune.
+        primaryPageMeta = meta;
+        const onPanesChange = vi.fn();
+        render({ sessionIds: ['deep1'], onPanesChange });
+        await flushAsync();
+        expect(workspaceClient.getStandaloneSession).not.toHaveBeenCalled();
+        expect(onPanesChange).not.toHaveBeenCalled();
+      },
+    );
+
+    it('never probes panes the catalog still lists', async () => {
+      connectionState.capabilities = {
+        features: ['standalone_sessions_v1'],
+        workspaceCwd: '/w',
+      };
+      workspaceClient.getStandaloneSession.mockResolvedValue({
+        sessionId: 'x',
+      });
+      const onPanesChange = vi.fn();
+      render({ sessionIds: ['s1', 's2'], onPanesChange });
+      await flushAsync();
+      expect(workspaceClient.getStandaloneSession).not.toHaveBeenCalled();
+      await pushCatalog([...sessionsState]);
+      expect(workspaceClient.getStandaloneSession).not.toHaveBeenCalled();
+      expect(onPanesChange).not.toHaveBeenCalled();
+    });
+
+    it('keeps the seed pane in its workspace across a terminal park', async () => {
+      // x1 is the current session in /wsB and appears in no list: only the
+      // connection knows its workspace. Clearing `connection.sessionId` on
+      // the park must not remount the pane under the primary workspace.
+      connectionState = {
+        ...connectionState,
+        sessionId: 'x1',
+        workspaceCwd: '/wsB',
+        capabilities: MULTI_WORKSPACE_CAPS,
+      };
+      render({ sessionIds: ['x1'] });
+      await flushAsync();
+      const workspaceOfX1 = () =>
+        container!
+          .querySelector('[data-session="x1"]')
+          ?.getAttribute('data-workspace');
+      expect(workspaceOfX1()).toBe('/wsB');
+      terminalArchived.add('x1');
+      connectionState = {
+        ...connectionState,
+        sessionId: undefined,
+        status: 'disconnected',
+        errorStatus: 409,
+        sessionArchived: true,
+      };
+      rerender({ sessionIds: ['x1'] });
+      await flushAsync();
+      expect(panes()).toHaveLength(1);
+      expect(workspaceOfX1()).toBe('/wsB');
+    });
   });
 });
