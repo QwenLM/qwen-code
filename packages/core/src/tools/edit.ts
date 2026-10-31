@@ -126,7 +126,6 @@ export interface EditToolParams {
 interface CalculatedEdit {
   sandboxFileVersion?: SandboxFileVersion | null;
   currentContent: string | null;
-  newContent: string;
   /**
    * Payload to write. For a new file it is `newContent`; for an existing file
    * containing CRLF, the replacement is spliced into the original bytes so
@@ -210,7 +209,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
       if (!decision.ok) {
         return {
           currentContent: null,
-          newContent: '',
           contentForWrite: '',
           occurrences: 0,
           error: {
@@ -284,7 +282,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         });
         return {
           currentContent: null,
-          newContent: '',
           contentForWrite: '',
           occurrences: 0,
           error: {
@@ -445,7 +442,6 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
 
     return {
       currentContent,
-      newContent,
       contentForWrite,
       sandboxFileVersion,
       occurrences,
