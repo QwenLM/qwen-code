@@ -35,6 +35,7 @@ import {
   trustAnchor,
   resolveWatchRoot,
   requireState,
+  withKnownHead,
   withWatchLock,
   writeState,
   type AutofixPrPaths,
@@ -218,7 +219,7 @@ function syncLocked(
     if (own > 0) dropped = own;
     if (dirtyOrUnreadable(worktree)) {
       if (moved || current !== state) {
-        writeState(paths.statePath, { ...current, lastKnownHeadSha: prHead });
+        writeState(paths.statePath, withKnownHead(current, prHead));
       }
       return {
         synced: false,
@@ -368,7 +369,7 @@ function syncLocked(
     }
   }
   if (moved || current !== state) {
-    writeState(paths.statePath, { ...current, lastKnownHeadSha: prHead });
+    writeState(paths.statePath, withKnownHead(current, prHead));
   }
   // A submodule the new head moved, which git could not check out, would
   // otherwise be committed back to its old commit by the next fix.
