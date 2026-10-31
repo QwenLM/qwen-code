@@ -1,7 +1,7 @@
 {
   "name": "@qwen-code/qwen-code",
   "private": true,
-  "version": "0.26.3",
+  "version": "0.26.4",
   "packageManager": "pnpm@11.24.0+sha512.bd27e345e976dcb0be0b7a1228217b049a817e21b1f355c90dbe7dc46671895a8bc1e6d06c24554505ea93ea0b45f489a27ec1bfbc8de6a9659fca0f16fa0000",
   "engines": {
     "node": ">=22.0.0"
@@ -35,7 +35,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.26.3"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.26.4"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -80,9 +80,13 @@
     "test:e2e:managed-harness-restart-approval-after-decision": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault after-decision",
     "test:e2e:managed-harness-restart-approval-after-prepare": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault after-prepare",
     "test:e2e:managed-harness-restart-approval-after-result": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault after-result",
+    "test:e2e:managed-harness-restart-approval-finished-before-commit": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault finished-before-commit",
+    "test:e2e:managed-harness-restart-approval-sibling-approval": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault sibling-approval",
+    "test:e2e:managed-harness-restart-approval-after-earlier-tools": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault after-earlier-tools",
     "test:e2e:managed-harness-restart-approval-cleanup-failed": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault cleanup-failed",
     "test:e2e:managed-harness-restart-approval-decision-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault decision-reply-lost",
     "test:e2e:managed-harness-restart-approval-admission-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault admission-reply-lost",
+    "test:e2e:managed-harness-restart-approval-load-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault load-reply-lost",
     "test:e2e:managed-harness-restart-approval-terminal-reply-lost": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault terminal-reply-lost",
     "test:e2e:managed-harness-restart-approval-terminal-write-failed": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify allow --g3-fault terminal-write-failed",
     "test:e2e:managed-harness-restart-continuation-closeout": "tsx scripts/run-managed-agent-server-e2e.ts --continuation-failover --harness-only --g3-verify continuation",

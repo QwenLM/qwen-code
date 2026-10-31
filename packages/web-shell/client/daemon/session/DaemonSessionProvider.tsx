@@ -2436,6 +2436,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 error: undefined,
                 errorStatus: undefined,
                 missingSession: false,
+                sessionArchived: undefined,
                 loadingTranscript: true,
               }));
             }
@@ -4509,6 +4510,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               error: undefined,
               errorStatus: undefined,
               missingSession: false,
+              sessionArchived: undefined,
             }));
             return;
           }
@@ -4791,9 +4793,9 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 reason: isAuthFailure ? 'auth-failed' : 'deleted',
               });
             }
-            // Auth failures (401/403) and terminal session errors (404/410)
-            // must clear the session — the server-side state is gone or
-            // inaccessible, so delta resume is impossible.
+            // Auth failures (401/403) and terminal session errors (404/410, and
+            // 409 session_archived) must clear the session — the server-side
+            // state is gone or inaccessible, so delta resume is impossible.
             session = undefined;
             sessionRef.current = undefined;
             if (isAuthFailure) {
@@ -4849,6 +4851,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               // but they also must not clear one confirmed by load/heartbeat.
               missingSession:
                 missingLoadedSession || current.missingSession === true,
+              sessionArchived: isSessionArchivedHttpError(error) || undefined,
               capabilities: capabilities ?? current.capabilities,
               loadingTranscript: undefined,
               catchingUp: undefined,
@@ -4921,6 +4924,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               current.errorStatus,
             ),
             missingSession: false,
+            sessionArchived: undefined,
             loadingTranscript: undefined,
           }));
         }
@@ -6811,8 +6815,23 @@ function bumpSessionEventSignals(
 }
 
 function isTerminalSessionHttpError(error: unknown): boolean {
+  if (isSessionArchivedHttpError(error)) return true;
   const status = extractHttpStatus(error);
   return status !== undefined && TERMINAL_SESSION_HTTP_STATUSES.has(status);
+}
+
+/**
+ * The daemon answers 409 `{ code: 'session_archived' }` for every active-route
+ * load/resume/attach of an archived session. A plain 409 (for example a
+ * session-writer conflict) stays retriable: that conflict can clear on its own.
+ * An archived session will not, so retrying loops forever on an empty
+ * transcript — treat the error as terminal and park with a visible error
+ * instead of reconnecting.
+ */
+export function isSessionArchivedHttpError(error: unknown): boolean {
+  if (!(error instanceof DaemonHttpError) || error.status !== 409) return false;
+  const body = isRecord(error.body) ? error.body : undefined;
+  return body?.['code'] === 'session_archived';
 }
 
 function isAuthFailureHttpError(error: unknown): boolean {

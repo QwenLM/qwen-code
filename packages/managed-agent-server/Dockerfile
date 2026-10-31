@@ -17,7 +17,7 @@ RUN mvn --batch-mode --no-transfer-progress \
     # exists. sh has no nullglob, so a zero-match glob yields the pattern
     # itself — break on it so the count check below still fails, and name
     # the expectation loudly instead of dying at cp.
-    && cd packages/managed-agent-server/target \
+    && cd packages/managed-agent-server/server/target \
     && main="" && count=0 \
     && for f in qwen-managed-agent-server-*-exec.jar; do \
          [ -e "$f" ] || break; \
