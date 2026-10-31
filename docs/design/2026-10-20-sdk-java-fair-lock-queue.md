@@ -109,7 +109,7 @@ the bound.
 Both Maven runs already resolve from a job-local repository, so they touch no
 host-shared state. Only the cache write-back mutates `~/.m2`, so only the
 write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
-and runs before the acquisition; it then drops the two in-house fixed-release
+and runs before the acquisition; it then drops the in-house fixed-release
 coordinates from the job-local copy, so the unlocked `mvn install` writes
 fresh inodes instead of rewriting the host cache through a hardlink. Maven's
 tracking markers (`resolver-status.properties`, `*.lastUpdated`,
@@ -317,7 +317,7 @@ order this section exists to prevent.
   `|| mvn_status=$?` with a named stage, the tolerated-skip arms exercised
   with both a green and a red status (the red ones assert the stage
   annotation and the 300 s budget), their write-back children's fd 9 close,
-  the two in-house coordinates' and the resolver bookkeeping's —
+  the in-house coordinates' and the resolver bookkeeping's —
   `_remote.repositories`, `maven-metadata-local.xml`,
   `resolver-status.properties`, `*.lastUpdated`, and `*.tmp` — absence from
   every seeded job-local repository and from both write-back prunes, the
@@ -339,7 +339,7 @@ order this section exists to prevent.
   its 310-minute ceiling. The test job passes its tier and the MariaDB site
   defaults to normal. Both sites run their Maven suites from a job-local
   repository before the acquisition. Every job that seeds a job-local
-  repository drops the two in-house fixed-release coordinates from the copy
+  repository drops the in-house fixed-release coordinates from the copy
   before running Maven.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`

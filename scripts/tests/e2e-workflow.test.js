@@ -179,6 +179,20 @@ describe('TUI product evidence', () => {
     ['integration-tests/test-helper.ts', lanes],
     ['.github/workflows/tui-parity.yml', lanes],
     ['docs/design/unrelated.md', []],
+    ['packages/web-shell/client/App.tsx', []],
+    ['packages/chrome-extension/package.json', []],
+    ['packages/mobile-mcp/package.json', []],
+    ['packages/qwen-live/build.mjs', []],
+    ['integrations/external-context/package.json', []],
+    ['integrations/external-context-mem0/package.json', []],
+    ['integrations/test-failure-explorer/package.json', []],
+    ['packages/desktop/package.json', []],
+    ['packages/live-host/electron-builder.yml', []],
+    ['packages/mobile-shell/build.gradle.kts', []],
+    ['packages/sdk-java/client/pom.xml', []],
+    ['packages/sdk-python/pyproject.toml', []],
+    ['packages/zed-extension/extension.toml', []],
+    ['packages/cua-driver/typescript/src/native-assets.ts', []],
     ['scripts/unrelated-maintenance.js', ['component']],
   ])(
     'selects mechanisms rather than blanket full acceptance for %s',
@@ -593,6 +607,64 @@ describe('TUI product evidence', () => {
     ).toBe(false);
   });
 
+  it('skips Web Shell-only changes but runs when CLI source rides along', async () => {
+    expect(
+      await required([
+        { filename: 'packages/web-shell/client/App.tsx' },
+        {
+          filename: 'packages/web-shell/client/completions/slashCompletion.ts',
+        },
+      ]),
+    ).toBe(false);
+    expect(
+      await required([
+        { filename: 'packages/web-shell/client/App.tsx' },
+        { filename: 'packages/cli/src/ui/App.tsx' },
+      ]),
+    ).toBe(true);
+  });
+
+  it('reports a policy exclusion instead of the no-impact default', async () => {
+    const { outputs } = await impact([
+      { filename: 'packages/cua-driver/typescript/src/native-assets.ts' },
+    ]);
+    expect(outputs.component).toBe('false');
+    expect(outputs.reason).toBe('Outside the TUI build/test closure');
+  });
+
+  // Parse by value, not by literal spelling: a trailing comment or an
+  // `!integrations/...` negation is lint-legal and must still be reconciled.
+  const excludedTrees = (yamlText) =>
+    parse(yamlText)
+      .packages.filter((entry) => entry.startsWith('!'))
+      .map((entry) => entry.slice(1));
+
+  it('excludes every tree the pnpm workspace itself leaves out', async () => {
+    const excluded = excludedTrees(readFileSync('pnpm-workspace.yaml', 'utf8'));
+    expect(excluded.length).toBeGreaterThan(0);
+    for (const tree of excluded) {
+      const { outputs } = await impact([
+        { filename: `${tree}/placeholder.ts` },
+      ]);
+      expect(outputs.component, tree).toBe('false');
+      expect(outputs.reason, tree).toBe('Outside the TUI build/test closure');
+    }
+  });
+
+  it('reconciles negations spelled with a trailing comment or another scope', () => {
+    expect(
+      excludedTrees(
+        [
+          'packages:',
+          "  - 'packages/*'",
+          "  - '!packages/desktop' # promoted to its own release later",
+          "  - '!integrations/generated-ui'",
+          '',
+        ].join('\n'),
+      ),
+    ).toEqual(['packages/desktop', 'integrations/generated-ui']);
+  });
+
   it.each([
     'packages/cli/src/ui/App.tsx',
     'packages/vscode-ide-companion/package.json',
@@ -657,6 +729,61 @@ describe('TUI product evidence', () => {
       'both ends under docs/',
       'docs/design/runtime.md',
       'docs/design/old-runtime.md',
+    ],
+    [
+      'both ends in the Web Shell',
+      'packages/web-shell/client/App.tsx',
+      'packages/web-shell/client/OldApp.tsx',
+    ],
+    [
+      'both ends in the Chrome extension',
+      'packages/chrome-extension/package.json',
+      'packages/chrome-extension/old-package.json',
+    ],
+    [
+      'both ends in mobile-mcp',
+      'packages/mobile-mcp/package.json',
+      'packages/mobile-mcp/old-package.json',
+    ],
+    [
+      'both ends in qwen-live',
+      'packages/qwen-live/build.mjs',
+      'packages/qwen-live/old-build.mjs',
+    ],
+    [
+      'both ends in external-context',
+      'integrations/external-context/package.json',
+      'integrations/external-context/old-package.json',
+    ],
+    [
+      'both ends in external-context-mem0',
+      'integrations/external-context-mem0/package.json',
+      'integrations/external-context-mem0/old-package.json',
+    ],
+    [
+      'both ends in test-failure-explorer',
+      'integrations/test-failure-explorer/package.json',
+      'integrations/test-failure-explorer/old-package.json',
+    ],
+    [
+      'both ends in the workspace-excluded desktop tree',
+      'packages/desktop/package.json',
+      'packages/desktop/old-package.json',
+    ],
+    [
+      'both ends in the workspace-excluded live-host tree',
+      'packages/live-host/electron-builder.yml',
+      'packages/live-host/old-electron-builder.yml',
+    ],
+    [
+      'both ends in the workspace-excluded mobile-shell tree',
+      'packages/mobile-shell/build.gradle.kts',
+      'packages/mobile-shell/old-build.gradle.kts',
+    ],
+    [
+      'both ends in the CUA driver tree',
+      'packages/cua-driver/typescript/src/native-assets.ts',
+      'packages/cua-driver/typescript/src/old-native-assets.ts',
     ],
   ])(
     'still skips a rename with %s',
@@ -1260,18 +1387,158 @@ describe('e2e workflow', () => {
       expect(gateIndex).toBeLessThan(names.indexOf('Install dependencies'));
     });
 
-    it('keeps the gate on every pool-routed job', () => {
+    it('keeps the self-hosted contract on every pool-routed job', () => {
       // A new pool-routed leg without the gate reddens here instead of on a
-      // saturated host; the hosted legs stay ungated on fresh VMs.
+      // saturated host; the hosted legs stay ungated on fresh VMs. The same
+      // holds for the Node preflight (nodejs.org may be unreachable through
+      // the pool's egress proxy) and the ownership heal (docker shards leave
+      // root-owned files on the runners).
       const poolJobs = Object.entries(yml.jobs).filter(([, job]) =>
         String(job['runs-on'] ?? '').includes('ecs-qwen'),
       );
-      expect(poolJobs.map(([id]) => id)).toEqual(['e2e-test-linux']);
+      expect(poolJobs.map(([id]) => id)).toEqual(['build', 'e2e-test-linux']);
+      // Keep the build aligned with the leg, and pin the workspace fallback
+      // chains below so editing both copies cannot silently remove them.
+      const pinnedHeal = yml.jobs['e2e-test-linux'].steps.find(
+        (step) => step.name === 'Restore workspace ownership',
+      );
       for (const [id, job] of poolJobs) {
-        const gate = (job.steps ?? []).find(
+        const steps = job.steps ?? [];
+        const names = steps.map((step) => step.name);
+        const checkoutIndex = steps.findIndex((step) =>
+          String(step.uses ?? '').includes('actions/checkout'),
+        );
+        const installIndex = names.indexOf('Install dependencies');
+        // Presence alone is not the contract: the heal must precede
+        // checkout, the gate must sit between checkout and install, and the
+        // preflight must be the pool's own action — a reordered or
+        // re-pointed step fails here instead of on a runner.
+        const heal = steps.find(
+          (step) => step.name === 'Restore workspace ownership',
+        );
+        expect(heal?.if, id).toBe("${{ runner.environment == 'self-hosted' }}");
+        expect(names.indexOf('Restore workspace ownership'), id).toBeLessThan(
+          checkoutIndex,
+        );
+        const gate = steps.find(
           (step) => step.name === 'Disk floor gate (self-hosted)',
         );
         expect(gate, id).toBeDefined();
+        const gateIndex = names.indexOf('Disk floor gate (self-hosted)');
+        expect(gateIndex, id).toBeGreaterThan(checkoutIndex);
+        expect(gateIndex, id).toBeLessThan(installIndex);
+        const poolNode = steps.find(
+          (step) => step.name === 'Use pre-installed Node.js (self-hosted)',
+        );
+        expect(poolNode?.uses, id).toBe('./.github/actions/self-hosted-node');
+        const hostedNode = steps.find(
+          (step) =>
+            typeof step.name === 'string' &&
+            step.name.startsWith('Set up Node.js'),
+        );
+        expect(hostedNode?.if, id).toBe(
+          "${{ runner.environment == 'github-hosted' }}",
+        );
+        const npmCacheIndex = names.indexOf(
+          'Configure persistent npm cache (self-hosted)',
+        );
+        // Presence alone is not the contract here either: below the install it
+        // exports NPM_CONFIG_CACHE after npm has already picked a cache, so
+        // the pool re-downloads through the slow egress this step avoids, and
+        // without the `if:` the hosted lane points npm at a directory no cache
+        // step ever restores.
+        expect(npmCacheIndex, id).toBeGreaterThanOrEqual(0);
+        expect(npmCacheIndex, id).toBeLessThan(installIndex);
+        expect(steps[npmCacheIndex]?.if, id).toBe(
+          "${{ runner.environment == 'self-hosted' }}",
+        );
+        expect(steps[npmCacheIndex]?.run, id).toContain(
+          'cache_dir="${HOME}/.cache/qwen-code/npm"',
+        );
+        expect(steps[npmCacheIndex]?.run, id).toContain(
+          'echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"',
+        );
+        expect(heal?.run, id).toBe(pinnedHeal?.run);
+        expect(heal?.run, id).toContain(
+          'chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chown -R "$RUNNER_UID:$RUNNER_GID" "$GITHUB_WORKSPACE"',
+        );
+        expect(heal?.run, id).toContain(
+          'chmod -R u+rwX "$GITHUB_WORKSPACE" 2>/dev/null || sudo -n chmod -R u+rwX "$GITHUB_WORKSPACE"',
+        );
+      }
+    });
+  });
+
+  describe('artifact download time-boxing', () => {
+    // #12132: each leg downloads the shared archive twice — once, and again
+    // from the retry that only fires when the first attempt failed. Only the
+    // first attempt was time-boxed, so a stalling retry held its runner with
+    // no ceiling at all, and two legs had no job-level ceiling either.
+    const legs = [
+      'e2e-test-linux',
+      'e2e-test-macos',
+      'e2e-interactive-opentui',
+      'isolated-nightly',
+    ];
+    const downloads = (leg) =>
+      yml.jobs[leg].steps.filter((step) =>
+        String(step.name).startsWith('Download build artifact'),
+      );
+
+    it('caps every artifact-consuming leg at the job level', () => {
+      // 60 is the ceiling e2e-test-linux and e2e-interactive-opentui already
+      // carried; the other two legs consume the same archive on the same
+      // runners, so they get that budget instead of a new number.
+      for (const leg of legs) {
+        expect(yml.jobs[leg]['timeout-minutes'], leg).toBe(60);
+      }
+    });
+
+    it('time-boxes the retry as tightly as the first attempt', () => {
+      // 10 is the value every first-attempt download already pins. Without it
+      // the retry — the step that exists precisely because the first attempt
+      // misbehaved — was the only unbounded step in the download leg.
+      for (const leg of legs) {
+        const steps = downloads(leg);
+        expect(
+          steps.map((step) => step.name),
+          leg,
+        ).toEqual([
+          'Download build artifact',
+          'Download build artifact (retry)',
+        ]);
+        for (const step of steps) {
+          expect(step['timeout-minutes'], `${leg}/${step.name}`).toBe(10);
+        }
+      }
+    });
+
+    it('keeps the retry step red when the retry itself fails', () => {
+      // The first attempt's continue-on-error is what makes the retry
+      // reachable. Copying it onto the retry would leave a stalled download
+      // invisible: the leg would go on to unpack a missing archive and report
+      // a failure with the wrong cause.
+      for (const leg of legs) {
+        const retry = downloads(leg)[1];
+        expect(retry.name, leg).toBe('Download build artifact (retry)');
+        expect(retry['continue-on-error']).toBeUndefined();
+      }
+    });
+
+    it('leaves the already-landed ceilings where they are', () => {
+      // Regression guard. `build` produces the archive on a 30-minute budget
+      // while the legs consume it on 60, and 60 is also the number the
+      // shard-retry budget gate in run-e2e-tests.sh takes its 25-minute
+      // reserve out of. A later pass that "unifies" these values would move
+      // either the producer's ceiling or the retry arithmetic with every
+      // other witness green.
+      expect(yml.jobs.build['timeout-minutes']).toBe(30);
+      expect(yml.jobs['e2e-test-linux']['timeout-minutes']).toBe(60);
+      expect(yml.jobs['e2e-interactive-opentui']['timeout-minutes']).toBe(60);
+      for (const leg of legs) {
+        const first = downloads(leg)[0];
+        expect(first['timeout-minutes'], leg).toBe(10);
+        expect(first['continue-on-error'], leg).toBe(true);
       }
     });
   });
@@ -1279,8 +1546,8 @@ describe('e2e workflow', () => {
   describe('one build for every leg', () => {
     // Each leg used to build and bundle on its own runner — 4–8 minutes on a
     // hosted VM, 10–17 on a busy pool host, eleven times per run. The `build`
-    // job does it once on a hosted VM and the legs unpack its archive; these
-    // pins keep a leg from quietly growing its own build back.
+    // job does it once and the legs unpack its archive; these pins keep a leg
+    // from quietly growing its own build back.
     const build = yml.jobs.build;
     const legs = [
       'e2e-test-linux',
@@ -1289,9 +1556,13 @@ describe('e2e workflow', () => {
       'isolated-nightly',
     ];
 
-    it('builds once, on a hosted runner, off the shared pool', () => {
+    it("builds once, sharing the legs' pool-first runner routing", () => {
       expect(build.needs).toBeUndefined();
-      expect(build['runs-on']).toBe('ubuntu-latest');
+      // Hosted ubuntu jobs queued for hours while the pool idled
+      // (2026-10-28), so the build rides the exact routing expression every
+      // other pool job uses instead of pinning a hosted-only label.
+      expect(build['runs-on']).toBe(yml.jobs['e2e-test-linux']['runs-on']);
+      expect(String(build['runs-on'])).toContain('ecs-qwen');
       const names = build.steps.map((step) => step.name);
       expect(names).toContain('Build project');
       expect(names).toContain('Bundle CLI for E2E tests');

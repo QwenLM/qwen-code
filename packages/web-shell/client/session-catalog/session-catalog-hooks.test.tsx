@@ -264,6 +264,32 @@ describe('session catalog hooks', () => {
     expect(invalidateDeleted).not.toHaveBeenCalled();
   });
 
+  it('forwards a page that is stale mid-refresh without an error', async () => {
+    legacy
+      .mockResolvedValueOnce({ sessions: [{ sessionId: 'primary' }] })
+      .mockReturnValueOnce(new Promise(() => {}));
+    let facade: ReturnType<typeof useWebShellSessions> | undefined;
+
+    function FacadeProbe() {
+      facade = useWebShellSessions({ autoLoad: true });
+      return null;
+    }
+
+    await act(async () => {
+      root.render(<FacadeProbe />);
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(facade!.stale).toBe(false);
+    act(() => {
+      void facade!.reload();
+    });
+    // Retained while the refresh is in flight: not a fresh answer, and not
+    // an error either.
+    expect(facade!.stale).toBe(true);
+    expect(facade!.error).toBeUndefined();
+  });
+
   it('keeps the legacy reload contract when a list request fails', async () => {
     legacy.mockRejectedValue(new Error('offline'));
     let facade: ReturnType<typeof useWebShellSessions> | undefined;
