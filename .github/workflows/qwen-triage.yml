@@ -5923,10 +5923,13 @@ jobs:
           else
             collect_and_host_evidence
             # Pin the artifact-dir shape and sort: a bare -name search takes
-            # whatever directory find visits first, which is unordered. Depth
-            # 2 exactly: a report.md nested in a round (evidence/) sorts
-            # ahead of the round's own and would stand in for it.
-            REPORT="$(find verify-results -mindepth 2 -maxdepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
+            # whatever directory find visits first, which is unordered. Rounds
+            # are named pr<n>-verify-<YYYYMMDD>-<HHMMSS>, so the last in sort
+            # order is the newest; an earlier round left beside it must not
+            # headline the run. Depth 2 exactly: a report.md nested in a
+            # round (scratch/) sorts past the round's own and would stand in
+            # for it.
+            REPORT="$(find verify-results -mindepth 2 -maxdepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | tail -1 || true)"
             # The report's own directory is the round: its counts and its
             # verdict word headline it, never another directory's. This is
             # the only reader of verdict.txt, which untrusted PR code wrote.
@@ -5942,7 +5945,9 @@ jobs:
                   ;;
               esac
             else
-              ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
+              # No report, so no verdict to trust: the newest round's counts
+              # are shown only as partial evidence under the process outcome.
+              ASSERTIONS_FILE="$(find verify-results -mindepth 2 -maxdepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | tail -1 || true)"
             fi
             # Exact root-level path, never a find: the staging step writes
             # this name last as root, and a same-named file nested inside a

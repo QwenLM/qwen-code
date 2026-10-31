@@ -5502,27 +5502,29 @@ describe('qwen-triage verify hardening round 2', () => {
   });
 
   // This step runs the checker itself (design decision 3), but still spells
-  // out the verdict vocabulary twice: the allowlist that reads verdict.txt and
-  // the headline labels. Both must stay the checker's four words, so a fifth
-  // word on either side fails here.
+  // out the verdict vocabulary three times: the allowlist that reads
+  // verdict.txt, the trust switch, and the headline labels. All three must
+  // stay the checker's four words, so a fifth or a missing word on any of
+  // them fails here.
   it('keeps the local checker aligned with the publisher verdicts', () => {
     const publishStep = step('Post verification report comment');
+    const labelsAt = (at) =>
+      new Set(
+        [
+          ...publishStep
+            .slice(at)
+            .split('esac')[0]
+            .matchAll(/^\s+([a-z][a-z|-]*)\)/gm),
+        ].flatMap((match) => match[1].split('|')),
+      );
     const marker = 'case "$AGENT_VERDICT" in';
-    const allowlist = publishStep
-      .slice(publishStep.indexOf(marker) + marker.length)
-      .trim()
-      .split(')')[0]
-      .split('|');
-    expect(new Set(allowlist)).toEqual(new Set(VERDICTS));
-    const headlineCase = publishStep
-      .slice(publishStep.lastIndexOf(marker))
-      .split('esac')[0];
-    const labels = new Set(
-      [...headlineCase.matchAll(/^\s+([a-z][a-z-]*)\)/gm)].map(
-        (match) => match[1],
-      ),
+    const trust = 'case "${AGENT_VERDICT:-}" in';
+    expect(publishStep.split(trust)).toHaveLength(2);
+    expect(labelsAt(publishStep.indexOf(marker))).toEqual(new Set(VERDICTS));
+    expect(labelsAt(publishStep.indexOf(trust))).toEqual(new Set(VERDICTS));
+    expect(labelsAt(publishStep.lastIndexOf(marker))).toEqual(
+      new Set(VERDICTS),
     );
-    expect(labels).toEqual(new Set(VERDICTS));
   });
 });
 
@@ -5535,8 +5537,7 @@ describe('qwen-triage verify publish fidelity', () => {
   // Render the publisher for a given outcome with a stubbed gh and the real
   // artifact checker, and return the comment body it would post plus the
   // step log. The publisher reads the agent's word only from verdict.txt
-  // beside the report, so AGENT_VERDICT names what the fixture writes there
-  // unless VERDICT_TXT says otherwise.
+  // beside the report, so AGENT_VERDICT names what the fixture writes there.
   const publish = (dir, env) => {
     const out = join(dir, `body-${env.NAME}.md`);
     const work = join(dir, 'work');
@@ -5547,8 +5548,9 @@ describe('qwen-triage verify publish fidelity', () => {
       'verdict.txt',
     );
     rmSync(verdictFile, { force: true });
-    const word = env.VERDICT_TXT ?? env.AGENT_VERDICT;
-    if (word) writeFileSync(verdictFile, `${word}\n`);
+    if (env.AGENT_VERDICT) {
+      writeFileSync(verdictFile, `${env.AGENT_VERDICT}\n`);
+    }
     const res = spawnSync('bash', ['-c', publishScript()], {
       cwd: work,
       encoding: 'utf8',
@@ -5969,22 +5971,22 @@ describe('qwen-triage verify publish fidelity', () => {
   // REPORT, the counts and the verdict were picked by independent searches
   // (the verdict in another job), so a run that left an earlier round
   // directory behind could headline the later report with that directory's
-  // zero or verdict word.
-  it("binds the headline to the report's own directory", () => {
+  // zero or verdict word. With more than one complete round, the oldest one
+  // was the one published.
+  it("binds the headline to the newest round's own directory", () => {
     const dir = fixture();
     const results = join(dir, 'work', 'verify-results');
     const round = join(results, 'prA-verify-1');
+    const earlier = join(results, 'prA-verify-0');
     try {
-      // The leftover sorts first and holds a complete green round's files.
-      mkdirSync(join(results, 'prA-verify-0'));
+      // An earlier round, complete and green, sorts ahead of the newest.
+      mkdirSync(earlier);
+      writeFileSync(join(earlier, 'report.md'), '## earlier round\n');
       writeFileSync(
-        join(results, 'prA-verify-0', 'assertions.json'),
+        join(earlier, 'assertions.json'),
         '{"pass":10,"fail":0,"total":10}',
       );
-      writeFileSync(
-        join(results, 'prA-verify-0', 'verdict.txt'),
-        'merge-ready\n',
-      );
+      writeFileSync(join(earlier, 'verdict.txt'), 'merge-ready\n');
       writeFileSync(
         join(round, 'assertions.json'),
         '{"pass":9,"fail":1,"total":10,"failures":[{"id":"x","attribution":"pr"}]}',
@@ -5996,11 +5998,13 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(mixed).toContain(
         'Scripted assertions: 9 passed · 1 failed · 10 total',
       );
+      expect(mixed).toContain('real report');
+      expect(mixed).not.toContain('earlier round');
       expect(mixed).not.toContain('merge-ready (agent verdict)');
       expect(mixed).not.toContain('verify-pr-check.mjs');
 
       // A round holding only its report has no counts and no word, and the
-      // leftover must lend it neither.
+      // earlier round must lend it neither.
       rmSync(join(round, 'assertions.json'));
       const bare = publish(dir, { NAME: 'bare', AGENT_VERDICT: '' });
       expect(bare.body).toContain(
@@ -6011,18 +6015,54 @@ describe('qwen-triage verify publish fidelity', () => {
         '::warning::No usable verdict.txt beside the published report.md',
       );
 
-      // A report.md nested inside the round sorts ahead of the round's own.
+      // A word outside the four is no verdict either, and never reaches the
+      // body, not even as an untrusted one.
       writeFileSync(
         join(round, 'assertions.json'),
         '{"pass":10,"fail":0,"total":10}',
       );
-      mkdirSync(join(round, 'evidence'));
-      writeFileSync(join(round, 'evidence', 'report.md'), '## nested\n');
+      const unknown = publish(dir, { NAME: 'unk', AGENT_VERDICT: 'shipit' });
+      expect(unknown.body).toContain(
+        '⚠️ inconclusive — completed without a usable structured verdict',
+      );
+      expect(unknown.body).not.toContain('shipit');
+      expect(unknown.log).toContain(
+        '::warning::No usable verdict.txt beside the published report.md',
+      );
+
+      // A report.md nested inside the round sorts past the round's own.
+      mkdirSync(join(round, 'scratch'));
+      writeFileSync(join(round, 'scratch', 'report.md'), '## scratch report\n');
       const nested = render(dir, {
         NAME: 'nested',
         AGENT_VERDICT: 'merge-ready',
       });
       expect(nested).toContain('✅ passed — merge-ready (agent verdict)');
+      expect(nested).not.toContain('scratch report');
+
+      // Without a report the newest round's own counts still show, at the
+      // same depth, under the process outcome.
+      rmSync(join(earlier, 'report.md'));
+      rmSync(join(round, 'report.md'));
+      writeFileSync(
+        join(round, 'assertions.json'),
+        '{"pass":9,"fail":1,"total":10,"failures":[{"id":"x","attribution":"pr"}]}',
+      );
+      writeFileSync(
+        join(round, 'scratch', 'assertions.json'),
+        '{"pass":7,"fail":3,"total":10}',
+      );
+      const reportless = render(dir, {
+        NAME: 'nore',
+        VERDICT: 'timeout',
+        AGENT_VERDICT: '',
+      });
+      expect(reportless).toContain(
+        '⚠️ incomplete — the run timed out with partial evidence',
+      );
+      expect(reportless).toContain(
+        'Scripted assertions: 9 passed · 1 failed · 10 total',
+      );
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

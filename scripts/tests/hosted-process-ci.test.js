@@ -920,20 +920,28 @@ describe('Hosted real-process gates', () => {
     const gates = steps.find(
       (step) => step.name === 'Run Runtime Broker fault gates',
     );
-    // Without a condition a red Hosted verify skipped them on 11 of the 14
+    // Without a condition a red Hosted verify skipped them on 10 of the 14
     // nights to 10-27, though they need neither its build nor MySQL.
     expect(gates.if).toBe(
       "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}",
     );
     expect(gates['continue-on-error']).toBeUndefined();
     // An unknown step id reads as '' and would skip the gates on every run.
-    // The install step itself runs only after every setup step before it,
-    // the CLI bundle the gates spawn among them, succeeded.
     const install = steps.find((step) => step.id === 'managed_dependencies');
     expect(install, 'the managed_dependencies step').toBeDefined();
     expect(install.name).toBe('Install Managed Agent dependencies');
-    expect(install.if).toBeUndefined();
     expect(install.run).toContain('-f packages/sdk-java/qwencode/pom.xml');
+    // The install step runs only when no step before it failed, and a step
+    // skipped by its own `if:`, or one whose failure `continue-on-error`
+    // absorbs, fails nothing: either on the bundle step would leave the
+    // gates spawning a missing dist/cli.js. So no step up to the install
+    // may carry either key.
+    const setup = steps.slice(0, steps.indexOf(install) + 1);
+    expect(
+      setup
+        .filter((step) => 'if' in step || 'continue-on-error' in step)
+        .map((step) => step.name),
+    ).toEqual([]);
     const bundle = steps.findIndex(
       (step) => step.name === 'Install, build and bundle CLI',
     );
