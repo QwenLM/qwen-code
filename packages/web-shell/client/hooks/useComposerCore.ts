@@ -1026,6 +1026,15 @@ export interface EditorHandle extends WebShellComposerApi {
   restoreInputAnnotations?(
     inputAnnotations: readonly DaemonInputAnnotation[],
   ): void;
+  /**
+   * Quote to composer: a synchronous user gesture, so unlike end-placed
+   * `addTags` it puts the chip on its own line at the document end (a
+   * blockquote marker only counts at a line start), moves the caret after
+   * it and scrolls it into view. Declines with `false` while the composer
+   * is disabled, and in shell mode, where the draft runs as a shell command
+   * and a quoted `> fragment` would become a redirect.
+   */
+  insertQuote?(tag: WebShellComposerTag): boolean;
 }
 
 // ---- Compartments (shared) ----
@@ -4956,6 +4965,54 @@ export function useComposerCore(
     [isTouchComposer, resolveComposerTagIcon, setComposerTags],
   );
 
+  const insertQuote = useCallback(
+    (tag: WebShellComposerTag): boolean => {
+      if (disabledRef.current) return false;
+      if (shellModeRef.current) {
+        emitImageIngestionNotice('warning', t('composer.quote.shellMode'));
+        return false;
+      }
+      // The textarea backend has no inline chips: the quote rides as a top
+      // tag, like every other inline request there.
+      if (isTouchComposer) {
+        addTags([tag]);
+        return true;
+      }
+      const view = viewRef.current;
+      if (!view) return false;
+      const { doc } = view.state;
+      const tagText = serializeComposerTag(tag);
+      // The line break stays document text outside the chip range: the
+      // chip's slice must equal its serialized form for the submit
+      // annotations.
+      const lineBreak =
+        doc.length === 0 || doc.sliceString(doc.length - 1) === '\n'
+          ? ''
+          : '\n';
+      const from = doc.length + lineBreak.length;
+      const insert = `${lineBreak}${tagText} `;
+      view.dispatch({
+        changes: { from: doc.length, insert },
+        effects: addInlineTagEffect.of({
+          from,
+          to: from + tagText.length,
+          tag: resolveComposerTagIcon(tag),
+        }),
+        selection: { anchor: doc.length + insert.length },
+        scrollIntoView: true,
+      });
+      view.focus();
+      return true;
+    },
+    [
+      addTags,
+      emitImageIngestionNotice,
+      isTouchComposer,
+      resolveComposerTagIcon,
+      t,
+    ],
+  );
+
   const removeTopTag = useCallback(
     (id: string) => {
       setComposerTags((current) => {
@@ -5461,6 +5518,7 @@ export function useComposerCore(
       restoreImages,
       restoreFiles,
       restoreInputAnnotations,
+      insertQuote,
       submit,
     };
   }, [
@@ -5471,6 +5529,7 @@ export function useComposerCore(
     getText,
     hasAttachments,
     hasInput,
+    insertQuote,
     insertText,
     removeTopTag,
     restoreImages,

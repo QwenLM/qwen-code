@@ -134,6 +134,17 @@ describe('selected reply clipboard content', () => {
     expect(result.markdown).toMatch(/> 4\.\s+Fou/);
     expect(result.markdown).not.toContain('Fourth');
   });
+  it('separates definition terms and descriptions in a question answer pair', () => {
+    const body = fixture(
+      '<dl><div><dt>Which database?</dt><dd>Postgres</dd></div></dl>',
+    );
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    expect(getSelectedReplyContent(body, range)).toEqual({
+      text: 'Which database?\nPostgres',
+      markdown: 'Which database?\n\nPostgres',
+    });
+  });
   it('keeps the original number when selecting a later ordered-list item', () => {
     const body = fixture(
       '<ol start="3"><li>Third</li><li>Fourth</li><li>Fifth</li></ol>',

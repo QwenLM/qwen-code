@@ -3,6 +3,8 @@ import type { getQuestionAnswerResult } from './toolFormatting';
 import flashStyles from '../MessageLocateFlash.module.css';
 import messageStyles from './UserMessage.module.css';
 import styles from './QuestionAnswerMessage.module.css';
+import { SelectionCopyMenu } from './SelectionCopyMenu';
+import { useTranscriptRenderMode } from '../../transcriptRenderMode';
 
 export function QuestionAnswerMessage({
   tool,
@@ -14,16 +16,25 @@ export function QuestionAnswerMessage({
   isLocateFlashing?: boolean;
 }) {
   const { text, answers } = result;
+  const interactive = useTranscriptRenderMode() === 'interactive';
+  const content =
+    answers.length > 0
+      ? answers
+          .map(({ question, answer }) => `${question}\n${answer}`)
+          .join('\n\n')
+      : text;
   return (
     <div
       className={messageStyles.chatMessageRow}
       data-transcript-tool-call-id={tool.callId}
     >
       <div className={messageStyles.chatMessageColumn}>
-        <div
+        <SelectionCopyMenu
           className={`${messageStyles.chatBubble} ${styles.bubble} ${
             isLocateFlashing ? flashStyles.flash : ''
           }`}
+          content={content}
+          enabled={interactive}
         >
           {answers.length > 0 ? (
             <dl className={styles.answers}>
@@ -37,7 +48,7 @@ export function QuestionAnswerMessage({
           ) : (
             text
           )}
-        </div>
+        </SelectionCopyMenu>
       </div>
     </div>
   );

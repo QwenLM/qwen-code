@@ -12,6 +12,8 @@ import { I18nProvider } from '../../i18n';
 import { TranscriptRenderModeProvider } from '../../transcriptRenderMode';
 import { MessageItem } from '../MessageItem';
 import { UserMessage } from './UserMessage';
+import { QuoteToComposerContext } from './quoteToComposerContext';
+import { WebShellPortalRootContext } from '../../portalRoot';
 
 (
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
@@ -1496,5 +1498,116 @@ describe('UserMessage author', () => {
     );
     expect(container.textContent).toContain('reviewer');
     expect(container.textContent).toContain('@writer your turn');
+  });
+});
+
+describe('UserMessage selection menu', () => {
+  const portals: HTMLElement[] = [];
+  function renderSelectable(
+    node: ReactNode,
+    {
+      mode,
+      onQuote = null,
+    }: {
+      mode?: 'interactive' | 'document';
+      onQuote?: ((text: string) => void) | null;
+    } = {},
+  ) {
+    const portal = document.createElement('div');
+    document.body.appendChild(portal);
+    const tree = (
+      <I18nProvider language="en">
+        <WebShellPortalRootContext.Provider value={portal}>
+          <QuoteToComposerContext.Provider value={onQuote}>
+            {node}
+          </QuoteToComposerContext.Provider>
+        </WebShellPortalRootContext.Provider>
+      </I18nProvider>
+    );
+    const container = render(
+      mode ? (
+        <TranscriptRenderModeProvider value={mode}>
+          {tree}
+        </TranscriptRenderModeProvider>
+      ) : (
+        tree
+      ),
+    );
+    portals.push(portal);
+    return { container, portal };
+  }
+
+  async function selectMessage(container: HTMLElement) {
+    const body = container.querySelector('[class*="chatContent"]')!
+      .firstElementChild as HTMLElement;
+    const pointer = (type: string) => {
+      const event = new MouseEvent(type, { bubbles: true, button: 0 });
+      Object.defineProperty(event, 'pointerType', { value: 'mouse' });
+      return event;
+    };
+    await act(async () => body.dispatchEvent(pointer('pointerdown')));
+    const range = document.createRange();
+    range.selectNodeContents(body);
+    window.getSelection()!.removeAllRanges();
+    window.getSelection()!.addRange(range);
+    await act(async () => body.dispatchEvent(pointer('pointerup')));
+  }
+
+  afterEach(() => {
+    window.getSelection()?.removeAllRanges();
+    for (const portal of portals.splice(0)) portal.remove();
+  });
+
+  it('opens over a user message in interactive mode', async () => {
+    const { container, portal } = renderSelectable(
+      <UserMessage content="please review this" />,
+      { mode: 'interactive', onQuote: vi.fn() },
+    );
+    await selectMessage(container);
+    expect(
+      portal.querySelector('[data-slot="popover-content"]'),
+    ).not.toBeNull();
+  });
+
+  it('stays closed over a user message in document mode', async () => {
+    const { container, portal } = renderSelectable(
+      <UserMessage content="please review this" />,
+      { mode: 'document', onQuote: vi.fn() },
+    );
+    await selectMessage(container);
+    expect(portal.querySelector('[data-slot="popover-content"]')).toBeNull();
+  });
+
+  it('keeps a reference chip tooltip out of the quoted text', async () => {
+    const content = 'see @README.md now';
+    const onQuote = vi.fn();
+    const { container, portal } = renderSelectable(
+      <WebShellCustomizationProvider
+        value={{ renderComposerTagTooltip: () => 'HIDDEN TOOLTIP' }}
+      >
+        <UserMessage
+          content={content}
+          inputAnnotations={[
+            referenceAnnotation(content, '@README.md', {
+              id: 'file:README.md',
+              kind: 'file',
+              value: 'README.md',
+              serialized: '@README.md',
+            }),
+          ]}
+        />
+      </WebShellCustomizationProvider>,
+      { onQuote },
+    );
+    expect(container.textContent).toContain('HIDDEN TOOLTIP');
+    await selectMessage(container);
+    const quote = [...portal.querySelectorAll('button')].find(
+      (button) => button.textContent === 'Quote to composer',
+    )!;
+    expect(quote).toBeDefined();
+    await act(async () => quote.click());
+    expect(onQuote).toHaveBeenCalledTimes(1);
+    expect(onQuote.mock.calls[0]![0]).toContain('README.md');
+    expect(onQuote.mock.calls[0]![0]).not.toContain('HIDDEN TOOLTIP');
   });
 });

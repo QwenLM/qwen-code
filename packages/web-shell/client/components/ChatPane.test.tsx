@@ -7,7 +7,8 @@
 
 import * as messageDeletion from '../utils/message-deletion';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, forwardRef, useImperativeHandle } from 'react';
+import { act, forwardRef, useContext, useImperativeHandle } from 'react';
+import { QuoteToComposerContext } from './messages/quoteToComposerContext';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   DaemonHttpError,
@@ -69,6 +70,10 @@ let latestMonitorDetailsOnOpen:
 let sendPromptAdmit: (() => void) | undefined;
 const clearFollowup = vi.fn();
 const insertText = vi.fn();
+const insertQuote = vi.fn(
+  (_tag: { kind?: string; serialized?: string }) => true,
+);
+let latestPaneQuoteToComposer: ((text: string) => void) | null | undefined;
 const transcriptDispatch = vi.fn();
 const appendLocalUserMessage = vi.fn();
 const sendPrompt = vi.fn(async () => ({}) as any);
@@ -223,39 +228,42 @@ vi.mock('../monitorDetailsContext', async () => {
 });
 
 vi.mock('./TranscriptViewport', () => ({
-  TranscriptViewport: (props: any) => (
-    <div
-      data-testid="pane-messages"
-      data-approval={props.pendingApproval ? 'yes' : 'no'}
-    >
-      {props.messages.length}
-      <button
-        data-testid="pane-open-turn-output"
-        type="button"
-        onClick={() =>
-          props.onTurnOutputOpen?.({
-            id: 'artifact:turn-artifact',
-            kind: 'artifact',
-            title: 'Turn artifact',
-            turnId: 'turn-1',
-            artifactId: 'turn-artifact',
-            artifact: { id: 'turn-artifact', title: 'Turn artifact' },
-            workspaceCwd: '/w',
-          })
-        }
-      />
-      <button
-        data-testid="pane-open-attachment"
-        type="button"
-        onClick={() =>
-          props.onAttachmentPreview?.({
-            name: 'data.json',
-            attachmentId: 'attachment-1',
-          })
-        }
-      />
-    </div>
-  ),
+  TranscriptViewport: function MockTranscriptViewport(props: any) {
+    latestPaneQuoteToComposer = useContext(QuoteToComposerContext);
+    return (
+      <div
+        data-testid="pane-messages"
+        data-approval={props.pendingApproval ? 'yes' : 'no'}
+      >
+        {props.messages.length}
+        <button
+          data-testid="pane-open-turn-output"
+          type="button"
+          onClick={() =>
+            props.onTurnOutputOpen?.({
+              id: 'artifact:turn-artifact',
+              kind: 'artifact',
+              title: 'Turn artifact',
+              turnId: 'turn-1',
+              artifactId: 'turn-artifact',
+              artifact: { id: 'turn-artifact', title: 'Turn artifact' },
+              workspaceCwd: '/w',
+            })
+          }
+        />
+        <button
+          data-testid="pane-open-attachment"
+          type="button"
+          onClick={() =>
+            props.onAttachmentPreview?.({
+              name: 'data.json',
+              attachmentId: 'attachment-1',
+            })
+          }
+        />
+      </div>
+    );
+  },
 }));
 vi.mock('./StreamingStatus', () => ({
   StreamingStatus: (props: any) => (
@@ -326,6 +334,7 @@ vi.mock('./ChatEditor', () => ({
     latestChatEditorProps = props;
     useImperativeHandle(ref, () => ({
       insertText,
+      insertQuote,
     }));
     if (renderRealChatEditor) {
       return <RealChatEditor {...props} visibleToolbarActions={[]} />;
@@ -488,6 +497,8 @@ beforeEach(() => {
   });
   clearFollowup.mockClear();
   insertText.mockClear();
+  insertQuote.mockClear();
+  latestPaneQuoteToComposer = undefined;
   submitPermission.mockClear();
   respondToPermission.mockClear();
   cancel.mockClear();
@@ -1649,6 +1660,46 @@ describe('ChatPane', () => {
       container!.querySelector('[data-web-shell-composer]')?.parentElement
         ?.className,
     ).not.toContain('composerHidden');
+  });
+
+  it("quotes into this pane's own composer, not an outer chat's", () => {
+    const mainQuote = vi.fn();
+    container = document.createElement('div');
+    document.body.appendChild(container);
+    root = createRoot(container);
+    act(() =>
+      root!.render(
+        <QuoteToComposerContext.Provider value={mainQuote}>
+          <WebShellCustomizationProvider value={EMPTY_CUSTOMIZATION}>
+            <I18nProvider language="en">
+              <ChatPane />
+            </I18nProvider>
+          </WebShellCustomizationProvider>
+        </QuoteToComposerContext.Provider>,
+      ),
+    );
+    expect(latestPaneQuoteToComposer).toBeTypeOf('function');
+    expect(latestPaneQuoteToComposer).not.toBe(mainQuote);
+
+    act(() => latestPaneQuoteToComposer!('quoted\ntext'));
+
+    expect(insertQuote).toHaveBeenCalledTimes(1);
+    expect(insertQuote.mock.calls[0]![0]).toMatchObject({
+      kind: 'quote',
+      serialized: '> quoted text',
+    });
+    expect(mainQuote).not.toHaveBeenCalled();
+  });
+
+  it('offers no Quote action while an approval owns the pane composer', () => {
+    pendingPermission = { id: 'perm-1', toolName: 'write_file', rawInput: {} };
+    render();
+    expect(testid('pane-approval')).not.toBeNull();
+    expect(latestPaneQuoteToComposer).toBeNull();
+
+    pendingPermission = null;
+    rerender();
+    expect(latestPaneQuoteToComposer).toBeTypeOf('function');
   });
 
   it('adds no composer footer DOM when omitted or returning null', () => {
