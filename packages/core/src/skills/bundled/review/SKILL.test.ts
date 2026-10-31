@@ -1827,10 +1827,19 @@ describe('bundled review skill', () => {
       'spells the range field `startLine`, so rename it',
     );
     expect(posting).toContain(
+      '`line` must be a nonnegative integer (missing/null means 0)',
+    );
+    expect(posting).toContain(
+      '`start_line`, when present, must be a positive integer with a positive `line`',
+    );
+    expect(posting).toContain(
       'still add one id-less placeholder `{path, line}` for every body-only Critical',
     );
     expect(posting).toContain(
       "an aggregate's locations carry `<id>-k`, which this shape refuses",
+    );
+    expect(posting).toContain(
+      'Match the full finding ID or its `<findingId>-k` expansion',
     );
     expect(posting).toContain(
       'never blindly strip a trailing `-<n>`, because a standalone ledger ID such as `R3-2` is already complete',

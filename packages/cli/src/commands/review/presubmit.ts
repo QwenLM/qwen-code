@@ -279,15 +279,19 @@ interface PresubmitArgs {
  */
 export function parseFindingsFile(
   path: string,
-  onUnexpectedKey?: (key: string) => void,
+  onInvalid?: (detail: string) => void,
 ): FindingAnchor[] | null {
+  const invalid = (detail: string): null => {
+    onInvalid?.(detail);
+    return null;
+  };
   let parsed: unknown;
   try {
     parsed = JSON.parse(readFileSync(path, 'utf8'));
   } catch {
-    return null;
+    return invalid('could not read a JSON file');
   }
-  if (!Array.isArray(parsed)) return null;
+  if (!Array.isArray(parsed)) return invalid('expected an array');
   const out: FindingAnchor[] = [];
   for (const entry of parsed) {
     if (
@@ -295,7 +299,7 @@ export function parseFindingsFile(
       entry === null ||
       typeof (entry as { path?: unknown }).path !== 'string'
     ) {
-      return null;
+      return invalid('each entry needs a string path');
     }
     const e = entry as {
       path: string;
@@ -310,8 +314,23 @@ export function parseFindingsFile(
         value != null && !['path', 'line', 'start_line', 'id'].includes(key),
     )?.[0];
     if (unexpectedKey !== undefined) {
-      onUnexpectedKey?.(unexpectedKey);
-      return null;
+      return invalid(`unexpected key ${quoteFindingValue(unexpectedKey)}`);
+    }
+    if (
+      e.line != null &&
+      (typeof e.line !== 'number' || !Number.isInteger(e.line) || e.line < 0)
+    ) {
+      return invalid('line must be a nonnegative integer');
+    }
+    if (
+      e.start_line != null &&
+      (typeof e.start_line !== 'number' ||
+        !Number.isInteger(e.start_line) ||
+        e.start_line <= 0 ||
+        typeof e.line !== 'number' ||
+        e.line <= 0)
+    ) {
+      return invalid('start_line needs a positive integer and a positive line');
     }
     // Same fail-safe as `path`: an `id` of the wrong type or shape is a
     // malformed file, and silently ignoring it would let a carried re-post
@@ -325,7 +344,9 @@ export function parseFindingsFile(
       e.id !== null &&
       (typeof e.id !== 'string' || !LEDGER_ID_SHAPE.test(e.id))
     ) {
-      return null;
+      return invalid(
+        `id must be R<round>-<n>${typeof e.id === 'string' ? `: ${quoteFindingValue(e.id, 30)}` : ''}`,
+      );
     }
     out.push({
       path: e.path,
@@ -335,6 +356,17 @@ export function parseFindingsFile(
     });
   }
   return out;
+}
+
+function quoteFindingValue(value: string, maxLength = 40): string {
+  const quoted = JSON.stringify(value);
+  if (quoted.length <= maxLength) return quoted;
+  let prefix = '';
+  for (const point of value) {
+    if (JSON.stringify(`${prefix}${point}…`).length > maxLength) break;
+    prefix += point;
+  }
+  return JSON.stringify(`${prefix}…`);
 }
 
 /** Best-effort delta between the reviewed SHA and the live head. */
@@ -1047,10 +1079,10 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
   // will not parse, is not an array, or holds an entry without a string
   // `path` collapses to `null` (unknown → fail-safe at-risk), never to a
   // silently-shorter set that could make a real overlap read as disjoint.
-  let unexpectedFindingsKey: string | undefined;
+  let invalidFindingsDetail: string | undefined;
   const newFindings = newFindingsPath
-    ? parseFindingsFile(newFindingsPath, (key) => {
-        unexpectedFindingsKey = key;
+    ? parseFindingsFile(newFindingsPath, (detail) => {
+        invalidFindingsDetail = detail;
       })
     : null;
   // A path was given but did not parse into a usable list. The drift path
@@ -1156,7 +1188,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
     driftReason,
     metaUnavailable,
     findingsFileInvalid,
-    unexpectedFindingsKey,
+    invalidFindingsDetail,
   });
 }
 
@@ -1186,7 +1218,7 @@ function writePresubmitReport(input: {
   driftReason?: string;
   metaUnavailable: boolean;
   findingsFileInvalid: boolean;
-  unexpectedFindingsKey?: string;
+  invalidFindingsDetail?: string;
 }): void {
   const {
     prNumber,
@@ -1201,7 +1233,7 @@ function writePresubmitReport(input: {
     driftReason,
     metaUnavailable,
     findingsFileInvalid,
-    unexpectedFindingsKey,
+    invalidFindingsDetail,
   } = input;
 
   const downgradeReasons: string[] = [];
@@ -1229,14 +1261,12 @@ function writePresubmitReport(input: {
     );
   }
   if (findingsFileInvalid) {
-    // Bound the quoted key so the actionable contract survives the downstream
-    // 400-code-point per-reason limit, even for arbitrary JSON property names.
-    const keyDetail =
-      unexpectedFindingsKey === undefined
-        ? ''
-        : ` (unexpected key ${JSON.stringify(unexpectedFindingsKey).slice(0, 40)})`;
+    // Parser details bound escaped values so this remedy survives the downstream
+    // 400-code-point per-reason limit without cutting a JSON escape or surrogate.
+    const detail =
+      invalidFindingsDetail === undefined ? '' : ` (${invalidFindingsDetail})`;
     downgradeReasons.push(
-      `the --new-findings file was malformed${keyDetail} — overlap dedup disabled; ` +
+      `the --new-findings file was malformed${detail} — overlap dedup disabled; ` +
         'anchor-risk at-risk. Expected [{path, line, start_line?, id?}]: use ' +
         'resolved lines, rename startLine, strip other keys; id only on carried ' +
         'findings, plus an id-less placeholder per body-only Critical. Not the ' +
@@ -1376,10 +1406,10 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
   // but presubmit does not re-fetch: `compare` stays null, which rules
   // `anchorsAtRisk` true on ANY drift — the fail-safe default that sends
   // the skill back to re-review the amended head.
-  let unexpectedFindingsKey: string | undefined;
+  let invalidFindingsDetail: string | undefined;
   const newFindings = newFindingsPath
-    ? parseFindingsFile(newFindingsPath, (key) => {
-        unexpectedFindingsKey = key;
+    ? parseFindingsFile(newFindingsPath, (detail) => {
+        invalidFindingsDetail = detail;
       })
     : null;
   const findingsFileInvalid =
@@ -1471,7 +1501,7 @@ async function runPresubmitAone(args: PresubmitArgs): Promise<void> {
     driftReason,
     metaUnavailable,
     findingsFileInvalid,
-    unexpectedFindingsKey,
+    invalidFindingsDetail,
   });
 }
 
@@ -1510,7 +1540,7 @@ export const presubmitCommand: CommandModule = {
       .option('new-findings', {
         type: 'string',
         describe:
-          "Path to a JSON file shaped as [{path, line, start_line?, id?}] — the anchors of the comments you are about to post, one entry per location plus one id-less placeholder per body-only Critical. `line`/`start_line` come from the RESOLVED anchors (`resolve-anchors` writes them to `…-anchors-resolved.json` and names the range field `startLine`); rename `startLine` to `start_line` and keep only the four listed keys, dropping `anchor` and all other resolver metadata. An unexpected non-null key is refused and named in the report. `id` is the FINDING's carried ledger id (`R<round>-<n>`, from the carried-ledger set): join an aggregate's `<id>-k` back to the artifact's actual finding IDs, never blindly strip a trailing `-<n>`, and omit id on fresh findings. This is NOT the canonical findings artifact or either raw resolver file. When provided, existing comments are checked for same-(path, line) overlap with the new findings: an id-matched own-account comment — a root at the same location, or the pipeline's own carry-reply in that id's thread at any location — is reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
+          "Path to a JSON file shaped as [{path, line, start_line?, id?}] — the anchors of the comments you are about to post, one entry per location plus one id-less placeholder per body-only Critical. `line`/`start_line` come from the RESOLVED anchors (`resolve-anchors` writes them to `…-anchors-resolved.json` and names the range field `startLine`); rename `startLine` to `start_line` and keep only the four listed keys, dropping `anchor` and all other resolver metadata. An unexpected non-null key is refused and named in the report. `line` must be a nonnegative integer (missing/null means 0); `start_line`, when present, must be a positive integer with a positive `line`. `id` is the FINDING's carried ledger id (`R<round>-<n>`, from the carried-ledger set): join an aggregate's `<id>-k` back to the artifact's actual finding IDs, never blindly strip a trailing `-<n>`, and omit id on fresh findings. This is NOT the canonical findings artifact or either raw resolver file. When provided, existing comments are checked for same-(path, line) overlap with the new findings: an id-matched own-account comment — a root at the same location, or the pipeline's own carry-reply in that id's thread at any location — is reported in `repost` so the drop rule can exempt the re-post, and a fresh id could only corrupt that match.",
       }),
   handler: async (argv) => {
     const host = (argv as { host?: string }).host;
