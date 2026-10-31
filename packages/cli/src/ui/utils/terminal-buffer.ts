@@ -41,12 +41,24 @@ export function isInteractiveTerminal(
   );
 }
 
+function isConEmuOrCmder(env: TerminalEnvironment): boolean {
+  return Boolean(env['ConEmuPID'] || env['CMDER_SHELL']);
+}
+
 export function shouldUseVirtualViewport(
   useTerminalBuffer: boolean | undefined,
   screenReader: boolean,
   terminalInteractive: boolean,
+  env: TerminalEnvironment = process.env,
 ): boolean {
-  // The settings loader does not apply schema defaults, so keep this fallback
-  // in sync with settingsSchema.ts's default for ui.useTerminalBuffer.
-  return terminalInteractive && (useTerminalBuffer ?? true) && !screenReader;
+  // The settings loader does not apply schema defaults, so keep the ordinary
+  // terminal fallback in sync with settingsSchema.ts's default for
+  // ui.useTerminalBuffer. ConEmu/Cmder are the exception: they repaint every
+  // write instead of coalescing whole-viewport rewrites, so they default to
+  // the append-only path unless the user opted in.
+  return (
+    terminalInteractive &&
+    !screenReader &&
+    (useTerminalBuffer ?? !isConEmuOrCmder(env))
+  );
 }
