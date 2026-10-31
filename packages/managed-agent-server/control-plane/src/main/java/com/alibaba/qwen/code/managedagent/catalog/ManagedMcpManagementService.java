@@ -1,7 +1,7 @@
 package com.alibaba.qwen.code.managedagent.catalog;
 
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionPolicyStore;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessFailure;
 import com.alibaba.qwen.code.managedagent.harness.contracts.HarnessHttpFailure;
@@ -25,11 +25,11 @@ import java.util.function.Supplier;
 public class ManagedMcpManagementService {
     private static final Set<String> ACTIONS = Set.of("add", "edit", "remove", "enable", "disable", "reload", "restart");
     private final ManagedAgentService sessions;
-    private final AgentStateStore store;
+    private final SessionPolicyStore store;
     private final HarnessConnector harness;
     private final ObjectMapper json;
 
-    public ManagedMcpManagementService(ManagedAgentService sessions, AgentStateStore store,
+    public ManagedMcpManagementService(ManagedAgentService sessions, SessionPolicyStore store,
             HarnessConnector harness, @Qualifier("managedAgentObjectMapper") ObjectMapper json) {
         this.sessions = sessions;
         this.store = store;

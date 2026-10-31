@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { inspect } from 'node:util';
+import { inspect, isDeepStrictEqual } from 'node:util';
 import {
   createSourceFile,
   isArrayLiteralExpression,
@@ -589,11 +589,18 @@ describe('managed-agent-server e2e runner', () => {
     // Two siblings settle once each under their original identities: the
     // count, both Action rows, the pending sibling's own decision, the second
     // file effect and the order-sensitive final plan are all pinned.
-    // R1-7: anchor the count ternary to expectedExecutions specifically — the
-    // bare ternary also matches expectedOriginalPlanCalls, so narrowing one
-    // while dropping the other must not stay green.
+    // R1-7 / F1: anchor each count ternary to its own site. The bare `? 2 : 1`
+    // matches both expectedExecutions and expectedOriginalPlanCalls, so each is
+    // pinned separately and narrowing either one (2 -> 1) reds here at unit
+    // speed, not only at the real-stack barrier.
     expect(source).toMatch(
-      /const expectedExecutions =[\s\S]*?approvalFault === 'sibling-approval'\s*\?\s*2\s*:\s*1/,
+      /const expectedExecutions =[\s\S]*?approvalFault === 'sibling-approval' \|\|\s*approvalFault === 'after-earlier-tools'\s*\?\s*2\s*:\s*1/,
+    );
+    // `\s*`, not `[\s\S]*?`: the gap here is whitespace-only, so a tight anchor
+    // cannot span past this site to the expectedExecutions ternary and mask a
+    // narrowed count (the spanning form stays green under `? 2` -> `? 1`).
+    expect(source).toMatch(
+      /const expectedOriginalPlanCalls =\s*approvalFault === 'sibling-approval'\s*\?\s*2\s*:\s*1/,
     );
     // R1-7: pin the per-call identity loop itself (match by prepare key, not
     // the pre-PR single-execution shape), so reverting it reds here at unit
@@ -641,6 +648,73 @@ describe('managed-agent-server e2e runner', () => {
     expect(a3PlanFnBody).toContain("event.kind !== 'hosted.batch.planned'");
     expect(a3PlanFnBody).toContain("payload['batchId'] !== batchId");
     expect(a3PlanFnBody).toContain("plan.stage !== 'final'");
+    // B3 after-earlier-tools: the multi-round fixture, the second-Allow
+    // choreography, the round/budget continuity readers + assertions, and the
+    // later-round deep-equal parity are all pinned so a regression reds here.
+    expect(source).toContain("'after-earlier-tools'");
+    expect(source).toContain('call_managed_b3_second');
+    expect(source).toContain('b3BudgetDirective');
+    expect(source).toContain('Second earlier-tool approval requested');
+    expect(source).toContain('Earlier tools settled and the later round held');
+    expect(source).toContain('b3RoundAndBudget(');
+    expect(source).toContain('B3 recovery reset the logical round');
+    expect(source).toContain('B3 recovery reset the turn budget snapshot');
+    expect(source).toContain('B3 recovery wiped the per-model token ledger');
+    expect(source).toContain('B3 second physical file assertion failed');
+    expect(source).toContain(
+      'B3 recovery changed the saved later-round model request',
+    );
+    expect(source).toContain('B3 earlier execution');
+    expect(source).toContain('B3 approval identities/states differ');
+    // The hold armed for B3 must also be RELEASED after the crash: a release
+    // gated to after-result alone leaves the recovery generation's reissued
+    // request held forever (the .75 head run crash-looped on exactly that).
+    const releaseAt = source.indexOf('releaseApprovalResultHold();');
+    expect(releaseAt).toBeGreaterThan(-1);
+    expect(source.slice(releaseAt - 200, releaseAt)).toContain(
+      "approvalFault === 'after-earlier-tools'",
+    );
+    // B3 shares after-result's published-prefix capture and retraction proof.
+    expect(source).toMatch(
+      /approvalFault === 'after-result' \|\|\s*approvalFault === 'after-earlier-tools'\s*\) \{\s*\/\/ The reissue must retract the held prefix/,
+    );
+    // The fixture must charge non-zero usage (the fake default is all zeros,
+    // which makes the ledger continuity assertion vacuous) and the ledger
+    // check must compare per-model totals — an empty {} ledger is truthy.
+    expect(source).toContain('completion_tokens: 300');
+    expect(source).toContain(
+      'B3 crash-boundary per-model token ledger is empty',
+    );
+    expect(source).toContain('B3 crash-boundary turn budget was not exercised');
+    expect(source).toContain('afterTokens < beforeTokens');
+    expect(source).toContain('assertB3CostContinuity(');
+    // R1-3: the budget guard must test the NUMERIC field — a non-null snapshot
+    // with budget: null is a legal production state, so an object-truthy guard
+    // would let a lost +Nk directive pass as null == null.
+    const b3CostFn = source.indexOf('function assertB3CostContinuity(');
+    expect(b3CostFn).toBeGreaterThan(-1);
+    const b3CostFnBody = source.slice(
+      b3CostFn,
+      source.indexOf('\n}', b3CostFn),
+    );
+    expect(b3CostFnBody).toContain(
+      'b3Budget === null || b3Budget === undefined',
+    );
+    // R1-4: site-anchor the B3 post-tool request count like the neighbouring
+    // R1-7 / F1 pins — the identifier alone survives a conflict resolution
+    // back to the pre-PR ternary, which would only red in the real-stack lane.
+    // Deleting the after-earlier-tools ? 3 clause must red here.
+    expect(source).toMatch(
+      /const expectedModelsAfterResults =[\s\S]*?approvalFault === 'after-earlier-tools'\s*\?\s*3\s*:/,
+    );
+    const b3Fn = source.indexOf('function b3RoundAndBudget(');
+    expect(b3Fn).toBeGreaterThan(-1);
+    const b3FnBody = source.slice(b3Fn, source.indexOf('\n}', b3Fn));
+    expect(b3FnBody).toContain('qwen_managed_agent.ma_session_journal_tx');
+    expect(b3FnBody).toContain("event.kind !== 'model.attempt'");
+    expect(b3FnBody).toContain('SELECT HEX(inline_bytes)');
+    expect(b3FnBody).toContain("attempts[i].payload['recoveryRef']");
+    expect(b3FnBody).toContain("['usageRef', 'routeRef']");
   });
 
   // R4-2 (behavioural): the source pins above assert the window helper's
@@ -829,6 +903,191 @@ describe('managed-agent-server e2e runner', () => {
         planned(10),
       ]),
     ).toEqual(finalPlan);
+  });
+
+  // B3 (behavioural): exercise b3RoundAndBudget on injected journal rows and
+  // request/route/usage resources, so the latest-attempt round selection, the
+  // reverse-scan for budget/models, and both throw branches are proven on data.
+  // runMysql is injected through load() and dispatches on the query (journal
+  // HEX rows vs HEX resource bytes keyed by resource_id); sqlString is
+  // extracted too.
+  it('behaves b3RoundAndBudget on injected journal rows', () => {
+    const attempt = (sequence, refs) => ({
+      kind: 'model.attempt',
+      sequence,
+      payload: refs,
+    });
+    const journalRows = (events) =>
+      Buffer.from(
+        events
+          .map((event) =>
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: event,
+            }),
+          )
+          .join('\n'),
+        'utf8',
+      ).toString('hex');
+    const budgetSnapshot = { budget: 500000, outputTokensAtTurnStart: 100 };
+    const resources = {
+      // The saved request carries the full system prompt, so its JSON has \"
+      // and \\ sequences — the shape mysql --batch escaping corrupted when the
+      // helper read CONVERT(inline_bytes) instead of HEX.
+      req_round2: { round: 2, prompt: 'reply "exactly" then \\ stop' },
+      req_round0: { round: 0 },
+      usage1: { budget: budgetSnapshot, models: { m: { output: 150 } } },
+      route2: { budget: budgetSnapshot },
+      // R1-2: a discriminating pair — the older attempt carries a DIFFERENT
+      // budget and a smaller ledger, the newest its own. An oldest-first scan
+      // returns 900000/300 where the newest-first contract returns 500000/600,
+      // so the direction is proven on data, not only on the round selection.
+      usageOld: {
+        budget: { budget: 900000, outputTokensAtTurnStart: 0 },
+        models: { m: { tokens: { candidates: 300 } } },
+      },
+      usageNew: {
+        budget: budgetSnapshot,
+        models: { m: { tokens: { candidates: 600 } } },
+      },
+    };
+    const run = (events) =>
+      load(
+        ['b3RoundAndBudget', 'sqlString'],
+        'b3RoundAndBudget',
+        'runMysql',
+      )((_port, query) => {
+        if (query.includes('ma_session_journal_tx')) return journalRows(events);
+        if (query.includes('ma_resource')) {
+          const resourceId = query.match(/resource_id='([^']+)'/)?.[1];
+          const res = resources[resourceId];
+          if (!res) throw new Error(`no resource ${String(resourceId)}`);
+          return Buffer.from(JSON.stringify(res), 'utf8').toString('hex');
+        }
+        throw new Error(`unexpected query: ${query}`);
+      }).b3RoundAndBudget(0, 'filter');
+
+    // The latest attempt's request gives the round; budget/models reverse-scan
+    // across the route/usage refs (budget from the newest, models from usage1).
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usage1' },
+        }),
+        attempt(20, {
+          recoveryRef: { resourceId: 'req_round2' },
+          routeRef: { resourceId: 'route2' },
+        }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { m: { output: 150 } },
+    });
+    // Models still resolve from an earlier attempt when the newest has no usage.
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usage1' },
+        }),
+        attempt(20, { recoveryRef: { resourceId: 'req_round2' } }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { m: { output: 150 } },
+    });
+    // R1-2: the newest attempt's own usage wins over an older, different one —
+    // an oldest-first budget/models scan reds here (900000/300 vs 500000/600).
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usageOld' },
+        }),
+        attempt(20, {
+          recoveryRef: { resourceId: 'req_round2' },
+          usageRef: { resourceId: 'usageNew' },
+        }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { m: { tokens: { candidates: 600 } } },
+    });
+    // No attempt at all.
+    expect(() => run([])).toThrow(/no model attempt/);
+    // An attempt with no saved request round.
+    expect(() => run([attempt(10, {})])).toThrow(
+      /no saved model-request round/,
+    );
+  });
+
+  // R1-2 / R1-3 (behavioural): the cost-continuity assertion on injected
+  // before/after states. isDeepStrictEqual is injected through load() because
+  // the extracted body's free identifiers resolve against the harness scope.
+  it('behaves assertB3CostContinuity on injected before/after states', () => {
+    const assertCost = load(
+      ['assertB3CostContinuity'],
+      'assertB3CostContinuity',
+      'isDeepStrictEqual',
+    )(isDeepStrictEqual).assertB3CostContinuity;
+    const snapshot = {
+      sessionId: 's',
+      promptId: 'p',
+      budget: 500000,
+      directiveText: '+500k',
+      outputTokensAtTurnStart: 0,
+    };
+    const ledger = (candidates) => ({
+      'fake-model': { tokens: { candidates } },
+    });
+    const before = { round: 2, budget: snapshot, models: ledger(600) };
+    // The healthy recovery: snapshot deep-equal, ledger grown by the final round.
+    expect(() =>
+      assertCost(before, { round: 2, budget: snapshot, models: ledger(700) }),
+    ).not.toThrow();
+    // R1-3: a non-null snapshot whose numeric budget is null (the +Nk directive
+    // stopped being parsed) must red — an object-truthy guard passes it and the
+    // deep-equal then compares null with null.
+    expect(() =>
+      assertCost(
+        { ...before, budget: { ...snapshot, budget: null } },
+        {
+          round: 2,
+          budget: { ...snapshot, budget: null },
+          models: ledger(700),
+        },
+      ),
+    ).toThrow(/turn budget was not exercised/);
+    // A missing snapshot reds the same guard.
+    expect(() =>
+      assertCost({ ...before, budget: null }, { ...before, budget: null }),
+    ).toThrow(/turn budget was not exercised/);
+    // A re-baselined snapshot (different turn-start baseline) reds deep-equal.
+    expect(() =>
+      assertCost(before, {
+        round: 2,
+        budget: { ...snapshot, outputTokensAtTurnStart: 600 },
+        models: ledger(700),
+      }),
+    ).toThrow(/reset the turn budget snapshot/);
+    // An empty crash-boundary ledger is vacuous and must red.
+    expect(() =>
+      assertCost({ ...before, models: {} }, { ...before, models: {} }),
+    ).toThrow(/token ledger is empty/);
+    // A zeroed ({}) after-ledger must red — {} is truthy, so a null check passes it.
+    expect(() =>
+      assertCost(before, { round: 2, budget: snapshot, models: {} }),
+    ).toThrow(/wiped the per-model token ledger/);
+    // A shrunk per-model total must red (the dropped-restore shape).
+    expect(() =>
+      assertCost(before, { round: 2, budget: snapshot, models: ledger(100) }),
+    ).toThrow(
+      /wiped the per-model token ledger: model=fake-model before=600 after=100/,
+    );
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,

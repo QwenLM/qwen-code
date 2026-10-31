@@ -988,6 +988,7 @@ export function runPrepare(args: PrepareArgs): void {
             handledConflictSha: existing.handledConflictSha,
             pushCount: existing.pushCount,
             summarizedSha: existing.summarizedSha,
+            reportedNeedsHuman: existing.reportedNeedsHuman,
             pendingPosts: existing.pendingPosts,
             deferredRuns: existing.deferredRuns,
             heldChecks: existing.heldChecks,

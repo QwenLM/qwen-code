@@ -100,6 +100,12 @@ export interface AutofixPrState {
   watch?: AutofixPrWatchOptions;
   /** What rounds left for a person, newest last, for `status`. */
   needsHuman?: NeedsHumanItem[];
+  /** The `needsHuman` lines a summary that reached the PR has reported, and
+   * the head it reported them on. Kept apart from `needsHuman`, which is
+   * recorded before any POST so `status` survives a later failure: this one
+   * advances only on a delivered (or adopted) summary, so a report that never
+   * arrived stays due on the next run. */
+  reportedNeedsHuman?: { sha: string; texts: string[] };
   /** When `prepare` made this state (ISO 8601): a gate cursor older than
    * it is a former watch's, which `status` does not report. */
   preparedAt?: string;
@@ -147,6 +153,9 @@ export interface PendingPost {
   bodyHash: string;
   /** The head the reply was posted on: a summary reports that head's push. */
   sha: string;
+  /** For a summary: the `needsHuman` lines its body reports, so adopting it
+   * marks exactly those as reported, never a later plan's. */
+  needsHuman?: string[];
 }
 
 /**
@@ -776,7 +785,8 @@ function isPendingPost(value: unknown): value is PendingPost {
     (post.where === 'summary' || Number.isInteger(post.where)) &&
     isStringList(post.handled) &&
     typeof post.bodyHash === 'string' &&
-    typeof post.sha === 'string'
+    typeof post.sha === 'string' &&
+    (post.needsHuman === undefined || isStringList(post.needsHuman))
   );
 }
 
@@ -873,6 +883,18 @@ export function stateDefect(state: AutofixPrState): string | null {
   ) {
     return 'needsHuman';
   }
+  if (
+    state.reportedNeedsHuman !== undefined &&
+    !(
+      typeof state.reportedNeedsHuman === 'object' &&
+      state.reportedNeedsHuman !== null &&
+      typeof state.reportedNeedsHuman.sha === 'string' &&
+      SHA_RE.test(state.reportedNeedsHuman.sha) &&
+      isStringList(state.reportedNeedsHuman.texts)
+    )
+  ) {
+    return 'reportedNeedsHuman';
+  }
   if (state.preparedAt !== undefined && typeof state.preparedAt !== 'string') {
     return 'preparedAt';
   }
@@ -951,7 +973,7 @@ export function readState(statePath: string): AutofixPrState | null {
   }
   // The fields these hold, and nothing else: what reaches `status`, a
   // rebuilt state and the next write is what the helpers wrote.
-  const { watch, ended, needsHuman } = parsed;
+  const { watch, ended, needsHuman, reportedNeedsHuman } = parsed;
   return {
     ...parsed,
     ...(watch
@@ -972,6 +994,14 @@ export function readState(statePath: string): AutofixPrState | null {
             at,
             text,
           })),
+        }
+      : {}),
+    ...(reportedNeedsHuman
+      ? {
+          reportedNeedsHuman: {
+            sha: reportedNeedsHuman.sha,
+            texts: [...reportedNeedsHuman.texts],
+          },
         }
       : {}),
   };
