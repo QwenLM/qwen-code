@@ -6009,10 +6009,13 @@ jobs:
                 # assertions" a measure of the repo, not of the round. Totals
                 # only, so no agent-chosen suite name reaches the body; a
                 # malformed list gets no line, and the checker refuses it.
+                # Shape rules mirror the checker's: a blank suite or a
+                # non-count skipped (false/null) is refused, not defaulted,
+                # so a shape the checker refuses never renders totals.
                 GATES_META="$(
                   jq -r 'def count: type == "number" and . >= 0 and . == floor;
                          if (.gates | type) == "array" and (.gates | length) > 0
-                            and (.gates | all(type == "object" and (.suite | type) == "string" and (.pass | count) and (.fail | count) and ((.skipped // 0) | count)))
+                            and (.gates | all(type == "object" and (.suite | type) == "string" and (.suite | test("\\S")) and (.pass | count) and (.fail | count) and ((has("skipped") | not) or (.skipped | count))))
                          then "\(.gates | length) \(.gates | map(.pass) | add | floor) \(.gates | map(.fail) | add | floor) \(.gates | map(.skipped // 0) | add | floor)"
                          else empty end' "$ASSERTIONS_FILE" 2>/dev/null || true
                 )"

@@ -79,8 +79,9 @@ them rather than at the end of the document.
   reason the round is dirty and exits 1.
 
 The checker gains three rules over the artifacts the contract asks the round
-to write. The artifact contract names both, because a file no artifact list asks
-for is a file no round produces, and a check over an absent file is silent:
+to write. The artifact contract names all three, because a file no artifact
+list asks for is a file no round produces, and a check over an absent file is
+silent:
 
 - `assertions.json` carries `failures: [{ id, attribution }]` whenever `fail` is
   nonzero, one entry per failed assertion, attributed `pr`, `harness` or

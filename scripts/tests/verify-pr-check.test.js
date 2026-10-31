@@ -310,6 +310,11 @@ describe('gates', () => {
     expect(result.errors).toEqual([]);
     expect(result.warnings).toEqual([]);
     expect(result.counts).toEqual({ pass: 4, fail: 0, total: 4 });
+    // An empty list is a round that ran no suites: valid, and below the
+    // size threshold it has nothing to warn about.
+    const empty = withGates([]);
+    expect(empty.errors).toEqual([]);
+    expect(empty.warnings).toEqual([]);
   });
 
   it('refuses a malformed list without echoing the suite name', () => {
@@ -321,6 +326,8 @@ describe('gates', () => {
       [{ suite: 'x', pass: -1, fail: 0 }],
       [{ suite: 'x', pass: 1, fail: 0.5 }],
       [{ suite: 'x', pass: 1, fail: 0, skipped: '2' }],
+      [{ suite: 'x', pass: 1, fail: 0, skipped: false }],
+      [{ suite: 'x', pass: 1, fail: 0, skipped: null }],
       [{ suite: 'x', pass: '1', fail: 0 }],
     ]) {
       const result = withGates(gates);
@@ -352,6 +359,11 @@ describe('gates', () => {
       total: 1001,
     });
     expect(split.warnings.join('\n')).not.toMatch(/records no gates/);
+    // An empty list records no suites, so it must not silence the warning
+    // either: folding suites in and writing [] is the same smell.
+    const empty = withGates([], { pass: 1001, fail: 0, total: 1001 });
+    expect(empty.errors).toEqual([]);
+    expect(empty.warnings.join('\n')).toMatch(/records no gates/);
   });
 });
 

@@ -286,9 +286,9 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
         // no suite name: the publisher forwards error lines to its log.
         const gates = parsed.gates;
         const isCount = (value) => Number.isInteger(value) && value >= 0;
-        if (gates !== undefined) {
-          if (
-            !Array.isArray(gates) ||
+        if (
+          gates !== undefined &&
+          (!Array.isArray(gates) ||
             gates.some(
               (gate) =>
                 !gate ||
@@ -297,13 +297,18 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
                 !isCount(gate.pass) ||
                 !isCount(gate.fail) ||
                 (gate.skipped !== undefined && !isCount(gate.skipped)),
-            )
-          ) {
-            errors.push(
-              'assertions.json gates must be an array of { suite, pass, fail } entries with non-negative integer counts (skipped optional)',
-            );
-          }
-        } else if (counts.total > SUITE_SIZED_TOTAL) {
+            ))
+        ) {
+          errors.push(
+            'assertions.json gates must be an array of { suite, pass, fail } entries with non-negative integer counts (skipped optional)',
+          );
+        }
+        // An empty list records no suites, so it must not silence the
+        // size warning either.
+        if (
+          counts.total > SUITE_SIZED_TOTAL &&
+          (gates === undefined || (Array.isArray(gates) && gates.length === 0))
+        ) {
           warnings.push(
             `assertions.json counts ${counts.total} assertions and records no gates: an existing test suite's results belong in gates, not in pass, fail and total`,
           );

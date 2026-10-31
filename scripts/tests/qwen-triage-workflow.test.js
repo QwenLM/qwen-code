@@ -6505,7 +6505,9 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(body).toContain('✅ passed');
 
       // No list prints no line. Neither does a malformed one, and the
-      // checker refuses it, so the verdict is not trusted either.
+      // checker refuses it, so the verdict is not trusted either. The
+      // shape rules mirror the checker's: a blank suite name and a
+      // non-count skipped (false/null) are refused, not defaulted.
       expect(publishWith('gates-none', counts)).not.toContain('Targeted gates');
       expect(
         publishWith('gates-empty', { ...counts, gates: [] }),
@@ -6513,9 +6515,13 @@ describe('qwen-triage verify publish fidelity', () => {
       for (const gates of [
         [{ suite: 'x', pass: '1290', fail: 0 }],
         [{ pass: 1290, fail: 0 }],
+        [{ suite: '', pass: 1290, fail: 0 }],
+        [{ suite: '   ', pass: 1290, fail: 0 }],
         [{ suite: 'x', pass: -1, fail: 0 }],
         [{ suite: 'x', pass: 1, fail: -1 }],
         [{ suite: 'x', pass: 1, fail: 0, skipped: 0.5 }],
+        [{ suite: 'x', pass: 1, fail: 0, skipped: false }],
+        [{ suite: 'x', pass: 1, fail: 0, skipped: null }],
       ]) {
         const bad = publishWith('gates-bad', { ...counts, gates });
         expect(bad).not.toContain('Targeted gates');
