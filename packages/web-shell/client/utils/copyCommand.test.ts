@@ -89,6 +89,109 @@ describe('copyFromLastAssistantMessage', () => {
     });
   });
 
+  const shellMarker = (id: string): Message => ({
+    id,
+    role: 'system',
+    variant: 'info',
+    source: 'background_notification_turn_started',
+    content: 'shell',
+    backgroundTurn: {
+      turnId: `auto-${id}`,
+      taskId: id,
+      kind: 'shell',
+      startedAt: 100,
+    },
+  });
+
+  const taskCompleted = (id: string): Message => ({
+    id: `${id}-completed`,
+    role: 'system',
+    variant: 'info',
+    source: 'background_task_completed',
+    content: 'Background shell finished',
+    data: { kind: 'shell', taskId: id, status: 'completed' },
+  });
+
+  const taggedAck = (id: string): Message => ({
+    id,
+    role: 'assistant',
+    content: 'Done.',
+    source: 'background_notification_response',
+  });
+
+  it('copies the main reply when the next turn starts after the ack', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+
+    const result = await copyFromLastAssistantMessage(
+      [
+        user('hello'),
+        assistant('The deliverable report.'),
+        shellMarker('task-1'),
+        taggedAck('ack-1'),
+        { id: 'next-turn', role: 'user', content: 'thanks' },
+      ],
+      '',
+      writeText,
+    );
+
+    expect(writeText).toHaveBeenCalledWith('The deliverable report.');
+    expect(result.status).toBe('info');
+  });
+
+  it('copies the main reply when the next shell prompt follows the ack', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+
+    const result = await copyFromLastAssistantMessage(
+      [
+        user('hello'),
+        assistant('The deliverable report.'),
+        shellMarker('task-1'),
+        taggedAck('ack-1'),
+        { id: 'next-shell', role: 'user_shell', command: 'ls', output: '' },
+      ],
+      '',
+      writeText,
+    );
+
+    expect(writeText).toHaveBeenCalledWith('The deliverable report.');
+    expect(result.status).toBe('info');
+  });
+
+  it('copies the main reply when two background completions are acknowledged', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+
+    const result = await copyFromLastAssistantMessage(
+      [
+        user('hello'),
+        assistant('The deliverable report.'),
+        shellMarker('task-1'),
+        taskCompleted('task-1'),
+        taggedAck('ack-1'),
+        shellMarker('task-2'),
+        taskCompleted('task-2'),
+        taggedAck('ack-2'),
+      ],
+      '',
+      writeText,
+    );
+
+    expect(writeText).toHaveBeenCalledWith('The deliverable report.');
+    expect(result.status).toBe('info');
+  });
+
+  it('copies the tagged ack when the turn answered nothing before the marker', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+
+    const result = await copyFromLastAssistantMessage(
+      [user('hello'), shellMarker('task-1'), taggedAck('ack-1')],
+      '',
+      writeText,
+    );
+
+    expect(writeText).toHaveBeenCalledWith('Done.');
+    expect(result.status).toBe('info');
+  });
+
   it('copies the last fenced code block with /copy code', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     const content = [

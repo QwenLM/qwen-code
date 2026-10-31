@@ -20,6 +20,7 @@ import {
   type TranscriptRenderMode,
 } from '../transcriptRenderMode';
 import { WEB_SHELL_TRANSCRIPT_RELOAD_BLOCKS } from '../constants/sessions';
+import type { TurnOutputFileChange } from './artifacts/TurnOutputs';
 import flashStyles from './MessageLocateFlash.module.css';
 import styles from './MessageList.module.css';
 
@@ -142,6 +143,20 @@ vi.mock('./MessageItem', async () => {
 });
 vi.mock('./messages/ToolApproval', () => ({ ToolApproval: () => null }));
 vi.mock('./messages/AskUserQuestion', () => ({ AskUserQuestion: () => null }));
+// The turn outputs card resolves its artifact workspace through the strict
+// workspace hooks, which require a DaemonWorkspaceProvider; the mount below
+// renders no provider, so the stubs keep the card workspace-free.
+vi.mock('@qwen-code/web-shell/daemon-react-sdk', async (importOriginal) => {
+  const original =
+    await importOriginal<
+      typeof import('@qwen-code/web-shell/daemon-react-sdk')
+    >();
+  return {
+    ...original,
+    useWorkspace: () => ({ capabilities: undefined }),
+    useWorkspaceActions: () => ({}),
+  };
+});
 vi.mock('@tanstack/react-virtual', () => ({
   useVirtualizer: ({
     count,
@@ -378,6 +393,7 @@ function mount(
     pendingApproval?: PermissionRequest | null;
     failedPromptMessageId?: string;
     onRetryFailedPrompt?: () => void;
+    turnFileChanges?: ReadonlyMap<string, readonly TurnOutputFileChange[]>;
   } = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -419,6 +435,7 @@ function mount(
                 onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
                 failedPromptMessageId={opts.failedPromptMessageId}
                 onRetryFailedPrompt={opts.onRetryFailedPrompt}
+                turnFileChanges={opts.turnFileChanges}
               />
             </TranscriptRenderModeProvider>
           </CompactModeContext.Provider>
@@ -3213,6 +3230,97 @@ describe('MessageList — turn collapse (DOM)', () => {
         },
       },
     ]);
+    expect(
+      c.querySelectorAll('[data-testid="assistant-turn-footer"]'),
+    ).toHaveLength(1);
+  });
+
+  it('keeps the footer on the main reply when a turn outputs card follows the ack', () => {
+    const shellMarker: SystemMessage = {
+      id: 'marker',
+      role: 'system',
+      content: 'shell',
+      variant: 'info',
+      source: 'background_notification_turn_started',
+      backgroundTurn: {
+        turnId: 'auto-task',
+        taskId: 'task',
+        kind: 'shell',
+        startedAt: 100,
+      },
+    };
+    const ack: AssistantMessage = {
+      ...asstMsg('ack'),
+      source: 'background_notification_response',
+    };
+    const changes: TurnOutputFileChange[] = [
+      {
+        path: 'src/app.ts',
+        status: 'modified',
+        toolCallId: 'call-a1',
+        isArtifact: false,
+        diffs: [{ oldText: 'one\n', newText: 'two\n' }],
+      },
+    ];
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+    const c = mount(
+      [userMsg('u1'), asstMsg('report'), shellMarker, ack],
+      undefined,
+      {
+        customization: { renderAssistantTurnFooter },
+        turnFileChanges: new Map([['u1', changes]]),
+      },
+    );
+
+    expect(
+      renderAssistantTurnFooter.mock.calls.map(([info]) => info.message.id),
+    ).toEqual(['report']);
+    expect(
+      c.querySelectorAll('[data-testid="assistant-turn-footer"]'),
+    ).toHaveLength(1);
+    // The turn outputs card is rendered: it is the row the fold must skip.
+    expect(c.textContent).toContain('src/app.ts');
+  });
+
+  it('keeps the footer on the tagged ack when no answer precedes the marker', () => {
+    const shellMarker: SystemMessage = {
+      id: 'marker',
+      role: 'system',
+      content: 'shell',
+      variant: 'info',
+      source: 'background_notification_turn_started',
+      backgroundTurn: {
+        turnId: 'auto-task',
+        taskId: 'task',
+        kind: 'shell',
+        startedAt: 100,
+      },
+    };
+    const notification: SystemMessage = {
+      id: 'notification',
+      role: 'system',
+      content: 'Background shell finished.',
+      variant: 'info',
+      source: 'background_notification',
+    };
+    const ack: AssistantMessage = {
+      ...asstMsg('ack'),
+      source: 'background_notification_response',
+    };
+    const renderAssistantTurnFooter = vi.fn(() => (
+      <span data-testid="assistant-turn-footer">footer</span>
+    ));
+    const c = mount(
+      [userMsg('u1'), notification, shellMarker, ack],
+      undefined,
+      { customization: { renderAssistantTurnFooter } },
+    );
+
+    expect(
+      renderAssistantTurnFooter.mock.calls.map(([info]) => info.message.id),
+    ).toEqual(['ack']);
     expect(
       c.querySelectorAll('[data-testid="assistant-turn-footer"]'),
     ).toHaveLength(1);

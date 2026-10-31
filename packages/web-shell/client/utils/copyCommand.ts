@@ -2,6 +2,7 @@ import type { Message } from '../adapters/types';
 import { writeClipboardText } from './clipboard';
 import {
   isShellCompletionAckRow,
+  isTurnStartMessage,
   shellAckRowFromMessage,
 } from './shellCompletionAck';
 
@@ -360,17 +361,23 @@ function getLastAssistantOutput(messages: readonly Message[]): string | null {
     if (message.role !== 'assistant' || !message.content) continue;
     let turnStart = -1;
     for (let j = i - 1; j >= 0; j--) {
-      const prior = messages[j];
-      if (prior.role === 'user' || prior.role === 'user_shell') {
+      if (isTurnStartMessage(messages[j])) {
         turnStart = j;
+        break;
+      }
+    }
+    // Bound the span at the turn's own end, not the transcript's: rows of
+    // later turns are not a continuation of this one.
+    let turnEnd = messages.length - 1;
+    for (let j = i + 1; j < messages.length; j++) {
+      if (isTurnStartMessage(messages[j])) {
+        turnEnd = j - 1;
         break;
       }
     }
     // The collapse path shows the turn's main answer, not a bookkeeping
     // reply to a background shell completion; /copy must agree with it.
-    if (
-      isShellCompletionAckRow(rows, i, turnStart, messages.length - 1, false)
-    ) {
+    if (isShellCompletionAckRow(rows, i, turnStart, turnEnd)) {
       continue;
     }
     return message.content;

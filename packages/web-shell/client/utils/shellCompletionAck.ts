@@ -32,6 +32,12 @@ export interface ShellAckRow {
    * status) that can sit between a marker and the model's reply to it.
    */
   isCompletionRow: boolean;
+  /**
+   * Turn chrome (a turn_outputs card or a turn_collapse row): part of
+   * the turn's rendering, not its content, so it is transparent to the
+   * rule.
+   */
+  isTurnChrome?: boolean;
 }
 
 /**
@@ -43,39 +49,15 @@ export interface ShellAckRow {
 export const BACKGROUND_NOTIFICATION_RESPONSE =
   'background_notification_response';
 
-/**
- * The terminal task status meaning "nothing left to report". A failed or
- * cancelled shell has a result its reply may summarize, so that reply
- * stays the turn's final answer.
- */
-const COMPLETED_TASK_STATUS = 'completed';
+const RAW_NOTIFICATION = 'background_notification';
+const TASK_COMPLETED = 'background_task_completed';
 
 /**
- * Which background-turn kinds make a post-marker reply a bookkeeping ack.
- * Only a shell completion is terminal bookkeeping: its output already
- * surfaced in the transcript, so a well-formed reply to it is an ack.
- * Agent, monitor, workflow, and peer turns carry a result the parent
- * synthesizes into its own reply, so a post-marker reply is content,
- * never an ack. The exhaustive switch forces a decision at compile time
- * when the daemon adds a sixth kind.
+ * Turn heads bounding an ack-rule span, shared by the collapse path and
+ * /copy so both measure a turn the same way.
  */
-export function isShellBookkeepingKind(
-  kind: DaemonBackgroundTurn['kind'] | undefined,
-): boolean {
-  if (kind === undefined) return false;
-  switch (kind) {
-    case 'shell':
-      return true;
-    case 'agent':
-    case 'monitor':
-    case 'workflow':
-    case 'peer':
-      return false;
-    default: {
-      const _exhaustive: never = kind;
-      return false;
-    }
-  }
+export function isTurnStartMessage(message: Message): boolean {
+  return message.role === 'user' || message.role === 'user_shell';
 }
 
 /**
@@ -83,16 +65,25 @@ export function isShellBookkeepingKind(
  * shell completion and must not stand as the turn's final answer.
  *
  * A row is folded only on positive signals:
- * - the nearest preceding marker is a shell completion
- *   (see isShellBookkeepingKind);
- * - the turn already produced a main answer before that marker;
+ * - the nearest preceding marker is a shell completion. Only a shell
+ *   completion is terminal bookkeeping: its output already surfaced in
+ *   the transcript, so a well-formed reply to it is an ack. Agent,
+ *   monitor, workflow, and peer turns carry a result the parent
+ *   synthesizes into its own reply, so a post-marker reply is content,
+ *   never an ack (and a kind the daemon adds later stays non-foldable
+ *   until proven otherwise).
+ * - the turn already produced an assistant main answer before that
+ *   marker (a raw machine notification never licenses a fold, so no
+ *   consumer can license it differently);
  * - for an assistant reply, the daemon tagged it
  *   `background_notification_response`, and when the marker carries the
  *   task's terminal status that status is a clean completion;
- * - only thoughts and daemon bookkeeping rows sit between the marker and
- *   the row, and nothing but thoughts and markers follows it (user
- *   steering, more work, or a terminal state makes it a real
- *   continuation).
+ * - only thoughts, markers, daemon bookkeeping rows, and turn chrome sit
+ *   between the marker and the row, and nothing but thoughts, markers,
+ *   task-completed bookkeeping, turn chrome, and a reply this very rule
+ *   folds follows it (user steering, more work, or a terminal state
+ *   makes it a real continuation; the raw result notification can itself
+ *   stand as an answer, so it vetoes too).
  *
  * `start` is the turn's head index, excluded from every scan, and `end`
  * the turn's last index. A candidate with no marker ahead of it, or with
@@ -103,85 +94,45 @@ export function isShellCompletionAckRow(
   index: number,
   start: number,
   end: number,
-  includeBackgroundNotifications: boolean,
 ): boolean {
-  let marker = -1;
-  for (let i = index - 1; i > start; i--) {
-    if (rows[i]!.markerKind !== undefined) {
-      marker = i;
-      break;
-    }
+  let marker = index - 1;
+  while (marker > start && rows[marker]!.markerKind === undefined) {
+    marker -= 1;
   }
-  if (marker === -1) return false;
-  const markerRow = rows[marker]!;
-  if (!isShellBookkeepingKind(markerRow.markerKind)) return false;
-  if (
-    !isAckCandidate(
-      rows[index]!,
-      markerRow.markerTaskStatus,
-      includeBackgroundNotifications,
-    )
-  ) {
+  if (marker <= start || rows[marker]!.markerKind !== 'shell') {
     return false;
   }
-  if (
-    findPriorAnswerRow(
-      rows,
-      start,
-      marker - 1,
-      includeBackgroundNotifications,
-    ) === -1
-  ) {
-    return false;
-  }
-  for (let i = marker + 1; i < index; i++) {
-    const between = rows[i]!;
+  const candidate = rows[index]!;
+  if (candidate.role === 'assistant') {
+    const status = rows[marker]!.markerTaskStatus;
     if (
-      between.role !== 'thinking' &&
-      between.markerKind === undefined &&
-      !between.isCompletionRow
+      candidate.source !== BACKGROUND_NOTIFICATION_RESPONSE ||
+      !(status === undefined || status === 'completed')
     ) {
       return false;
     }
+  } else if (
+    candidate.role !== 'system' ||
+    candidate.source !== RAW_NOTIFICATION
+  ) {
+    return false;
   }
-  for (let i = index + 1; i <= end; i++) {
-    const after = rows[i]!;
-    if (after.role !== 'thinking' && after.markerKind === undefined) {
-      return false;
-    }
-  }
-  return true;
+  if (findPriorAnswerRow(rows, start, marker - 1) === -1) return false;
+  if (!spanClear(rows, marker + 1, index - 1, false, start)) return false;
+  return spanClear(rows, index + 1, end, true, start);
 }
 
-function isAckCandidate(
-  row: ShellAckRow,
-  markerTaskStatus: string | undefined,
-  includeBackgroundNotifications: boolean,
-): boolean {
-  if (row.role === 'assistant') {
-    if (row.source !== BACKGROUND_NOTIFICATION_RESPONSE) return false;
-    // A terminal status that reached the marker decides: anything but a
-    // clean completion means the reply may report a result, so it stays
-    // final. With no record yet, the daemon tag alone suffices.
-    return (
-      markerTaskStatus === undefined ||
-      markerTaskStatus === COMPLETED_TASK_STATUS
-    );
-  }
-  // The raw result notification is machine bookkeeping, not model text:
-  // it is never the turn's deliverable when a main answer precedes it.
-  return (
-    includeBackgroundNotifications &&
-    row.role === 'system' &&
-    row.source === 'background_notification'
-  );
-}
-
+/**
+ * The nearest row before `end` that already stands as the turn's main
+ * answer: an assistant reply with content, with no execution work or
+ * marker between it and `end`. Raw machine notifications are never
+ * accepted, in any consumer, so the fold license cannot differ between
+ * the collapse path, the footer map, the timeline, and /copy.
+ */
 function findPriorAnswerRow(
   rows: readonly ShellAckRow[],
   start: number,
   end: number,
-  includeBackgroundNotifications: boolean,
 ): number {
   let hasLaterWork = false;
   for (let i = end; i > start; i--) {
@@ -192,7 +143,9 @@ function findPriorAnswerRow(
       hasLaterWork = true;
     } else if (
       !hasLaterWork &&
-      isAnswerRow(row, includeBackgroundNotifications)
+      row.hasContent &&
+      row.role === 'assistant' &&
+      !row.isAgentReply
     ) {
       return i;
     }
@@ -200,17 +153,42 @@ function findPriorAnswerRow(
   return -1;
 }
 
-function isAnswerRow(
-  row: ShellAckRow,
-  includeBackgroundNotifications: boolean,
+/**
+ * True when every row in `from..to` is transparent to the fold. Before
+ * the candidate (`after` false) any daemon bookkeeping row is
+ * transparent; after it (`after` true) only the task-completed status
+ * and a second reply this very rule folds are, while the raw result
+ * notification vetoes. The recursion runs on strictly greater indexes,
+ * so it terminates.
+ */
+function spanClear(
+  rows: readonly ShellAckRow[],
+  from: number,
+  to: number,
+  after: boolean,
+  start: number,
 ): boolean {
-  if (!row.hasContent) return false;
-  if (row.role === 'assistant') return !row.isAgentReply;
-  return (
-    includeBackgroundNotifications &&
-    row.role === 'system' &&
-    row.source === 'background_notification'
-  );
+  for (let i = from; i <= to; i++) {
+    const row = rows[i]!;
+    if (
+      row.role === 'thinking' ||
+      row.markerKind !== undefined ||
+      row.isTurnChrome ||
+      (row.isCompletionRow && (!after || row.source !== RAW_NOTIFICATION))
+    ) {
+      continue;
+    }
+    if (
+      after &&
+      row.role === 'assistant' &&
+      row.source === BACKGROUND_NOTIFICATION_RESPONSE &&
+      isShellCompletionAckRow(rows, i, start, to)
+    ) {
+      continue;
+    }
+    return false;
+  }
+  return true;
 }
 
 function backgroundTaskStatus(data: unknown): string | undefined {
@@ -222,23 +200,20 @@ function backgroundTaskStatus(data: unknown): string | undefined {
   return typeof status === 'string' ? status : undefined;
 }
 
-function messageSource(message: Message): string | undefined {
-  if ('source' in message && typeof message.source === 'string') {
-    return message.source;
-  }
-  return undefined;
-}
-
 /**
  * Project a raw daemon message into the ack rule's row view.
  */
 export function shellAckRowFromMessage(message: Message): ShellAckRow {
+  const source =
+    'source' in message && typeof message.source === 'string'
+      ? message.source
+      : undefined;
   const isMarker =
     message.role === 'system' &&
-    message.source === 'background_notification_turn_started';
+    source === 'background_notification_turn_started';
   return {
     role: message.role,
-    source: messageSource(message),
+    source,
     hasContent:
       'content' in message &&
       typeof message.content === 'string' &&
@@ -255,7 +230,6 @@ export function shellAckRowFromMessage(message: Message): ShellAckRow {
       : {}),
     isCompletionRow:
       message.role === 'system' &&
-      (message.source === 'background_notification' ||
-        message.source === 'background_task_completed'),
+      (source === RAW_NOTIFICATION || source === TASK_COMPLETED),
   };
 }
