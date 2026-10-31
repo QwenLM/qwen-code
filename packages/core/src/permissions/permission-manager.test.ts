@@ -22,6 +22,7 @@ import {
   toolMatchesRuleToolName,
   splitCompoundCommand,
   splitCompoundCommandSegments,
+  splitCompoundCommandSegmentsForReading,
   buildPermissionRules,
   getRuleDisplayName,
   buildHumanReadableRuleLabel,
@@ -957,6 +958,33 @@ describe('splitCompoundCommandSegments', () => {
       { command: 'echo {} > settings.json', terminator: '' },
     ]);
   });
+
+  it('bash reading reads a backslash as literal inside plain single quotes (#12246-R1-7)', () => {
+    const payload = `cd 'x\\'';echo ' & echo {} > settings.json`;
+    // The union split (default) also finds the phantom `;` the
+    // escape-everywhere reading sees inside what bash treats as one quoted
+    // word.
+    expect(splitCompoundCommandSegments(payload)).toEqual([
+      { command: "cd 'x\\''", terminator: ';' },
+      { command: "echo '", terminator: '&' },
+      { command: 'echo {} > settings.json', terminator: '' },
+    ]);
+    // bash reading: `'x\''` closes, `';echo '` is a second span, the only
+    // boundary is the real ` & `
+    expect(splitCompoundCommandSegmentsForReading(payload, 'bash')).toEqual([
+      { command: `cd 'x\\'';echo '`, terminator: '&' },
+      { command: 'echo {} > settings.json', terminator: '' },
+    ]);
+  });
+
+  it("bash reading still processes escapes inside ANSI-C $'...' spans (#12246-R1-7)", () => {
+    // $'a\' ; rm...' is one ANSI-C string to bash (the \' is an escaped
+    // quote), so the bash reading must not split at that `;` either.
+    const payload = `printf $'a\\' ; rm -rf src/keepme'`;
+    expect(splitCompoundCommandSegmentsForReading(payload, 'bash')).toEqual([
+      { command: `printf $'a\\' ; rm -rf src/keepme'`, terminator: '' },
+    ]);
+  });
 });
 
 // ─── resolvePathPattern ──────────────────────────────────────────────────────
@@ -1844,6 +1872,627 @@ describe('PermissionManager', () => {
       pm = makePm({ permissionsAllow: ['Bash(git *)'] });
       // 'grep' is a readonly command, so its default permission is 'allow'
       expect(await pm.evaluate(sh('git log | grep fix'))).toBe('allow');
+    });
+
+    it('deny rule applies when quoting hides the async operator from the splitter (#12246)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // bash reads `'x\''` + `';echo '` as one concatenated argument, so the
+      // second `cd` is backgrounded by the real ` & ` and the write lands in
+      // .qwen — the deny rule must fire, not a phantom foreground reading.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd .qwen ; cd 'x\\'';echo ' & echo {} > settings.json`,
+        }),
+      ).toBe('deny');
+      // Controls keep their verdicts.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd .qwen ; cd x & echo {} > settings.json',
+        }),
+      ).toBe('deny');
+    });
+
+    it('deny rule still cites a quoted metachar dir despite an unrelated backslash', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(printf *)'],
+        permissionsDeny: ['Write(r&d/.env)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // `r&d` is a real quoted directory name; the backslash in printf's
+      // argument belongs to an unrelated segment and must not de-resolve it.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "cd 'r&d' && printf 'x\\n' > .env",
+        }),
+      ).toBe('deny');
+    });
+
+    it('resolves a quoted drive-letter dir holding backslash and metacharacter (#R7-1)', () => {
+      const command = `cd 'C:\\Users\\me\\R&D' && echo {} > settings.json`;
+      expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+        expect.objectContaining({
+          filePath: 'C:/Users/me/R&D/settings.json',
+        }),
+      ]);
+    });
+
+    it('does not hard-deny the write a multi-operand cd never redirects (#R7-2)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // bash rejects the two-operand cd, so the write lands in /repo; the
+      // cwd-unknown flags escalate it to ask instead of a deny citing a path
+      // the command never writes.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd .qwen 'a\\'' ; cd src ' ; echo {} > settings.json`,
+        }),
+      ).toBe('ask');
+    });
+
+    it('allows the write only the coarser quote reading misplaces (#R7-3)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(sub/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // Real bash ends in sub/.qwen and writes only sub/.qwen/settings.json.
+      // The coarser reading's sub/settings.json op is not this command's write
+      // target (it would be only if the final cwd were sub), so it must not
+      // cite the deny rule.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd sub ; echo 'a\\' ; cd .qwen ; echo {} > settings.json`,
+        }),
+      ).toBe('allow');
+      // Backslash-free control asserts the same.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd sub ; echo 'a' ; cd .qwen ; echo {} > settings.json`,
+        }),
+      ).toBe('allow');
+    });
+
+    it('deny rule still fires for a cd hidden by comment or redirect residue (#R7-2)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // bash performs the cd in every one of these; the leftover comment
+      // words or redirect targets are not operands. The redirect targets
+      // stay literal: an expanding one like "$LOG" can fail at runtime and
+      // abort the cd outright, which is the separate failable-redirect
+      // entrance deferred to the #11882 umbrella (#12280 R2-1).
+      for (const command of [
+        'cd .qwen # note\necho {} > settings.json',
+        'cd .qwen > log.out ; echo {} > settings.json',
+        'cd .qwen 1>> log.out ; echo {} > settings.json',
+        'cd .qwen <<< "$STR" ; echo {} > settings.json',
+        'cd .qwen > >(tee log) ; echo {} > settings.json',
+        'cd .qwen {fd}>log ; echo {} > settings.json',
+        'cd .qwen <> l ; echo {} > settings.json',
+      ]) {
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      }
+    });
+
+    it('deny rule still fires for a cd hidden by fd duplication (#R7-2)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(sub/.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd sub >& 2 ; cd .qwen ; echo {} > settings.json',
+        }),
+      ).toBe('deny');
+    });
+
+    it('resolves a quoted drive-letter dir whose closing quote follows a backslash (#R7-1)', () => {
+      const command = `cd 'C:\\Users\\me\\R&D\\' && echo {} > settings.json`;
+      expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+        expect.objectContaining({
+          filePath: 'C:/Users/me/R&D/settings.json',
+        }),
+      ]);
+    });
+
+    it('deny rule survives an unrelated quote divergence elsewhere (#R7-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)', 'Bash(printf *)'],
+        permissionsDeny: ['Write(x>y/z/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `printf 'a\\' ; cd 'x>y\\z' && echo {} > settings.json`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies the write only a tied quote reading can see (#R7-3 tie)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd .qwen ; echo # note 'a\\' ; echo '\necho {} > settings.json`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies the write a comment-opened quote hides from the bash reading (#R7-3 open-quote)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // bash really writes settings.json here — the `#` comment hides the
+      // quote from real bash too, so the second echo runs outside any quote.
+      // The bash reading's quoted blob must not swallow the deny.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd .qwen ; echo real > one.txt # note 'a\\''\necho {} > settings.json`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies the write when the fallback keeps the bash-found cd boundaries (#R9-2)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(sub/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // Real bash moves into sub before the write; a fallback that re-walks
+      // under the escape-everywhere reading alone loses the `cd sub` and
+      // cites /repo/settings.json, escaping this deny.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `echo 'a\\' ; cd sub ; echo # note '\necho {} > settings.json`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies the wrapped write the outer reading tie used to hide (#R8-1)', async () => {
+      pm = makePm({
+        permissionsAllow: [
+          'Bash(cd *)',
+          'Bash(echo *)',
+          'Bash(bash *)',
+          'Bash(sh *)',
+        ],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      for (const command of [
+        `bash -lc "echo done # note 'a\\''\necho {} > .qwen/settings.json"`,
+        `sh -c "echo done # note 'a\\''\necho {} > .qwen/settings.json"`,
+      ]) {
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      }
+    });
+
+    it('deny rule still fires when the comment hides behind a line continuation (#12280-R1-4)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // bash drops the `\<newline>` pair, so the `#` opens a real comment and
+      // the cd still happens; leaving the comment words as extra operands
+      // de-resolved it and the deny went to ask.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd .qwen \\\n# note\necho {} > settings.json',
+        }),
+      ).toBe('deny');
+    });
+
+    it('deny rule still fires when the comment itself ends in a backslash (#12280-R2-2)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // The splitter suppressed the newline after `\` as a continuation, but
+      // bash ends a comment at the newline either way, so the cd really runs
+      // and the next line is a separate command. Gluing them together
+      // de-resolved the cd and the deny dropped to ask.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd .qwen # note \\\necho x ; echo {} > settings.json',
+        }),
+      ).toBe('deny');
+    });
+
+    it('escalates instead of publishing a glob spelling as a literal cwd (#12280-R2-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(sub/**)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // `cd *` expands to whichever entry the shell picks (sub among the
+      // candidates), so the manager cannot name the landing cwd and escalates
+      // rather than certifying one; the literal `*` is a path no shell enters,
+      // and publishing it unflagged would have let the write rule judge a
+      // location no write lands in.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd * ; echo {} > .qwen/settings.json',
+        }),
+      ).toBe('ask');
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd sub ; echo {} > .qwen/settings.json',
+        }),
+      ).toBe('deny');
+    });
+
+    it('keeps the real cwd denied after a partially quoted glob or quoted brace (#12280-R2-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(sub/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      for (const command of [
+        "cd sub ; cd 'a'/* ; echo {} > settings.json",
+        "cd sub ; cd '{' ; echo {} > settings.json",
+      ]) {
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      }
+    });
+
+    it('keeps env, command and builtin cd prefixes subject to the same deny (#12280-R2-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      for (const prefix of [
+        'FOO=1',
+        'command',
+        'command -p',
+        'command --',
+        'builtin',
+        'builtin --',
+      ]) {
+        expect(
+          await pm.evaluate({
+            toolName: 'run_shell_command',
+            command: `${prefix} cd .qwen ; echo {} > settings.json`,
+          }),
+        ).toBe('deny');
+      }
+    });
+
+    it('denies a write whose redirect has only quoting before the bare operator (#12280-R3-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: "cd .qwen ; echo {} ''>settings.json",
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies a separate arbitrary-fd redirect target (#12280-R6-2)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)'],
+        permissionsDeny: ['Write(log3.txt)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd sub 3> log3.txt',
+        }),
+      ).toBe('deny');
+    });
+
+    it('asks instead of trusting a cd redirect under an unknown incoming cwd (#12280-R6-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)'],
+        permissionsDeny: ['Write(.env)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd $D ; cd sub > log',
+        }),
+      ).toBe('ask');
+    });
+
+    it('denies the write a process substitution used to erase from the cd (#12280-R2-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(sub/**)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // bash expands `>(tee log)` to a real fd word, so the first cd fails
+      // with too many arguments; erasing the substitution let it read as a
+      // clean one-operand cd.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd backup >(tee log) ; cd sub ; echo {} > f',
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies the write an fd-prefixed process substitution erases from the cd (#12280-R2-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(sub/**)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // `2>(...)` and `{fd}>(...)` are process substitutions just like `>(...)`:
+      // bash expands them to fd words, so the first cd fails with too many
+      // arguments and erasing the substitution reads as a clean one-operand cd.
+      for (const command of [
+        'cd backup 2>(tee log) ; cd sub ; echo {} > f',
+        'cd backup {fd}>(tee log) ; cd sub ; echo {} > f',
+      ]) {
+        expect(
+          await pm.evaluate({ toolName: 'run_shell_command', command }),
+        ).toBe('deny');
+      }
+    });
+
+    it('does not publish $HOME for a cd whose option word bash rejects (#12280-R2-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // `cd -x` is an invalid option in bash: the command errors and the cwd
+      // never moves, so the second cd enters .qwen and the write meets the
+      // deny rule. The two-cd spelling is discriminating: at the merge base
+      // the first cd published $HOME and the verdict was allow (#12280 R4-1).
+      const command = 'cd -x ; cd .qwen ; echo {} > settings.json';
+      expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+        expect.objectContaining({
+          filePath: '/repo/.qwen/settings.json',
+          cwdUnknown: true,
+        }),
+      ]);
+      expect(
+        await pm.evaluate({ toolName: 'run_shell_command', command }),
+      ).toBe('deny');
+    });
+
+    it('denies the write a comment apostrophe balances away from the bash scan (#12280-R1-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // The trailing comment apostrophe closes the quote the bash scan is
+      // stuck in, so the scan reports balanced and the early return used to
+      // drop the settings write from the operation set entirely.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd .qwen ; echo 'a\\' ; echo x > one.txt ; echo done # note '\necho {} > settings.json # trailing '`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('does not hard-deny the phantom a coarser merge walk misplaces (#12280-R1-5)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(f)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // bash opens a comment at the first `#` and runs only `echo hi` — no
+      // file is written at all. The escape-everywhere merge walk still reads
+      // a write out of the comment words and publishes it at /repo/sub/f (a
+      // comment-modeling gap tracked under #11882, already present at the
+      // merge base). What this verdict pins is the R1-5 defect proper: that
+      // walk used to misplace the write at /repo/f, where this deny rule
+      // would cite it against a write the command never performs
+      // (#12280 R3-5).
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `echo hi # c 'a\\' ; cd sub ; echo x > f # note '`,
+        }),
+      ).toBe('allow');
+    });
+
+    it('denies the write a union-only repeated cd used to certify (#12280-R2-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // The union split mines a second `cd .qwen` out of the comment text; a
+      // text-membership artifact check certified it and published
+      // .qwen/.qwen/settings.json, outside the denied path. Span matching
+      // keeps it an artifact, so the write stays on the denied path with the
+      // escalation flags.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd .qwen ; echo # 'a\\'b' ; cd .qwen\necho x > settings.json`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies the write a quoted redirect operator used to relocate (#12280-R3-1)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // `'>'` is a literal operand, not a redirect: bash rejects the first cd
+      // with too many arguments and never leaves /repo, so the write lands on
+      // the denied path. Reading the quoted operator as a real redirect used
+      // to certify $HOME and let the write through.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd '>' sub ; cd .qwen ; echo {} > settings.json`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies the write an empty quoted cd operand used to relocate (#12280-R3-2)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)', 'Bash(bash *)'],
+        permissionsDeny: ['Write(.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // `cd ''` errors without moving the cwd; erasing the empty operand used
+      // to turn it into a bare `cd` and certify $HOME.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `bash -lc "cd '' ; echo {} > .qwen/settings.json"`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('still denies through a quoted glob cd target (#12280-R3-3)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(app/**)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // Quoting suppresses globbing: bash enters the literal `app/[id]`
+      // directory, so the write is the denied path, not a de-resolved
+      // /repo/page.tsx an attacker could wave through.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd 'app/[id]' && echo {} > page.tsx`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('still denies through a tilde cd target (#12280-R3-3)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(~/.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // `~` and `~/…` expand deterministically via os.homedir(); refusing
+      // them de-resolved the write to /repo and downgraded the deny to ask.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd ~/.qwen && echo {} > settings.json',
+        }),
+      ).toBe('deny');
+    });
+
+    it('still denies through a flag-only cd bash accepts (#12280-R3-4)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(~/.qwen/settings.json)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // `cd -L` is a valid flag-only cd: bash lands in $HOME, so the second
+      // cd enters ~/.qwen and the write meets the home-scoped deny rule.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: 'cd -L ; cd .qwen ; echo {} > settings.json',
+        }),
+      ).toBe('deny');
+    });
+
+    it('denies the write a union-only cd target used to relocate (#12280-R1-3)', async () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(cd *)', 'Bash(echo *)'],
+        permissionsDeny: ['Write(sub/docs/plan.md)'],
+        cwd: '/repo',
+        projectRoot: '/repo',
+      });
+      // Real bash fails the artifact cd (`x\;echo ` does not exist) and
+      // writes sub/docs/plan.md, the exact denied path; the trusted phantom
+      // cwd used to publish it under /repo/x/sub/docs/plan.md and the deny
+      // evaluated to allow.
+      expect(
+        await pm.evaluate({
+          toolName: 'run_shell_command',
+          command: `cd 'x\\'';echo ' & cd sub ; echo # note '\necho {} > docs/plan.md`,
+        }),
+      ).toBe('deny');
+    });
+
+    it('resolves a drive-letter directory containing a sibling segment (#12280-R1-2)', () => {
+      const command = `cd 'C:\\build\\R&D' && build && echo {} > settings.json`;
+      expect(extractShellOperationsAcrossCommand(command, '/repo')).toEqual([
+        expect.objectContaining({
+          filePath: 'C:/build/R&D/settings.json',
+        }),
+      ]);
     });
 
     it('semicolon compound: deny in second → deny', async () => {
