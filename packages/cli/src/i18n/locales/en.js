@@ -1066,6 +1066,8 @@ export default {
     'No plugins available in this marketplace.',
   'Select a plugin to install from marketplace "{{name}}":':
     'Select a plugin to install from marketplace "{{name}}":',
+  'Could not read an answer from stdin (input closed); treating this as a refusal.':
+    'Could not read an answer from stdin (input closed); treating this as a refusal.',
   'Plugin selection cancelled.': 'Plugin selection cancelled.',
   'Select a plugin from "{{name}}"': 'Select a plugin from "{{name}}"',
   'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':

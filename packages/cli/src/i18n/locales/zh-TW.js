@@ -994,6 +994,8 @@ export default {
   'No plugins available in this marketplace.': '此市場中沒有可用的插件。',
   'Select a plugin to install from marketplace "{{name}}":':
     '從市場 "{{name}}" 中選擇要安裝的插件：',
+  'Could not read an answer from stdin (input closed); treating this as a refusal.':
+    '無法從 stdin 讀取答案（輸入已關閉），按拒絕處理。',
   'Plugin selection cancelled.': '插件選擇已取消。',
   'Select a plugin from "{{name}}"': '從 "{{name}}" 中選擇插件',
   'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
