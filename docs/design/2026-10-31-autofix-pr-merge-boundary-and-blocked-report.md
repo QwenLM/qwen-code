@@ -177,9 +177,11 @@ repeating.
   482 passed; `reply.test.ts` alone 32 (30 before).
 - Mutation check: with `freshNeedsHuman.length > 0` disabled, the new
   blocked-round test fails on `summarySkipped`; restored, it passes.
-- `tsc --noEmit` in `packages/core`: clean. In `packages/cli`: 73 errors,
-  every one in `src/acp-integration/*` or `src/serve/*` and caused by the
-  checkout's stale `@qwen-code/acp-bridge` dist; none names a changed file.
+- `tsc --noEmit` in `packages/core`: clean. In `packages/cli`: 68 errors,
+  every one in `src/acp-integration/*` or `src/serve/*`, from the checkout's
+  stale `@qwen-code/acp-bridge` dist; none names a changed file. Restoring
+  the two changed files to the base commit and re-running gives an identical
+  error list, so all 68 are pre-existing.
 - A full `npm run build` was not run: this checkout's dependencies predate
   the lockfile (`mime` 2.6.0, `ignore` 5.3.2, `playwright-core` 1.58.2),
   which fails `packages/browser-use` for reasons unrelated to this change.

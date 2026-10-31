@@ -90,7 +90,7 @@ const summaryDue =
 - `cd packages/core && npx vitest run src/skills/bundled/autofix-pr/SKILL.test.ts`——11 通过（此前 9）。
 - `cd packages/cli && npx vitest run src/commands/autofix-pr`——16 个文件、482 通过；其中 `reply.test.ts` 32 通过（此前 30）。
 - 变异验证：关掉 `freshNeedsHuman.length > 0` 后，新增的受阻一轮测试在 `summarySkipped` 上失败；恢复后通过。
-- `packages/core` 的 `tsc --noEmit`：干净。`packages/cli`：73 个错误，全部位于 `src/acp-integration/*` 或 `src/serve/*`，由本 checkout 过旧的 `@qwen-code/acp-bridge` dist 引起；没有一个指向改动文件。
+- `packages/core` 的 `tsc --noEmit`：干净。`packages/cli`：68 个错误，全部位于 `src/acp-integration/*` 或 `src/serve/*`，来自本 checkout 过旧的 `@qwen-code/acp-bridge` dist；没有一个指向改动文件。把两个改动文件退回 base 提交再跑一次，错误清单完全相同，所以这 68 个都是存量。
 - 未跑全量 `npm run build`：本 checkout 的依赖停在旧 lockfile（`mime` 2.6.0、`ignore` 5.3.2、`playwright-core` 1.58.2），会让 `packages/browser-use` 因与本次改动无关的原因失败。构建与 typecheck 以 PR 上的 CI 为准。
 - 所有改动文件的 ESLint 与 Prettier 均干净。
 
