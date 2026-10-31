@@ -113,19 +113,24 @@ const REGISTRY_DIRECTORY_MODE = 0o700;
 const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,
   stale: 5000,
-  retries: {
-    retries: 10,
-    minTimeout: 5,
-    maxTimeout: 100,
-    factor: 2,
-    randomize: true,
-  },
   onCompromised: (error) => {
     debugLogger.debug(
       `controller registry lock compromised: ${describe(error)}`,
     );
   },
 };
+
+// How long a writer waits while another process holds the lock. It must
+// outlast a lock left by a crashed holder, so the waiter takes it over
+// instead of failing (#15991). The holder refreshes the lock's mtime every
+// `stale / 2`, but proper-lockfile stamps a process's first lock up to
+// 1 s in the future while it probes mtime precision, so a dead holder's
+// lock can take `stale` + 1 s to go stale. 8 s leaves about 2 s of margin.
+const LOCK_WAIT_MS = 8000;
+
+// How many times a mutation is redone because the registry changed under
+// it (see `writeRegistry`).
+const MAX_MUTATION_ATTEMPTS = 3;
 
 const CONTROLLER_ID_RE = /^c_[0-9a-f]{8}$/;
 const TOKEN_HASH_RE = /^[0-9a-f]{64}$/;
@@ -172,6 +177,16 @@ export class PeerControllerError extends Error {
   ) {
     super(message);
     this.name = 'PeerControllerError';
+  }
+}
+
+/** The registry changed between a mutation's read and its write. */
+class RegistryChangedError extends Error {
+  constructor() {
+    super(
+      'The controller registry kept changing while this write was in progress; nothing was saved. Try again.',
+    );
+    this.name = 'RegistryChangedError';
   }
 }
 
@@ -404,11 +419,26 @@ async function assertWritablePath(filePath: string): Promise<void> {
   }
 }
 
+/**
+ * Replace the registry, but only over the text the mutation read
+ * (`basis`; null when there was no file).
+ *
+ * Under the lock that text cannot change. But a holder stalled past
+ * `stale` (SIGSTOP, a laptop suspend) loses its lock to a waiter. Without
+ * this check it would resume and overwrite the waiter's write with its
+ * older snapshot, dropping a new grant or restoring a revoked one. A stall
+ * between the check and the rename can still do that; the check shrinks
+ * the window from the whole mutation to the write itself.
+ */
 async function writeRegistry(
   filePath: string,
   registry: PeerControllerRegistry,
+  basis: string | null,
 ): Promise<void> {
   await assertWritablePath(filePath);
+  if (readRegistryTextSync(filePath) !== basis) {
+    throw new RegistryChangedError();
+  }
   await atomicWriteJSON(filePath, registry, {
     mode: REGISTRY_FILE_MODE,
     // The file holds credentials-in-effect: an over-permissive copy
@@ -431,11 +461,11 @@ function invalidRegistry(
   );
 }
 
-function readPeerControllerRegistryStrictSync(
+/** The registry's text as it stands, or null when there is no file. */
+function readRegistryTextSync(
   filePath: string,
-  options: { skipMalformedEntries?: boolean; readOnly?: boolean } = {},
-): PeerControllerRegistry {
-  let raw: string;
+  readOnly = false,
+): string | null {
   try {
     const stats = fsSync.lstatSync(filePath);
     if (!stats.isFile()) {
@@ -445,24 +475,39 @@ function readPeerControllerRegistryStrictSync(
           'unsafe-path',
         );
       }
-      throw invalidRegistry(
-        filePath,
-        'it is not a regular file',
-        options.readOnly,
-      );
+      throw invalidRegistry(filePath, 'it is not a regular file', readOnly);
     }
     if (stats.size > MAX_REGISTRY_BYTES) {
       throw invalidRegistry(
         filePath,
         `it exceeds the ${MAX_REGISTRY_BYTES}-byte limit`,
-        options.readOnly,
+        readOnly,
       );
     }
-    raw = fsSync.readFileSync(filePath, 'utf8');
+    return fsSync.readFileSync(filePath, 'utf8');
   } catch (error) {
-    if (isNodeError(error) && error.code === 'ENOENT') return emptyRegistry();
+    if (isNodeError(error) && error.code === 'ENOENT') return null;
     throw error;
   }
+}
+
+function readPeerControllerRegistryStrictSync(
+  filePath: string,
+  options: { skipMalformedEntries?: boolean; readOnly?: boolean } = {},
+): PeerControllerRegistry {
+  return parseRegistry(
+    filePath,
+    readRegistryTextSync(filePath, options.readOnly),
+    options,
+  );
+}
+
+function parseRegistry(
+  filePath: string,
+  raw: string | null,
+  options: { skipMalformedEntries?: boolean; readOnly?: boolean } = {},
+): PeerControllerRegistry {
+  if (raw === null) return emptyRegistry();
 
   let parsed: unknown;
   try {
@@ -516,6 +561,33 @@ function getRegistryLock(lockPath: string): Mutex {
   return lock;
 }
 
+/**
+ * Take the cross-process lock, waiting only while another process holds
+ * it. proper-lockfile's own `retries` would retry every error, so a lock
+ * that can never be taken (a regular file at the lock path, a read-only
+ * home) would also sit through the whole wait before failing.
+ */
+async function acquireRegistryLock(
+  lockPath: string,
+): Promise<() => Promise<void>> {
+  const deadline = Date.now() + LOCK_WAIT_MS;
+  for (let delay = 5; ; delay = Math.min(delay * 2, 100)) {
+    try {
+      return await lockfile.lock(lockPath, LOCK_OPTIONS);
+    } catch (error) {
+      if (
+        !isNodeError(error) ||
+        error.code !== 'ELOCKED' ||
+        Date.now() >= deadline
+      ) {
+        throw error;
+      }
+      const pause = Math.min(delay * (1 + Math.random()), 100);
+      await new Promise((resolve) => setTimeout(resolve, pause));
+    }
+  }
+}
+
 async function withRegistryLock<T>(
   filePath: string,
   mutate: () => Promise<T>,
@@ -530,15 +602,26 @@ async function withRegistryLock<T>(
     path.basename(filePath),
   );
   return getRegistryLock(lockPath).runExclusive(async () => {
-    const release = await lockfile.lock(lockPath, LOCK_OPTIONS);
-    try {
-      return await mutate();
-    } finally {
+    for (let attempt = 1; ; attempt++) {
+      const release = await acquireRegistryLock(lockPath);
       try {
-        await release();
-      } catch {
-        // A completed registry mutation must not be reported as failed
-        // merely because a stale-lock takeover already removed the lock.
+        return await mutate();
+      } catch (error) {
+        // Another writer took the lock over mid-mutation and landed its
+        // write: redo this mutation from a fresh read under a fresh lock.
+        if (
+          !(error instanceof RegistryChangedError) ||
+          attempt >= MAX_MUTATION_ATTEMPTS
+        ) {
+          throw error;
+        }
+      } finally {
+        try {
+          await release();
+        } catch {
+          // A completed registry mutation must not be reported as failed
+          // merely because a stale-lock takeover already removed the lock.
+        }
       }
     }
   });
@@ -579,7 +662,8 @@ export async function addPeerController(
   }
 
   return withRegistryLock(filePath, async () => {
-    const registry = readPeerControllerRegistryStrictSync(filePath);
+    const basis = readRegistryTextSync(filePath);
+    const registry = parseRegistry(filePath, basis);
     if (
       registry.controllers.some(
         (record) => record.label.toLowerCase() === flattened.toLowerCase(),
@@ -609,10 +693,14 @@ export async function addPeerController(
       tokenHash: hashControllerToken(token),
       createdAt: Date.now(),
     };
-    await writeRegistry(filePath, {
-      schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION,
-      controllers: [...registry.controllers, record],
-    });
+    await writeRegistry(
+      filePath,
+      {
+        schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION,
+        controllers: [...registry.controllers, record],
+      },
+      basis,
+    );
     return { record, token };
   });
 }
@@ -631,7 +719,8 @@ export async function removePeerController(
   filePath: string = getPeerControllerRegistryPath(),
 ): Promise<PeerControllerRecord | null> {
   return withRegistryLock(filePath, async () => {
-    const registry = readPeerControllerRegistryStrictSync(filePath, {
+    const basis = readRegistryTextSync(filePath);
+    const registry = parseRegistry(filePath, basis, {
       skipMalformedEntries: true,
     });
     const needle = id.trim().toLowerCase();
@@ -639,12 +728,16 @@ export async function removePeerController(
       (record) => record.id.toLowerCase() === needle,
     );
     if (!removed) return null;
-    await writeRegistry(filePath, {
-      schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION,
-      controllers: registry.controllers.filter(
-        (record) => record.tokenHash !== removed.tokenHash,
-      ),
-    });
+    await writeRegistry(
+      filePath,
+      {
+        schemaVersion: PEER_CONTROLLER_SCHEMA_VERSION,
+        controllers: registry.controllers.filter(
+          (record) => record.tokenHash !== removed.tokenHash,
+        ),
+      },
+      basis,
+    );
     return removed;
   });
 }
