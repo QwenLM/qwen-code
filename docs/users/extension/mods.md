@@ -128,21 +128,23 @@ this recovery exception.
 
 | Surface    | Behavior                                                                                                                                                                                |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Packaging  | One `.js`, `.mjs`, `.cjs`, `.ts`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin                                                        |
+| Packaging  | One `.ts`, `.tsx`, `.jsx`, `.js`, `.mjs`, `.cjs`, `.mts` or `.cts` ESM entry; relative static imports and re-exports inside the installed plugin; JSX in `.tsx` and `.jsx` files        |
 | Entry      | `register(on, options)`; async registration is awaited; typed non-secret options are copied and deeply frozen                                                                           |
 | Lifecycle  | All modules register before the initial `session.start` chain; `session.end` on exit and conversation replacement; clear/resume do not reload modules                                   |
 | Commands   | Register during `session.start` using name, description and optional argumentHint; intercept registered Mod commands across plugins; return `{text}` or `{}`                            |
 | Tools      | In headless and local terminal model turns, intercept existing main-session tools with `tool.call`; inspect and restrict native permission decisions with `tool.check`                  |
 | Middleware | Patterns and recursive matchers; explicit, repeatable `next(e)`; `.catch` and per-plugin failure recovery; frozen input and host identity                                               |
-| API events | `command.register`, `ui.log` and the session and clock methods pass through the middleware chain with host-supplied origin                                                              |
+| API events | `command.register`, `ui.log`, `ui.invalidate` and the session and clock methods pass through the middleware chain with host-supplied origin                                             |
 | Session    | `$.plugin`, read-only `$.session` facts, `$.clock.now` and `$.clock.sleep`, described in [Session facts and clock](#session-facts-and-clock)                                            |
 | Turns      | `turn.start`, `turn.complete` and `$.turn.abort` for the prompts a person submits, described in [Turn events](#turn-events)                                                             |
 | Logging    | `$.ui.log` returns void and queues delivery; transcript logs use stderr in text mode or `system/ui_log` in JSON modes; debug logs stay in the debug logger; neither becomes model input |
+| Elements   | `$.ui.resolve`, `$.ui.invalidate` and the `h` and `Fragment` globals, described in [Elements](#elements)                                                                                |
+| Drawing    | `ui.render` for the band above the prompt in the Ink and OpenTUI terminals, described in [The band above the prompt](#the-band-above-the-prompt)                                        |
 | Isolation  | Separate QuickJS environment per plugin inside a session worker; no Node, filesystem or network APIs; memory, stack, source/output and execution limits                                 |
 
 This is a supported subset, not full compatibility with existing Claude Mods.
-JSX/TSX, runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
-`$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, rendering, streaming events and hot reload are not implemented.
+Runtime package imports, built-in command interception, tool registration and active `$.tool` APIs, context,
+`$.session.messages` and `repo`, state/store, `$.clock.after` and `every`, `ui.render` sites other than the band above the prompt, streaming events and hot reload are not implemented.
 Commands cannot return `context`, `exitCode` or engine references yet. Hooks for
 other Claude Code events load without running, as described in
 [Middleware and recovery](#middleware-and-recovery).
@@ -155,13 +157,14 @@ command names are matched against the resulting name.
 ## Middleware and recovery
 
 Patterns select among the engine events `session.start`, `session.end`,
-`command.run`, `tool.call`, `tool.check`, `turn.start` and `turn.complete`, and the API event of each supported
+`command.run`, `tool.call`, `tool.check`, `turn.start`, `turn.complete` and, in the Ink and OpenTUI terminals, `ui.render`, and the API event of each supported
 `$` method, which `$.session.version()` lists. Use an exact name, a prefix such as `command.*`,
 `*`, or a single negation such as `!session.*`. The patterns `!*` and `!!...` are
 rejected.
 
-Claude Code 2.1.308 also defines events that Qwen Code does not run yet, such as
-`prompt.submit`, `ui.render` or `classic.Stop`. A registration for one of them,
+Claude Code 2.1.310 also defines events that Qwen Code does not run yet, such as
+`prompt.submit` or `classic.Stop`, and `ui.render` runs only where a host draws
+it. A registration for one of them,
 or for a prefix such as `prompt.*` that matches none of the events above, loads
 but never runs, so the rest of the Mod keeps working. At startup each plugin
 reports its skipped patterns once, where transcript logs appear:
@@ -264,8 +267,10 @@ call does not approve it; and a headless run without a permission host denies
 it, giving the model the Mod's reason. A PermissionRequest hook can deny it but
 cannot answer for the user. Qwen's own ask passed up unchanged keeps the current
 approval mode's decision flow. If a native PermissionRequest hook rebuilds the
-arguments, they are checked again. A Mod-authored `rule`, `hook`, `ceiling` or
-`plugin` cannot create host permissions; the host sets `plugin`.
+arguments, they are checked again. A Mod-authored `rule`, `hook`, `setting`,
+`ceiling` or `plugin` cannot create host permissions. The host sets `plugin`.
+It drops a `setting` a hook writes: in Claude Code that field names a Claude
+Code option's own check, and Qwen Code reports none.
 
 Return `{deny: reason}` to block, or `{result: value}` to supply a JSON result
 without executing. Native next returns `{ref, result, text, isError?}`.
@@ -393,7 +398,7 @@ recovery are not available.
 
 API events begin at the chain head. Their input is the command specification,
 the `{text, to}` log payload, `{ms}` for `clock.sleep`, the `{breakdown, columns}`
-arguments of `session.usage`, `{turnId}` for `turn.abort`, or `{}` for the other session and clock methods. Return `next(e)`,
+arguments of `session.usage`, `{turnId}` for `turn.abort`, `{event}` for `ui.invalidate`, or `{}` for the other session and clock methods. Return `next(e)`,
 `{value}` to answer, or `{deny: reason}` to reject the API call. Registrations
 already in the event's call chain are skipped, including their catches. Other
 registrations in the same plugin remain eligible. This re-entry behavior follows
@@ -409,7 +414,7 @@ supports:
 {
   "version": "0.26.0",
   "qwen": {
-    "claudeCode": "2.1.308",
+    "claudeCode": "2.1.310",
     "events": [
       "clock.now",
       "clock.sleep",
@@ -431,6 +436,7 @@ supports:
       "turn.abort",
       "turn.complete",
       "turn.start",
+      "ui.invalidate",
       "ui.log"
     ],
     "methods": [
@@ -447,12 +453,15 @@ supports:
       "session.usage",
       "session.version",
       "turn.abort",
-      "ui.log"
+      "ui.invalidate",
+      "ui.log",
+      "ui.resolve"
     ]
   }
 }
 ```
 
+This is a headless run. In the Ink and OpenTUI terminals, `events` also lists `ui.render`.
 `claudeCode` is the Claude Code release whose event names are recognized,
 `events` lists the events hooks can receive and `methods` the `$` methods a Mod can
 call. A Mod can use it to choose a fallback, such as a command reply where a
@@ -502,7 +511,7 @@ Mod discovery. Mod manifests must be relative paths inside the extension.
 directory, the one that holds `qwen-extension.json` or
 `.claude-plugin/plugin.json`. They are plain properties.
 
-The other methods are API events that resolve to the shapes Claude Code 2.1.308
+The other methods are API events that resolve to the shapes Claude Code 2.1.310
 declares:
 
 | Method                                | Resolves to                                                                             |
@@ -616,22 +625,167 @@ ending. In a headless run the turn ends with the error result
 its next message. Qwen Code has no `$.prompt.submit` yet, so a Mod cannot send a
 prompt after it ends a turn.
 
-## TypeScript and relative imports
+## Elements
 
-Change the hooks entry to `./register.ts` to use TypeScript. Imports and
-re-exports may use relative paths, extensionless paths, directory `index` files,
-or JavaScript spellings of TypeScript files (`./helper.js` can resolve to
-`helper.ts`). Exact files win. Next come `.js` → `.ts`, `.mjs` → `.mts`, and
-`.cjs` → `.cts` substitutions, followed by `.ts`, `.js`, `.mjs`, `.cjs`, `.mts`,
-`.cts` candidates, trying each file and then its directory index. All six
-suffixes use ESM, including `.cjs` and `.cts`. Module cycles and shared imported
-state within one plugin are supported.
+`$.ui.resolve(e)` returns the element table of the terminal: a frozen object
+with no prototype that holds Claude Code's eleven terminal constructors,
+`Box`, `Text`, `Button`, `Input`, `Select`, `Link`, `Code`, `Markdown`,
+`Client`, `Raster` and `Image`. It reads the table without a dispatch. `e` is a
+`ui.render` event; any argument whose `surface` is not `"terminal"` throws.
+
+A constructor takes the props, `children` among them, and returns a frozen
+plain-data element `{ type, props?, hover?, children? }`. Children are
+flattened: `null`, `undefined` and booleans are dropped, arrays are spread and
+numbers become strings. `key` is kept only on a `Box`. The `h(tag, props,
+...children)` and `Fragment` globals build the same elements, as Claude Code's
+JSX factory does; `Fragment` is a column `Box`. `h` calls a function tag with
+its props and its children flattened into an array, and throws for a string tag other than `Box` or `Text`.
+JSX in a `.tsx` or `.jsx` file compiles to these calls, as described in
+[TypeScript, JSX and relative imports](#typescript-jsx-and-relative-imports).
+
+A tree a hook returns is judged with Claude Code 2.1.310's rules for `Box` and
+`Text`, and any other element refuses it with
+`<Element> is not drawn by Qwen Code yet`.
+
+`$.ui.invalidate("ui.render")` returns at once and asks for a redraw of the
+sites the plugin's `ui.render` hooks may draw. The cached-answer events
+Claude Code also accepts, such as `prompt.section`, do nothing in Qwen Code.
+Any other name throws. Both methods work in every host, so a `turn.complete`
+hook that asks for a redraw does not fail where nothing is drawn.
+
+## The band above the prompt
+
+The Ink and OpenTUI terminals raise `ui.render` for Claude Code's `AbovePrompt`
+site, a band between the session survey and the prompt input. Headless runs
+draw no site: there a `ui.render` hook is skipped and listed at startup, and
+`$.session.version()` leaves it out.
+
+A hook receives Claude Code's input:
+
+```js
+{
+  surface: 'terminal',
+  component: 'AbovePrompt',
+  requestId: 'above-prompt',
+  viewport: { columns: 120, rows: 40, isFullscreen: true },
+  props: {
+    hasSurvey: false, // the session survey shows above the band
+    isWorking: false, // a model turn runs
+    maxRows: 13, // a third of the terminal's rows, at least 1
+    bodyColumns: 115, // the terminal's width less 5 columns
+    scroll: { offset: 0, bodyRows: 12 },
+    view: {},
+  },
+}
+```
+
+`isFullscreen` is true when Qwen Code draws on the alternate screen. A hook may
+rewrite the props but keep their kinds; changing `surface`, `component`,
+`requestId`, `viewport` or `props.view` fails the hook. `next(e)` resolves to
+the engine's own node, `{ type: 'engine', ref: 0 }`, which draws nothing here.
+With no hook, or with every hook passing `next(e)` on, the band takes no rows.
+
+The band renders after `session.start`, after `/clear`, `/resume` and
+`/branch`, when a plugin calls `$.ui.invalidate("ui.render")`, and when its
+input changes. A change of height alone renders nothing unless it changes
+`maxRows`. A change of width or of `maxRows` renders once it has settled for
+150 milliseconds. Requests fold into one render, and renders run at most every
+34 milliseconds, or every 100 milliseconds for a second after one took longer
+than that. A render waits in the session's queue behind commands, tool calls and
+turn events, and a render that is running is never cancelled for a newer one.
+The band keeps its last tree until a new answer lands, and the prompt never
+waits for it.
+
+The band is drawn with these conversions:
+
+- A string inside a `Box` is drawn as a `Text`.
+- Text wrap values `end` and `middle` become `truncate-end` and
+  `truncate-middle`.
+- Spacing steps become cells: `xs` and `sm` are 1 across and 0 down, `md` 2 and
+  1, `lg` 3 and 1, `xl` 4 and 2.
+- `weight: "semibold"` or `"bold"` draws bold. `size`, `mono`, `tabular` and
+  `dir` are dropped, as Claude Code's terminal drops them. `hover` is checked
+  but not drawn.
+- The theme keys `text`, `subtle`, `inactive`, `success`, `error`, `warning`,
+  `claude` and `suggestion` follow the active Qwen Code theme. Claude Code's
+  other theme keys, such as `permission` or `diffAdded`, draw in the default
+  color. Other colors draw when they are an ANSI color name such as `cyan` or
+  `redBright`, a hex value, `rgb(r, g, b)` or `ansi256(n)`.
+- Text is sanitized for the terminal, as Mod transcript lines are. Tabs
+  become spaces to the next 8-column stop, as in Claude Code.
+
+The band clips horizontal overflow to the composer's width.
+
+A tree that throws while drawn shows nothing, and the next answer is drawn
+afresh. The debug log records each refused tree and adjustment, such as
+`<plugin>: ui.render (AbovePrompt) refused: <reason>; nothing was drawn`.
+
+These differ from Claude Code:
+
+- The band has no collapse mark, focus, scrolling or `n more` row. A tree
+  taller than `maxRows` is clipped. `maxRows` is a third of the terminal's rows,
+  where Claude Code gives the bottom slot's remaining rows on the alternate
+  screen and the terminal's height otherwise.
+- The band shows only under the main conversation, never in an agent tab, and
+  hides while a dialog takes the composer's place.
+- `$.ui.invalidate` takes effect after the dispatch that called it, since Qwen
+  Code Mods have no timers.
+- A render can wait behind a tool call and its approval, and the band keeps its
+  last tree meanwhile. A tool call, command or turn event queued behind a
+  running render waits for it, up to 10 seconds for each `ui.render` hook in
+  the chain.
+- Refusal lines go only to the debug log, since Qwen Code has no hot reload.
+- OpenTUI has no session survey, so `hasSurvey` is always `false` there, and
+  `isWorking` stays `false` while a `!` shell command runs. OpenTUI takes
+  colors as hex values, so ANSI color names and `ansi256()` colors draw as
+  fixed values instead of the terminal's palette, and a `borderColor` border
+  draws undimmed under `borderDimColor`. Its text truncates only in the
+  middle, with `...` where Ink draws `…`: `wrap: "middle"` and
+  `"truncate-middle"` draw that way, and the other truncations cut the text
+  off at the right edge without a mark. Its borders have one stroke per axis,
+  so the `arrow` border draws its top arrow on the bottom edge and its left
+  arrow on the right edge.
+
+## TypeScript, JSX and relative imports
+
+Change the hooks entry to `./register.ts` to use TypeScript, or to
+`./register.tsx` or `./register.jsx` to write JSX. Imports and re-exports may
+use relative paths, extensionless paths, directory `index` files, or JavaScript
+spellings of TypeScript files (`./helper.js` can resolve to `helper.ts`). Exact
+files win. Next come `.js` → `.ts` or `.tsx`, `.jsx` → `.tsx`, `.mjs` → `.mts`
+and `.cjs` → `.cts` substitutions, followed by `.ts`, `.tsx`, `.jsx`, `.js`,
+`.mjs`, `.cjs`, `.mts`, `.cts` candidates, trying each file and then its
+directory index. This is Claude Code's order. All eight suffixes use ESM,
+including `.cjs` and `.cts`. Module cycles and shared imported state within one
+plugin are supported.
+
+JSX compiles with the classic runtime to calls of the `h` and `Fragment`
+globals, as Claude Code compiles it, so `<>...</>` is a column `Box`. A tag is
+one of the constructors `$.ui.resolve(e)` returns, or a function component:
+
+```tsx
+on('ui.render', { component: 'AbovePrompt' }, ($, e) => {
+  const { Box, Text } = $.ui.resolve(e);
+  return (
+    <Box flexDirection="row" paddingX={1}>
+      <Text bold>☀ Clear</Text>
+      <Text dimColor> {e.props.bodyColumns} columns</Text>
+    </Box>
+  );
+});
+```
+
+Only `.tsx` and `.jsx` files take JSX. As in Claude Code, a module that declares
+its own `h` or `Fragment`, or carries a `@jsx` pragma, points its JSX away from
+the globals. A file that fails to compile reports the first error with its line
+and column, such as
+`Invalid Mod JSX: view.jsx: JSX element 'Text' has no corresponding closing tag. (line 4, column 12).`
 
 Compilation uses fixed options inside the cancellable worker; it does not
 type-check or load `tsconfig.json`, package resolvers or build plugins. Type-only
 imports, including types from `claude-code`, are erased. Runtime value imports
 from `claude-code` require APIs outside this subset and are rejected, as are
-package/Node/URL imports, dynamic imports, `require`, JSX and imported top-level
+package/Node/URL imports, dynamic imports, `require` and imported top-level
 `await`. Guest code continues to execute only in QuickJS.
 
 ## Plugin options
@@ -736,6 +890,6 @@ Own `__proto__` keys in tool inputs and results are ordinary data on both sides.
 A hook answer whose getter throws while Qwen Code reads it fails as a whole;
 Claude Code 2.1.299 drops only that key.
 
-The author API is based on Claude Code 2.1.296 declarations, with event names
-recognized from Claude Code 2.1.308, and the
+The author API follows the Claude Code 2.1.310 declarations, event names
+included, and the
 [official Mod documentation](https://code.claude.com/docs/en/plugins/mods/create).

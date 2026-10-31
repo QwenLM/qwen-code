@@ -12,6 +12,7 @@ export interface SessionTurnState {
   initialTurn: number;
   turnParentUuids: Array<string | null>;
   turnPromptIds: Array<string | undefined>;
+  turnDaemonPromptIds: Array<string | undefined>;
   backgroundNotificationTaskIds: string[];
 }
 
@@ -20,6 +21,7 @@ export interface SessionTurnRecordHint {
   countsAsUserPrompt: boolean;
   turnParentUuid?: string | null;
   turnPromptId?: string;
+  turnDaemonPromptId?: string;
   backgroundNotificationTaskId?: string;
 }
 
@@ -28,6 +30,7 @@ export class SessionTurnStateAccumulator {
   private userMessageCount = 0;
   private readonly turnParentUuids: Array<string | null> = [];
   private readonly turnPromptIds: Array<string | undefined> = [];
+  private readonly turnDaemonPromptIds: Array<string | undefined> = [];
   private readonly backgroundNotificationTaskIds = new Set<string>();
 
   constructor(private readonly sessionId: string) {}
@@ -46,6 +49,7 @@ export class SessionTurnStateAccumulator {
     if (hint.turnParentUuid !== undefined) {
       this.turnParentUuids.push(hint.turnParentUuid);
       this.turnPromptIds.push(hint.turnPromptId);
+      this.turnDaemonPromptIds.push(hint.turnDaemonPromptId);
     }
     if (hint.backgroundNotificationTaskId !== undefined) {
       this.backgroundNotificationTaskIds.add(hint.backgroundNotificationTaskId);
@@ -58,6 +62,7 @@ export class SessionTurnStateAccumulator {
         this.maxPromptTurn > 0 ? this.maxPromptTurn : this.userMessageCount,
       turnParentUuids: [...this.turnParentUuids],
       turnPromptIds: [...this.turnPromptIds],
+      turnDaemonPromptIds: [...this.turnDaemonPromptIds],
       backgroundNotificationTaskIds: [...this.backgroundNotificationTaskIds],
     };
   }
@@ -101,6 +106,7 @@ export function getSessionTurnRecordHint(
       ? {
           turnParentUuid,
           turnPromptId: getRecordRewindId(record),
+          turnDaemonPromptId: record.daemonPromptId,
         }
       : {}),
     ...(typeof backgroundTask?.taskId === 'string'

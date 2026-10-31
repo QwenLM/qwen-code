@@ -64,6 +64,7 @@ const SETTING_KEYS = {
   'setting:omni-media-delivery': 'omni.enabled',
   'setting:artifacts': 'experimental.artifact',
   'setting:tool-use-summaries': 'experimental.emitToolUseSummaries',
+  'setting:unified-agent-loop': 'experimental.unifiedAgentLoop',
   'setting:voice-model': 'voiceModel',
   'setting:image-model': 'imageModel',
 } as const;
@@ -74,6 +75,7 @@ const BUILTIN_IDS = [
   'builtin:live-setup',
   'builtin:local-control',
   'builtin:connections',
+  'builtin:archived-sessions',
   'builtin:workspace-directories',
   'builtin:model-management',
 ] as const;

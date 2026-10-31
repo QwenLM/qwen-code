@@ -1617,6 +1617,14 @@ function recordedFor(
 
 export { hostedRuntimeSessionId } from './hosted-workspace-broker.js';
 
+// A3 packaged fault arm: the replacement holds the first sibling approval it
+// asks (the pending sibling after an earlier decided one) so the runner can
+// crash inside the mixed-sibling approval gap. Test-gated, never set in
+// production; read once, fires once per process.
+const holdPendingSiblingSession =
+  process.env['QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL'];
+let holdPendingSiblingFired = false;
+
 export class HostedToolRecoveryRequiredError extends Error {
   constructor(cause: unknown) {
     super(
@@ -3952,8 +3960,9 @@ export class HostedWorkspaceToolTurn {
             backgroundIllFormed ||
             (backgroundRequested && !backgroundAdmitted)
           ) {
-            validationError =
-              'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
+            validationError = this.backgroundShellAdmitted()
+              ? 'Hosted Shell is_background must be a boolean; correct the arguments before retrying.'
+              : 'Hosted Shell requires a foreground command in the saved directory. Background jobs and Monitor are unavailable; correct the arguments before retrying.';
           } else if (
             args['description'] !== undefined &&
             typeof args['description'] !== 'string'
@@ -3969,7 +3978,7 @@ export class HostedWorkspaceToolTurn {
               'Hosted Shell timeout must be an integer from 1 to 600000 ms.';
           }
           if (
-            !backgroundAdmitted &&
+            !this.backgroundShellAdmitted() &&
             this.publication &&
             args['is_background'] !== undefined
           ) {
@@ -3979,7 +3988,7 @@ export class HostedWorkspaceToolTurn {
             hostedShellInputError(call.name, args) ?? validationError;
           input = backgroundAdmitted
             ? { ...args, is_background: true }
-            : this.publication
+            : this.publication && args['is_background'] === undefined
               ? { ...args }
               : { ...args, is_background: false };
         } else if (call.name === 'web_fetch') {
@@ -8895,6 +8904,24 @@ export class HostedWorkspaceToolTurn {
       },
       { turnId: this.promptId, promptId: this.promptId },
     );
+    if (
+      holdPendingSiblingSession ===
+        this.session.authority.sessionHeader.sessionKey.sessionId &&
+      !holdPendingSiblingFired
+    ) {
+      holdPendingSiblingFired = true;
+      writeStderrLineSafe(
+        `qwen serve: E2E holding pending sibling approval for Session ${holdPendingSiblingSession} call ${call.callId}`,
+      );
+      // Reject on abort so a leaked flag cannot park a real Session
+      // un-cancelably; the runner SIGKILLs this generation after the barrier.
+      await new Promise<never>((_resolve, reject) => {
+        const release = (): void =>
+          reject(signal.reason ?? new Error('aborted'));
+        if (signal.aborted) release();
+        else signal.addEventListener('abort', release, { once: true });
+      });
+    }
     await approval.waiters.wait(
       requestId,
       options.expiresAt,

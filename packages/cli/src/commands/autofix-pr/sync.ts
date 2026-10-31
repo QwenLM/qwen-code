@@ -21,29 +21,33 @@
 import type { CommandModule } from 'yargs';
 import { execFileSync } from 'node:child_process';
 import { realpathSync } from 'node:fs';
-import { join, resolve } from 'node:path';
+import { join, relative, resolve } from 'node:path';
 import { isWithinRoot } from '../../config/path-comparison.js';
 import { writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { git, gitOpt } from '../review/lib/git.js';
+import { git, gitOpt, gitRaw } from '../review/lib/git.js';
 import { liveDestination, withLiveBase } from './push.js';
 import {
   assertWatching,
   TASK_OPTION,
   taskArg,
   autofixPrPaths,
-  repoRoot,
+  statePaths,
+  trustAnchor,
+  resolveWatchRoot,
   requireState,
   withWatchLock,
   writeState,
   type AutofixPrPaths,
 } from './state.js';
 import {
+  checkoutHoldsWork,
   hasUncommittedChanges,
   isAncestor,
   networkGit,
   networkGitEnv,
   requireWorktree,
 } from './worktree.js';
+import { assertNoFixInFlight, clearAbandonedFix } from './fix.js';
 
 export interface SyncOutcome {
   synced: boolean;
@@ -61,6 +65,9 @@ export interface SyncOutcome {
   /** Commits the worktree holds that the PR does not: a round's work not
    * pushed yet — or left behind by a round that never ended. */
   unpushed?: number;
+  /** A background fix whose session ended before its round went on: its
+   * marker is gone, and the round discards what the worktree holds. */
+  abandonedFix?: { startedAt: string | null };
 }
 
 /**
@@ -72,11 +79,19 @@ export function runSync(
   discard = false,
   task?: string,
 ): SyncOutcome {
-  const root = repoRoot();
+  const root = resolveWatchRoot(prNumber);
   const paths = autofixPrPaths(root, prNumber);
-  return withWatchLock(paths, prNumber, () =>
-    syncLocked(paths, prNumber, discard, root, task),
-  );
+  return withWatchLock(paths, prNumber, () => {
+    // Before anything moves: the attempt's agent may be working in the
+    // worktree. Only the session that owns the watch removes a marker its
+    // session left behind (Section 6.14): `syncLocked` checks it first.
+    assertNoFixInFlight(paths, prNumber);
+    // Removed once the sync answered: one that fails keeps it for the
+    // next, which then reports it.
+    const outcome = syncLocked(paths, prNumber, discard, root, task);
+    const abandonedFix = clearAbandonedFix(paths);
+    return abandonedFix ? { ...outcome, abandonedFix } : outcome;
+  });
 }
 
 function syncLocked(
@@ -88,13 +103,26 @@ function syncLocked(
 ): SyncOutcome {
   const state = requireState(paths.statePath, prNumber);
   assertWatching(state, task);
+  // An in-place watch works in the checkout the state names, not the
+  // worktree path the PR number alone derives.
+  paths = statePaths(root, state);
   const worktree = paths.worktreePath;
-  requireWorktree(paths, prNumber, root, discard);
+  const inPlace = state.inPlace === true;
+  if (discard && inPlace) {
+    throw new Error(
+      `an in-place watch never discards the user's checkout (${worktree}); commit or stash what it holds, or end the watch with \`qwen autofix-pr cleanup ${prNumber}\``,
+    );
+  }
+  requireWorktree(paths, prNumber, root, discard, trustAnchor(state), inPlace);
 
   const known = state.lastKnownHeadSha;
   // The state with the PR's base as GitHub names it now.
   let current = state;
-  // FETCH_HEAD is per worktree, so this leaves the user's checkout alone.
+  // FETCH_HEAD is per worktree, so in the worktree mode this leaves the
+  // user's checkout alone. An in-place watch IS the user's checkout, where
+  // a concurrent fetch (an IDE's autofetch, another terminal) rewrites
+  // FETCH_HEAD between the fetch and the read: fetch and read the watch's
+  // private ref instead, as prepare does.
   const fetchPrHead = (): string => {
     const live = liveDestination(state, prNumber);
     if (live.state !== 'OPEN') {
@@ -112,9 +140,16 @@ function syncLocked(
       '--quiet',
       '--no-recurse-submodules',
       state.pushTarget,
-      `refs/heads/${state.headRefName}`,
+      inPlace
+        ? `+refs/heads/${state.headRefName}:${paths.headRef}`
+        : `refs/heads/${state.headRefName}`,
     ]);
-    return git('-C', worktree, 'rev-parse', 'FETCH_HEAD^{commit}');
+    return git(
+      '-C',
+      worktree,
+      'rev-parse',
+      inPlace ? `${paths.headRef}^{commit}` : 'FETCH_HEAD^{commit}',
+    );
   };
   let prHead: string;
   if (discard) {
@@ -128,6 +163,18 @@ function syncLocked(
     }
   } else {
     prHead = fetchPrHead();
+  }
+  // The branch check in requireWorktree ran before the network round-trips;
+  // the user may have switched branches while they waited. Revalidate
+  // immediately before reading HEAD and moving the checkout — advancing the
+  // branch the user switched to is exactly the mid-round switch refusal.
+  if (inPlace) {
+    const nowBranch = gitOpt('-C', worktree, 'symbolic-ref', '-q', 'HEAD');
+    if (nowBranch !== `refs/heads/${state.branch}`) {
+      throw new Error(
+        `${worktree} has ${nowBranch ? `branch ${nowBranch.replace(/^refs\/heads\//, '')}` : 'a detached HEAD'} checked out, not ${state.branch}; switch it back before pushing or syncing.`,
+      );
+    }
   }
   const head = git('-C', worktree, 'rev-parse', 'HEAD');
   const moved = prHead !== known;
@@ -182,6 +229,15 @@ function syncLocked(
     }
   } else if (!isAncestor(worktree, known, prHead)) {
     // The author rewrote the history the watch knew.
+    if (inPlace) {
+      // The user's branch is theirs to reconcile: no reset, ever.
+      return {
+        synced: false,
+        headSha: prHead,
+        moved,
+        reason: `the author rewrote the PR's history; reconcile ${worktree} with the new head ${prHead.slice(0, 12)} yourself — an in-place watch never resets your branch`,
+      };
+    }
     if (hasUncommittedChanges(worktree)) {
       throw new Error(
         `${worktree} has uncommitted changes; commit or discard them before moving it to the new PR head.`,
@@ -210,22 +266,89 @@ function syncLocked(
           `merge ${prHead} into the worktree (never rebase), then run sync again`,
       };
     }
-    if (hasUncommittedChanges(worktree)) {
+    // The checkout holds the watch's own files under .qwen/tmp: they are
+    // not the user's work.
+    const dirty = inPlace
+      ? (checkoutHoldsWork(worktree) ?? true)
+      : hasUncommittedChanges(worktree);
+    if (dirty) {
+      if (inPlace) {
+        return {
+          synced: false,
+          headSha: prHead,
+          moved,
+          reason: `${worktree} has uncommitted changes; commit or stash them before the round moves it to the new PR head.`,
+        };
+      }
       throw new Error(
         `${worktree} has uncommitted changes; commit or discard them before moving it to the new PR head.`,
       );
     }
-    git(
-      '-c',
-      'submodule.recurse=false',
-      '-C',
-      worktree,
-      'merge',
-      '--ff-only',
-      '--quiet',
-      prHead,
-    );
-    alignSubmodules(worktree);
+    if (inPlace) {
+      // The dirty gate ignores ignored files on purpose; the merge must not
+      // overwrite them when the PR head starts tracking the same path.
+      // --no-overwrite-ignore refuses instead, and the collision is the
+      // user's to resolve — an in-place watch never destroys their files.
+      try {
+        git(
+          '-c',
+          'submodule.recurse=false',
+          '-C',
+          worktree,
+          'merge',
+          '--ff-only',
+          '--quiet',
+          '--no-overwrite-ignore',
+          prHead,
+        );
+      } catch (err) {
+        const stderr = String((err as { stderr?: unknown }).stderr ?? '');
+        const lines = stderr.split('\n');
+        const header = lines.findIndex((line) =>
+          line.includes('would be overwritten by merge'),
+        );
+        const collided: string[] = [];
+        if (header !== -1) {
+          for (const line of lines.slice(header + 1)) {
+            const trimmed = line.trim();
+            if (trimmed === '' || trimmed.startsWith('Please')) break;
+            collided.push(trimmed);
+          }
+        }
+        return {
+          synced: false,
+          headSha: prHead,
+          moved,
+          reason:
+            collided.length > 0
+              ? `the PR head starts tracking ${collided.join(', ')}, which ${worktree} holds as ignored file(s); move aside or unignore them, then sync again — an in-place watch never overwrites your files`
+              : `the fast-forward of ${worktree} to ${prHead.slice(0, 12)} failed: ${stderr.trim().split('\n').slice(-3).join(' ') || (err as Error).message}`,
+        };
+      }
+    } else {
+      git(
+        '-c',
+        'submodule.recurse=false',
+        '-C',
+        worktree,
+        'merge',
+        '--ff-only',
+        '--quiet',
+        prHead,
+      );
+    }
+    // In the user's checkout a submodule holding work is left alone, and
+    // one whose target commit would overwrite an ignored file is reported.
+    const collisions: string[] = [];
+    alignSubmodules(worktree, inPlace, inPlace ? collisions : undefined);
+    if (collisions.length > 0) {
+      return {
+        synced: false,
+        headSha: prHead,
+        moved,
+        reason: submoduleCollisionReason(collisions),
+      };
+    }
   }
 
   if (!discard && (head === prHead || isAncestor(worktree, prHead, head))) {
@@ -233,20 +356,34 @@ function syncLocked(
     // merge moves the gitlinks, not the checked-out submodules. Nothing was
     // checked for uncommitted changes on this path, so a submodule holding
     // work of its own is left for the check below.
-    alignSubmodules(worktree, true);
+    const collisions: string[] = [];
+    alignSubmodules(worktree, true, inPlace ? collisions : undefined);
+    if (collisions.length > 0) {
+      return {
+        synced: false,
+        headSha: prHead,
+        moved,
+        reason: submoduleCollisionReason(collisions),
+      };
+    }
   }
   if (moved || current !== state) {
     writeState(paths.statePath, { ...current, lastKnownHeadSha: prHead });
   }
   // A submodule the new head moved, which git could not check out, would
   // otherwise be committed back to its old commit by the next fix.
-  if (!discard && dirtyOrUnreadable(worktree)) {
+  const stillDirty = inPlace
+    ? (checkoutHoldsWork(worktree) ?? true)
+    : dirtyOrUnreadable(worktree);
+  if (!discard && stillDirty) {
     return {
       synced: false,
       headSha: prHead,
       moved,
       ...(dropped === undefined ? {} : { dropped }),
-      reason: `${worktree} is not clean at ${prHead.slice(0, 12)}: it has uncommitted or untracked files, or a submodule git could not move; run \`qwen autofix-pr sync ${prNumber} --discard\``,
+      reason: inPlace
+        ? `${worktree} is not clean at ${prHead.slice(0, 12)}: it has uncommitted or untracked files, or a submodule holding work or one whose recorded commit could not be fetched; commit or stash what it holds, or fetch the submodule's commit yourself`
+        : `${worktree} is not clean at ${prHead.slice(0, 12)}: it has uncommitted or untracked files, or a submodule git could not move; run \`qwen autofix-pr sync ${prNumber} --discard\``,
     };
   }
   return {
@@ -269,6 +406,9 @@ interface Alignment {
   /** Leave a submodule that holds work a reset would lose. */
   keepWork: boolean;
   deadline: number;
+  /** When present (an in-place watch), ignored-file collisions are
+   * collected here and the submodule is left untouched instead of reset. */
+  collisions?: string[];
 }
 
 /**
@@ -280,13 +420,18 @@ interface Alignment {
  * after the helper returned. A commit a submodule lacks is fetched from its
  * own remote, under the protocol policy git applies to submodules.
  */
-function alignSubmodules(repository: string, keepWork = false): void {
+function alignSubmodules(
+  repository: string,
+  keepWork = false,
+  collisions?: string[],
+): void {
   alignLevel(
     repository,
     {
       root: realpathSync(repository),
       keepWork,
       deadline: Date.now() + SUBMODULE_FETCH_BUDGET_MS,
+      collisions,
     },
     0,
   );
@@ -335,6 +480,22 @@ function alignLevel(
       fetchSubmoduleCommit(dir, sha, alignment.deadline);
     }
     if (alignment.keepWork && holdsWork(dir, sha)) continue;
+    if (alignment.collisions) {
+      // The dirty gate ignores ignored files on purpose; a reset would
+      // overwrite one the target commit tracks, at the same path or across
+      // a file/directory transition. An unreadable listing is a refusal
+      // too — never an assumption that there is nothing to lose.
+      const collided = ignoredCollisions(dir, sha);
+      const rel = relative(alignment.root, dir);
+      if (collided === null) {
+        alignment.collisions.push(`${rel}: (path listing unreadable)`);
+        continue;
+      }
+      if (collided.length > 0) {
+        alignment.collisions.push(...collided.map((p) => `${rel}: ${p}`));
+        continue;
+      }
+    }
     if (
       gitOpt(
         '-C',
@@ -381,6 +542,97 @@ function isOwnSubmodule(
   } catch {
     return false;
   }
+}
+
+/** The refusal naming the submodules whose reset would overwrite an
+ * ignored file of the user's, or whose path listings could not be read. */
+function submoduleCollisionReason(collisions: string[]): string {
+  return `in-place sync refused to reset submodule(s): the PR head's tracked paths collide with ignored files in your checkout, or a path listing could not be read (${collisions.join('; ')}); resolve them, then sync again — an in-place watch never overwrites your files`;
+}
+
+/**
+ * Ignored files of a submodule that the target commit's tracked paths would
+ * overwrite: the exact path, or a file/directory transition in either
+ * direction (an ignored directory whose path the target tracks as a blob,
+ * or an ignored file the target tracks under as a directory). Both listings
+ * are NUL-delimited, so a C-quoted path cannot dodge the match. Comparisons
+ * honor the submodule's core.ignorecase: on a case-insensitive filesystem
+ * differently cased names are the same path. Returns null when either
+ * listing cannot be read — the caller must then refuse the reset, not
+ * assume there is nothing to lose.
+ */
+function ignoredCollisions(dir: string, sha: string): string[] | null {
+  const decode = (buf: Buffer): string | null => {
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+    } catch {
+      return null;
+    }
+  };
+  let ignoredRaw: string;
+  let trackedRaw: string;
+  try {
+    // gitRaw, not gitOpt: a large ignored dependency tree runs past the
+    // 1 MiB default buffer, and a failed read must not read as "no ignored
+    // files". A failure throws and refuses the reset below.
+    const ignoredDecoded = decode(
+      gitRaw(
+        '-C',
+        dir,
+        'ls-files',
+        '--others',
+        '--ignored',
+        '--exclude-standard',
+        '-z',
+      ),
+    );
+    const trackedDecoded = decode(
+      gitRaw('-C', dir, 'ls-tree', '-r', '--name-only', '-z', sha),
+    );
+    if (ignoredDecoded === null || trackedDecoded === null) return null;
+    ignoredRaw = ignoredDecoded;
+    trackedRaw = trackedDecoded;
+  } catch {
+    return null;
+  }
+  // Git's own view of the filesystem: core.ignorecase is set where
+  // differently cased names identify the same path. Folding more than git
+  // does (Unicode case) only over-refuses, which is the safe direction.
+  const ignoreCase =
+    gitOpt('-C', dir, 'config', '--bool', 'core.ignorecase') === 'true';
+  const norm = (p: string): string => (ignoreCase ? p.toLowerCase() : p);
+  const ignoredSet = new Set<string>();
+  const ignoredAncestors = new Set<string>();
+  for (const raw of ignoredRaw.split('\0')) {
+    if (raw === '') continue;
+    // An entirely ignored directory is listed with a trailing slash.
+    const p = norm(raw.endsWith('/') ? raw.slice(0, -1) : raw);
+    ignoredSet.add(p);
+    const parts = p.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      ignoredAncestors.add(parts.slice(0, i).join('/'));
+    }
+  }
+  if (ignoredSet.size === 0) return [];
+  const collisions: string[] = [];
+  for (const raw of trackedRaw.split('\0')) {
+    if (raw === '') continue;
+    const t = norm(raw);
+    // The target tracks an ignored path itself, or a path under it.
+    if (ignoredSet.has(t) || ignoredAncestors.has(t)) {
+      collisions.push(raw);
+      continue;
+    }
+    // The target tracks a directory where an ignored file sits.
+    const parts = t.split('/');
+    for (let i = 1; i < parts.length; i++) {
+      if (ignoredSet.has(parts.slice(0, i).join('/'))) {
+        collisions.push(raw);
+        break;
+      }
+    }
+  }
+  return collisions;
 }
 
 /**

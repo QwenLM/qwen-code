@@ -932,7 +932,7 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
     assert.match(run('Build Java components'), /-Dmaven\.repo\.local=/);
     assert.match(
       run('Build Java components'),
-      /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/qwen-managed-agent-server"/,
+      /rm -rf -- "\$\{repo\}\/com\/alibaba\/qwencode-sdk" "\$\{repo\}\/com\/alibaba\/"qwen-managed-agent-\*/,
     );
     assert.match(
       run('Assemble reference distribution'),
@@ -979,6 +979,56 @@ describe('trusted-PR lanes moved off the hosted queue (#13245)', () => {
       String(s.run || '').includes('accept-noflicker.sh'),
     );
     assert.equal(gate.env?.OUT, '${{ runner.temp }}/opentui-noflicker-out');
+  });
+
+  it('tui-parity changes gate is routed like the lanes it guards', () => {
+    // The changes job is the door to parity/noflicker: a 40-minute hosted
+    // queue wait behind it starves two pool-routed lanes. Route it like them;
+    // it runs no checkout, so the workspace-restore pin does not apply.
+    const doc = parse(
+      readFileSync(join(workflowsDir, 'tui-parity.yml'), 'utf8'),
+    );
+    const job = doc.jobs.changes;
+    const runsOn = String(job['runs-on']);
+    const route = (eventName, sameRepo, assoc, ecsDisabled = false) =>
+      evalRunsOn(runsOn, { ecsDisabled, eventName, sameRepo, assoc });
+    assert.match(runsOn, /github\.repository == 'QwenLM\/qwen-code'/);
+    assert.deepEqual(route('pull_request', true, 'NONE'), ECS_LABELS);
+    for (const assoc of TRUSTED) {
+      assert.deepEqual(route('pull_request', false, assoc), ECS_LABELS, assoc);
+    }
+    assert.deepEqual(route('workflow_dispatch', false, ''), ECS_LABELS);
+    for (const assoc of ['CONTRIBUTOR', 'FIRST_TIME_CONTRIBUTOR', 'NONE']) {
+      assert.deepEqual(
+        route('pull_request', false, assoc),
+        HOSTED_LABELS,
+        assoc,
+      );
+    }
+    for (const eventName of ['pull_request', 'workflow_dispatch']) {
+      assert.deepEqual(
+        route(eventName, true, 'OWNER', true),
+        HOSTED_LABELS,
+        eventName,
+      );
+    }
+    // Byte-identity with the lanes it guards is this change's own acceptance
+    // criterion: the gate is their door, so drift here is what re-starves
+    // them behind a hosted queue.
+    for (const lane of ['parity', 'noflicker']) {
+      assert.equal(
+        runsOn,
+        String(doc.jobs[lane]['runs-on']),
+        `the gate must be routed by the same expression as ${lane}`,
+      );
+    }
+    // Any added step would run on the reused pool workspace with no hygiene
+    // step before it, so the whole step list is pinned, not just checkouts.
+    assert.deepEqual(
+      job.steps.map((s) => s.uses),
+      ['actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3'],
+      'changes gate must stay checkout-free and shell-free; adding a step re-adds the pool-hygiene requirement',
+    );
   });
 });
 

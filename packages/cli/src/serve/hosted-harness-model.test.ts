@@ -1080,7 +1080,12 @@ describe('Hosted Harness model boundary', () => {
     expect(hooks.setHistory).toHaveBeenCalledWith([]);
     expect(hooks.shutdown).toHaveBeenCalledOnce();
     const args = vi.mocked(loadCliConfig).mock.calls[0];
-    expect(args?.[1]).toMatchObject({ safeMode: true, chatRecording: false });
+    expect(args?.[1]).toMatchObject({
+      safeMode: true,
+      chatRecording: false,
+      sessionId: input.sessionId,
+      sessionIdGenerated: true,
+    });
     expect(args?.[9]?.toolInvocationGuard?.({} as never)).toMatchObject({
       allowed: false,
     });

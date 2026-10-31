@@ -10,6 +10,7 @@ import type {
   ModToolCheckResult,
   ModToolResult,
 } from './tool-events.js';
+import type { ModRenderInput, ModRenderSite } from './render-tree.js';
 
 export const MOD_MAX_BYTES = 262_144;
 export const MOD_MAX_DEPTH = 512;
@@ -122,6 +123,8 @@ export type ModRequest =
       cwd: string;
       surface: 'terminal' | null;
       version: string;
+      /** The render sites this host draws; `ui.render` runs only where one is offered. */
+      sites?: readonly ModRenderSite[];
     }
   | {
       type: 'command';
@@ -142,6 +145,7 @@ export type ModRequest =
   | { type: 'end'; sessionId: string; reason: 'clear' | 'resume' | 'other' }
   | { type: 'turn-start'; input: ModTurnStart }
   | { type: 'turn-complete'; input: ModTurnComplete }
+  | { type: 'render'; input: ModRenderInput }
   | { type: 'turn-abort-result'; id: number; error?: string };
 
 export type ModReply =
@@ -157,6 +161,7 @@ export type ModReply =
       error?: string;
     }
   | { type: 'turn-abort'; id: number; turnId: string }
+  | { type: 'invalidate'; plugin: string; event: string }
   | ({ type: 'log'; plugin: string } & ModLog);
 
 export type ModWorkerRequest = ModRequest & {

@@ -101,7 +101,10 @@ describe('Generated UI worker execution outcomes', () => {
       const calls = worker.postMessage.mock.calls.length;
       expect(worker.postMessage).toHaveBeenLastCalledWith({
         sequence: failure === 'init' ? 1 : 2,
-        error: 'Generated JavaScript failed or exceeded a runtime limit.',
+        error:
+          failure === 'init'
+            ? 'Script error: failure (line 1, column 16).'
+            : 'Script error: failure (line 1, column 46).',
       });
       expect(worker.close).toHaveBeenCalledOnce();
       await send(request);

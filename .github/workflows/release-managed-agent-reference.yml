@@ -7,9 +7,12 @@ on:
     paths:
       - '.github/workflows/release-managed-agent-reference.yml'
       - 'scripts/package-managed-agent-reference.mjs'
+      - 'scripts/generate-managed-agent-configuration-reference.mjs'
       - 'scripts/contract-version-utils.js'
       - 'scripts/flyway-migration-utils.js'
       - 'scripts/tests/package-managed-agent-reference.test.mjs'
+      - 'scripts/tests/managed-agent-upgrade.test.mjs'
+      - 'scripts/tests/generate-managed-agent-configuration-reference.test.mjs'
       - 'packages/sdk-java/qwencode/**'
       - 'packages/managed-agent-server/**'
       - 'packages/core/src/managed-runtime/contracts/**'
@@ -18,6 +21,8 @@ on:
       - 'packages/cli/src/serve/hosted-harness-contract.ts'
       - 'docs/users/managed-agent-reference-deployment.md'
       - 'docs/users/managed-agent-reference-deployment.zh-CN.md'
+      - 'docs/users/managed-agent-configuration-reference.md'
+      - 'docs/users/managed-agent-configuration-reference.zh-CN.md'
       - 'docs/users/hosted-workspace-recovery.md'
       - 'docs/users/hosted-workspace-recovery.zh-CN.md'
       - 'LICENSE'
@@ -216,15 +221,43 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
       - name: 'Set up Maven (self-hosted)'
         if: "${{ runner.environment == 'self-hosted' }}"
         run: |-
           archive="${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
-          curl -fsSL "https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"
-          echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status
+          # Maven Central rate-limits the pool's shared egress for minutes at a
+          # time: 429 killed a lane before any test (run 40191430799), and a 2 s
+          # retry and then a 15 s one, 2.5 minutes in all, answered 429 on every
+          # attempt here. So a host keeps one copy and a cold fetch falls back
+          # to the mirror that serves the same bytes -- the pinned SHA-512 below
+          # still decides what gets extracted, so a bad mirror only fails.
+          cached="${HOME}/.cache/qwen-code-ci/apache-maven-${MAVEN_VERSION}-bin.tar.gz"
+          if ! { [ -f "${cached}" ] && cp -- "${cached}" "${archive}" &&
+            echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; }; then
+            for base in \
+              'https://repo.maven.apache.org/maven2/org/apache/maven/apache-maven' \
+              'https://maven.aliyun.com/repository/public/org/apache/maven/apache-maven'; do
+              if curl -fsSL --retry 2 --retry-delay 5 --retry-connrefused --retry-max-time 30 --max-time 300 \
+                "${base}/${MAVEN_VERSION}/apache-maven-${MAVEN_VERSION}-bin.tar.gz" -o "${archive}"; then
+                break
+              fi
+            done
+            if ! echo "${MAVEN_SHA512}  ${archive}" | sha512sum --check --status; then
+              echo "::error::no checksum-verified Maven ${MAVEN_VERSION} from Maven Central or its mirror"
+              exit 1
+            fi
+            # Best-effort: the archive is already verified job-locally, so an
+            # unwritable shared cache must not abort the step before tar.
+            if ! { mkdir -p -- "$(dirname -- "${cached}")" &&
+              cp -- "${archive}" "${cached}.$$" &&
+              mv -- "${cached}.$$" "${cached}"; }; then
+              rm -f -- "${cached}.$$"
+              echo "::warning::Maven cache write-back skipped: the shared cache is not writable; the verified job-local archive is used instead"
+            fi
+          fi
           tar -xzf "${archive}" -C "${RUNNER_TEMP}"
           echo "${RUNNER_TEMP}/apache-maven-${MAVEN_VERSION}/bin" >> "${GITHUB_PATH}"
 
@@ -285,8 +318,8 @@ jobs:
             mysql -uroot -proot \
             --execute="GRANT SELECT ON performance_schema.user_variables_by_thread TO 'qwen'@'%';"
 
-      - name: 'Test the packager'
-        run: 'node --test scripts/tests/package-managed-agent-reference.test.mjs'
+      - name: 'Test the packager and the upgrade command'
+        run: 'node --test scripts/tests/package-managed-agent-reference.test.mjs scripts/tests/managed-agent-upgrade.test.mjs scripts/tests/generate-managed-agent-configuration-reference.test.mjs'
 
       - name: 'Build Java components'
         run: |-
@@ -297,11 +330,15 @@ jobs:
             # PR's build must never reach the host-shared ~/.m2.
             repo="${RUNNER_TEMP}/m2-repo"
             cp -aln "${HOME}/.m2/repository" "${repo}" 2>/dev/null || true
-            rm -rf -- "${repo}/com/alibaba/qwencode-sdk" "${repo}/com/alibaba/qwen-managed-agent-server"
+            rm -rf -- "${repo}/com/alibaba/qwencode-sdk" "${repo}/com/alibaba/"qwen-managed-agent-*
             MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"
           fi
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true clean install
           mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml -DskipTests clean package
+
+      # The build wrote the configuration metadata the reference is made from.
+      - name: 'Check the configuration reference'
+        run: 'node scripts/generate-managed-agent-configuration-reference.mjs --check'
 
       - name: 'Assemble reference distribution'
         env:

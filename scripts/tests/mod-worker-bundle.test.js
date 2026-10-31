@@ -110,6 +110,7 @@ it('runs a relocated bundled worker with TypeScript and relative imports', async
     commands: [{ name: 'hello', description: 'Bundled', plugin: 'fixture' }],
     turnStart: false,
     turnComplete: [],
+    render: [],
   });
   expect(
     await dispatch({ type: 'command', command: 'hello', args: '' }),

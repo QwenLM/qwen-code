@@ -28,14 +28,15 @@ import { buildSessionAwareFetch } from '../../outbound-session-id.js';
 import {
   QWENCLOUD_MAAS_HOSTS,
   withDashScopeSourceConfig,
+  withoutDashScopeSourceConfig,
 } from '../../dashscope-source-config.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
 /**
  * Legacy input ladder for routes without an explicit reasoning capability.
- * DashScope accepts high/max as xhigh aliases; configured presets expose only
- * native low/medium/xhigh choices. Keep this fallback's clamp and warning for
+ * Configured presets declare the tiers the model accepts (qwen3.8 goes up to
+ * max) and bypass this ladder. Keep this fallback's clamp and warning for
  * existing unconfigured routes.
  */
 const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
@@ -365,7 +366,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       fetch: buildSessionAwareFetch(
         runtimeOptions?.fetch,
         this.cliConfig,
-        this.contentGeneratorConfig.customHeaders,
+        withoutDashScopeSourceConfig(this.contentGeneratorConfig.customHeaders),
       ),
     });
   }

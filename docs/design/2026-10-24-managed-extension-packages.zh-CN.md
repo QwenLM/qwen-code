@@ -117,6 +117,8 @@ Linux owner 停止使用进程树证据。SSH 必须实现启动、按范围配�
 actor 和执行策略。命令使用稳定幂等键与预期配置版本。
 状态查询只读，不创建 Session、不冷加载 Harness、不重提操作。
 管理 UI 复用界面，使用独立 Managed provider，并取消旧目标请求。
+统一 Plugins → Extensions 页签接收当前 Managed provider、Workspace 和会话；
+未选择会话时也保留 Managed 上下文，不回退到 daemon 扩展目录。
 目录最多包含 256 个包，每个 Session 最多选择 32 个。
 只有明确在受理前返回的 `extension_config_revision_conflict` 才清除 pending apply 并刷新配置版本；
 通用冲突和未知结果保留原选择及幂等键。

@@ -29,7 +29,7 @@ for (const navigation of [true, false]) {
     page,
     baseURL,
   }, testInfo) => {
-    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.setViewportSize({ width: 1600, height: 900 });
     const scenario = createWebShellDaemonScenario({
       events: Array.from({ length: 4 }, (_, index) => [
         userTextEvent('What is the weather?', { id: index * 3 + 1 }),
@@ -117,7 +117,9 @@ for (const navigation of [true, false]) {
       'color(srgb 1 1 1 / 0.96)',
     );
     await scrollToBottom.click();
-    for (const width of [1440, 1300, 1261, 1260, 1259, 1000, 802, 700, 599]) {
+    for (const width of [
+      1600, 1440, 1405, 1404, 1403, 1300, 1000, 802, 700, 599,
+    ]) {
       await page.setViewportSize({ width, height: 900 });
       await expectSameEdges(message, composer);
       const viewport = page.locator('[data-history-viewport]');
@@ -132,7 +134,7 @@ for (const navigation of [true, false]) {
         })
         .toBeLessThanOrEqual(1);
       const viewportBox = await viewport.boundingBox();
-      if (viewportBox && viewportBox.width >= 1000) {
+      if (viewportBox && viewportBox.width >= 1128) {
         await expect(rail).toBeVisible();
         const railBox = await rail.boundingBox();
         const messageBox = await message.boundingBox();
@@ -142,7 +144,7 @@ for (const navigation of [true, false]) {
       }
     }
     {
-      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.setViewportSize({ width: 1600, height: 900 });
       const shell = page.locator('[data-web-shell-root]');
       const sidebar = page.getByRole('complementary', {
         name: 'Workspace sidebar',
@@ -155,17 +157,37 @@ for (const navigation of [true, false]) {
             '--chat-regular-content-width',
             `${width}px`,
           );
+          element.style.setProperty('--chat-content-width', `${width}px`);
+          element.style.setProperty('--chat-shell-width', `${width + 40}px`);
         }, minWidth);
         for (const offset of [-1, 0, 1]) {
           await page.setViewportSize({
-            width: minWidth + sidebarWidth + offset,
+            width: minWidth + 128 + sidebarWidth + offset,
             height: 900,
           });
           if (offset < 0) await expect(rail).toBeHidden();
-          else await expect(rail).toBeVisible();
+          else {
+            await expect(rail).toBeVisible();
+            const button = rail.locator('button').first();
+            const tick = button.locator(':scope > span').first();
+            await button.hover();
+            await expect
+              .poll(async () => (await tick.boundingBox())?.width ?? 0)
+              .toBeGreaterThan(27);
+            await expect
+              .poll(async () => {
+                const tickBox = await tick.boundingBox();
+                const messageBox = await message.boundingBox();
+                return tickBox && messageBox
+                  ? messageBox.x - tickBox.x - tickBox.width
+                  : -Infinity;
+              })
+              .toBeGreaterThanOrEqual(16);
+            await page.mouse.move(500, 10);
+          }
         }
       }
-      await page.setViewportSize({ width: 1000 + sidebarWidth, height: 900 });
+      await page.setViewportSize({ width: 1128 + sidebarWidth, height: 900 });
       await shell.evaluate((element) => {
         element.style.setProperty('--chat-regular-content-width', '1200px');
       });
@@ -174,8 +196,17 @@ for (const navigation of [true, false]) {
         element.style.setProperty('--chat-regular-content-width', '1000px');
       });
       await expect(rail).toBeVisible();
+      await shell.evaluate((element) => {
+        element.style.setProperty('--chat-content-width', '100%');
+      });
+      await expect(rail).toBeHidden();
+      await shell.evaluate((element) => {
+        element.style.setProperty('--chat-content-width', '1000px');
+        element.style.setProperty('--chat-shell-width', '1040px');
+      });
+      await expect(rail).toBeVisible();
     }
-    for (const width of [1440, 1360]) {
+    for (const width of [1600, 1500]) {
       await page.setViewportSize({ width, height: 900 });
       const button = rail.locator('button').first();
       const tick = button.locator(':scope > span').first();
