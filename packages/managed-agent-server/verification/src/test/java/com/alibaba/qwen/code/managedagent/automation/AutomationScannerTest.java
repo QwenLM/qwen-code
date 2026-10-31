@@ -813,7 +813,7 @@ class AutomationScannerTest {
     }
 
     @Test
-    void aScannerThatLostItsLeaseCannotMoveTheLedger() {
+    void aScannerWhoseLeaseWasTakenCannotMoveTheLedger() {
         PublicAutomation automation = define("* * * * *", "skip", "none", null,
                 true);
         String id = automation.id();
@@ -893,8 +893,30 @@ class AutomationScannerTest {
                 late)).isTrue();
         assertThat(ledger.advanceWatermark(tenant, id, "scanner-a", fence,
                 T0 + MINUTE, late)).isTrue();
-        // The next claim takes the lapsed lease and moves the fence; from then
-        // on the earlier holder moves nothing.
+        String next = "schedule:2026-06-01T10:02:00Z";
+        assertThat(ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow
+                .decision(row, next, T0 + 2 * MINUTE,
+                        AutomationScanner.TRIGGER_SCHEDULED,
+                        AutomationLedgerStore.OUTCOME_FIRING, null, fence, late),
+                "scanner-a")).isPresent();
+        assertThat(ledger.settleOccurrence(tenant, id, next,
+                AutomationLedgerStore.OUTCOME_SKIPPED, "gate_failed",
+                "probe exited 2", "scanner-a", fence, late)).isTrue();
+        assertThat(ledger.findOccurrence(tenant, id, next).orElseThrow()
+                .lastError()).isEqualTo("probe exited 2");
+        assertThat(ledger.recordGateOutcome(row, row.definitionRevision(),
+                "scanner-a", fence, AutomationLedgerStore.GATE_FAILED,
+                "probe exited 2", late)).isTrue();
+        ledger.block(tenant, id, "scanner-a", fence, "cron * does not compile",
+                late);
+        ScheduleRow held = ledger.findSchedule(tenant, id).orElseThrow();
+        assertThat(held.gateLastError()).isEqualTo("probe exited 2");
+        assertThat(held.blockedReason()).isEqualTo("cron * does not compile");
+        ledger.release(tenant, id, "scanner-a", fence, late);
+        assertThat(ledger.findSchedule(tenant, id).orElseThrow().leaseOwner())
+                .isNull();
+        // The next claim moves the fence; from then on the earlier holder
+        // moves nothing.
         assertThat(ledger.claim(tenant, id, "scanner-b", late + 60_000, late + 1))
                 .isGreaterThan(fence);
         assertThat(ledger.advanceWatermark(tenant, id, "scanner-a", fence,
