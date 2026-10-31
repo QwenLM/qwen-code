@@ -21,6 +21,7 @@ import {
   TASK_OPTION,
   taskArg,
   autofixPrPaths,
+  statePaths,
   isBranchName,
   isCommandSafeName,
   trustAnchor,
@@ -33,6 +34,7 @@ import {
 } from './state.js';
 import { assertNoFixInFlight } from './fix.js';
 import {
+  checkoutHoldsWork,
   hasUncommittedChanges,
   isAncestor,
   networkGitEnv,
@@ -230,9 +232,25 @@ function pushLocked(
   const state = requireState(paths.statePath, prNumber);
   assertWatching(state, task);
   assertNoFixInFlight(paths, prNumber);
+  // An in-place watch works in the checkout the state names, not the
+  // worktree path the PR number alone derives.
+  paths = statePaths(root, state);
   const worktree = paths.worktreePath;
-  requireWorktree(paths, prNumber, root, false, trustAnchor(state));
-  if (hasUncommittedChanges(worktree)) {
+  requireWorktree(
+    paths,
+    prNumber,
+    root,
+    false,
+    trustAnchor(state),
+    state.inPlace === true,
+  );
+  // An in-place checkout holds the watch's own files under .qwen/tmp:
+  // they are not the user's work.
+  const dirty =
+    state.inPlace === true
+      ? (checkoutHoldsWork(worktree) ?? true)
+      : hasUncommittedChanges(worktree);
+  if (dirty) {
     throw new Error(
       `${worktree} has uncommitted changes; commit them, or discard what should not be pushed, before pushing.`,
     );

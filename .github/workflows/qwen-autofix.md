@@ -1406,8 +1406,8 @@ Why 20: 37 PRs carried the label on 2026-08-08, so 5 slots served
 at a larger scale. The ecs-qwen fleet is 84 runners, so 20 concurrent
 legs occupy under a quarter of it, and the executed legs sampled that
 day finished in 3-28 minutes.
-The 300-minute job cap puts the worst case at 5 runner-hours per slot
-(100 across the fleet at 20) and holds the per-PR head-write
+The 345-minute job cap puts the worst case at 5.75 runner-hours per
+slot (115 across the fleet at 20) and holds the per-PR head-write
 concurrency group for the same window. Different PRs never share that
 group, so raising this does not add push contention.
 RAISE BOTH TOGETHER: this must stay strictly below
@@ -1647,11 +1647,11 @@ for this cap. Worst-case budget:
   setup                    7
   Triage and address     130  (120 budget + 10 margin)
   Verification gate       60  (2.6x the measured 22m48s)
-  Repair                  20
+  Repair                  70  (60 budget + the same 10 margin)
   Repair verification     60
   report                   3
   -------------------------------
-  worst case             280  => job timeout 300, and the job runs
+  worst case             330  => job timeout 345, and the job runs
                                  on ubuntu-latest, whose own ceiling
                                  is 360.
 ```
