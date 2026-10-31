@@ -413,8 +413,8 @@ public class AutomationLedgerStore
 
     /**
      * Claims one definition for a scanner: the lease must be free or expired, and the fence moves
-     * so a scanner that lost it can prove nothing about the row any more. Answers the fence held,
-     * or -1.
+     * so the scanner it was taken from can prove nothing about the row any more. Answers the fence
+     * held, or -1.
      */
     public long claim(String tenantId, String scheduleId, String owner,
             long leaseUntil, long now) {
@@ -443,7 +443,10 @@ public class AutomationLedgerStore
                 now, tenantId, scheduleId, owner, fence);
     }
 
-    /** True when the fenced write landed; false when the lease was lost. */
+    /**
+     * True when the fenced write landed; false once another claim has moved the fence, or when the
+     * watermark already covers the slot.
+     */
     public boolean advanceWatermark(String tenantId, String scheduleId,
             String owner, long fence, long slot, long now) {
         return jdbc.update("UPDATE ma_schedule"
@@ -475,10 +478,10 @@ public class AutomationLedgerStore
 
     /**
      * Records one occurrence decision under the writer's lease unless one exists: the row is
-     * selected from the definition row the owner holds, so a writer whose lease was lost inserts
-     * nothing, and the primary key keeps the first decision of a slot. Answers the row now held —
-     * the one written, or the earlier decision — or empty when the lease was lost and no decision
-     * exists.
+     * selected from the definition row the owner holds, so a writer whose lease another claim has
+     * taken inserts nothing, and the primary key keeps the first decision of a slot. Answers the row
+     * now held — the one written, or the earlier decision — or empty when another claim has taken
+     * the lease and no decision exists.
      */
     public Optional<OccurrenceRow> recordOccurrence(OccurrenceRow row,
             String owner) {
@@ -509,8 +512,9 @@ public class AutomationLedgerStore
     }
 
     /**
-     * A firing row settles into its outcome once the Harness answered; only the lease holder
-     * settles. True when the write landed.
+     * A firing row settles into its outcome once the Harness answered; only the holder of the
+     * latest claim's owner and fence settles, whether or not its lease has lapsed. True when the
+     * write landed.
      */
     public boolean settleOccurrence(String tenantId, String scheduleId,
             String occurrenceKey, String outcome, String reason, String owner,

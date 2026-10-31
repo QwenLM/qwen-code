@@ -1005,27 +1005,32 @@ class HttpRuntimeTransportTest {
     @Test
     void closesTheConnectionOnTheDeadlineAndOnCallerCancel() throws Exception {
         for (boolean callerCancels : new boolean[] {false, true}) {
+            CountDownLatch responseStarted = new CountDownLatch(1);
             CountDownLatch closed = new CountDownLatch(1);
             HttpServer drip = HttpServer.create(
                     new InetSocketAddress("127.0.0.1", 0), 0);
-            drip.setExecutor(Executors.newCachedThreadPool());
+            var executor = Executors.newCachedThreadPool();
+            drip.setExecutor(executor);
             drip.createContext("/", exchange -> {
-                exchange.getRequestBody().readAllBytes();
-                exchange.getResponseHeaders().set("Cache-Control", "no-store");
-                exchange.getResponseHeaders().set("Content-Type",
-                        "application/json");
-                exchange.sendResponseHeaders(200, 1 << 20);
-                OutputStream out = exchange.getResponseBody();
                 try {
+                    exchange.getRequestBody().readAllBytes();
+                    exchange.getResponseHeaders().set("Cache-Control", "no-store");
+                    exchange.getResponseHeaders().set("Content-Type",
+                            "application/json");
+                    exchange.sendResponseHeaders(200, 1 << 20);
+                    OutputStream out = exchange.getResponseBody();
                     for (int tick = 0; tick < 200; tick++) {
                         out.write(' ');
                         out.flush();
+                        responseStarted.countDown();
                         Thread.sleep(25);
                     }
                 } catch (IOException gone) {
                     closed.countDown();
                 } catch (InterruptedException interrupted) {
                     Thread.currentThread().interrupt();
+                } finally {
+                    exchange.close();
                 }
             });
             drip.start();
@@ -1038,13 +1043,17 @@ class HttpRuntimeTransportTest {
                         attest(client, drip.getAddress().getPort())
                                 .toCompletableFuture();
                 if (callerCancels) {
-                    Thread.sleep(200);
-                    pending.cancel(true);
+                    assertTrue(responseStarted.await(2, TimeUnit.SECONDS),
+                            "streaming response started before caller cancel");
+                    assertFalse(pending.isDone());
+                    assertTrue(pending.cancel(true));
+                    assertTrue(pending.isCancelled());
                 }
                 assertTrue(closed.await(2, TimeUnit.SECONDS),
                         callerCancels ? "caller cancel" : "deadline");
             } finally {
                 drip.stop(0);
+                executor.shutdownNow();
             }
         }
     }
