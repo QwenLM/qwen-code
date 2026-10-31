@@ -103,6 +103,7 @@ import type { RestoreOption } from './session-rewind.js';
 import { realUserPromptTexts } from '../utils/historyUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { t } from '../../i18n/index.js';
+import { requestConsentOrFail } from '../../commands/extensions/consent.js';
 import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
@@ -127,6 +128,9 @@ import { OpenTuiInputPrompt, type InputPromptProps } from './input-prompt.js';
 import { OpenTuiBanner } from './opentui-header.js';
 import { OpenTuiFooter, OpenTuiLoadingIndicator } from './opentui-footer.js';
 import { OpenTuiQueuedMessageDisplay } from './queued-message.js';
+import { OpenTuiModBand } from './mod-band.js';
+import { useModBand } from '../hooks/use-mod-band.js';
+import { modBandMaxRows } from '../utils/mod-band-tree.js';
 import {
   OpenTuiActionConfirmation,
   OpenTuiMcpApprovalDialog,
@@ -135,6 +139,8 @@ import {
 } from './dialogs-confirm.js';
 import { useMcpApproval } from '../hooks/useMcpApproval.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
+import { sanitizeTerminalText } from '../utils/textUtils.js';
+import { C } from './theme.js';
 import {
   getDialogMaxHeight,
   STATIC_EXTRA_HEIGHT,
@@ -344,6 +350,7 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
   const shellControllersRef = useRef<Set<AbortController>>(new Set());
   const { width: terminalWidth, height: terminalHeight } =
     useTerminalDimensions();
+  const modBand = useModBand(config);
   // ink renders every dialog inside a region of exactly this height, clipped,
   // with the composer swapped out (`DefaultAppLayout`'s dialog wrapper) — in
   // ink's default state: its show-more-lines key lifts `constrainHeight`, which
@@ -612,6 +619,29 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     }),
     [],
   );
+
+  useEffect(() => {
+    const manager = config.getExtensionManager();
+    const controller = new AbortController();
+    manager.setRequestConsent((options) => {
+      if (controller.signal.aborted)
+        return Promise.reject(
+          new Error(t('Extension installation cancelled.')),
+        );
+      return requestConsentOrFail(
+        (description) =>
+          confirmations.presentAction(
+            <text fg={C.text}>{sanitizeTerminalText(description)}</text>,
+            {
+              signal: controller.signal,
+              isCurrent: () => !controller.signal.aborted,
+            },
+          ),
+        options,
+      );
+    });
+    return () => controller.abort();
+  }, [config, confirmations]);
 
   const activeModal = modals[0] ?? null;
   const closeShellModal = useCallback(
@@ -1651,6 +1681,10 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
                 showPhrase={showLoadingPhrases}
               />
               <OpenTuiQueuedMessageDisplay messageQueue={displayedQueue} />
+              <OpenTuiModBand
+                band={modBand}
+                maxRows={modBandMaxRows(terminalHeight)}
+              />
               <OpenTuiInputPrompt
                 onSubmit={onSubmit}
                 onNotice={notify}

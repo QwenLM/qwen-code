@@ -312,6 +312,8 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => ({
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).tryResolveModelProtocol,
 
+  Config: (await importOriginal<typeof import('@qwen-code/qwen-code-core')>())
+    .Config,
   SessionSourceService: (
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>()
   ).SessionSourceService,
@@ -1121,6 +1123,8 @@ vi.mock('../ui/commands/contextCommand.js', () => ({
     skillToolDefinitionTokens: 0,
     loadedSkillBodiesTokens: 0,
     memoryFilesTokens: 50,
+    breakdown: { instructionFiles: 30, memoryFiles: 20 },
+    instructionFiles: [{ path: 'QWEN.md', tokens: 30 }],
     categories: [],
     builtinTools: [],
     mcpTools: [],
@@ -4521,6 +4525,48 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it.each([
+    [true, true],
+    [false, false],
+    [undefined, false],
+  ])(
+    'declares an MCP App host only when the client advertises one (%s)',
+    async (advertised, expected) => {
+      const innerConfig = await setupSessionMocks('mcp-app-host-session');
+      const agentPromise = runAcpAgent(
+        mockConfig,
+        makeSessionSettings(),
+        mockArgv,
+      );
+      await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+      const agent = capturedAgentFactory!({
+        get closed() {
+          return mockConnectionState.promise;
+        },
+      }) as AgentLike;
+      try {
+        await agent.initialize({
+          clientCapabilities:
+            advertised === undefined
+              ? {}
+              : { _meta: { 'qwen.mcpAppHost': advertised } },
+        });
+        await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+        if (expected) {
+          expect(innerConfig.setMcpAppHostSupported).toHaveBeenCalledWith(true);
+          expect(
+            innerConfig.setMcpAppHostSupported.mock.invocationCallOrder[0],
+          ).toBeLessThan(innerConfig.initialize.mock.invocationCallOrder[0]);
+        } else {
+          expect(innerConfig.setMcpAppHostSupported).not.toHaveBeenCalled();
+        }
+      } finally {
+        mockConnectionState.resolve();
+        await agentPromise;
+      }
+    },
+  );
+
   it('profiles newSession stages under the daemon trace context', async () => {
     const parentContext = { trace: 'parent' };
     mockExtractDaemonTraceContext.mockReturnValue(parentContext);
@@ -5782,6 +5828,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       setSessionSource: vi.fn(),
       setArtifactSnapshotsEnabled: vi.fn(),
       setGoalProposalHostSupported: vi.fn(),
+      setMcpAppHostSupported: vi.fn(),
       setSessionSourceServiceFactory: vi.fn(),
       registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
       getSessionSourceService: vi.fn(),
@@ -15375,10 +15422,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       SERVE_STATUS_EXT_METHODS.sessionAgents,
       { sessionId },
     );
+    // Distinguish the admission root from the live target dir so the
+    // workspaceRoot producer is pinned: a relocated session keeps its
+    // admission root while the live cwd moves. Applied after the context
+    // status read above so that assertion still sees the original cwd.
+    vi.mocked(innerConfig.storage.getProjectRoot).mockReturnValue('/repo');
+    vi.mocked(innerConfig.getTargetDir).mockReturnValue('/repo/sub');
     const contextUsage = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContextUsage,
       { sessionId, detail: true },
     );
+    // Restore the live cwd so the later LSP status assertion still sees /tmp.
+    vi.mocked(innerConfig.getTargetDir).mockReturnValue('/tmp');
     const lsp = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionLspStatus,
       {
@@ -15500,12 +15555,33 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(contextUsage).toMatchObject({
       v: 1,
       sessionId,
-      workspaceCwd: '/tmp',
+      workspaceCwd: '/repo/sub',
+      workspaceRoot: '/repo',
       usage: {
         modelName: 'm',
         showDetails: true,
+        breakdown: { instructionFiles: 30, memoryFiles: 20 },
+        instructionFiles: [{ path: 'QWEN.md', tokens: 30 }],
       },
       formattedText: expect.stringContaining('## Context Usage'),
+    });
+    const { collectContextData } = await import(
+      '../ui/commands/contextCommand.js'
+    );
+    vi.mocked(collectContextData).mockRejectedValueOnce(
+      new Error('Context not initialized'),
+    );
+    await expect(
+      agent.extMethod(SERVE_STATUS_EXT_METHODS.sessionContextUsage, {
+        sessionId,
+      }),
+    ).resolves.toMatchObject({
+      usage: {
+        breakdown: { instructionFiles: 0, memoryFiles: 0 },
+        instructionFiles: [],
+        memoryFiles: [],
+        isEstimated: true,
+      },
     });
     expect(lsp).toEqual({
       v: 1,
@@ -21491,6 +21567,56 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       'Japanese',
     );
     expect(updateOutputLanguageFile).toHaveBeenCalledWith('Japanese');
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('qwen/settings setCoreValue still resolves when the output language rule file write fails', async () => {
+    const settings = makeCoreSettings();
+    vi.mocked(loadSettings).mockReturnValue(settings);
+    const agentPromise = runAcpAgent(mockConfig, settings, mockArgv);
+
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    // output-language.md is a best-effort mirror of an already-persisted
+    // setting, so a filesystem failure here (EACCES/EROFS on an unwritable
+    // ~/.qwen) must not fail the whole route. `mockImplementationOnce` keeps
+    // the throwing implementation from leaking into later tests, since
+    // `beforeEach` only clears call records and not implementations.
+    vi.mocked(updateOutputLanguageFile).mockImplementationOnce(() => {
+      throw new Error('EACCES: permission denied');
+    });
+
+    await agent.extMethod('qwen/settings/setCoreValue', {
+      scope: 'user',
+      key: 'general.outputLanguage',
+      value: 'Japanese',
+    });
+
+    // Reaching this line is the point: the route resolved instead of rejecting
+    // with an opaque internal error.
+    expect(settings.setValue).toHaveBeenCalledWith(
+      'User',
+      'general.outputLanguage',
+      'Japanese',
+    );
+    // The setting stayed persisted at user scope - no rollback.
+    expect(settings.user.settings['general']).toEqual({
+      outputLanguage: 'Japanese',
+    });
+    expect(updateOutputLanguageFile).toHaveBeenCalledWith('Japanese');
+    // ...and the swallowed failure was logged rather than lost.
+    expect(mockDebugLogger.warn).toHaveBeenCalledWith(
+      'Failed to write output-language.md:',
+      expect.any(Error),
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -29711,6 +29837,42 @@ describe('QwenAgent session-management routing (rename / delete / list / branch 
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it('stops the session lsp client when an unstored config is cleaned up (#14751)', async () => {
+    const stop = vi.fn().mockResolvedValue(undefined);
+    const { Config: RealConfig } = await import('@qwen-code/qwen-code-core');
+    const realConfig = new RealConfig({
+      targetDir: '/tmp',
+      cwd: '/tmp',
+      debugMode: false,
+      model: 'test-model',
+      chatRecording: false,
+      lspClient: { stop } as never,
+    });
+    await realConfig.initialize({
+      skipLlmInitialization: true,
+      skipHooks: true,
+      skipMcpDiscovery: true,
+      skipSkillManager: true,
+      skipFileCheckpointing: true,
+      // SkillTool's constructor requires the SkillManager this Config
+      // deliberately skips; warm the registry leniently so it is logged and
+      // skipped instead of aborting initialize().
+      lenientToolWarmup: true,
+    });
+
+    const { agent, agentPromise } = await bootAgent(
+      makeLiveSessionInnerConfig(makeRecordingService()),
+    );
+    const cleanup = agent as unknown as {
+      cleanupUnstoredConfig(config: Config): Promise<void>;
+    };
+    await cleanup.cleanupUnstoredConfig(realConfig);
+    expect(stop).toHaveBeenCalledTimes(1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
 });
 
 describe('QwenAgent unstable_listSessions cursor parsing', () => {
@@ -30158,6 +30320,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       setSessionSource: vi.fn(),
       setArtifactSnapshotsEnabled: vi.fn(),
       setGoalProposalHostSupported: vi.fn(),
+      setMcpAppHostSupported: vi.fn(),
       setSessionSourceServiceFactory: vi.fn(),
       registerSessionSourceTool: vi.fn().mockResolvedValue(undefined),
       getSessionSourceService: vi.fn(),
