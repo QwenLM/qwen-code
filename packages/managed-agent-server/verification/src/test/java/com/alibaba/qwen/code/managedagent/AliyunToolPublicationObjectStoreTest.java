@@ -107,13 +107,16 @@ class AliyunToolPublicationObjectStoreTest {
 
     @Test
     void permanentOrUnclassifiedErrorsAreNotRetried() {
+        // ClientException("unknown") carries the code "Unknown"; only the
+        // no-argument constructor reaches the store's null-code guard.
         for (RuntimeException failure : new RuntimeException[] {
-                error("AccessDenied"), error("NoSuchKey"), new ClientException("unknown")}) {
+                error("AccessDenied"), error("NoSuchKey"), new ClientException("unknown"),
+                new ClientException()}) {
             doThrow(failure).when(client).getObject("bucket", "key");
             assertThatThrownBy(() -> store.open("key"))
                     .isInstanceOf(ToolPublicationStorageException.class).hasCause(failure);
         }
-        verify(client, times(3)).getObject("bucket", "key");
+        verify(client, times(4)).getObject("bucket", "key");
     }
 
     @Test
