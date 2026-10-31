@@ -79,6 +79,8 @@ function descendantArgs(root: number): string[] {
   const children = new Map<number, Array<{ pid: number; args: string }>>();
   for (const line of execFileSync('ps', ['-eo', 'pid=,ppid=,args='], {
     encoding: 'utf8',
+    // A loaded CI shard's process table exceeds execFileSync's 1 MiB default.
+    maxBuffer: 16 * 1024 * 1024,
   }).split('\n')) {
     const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/u.exec(line);
     if (!match) continue;

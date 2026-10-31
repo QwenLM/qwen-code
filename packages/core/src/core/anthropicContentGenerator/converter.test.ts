@@ -167,10 +167,10 @@ describe('AnthropicContentConverter', () => {
     });
 
     it('emits scope:"global" on the system text when useGlobalCacheScope is set', () => {
-      // Anthropic-native + caching enabled → the generator passes
-      // `useGlobalCacheScope: true` and the system prefix joins cross-session
-      // caching under the `prompt-caching-scope-2026-01-05` beta. Other
-      // backends pass false (or omit) and get the per-session shape above.
+      // Caching on plus an explicit `forceGlobalCacheScope` opt-in → the
+      // generator passes `useGlobalCacheScope: true`, and the system prefix
+      // joins cross-session caching under the scope beta. Without the opt-in
+      // every backend gets the per-session shape above.
       expect(systemOf('sys', { useGlobalCacheScope: true })).toEqual([
         txt('sys', GLOBAL),
       ]);
@@ -1595,9 +1595,9 @@ describe('AnthropicContentConverter', () => {
 
     it('emits scope:"global" on the last tool when useGlobalCacheScope is set', async () => {
       // Mirror of the system-block scope test: cross-session caching for
-      // tools (the largest, slowest-changing prefix) only fires for
-      // Anthropic-native baseURLs. The generator latches the predicate
-      // once per request and forwards the same value here.
+      // tools (the largest, slowest-changing prefix) only fires under an
+      // explicit `forceGlobalCacheScope` opt-in. The generator latches the
+      // predicate once per request and forwards the same value here.
       const result = await converter.convertLlmToolsToAnthropic(
         toolsOf(weather()),
         { useGlobalCacheScope: true },
@@ -1934,8 +1934,8 @@ describe('AnthropicContentConverter', () => {
 
       it('honors useGlobalCacheScope independently of enableCacheControl source', async () => {
         // Cache on (per-call), scope off (per-call default): the emitted
-        // shape is per-session even though cache_control IS attached —
-        // non-Anthropic baseURL behavior in one call.
+        // shape is per-session even though cache_control IS attached — the
+        // default on every baseURL.
         const { system } = convert(
           'Hello',
           {

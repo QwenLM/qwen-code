@@ -51,7 +51,14 @@ const LOOP_TYPE_LABELS: Record<LoopType, string> = {
 
 const ALWAYS_ON_HINT =
   ' This is an always-on guard and cannot be disabled via `model.skipLoopDetection`.';
+// Guards that follow `model.loopProtection` (#14828).
+const GOVERNED_HINT =
+  ' Set `model.loopProtection` to "warn" to remind the model instead of stopping, or to "off" to disable this guard.';
 const HEURISTIC_HINT =
+  ' Set `model.loopProtection` to "warn" to remind the model instead of stopping, or `model.skipLoopDetection` to true to disable this check.';
+// For content and thought repetition, which stops under "warn" too, and for
+// a stop of unknown type.
+const SKIP_HINT =
   ' Set the `model.skipLoopDetection` setting to true to disable.';
 
 function reasonLabel(stop: LoopStop): string | undefined {
@@ -81,7 +88,7 @@ function hint(stop: LoopStop): string {
     case LoopReason.BACKSTOP:
       return ' Set `model.maxToolCallsPerTurn` to choose a fixed cap instead (0 disables it).';
     case LoopReason.STUCK_REPETITION:
-      return ' Give the model a more specific instruction. An explicit `model.maxToolCallsPerTurn` replaces this repetition check with a fixed cap (0 disables it).';
+      return ' Give the model a more specific instruction, or set `model.loopProtection` to "warn" to remind it instead of stopping. An explicit `model.maxToolCallsPerTurn` replaces this repetition check with a fixed cap (0 disables it).';
     case LoopReason.REPEATED_CALL:
       return HEURISTIC_HINT;
     case LoopReason.PROVIDER_DUPLICATE_ID:
@@ -89,22 +96,24 @@ function hint(stop: LoopStop): string {
     default:
       break;
   }
-  const loopType = stop.loopType;
-  // The always-on guards run before the skipLoopDetection gate, so that
-  // setting can't disable them — don't suggest it for those loop types. The
-  // per-turn cap is also always-on but has its own knob, so it gets a
-  // dedicated hint instead of membership in this list.
-  const isAlwaysOn =
-    loopType === LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS ||
-    loopType === LoopType.SHELL_COMMAND_STAGNATION ||
-    loopType === LoopType.GLOBAL_TOOL_CALL_DUPLICATE ||
-    loopType === LoopType.INVALID_TOOL_PARAMS_STAGNATION ||
-    loopType === LoopType.REPEATED_TOOL_EXECUTION_FAILURE;
-  return loopType === LoopType.TURN_TOOL_CALL_CAP
-    ? ' A per-turn tool-call cap was reached. The default is adaptive (allows up to 1000 diverse calls, halting only on repeated calls); an explicitly set `model.maxToolCallsPerTurn` is a hard cap. If the model was repeating the same call, investigate the repetition; otherwise unset the value to use the adaptive default, or raise it (set 0 to disable).'
-    : isAlwaysOn
-      ? ALWAYS_ON_HINT
-      : HEURISTIC_HINT;
+  switch (stop.loopType) {
+    case LoopType.TURN_TOOL_CALL_CAP:
+      return ' A per-turn tool-call cap was reached. The default is adaptive (allows up to 1000 diverse calls, halting only on repeated calls); an explicitly set `model.maxToolCallsPerTurn` is a hard cap. If the model was repeating the same call, investigate the repetition; otherwise unset the value to use the adaptive default, or raise it (set 0 to disable).';
+    // The always-on guards run before the skipLoopDetection gate, so that
+    // setting can't disable them; `model.loopProtection` governs them.
+    case LoopType.CONSECUTIVE_IDENTICAL_TOOL_CALLS:
+    case LoopType.SHELL_COMMAND_STAGNATION:
+    case LoopType.INVALID_TOOL_PARAMS_STAGNATION:
+      return GOVERNED_HINT;
+    case LoopType.REPEATED_TOOL_EXECUTION_FAILURE:
+      return ALWAYS_ON_HINT;
+    case LoopType.CHANTING_IDENTICAL_SENTENCES:
+    case LoopType.REPETITIVE_THOUGHTS:
+    case undefined:
+      return SKIP_HINT;
+    default:
+      return HEURISTIC_HINT;
+  }
 }
 
 /**

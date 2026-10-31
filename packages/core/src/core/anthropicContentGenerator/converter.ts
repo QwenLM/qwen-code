@@ -211,7 +211,8 @@ export interface ConvertLlmRequestToAnthropicOptions {
    * When `true`, emit `cache_control: { type: 'ephemeral', scope: 'global' }`
    * on the system text and last tool entry so prefixes cache across
    * sessions; when `false` (or omitted), emit the SDK-standard per-session
-   * shape `{ type: 'ephemeral' }`. Must be a strict subset of
+   * shape `{ type: 'ephemeral' }`, which is what every caller passes unless
+   * the user explicitly opted in (issue #15039). Must be a strict subset of
    * `enableCacheControl` (no scope without a cache_control entry to
    * attach it to) and should mirror the generator's
    * `prompt-caching-scope-2026-01-05` beta-header gate — both ship
@@ -469,9 +470,11 @@ export class AnthropicContentConverter {
     // identical tool prefixes are cached across sessions — tools tend to
     // be the largest, slowest-changing prefix (often 5K+ tokens), so
     // cross-session reuse is where most of the hit-rate improvement under
-    // `prompt-caching-scope-2026-01-05` shows up. Non-Anthropic baseURLs
-    // ship the standard per-session shape so they don't see a scope
-    // extension they may not recognize.
+    // `prompt-caching-scope-2026-01-05` shows up. By default every baseURL
+    // ships the standard per-session shape: the API only accepts a global
+    // breakpoint when every preceding block is globally scoped too, and the
+    // four-breakpoint-per-request cap rules that out for a real tool list
+    // (issue #15039).
     // Per-call overrides mirror the request-shape gates in
     // `convertLlmRequestToAnthropic` so a qwen-oauth-style hot flip of
     // `enableCacheControl` (the only field `Config.handleModelChange()`
@@ -1075,8 +1078,10 @@ export class AnthropicContentConverter {
    * When `useGlobalCacheScope` is set, attach `scope: 'global'` so the
    * system prefix participates in cross-session caching under the
    * `prompt-caching-scope-2026-01-05` beta. Otherwise emit the standard
-   * per-session shape so non-Anthropic baseURLs aren't sent a scope
-   * extension they may not recognize.
+   * per-session shape, which is what every baseURL ships by default —
+   * a global breakpoint is only accepted when every preceding block is
+   * globally scoped too, and the tool list cannot satisfy that within
+   * Anthropic's four-breakpoint cap (issue #15039).
    *
    * When `staticSystemPrefix` matches the beginning of the system text and
    * a suffix follows (the managed auto-memory section the client appends
@@ -1401,8 +1406,9 @@ export class AnthropicContentConverter {
    * no `scope: 'global'`. The last user message changes every turn (it's
    * the live prompt and any tool_result blocks from the immediately prior
    * round), so cross-session reuse here has effectively zero hit rate and
-   * paying the global-scope overhead would just churn cache. The static
-   * system prefix and tool prefixes (which DO repeat across sessions) carry
+   * paying the global-scope overhead would just churn cache. Under an
+   * explicit `forceGlobalCacheScope` opt-in the static system prefix and
+   * the last tool (which DO repeat across sessions) carry
    * `scope: 'global'` instead.
    */
   private addCacheControlToMessages(

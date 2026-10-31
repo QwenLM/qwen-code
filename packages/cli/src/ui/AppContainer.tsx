@@ -28,7 +28,6 @@ import { ConfigContext } from './contexts/ConfigContext.js';
 import type { Part } from '@google/genai';
 import {
   type HistoryItem,
-  type HistoryItemUser,
   type IndividualToolCallDisplay,
   ToolCallStatus,
   type HistoryItemWithoutId,
@@ -64,8 +63,6 @@ import {
   PromptSuggestionEvent,
   logSpeculation,
   SpeculationEvent,
-  logWorkflowKeyword,
-  WorkflowKeywordEvent,
   resolveWorkflowSizeGuidelineSetting,
   type WorkflowSizeGuidelineSetting,
   startSpeculation,
@@ -92,9 +89,7 @@ import {
   applyCollapsePolicyAndSummary,
   buildResumedHistoryItems,
   computeResumedPromptCountSeed,
-  expandCollapsedHistory,
 } from './utils/resumeHistoryUtils.js';
-import { recoalesceFindingsHistoryItems } from './utils/findings-coalescing.js';
 import { buildWakeRepaint } from './utils/terminal-resize-reflow.js';
 import { loadLowlight } from './utils/lowlightLoader.js';
 import {
@@ -157,12 +152,11 @@ import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
 import { useSlashCommandProcessor } from './hooks/slashCommandProcessor.js';
 import { getInteractiveModSession } from '../services/interactive-mod-session.js';
+import { useModBand } from './hooks/use-mod-band.js';
+import { modBandInput } from './utils/mod-band-tree.js';
 import { useDoublePress } from './hooks/useDoublePress.js';
-import {
-  computeApiTruncationIndex,
-  isIdentifiedRetainedTurn,
-  isRealUserTurn,
-} from './utils/historyMapping.js';
+import { rewindSession } from './utils/session-rewind.js';
+import { isRewindableUserTurn } from './utils/historyMapping.js';
 import { waitForGoalRuntime } from './utils/goal-runtime.js';
 import { sanitizeTerminalLine } from './utils/textUtils.js';
 import {
@@ -195,7 +189,14 @@ import {
   isContextFilesAnnouncement,
   isSlashCommand,
 } from './utils/commandUtils.js';
-import { buildWorkflowKeywordPrefix } from './utils/workflow-keyword.js';
+import {
+  resolveWorkflowIntent,
+  type HumanPromptInput,
+} from '@qwen-code/qwen-code-core/core/workflow-intent.js';
+import {
+  expandPendingPastePlaceholders,
+  restorePasteDraft,
+} from './utils/paste-placeholders.js';
 import { buildWorkflowSizeGuidelineChangePrefix } from './utils/workflow-size-notice.js';
 import { parseSlashCommand } from './commands/commands.js';
 import { type LoadedSettings, SettingScope } from '../config/settings.js';
@@ -575,6 +576,12 @@ export function useQueuedSubmissionDrain({
         undefined,
         {
           userAdmission: { turnKey: submission.turnKey },
+          displayText: submission.displayText,
+          humanInput: submission.humanInput,
+          ...(submission.hasUnknownInput ? { hasUnknownInput: true } : {}),
+          ...(submission.pasteExpansions?.size
+            ? { pasteExpansions: submission.pasteExpansions }
+            : {}),
           ...(submission.submittedPrompt === undefined
             ? {}
             : { submittedPrompt: submission.submittedPrompt }),
@@ -594,6 +601,22 @@ export function useQueuedSubmissionDrain({
               submission.submittedPrompt,
               true,
               submission.shellMode,
+              ...(submission.displayText !== undefined ||
+              submission.humanInput !== undefined ||
+              submission.pasteExpansions?.size
+                ? ([
+                    {
+                      displayText: submission.displayText,
+                      humanInput: submission.humanInput,
+                      ...(submission.hasUnknownInput
+                        ? { hasUnknownInput: true }
+                        : {}),
+                      ...(submission.pasteExpansions?.size
+                        ? { pasteExpansions: submission.pasteExpansions }
+                        : {}),
+                    },
+                  ] as const)
+                : ([] as const)),
             );
             markAdmissionFailed();
           },
@@ -946,7 +969,7 @@ export const AppContainer = (props: AppContainerProps) => {
     config.getWorkingDir(),
   );
 
-  const { providerUpdateRequest, dismissProviderUpdate } = useProviderUpdates(
+  const { providerUpdateRequest } = useProviderUpdates(
     settings,
     config,
     historyManager.addItem,
@@ -1035,10 +1058,11 @@ export const AppContainer = (props: AppContainerProps) => {
     worktreeSession?.worktreePath ?? config.getTargetDir(),
   );
   const [showWorktreeExitDialog, setShowWorktreeExitDialog] = useState(false);
-  // P7-trigger: true while the current turn was steered toward the Workflow
-  // tool by the `workflow` keyword (drives the Footer indicator). Set in
-  // `handleFinalSubmit`, cleared when the turn returns to idle (effect below).
-  const [workflowKeywordActive, setWorkflowKeywordActive] = useState(false);
+  useEffect(() => {
+    config.setWorkflowKeywordTriggerEnabled?.(
+      settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+    );
+  }, [config, settings.merged.ui?.disableWorkflowKeywordTrigger]);
   /**
    * One-shot worktree restore reminder for the TUI path. Set during
    * `--resume` when the persisted sidecar names a live worktree, then
@@ -1245,7 +1269,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // Restore the transcript before Mod diagnostics, without making input
       // or Mod startup wait for asynchronous session recovery.
       void getInteractiveModSession(config)
-        ?.initialize()
+        ?.initialize(['AbovePrompt'])
         .catch(() => {});
 
       if (resumedSessionData) {
@@ -1545,19 +1569,32 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const preferredEditor = usePreferredEditor();
   const restoredSubmissionRef = useRef<
-    | (Pick<QueuedUserSubmission, 'modelText' | 'submittedPrompt'> & {
+    | (Pick<
+        QueuedUserSubmission,
+        | 'modelText'
+        | 'submittedPrompt'
+        | 'displayText'
+        | 'humanInput'
+        | 'hasUnknownInput'
+        | 'pasteExpansions'
+      > & {
         /** Model-bound prompt, when it differs from what the buffer holds. */
         modelSubmission?: string;
       })
     | null
   >(null);
+  const [pendingPastes, setPendingPastes] = useState<Map<string, string>>(
+    new Map(),
+  );
   const submittedPromptProvenanceUnavailableRef = useRef(false);
+  const humanInputProvenanceUnavailableRef = useRef(false);
   const setBufferTextRef = useRef<
     ReturnType<typeof useTextBuffer>['setText'] | null
   >(null);
   const invalidateSubmittedPromptProvenance = useCallback(() => {
     restoredSubmissionRef.current = null;
     submittedPromptProvenanceUnavailableRef.current = true;
+    humanInputProvenanceUnavailableRef.current = true;
   }, []);
   const handleBufferChange = useCallback((text: string) => {
     if (text.length === 0) {
@@ -1569,12 +1606,16 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = false;
+      humanInputProvenanceUnavailableRef.current = false;
       return;
     }
     if (
       restoredSubmissionRef.current !== null &&
       restoredSubmissionRef.current.modelText !== text
     ) {
+      humanInputProvenanceUnavailableRef.current =
+        restoredSubmissionRef.current.hasUnknownInput === true ||
+        restoredSubmissionRef.current.humanInput === undefined;
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = true;
     }
@@ -1602,6 +1643,7 @@ export const AppContainer = (props: AppContainerProps) => {
     restorePromptStash(promptStashTargetDir, buffer.text, (text) => {
       restoredSubmissionRef.current = null;
       submittedPromptProvenanceUnavailableRef.current = true;
+      humanInputProvenanceUnavailableRef.current = true;
       buffer.setText(text);
     });
   }, [buffer, promptStashTargetDir]);
@@ -1973,16 +2015,16 @@ export const AppContainer = (props: AppContainerProps) => {
   const openHelpDialog = useCallback(() => setHelpDialogOpen(true), []);
   const closeHelpDialog = useCallback(() => setHelpDialogOpen(false), []);
 
-  const { vimEnabled, vimMode } = useVimModeState();
+  const { vimEnabled } = useVimModeState();
   const { toggleVimEnabled } = useVimModeActions();
 
   useLayoutEffect(() => {
     if (vimEnabled && buffer.text.length > 0) {
-      // Vim registers outlive buffer clears, so provenance cannot be recovered
-      // by pasting register contents and then disabling Vim.
-      invalidateSubmittedPromptProvenance();
+      // Vim edits cannot preserve Hook provenance. Register pastes separately
+      // invalidate human origin at the mutation site.
+      submittedPromptProvenanceUnavailableRef.current = true;
     }
-  }, [buffer.text, invalidateSubmittedPromptProvenance, vimEnabled]);
+  }, [buffer.text, vimEnabled]);
 
   const {
     isSubagentCreateDialogOpen,
@@ -2013,7 +2055,9 @@ export const AppContainer = (props: AppContainerProps) => {
   // Ref bridges: these callbacks are defined later, but slashCommandActions
   // needs them now. The refs let the useMemo capture stable function pointers
   // whose implementations are swapped in once the real callbacks exist.
-  const openRewindSelectorRef = useRef<() => void>(() => {});
+  const openRewindSelectorRef = useRef<(origin?: 'slash-command') => void>(
+    () => {},
+  );
   const cancelOngoingRequestRef = useRef<() => void>(() => {});
 
   // /diff opens a per-turn diff dialog. Unlike rewind, no double-press or
@@ -2164,7 +2208,8 @@ export const AppContainer = (props: AppContainerProps) => {
       openHooksDialog,
       openStatsDialog,
       openResumeDialog,
-      openRewindSelector: () => openRewindSelectorRef.current(),
+      openRewindSelector: (origin?: 'slash-command') =>
+        openRewindSelectorRef.current(origin),
       openDiffDialog,
       handleResume,
       handleBranch,
@@ -2510,6 +2555,7 @@ export const AppContainer = (props: AppContainerProps) => {
     pendingToolCalls,
     streamingResponseLengthRef,
     isReceivingContent,
+    workflowKeywordActive,
   } = useLlmStream(
     config.getLlmClient(),
     historyManager.history,
@@ -2547,9 +2593,6 @@ export const AppContainer = (props: AppContainerProps) => {
   useEffect(() => {
     if (streamingState === StreamingState.Idle) {
       updateHandlerRef.current?.flush();
-      // P7-trigger: a steered turn has finished — drop the `workflow active`
-      // indicator until the next keyword prompt re-arms it.
-      setWorkflowKeywordActive(false);
     }
   }, [streamingState]);
 
@@ -2632,6 +2675,14 @@ export const AppContainer = (props: AppContainerProps) => {
     }
   }, []);
 
+  useEffect(
+    () =>
+      config.onWorkflowModeChange?.(() => {
+        if (config.hasWorkflowModeContext()) abortPromptSuggestion();
+      }),
+    [config, abortPromptSuggestion],
+  );
+
   // Auto-accept indicator — disabled on agent tabs (agents handle their own)
   const llmClient = config.getLlmClient();
 
@@ -2707,10 +2758,35 @@ export const AppContainer = (props: AppContainerProps) => {
     }
     const submission = popAllMessages();
     if (submission === null) return null;
-    restoredSubmissionRef.current = submission;
+    const hasUnknownInput =
+      submission.hasUnknownInput ||
+      (buffer.text.length > 0 && humanInputProvenanceUnavailableRef.current);
+    const draft = restorePasteDraft(
+      submission.displayText ?? submission.modelText,
+      submission.pasteExpansions ?? new Map(),
+      pendingPastes,
+    );
+    const text = draft.text;
+    setPendingPastes(draft.pasteExpansions);
+    restoredSubmissionRef.current = {
+      ...submission,
+      ...(hasUnknownInput ? { hasUnknownInput: true } : {}),
+      modelText: text,
+      ...(text === submission.modelText
+        ? {}
+        : { modelSubmission: submission.modelText }),
+    };
     submittedPromptProvenanceUnavailableRef.current = false;
-    return submission.modelText;
-  }, [popAllMessages, releaseQueuedGoalReservations, removeGoalTurns]);
+    humanInputProvenanceUnavailableRef.current =
+      hasUnknownInput === true || submission.humanInput === undefined;
+    return text;
+  }, [
+    popAllMessages,
+    releaseQueuedGoalReservations,
+    removeGoalTurns,
+    pendingPastes,
+    buffer.text,
+  ]);
 
   useEffect(() => {
     const host: GoalTurnHost = {
@@ -3124,19 +3200,46 @@ export const AppContainer = (props: AppContainerProps) => {
       options?: {
         deferUntilIdle?: boolean;
         submittedPrompt?: string;
+        displayText?: string;
+        humanInput?: HumanPromptInput;
+        pasteExpansions?: ReadonlyMap<string, string>;
       },
     ) => {
       const consumesComposerState = options !== undefined;
+      const pasteExpansions = consumesComposerState
+        ? (options?.pasteExpansions ?? pendingPastes)
+        : undefined;
       const restoredSubmission = consumesComposerState
         ? restoredSubmissionRef.current
         : null;
       const submittedPromptProvenanceUnavailable =
         consumesComposerState &&
         submittedPromptProvenanceUnavailableRef.current;
+      const humanInputProvenanceUnavailable =
+        consumesComposerState && humanInputProvenanceUnavailableRef.current;
       if (consumesComposerState) {
         restoredSubmissionRef.current = null;
         submittedPromptProvenanceUnavailableRef.current = false;
+        humanInputProvenanceUnavailableRef.current = false;
+        setPendingPastes(new Map());
       }
+      const displayText = options?.displayText;
+      const unchangedRestoredSubmission =
+        restoredSubmission !== null &&
+        restoredSubmission.modelText === (displayText ?? submittedValue);
+      let humanInput = shellModeActive
+        ? undefined
+        : unchangedRestoredSubmission
+          ? restoredSubmission.humanInput
+          : humanInputProvenanceUnavailable ||
+              (restoredSubmission !== null &&
+                (restoredSubmission.hasUnknownInput ||
+                  restoredSubmission.humanInput === undefined))
+            ? undefined
+            : options?.humanInput;
+      const hasUnknownInput = unchangedRestoredSubmission
+        ? restoredSubmission.hasUnknownInput
+        : undefined;
       const submittedPromptCandidate = options?.submittedPrompt;
       const provenanceEnabled =
         !vimEnabled && submittedPromptCandidate !== undefined;
@@ -3147,11 +3250,18 @@ export const AppContainer = (props: AppContainerProps) => {
           ? undefined
           : restoredSubmission === null
             ? trimmedSubmittedPrompt || undefined
-            : restoredSubmission.modelText === submittedValue
+            : unchangedRestoredSubmission
               ? restoredSubmission.submittedPrompt
               : undefined;
       if (restoredSubmission !== null || submittedPromptProvenanceUnavailable) {
         setBufferText('', { clearUndoHistory: true });
+      }
+
+      if (pasteExpansions?.size && options?.pasteExpansions === undefined) {
+        submittedValue = expandPendingPastePlaceholders(
+          submittedValue,
+          pasteExpansions,
+        );
       }
 
       // Route to active in-process agent if viewing a sub-agent tab.
@@ -3162,13 +3272,27 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
       }
-      // The user's raw text, captured before any `<system-reminder>` prefix is
-      // prepended below (so keyword detection sees only what the user typed).
       const userPromptText = submittedValue;
+      if (isSlashCommand(userPromptText) || isBtwCommand(userPromptText)) {
+        humanInput = undefined;
+      }
+      const submissionMetadata =
+        displayText !== undefined ||
+        humanInput !== undefined ||
+        pasteExpansions?.size
+          ? ([
+              {
+                displayText,
+                humanInput,
+                ...(hasUnknownInput ? { hasUnknownInput: true } : {}),
+                ...(pasteExpansions?.size ? { pasteExpansions } : {}),
+              },
+            ] as const)
+          : ([] as const);
       // A cancelled turn comes back to the composer as the user's own text;
       // re-send the model-bound copy so its consumed notice is not lost.
       if (
-        restoredSubmission !== null &&
+        unchangedRestoredSubmission &&
         restoredSubmission.modelSubmission !== undefined
       ) {
         submittedValue = restoredSubmission.modelSubmission;
@@ -3254,35 +3378,6 @@ export const AppContainer = (props: AppContainerProps) => {
           `<system-reminder>\n${worktreeNotice}\n</system-reminder>\n\n` +
           submittedValue;
       }
-      // P7-trigger: when the user's prompt mentions `workflow`, softly steer
-      // this turn toward the Workflow tool (same one-shot reminder mechanism
-      // as the worktree notice). Detect on the user's original text — `notice`
-      // above only adds system text, never the keyword. Gated on the feature
-      // flag + the opt-out setting; skipped for slash commands. The model
-      // keeps discretion, so a casual mention can't force a tool call.
-      const workflowTriggerEnabled =
-        config.isWorkflowsEnabled() &&
-        !settings.merged.ui?.disableWorkflowKeywordTrigger;
-      if (
-        workflowTriggerEnabled &&
-        !isSlashCommand(userPromptText) &&
-        // Skip `?btw`/`/btw` side-questions: prefixing a system-reminder would
-        // break the BTW routing check below (which tests `submittedValue`),
-        // queuing the side question as a normal prompt instead.
-        !isBtwCommand(userPromptText)
-      ) {
-        // A `null` result means no reminder for this submission: the keyword
-        // is absent, the Workflow tool is not in this session, or this is a
-        // shell-mode command, which goes to bash rather than to the model.
-        const prefix = buildWorkflowKeywordPrefix(config, userPromptText, {
-          shellMode: shellModeActive,
-        });
-        if (prefix) {
-          setWorkflowKeywordActive(true);
-          logWorkflowKeyword(config, new WorkflowKeywordEvent());
-          submittedValue = prefix + submittedValue;
-        }
-      }
       // The Workflow tool description states the size guideline it was built
       // with. When the user changes the setting mid-session, say so on the next
       // prompt the model reads, and move the runtime thresholds with it.
@@ -3316,7 +3411,13 @@ export const AppContainer = (props: AppContainerProps) => {
         submittedPrompt = userPromptText;
       }
       if (options?.deferUntilIdle) {
-        addMessage(submittedValue, true, submittedPrompt, shellModeActive);
+        addMessage(
+          submittedValue,
+          true,
+          submittedPrompt,
+          shellModeActive,
+          ...submissionMetadata,
+        );
         return;
       }
       if (
@@ -3335,12 +3436,22 @@ export const AppContainer = (props: AppContainerProps) => {
         void Promise.resolve(
           submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
             ...(submittedPrompt === undefined ? {} : { submittedPrompt }),
+            displayText,
+            ...(pasteExpansions?.size ? { pasteExpansions } : {}),
             onAdmissionFailed: () => {
               addMessage(
                 submittedValue,
                 true,
                 submittedPrompt,
                 shellModeActive,
+                ...(displayText === undefined && !pasteExpansions?.size
+                  ? ([] as const)
+                  : ([
+                      {
+                        displayText,
+                        ...(pasteExpansions?.size ? { pasteExpansions } : {}),
+                      },
+                    ] as const)),
               );
             },
           }),
@@ -3352,10 +3463,16 @@ export const AppContainer = (props: AppContainerProps) => {
 
       // Check if speculation has results for this submission
       const spec = speculationRef.current;
+      const needsWorkflowIntent =
+        spec.status === 'completed' &&
+        spec.suggestion === submittedValue &&
+        resolveWorkflowIntent(config, humanInput) !== null;
       if (
         spec.status !== 'idle' &&
         spec.suggestion === submittedValue &&
-        spec.status === 'completed'
+        spec.status === 'completed' &&
+        !needsWorkflowIntent &&
+        !config.hasWorkflowModeContext()
       ) {
         // Accept completed speculation: inject messages and apply files
         acceptSpeculation(spec, llmClient)
@@ -3439,14 +3556,24 @@ export const AppContainer = (props: AppContainerProps) => {
           })
           .catch(() => {
             // Fallback: submit normally
-            addMessage(submittedValue, false, submittedPrompt, shellModeActive);
+            addMessage(
+              submittedValue,
+              false,
+              submittedPrompt,
+              shellModeActive,
+              ...submissionMetadata,
+            );
           });
         speculationRef.current = IDLE_SPECULATION;
         return;
       }
 
-      // Abort any running speculation since we're submitting something different
-      if (spec.status === 'running') {
+      // Automatic speculation never received the current human intent.
+      if (
+        spec.status === 'running' ||
+        needsWorkflowIntent ||
+        (spec.status !== 'idle' && config.hasWorkflowModeContext())
+      ) {
         abortSpeculation(spec).catch(() => {});
         speculationRef.current = IDLE_SPECULATION;
       }
@@ -3457,19 +3584,24 @@ export const AppContainer = (props: AppContainerProps) => {
         isSlashCommand(submittedValue)
       ) {
         void Promise.resolve(
-          submitQuery(
-            submittedValue,
-            SendMessageType.UserQuery,
-            undefined,
-            submittedPrompt === undefined ? undefined : { submittedPrompt },
-          ),
+          submitQuery(submittedValue, SendMessageType.UserQuery, undefined, {
+            submittedPrompt,
+            displayText,
+            ...(pasteExpansions?.size ? { pasteExpansions } : {}),
+          }),
         ).catch((error) => {
           debugLogger.warn('Failed to admit slash command', error);
         });
         return;
       }
 
-      addMessage(submittedValue, false, submittedPrompt, shellModeActive);
+      addMessage(
+        submittedValue,
+        false,
+        submittedPrompt,
+        shellModeActive,
+        ...submissionMetadata,
+      );
     },
     [
       addMessage,
@@ -3482,11 +3614,11 @@ export const AppContainer = (props: AppContainerProps) => {
       config,
       llmClient,
       historyManager,
-      settings.merged.ui?.disableWorkflowKeywordTrigger,
       settings.merged.tools?.workflowSizeGuideline,
       setBufferText,
       shellModeActive,
       vimEnabled,
+      pendingPastes,
     ],
   );
 
@@ -3549,16 +3681,33 @@ export const AppContainer = (props: AppContainerProps) => {
       }
       const popped = popAllMessages();
       if (popped) {
+        const hasUnknownInput =
+          popped.hasUnknownInput ||
+          (!draftWasEmpty && humanInputProvenanceUnavailableRef.current);
         // Same contract as the auto-restore path below: the buffer holds the
         // user's own text, and the model-bound copy rides along so an
         // unchanged resubmit keeps the one-shot notice (#11553).
-        const restoredText = popped.submittedPrompt ?? popped.modelText;
+        const draft = restorePasteDraft(
+          popped.displayText ?? popped.submittedPrompt ?? popped.modelText,
+          popped.pasteExpansions ?? new Map(),
+          pendingPastes,
+        );
+        const restoredText = draft.text;
+        setPendingPastes(draft.pasteExpansions);
         restoredSubmissionRef.current = {
           modelText: restoredText,
           submittedPrompt: popped.submittedPrompt,
+          displayText: popped.displayText,
+          humanInput: popped.humanInput,
+          ...(hasUnknownInput ? { hasUnknownInput: true } : {}),
+          ...(popped.pasteExpansions?.size
+            ? { pasteExpansions: popped.pasteExpansions }
+            : {}),
           modelSubmission: popped.modelText,
         };
         submittedPromptProvenanceUnavailableRef.current = false;
+        humanInputProvenanceUnavailableRef.current =
+          hasUnknownInput === true || popped.humanInput === undefined;
         const currentText = buffer.text;
         buffer.setText(
           currentText ? `${restoredText}\n${currentText}` : restoredText,
@@ -3574,7 +3723,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // the strip only pops trailing user entries, and a responded prompt is
       // not trailing.
       if (info?.wasGoalTurn) {
-        llmClient?.stripOrphanedUserEntriesFromHistory?.();
+        llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
       }
 
       // Restore-on-cancel: pull the just-submitted prompt back into the input
@@ -3622,8 +3771,22 @@ export const AppContainer = (props: AppContainerProps) => {
         return;
       }
       const restoreCancelledPrompt = () => {
+        const draft = restorePasteDraft(
+          cancelledTurnUserItem.text,
+          cancelledTurnUserItem.pasteExpansions ?? new Map(),
+          pendingPastes,
+        );
+        setPendingPastes(draft.pasteExpansions);
         restoredSubmissionRef.current = {
-          modelText: cancelledTurnUserItem.text,
+          modelText: draft.text,
+          displayText: draft.text,
+          ...(cancelledTurnUserItem.pasteExpansions?.size
+            ? { pasteExpansions: cancelledTurnUserItem.pasteExpansions }
+            : {}),
+          humanInput: cancelledTurnUserItem.humanInput,
+          ...(cancelledTurnUserItem.hasUnknownInput
+            ? { hasUnknownInput: true }
+            : {}),
           ...(cancelledTurnUserItem.submittedPrompt === undefined
             ? {}
             : { submittedPrompt: cancelledTurnUserItem.submittedPrompt }),
@@ -3632,7 +3795,10 @@ export const AppContainer = (props: AppContainerProps) => {
             : { modelSubmission: cancelledTurnUserItem.modelText }),
         };
         submittedPromptProvenanceUnavailableRef.current = false;
-        buffer.setText(cancelledTurnUserItem.text);
+        humanInputProvenanceUnavailableRef.current =
+          cancelledTurnUserItem.hasUnknownInput === true ||
+          cancelledTurnUserItem.humanInput === undefined;
+        buffer.setText(draft.text);
       };
 
       if (pendingHistoryItems.some((item) => item.type === 'tool_group')) {
@@ -3723,7 +3889,7 @@ export const AppContainer = (props: AppContainerProps) => {
       // contradict what the UI told the user was rewound. Mirrors the
       // existing strip in the Retry submit path
       // (LlmClient.sendMessageStream).
-      llmClient?.stripOrphanedUserEntriesFromHistory?.();
+      llmClient?.stripOrphanedUserEntriesFromHistory?.(true);
       // Also undo the cross-session ↑-history disk entry written by
       // useLlmStream's `logger.logMessage` — otherwise
       // getPreviousUserMessages would resurrect the cancelled prompt next
@@ -3740,6 +3906,7 @@ export const AppContainer = (props: AppContainerProps) => {
     },
     [
       buffer,
+      pendingPastes,
       popAllMessages,
       releaseQueuedGoalReservations,
       removeGoalTurns,
@@ -3762,7 +3929,44 @@ export const AppContainer = (props: AppContainerProps) => {
     remountStaticHistory();
   }, [historyManager, remountStaticHistory]);
 
-  const { handleInput: vimHandleInput } = useVim(buffer, handleFinalSubmit);
+  const submitVimPrompt = useCallback(
+    (text: string) => {
+      buffer.setText('');
+      handleFinalSubmit(text, {
+        displayText: text,
+        humanInput: {
+          text: expandPendingPastePlaceholders(text, pendingPastes),
+        },
+      });
+    },
+    [buffer, handleFinalSubmit, pendingPastes],
+  );
+  // Vim's Enter bypasses the composer, so route it through the submit path
+  // the composer registers: large-paste expansion, the submit epoch and the
+  // stash cleanup all live there.
+  const promptSubmitRef = useRef<((value: string) => void) | null>(null);
+  const registerPromptSubmit = useCallback(
+    (handler: ((value: string) => void) | null) => {
+      promptSubmitRef.current = handler;
+    },
+    [],
+  );
+  const handleVimSubmit = useCallback(
+    (value: string) => {
+      const submit = promptSubmitRef.current;
+      if (submit) {
+        submit(value);
+        return;
+      }
+      submitVimPrompt(value);
+    },
+    [submitVimPrompt],
+  );
+  const { handleInput: vimHandleInput, ownsEscape: vimOwnsEscape } = useVim(
+    buffer,
+    handleVimSubmit,
+    invalidateSubmittedPromptProvenance,
+  );
 
   /**
    * Determines if the input prompt should be active and accept user input.
@@ -3919,9 +4123,16 @@ export const AppContainer = (props: AppContainerProps) => {
           if (result.suggestion) {
             setPromptSuggestion(result.suggestion);
             // Start speculation if enabled (runs in background)
-            if (settings.merged.ui?.enableSpeculation) {
+            if (
+              settings.merged.ui?.enableSpeculation &&
+              !config.hasWorkflowModeContext()
+            ) {
               startSpeculation(config, result.suggestion, ac.signal)
                 .then((state) => {
+                  if (ac.signal.aborted || config.hasWorkflowModeContext()) {
+                    void abortSpeculation(state).catch(() => {});
+                    return;
+                  }
                   speculationRef.current = state;
                 })
                 .catch(() => {
@@ -4149,6 +4360,29 @@ export const AppContainer = (props: AppContainerProps) => {
     : 'hidden';
   const [controlsHeight, setControlsHeight] = useState(0);
 
+  // The Mods' band above the prompt: its input, and its tree, whose height
+  // the controls measurement below takes in.
+  const modBand = useModBand(config);
+  const isModWorking = streamingState !== StreamingState.Idle;
+  useEffect(() => {
+    getInteractiveModSession(config)?.setRenderInput(
+      modBandInput({
+        columns: terminalWidth,
+        rows: terminalHeight,
+        isFullscreen: useTerminalBuffer,
+        hasSurvey: isFeedbackDialogOpen,
+        isWorking: isModWorking,
+      }),
+    );
+  }, [
+    config,
+    terminalWidth,
+    terminalHeight,
+    useTerminalBuffer,
+    isFeedbackDialogOpen,
+    isModWorking,
+  ]);
+
   // Re-measure the footer whenever the LiveAgentPanel's height can change
   // (agents launching / finishing / focus), so `controlsHeight` — and thus
   // `availableTerminalHeight` — never goes stale below the composer. See
@@ -4196,6 +4430,7 @@ export const AppContainer = (props: AppContainerProps) => {
     embeddedShellFocused,
     messageQueue.length,
     isInputActive,
+    modBand,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
@@ -4286,23 +4521,34 @@ export const AppContainer = (props: AppContainerProps) => {
   // --- Rewind selector callbacks ---
   // IDE guard here is NOT redundant with the keyboard handler guard (line ~2375):
   // /rewind calls openRewindSelector directly, bypassing the keyboard handler.
-  const openRewindSelector = useCallback(() => {
-    if (streamingState !== StreamingState.Idle) return;
-    if (dialogsVisibleRef.current) return;
-    if (config.getIdeMode()) {
-      historyManager.addItem(
-        {
-          type: 'info',
-          text: 'Rewind is disabled in IDE mode.',
-        },
-        Date.now(),
-      );
-      return;
-    }
-    const hasUserTurns = historyManager.history.some((h) => h.type === 'user');
-    if (!hasUserTurns) return;
-    setIsRewindSelectorOpen(true);
-  }, [streamingState, config, historyManager]);
+  const openRewindSelector = useCallback(
+    (origin?: 'slash-command') => {
+      if (
+        streamingState !== StreamingState.Idle &&
+        !(
+          origin === 'slash-command' &&
+          streamingState === StreamingState.Responding
+        )
+      )
+        return;
+      if (dialogsVisibleRef.current) return;
+      if (config.getIdeMode()) {
+        historyManager.addItem(
+          {
+            type: 'info',
+            text: 'Rewind is disabled in IDE mode.',
+          },
+          Date.now(),
+        );
+        return;
+      }
+      const hasRewindableTurns =
+        historyManager.history.some(isRewindableUserTurn);
+      if (!hasRewindableTurns) return;
+      setIsRewindSelectorOpen(true);
+    },
+    [streamingState, config, historyManager],
+  );
   openRewindSelectorRef.current = openRewindSelector;
 
   const closeRewindSelector = useCallback(() => {
@@ -4311,216 +4557,57 @@ export const AppContainer = (props: AppContainerProps) => {
 
   const handleRewindConfirm = useCallback(
     async (userItem: HistoryItem, option: RestoreOption) => {
+      const snapshot = historyManager.history;
+      const sessionId = config.getSessionId();
+      let loaded: HistoryItem[] | undefined;
+      let noticeId: number | undefined;
+      const isCurrent = () => {
+        const current = historyRef.current;
+        return (
+          config.getSessionId() === sessionId &&
+          isIdleRef.current &&
+          (current === snapshot ||
+            (loaded !== undefined &&
+              (current === loaded ||
+                (current.length === loaded.length + 1 &&
+                  current.at(-1)?.id === noticeId &&
+                  loaded.every((item, index) => item === current[index])))))
+        );
+      };
       try {
-        if (
-          config.getShellExecutionSandbox?.() &&
-          (option === 'code' || option === 'both')
-        ) {
-          historyManager.addItem(
-            {
-              type: 'error',
-              text: 'File restore is unavailable in tool sandbox.',
-            },
-            Date.now(),
-          );
-          return;
-        }
-
-        // For 'both', validate that conversation can be truncated BEFORE
-        // touching files — otherwise we'd roll back the workspace while
-        // the conversation stays at the newer state.
-        const needsConversation =
-          option === 'conversation' || option === 'both';
-        const llmClient = needsConversation ? config.getLlmClient() : null;
-        let apiTruncateIndex = -1;
-        let conversationSkippedNoClient = false;
-        if (needsConversation) {
-          if (!llmClient) {
-            if (option === 'conversation') {
-              historyManager.addItem(
-                {
-                  type: 'error',
-                  text: t(
-                    'Cannot rewind conversation: no active model client.',
-                  ),
-                },
-                Date.now(),
-              );
-              return;
+        const outcome = await rewindSession(
+          config,
+          snapshot,
+          userItem,
+          option,
+          (truncatedUi, draft) => {
+            clearPendingStateRef.current();
+            loaded = truncatedUi;
+            loadHistoryWithLatchReconciliation(truncatedUi);
+            refreshStatic();
+            if (draft) {
+              restoredSubmissionRef.current = null;
+              submittedPromptProvenanceUnavailableRef.current = true;
+              humanInputProvenanceUnavailableRef.current = true;
+              buffer.setText(draft);
             }
-            // 'both' with no client: skip conversation, still try files,
-            // and surface a warning after the restore output.
-            conversationSkippedNoClient = true;
-          } else {
-            apiTruncateIndex = computeApiTruncationIndex(
-              historyManager.history,
-              userItem.id,
-              llmClient.getHistoryShallow(),
+            noticeId = historyManager.addItem(
+              {
+                type: 'info',
+                text: t(
+                  'Conversation rewound. Edit your prompt and press Enter to continue.',
+                ),
+              },
+              Date.now(),
             );
-            if (apiTruncateIndex < 0) {
-              historyManager.addItem(
-                {
-                  type: 'error',
-                  text: isIdentifiedRetainedTurn(
-                    historyManager.history,
-                    userItem.id,
-                  )
-                    ? t(
-                        'Cannot rewind the conversation to this turn: it no longer matches the model history (for example, after a retry). Try a more recent turn.',
-                      )
-                    : t(
-                        'Cannot rewind to a turn that was compressed. Try a more recent turn.',
-                      ),
-                },
-                Date.now(),
-              );
-              if (option === 'both') {
-                // Abort file restore too — don't create inconsistent state
-                return;
-              }
-              return;
-            }
-          }
-        }
-
-        // Restore code (files on disk). For 'code'-only, don't truncate
-        // the snapshot timeline — the conversation turns remain visible
-        // and their snapshots must stay available for future rewinds.
-        let fileRestoreMessage: string | undefined;
-        let fileRestoreError: string | undefined;
-        let hasRestoreFailure = false;
-        if (option === 'code' || option === 'both') {
-          const promptId = (userItem as HistoryItemUser).promptId;
-          if (promptId) {
-            try {
-              const truncateHistory =
-                option === 'both' && !!llmClient && apiTruncateIndex >= 0;
-              const result = await config
-                .getFileHistoryService()
-                .rewind(promptId, truncateHistory);
-              if (result.filesChanged.length > 0) {
-                fileRestoreMessage = t('Restored {{count}} file(s).', {
-                  count: String(result.filesChanged.length),
-                });
-              } else if (result.filesFailed.length === 0) {
-                fileRestoreMessage = t('No files needed to be restored.');
-              }
-              if (result.filesFailed.length > 0) {
-                hasRestoreFailure = true;
-                fileRestoreError = t(
-                  'Failed to restore {{count}} file(s): {{files}}',
-                  {
-                    count: String(result.filesFailed.length),
-                    files: result.filesFailed
-                      .map((f) => f.split('/').pop())
-                      .join(', '),
-                  },
-                );
-              }
-            } catch (error) {
-              hasRestoreFailure = true;
-              fileRestoreError = t('Failed to restore files: {{error}}', {
-                error: error instanceof Error ? error.message : String(error),
-              });
-            }
-          } else {
-            hasRestoreFailure = true;
-            fileRestoreError = t(
-              'Cannot restore files: this turn was created before file checkpointing was enabled.',
-            );
-          }
-        }
-
-        // Truncate conversation (already validated above).
-        // Skip if file restore had failures in "both" mode to avoid inconsistent state.
-        if (
-          needsConversation &&
-          llmClient &&
-          apiTruncateIndex >= 0 &&
-          !(option === 'both' && hasRestoreFailure)
-        ) {
-          const originalHistory = historyManager.history;
-          const hasSummary = originalHistory.some(
-            (h) => h.display?.kind === 'collapse-summary',
-          );
-          const effectiveLength = hasSummary
-            ? originalHistory.length - 1
-            : originalHistory.length;
-
-          let targetTurnIndex = 0;
-          for (const h of originalHistory) {
-            if (h.id === userItem.id) break;
-            if (isRealUserTurn(h)) targetTurnIndex++;
-          }
-
-          llmClient.truncateHistory(apiTruncateIndex);
-
-          // Strip suppressOnRestore flags and filter out collapse-summary items
-          // so rewound items remain visible without stale summary text
-          const truncatedUi = recoalesceFindingsHistoryItems(
-            expandCollapsedHistory(
-              originalHistory.filter((h) => h.id < userItem.id),
-            ),
-          );
-          clearPendingStateRef.current();
-          loadHistoryWithLatchReconciliation(truncatedUi);
-
-          refreshStatic();
-
-          if (userItem.type === 'user' && userItem.text) {
-            restoredSubmissionRef.current = null;
-            submittedPromptProvenanceUnavailableRef.current = true;
-            buffer.setText(userItem.text);
-          }
-
-          historyManager.addItem(
-            {
-              type: 'info',
-              text: t(
-                'Conversation rewound. Edit your prompt and press Enter to continue.',
-              ),
-            },
-            Date.now(),
-          );
-
-          config.getChatRecordingService()?.rewindRecording(
-            targetTurnIndex,
-            { truncatedCount: effectiveLength - truncatedUi.length },
-            !hasRestoreFailure
-              ? config
-                  .getFileHistoryService()
-                  .getSnapshots()
-                  .slice(0, targetTurnIndex + 1)
-              : undefined,
-          );
-        }
-
-        // Show file restore result after conversation truncation so the
-        // message isn't immediately removed by loadHistory.
-        if (fileRestoreMessage) {
-          historyManager.addItem(
-            { type: 'info', text: fileRestoreMessage },
-            Date.now(),
-          );
-        }
-        if (fileRestoreError) {
-          historyManager.addItem(
-            { type: 'error', text: fileRestoreError },
-            Date.now(),
-          );
-        }
-        if (conversationSkippedNoClient) {
-          historyManager.addItem(
-            {
-              type: 'info',
-              text: t(
-                'Code restored, but conversation could not be rewound (no active client).',
-              ),
-            },
-            Date.now(),
-          );
-        }
+          },
+          isCurrent,
+        );
+        if (!outcome.stale && isCurrent())
+          for (const message of outcome.messages)
+            historyManager.addItem(message, Date.now());
       } catch (error) {
+        if (!isCurrent()) return;
         historyManager.addItem(
           {
             type: 'error',
@@ -4872,11 +4959,9 @@ export const AppContainer = (props: AppContainerProps) => {
         if (contextMenuOpenRef.current) {
           return;
         }
-        // In vim INSERT mode, let vim's own handler (in InputPrompt) consume
-        // the Esc to switch to NORMAL mode. Without this guard, both handlers
-        // fire on the same keypress — vim switches mode AND AppContainer
-        // shows "Press Esc again to clear" or cancels the stream.
-        if (vimEnabled && vimMode === 'INSERT') {
+        // Vim may have consumed this same broadcast before this subscriber.
+        // Pending-state cancellation must not also arm or clear the draft.
+        if (vimOwnsEscape(key)) {
           return;
         }
 
@@ -5094,8 +5179,7 @@ export const AppContainer = (props: AppContainerProps) => {
       setRenderMode,
       refreshStatic,
       handleDoubleEscRewind,
-      vimEnabled,
-      vimMode,
+      vimOwnsEscape,
       setThoughtExpanded,
     ],
   );
@@ -5226,6 +5310,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellModeActive,
       userMessages,
       buffer,
+      pendingPastes,
       inputWidth,
       suggestionsWidth,
       isInputActive,
@@ -5375,6 +5460,7 @@ export const AppContainer = (props: AppContainerProps) => {
       shellModeActive,
       userMessages,
       buffer,
+      pendingPastes,
       inputWidth,
       suggestionsWidth,
       isInputActive,
@@ -5497,7 +5583,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
@@ -5511,9 +5596,11 @@ export const AppContainer = (props: AppContainerProps) => {
       onTabConsumerChange: setHasTabConsumer,
       refreshStatic,
       handleFinalSubmit,
+      registerPromptSubmit,
       handleRetryLastPrompt: retryLastPrompt,
       handleClearScreen,
       popAllQueuedMessages,
+      setPendingPastes,
       invalidateSubmittedPromptProvenance,
       // Welcome back dialog
       handleWelcomeBackSelection,
@@ -5590,7 +5677,6 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       closeArenaDialog,
       handleArenaModelsSelected,
-      dismissProviderUpdate,
       closeTrustDialog,
       closePermissionsDialog,
       setShellModeActive,
@@ -5603,6 +5689,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleEscapePromptChange,
       refreshStatic,
       handleFinalSubmit,
+      registerPromptSubmit,
       retryLastPrompt,
       handleClearScreen,
       popAllQueuedMessages,

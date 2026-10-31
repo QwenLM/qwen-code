@@ -89,6 +89,22 @@ const mcpAppDisplay = (
 });
 
 describe('toolResultDisplayCompaction', () => {
+  it('preserves the built-in feature restriction through recording, history and JSON replay', () => {
+    const display = mcpAppDisplay({
+      requiredFeature: 'generated-ui',
+      resourceUri: 'ui://qwen-code-generated-ui/view-v1.html',
+    });
+    for (const compact of [
+      compactToolResultDisplayForRecording,
+      compactToolResultDisplayForHistory,
+    ]) {
+      const replay = JSON.parse(JSON.stringify(compact(display)));
+      expect(replay.requiredFeature).toBe('generated-ui');
+      expect(replay.resourceUri).toBe(display.resourceUri);
+      expect(replay.fallbackText).toBe('Dashboard ready');
+    }
+  });
+
   it.each([
     { answers: [] },
     { text: 42, answers: [] },

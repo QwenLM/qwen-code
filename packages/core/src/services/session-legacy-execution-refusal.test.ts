@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from '../managed-runtime/local-jsonl-managed-session-journal-store.js';
 import { randomUUID } from 'node:crypto';
 import {
   mkdir,
@@ -226,13 +227,17 @@ describe('Legacy refusal of Managed-owned transcripts', () => {
       transcriptPath,
     });
     try {
+      const sessionKey = {
+        tenantId: 'local',
+        workspaceId: 'workspace',
+        sessionId: SESSION_ID,
+      };
       const authority = await LocalManagedSessionAuthority.open({
-        lease,
-        sessionKey: {
-          tenantId: 'local',
-          workspaceId: 'workspace',
-          sessionId: SESSION_ID,
-        },
+        journal: LocalJsonlManagedSessionJournalStore.fromLease(
+          lease,
+          sessionKey,
+        ),
+        sessionKey,
         cwd: projectDir,
         version: 'test',
         create: {

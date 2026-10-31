@@ -1,11 +1,11 @@
-import type { ContextUsageControls } from '../hooks/useContextUsageControls';
+import type { ContextCompressionControls } from '../hooks/useContextUsageControls';
 import { useI18n } from '../i18n';
 
 export function ContextCompressionFeedback({
   controls,
   className,
 }: {
-  controls?: Pick<ContextUsageControls, 'compressing' | 'result'>;
+  controls?: Pick<ContextCompressionControls, 'compressing' | 'result'>;
   className?: string;
 }) {
   const { t } = useI18n();
@@ -25,13 +25,17 @@ export function ContextCompressionFeedback({
           ? 'contextUsage.compressing'
           : result?.kind === 'completed'
             ? 'contextUsage.compressed'
-            : result?.kind === 'cancelled'
-              ? 'contextUsage.compressCancelled'
-              : result?.kind === 'interrupted'
-                ? 'contextUsage.compressInterrupted'
-                : result?.kind === 'refreshFailed'
-                  ? 'contextUsage.compressRefreshFailed'
-                  : 'contextUsage.compressFailed',
+            : result?.kind === 'compressed'
+              ? 'contextUsage.compressedUnknown'
+              : result?.kind === 'noop'
+                ? 'contextCompression.noop'
+                : result?.kind === 'cancelled'
+                  ? 'contextUsage.compressCancelled'
+                  : result?.kind === 'interrupted'
+                    ? 'contextUsage.compressInterrupted'
+                    : result?.kind === 'refreshFailed'
+                      ? 'contextUsage.compressRefreshFailed'
+                      : 'contextUsage.compressFailed',
       )}
     </div>
   );
