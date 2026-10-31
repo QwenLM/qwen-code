@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { writeFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -72,6 +73,24 @@ const registryJson = (controllers: unknown, extra: object = {}) =>
     controllers,
     ...extra,
   });
+
+/**
+ * Lands `rivalWrite` after the next mutation has read the registry but
+ * before it commits, as a waiter that took over a stalled holder's lock
+ * would. The mutation reads synchronously as soon as it holds the lock
+ * and then waits on I/O, so a `setImmediate` queued at lock time runs in
+ * between.
+ */
+function landWriteAfterNextRead(rivalWrite: () => void) {
+  const realLock = lockfile.lock.bind(lockfile);
+  return vi
+    .spyOn(lockfile, 'lock')
+    .mockImplementationOnce(async (file, options) => {
+      const release = await realLock(file, options);
+      setImmediate(rivalWrite);
+      return release;
+    });
+}
 
 /** Makes registryPath a symlink to `elsewhere.json`, which `fill` creates. */
 async function symlinkRegistry(
@@ -216,25 +235,69 @@ describe('addPeerController', () => {
     await fs.mkdir(lockDir);
     const lastRefresh = new Date(Date.now() - 3000);
     await fs.utimes(lockDir, lastRefresh, lastRefresh);
+    const startedAt = Date.now();
+    const added = await add('voice');
+    // The wait shows the planted lock was in the way; a lock the code
+    // never looked at would let the write through in milliseconds.
+    expect(Date.now() - startedAt).toBeGreaterThan(1500);
+    expect((await readRaw()).controllers).toEqual([added.record]);
+  });
+
+  it("waits longer than a dead holder's lock can take to go stale", async () => {
+    // A lock stamped just before its holder crashed can take `stale` plus
+    // 1 s to go stale: proper-lockfile stamps a process's first lock up to
+    // 1 s ahead. The writer must still be waiting by then.
+    vi.useFakeTimers();
+    const lockSpy = vi.spyOn(lockfile, 'lock').mockRejectedValue(
+      Object.assign(new Error('Lock file is already being held'), {
+        code: 'ELOCKED',
+      }),
+    );
+    try {
+      const startedAt = Date.now();
+      const outcome = add('voice').catch((error: unknown) => error);
+      await vi.waitFor(() => expect(lockSpy).toHaveBeenCalled());
+      await vi.runAllTimersAsync();
+      expect(await outcome).toMatchObject({ code: 'ELOCKED' });
+      const { stale } = lockSpy.mock.calls[0][1]!;
+      expect(Date.now() - startedAt).toBeGreaterThan(stale! + 1000);
+    } finally {
+      lockSpy.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  // POSIX only: what rmdir reports for a regular file is platform-specific.
+  it.skipIf(isWindows)('fails at once when waiting cannot help', async () => {
+    // A regular file where the lock directory goes cannot be removed as a
+    // stale lock (ENOTDIR), however long the writer waits.
+    const lockPath = `${registryPath}.lock`;
+    await fs.writeFile(lockPath, '');
+    const longAgo = new Date(Date.now() - 60_000);
+    await fs.utimes(lockPath, longAgo, longAgo);
     const lockSpy = vi.spyOn(lockfile, 'lock');
     try {
-      const added = await add('voice');
-      expect((await readRaw()).controllers).toEqual([added.record]);
+      await expect(add('voice')).rejects.toMatchObject({ code: 'ENOTDIR' });
+      expect(lockSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      lockSpy.mockRestore();
+    }
+  });
 
-      // A lock stamped just before the crash can take `stale` plus 1 s to
-      // go stale: proper-lockfile stamps a process's first lock up to 1 s
-      // ahead. Even the shortest back-off (no jitter) must outlast that.
-      const { stale, retries } = lockSpy.mock.calls[0][1]!;
-      const backoff = retries as Record<
-        'retries' | 'minTimeout' | 'maxTimeout' | 'factor',
-        number
-      >;
-      let shortestWait = 0;
-      for (let attempt = 0; attempt < backoff.retries; attempt++) {
-        const delay = backoff.minTimeout * backoff.factor ** attempt;
-        shortestWait += Math.min(delay, backoff.maxTimeout);
-      }
-      expect(shortestWait).toBeGreaterThan(stale! + 1000);
+  it('keeps a grant that landed while an add was in flight', async () => {
+    const rival = {
+      id: 'c_0000000a',
+      label: 'rival',
+      tokenHash: 'a'.repeat(64),
+      createdAt: 1,
+    };
+    const lockSpy = landWriteAfterNextRead(() =>
+      writeFileSync(registryPath, registryJson([rival])),
+    );
+    try {
+      const added = await add('voice');
+      expect((await readRaw()).controllers).toEqual([rival, added.record]);
+      expect(lockSpy).toHaveBeenCalledTimes(2);
     } finally {
       lockSpy.mockRestore();
     }
@@ -315,9 +378,17 @@ describe('addPeerController', () => {
 
   it('refuses a duplicate label, whatever its case', async () => {
     await add('Voice');
-    await expect(add('voice')).rejects.toMatchObject({
-      code: 'duplicate-label',
-    });
+    const lockSpy = vi.spyOn(lockfile, 'lock');
+    try {
+      await expect(add('voice')).rejects.toMatchObject({
+        code: 'duplicate-label',
+      });
+      // A refusal is final; only a registry that changed under the
+      // mutation is worth redoing.
+      expect(lockSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      lockSpy.mockRestore();
+    }
     expect(await list()).toHaveLength(1);
   });
 
@@ -376,6 +447,25 @@ describe('removePeerController', () => {
     const second = await add('two');
     await Promise.all([remove(first.record.id), remove(second.record.id)]);
     expect(await list()).toEqual([]);
+  });
+
+  it('keeps a revocation that landed while a revoke was in flight', async () => {
+    const first = await add('one');
+    const second = await add('two');
+    // The rival revokes "two" while this call is revoking "one".
+    const lockSpy = landWriteAfterNextRead(() =>
+      writeFileSync(registryPath, registryJson([first.record])),
+    );
+    try {
+      expect(await remove(first.record.id)).toEqual(first.record);
+      expect(await list()).toEqual([]);
+      expect(
+        resolveControllerToken(second.token, registryPath),
+      ).toBeUndefined();
+      expect(lockSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      lockSpy.mockRestore();
+    }
   });
 
   it('revokes every record that carries the same credential', async () => {
