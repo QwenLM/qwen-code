@@ -730,6 +730,33 @@ describe('ChatRecordingService', () => {
       });
     });
 
+    it('writes bounded embedded text resources on a resource-only user record', async () => {
+      const embeddedResources = [
+        {
+          type: 'resource' as const,
+          resource: {
+            uri: 'context://example/selection',
+            mimeType: 'application/json',
+            text: '{"items":["example"]}',
+          },
+        },
+      ];
+      svc.recordUserMessage(
+        '',
+        undefined,
+        { displayText: '', hookContext: '', embeddedResources },
+        undefined,
+        'embedded-prompt',
+      );
+      const record = await flushed();
+      expect(record.daemonPromptId).toBe('embedded-prompt');
+      expect(record.systemPayload).toEqual({
+        displayText: '',
+        hookContext: '',
+        embeddedResources,
+      });
+    });
+
     it('records mid-turn attachment references without inline bytes', async () => {
       const { record, attachmentReferences } = await recordMidTurnImage(
         'inspect image',
@@ -3153,6 +3180,155 @@ describe('ChatRecordingService', () => {
     };
     const failNextFileWrite = (code: string) =>
       vi.spyOn(fs, 'writeFileSync').mockImplementationOnce(throwFsError(code));
+
+    it('restores projection mode and title texts from a projected restore state', () => {
+      const service = activateReduced({
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null],
+        displayProjectionForTitle: true,
+        userDisplayTextsForTitle: ['visible prompt'],
+        lastProjectionTextForTitle: 'visible prompt',
+      });
+
+      expect(service.hasDisplayProjectionForTitle()).toBe(true);
+      expect(service.getUserDisplayTextsForTitle()).toEqual(['visible prompt']);
+    });
+
+    it('keeps projection mode when a rewind leaves restored projected turns', () => {
+      // R15-2: the reduced restore path used to restore the flag but not
+      // the per-turn states, so rewind re-derived it from an empty array and
+      // dropped projection mode for a session whose surviving turns still
+      // project.
+      const turnTitleStates = Array.from({ length: 8 }, (_, index) => ({
+        projection: true,
+        displayText: `visible ${index}`,
+      }));
+      const service = activateReduced({
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: Array.from({ length: 8 }, () => null),
+        turnTitleStates,
+        displayProjectionForTitle: true,
+        userDisplayTextsForTitle: turnTitleStates.map(
+          (turn) => turn.displayText,
+        ),
+        lastProjectionTextForTitle: 'visible 7',
+      });
+
+      service.rewindRecording(6, { truncatedCount: 2 });
+
+      expect(service.hasDisplayProjectionForTitle()).toBe(true);
+      expect(service.getUserDisplayTextsForTitle()).toEqual(
+        turnTitleStates.slice(0, 6).map((turn) => turn.displayText),
+      );
+    });
+
+    it('prunes a post-restore projected turn by its aligned index', () => {
+      // R15-2 mirror case: restored turns did not project, so a rewind past
+      // the only newly recorded projected turn must leave projection mode.
+      // The restored per-turn array keeps the new state at index 2 instead
+      // of letting `min(length, targetTurnIndex)` retain it.
+      const service = activateReduced({
+        lastCompletedUuid: 'plain-leaf',
+        turnParentUuids: [null, null],
+        turnTitleStates: [
+          { projection: false, displayText: 'restored one' },
+          { projection: false, displayText: undefined },
+        ],
+        userDisplayTextsForTitle: ['restored one', undefined],
+      });
+      service.recordUserMessage([{ text: 'visible new' }], undefined, {
+        displayText: 'visible new',
+        hookContext: '',
+      });
+      expect(service.hasDisplayProjectionForTitle()).toBe(true);
+
+      service.rewindRecording(2, { truncatedCount: 1 });
+
+      expect(service.hasDisplayProjectionForTitle()).toBe(false);
+      expect(service.getUserDisplayTextsForTitle()).toEqual([
+        'restored one',
+        undefined,
+      ]);
+    });
+
+    it('keeps the restored projection flag when per-turn state is unavailable', () => {
+      // A legacy restore state carries no per-turn array. Re-deriving the
+      // flag from an empty array would drop projection mode and title from
+      // the hidden raw history, so a rewind must fail closed here.
+      const service = activateReduced({
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null, null],
+        displayProjectionForTitle: true,
+        userDisplayTextsForTitle: ['visible prompt', undefined],
+        lastProjectionTextForTitle: 'visible prompt',
+      });
+
+      service.rewindRecording(1, { truncatedCount: 1 });
+
+      expect(service.hasDisplayProjectionForTitle()).toBe(true);
+    });
+
+    it('drops retained title text when the rewind discards its turn', () => {
+      // R18-2: a legacy restore state leaves the per-turn array misaligned.
+      // The flag stays fail-closed, but a retained text whose turn this
+      // rewind discarded must not survive as the sole title input.
+      const service = activateReduced({
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null, null],
+        displayProjectionForTitle: true,
+        userDisplayTextsForTitle: ['visible prompt', undefined],
+        lastProjectionTextForTitle: 'visible prompt',
+      });
+
+      service.rewindRecording(0, { truncatedCount: 2 });
+
+      expect(service.hasDisplayProjectionForTitle()).toBe(true);
+      expect(service.getUserDisplayTextsForTitle()).toEqual([]);
+    });
+
+    it('realigns title state when a rebuilt boundary list shrinks', () => {
+      // R18-2 trigger 2: a cold-projection restore carries N aligned turns,
+      // then a rebuild sees the M < N post-compression records. The title
+      // state must be rebuilt with the boundaries instead of staying stale
+      // and misaligned, which disables every later rewind re-derivation.
+      const service = activateReduced({
+        lastCompletedUuid: 'projected-leaf',
+        turnParentUuids: [null, null],
+        turnTitleStates: [
+          { projection: true, displayText: 'restored one' },
+          { projection: true, displayText: 'restored two' },
+        ],
+        displayProjectionForTitle: true,
+        userDisplayTextsForTitle: ['restored one', 'restored two'],
+        lastProjectionTextForTitle: 'restored two',
+      });
+
+      service.rebuildTurnBoundaries(
+        resumedChain(null, [
+          'compressed-user',
+          'user',
+          'post-compression turn',
+        ]),
+      );
+
+      expect(service.getUserDisplayTextsForTitle()).not.toContain(
+        'restored two',
+      );
+
+      service.rewindRecording(0, { truncatedCount: 1 });
+
+      expect(service.getUserDisplayTextsForTitle()).toEqual([]);
+    });
+
+    it('does not inherit projection mode when the restore state carries none', () => {
+      const service = activateReduced({
+        lastCompletedUuid: 'plain-leaf',
+        turnParentUuids: [null],
+      });
+
+      expect(service.hasDisplayProjectionForTitle()).toBe(false);
+      expect(service.getUserDisplayTextsForTitle()).toEqual([]);
+    });
 
     it('reanchors session source after more than the tail window is appended', async () => {
       await expect(

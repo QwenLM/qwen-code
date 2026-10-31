@@ -1,0 +1,1364 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it, vi } from 'vitest';
+import type { DaemonEvent } from '../../src/daemon/types.js';
+import { projectChatRecordsToDaemonTranscript } from '../../src/daemon/transcript.js';
+import { normalizeDaemonEvent } from '../../src/daemon/ui/normalizer.js';
+import { createDaemonTranscriptStore } from '../../src/daemon/ui/store.js';
+import { estimateDaemonTranscriptBlockBytes } from '../../src/daemon/ui/transcript.js';
+import type { DaemonEmbeddedResource } from '../../src/daemon/index.js';
+
+const resource: DaemonEmbeddedResource = {
+  type: 'resource',
+  resource: {
+    uri: 'context://example/selection',
+    mimeType: 'application/json',
+    text: '{"items":["example"]}',
+  },
+  _meta: { selection: 'current' },
+};
+
+function frame(content: unknown): DaemonEvent {
+  return {
+    v: 1,
+    id: 10,
+    type: 'session_update',
+    promptId: 'prompt-1',
+    originatorClientId: 'client-1',
+    data: {
+      update: {
+        sessionUpdate: 'user_message_chunk',
+        content,
+        _meta: { source: 'user', qwenTranscript: { sourceRecordIds: ['r1'] } },
+      },
+    },
+  };
+}
+
+describe('daemon embedded text resources', () => {
+  it('normalizes a typed resource without inventing an attachment or fetching its URI', () => {
+    const [event] = normalizeDaemonEvent(frame(resource));
+    expect(event).toMatchObject({
+      type: 'user.resource.delta',
+      resource,
+      promptId: 'prompt-1',
+      sourceRecordIds: ['r1'],
+    });
+    expect(event).not.toHaveProperty('attachmentId');
+    expect(
+      normalizeDaemonEvent(frame(resource), {
+        suppressOwnUserEcho: true,
+        clientId: 'client-1',
+      }),
+    ).toEqual([]);
+    expect(
+      normalizeDaemonEvent(frame({ type: 'resource', resource: { uri: 'x' } })),
+    ).toEqual([]);
+  });
+
+  it('keeps a resource-only prompt separate from the next prompt and clears it on rewind', () => {
+    const event = normalizeDaemonEvent(frame(resource))[0]!;
+    const store = createDaemonTranscriptStore({ now: 1 });
+    store.dispatch([
+      event,
+      {
+        type: 'assistant.text.delta',
+        text: 'used context',
+        promptId: 'prompt-1',
+      },
+      { type: 'assistant.done', promptId: 'prompt-1' },
+      { type: 'user.text.delta', text: 'next', promptId: 'prompt-2' },
+    ]);
+    const users = store
+      .getSnapshot()
+      .blocks.filter((block) => block.kind === 'user');
+    expect(users.map((block) => block.promptId)).toEqual([
+      'prompt-1',
+      'prompt-2',
+    ]);
+    expect(users[0]).toMatchObject({ text: '', embeddedResources: [resource] });
+    expect(users[1]).not.toHaveProperty('embeddedResources');
+
+    store.dispatch({
+      type: 'session.rewound',
+      promptId: 'prompt-2',
+      targetTurnIndex: 1,
+    });
+    expect(
+      store.getSnapshot().blocks.filter((block) => block.kind === 'user'),
+    ).toHaveLength(1);
+    store.reset();
+    expect(store.getSnapshot().blocks).toEqual([]);
+  });
+
+  it('deduplicates only identical echoes and counts distinct metadata against retention', () => {
+    const store = createDaemonTranscriptStore({ now: 1 });
+    const original = normalizeDaemonEvent(frame(resource))[0]!;
+    const changed = normalizeDaemonEvent(
+      frame({ ...resource, _meta: { selection: 'updated' } }),
+    )[0]!;
+    const differentText = normalizeDaemonEvent(
+      frame({
+        ...resource,
+        resource: { ...resource.resource, text: '{"items":["other"]}' },
+      }),
+    )[0]!;
+    store.dispatch([original, original, changed, differentText]);
+    const [block] = store.getSnapshot().blocks;
+    expect(block).toMatchObject({
+      kind: 'user',
+      embeddedResources: [
+        resource,
+        { ...resource, _meta: { selection: 'updated' } },
+        // Same uri and _meta as the first entry, but distinct text: a
+        // uri-keyed merge must not collapse it.
+        {
+          ...resource,
+          resource: { ...resource.resource, text: '{"items":["other"]}' },
+        },
+      ],
+    });
+    expect(store.getSnapshot().retainedBytes).toBe(
+      estimateDaemonTranscriptBlockBytes(block!),
+    );
+  });
+
+  it('bounds retained resource text so one echo cannot pin the store over budget', () => {
+    // The live echo caps block count only, and retention trimming never
+    // evicts the newest block, so an unbounded resource text would hold the
+    // store above maxRetainedBytes with no eviction able to reclaim it.
+    const maxRetainedBytes = 1024 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    const oversized = normalizeDaemonEvent(
+      frame({
+        type: 'resource',
+        resource: {
+          uri: 'context://example/large',
+          mimeType: 'text/plain',
+          text: 'x'.repeat(4 * 1024 * 1024),
+        },
+      }),
+    )[0]!;
+    store.dispatch(oversized);
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    const retained = block.embeddedResources![0]!;
+    expect(retained.resource.uri).toBe('context://example/large');
+    expect(retained.resource.mimeType).toBe('text/plain');
+    expect(retained.resource.text.length).toBeLessThanOrEqual(100_000);
+    expect(retained.resource.text).toContain('[truncated]');
+    // The cut must be reported: the offline projection derives its
+    // completeness verdict from this callback, so a silent bound would
+    // export a truncated session as `complete: true`.
+    expect(onTruncation).toHaveBeenCalledWith({
+      kind: 'text',
+      blockId: block.id,
+      sourceRecordIds: ['r1'],
+    });
+  });
+
+  it('bounds the whole retained resource so a non-text payload cannot pin the store over budget', () => {
+    // The open index signature admits a large `blob` or vendor key beside an
+    // empty text at either level; trimming never evicts the newest block, so
+    // without a whole-object bound either one pins the store above budget
+    // for the rest of the session.
+    const maxRetainedBytes = 1024 * 1024;
+    const shapes: Array<{
+      content: Record<string, unknown>;
+      uri: string;
+      droppedKey: string;
+      droppedAt: 'resource' | 'top';
+    }> = [
+      {
+        content: {
+          type: 'resource',
+          resource: {
+            uri: 'context://example/blob',
+            mimeType: 'application/octet-stream',
+            text: '',
+            blob: 'x'.repeat(4 * 1024 * 1024),
+          },
+          _meta: { selection: 'current' },
+        },
+        uri: 'context://example/blob',
+        droppedKey: 'blob',
+        droppedAt: 'resource',
+      },
+      {
+        content: {
+          type: 'resource',
+          resource: {
+            uri: 'context://example/vendor',
+            mimeType: 'text/plain',
+            text: 'small',
+          },
+          _meta: { selection: 'current' },
+          vendorExtension: 'x'.repeat(4 * 1024 * 1024),
+        },
+        uri: 'context://example/vendor',
+        droppedKey: 'vendorExtension',
+        droppedAt: 'top',
+      },
+    ];
+    for (const { content, uri, droppedKey, droppedAt } of shapes) {
+      const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+      store.dispatch(normalizeDaemonEvent(frame(content))[0]!);
+      const snapshot = store.getSnapshot();
+      expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+      const block = snapshot.blocks.find((b) => b.kind === 'user');
+      if (!block || block.kind !== 'user') {
+        throw new Error('expected one retained user block');
+      }
+      const retained = block.embeddedResources![0]!;
+      // The skeleton keeps the display fields and the replay contract's
+      // _meta; the oversized non-text payload is dropped.
+      expect(retained.resource.uri).toBe(uri);
+      expect(retained._meta).toEqual({ selection: 'current' });
+      if (droppedAt === 'resource') {
+        expect(retained.resource).not.toHaveProperty(droppedKey);
+      } else {
+        expect(retained).not.toHaveProperty(droppedKey);
+      }
+    }
+  });
+
+  it('re-measures the skeleton so the keys it keeps cannot defeat the ceiling', () => {
+    // The fallback keeps uri/text/mimeType and both `_meta` levels by
+    // explicit selection; an oversized payload parked in any of them must
+    // still be cut, or it pins the store over budget in the newest block,
+    // which trimming never evicts.
+    const maxRetainedBytes = 1024 * 1024;
+    const big = 'x'.repeat(4 * 1024 * 1024);
+    const cases: Array<{
+      content: Record<string, unknown>;
+      assertRetained: (retained: DaemonEmbeddedResource) => void;
+    }> = [
+      {
+        // Top-level `_meta` is an open index signature spread off the wire.
+        content: {
+          type: 'resource',
+          resource: { uri: 'context://example/meta', text: 'small' },
+          _meta: { payload: big },
+        },
+        assertRetained: (retained) =>
+          expect(retained).not.toHaveProperty('_meta'),
+      },
+      {
+        // A small `resource._meta` the replay contract keeps, beside an
+        // oversized `blob` at the same level.
+        content: {
+          type: 'resource',
+          resource: {
+            uri: 'context://example/blob',
+            text: '',
+            blob: big,
+            _meta: { tag: 'keep-me' },
+          },
+        },
+        assertRetained: (retained) => {
+          expect(retained.resource).not.toHaveProperty('blob');
+          expect(retained.resource['_meta']).toEqual({ tag: 'keep-me' });
+        },
+      },
+      {
+        content: {
+          type: 'resource',
+          resource: { uri: `context://example/${big}`, text: 'small' },
+        },
+        assertRetained: (retained) =>
+          expect(retained.resource.uri.length).toBeLessThanOrEqual(100_000),
+      },
+      {
+        content: {
+          type: 'resource',
+          resource: {
+            uri: 'context://example/mime',
+            text: 'small',
+            mimeType: big,
+          },
+        },
+        assertRetained: (retained) =>
+          expect(String(retained.resource.mimeType).length).toBeLessThanOrEqual(
+            100_000,
+          ),
+      },
+      {
+        // `mimeType` is typed `string | null` but unchecked on the wire: a
+        // non-string payload must fail closed — dropped and reported — not
+        // retained in full past the ceiling.
+        content: {
+          type: 'resource',
+          resource: {
+            uri: 'context://example/mime-object',
+            text: 'small',
+            mimeType: { payload: big },
+          },
+        },
+        assertRetained: (retained) =>
+          expect(retained.resource).not.toHaveProperty('mimeType'),
+      },
+    ];
+    for (const { content, assertRetained } of cases) {
+      const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+      store.dispatch(normalizeDaemonEvent(frame(content))[0]!);
+      const snapshot = store.getSnapshot();
+      expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+      const block = snapshot.blocks.find((b) => b.kind === 'user');
+      if (!block || block.kind !== 'user') {
+        throw new Error('expected one retained user block');
+      }
+      assertRetained(block.embeddedResources![0]!);
+    }
+  });
+
+  it('deduplicates an identical oversized echo instead of retaining every copy', () => {
+    // A retained text is the bounded one, so an oversized echo can never
+    // text-match the stored entry: dedup must compare a fingerprint of the
+    // untruncated text, or every copy is retained in the newest block,
+    // which trimming never evicts.
+    const store = createDaemonTranscriptStore({ now: 1 });
+    const oversized = normalizeDaemonEvent(
+      frame({
+        type: 'resource',
+        resource: {
+          uri: 'context://example/large',
+          mimeType: 'text/plain',
+          text: 'x'.repeat(120 * 1024),
+        },
+      }),
+    )[0]!;
+    store.dispatch(oversized);
+    const firstBytes = store.getSnapshot().retainedBytes;
+    store.dispatch(oversized);
+    const snapshot = store.getSnapshot();
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    expect(snapshot.retainedBytes).toBe(firstBytes);
+  });
+
+  it('deduplicates an identical oversized-uri echo instead of retaining every copy', () => {
+    // The skeleton cascade truncates an oversized stored uri at the text
+    // bound, so an oversized-uri echo can never uri-match its own retained
+    // entry: dedup must compare a fingerprint of the untruncated uri, or
+    // every copy is retained in the newest block, which trimming never
+    // evicts.
+    const store = createDaemonTranscriptStore({ now: 1 });
+    const oversizedUri = () =>
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: `context://example/${'x'.repeat(300_000)}`,
+            text: 'small',
+          },
+        }),
+      )[0]!;
+    store.dispatch(oversizedUri());
+    const firstBytes = store.getSnapshot().retainedBytes;
+    store.dispatch(oversizedUri());
+    const snapshot = store.getSnapshot();
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    expect(snapshot.retainedBytes).toBe(firstBytes);
+  });
+
+  it('deduplicates an identical cascade-emptied echo instead of retaining every copy', () => {
+    // The fingerprint must be captured whenever the retained text diverged
+    // from the wire text, not only past the text-length bound: a CJK text
+    // at exactly 100k code units passes the length gate but overflows the
+    // real-byte ceiling, so the cascade empties the stored text — and a
+    // length-gated fingerprint then compares '' against the full echo and
+    // retains every copy of an identical repeat.
+    const store = createDaemonTranscriptStore({ now: 1 });
+    const cascadeEcho = normalizeDaemonEvent(
+      frame({
+        type: 'resource',
+        resource: {
+          uri: 'context://example/wide',
+          mimeType: 'text/plain',
+          text: '\u754c'.repeat(100_000),
+        },
+      }),
+    )[0]!;
+    store.dispatch(cascadeEcho);
+    const firstBytes = store.getSnapshot().retainedBytes;
+    store.dispatch(cascadeEcho);
+    const snapshot = store.getSnapshot();
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    expect(snapshot.retainedBytes).toBe(firstBytes);
+  });
+
+  it('deduplicates an identical admission-degraded skeleton echo', () => {
+    // R16-2: admission empties an otherwise intact echo's text when the
+    // block's byte sum is already full, so the stored text diverges from the
+    // wire text even though the cascade retained it. The fingerprint must be
+    // taken from that stored divergence or every repeat echo appends another
+    // skeleton to the newest block, which trimming never evicts.
+    const maxRetainedBytes = 1024 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    const intact = {
+      type: 'resource',
+      resource: {
+        uri: 'context://example/intact',
+        text: '\u754c'.repeat(60_000),
+      },
+    };
+    const degraded = {
+      type: 'resource',
+      resource: {
+        uri: 'context://example/degraded',
+        text: '\u4e16'.repeat(40_000),
+      },
+    };
+    store.dispatch(normalizeDaemonEvent(frame(intact))[0]!);
+    const degradedEcho = normalizeDaemonEvent(frame(degraded))[0]!;
+    store.dispatch(degradedEcho);
+    const firstBytes = store.getSnapshot().retainedBytes;
+
+    store.dispatch(degradedEcho);
+    store.dispatch(degradedEcho);
+    store.dispatch(degradedEcho);
+
+    const snapshot = store.getSnapshot();
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(2);
+    expect(block.embeddedResources![1]!.resource.text).toBe('');
+    expect(snapshot.retainedBytes).toBe(firstBytes);
+    expect(onTruncation).toHaveBeenCalledTimes(1);
+  });
+
+  it('deduplicates an identical echo of an entry admitted whole', () => {
+    // R17-1: an entry admitted whole carries no fingerprint slot. When the
+    // same echo arrives again and admission degrades it to the text-emptied
+    // minimal skeleton, comparing against the missing slot must fall back to
+    // the value match or the block gains a duplicate empty entry and a
+    // spurious truncation report.
+    const maxRetainedBytes = 1024 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    const intact = {
+      type: 'resource',
+      resource: {
+        uri: 'context://example/intact',
+        text: '\u754c'.repeat(60_000),
+      },
+    };
+    const echo = normalizeDaemonEvent(frame(intact))[0]!;
+    store.dispatch(echo);
+    const firstBytes = store.getSnapshot().retainedBytes;
+
+    store.dispatch(echo);
+
+    const snapshot = store.getSnapshot();
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    expect(block.embeddedResources![0]!.resource.text).toBe(
+      '\u754c'.repeat(60_000),
+    );
+    expect(snapshot.retainedBytes).toBe(firstBytes);
+    expect(onTruncation).not.toHaveBeenCalled();
+  });
+
+  it('keeps distinct same-uri payloads that both cascade-empty as separate entries', () => {
+    // Both texts overflow the real-byte ceiling and are emptied by the
+    // cascade, so the stored entries are byte-identical; only the
+    // fingerprint of each untruncated wire text keeps them separate.
+    const store = createDaemonTranscriptStore({ now: 1 });
+    const payload = (text: string) =>
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: 'context://example/wide',
+            mimeType: 'text/plain',
+            text,
+          },
+        }),
+      )[0]!;
+    store.dispatch([
+      payload('\u754c'.repeat(100_000)),
+      payload('\u4e16'.repeat(100_000)),
+    ]);
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(2);
+  });
+
+  it('bounds the per-block aggregate in the estimate unit of the per-resource gate', () => {
+    // The per-resource gate bounds each resource in real bytes AND in
+    // estimate units; the block aggregate must bound both units too. Each
+    // flood below passes both per-resource bounds, and five of them pass
+    // the block's byte aggregate (~226 KB <= 256 KiB) — but their summed
+    // non-text estimate crosses MAX_EMBEDDED_RESOURCE_EXTRA_ESTIMATE, and
+    // the newest block they fold into is never evicted by trimming.
+    const maxRetainedBytes = 1024 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    const flood = (index: number) => ({
+      type: 'resource',
+      resource: {
+        uri: `context://example/flood/${index}`,
+        mimeType: 'application/json',
+        text: '',
+      },
+      _meta: { entries: Array.from({ length: 15_000 }, () => ({})) },
+    });
+    store.dispatch(
+      Array.from(
+        { length: 5 },
+        (_, index) => normalizeDaemonEvent(frame(flood(index)))[0]!,
+      ),
+    );
+    const snapshot = store.getSnapshot();
+    // The newest block is never evicted, and the summed estimate bound now
+    // covers a writer-admitted prompt (~2 MiB), so the block may charge up
+    // to that bound past a smaller store budget.
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(
+      maxRetainedBytes + 2 * 1024 * 1024 + 4096,
+    );
+    expect(onTruncation).toHaveBeenCalled();
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    // Admission degrades before dropping: the first two floods fit the
+    // summed estimate bound whole, and the rest keep their display identity
+    // as `_meta`-stripped skeletons.
+    expect(block.embeddedResources).toHaveLength(5);
+    expect(block.embeddedResources![0]).toHaveProperty('_meta');
+    expect(block.embeddedResources![4]).not.toHaveProperty('_meta');
+  });
+
+  it('skeletonizes rather than drops a resource whose oversized non-ASCII uri overflows the byte ceiling', () => {
+    // The cascade's uri/mimeType gates are UTF-16 code-unit bounds, but the
+    // ceiling is real UTF-8 bytes: a 90k three-byte-character uri passes
+    // the code-unit gate while overflowing the ceiling. Without a
+    // byte-driven cut the skeleton stays over the ceiling and the per-block
+    // aggregate cap drops the entry whole — the display skeleton the
+    // cascade exists to retain.
+    const maxRetainedBytes = 1024 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: `context://example/${'\u754c'.repeat(90_000)}`,
+            text: 'small',
+          },
+        }),
+      )[0]!,
+    );
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    expect(onTruncation).toHaveBeenCalled();
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    const retained = block.embeddedResources![0]!;
+    expect(retained.resource.uri.startsWith('context://example/')).toBe(true);
+    expect(retained.resource.uri).toContain('[truncated]');
+    // R14-4: the uri owns the overflow; a legitimate 5-char text is not the
+    // offender and must survive the uri-driven breach.
+    expect(retained.resource.text).toBe('small');
+    const retainedJsonBytes = new TextEncoder().encode(
+      JSON.stringify(retained),
+    ).length;
+    expect(retainedJsonBytes).toBeLessThanOrEqual(256 * 1024);
+  });
+
+  it('keeps a legitimate text when a multi-byte uri owns the byte-ceiling breach', () => {
+    // R20-3: the byte cut is authorized per field. A 90k CJK uri owns the
+    // real-byte overflow, so the cascade must cut the uri and leave the
+    // 40-char text intact — cutting the text would remove bytes the uri
+    // still owns and report a text truncation that never happened.
+    const maxRetainedBytes = 1024 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    const text = 'abcdefghijklmnopqrstuvwxyz0123456789ABCD';
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: `context://example/${'\u754c'.repeat(90_000)}`,
+            text,
+          },
+        }),
+      )[0]!,
+    );
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    expect(onTruncation).toHaveBeenCalled();
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    const retained = block.embeddedResources![0]!;
+    expect(retained.resource.text).toBe(text);
+    expect(
+      new TextEncoder().encode(JSON.stringify(retained)).length,
+    ).toBeLessThanOrEqual(256 * 1024);
+  });
+
+  it('does not skeletonize a writer-journaled payload on replay', () => {
+    // The writer journals a resource whose real JSON fits 256 KiB
+    // (`MAX_RECORDED_EMBEDDED_RESOURCES_BYTES`), and the offline projection
+    // is trim-free by bytes on purpose: replay must not skeletonize what
+    // the writer retained, nor report a text truncation that never happened.
+    const vendorResource = (payload: string) => ({
+      type: 'resource',
+      resource: {
+        uri: 'context://example/vendor',
+        mimeType: 'text/plain',
+        text: 'small',
+      },
+      vendorExtension: payload,
+    });
+    // Live store: a payload the writer journaled intact stays intact under
+    // the default byte budget.
+    const journaled = vendorResource('A'.repeat(200_000));
+    const store = createDaemonTranscriptStore({ now: 1 });
+    store.dispatch(normalizeDaemonEvent(frame(journaled))[0]!);
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    expect(block).toMatchObject({ embeddedResources: [journaled] });
+
+    // Offline projection: even a payload above any ceiling survives,
+    // because the projection documents itself as trim-free by bytes.
+    const beyondCeiling = vendorResource('A'.repeat(400_000));
+    const projection = projectChatRecordsToDaemonTranscript([
+      {
+        uuid: 'first',
+        parentUuid: null,
+        sessionId: 'session-1',
+        timestamp: '2026-09-23T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [] },
+        daemonPromptId: 'prompt-1',
+        systemPayload: {
+          displayText: '',
+          hookContext: '',
+          embeddedResources: [beyondCeiling],
+        },
+      },
+    ]);
+    expect(projection.complete).toBe(true);
+    const [user] = projection.blocks.filter((b) => b.kind === 'user');
+    expect(user).toMatchObject({ embeddedResources: [beyondCeiling] });
+  });
+
+  it('keeps a writer-journaled oversized text intact in the trim-free offline projection', () => {
+    // The writer journals a single block up to
+    // MAX_RECORDED_EMBEDDED_RESOURCES_BYTES (256 KiB of real JSON) intact,
+    // so a 150k-code-unit resource text is admitted whole. The offline
+    // projection is trim-free by bytes on purpose: cutting the text arm at
+    // the live store's 100k-unit bound there drops a third of the journaled
+    // context on every replay and flips the projection's completeness
+    // verdict for a journal that is complete.
+    const text = 'x'.repeat(150_000);
+    const projection = projectChatRecordsToDaemonTranscript([
+      {
+        uuid: 'first',
+        parentUuid: null,
+        sessionId: 'session-1',
+        timestamp: '2026-09-23T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [] },
+        daemonPromptId: 'prompt-1',
+        systemPayload: {
+          displayText: '',
+          hookContext: '',
+          embeddedResources: [
+            {
+              type: 'resource',
+              resource: {
+                uri: 'context://example/large-text',
+                mimeType: 'text/plain',
+                text,
+              },
+            },
+          ],
+        },
+      },
+    ]);
+    expect(projection.complete).toBe(true);
+    expect(projection.truncated).toBe(false);
+    const [user] = projection.blocks.filter((b) => b.kind === 'user');
+    if (!user || user.kind !== 'user') {
+      throw new Error('expected one projected user block');
+    }
+    const replayed = user.embeddedResources?.[0]?.resource.text;
+    expect(replayed).toHaveLength(150_000);
+    expect(replayed).not.toContain('[truncated]');
+  });
+
+  it('keeps a writer-journaled oversized text intact in a MAX_SAFE_INTEGER-budget projection', () => {
+    // R12-2: "no trimming" is spelled two ways in-repo —
+    // Number.POSITIVE_INFINITY (chat-record-transcript) and
+    // Number.MAX_SAFE_INTEGER (projectTrajectoryWindow's NO_TRIM and the
+    // navigation materialization store) — and Number.isFinite accepts the
+    // latter, so the trim-free predicate must recognize both spellings or
+    // the same journaled resource renders at two lengths across surfaces of
+    // one session.
+    const text = 'x'.repeat(150_000);
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxBlocks: Number.MAX_SAFE_INTEGER,
+      maxRetainedBytes: Number.MAX_SAFE_INTEGER,
+    });
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: 'context://example/large-text',
+            mimeType: 'text/plain',
+            text,
+          },
+        }),
+      )[0]!,
+    );
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    const replayed = block.embeddedResources?.[0]?.resource.text;
+    expect(replayed).toHaveLength(150_000);
+    expect(replayed).not.toContain('[truncated]');
+  });
+
+  it('does not apply the aggregate estimate cap on a MAX_SAFE_INTEGER budget', () => {
+    // R14-2: both spellings of "unbounded" must skip every byte-driven cut.
+    // The aggregate gate recognized only !isFinite, so this empty-object
+    // flood passed the per-resource gate (trim-free) and was then degraded
+    // by the block sum.
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxBlocks: Number.MAX_SAFE_INTEGER,
+      maxRetainedBytes: Number.MAX_SAFE_INTEGER,
+      onTruncation,
+    });
+    const flood = {
+      type: 'resource',
+      resource: { uri: 'context://example/scalar-flood', text: '' },
+      _meta: { entries: Array.from({ length: 80_000 }, () => ({})) },
+    };
+    store.dispatch(normalizeDaemonEvent(frame(flood))[0]!);
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    expect(block.embeddedResources![0]).toHaveProperty('_meta');
+    expect(onTruncation).not.toHaveBeenCalled();
+  });
+
+  it('retains two writer-admitted scalar resources whose summed estimate exceeds the per-resource bound', () => {
+    // R14-3: each resource is inside both per-resource bounds and the two
+    // real-byte sums fit the writer's 256 KiB per-prompt budget, but their
+    // summed estimate units cross the per-resource constant. The aggregate
+    // must be sized as a sum, not reuse the single-resource bound.
+    const maxRetainedBytes = 1024 * 1024;
+    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    const scalar = (index: number) => ({
+      type: 'resource',
+      resource: { uri: `context://example/scalar/${index}`, text: '' },
+      _meta: { nums: Array.from({ length: 40_000 }, () => 1) },
+    });
+    store.dispatch([
+      normalizeDaemonEvent(frame(scalar(0)))[0]!,
+      normalizeDaemonEvent(frame(scalar(1)))[0]!,
+    ]);
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(2);
+    expect(block.embeddedResources!.map((entry) => entry.resource.uri)).toEqual(
+      ['context://example/scalar/0', 'context://example/scalar/1'],
+    );
+    // The summed bound covers a writer-admitted prompt, so neither entry is
+    // degraded: a per-resource-sized sum would skeletonize the second.
+    expect(block.embeddedResources![0]).toHaveProperty('_meta');
+    expect(block.embeddedResources![1]).toHaveProperty('_meta');
+  });
+
+  it('does not skeletonize a writer-journaled scalar payload on replay', () => {
+    // The estimator bills a flat 16 units per number/boolean regardless of
+    // JSON width, so an estimate-sized ceiling skeletonizes a scalar-heavy
+    // payload the writer measured at ~80 KB of real JSON and journaled
+    // intact. The ceiling must be charged in the writer's own unit.
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({ now: 1, onTruncation });
+    const scalarPayload = {
+      type: 'resource',
+      resource: { uri: 'context://example/n', text: '' },
+      _meta: { nums: Array.from({ length: 40_000 }, () => 1) },
+    };
+    store.dispatch(normalizeDaemonEvent(frame(scalarPayload))[0]!);
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources![0]).toHaveProperty('_meta');
+    expect(onTruncation).not.toHaveBeenCalled();
+  });
+
+  it('keeps a writer-journaled scalar payload inside the writer byte ceiling', () => {
+    // 130,000 one-digit numbers are ~260 KB of real JSON — inside the
+    // writer's 256 KiB journal bound — but charge ~2.08M estimate units.
+    // The per-resource estimate ceiling must cover the writer-admitted
+    // window at the same ~8 units per writer byte as the aggregate bound,
+    // or a payload the writer journaled whole is skeletonized on replay.
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({ now: 1, onTruncation });
+    const scalarPayload = {
+      type: 'resource',
+      resource: { uri: 'context://example/parity', text: '' },
+      _meta: { nums: Array.from({ length: 130_000 }, () => 1) },
+    };
+    store.dispatch(normalizeDaemonEvent(frame(scalarPayload))[0]!);
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources![0]).toHaveProperty('_meta');
+    expect(onTruncation).not.toHaveBeenCalled();
+  });
+
+  it('bounds the per-block aggregate when many in-bounds resources fold into one turn', () => {
+    // R2-2 count leg: the live echo folds every resource of one prompt into
+    // a single user block, and trimming never evicts the newest block. Each
+    // resource below is inside BOTH per-resource bounds (~195 KB of real
+    // JSON, ~1.04M estimate units of non-text payload), so admission alone
+    // retains all 256 — pinning the store far over budget with no eviction
+    // able to reclaim it. The per-block aggregate cap (the writer's own
+    // per-prompt journal budget, in the same real-JSON-byte unit) admits
+    // only the first and reports the rest.
+    const maxRetainedBytes = 512 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    const floodResource = (index: number) => ({
+      type: 'resource',
+      resource: {
+        uri: `context://example/flood/${index}`,
+        mimeType: 'application/json',
+        text: '',
+      },
+      _meta: { nums: Array.from({ length: 65_000 }, (_, i) => 10 + (i % 90)) },
+    });
+    store.dispatch(
+      Array.from(
+        { length: 256 },
+        (_, index) => normalizeDaemonEvent(frame(floodResource(index)))[0]!,
+      ),
+    );
+
+    const snapshot = store.getSnapshot();
+    // The documented store ceiling is "budget + one worst-case block":
+    // trimming never evicts the newest block, and the one admitted flood
+    // resource charges max(real JSON bytes, non-text estimate) — up to
+    // MAX_EMBEDDED_RESOURCE_EXTRA_ESTIMATE (2 MiB) plus the block's own
+    // structural overhead — past this 512 KiB budget on its own, with
+    // nothing evictable.
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(
+      maxRetainedBytes + 2 * 1024 * 1024 + 4096,
+    );
+    expect(onTruncation).toHaveBeenCalled();
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    // Every writer-admitted entry keeps its identity: the first is whole,
+    // the rest fall back to `_meta`-stripped skeletons, so the block's real
+    // JSON sum stays inside the writer's per-prompt budget while no entry
+    // is lost whole.
+    expect(block.embeddedResources).toHaveLength(256);
+    expect(block.embeddedResources![0]).toHaveProperty('_meta');
+    expect(block.embeddedResources![255]).not.toHaveProperty('_meta');
+    const resourceJsonBytes = block.embeddedResources!.reduce(
+      (sum, entry) =>
+        sum + new TextEncoder().encode(JSON.stringify(entry)).length,
+      0,
+    );
+    expect(resourceJsonBytes).toBeLessThanOrEqual(256 * 1024 + 4096);
+  });
+
+  it('drops a minimal skeleton whose byte sum still exceeds the per-block ceiling', () => {
+    // R22-1: three conforming resources fold into one block. The first two
+    // carry 100,000-char ASCII texts (~100 KB of real JSON each), the third
+    // a 100,012-char non-ASCII uri with empty text (~200 KB). The block's
+    // byte sum (~400 KB) exceeds the ceiling, but `baseBytes` still fits, so
+    // the minimal-skeleton fallback admitted the third on the estimate arm
+    // alone and pinned the overage permanently: the newest block is never
+    // evicted, and admission is the only gate that can bound it.
+    const maxRetainedBytes = 1024 * 1024;
+    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    const textResource = (uri: string, text: string) => ({
+      type: 'resource',
+      resource: { uri, text },
+    });
+    store.dispatch([
+      normalizeDaemonEvent(
+        frame(textResource('context://a', 'a'.repeat(100_000))),
+      )[0]!,
+      normalizeDaemonEvent(
+        frame(textResource('context://b', 'b'.repeat(100_000))),
+      )[0]!,
+      normalizeDaemonEvent(
+        frame(textResource(`context://c/${'\u00e9'.repeat(100_000)}`, '')),
+      )[0]!,
+    ]);
+
+    const block = store
+      .getSnapshot()
+      .blocks.find((entry) => entry.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    const resourceJsonBytes = block.embeddedResources!.reduce(
+      (sum, entry) =>
+        sum + new TextEncoder().encode(JSON.stringify(entry)).length,
+      0,
+    );
+    expect(resourceJsonBytes).toBeLessThanOrEqual(256 * 1024 + 4096);
+    expect(block.embeddedResources).toHaveLength(2);
+  });
+
+  it('evicts the older block once retained resource charges cross the byte budget', () => {
+    // R11-2: the block charge must see what a resource pins on the heap. A
+    // `_meta` of 16,000 empty objects is ~48 KB of real JSON — inside both
+    // per-resource admission bounds — but ~1M live estimate units. Charged
+    // in real JSON bytes, both turns below total ~97 KB against the 1.5 MiB
+    // budget and nothing is ever evicted while the store holds ~2M units of
+    // live objects; charged at max(real bytes, non-text estimate), the
+    // second turn crosses the budget and the older block is evicted.
+    const maxRetainedBytes = 1536 * 1024;
+    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    const flood = (index: number) => ({
+      type: 'resource',
+      resource: {
+        uri: `context://example/flood/${index}`,
+        mimeType: 'application/json',
+        text: '',
+      },
+      _meta: { entries: Array.from({ length: 16_000 }, () => ({})) },
+    });
+    // Distinct prompt and record ids: equal ones would fold both resources
+    // into one newest block (the per-block aggregate cap's case above) and
+    // pin the record snap in trimTranscriptState.
+    const turn = (index: number): DaemonEvent => ({
+      v: 1,
+      id: 10,
+      type: 'session_update',
+      promptId: `prompt-${index}`,
+      originatorClientId: 'client-1',
+      data: {
+        update: {
+          sessionUpdate: 'user_message_chunk',
+          content: flood(index),
+          _meta: {
+            source: 'user',
+            qwenTranscript: { sourceRecordIds: [`record-${index}`] },
+          },
+        },
+      },
+    });
+    store.dispatch(normalizeDaemonEvent(turn(0))[0]!);
+    store.dispatch(normalizeDaemonEvent(turn(1))[0]!);
+
+    const userBlocks = store
+      .getSnapshot()
+      .blocks.filter((block) => block.kind === 'user');
+    expect(userBlocks).toHaveLength(1);
+    expect(userBlocks[0]!.embeddedResources?.[0]?.resource.uri).toBe(
+      'context://example/flood/1',
+    );
+  });
+
+  it('skeletonizes a scalar flood nested past the estimator depth cap', () => {
+    // R2-2 depth leg: 80,000 empty objects are ~240 KB of real JSON — under
+    // the writer-parity byte ceiling — but nested so the flood array sits
+    // past the estimator's depth cap, the walk returns 0 for it and the
+    // resource is retained whole (80k live objects pinned in the newest
+    // block). The estimate walk must fail closed: unmeasurable counts as
+    // over-bounds, so the payload falls back to the skeleton.
+    const maxRetainedBytes = 1024 * 1024;
+    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    let wrapper: Record<string, unknown> = {
+      entries: Array.from({ length: 80_000 }, () => ({})),
+    };
+    for (let i = 0; i < 15; i++) {
+      wrapper = { nested: wrapper };
+    }
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: { uri: 'context://example/objects', text: '' },
+          _meta: wrapper,
+        }),
+      )[0]!,
+    );
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    const retained = block.embeddedResources![0]!;
+    expect(retained).not.toHaveProperty('_meta');
+    expect(retained.resource.uri).toBe('context://example/objects');
+  });
+
+  it('converges the skeleton cascade when the bounded text alone exceeds the ceiling', () => {
+    // R2-2 cascade leg: the text cut bounds UTF-16 code units
+    // (MAX_TEXT_BLOCK_LENGTH) but the ceiling is real UTF-8 bytes, so 100k
+    // three-byte characters survive every prior cut (~300 KB of real JSON)
+    // and the cascade terminated still over ceiling. Emptying the text is
+    // the converging last resort; the display identity (uri, mimeType)
+    // survives.
+    const maxRetainedBytes = 1024 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: 'context://example/wide',
+            mimeType: 'text/plain',
+            text: '\u754c'.repeat(100_000),
+          },
+        }),
+      )[0]!,
+    );
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    const retained = block.embeddedResources![0]!;
+    // R14-4: the text owns the overflow, so the byte-budget cut keeps as
+    // much as fits instead of emptying all 100k characters.
+    expect(retained.resource.text).not.toBe('');
+    expect(retained.resource.text).toContain('[truncated]');
+    expect(
+      new TextEncoder().encode(JSON.stringify(retained)).length,
+    ).toBeLessThanOrEqual(256 * 1024);
+    expect(retained.resource.uri).toBe('context://example/wide');
+    expect(retained.resource.mimeType).toBe('text/plain');
+    expect(onTruncation).toHaveBeenCalledWith({
+      kind: 'text',
+      blockId: block.id,
+      sourceRecordIds: ['r1'],
+    });
+  });
+
+  it('converges a skeleton whose uri and text both own the overflow', () => {
+    // R14-4: a uri and text that each pass the code-unit gate can together
+    // overflow the real-byte ceiling. Both single-field cuts refuse while
+    // the text still holds part of the excess; emptying the text must re-run
+    // them or the returned skeleton stays over budget with the oversized uri
+    // untouched.
+    const maxRetainedBytes = 1024 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: `context://example/${'\u754c'.repeat(100_000)}`,
+            text: '\u754c'.repeat(100_000),
+          },
+        }),
+      )[0]!,
+    );
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    const retained = block.embeddedResources![0]!;
+    // Both fields own part of the overflow: the text cut absorbs what it can
+    // and the field rotation spends the remainder on the uri, so neither is
+    // emptied whole and the skeleton still converges.
+    expect(retained.resource.text).toContain('[truncated]');
+    expect(retained.resource.uri).toContain('[truncated]');
+    expect(
+      new TextEncoder().encode(JSON.stringify(retained)).length,
+    ).toBeLessThanOrEqual(256 * 1024);
+    expect(onTruncation).toHaveBeenCalled();
+  });
+
+  it('converges a skeleton whose uri and mimeType each own the overflow', () => {
+    // R14-4: when both retained skeleton fields exceed the whole excess, an
+    // all-or-nothing cut refuses each in turn and the admitted resource stays
+    // over the ceiling. A cut must absorb what the field can give so the
+    // caller's next re-check and the sibling field's cut converge.
+    const maxRetainedBytes = 1024 * 1024;
+    const onTruncation = vi.fn();
+    const store = createDaemonTranscriptStore({
+      now: 1,
+      maxRetainedBytes,
+      onTruncation,
+    });
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: `context://example/${'\u754c'.repeat(120_000)}`,
+            mimeType: '\u754c'.repeat(120_000),
+            text: 'small',
+          },
+        }),
+      )[0]!,
+    );
+
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(1);
+    const retained = block.embeddedResources![0]!;
+    expect(
+      new TextEncoder().encode(JSON.stringify(retained)).length,
+    ).toBeLessThanOrEqual(256 * 1024);
+    expect(onTruncation).toHaveBeenCalled();
+  });
+
+  it('bounds the estimate-unit charge of a scalar flood that passes the byte ceiling', () => {
+    // The estimator bills a flat 16 units per number/boolean regardless of
+    // JSON width, so real JSON bytes and retainedBytes disagree by ~21x on
+    // scalar-heavy payloads: 80,000 empty objects are ~240 KB of real JSON
+    // (under the writer-parity ceiling) but charge ~5.1M estimate units.
+    // Without the estimate-unit arm the resource is retained whole and pins
+    // the newest block — which trimming never evicts — far over budget.
+    const maxRetainedBytes = 1024 * 1024;
+    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: { uri: 'context://example/objects', text: '' },
+          _meta: { entries: Array.from({ length: 80_000 }, () => ({})) },
+        }),
+      )[0]!,
+    );
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    const retained = block.embeddedResources![0]!;
+    expect(retained).not.toHaveProperty('_meta');
+    expect(retained.resource.uri).toBe('context://example/objects');
+  });
+
+  it('bounds a string payload that passes the estimate-unit bound but not the byte ceiling', () => {
+    // The writer journals real JSON bytes: a 300k-char string charges
+    // ~600k estimate units (under the estimate bound) but ~300 KB of real
+    // JSON (over the writer-parity ceiling), so the byte arm must still
+    // skeletonize it. Only the byte arm discriminates here.
+    const maxRetainedBytes = 1024 * 1024;
+    const store = createDaemonTranscriptStore({ now: 1, maxRetainedBytes });
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: { uri: 'context://example/note', text: '' },
+          _meta: { note: 'x'.repeat(300_000) },
+        }),
+      )[0]!,
+    );
+    const snapshot = store.getSnapshot();
+    expect(snapshot.retainedBytes).toBeLessThanOrEqual(maxRetainedBytes);
+    const block = snapshot.blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources![0]).not.toHaveProperty('_meta');
+  });
+
+  it('keeps oversized resources whose texts differ past the truncation point as separate entries', () => {
+    // Both payloads truncate to the same 100k prefix; dedup must compare the
+    // incoming untruncated text, or the second resource silently vanishes.
+    const store = createDaemonTranscriptStore({ now: 1 });
+    const sharedPrefix = 'x'.repeat(120 * 1024);
+    const oversized = (tail: string) =>
+      normalizeDaemonEvent(
+        frame({
+          type: 'resource',
+          resource: {
+            uri: 'context://example/large',
+            mimeType: 'text/plain',
+            text: `${sharedPrefix}${tail}`,
+          },
+        }),
+      )[0]!;
+    store.dispatch([oversized('AAAA'), oversized('BBBB')]);
+
+    const block = store.getSnapshot().blocks.find((b) => b.kind === 'user');
+    if (!block || block.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    expect(block.embeddedResources).toHaveLength(2);
+    expect(
+      block.embeddedResources!.map((entry) => entry.resource.text.length),
+    ).toEqual([100_000, 100_000]);
+  });
+
+  it('clones retained resources so a newer snapshot never aliases the previous one', () => {
+    const store = createDaemonTranscriptStore({ now: 1 });
+    store.dispatch(normalizeDaemonEvent(frame(resource))[0]!);
+    const first = store.getSnapshot();
+    store.dispatch(
+      normalizeDaemonEvent(
+        frame({ ...resource, _meta: { selection: 'updated' } }),
+      )[0]!,
+    );
+    const second = store.getSnapshot();
+
+    const secondBlock = second.blocks.find((b) => b.kind === 'user');
+    if (!secondBlock || secondBlock.kind !== 'user') {
+      throw new Error('expected one retained user block');
+    }
+    secondBlock.embeddedResources![0]!.resource.text = 'CONSUMER-MUTATED';
+
+    const firstBlock = first.blocks.find((b) => b.kind === 'user');
+    expect(firstBlock).toMatchObject({
+      embeddedResources: [{ resource: { text: '{"items":["example"]}' } }],
+    });
+  });
+
+  it('reconstructs the active branch from persisted user records', () => {
+    const record = (
+      uuid: string,
+      parentUuid: string | null,
+      overrides: Record<string, unknown> = {},
+    ): Record<string, unknown> => ({
+      uuid,
+      parentUuid,
+      sessionId: 'session-1',
+      timestamp: '2026-09-23T00:00:00.000Z',
+      type: 'user',
+      message: { role: 'user', parts: [] },
+      ...overrides,
+    });
+    const records = [
+      record('first', null, {
+        daemonPromptId: 'prompt-1',
+        systemPayload: {
+          displayText: '',
+          hookContext: '',
+          embeddedResources: [resource],
+        },
+      }),
+      record('abandoned', 'first', {
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'old' }] },
+      }),
+      record('active', 'first', {
+        type: 'assistant',
+        message: { role: 'model', parts: [{ text: 'used context' }] },
+      }),
+      record('second', 'active', {
+        daemonPromptId: 'prompt-2',
+        message: { role: 'user', parts: [{ text: 'next' }] },
+      }),
+    ];
+    const projection = projectChatRecordsToDaemonTranscript(records);
+    expect(projection.complete).toBe(true);
+    const users = projection.blocks.filter((block) => block.kind === 'user');
+    expect(users).toHaveLength(2);
+    expect(users[0]).toMatchObject({
+      promptId: 'prompt-1',
+      sourceRecordIds: ['first'],
+      embeddedResources: [resource],
+    });
+    expect(users[1]).toMatchObject({ promptId: 'prompt-2', text: 'next' });
+    expect(users[1]).not.toHaveProperty('embeddedResources');
+  });
+});

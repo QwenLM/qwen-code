@@ -1312,6 +1312,210 @@ describe('createTranscriptReplayMachine', () => {
       },
     );
 
+    it.each(['read the selection', ''])(
+      'replays embedded resources as typed user chunks on their owning prompt (%j)',
+      (text) => {
+        const embeddedResource = {
+          type: 'resource' as const,
+          resource: {
+            uri: 'context://example/selection',
+            mimeType: 'application/json',
+            text: '{"items":["example"]}',
+          },
+        };
+        const secondResource = {
+          type: 'resource' as const,
+          resource: {
+            uri: 'context://example/second',
+            mimeType: 'text/plain',
+            text: 'second selection',
+          },
+        };
+        const projected = updates(
+          createTranscriptReplayMachine(),
+          record('user-embedded', 'user', {
+            daemonPromptId: 'embedded-1',
+            message: {
+              role: 'user',
+              parts: [{ text: 'expanded model input' }],
+            },
+            systemPayload: {
+              displayText: text,
+              hookContext: '',
+              embeddedResources: [embeddedResource, secondResource],
+            },
+          }),
+        );
+
+        expect(
+          projected.map((update) =>
+            'content' in update ? update.content : update,
+          ),
+        ).toEqual([
+          ...(text ? [{ type: 'text', text }] : []),
+          embeddedResource,
+          secondResource,
+        ]);
+        for (const update of projected) {
+          expect(update._meta).toMatchObject({
+            promptId: 'embedded-1',
+            qwenTranscript: { sourceRecordIds: ['user-embedded'] },
+          });
+        }
+      },
+    );
+
+    it('ignores malformed and blob embedded resource records', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-invalid-embedded', 'user', {
+          message: { role: 'user', parts: [] },
+          systemPayload: {
+            displayText: '',
+            hookContext: '',
+            embeddedResources: [
+              null,
+              { type: 'resource', resource: { uri: 'context://missing-text' } },
+              { type: 'resource', resource: { uri: '', text: 'empty URI' } },
+              {
+                type: 'resource',
+                resource: { uri: 'context://blob', blob: 'AQID' },
+              },
+            ],
+          },
+        }),
+      );
+      expect(projected).toEqual([]);
+    });
+
+    it('projects a placeholder for a truncation-only marker record', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-truncated-embedded', 'user', {
+          message: { role: 'user', parts: [{ text: '' }] },
+          systemPayload: {
+            displayText: '',
+            hookContext: '',
+            embeddedResourcesTruncated: true,
+          },
+        }),
+      );
+
+      expect(
+        projected.map((update) =>
+          'content' in update ? update.content : update,
+        ),
+      ).toEqual([
+        { type: 'text', text: '[Embedded resource too large to replay]' },
+      ]);
+      // The placeholder is a user chunk like any other: dropping its _meta
+      // would orphan it from the prompt it belongs to on replay clients.
+      expect(projected[0]?._meta).toMatchObject({
+        qwenTranscript: { sourceRecordIds: ['user-truncated-embedded'] },
+      });
+    });
+
+    it.each([
+      {
+        name: 'a retained embedded resource',
+        payload: {
+          embeddedResources: [
+            {
+              type: 'resource',
+              resource: {
+                uri: 'context://example/kept',
+                text: 'small',
+              },
+            },
+          ],
+        },
+        expected: [
+          {
+            type: 'resource',
+            resource: { uri: 'context://example/kept', text: 'small' },
+          },
+        ],
+      },
+      {
+        name: 'a retained resource link',
+        payload: {
+          resourceLinks: [
+            { type: 'resource_link', uri: 'transit://kept', name: 'notes.md' },
+          ],
+        },
+        expected: [
+          { type: 'resource_link', uri: 'transit://kept', name: 'notes.md' },
+        ],
+      },
+      {
+        name: 'a retained attachment reference',
+        payload: {
+          attachmentReferences: [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 3,
+            },
+          ],
+        },
+        expected: [
+          {
+            type: 'resource',
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 3,
+          },
+        ],
+      },
+    ])(
+      'does not add the placeholder beside $name on a partially truncated prompt',
+      ({ payload, expected }) => {
+        // projectedAny is the only thing keeping the truncation placeholder
+        // off a turn that already projects something; without it the replay
+        // contradicts itself (a retained resource followed by a chunk
+        // asserting the resource was too large to replay).
+        const projected = updates(
+          createTranscriptReplayMachine(),
+          record('user-partial-truncated', 'user', {
+            message: { role: 'user', parts: [{ text: '' }] },
+            systemPayload: {
+              displayText: '',
+              hookContext: '',
+              ...payload,
+              embeddedResourcesTruncated: true,
+            },
+          }),
+        );
+
+        expect(
+          projected.map((update) =>
+            'content' in update ? update.content : update,
+          ),
+        ).toEqual(expected);
+      },
+    );
+
+    it('does not add a placeholder when the truncated prompt has visible text', () => {
+      const projected = updates(
+        createTranscriptReplayMachine(),
+        record('user-truncated-with-text', 'user', {
+          message: { role: 'user', parts: [{ text: 'show this' }] },
+          systemPayload: {
+            displayText: 'show this',
+            hookContext: '',
+            embeddedResourcesTruncated: true,
+          },
+        }),
+      );
+
+      expect(
+        projected.map((update) =>
+          'content' in update ? update.content : update,
+        ),
+      ).toEqual([{ type: 'text', text: 'show this' }]);
+    });
+
     it('ignores invalid resource references and does not infer them from fileData', () => {
       const projected = updates(
         createTranscriptReplayMachine(),

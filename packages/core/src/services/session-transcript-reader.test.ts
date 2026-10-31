@@ -97,6 +97,7 @@ import {
   type SessionTranscriptCursorState,
   type SessionTranscriptReadPageOptions,
   type SessionTranscriptRecordPage,
+  navigationKindForRecord,
 } from './session-transcript-reader.js';
 import {
   content,
@@ -1398,6 +1399,17 @@ describe('SessionTranscriptReader', () => {
     expect(runtime?.recording.turnParentUuids).toEqual(
       turnState.turnParentUuids,
     );
+    // R15-2: the cold path must emit one title-projection state per turn
+    // boundary even when compression excludes the turn from the model read
+    // set; a short array is discarded by restoreProjectedState and the
+    // projection flag then survives a rewind with no per-turn text.
+    expect(runtime?.recording.turnTitleStates).toHaveLength(
+      runtime!.recording.turnParentUuids.length,
+    );
+    expect(runtime?.recording.turnTitleStates?.[0]).toEqual({
+      projection: false,
+      displayText: undefined,
+    });
     expect(runtime?.recording.turnPromptIds).toEqual([`${sessionId}########3`]);
     expect(runtime?.recording.turnDaemonPromptIds).toEqual(['daemon-prompt-3']);
     expect(runtime?.initialTurn).toBe(turnState.initialTurn);
@@ -1778,6 +1790,93 @@ describe('SessionTranscriptReader', () => {
       baseUrl: 'https://example.test/v1',
     });
     expect(recording?.lastAssistantModel).toBe('other-turn-model');
+  });
+
+  it('restores per-turn title projection state aligned with turnParentUuids', async () => {
+    const projected: ChatRecord = {
+      ...record('u1', null, 'visible one'),
+      systemPayload: { displayText: 'visible one', hookContext: '' },
+    };
+    const raw: ChatRecord = {
+      ...record('u2', 'a1', ''),
+      systemPayload: {
+        displayText: '',
+        hookContext: '',
+        displayProjection: false,
+      },
+    };
+    const emptyProjection: ChatRecord = {
+      ...record('u3', 'a2', ''),
+      systemPayload: {
+        displayText: '',
+        hookContext: '',
+        displayProjection: true,
+      },
+    };
+    await writeRecords([
+      projected,
+      record('a1', 'u1', 'answer'),
+      raw,
+      record('a2', 'u2', 'answer'),
+      emptyProjection,
+      record('a3', 'u3', 'answer'),
+    ]);
+
+    const recording = (await coldProjection())?.runtime.recording;
+
+    expect(recording?.turnParentUuids).toEqual([null, 'a1', 'a2']);
+    expect(recording?.turnTitleStates).toEqual([
+      { projection: true, displayText: 'visible one' },
+      { projection: false, displayText: undefined },
+      { projection: true, displayText: '' },
+    ]);
+  });
+
+  it('prunes a cold-restored compressed title projection on rewind', async () => {
+    const first: ChatRecord = {
+      ...record('u1', null, 'first prompt'),
+      systemPayload: { displayText: 'first visible', hookContext: '' },
+    };
+    const second: ChatRecord = {
+      ...record('u2', 'compression', 'second prompt'),
+      systemPayload: { displayText: 'second visible', hookContext: '' },
+    };
+    await writeRecords([
+      first,
+      record('a1', 'u1', 'answer'),
+      sys('compression', 'a1', 'chat_compression', compressedTurn()),
+      second,
+      record('a2', 'u2', 'answer'),
+    ]);
+
+    const projection = await coldProjection();
+    expect(projection?.runtime.recording.turnParentUuids).toEqual([
+      null,
+      'compression',
+    ]);
+    const config = {
+      storage: new Storage(workspaceDir),
+      getSessionId: () => sessionId,
+      getProjectRoot: () => workspaceDir,
+      getCliVersion: () => 'test',
+      getModel: () => 'test',
+      getAuthType: () => undefined,
+      getApprovalMode: () => ApprovalMode.DEFAULT,
+      getResumedSessionData: () => undefined,
+    } as unknown as Config;
+    const recorder = new ChatRecordingService(
+      config,
+      undefined,
+      false,
+      projection!.runtime.recording,
+    );
+    expect(recorder.hasDisplayProjectionForTitle()).toBe(true);
+    recorder.rewindRecording(0, { truncatedCount: 1 });
+
+    expect(recorder.hasDisplayProjectionForTitle()).toBe(false);
+    expect(recorder.getUserDisplayTextsForTitle()).not.toContain(
+      'second visible',
+    );
   });
 
   it('selects the last valid workflow mode on the active branch independently of replay', async () => {
@@ -3360,6 +3459,53 @@ describe('SessionTranscriptReader', () => {
   });
 
   describe('turn navigation', () => {
+    it('keeps a resource-only prompt visible in navigation', () => {
+      const record: ChatRecord = {
+        uuid: 'u-resource-only',
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date(RECORD_BASE_MS).toISOString(),
+        type: 'user',
+        cwd: workspaceDir,
+        version: '1.0.0',
+        message: { role: 'user', parts: [] },
+        systemPayload: {
+          displayText: '',
+          displayProjection: false,
+          hookContext: '',
+          embeddedResources: [
+            {
+              type: 'resource',
+              resource: { uri: 'context://ide/selection', text: '' },
+            },
+          ],
+        },
+      };
+
+      expect(navigationKindForRecord(record)).toBe('prompt');
+    });
+
+    it('keeps a truncation-only resource prompt visible in navigation', () => {
+      const record: ChatRecord = {
+        uuid: 'u-resource-truncated',
+        parentUuid: null,
+        sessionId,
+        timestamp: new Date(RECORD_BASE_MS).toISOString(),
+        type: 'user',
+        cwd: workspaceDir,
+        version: '1.0.0',
+        message: { role: 'user', parts: [] },
+        systemPayload: {
+          displayText: '',
+          displayProjection: false,
+          hookContext: '',
+          embeddedResourcesTruncated: true,
+        },
+      };
+
+      expect(navigationKindForRecord(record)).toBe('prompt');
+    });
+
     const turnResult = (uuid: string, parentUuid: string, promptId: string) =>
       sys(uuid, parentUuid, 'turn_result', {
         promptId,

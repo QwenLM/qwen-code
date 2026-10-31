@@ -130,6 +130,7 @@ describe('renameCommand', () => {
     const mockConfig = {
       getChatRecordingService: vi.fn().mockReturnValue({
         getUserDisplayTextsForTitle: vi.fn().mockReturnValue(displayTexts),
+        hasDisplayProjectionForTitle: vi.fn().mockReturnValue(true),
       }),
     };
     mockContext = createMockCommandContext({
@@ -142,6 +143,7 @@ describe('renameCommand', () => {
       mockConfig,
       expect.any(AbortSignal),
       ['你好'],
+      true,
     );
   });
 

@@ -117,6 +117,13 @@ export type SessionTitleOutcome =
  * Generate a short (3-7 word, sentence-case) title for the current session
  * using the configured fast model. Best-effort — never throws.
  *
+ * `projectionMode` is the recorder's authoritative flag that the session's
+ * user turns reached the model behind a client display projection: the title
+ * input is then `userDisplayTexts` alone and the raw history is never
+ * consulted (it can carry the context the client projected away). The flag
+ * must not be re-derived from the texts — the recorder's ring can shift
+ * every recorded entry out of a session that is still projected.
+ *
  * Returns a discriminated result so callers can either handle failures
  * generically (`if (!outcome.ok) return null`) or map failure reasons to
  * actionable messages (as `/rename --auto` does).
@@ -125,6 +132,7 @@ export async function tryGenerateSessionTitle(
   config: Config,
   abortSignal: AbortSignal,
   userDisplayTexts: ReadonlyArray<string | undefined> = [],
+  projectionMode = false,
 ): Promise<SessionTitleOutcome> {
   try {
     const model = config.getFastModel();
@@ -133,19 +141,20 @@ export async function tryGenerateSessionTitle(
     const llmClient = config.getLlmClient();
     if (!llmClient) return { ok: false, reason: 'no_client' };
 
-    const fullHistory = withoutAutoMemorySnapshots(
-      llmClient.getHistoryShallow(),
-    );
-    if (fullHistory.length < 2) return { ok: false, reason: 'empty_history' };
-
-    const hasDisplayProjection = userDisplayTexts.some(
-      (displayText) => displayText !== undefined,
-    );
-    const dialog = hasDisplayProjection
-      ? userDisplayTexts.flatMap((displayText): Content[] =>
-          displayText ? [{ role: 'user', parts: [{ text: displayText }] }] : [],
-        )
-      : filterToDialog(fullHistory);
+    let dialog: Content[];
+    if (projectionMode) {
+      dialog = userDisplayTexts.flatMap((displayText): Content[] =>
+        displayText ? [{ role: 'user', parts: [{ text: displayText }] }] : [],
+      );
+    } else {
+      const fullHistory = withoutAutoMemorySnapshots(
+        llmClient.getHistoryShallow(),
+      );
+      if (fullHistory.length < 2) {
+        return { ok: false, reason: 'empty_history' };
+      }
+      dialog = filterToDialog(fullHistory);
+    }
     const recentHistory = takeRecentDialog(dialog, RECENT_MESSAGE_WINDOW);
     if (recentHistory.length === 0) {
       return { ok: false, reason: 'empty_history' };

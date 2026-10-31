@@ -357,6 +357,7 @@ import {
   type BridgeSessionExternalRecordRequest,
   DAEMON_CHANNEL_DELIVERY_META_KEY,
   DAEMON_ATTACHMENT_REFERENCES_META_KEY,
+  DAEMON_ATTACHMENT_RESOURCE_INDEXES_META_KEY,
   DAEMON_INPUT_ANNOTATIONS_META_KEY,
   DAEMON_PERMISSION_CANCEL_REASON_META_KEY,
   DAEMON_PROMPT_DISPLAY_TEXT_META_KEY,
@@ -376,6 +377,13 @@ import {
   createTranscriptExecutionLifecycleUpdate,
 } from '@qwen-code/acp-bridge/transcriptReplay';
 import type { SessionAttachmentReference } from '@qwen-code/acp-bridge/sessionAttachments';
+import type { UserPromptRecordPayload } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
+import {
+  MAX_DAEMON_ATTACHMENT_REFERENCES,
+  readDaemonAttachmentReferences,
+  readDaemonNativeResourceIndexes,
+  snapshotReplayableEmbeddedResources,
+} from '@qwen-code/acp-bridge/embeddedResourceReplay';
 import {
   SERVE_CONTROL_EXT_METHODS,
   type ServeSessionContextStatus,
@@ -579,47 +587,6 @@ const GOAL_HELD_RECOVERY_COMMANDS =
   'Run:\n/goal pause\nThen, when ready:\n/goal resume';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
 const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
-const MAX_DAEMON_ATTACHMENT_REFERENCES = 256;
-function readDaemonAttachmentReferences(
-  value: unknown,
-): SessionAttachmentReference[] | undefined {
-  if (
-    !Array.isArray(value) ||
-    value.length === 0 ||
-    value.length > MAX_DAEMON_ATTACHMENT_REFERENCES
-  ) {
-    return undefined;
-  }
-  const references: SessionAttachmentReference[] = [];
-  for (const item of value) {
-    if (!item || typeof item !== 'object' || Array.isArray(item)) {
-      return undefined;
-    }
-    const reference = item as Record<string, unknown>;
-    if (
-      (reference['type'] !== 'image' && reference['type'] !== 'resource') ||
-      typeof reference['attachmentId'] !== 'string' ||
-      reference['attachmentId'].length === 0 ||
-      reference['attachmentId'].length > 255 ||
-      typeof reference['mimeType'] !== 'string' ||
-      reference['mimeType'].length === 0 ||
-      reference['mimeType'].length > 128 ||
-      typeof reference['size'] !== 'number' ||
-      !Number.isSafeInteger(reference['size']) ||
-      reference['size'] < 0 ||
-      (reference['type'] === 'image' && reference['size'] === 0)
-    ) {
-      return undefined;
-    }
-    references.push({
-      type: reference['type'],
-      attachmentId: reference['attachmentId'],
-      mimeType: reference['mimeType'],
-      size: reference['size'],
-    });
-  }
-  return references;
-}
 const MAX_DAEMON_INPUT_ANNOTATIONS = 256;
 function readDaemonInputAnnotations(
   value: unknown,
@@ -641,6 +608,56 @@ function readDaemonInputAnnotations(
   );
   return annotations.length > 0 ? structuredClone(annotations) : undefined;
 }
+/**
+ * Builds the durable user-prompt record payload, or undefined when nothing
+ * worth replaying rides on the turn. Shared by the general record site and
+ * the deferred /advisor site, which must stay in lockstep (R18-6). The
+ * payload exists so replay can render what the model input expansion hid, so
+ * displayProjection records provenance: displayText is a client-supplied
+ * projection only when the prompt metadata carried one.
+ */
+function buildUserPromptRecordPayload(input: {
+  prompt: ContentBlock[];
+  promptText: string;
+  promptDisplayText: string | undefined;
+  inputAnnotations: Array<Record<string, unknown>> | undefined;
+  attachmentReferences: SessionAttachmentReference[] | undefined;
+  embeddedResources: Array<Extract<ContentBlock, { type: 'resource' }>>;
+  embeddedResourcesTruncated: boolean;
+}): UserPromptRecordPayload | undefined {
+  const {
+    prompt,
+    promptText,
+    promptDisplayText,
+    inputAnnotations,
+    attachmentReferences,
+    embeddedResources,
+    embeddedResourcesTruncated,
+  } = input;
+  const resourceLinks = prompt
+    .filter((block) => block.type === 'resource_link')
+    .map((block) => structuredClone(block));
+  return promptDisplayText !== undefined ||
+    inputAnnotations ||
+    attachmentReferences ||
+    resourceLinks.length > 0 ||
+    embeddedResources.length > 0 ||
+    embeddedResourcesTruncated
+    ? {
+        displayText: promptDisplayText ?? promptText,
+        displayProjection: promptDisplayText !== undefined,
+        hookContext: '',
+        ...(inputAnnotations ? { inputAnnotations } : {}),
+        ...(attachmentReferences ? { attachmentReferences } : {}),
+        ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
+        ...(embeddedResources.length > 0 ? { embeddedResources } : {}),
+        ...(embeddedResourcesTruncated
+          ? { embeddedResourcesTruncated: true }
+          : {}),
+      }
+    : undefined;
+}
+
 const TODO_STOP_GUARD_PROMPT_PREFIX = '[Todo Stop Guard] ';
 const TODO_STOP_GUARD_PROMPT_BODY_SUFFIX =
   ' todo item(s) are still pending or in progress. Continue executing the current task now. Do not ask the user whether to continue. If progress requires user input, use the structured question or permission flow. If progress depends on external state, report the blocker explicitly.';
@@ -1891,6 +1908,7 @@ function parseMidTurnDrainResponse(response: unknown): DrainedMidTurnMessage[] {
         if (content.length === 0) return [];
         const attachmentReferences = readDaemonAttachmentReferences(
           item['attachmentReferences'],
+          Math.max(MAX_DAEMON_ATTACHMENT_REFERENCES, content.length),
         );
         // Same gate #buildMidTurnParts uses to decide whether references are
         // persisted; display text must agree or a mixed inline+reference
@@ -1955,8 +1973,10 @@ function isValidMidTurnDrainResponse(
         item['content'].length > 0 &&
         item['content'].every(isContentBlock) &&
         (item['attachmentReferences'] === undefined ||
-          readDaemonAttachmentReferences(item['attachmentReferences']) !==
-            undefined),
+          readDaemonAttachmentReferences(
+            item['attachmentReferences'],
+            Math.max(MAX_DAEMON_ATTACHMENT_REFERENCES, item['content'].length),
+          ) !== undefined),
     );
   }
 
@@ -6850,6 +6870,24 @@ export class Session implements SessionContext {
     goalTurn?: AcpGoalTurn,
     channelTurn = false,
   ): Promise<PromptResponse> {
+    const promptMetadata = (params as { _meta?: Record<string, unknown> })
+      ._meta;
+    const attachmentReferences = readDaemonAttachmentReferences(
+      promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
+      Math.max(MAX_DAEMON_ATTACHMENT_REFERENCES, params.prompt.length),
+    );
+    const nativeResourceIndexes = readDaemonNativeResourceIndexes(
+      promptMetadata?.[DAEMON_ATTACHMENT_RESOURCE_INDEXES_META_KEY],
+      params.prompt,
+      attachmentReferences,
+    );
+    const {
+      resources: embeddedResources,
+      truncated: embeddedResourcesTruncated,
+    } = snapshotReplayableEmbeddedResources(
+      params.prompt,
+      nativeResourceIndexes,
+    );
     let managedMemoryRecallStarted = false;
     let strippedRetryEntries: Content[] = [];
     let retryHistoryReplaced = false;
@@ -6894,8 +6932,6 @@ export class Session implements SessionContext {
           await this.config.getLlmClient().setTools();
         }
         const daemonPromptId = getInvocationContext()?.promptId;
-        const promptMetadata = (params as { _meta?: Record<string, unknown> })
-          ._meta;
         const continuesCurrentWorkChain =
           (params as { retry?: boolean }).retry === true ||
           promptMetadata?.[DAEMON_RETRY_META_KEY] === true ||
@@ -6937,6 +6973,11 @@ export class Session implements SessionContext {
               .join(' ');
             const promptDisplayTextValue =
               promptMetadata?.[DAEMON_PROMPT_DISPLAY_TEXT_META_KEY];
+            // An empty string is a valid client projection: it hides the
+            // turn's text on the display path and must stay a projection
+            // marker, or the raw model text (what the client projected
+            // away) becomes the user-visible transcript text and the title
+            // falls back to the hidden history.
             const promptDisplayText =
               typeof promptDisplayTextValue === 'string'
                 ? promptDisplayTextValue
@@ -7125,28 +7166,19 @@ export class Session implements SessionContext {
               // (R18-6) — while every other slash command records here,
               // BEFORE its action runs: `/clear` swaps in a fresh recorder
               // inside its action, so its record must land first (R20-9).
-              const attachmentReferences = readDaemonAttachmentReferences(
-                promptMetadata?.[DAEMON_ATTACHMENT_REFERENCES_META_KEY],
-              );
-              const resourceLinks = params.prompt
-                .filter((block) => block.type === 'resource_link')
-                .map((block) => structuredClone(block));
               const recorder = this.config.getChatRecordingService();
               recorder?.recordUserMessage(
                 promptText,
                 goalTurn?.permit,
-                promptDisplayText !== undefined ||
-                  inputAnnotations ||
-                  attachmentReferences ||
-                  resourceLinks.length > 0
-                  ? {
-                      displayText: promptDisplayText ?? promptText,
-                      hookContext: '',
-                      ...(inputAnnotations ? { inputAnnotations } : {}),
-                      ...(attachmentReferences ? { attachmentReferences } : {}),
-                      ...(resourceLinks.length > 0 ? { resourceLinks } : {}),
-                    }
-                  : undefined,
+                buildUserPromptRecordPayload({
+                  prompt: params.prompt,
+                  promptText,
+                  promptDisplayText,
+                  inputAnnotations,
+                  attachmentReferences,
+                  embeddedResources,
+                  embeddedResourcesTruncated,
+                }),
                 promptId,
                 daemonPromptId,
               );
@@ -7233,13 +7265,15 @@ export class Session implements SessionContext {
                 recorder?.recordUserMessage(
                   promptText,
                   goalTurn?.permit,
-                  promptDisplayText !== undefined || inputAnnotations
-                    ? {
-                        displayText: promptDisplayText ?? promptText,
-                        hookContext: '',
-                        ...(inputAnnotations ? { inputAnnotations } : {}),
-                      }
-                    : undefined,
+                  buildUserPromptRecordPayload({
+                    prompt: params.prompt,
+                    promptText,
+                    promptDisplayText,
+                    inputAnnotations,
+                    attachmentReferences,
+                    embeddedResources,
+                    embeddedResourcesTruncated,
+                  }),
                   promptId,
                   daemonPromptId,
                 );

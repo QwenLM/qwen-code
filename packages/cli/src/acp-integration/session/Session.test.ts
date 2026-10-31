@@ -14650,7 +14650,11 @@ describe('Session', () => {
               'same prompt',
               undefined,
               withDisplayText
-                ? { displayText: 'visible prompt', hookContext: '' }
+                ? {
+                    displayText: 'visible prompt',
+                    displayProjection: true,
+                    hookContext: '',
+                  }
                 : undefined,
               expect.stringContaining('test-session-id########'),
               currentPromptId,
@@ -15913,6 +15917,7 @@ describe('Session', () => {
         undefined,
         {
           displayText: text,
+          displayProjection: false,
           hookContext: '',
           inputAnnotations: expectedAnnotations,
         },
@@ -15964,6 +15969,7 @@ describe('Session', () => {
         undefined,
         {
           displayText: 'hello',
+          displayProjection: false,
           hookContext: '',
           inputAnnotations: [valid],
         },
@@ -16047,6 +16053,7 @@ describe('Session', () => {
           undefined,
           {
             displayText: text,
+            displayProjection: false,
             hookContext: '',
             resourceLinks: expectedLinks,
           },
@@ -16058,6 +16065,127 @@ describe('Session', () => {
         ]);
       },
     );
+
+    it.each(['read the selection', ''])(
+      'records accepted embedded resources on their owning prompt (%j)',
+      async (text) => {
+        const embeddedResource = {
+          type: 'resource' as const,
+          resource: {
+            uri: 'context://example/selection',
+            mimeType: 'application/json',
+            text: '{"items":["example"]}',
+          },
+        };
+        const expectedResource = structuredClone(embeddedResource);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              ...(text ? [{ type: 'text' as const, text }] : []),
+              embeddedResource,
+            ],
+          },
+          { version: 1, sessionId: 'test-session-id', promptId: 'embedded-1' },
+          undefined,
+          'model-only instruction',
+        );
+        embeddedResource.resource.text = 'changed after submission';
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          text,
+          undefined,
+          {
+            displayText: text,
+            displayProjection: false,
+            hookContext: '',
+            embeddedResources: [expectedResource],
+          },
+          expect.stringContaining('test-session-id########'),
+          'embedded-1',
+        );
+      },
+    );
+
+    it('keeps an empty client display projection as a projection marker', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const image = {
+        type: 'image' as const,
+        data: 'AQID',
+        mimeType: 'image/png',
+      };
+      const reference = {
+        type: 'image' as const,
+        attachmentId: 'attachment-1',
+        mimeType: 'image/png',
+        size: 3,
+      };
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [image],
+        _meta: {
+          'qwen.daemon.promptDisplayText': '',
+          'qwen.daemon.attachmentReferences': [reference],
+        },
+      });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        expect.any(String),
+        undefined,
+        expect.objectContaining({
+          displayText: '',
+          displayProjection: true,
+        }),
+        expect.any(String),
+        undefined,
+      );
+    });
+
+    it('keeps an empty projection over hidden model text and its embedded resources', async () => {
+      // R16-1: the image-only fixture above cannot catch the regression,
+      // because its promptText is '' too. A non-empty text block proves the
+      // record keeps the client's empty projection instead of falling back
+      // to the model-bound text the channel hid.
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+      const embeddedResource = {
+        type: 'resource' as const,
+        resource: {
+          uri: 'context://example/hidden',
+          mimeType: 'text/plain',
+          text: 'resource contents',
+        },
+      };
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text' as const, text: 'hidden channel instructions' },
+          embeddedResource,
+        ],
+        _meta: { 'qwen.daemon.promptDisplayText': '' },
+      });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'hidden channel instructions',
+        undefined,
+        expect.objectContaining({
+          displayText: '',
+          displayProjection: true,
+          embeddedResources: [embeddedResource],
+        }),
+        expect.any(String),
+        undefined,
+      );
+    });
 
     it.each(['image', 'text', 'binary'] as const)(
       'keeps %s attachment paths in model context without changing user display text',
@@ -16117,6 +16245,37 @@ describe('Session', () => {
       },
     );
 
+    it('does not retain text resources that exceed the per-prompt replay budget', async () => {
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'context://example/oversized',
+              text: 'x'.repeat(256 * 1024),
+            },
+          },
+        ],
+      });
+
+      expect(mockChat.sendMessageStream).toHaveBeenCalled();
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        '',
+        undefined,
+        expect.objectContaining({
+          hookContext: '',
+          embeddedResourcesTruncated: true,
+        }),
+        expect.stringContaining('test-session-id########'),
+        undefined,
+      );
+    });
+
     it('records daemon attachment references for transcript replay', async () => {
       const imageReference = {
         type: 'image' as const,
@@ -16158,9 +16317,170 @@ describe('Session', () => {
         undefined,
         {
           displayText: 'describe this',
+          displayProjection: false,
           hookContext: '',
           attachmentReferences: [imageReference, fileReference],
         },
+        expect.stringContaining('test-session-id########'),
+        undefined,
+      );
+    });
+
+    it('does not apply the inline replay limit to a large daemon-native text attachment', async () => {
+      const attachmentReference = {
+        type: 'resource' as const,
+        attachmentId: 'large-notes.txt',
+        mimeType: 'text/plain',
+        size: 256 * 1024,
+      };
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'attachment:///large-notes.txt',
+              mimeType: 'text/plain',
+              text: 'x'.repeat(256 * 1024),
+            },
+          },
+        ],
+        _meta: {
+          'qwen.daemon.attachmentReferences': [attachmentReference],
+          'qwen.daemon.attachmentResourceIndexes': [0],
+        },
+      });
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        '',
+        undefined,
+        {
+          displayText: '',
+          displayProjection: false,
+          hookContext: '',
+          attachmentReferences: [attachmentReference],
+        },
+        expect.stringContaining('test-session-id########'),
+        undefined,
+      );
+    });
+
+    it('retains a direct resource sharing a URI with a daemon-native attachment', async () => {
+      const attachmentReference = {
+        type: 'resource' as const,
+        attachmentId: 'notes.txt',
+        mimeType: 'text/plain',
+        size: 6,
+      };
+      const directResource = {
+        type: 'resource' as const,
+        resource: {
+          uri: 'attachment:///notes.txt',
+          mimeType: 'text/plain',
+          text: 'different direct content',
+        },
+      };
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          {
+            type: 'resource',
+            resource: {
+              uri: 'attachment:///notes.txt',
+              mimeType: 'text/plain',
+              text: 'native',
+            },
+          },
+          directResource,
+        ],
+        _meta: {
+          'qwen.daemon.attachmentReferences': [attachmentReference],
+          'qwen.daemon.attachmentResourceIndexes': [0],
+        },
+      });
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        '',
+        undefined,
+        {
+          displayText: '',
+          displayProjection: false,
+          hookContext: '',
+          attachmentReferences: [attachmentReference],
+          embeddedResources: [directResource],
+        },
+        expect.stringContaining('test-session-id########'),
+        undefined,
+      );
+    });
+
+    it('keeps ambiguous same-URI resources when legacy daemon metadata has no positions', async () => {
+      const directResource = {
+        type: 'resource' as const,
+        resource: { uri: 'attachment:///notes.txt', text: 'direct' },
+      };
+      const nativeResource = {
+        type: 'resource' as const,
+        resource: { uri: 'attachment:///notes.txt', text: 'native' },
+      };
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [directResource, nativeResource],
+        _meta: {
+          'qwen.daemon.attachmentReferences': [
+            {
+              type: 'resource',
+              attachmentId: 'notes.txt',
+              mimeType: 'text/plain',
+              size: 6,
+            },
+          ],
+        },
+      });
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        '',
+        undefined,
+        expect.objectContaining({
+          embeddedResources: [directResource, nativeResource],
+        }),
+        expect.stringContaining('test-session-id########'),
+        undefined,
+      );
+    });
+
+    it('drops more than 256 attachment references on a one-block prompt', async () => {
+      const attachmentReferences = Array.from({ length: 257 }, (_, index) => ({
+        type: 'image' as const,
+        attachmentId: `media-${index}`,
+        mimeType: 'image/png',
+        size: 3,
+      }));
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'describe these' }],
+        _meta: {
+          'qwen.daemon.attachmentReferences': attachmentReferences,
+        },
+      });
+
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        'describe these',
+        undefined,
+        undefined,
         expect.stringContaining('test-session-id########'),
         undefined,
       );
@@ -16189,6 +16509,50 @@ describe('Session', () => {
         'describe these',
         undefined,
         expect.objectContaining({ attachmentReferences }),
+        expect.stringContaining('test-session-id########'),
+        undefined,
+      );
+    });
+
+    it('does not apply the inline resource limit to more than 256 native references', async () => {
+      const attachmentReferences = Array.from({ length: 257 }, (_, index) => ({
+        type: 'resource' as const,
+        attachmentId: `notes-${index}.txt`,
+        mimeType: 'text/plain',
+        size: 1024,
+      }));
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: attachmentReferences.map((reference) => ({
+          type: 'resource' as const,
+          resource: {
+            uri: `attachment:///${reference.attachmentId}`,
+            mimeType: 'text/plain',
+            text: 'x'.repeat(1024),
+          },
+        })),
+        _meta: {
+          'qwen.daemon.attachmentReferences': attachmentReferences,
+          'qwen.daemon.attachmentResourceIndexes': Array.from(
+            { length: 257 },
+            (_, index) => index,
+          ),
+        },
+      });
+      expect(mockChat.sendMessageStream).toHaveBeenCalled();
+      expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+        '',
+        undefined,
+        {
+          displayText: '',
+          displayProjection: false,
+          hookContext: '',
+          attachmentReferences,
+        },
         expect.stringContaining('test-session-id########'),
         undefined,
       );
@@ -21174,7 +21538,7 @@ describe('Session', () => {
       expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
         'internal channel instructions\n\nhello',
         undefined,
-        { displayText: 'hello', hookContext: '' },
+        { displayText: 'hello', displayProjection: true, hookContext: '' },
         expect.stringContaining('test-session-id########'),
         undefined,
       );
@@ -24996,6 +25360,64 @@ describe('Session', () => {
         }
       });
 
+      it('treats a drain with more than 256 matching attachment references as reliable input', async () => {
+        recreateSessionWithGuardMode('enforce');
+        try {
+          installFailingTool();
+          const attachmentReferences = Array.from(
+            { length: 257 },
+            (_, index) => ({
+              type: 'resource' as const,
+              attachmentId: `notes-${index}.txt`,
+              mimeType: 'text/plain',
+              size: 3,
+            }),
+          );
+          mockClient.extMethod = vi.fn().mockImplementation(async (method) => {
+            if (method === 'craft/drainMidTurnQueue') {
+              return {
+                hasQueuedPrompt: false,
+                items: [
+                  {
+                    content: attachmentReferences.map((reference) => ({
+                      type: 'resource' as const,
+                      resource: {
+                        uri: `attachment:///${reference.attachmentId}`,
+                        mimeType: 'text/plain',
+                        text: 'abc',
+                      },
+                    })),
+                    displayText: 'queued notes',
+                    attachmentReferences,
+                  },
+                ],
+              };
+            }
+            return {};
+          });
+          queueMatchingFailureStreak();
+
+          await expect(
+            session.prompt({
+              sessionId: 'test-session-id',
+              prompt: [{ type: 'text', text: 'run the failing tool' }],
+            }),
+          ).resolves.toEqual({ stopReason: 'end_turn' });
+
+          expect(mockClient.extMethod).toHaveBeenCalledWith(
+            'craft/drainMidTurnQueue',
+            expect.objectContaining({ sessionId: 'test-session-id' }),
+          );
+          expect(
+            logRepeatedToolFailureGuardSpy.mock.calls.some(
+              ([event]) => event.reset_reason === 'unreliable_input',
+            ),
+          ).toBe(false);
+        } finally {
+          restoreGuardMode();
+        }
+      });
+
       it('resets the streak when the host reports a queued prompt', async () => {
         recreateSessionWithGuardMode('enforce');
         try {
@@ -28049,6 +28471,96 @@ describe('Session', () => {
           readManyFilesSpy.mockRestore();
           await fs.rm(tempDir, { recursive: true, force: true });
         }
+      });
+
+      it('records more than 256 drained attachment references when the content carries them', async () => {
+        // The prompt path widens the reference bound to the prompt's block
+        // count; a drain item carrying the same attachment set must keep its
+        // references too.
+        const executeSpy = vi.fn().mockResolvedValue({
+          llmContent: 'file contents',
+          returnDisplay: 'file contents',
+        });
+        const tool = {
+          name: 'read_file',
+          kind: core.Kind.Read,
+          build: vi.fn().mockReturnValue({
+            params: { path: '/tmp/test.txt' },
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Read file'),
+            toolLocations: vi.fn().mockReturnValue([]),
+            execute: executeSpy,
+          }),
+        };
+
+        mockToolRegistry.getTool.mockReturnValue(tool);
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'vision-agent',
+          baseUrl: 'https://vision.example.com/v1',
+          agentCapable: true,
+        });
+        const attachmentReferences = Array.from(
+          { length: 257 },
+          (_, index) => ({
+            type: 'image' as const,
+            attachmentId: `media-${index}`,
+            mimeType: 'image/png',
+            size: 8,
+          }),
+        );
+        mockClient.extMethod = vi.fn().mockResolvedValue({
+          hasQueuedPrompt: false,
+          items: [
+            {
+              content: attachmentReferences.map(() => ({
+                type: 'image' as const,
+                mimeType: 'image/png',
+                data: 'aW1n',
+              })),
+              displayText: 'describe these',
+              attachmentReferences,
+            },
+          ],
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'call-1',
+                      name: 'read_file',
+                      args: { path: '/tmp/test.txt' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read file' }],
+        });
+
+        expect(
+          mockChatRecordingService.recordMidTurnUserMessage,
+        ).toHaveBeenCalledWith(
+          [
+            {
+              text: '\n[User message received during tool execution]: describe these',
+            },
+          ],
+          'describe these',
+          undefined,
+          attachmentReferences,
+        );
       });
 
       it('keeps later structured mid-turn messages when one resolution fails', async () => {
@@ -35496,6 +36008,7 @@ describe('Session', () => {
           undefined,
           {
             displayText: '/advisor check my work',
+            displayProjection: false,
             hookContext: '',
             inputAnnotations: [
               {
@@ -35507,6 +36020,166 @@ describe('Session', () => {
               },
             ],
           },
+          expect.stringContaining('test-session-id########'),
+          'daemon-advisor',
+        );
+      });
+
+      it('records the truncation marker for a deferred custom advisor command with an oversized resource', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Shadowed advisor prompt' }],
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.FILE,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: '/advisor check my work' },
+              {
+                type: 'resource',
+                resource: {
+                  uri: 'context://example/oversized',
+                  text: 'x'.repeat(256 * 1024),
+                },
+              },
+            ],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-advisor',
+          },
+        );
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/advisor check my work',
+          undefined,
+          {
+            displayText: '/advisor check my work',
+            displayProjection: false,
+            hookContext: '',
+            embeddedResourcesTruncated: true,
+          },
+          expect.stringContaining('test-session-id########'),
+          'daemon-advisor',
+        );
+      });
+
+      it('records resource links and retained embedded resources for a deferred custom advisor command', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Shadowed advisor prompt' }],
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.FILE,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+        const resourceLink = {
+          type: 'resource_link' as const,
+          uri: 'transit://resource-a',
+          name: 'notes.md',
+        };
+        const embeddedResource = {
+          type: 'resource' as const,
+          resource: {
+            uri: 'context://example/selection',
+            mimeType: 'application/json',
+            text: '{"items":["example"]}',
+          },
+        };
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: '/advisor check my work' },
+              resourceLink,
+              embeddedResource,
+            ],
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-advisor',
+          },
+        );
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/advisor check my work',
+          undefined,
+          {
+            displayText: '/advisor check my work',
+            displayProjection: false,
+            hookContext: '',
+            resourceLinks: [resourceLink],
+            embeddedResources: [embeddedResource],
+          },
+          expect.stringContaining('test-session-id########'),
+          'daemon-advisor',
+        );
+      });
+
+      it('records daemon attachment references for a deferred custom advisor command', async () => {
+        vi.mocked(
+          nonInteractiveCliCommands.handleSlashCommand,
+        ).mockResolvedValueOnce({
+          type: 'submit_prompt',
+          content: [{ text: 'Shadowed advisor prompt' }],
+          resolvedCommand: {
+            name: 'advisor',
+            kind: CommandKind.FILE,
+          },
+        });
+        mockChatRecordingService.recordUserMessage.mockClear();
+        const attachmentReferences = [
+          {
+            type: 'resource' as const,
+            attachmentId: 'notes.txt',
+            mimeType: 'text/plain',
+            size: 6,
+          },
+        ];
+
+        await session.prompt(
+          {
+            sessionId: 'test-session-id',
+            prompt: [
+              { type: 'text', text: '/advisor check my work' },
+              {
+                type: 'resource',
+                resource: {
+                  uri: 'attachment:///notes.txt',
+                  mimeType: 'text/plain',
+                  text: 'hello',
+                },
+              },
+            ],
+            _meta: {
+              'qwen.daemon.attachmentReferences': attachmentReferences,
+            },
+          },
+          {
+            version: 1,
+            sessionId: 'test-session-id',
+            promptId: 'daemon-advisor',
+          },
+        );
+
+        expect(mockChatRecordingService.recordUserMessage).toHaveBeenCalledWith(
+          '/advisor check my work',
+          undefined,
+          expect.objectContaining({ attachmentReferences }),
           expect.stringContaining('test-session-id########'),
           'daemon-advisor',
         );

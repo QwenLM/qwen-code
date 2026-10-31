@@ -138,6 +138,50 @@ describe('recorded message deletion', () => {
     await expect(successor.assertOwnedAndUnchanged()).resolves.toBeUndefined();
   });
 
+  it('leaves projection mode when the only projected turn is deleted', async () => {
+    const { recorder } = await fixture();
+    recorder.recordUserMessage([{ text: 'visible question' }], undefined, {
+      displayText: 'visible question',
+      hookContext: '',
+    });
+    recorder.recordUserMessage([{ text: 'bare follow-up' }]);
+    await recorder.flush();
+    expect(recorder.hasDisplayProjectionForTitle()).toBe(true);
+
+    const before = await recorder.getMessageGroups();
+    const projected = before.groups[1]!;
+    await recorder.deleteMessageGroups({
+      snapshot: before.snapshot,
+      groupIds: [projected.id],
+    });
+
+    expect(recorder.hasDisplayProjectionForTitle()).toBe(false);
+    expect(
+      recorder
+        .getUserDisplayTextsForTitle()
+        .every((text) => text === undefined),
+    ).toBe(true);
+  });
+
+  it('leaves projection mode when the only projected turn is rewound', async () => {
+    const { recorder } = await fixture();
+    recorder.recordUserMessage([{ text: 'visible question' }], undefined, {
+      displayText: 'visible question',
+      hookContext: '',
+    });
+    await recorder.flush();
+    expect(recorder.hasDisplayProjectionForTitle()).toBe(true);
+
+    recorder.rewindRecording(0, { truncatedCount: 1 });
+
+    expect(recorder.hasDisplayProjectionForTitle()).toBe(false);
+    expect(
+      recorder
+        .getUserDisplayTextsForTitle()
+        .every((text) => text === undefined),
+    ).toBe(true);
+  });
+
   it('physically removes the only turn and permits appends and a successor writer', async () => {
     const { transcriptPath, options, lease, recorder } = await fixture();
     const before = await recorder.getMessageGroups();

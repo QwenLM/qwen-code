@@ -13282,6 +13282,7 @@ Other open files:
         expect(goalContext).toBeUndefined();
         expect(payload).toEqual({
           displayText: 'raw @file prompt',
+          displayProjection: true,
           hookContext: '&lt;hook-only context&gt;',
         });
         expect(promptId).toBe('prompt-hook-display-text');
@@ -13384,7 +13385,11 @@ Other open files:
               createUserPromptSubmitContextPart('extra hook context'),
             ],
             undefined,
-            { displayText: '/deploy prod', hookContext: 'extra hook context' },
+            {
+              displayText: '/deploy prod',
+              displayProjection: true,
+              hookContext: 'extra hook context',
+            },
             'prompt-admitted',
           );
           expect(getLastTurnRequestText().split(taggedContext)).toHaveLength(2);
@@ -13605,6 +13610,7 @@ Other open files:
         expect(goalContext).toBeUndefined();
         expect(payload).toEqual({
           displayText: 'my prompt',
+          displayProjection: true,
           hookContext: 'extra hook context',
         });
         expect(promptId).toBe('prompt-hook-context-tag');
@@ -13811,6 +13817,7 @@ Other open files:
           undefined,
           {
             displayText: 'my prompt',
+            displayProjection: true,
             hookContext: '',
           },
           'prompt-hook-context-dedup',
@@ -13879,6 +13886,7 @@ Other open files:
         expect(goalContext).toBeUndefined();
         expect(payload).toEqual({
           displayText: 'my prompt',
+          displayProjection: true,
           hookContext: 'extra hook context',
         });
         expect(promptId).toBe('prompt-hook-context-forged');

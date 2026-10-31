@@ -3267,7 +3267,11 @@ describe('scheduled-tasks routes', () => {
     expect(patch.status).toBe(200);
     expect(patch.body.recurring).toBe(false);
     expect(patch.body.createdAt).toBeGreaterThanOrEqual(now - 5_000); // re-seated
-    expect(patch.body.nextRunAt).toBeGreaterThan(now); // fires at NEXT occurrence
+    // A one-shot whose cron lands on :00/:30 fires up to 90s EARLY by design
+    // (deterministic jitter, cronScheduler computeJitter), so nextRunAt can read
+    // just before `now` when the patch lands just before the boundary; the
+    // un-re-seated failure mode this guards against reads years in the past.
+    expect(patch.body.nextRunAt).toBeGreaterThan(now - 90_000);
   });
 
   it('re-seats a schedule edit made while DISABLED (so a later re-enable is not a missed fire)', async () => {
