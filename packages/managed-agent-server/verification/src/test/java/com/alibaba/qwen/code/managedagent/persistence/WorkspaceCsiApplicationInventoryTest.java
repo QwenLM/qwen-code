@@ -788,7 +788,7 @@ class WorkspaceCsiApplicationInventoryTest {
     void inventoriesEveryDeclaredTableAndPreservesRealPrivateCreationFacts() throws Exception {
         var snapshot = inspect();
         assertThat(snapshot.tables()).hasSize(com.alibaba.qwen.code.runtimebroker.schema.ManagedSchemaContract.TABLES.size());
-        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(805);
+        assertThat(snapshot.tables().stream().map(table -> table.columns().size()).mapToInt(Integer::intValue).sum()).isEqualTo(806);
         assertThat(snapshot.blockers()).noneMatch(blocker -> blocker.code().equals("schema_drift")
                 || blocker.code().equals("query_unavailable"));
         for (String table : new String[] {"ma_session", "ma_public_event", "ma_event_stream", "ma_storage", "ma_operation",
@@ -1144,7 +1144,7 @@ class WorkspaceCsiApplicationInventoryTest {
                 .filter(row -> "CSI_RESOURCE_READ".equals(row.text("operation")))).hasSize(3);
         var settled = snapshot.table("ma_tool_execution").rows().stream()
                 .filter(row -> row.text("execution_call_id").equals("SETTLED")).findFirst().orElseThrow();
-        assertThat(settled.fields()).hasSize(28);
+        assertThat(settled.fields()).hasSize(29);
         assertThat(settled.text("native_authorization_json")).isEqualTo("{}");
         assertThat(settled.key()).containsExactly(settled.cell("execution_call_id_hash"));
         assertThat(snapshot.blockers()).anyMatch(blocker -> blocker.table().equals("ma_tool_execution"));
