@@ -866,6 +866,44 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aLapsedLeaseStillWritesUntilAnotherClaimMovesTheFence() {
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        String id = automation.id();
+        String key = "schedule:2026-06-01T10:01:00Z";
+        AutomationLedgerStore.ScheduleRow row = ledger.findSchedule(tenant, id)
+                .orElseThrow();
+        long fence = ledger.claim(tenant, id, "scanner-a", T0 + 60_000, T0);
+        assertThat(fence).isPositive();
+        // Past lease_until with nobody else claiming: owner and fence still
+        // match, so a tick that outlived its lease records and settles.
+        long late = T0 + 61_000;
+        assertThat(ledger.recordOccurrence(AutomationLedgerStore.OccurrenceRow
+                        .decision(row, key, T0 + MINUTE,
+                                AutomationScanner.TRIGGER_SCHEDULED,
+                                AutomationLedgerStore.OUTCOME_FIRING, null, fence,
+                                late), "scanner-a"))
+                .map(AutomationLedgerStore.OccurrenceRow::fence).contains(fence);
+        assertThat(ledger.repinOccurrence(tenant, id, key, 1, "scanner-a", fence,
+                late)).isTrue();
+        assertThat(ledger.deferOccurrence(tenant, id, key, 1, late + 1_000,
+                "slow", "scanner-a", fence, late)).isTrue();
+        assertThat(ledger.settleOccurrence(tenant, id, key,
+                AutomationLedgerStore.OUTCOME_FIRED, null, "scanner-a", fence,
+                late)).isTrue();
+        assertThat(ledger.advanceWatermark(tenant, id, "scanner-a", fence,
+                T0 + MINUTE, late)).isTrue();
+        // The next claim takes the lapsed lease and moves the fence; from then
+        // on the earlier holder moves nothing.
+        assertThat(ledger.claim(tenant, id, "scanner-b", late + 60_000, late + 1))
+                .isGreaterThan(fence);
+        assertThat(ledger.advanceWatermark(tenant, id, "scanner-a", fence,
+                T0 + 2 * MINUTE, late + 2)).isFalse();
+        assertThat(ledger.findSchedule(tenant, id).orElseThrow()
+                .watermarkSlot()).isEqualTo(T0 + MINUTE);
+    }
+
+    @Test
     void backsOffALostAnswerAndRecordsUnknownPastTheBound() {
         // One slot ever: 10:01 on June 1st.
         PublicAutomation automation = define("1 10 1 6 *", "skip", "none", null,
