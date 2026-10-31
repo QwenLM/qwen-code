@@ -1714,6 +1714,24 @@ describe('SkillManager', () => {
       expect(secondWatcher.listenerCount('all')).toBe(1);
     });
 
+    it('clears the start latch when no watcher attaches, so a later call retries', async () => {
+      // No skill directory exists, so `updateWatchersFromCache()` attaches no
+      // watcher. The start must not stay latched as "started": a later call has
+      // to run the start path again instead of short-circuiting.
+      vi.mocked(fsSync.existsSync).mockReturnValue(false);
+      mockReaddir();
+      const refreshSpy = vi.spyOn(manager, 'refreshCache');
+
+      await manager.startWatching();
+
+      expect(manager.hasActiveWatcher()).toBe(false);
+      expect(refreshSpy).toHaveBeenCalledOnce();
+
+      await manager.startWatching();
+
+      expect(refreshSpy).toHaveBeenCalledTimes(2);
+    });
+
     it('should pass ignored function and shallow depth to chokidar', async () => {
       vi.mocked(fsSync.existsSync).mockImplementation(
         (p) => String(p) === PROJECT_QWEN_DIR,
