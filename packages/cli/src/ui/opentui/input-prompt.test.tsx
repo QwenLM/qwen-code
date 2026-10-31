@@ -943,6 +943,32 @@ describe('OpenTuiInputPrompt printable fallback', () => {
     expect(editor.insertCalls).toEqual([]);
   });
 
+  it('leaves a Shift+Ctrl+C decoded key to its owner without clearing the composer', async () => {
+    const onSubmit = vi.fn((text: string) => text.length > 0);
+    render(<OpenTuiInputPrompt onSubmit={onSubmit} userMessages={[]} />);
+    await typeText('keep draft');
+    const preventDefault = vi.fn();
+    const stopPropagation = vi.fn();
+    await act(async () =>
+      lastKeyboardHandler()(
+        baseKeyEvent({
+          name: 'c',
+          ctrl: true,
+          shift: true,
+          sequence: '\x1b[27;6;99~',
+          preventDefault,
+          stopPropagation,
+        }),
+      ),
+    );
+    expect(currentBuffer().text).toBe('keep draft');
+    expect(currentEditor().plainText).toBe('keep draft');
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(stopPropagation).not.toHaveBeenCalled();
+    await pressKey('return');
+    expect(onSubmit.mock.calls.map(([text]) => text)).toEqual(['keep draft']);
+  });
+
   it('rejects release events', async () => {
     render(<OpenTuiInputPrompt onSubmit={() => true} userMessages={[]} />);
     const editor = currentEditor();

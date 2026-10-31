@@ -73,11 +73,19 @@ const mocks = vi.hoisted(() => {
           children,
         );
       }
-      return React.createElement(
+      const element = React.createElement(
         type as React.ElementType,
         config as Record<string, unknown>,
         children,
       );
+      if (typeof type === 'function' && type.name === 'FieldText') {
+        return React.createElement(
+          'span',
+          { key, 'data-field-text': '' },
+          element,
+        );
+      }
+      return element;
     };
     return { jsx, jsxs: jsx, jsxDEV: jsx, Fragment: React.Fragment };
   }
@@ -124,6 +132,7 @@ import * as coreRuntime from '@qwen-code/qwen-code-core';
 import { ICON } from '../constants.js';
 import { OpenTuiAuthDialog } from './dialogs-auth.js';
 import { setLanguageAsync } from '../../i18n/index.js';
+import * as providerSetupFlow from '../auth/useProviderSetupFlow.js';
 
 function baseKeyEvent(overrides: Record<string, unknown> = {}) {
   return {
@@ -1018,25 +1027,48 @@ describe('caret editing in dialog text fields (#107)', () => {
     await press('down'); // modality → context window (index 2 while it's closed)
   }
 
-  /**
-   * The focused field's rendered text and the cell the cursor sits on, read off
-   * the cursor cell's neighbours so a row that labels its own field — the
-   * context-window row — contributes only the value. Valid while the field holds
-   * a value: an empty field puts the cell on its placeholder's first character,
-   * which is the row's first text element.
-   */
+  /** Read only the FieldText component, excluding adjacent prompts and labels. */
   function focusedField(): { text: string; cell: string } {
     const cell = cursorCell();
     if (!cell) throw new Error('no field renders a cursor cell');
-    const at = cell.textContent ?? '';
+    const field = cell.closest('[data-field-text]');
+    if (!field) throw new Error('cursor cell is outside FieldText');
     return {
-      text:
-        (cell.previousElementSibling?.textContent ?? '') +
-        at +
-        (cell.nextElementSibling?.textContent ?? ''),
-      cell: at,
+      text: field.textContent ?? '',
+      cell: cell.textContent ?? '',
     };
   }
+
+  it.each(['URL', 'API key'])(
+    'clears only the %s field and retains local undo without consuming global Ctrl+C',
+    async (fieldName) => {
+      await runToBaseUrlStep();
+      if (fieldName === 'API key') {
+        await typeText('https://api.example.com/v1');
+        await press('return');
+      }
+      const empty = focusedField();
+      await typeText('ab😀');
+      await press('left');
+      const previous = focusedField();
+      const preventDefault = vi.fn();
+      const stopPropagation = vi.fn();
+      await press('c', {
+        ctrl: true,
+        sequence: '\x03',
+        preventDefault,
+        stopPropagation,
+      });
+      expect(focusedField()).toEqual(empty);
+      expect(preventDefault).not.toHaveBeenCalled();
+      expect(stopPropagation).not.toHaveBeenCalled();
+      await press('z', { ctrl: true, sequence: '\x1a' });
+      expect(focusedField()).toEqual(previous);
+      await press('c', { ctrl: true, shift: true, sequence: '\x03' });
+      await press('d', { ctrl: true, sequence: '\x04' });
+      expect(focusedField()).toEqual(previous);
+    },
+  );
 
   it('inserts at the position the arrows left the caret', async () => {
     await runToBaseUrlStep();
@@ -1129,6 +1161,168 @@ describe('caret editing in dialog text fields (#107)', () => {
       text: 'https://two.tests',
       cell: 'h',
     });
+  });
+
+  it('keeps numeric history and sends only accepted digits to the real owner', async () => {
+    const observed: string[] = [];
+    const useOriginal = providerSetupFlow.useProviderSetupFlow;
+    const useObservedProviderSetupFlow = (
+      ...args: Parameters<typeof useOriginal>
+    ) => {
+      const flow = useOriginal(...args);
+      return {
+        ...flow,
+        changeContextWindowSize(value: string) {
+          observed.push(value);
+          flow.changeContextWindowSize(value);
+        },
+      };
+    };
+    const spy = vi
+      .spyOn(providerSetupFlow, 'useProviderSetupFlow')
+      .mockImplementation(useObservedProviderSetupFlow);
+    try {
+      await runToContextWindowRow();
+      await typeText('123');
+      await typeText('x');
+      await press('z', { ctrl: true, sequence: '\x1a' });
+      expect(focusedField().text.trimEnd()).toBe('12');
+      await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+      expect(focusedField().text.trimEnd()).toBe('123');
+      await pasteText('1,024');
+      expect(focusedField().text.trimEnd()).toBe('1231024');
+      expect(observed).toContain('123');
+      expect(observed).toContain('1231024');
+      expect(observed.every((value) => /^[0-9]*$/.test(value))).toBe(true);
+      await press('z', { ctrl: true, sequence: '\x1a' });
+      expect(focusedField().text.trimEnd()).toBe('123');
+      await press('z', { ctrl: true, sequence: '\x1a' });
+      expect(focusedField().text.trimEnd()).toBe('12');
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('keeps older accepted edits across a normalized numeric paste', async () => {
+    await runToContextWindowRow();
+    await typeText('12');
+    await pasteText('1,024');
+    expect(focusedField().text.trimEnd()).toBe('121024');
+    await press('z', { ctrl: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('12');
+    await press('z', { ctrl: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('1');
+    await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+    await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('121024');
+    await press('return');
+    expect(document.body.textContent).toContain('"contextWindowSize": 121024');
+  });
+
+  it('handles an invalid numeric key between edit and history in one read', async () => {
+    await runToContextWindowRow();
+    await typeText('12');
+    const handler = lastKeyboardHandler();
+    await act(async () => {
+      handler(baseKeyEvent({ name: '3', sequence: '3' }));
+      handler(baseKeyEvent({ name: 'x', sequence: 'x' }));
+      handler(baseKeyEvent({ name: 'z', ctrl: true, sequence: '\x1a' }));
+      handler(
+        baseKeyEvent({ name: 'z', ctrl: true, shift: true, sequence: '\x1a' }),
+      );
+      handler(baseKeyEvent({ name: 'z', ctrl: true, sequence: '\x1a' }));
+    });
+    expect(focusedField().text.trimEnd()).toBe('12');
+    await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('123');
+    await press('return');
+    expect(document.body.textContent).toContain('"contextWindowSize": 123');
+  });
+
+  it('keeps redo when a numeric paste contains no valid characters', async () => {
+    await runToContextWindowRow();
+    await typeText('12');
+    await press('z', { ctrl: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('1');
+    const event = await pasteText('invalid,');
+    expect(event.preventDefault).toHaveBeenCalled();
+    await press('z', { ctrl: true, shift: true, sequence: '\x1a' });
+    expect(focusedField().text.trimEnd()).toBe('12');
+  });
+
+  it('accepts a numeric clear through the real flow and Undo submits its prior number', async () => {
+    const observed: string[] = [];
+    const useOriginal = providerSetupFlow.useProviderSetupFlow;
+    const useObservedProviderSetupFlow = (
+      ...args: Parameters<typeof useOriginal>
+    ) => {
+      const flow = useOriginal(...args);
+      return {
+        ...flow,
+        changeContextWindowSize(value: string) {
+          observed.push(value);
+          flow.changeContextWindowSize(value);
+        },
+      };
+    };
+    const spy = vi
+      .spyOn(providerSetupFlow, 'useProviderSetupFlow')
+      .mockImplementation(useObservedProviderSetupFlow);
+    try {
+      await runToContextWindowRow();
+      await typeText('12');
+      await press('c', { ctrl: true, sequence: '\x03' });
+      expect(observed.at(-1)).toBe('');
+      expect(contextRow()).toMatch(/Context window: auto$/);
+      const handler = lastKeyboardHandler();
+      await act(async () => {
+        handler(baseKeyEvent({ name: 'z', ctrl: true, sequence: '\x1a' }));
+        handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      });
+      expect(document.body.textContent).toContain('"contextWindowSize": 12');
+      expect(observed.every((value) => /^[0-9]*$/.test(value))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it('does not spend Undo on a numeric Space in the same read before submit', async () => {
+    const observed: string[] = [];
+    const useOriginal = providerSetupFlow.useProviderSetupFlow;
+    const useObservedProviderSetupFlow = (
+      ...args: Parameters<typeof useOriginal>
+    ) => {
+      const flow = useOriginal(...args);
+      return {
+        ...flow,
+        changeContextWindowSize(value: string) {
+          observed.push(value);
+          flow.changeContextWindowSize(value);
+        },
+      };
+    };
+    const spy = vi
+      .spyOn(providerSetupFlow, 'useProviderSetupFlow')
+      .mockImplementation(useObservedProviderSetupFlow);
+    try {
+      await runToContextWindowRow();
+      await typeText('12');
+      const handler = lastKeyboardHandler();
+      await act(async () => {
+        handler(baseKeyEvent({ name: '3', sequence: '3' }));
+        handler(baseKeyEvent({ name: 'space', sequence: ' ' }));
+        handler(baseKeyEvent({ name: 'z', ctrl: true, sequence: '\x1a' }));
+        handler(baseKeyEvent({ name: 'return', sequence: '\r' }));
+      });
+      expect(document.body.textContent).toContain('"contextWindowSize": 12');
+      expect(document.body.textContent).not.toContain(
+        '"contextWindowSize": 123',
+      );
+      expect(observed).toContain('123');
+      expect(observed.every((value) => /^[0-9]*$/.test(value))).toBe(true);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('edits the context-window field in place', async () => {

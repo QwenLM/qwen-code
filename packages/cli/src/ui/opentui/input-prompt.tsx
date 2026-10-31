@@ -1841,7 +1841,7 @@ export function OpenTuiInputPrompt(props: InputPromptProps) {
       return;
     }
 
-    if (key.name === 'c' && key.ctrl) {
+    if (matchesCommand(Command.CLEAR_INPUT, key)) {
       // Parity with CLEAR_INPUT: a non-empty buffer is cleared first; the
       // app-level quit only fires on an empty prompt.
       if (

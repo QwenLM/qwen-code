@@ -13,12 +13,22 @@
  * box/text render as div/span.
  */
 
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { render, screen } from '@testing-library/react';
 
 const mocks = vi.hoisted(() => {
   const state = {
     keyboardHandlers: [] as Array<(key: unknown) => void>,
+    pasteHandlers: [] as Array<(event: unknown) => void>,
     width: 100,
   };
   async function buildJsxRuntime() {
@@ -51,6 +61,7 @@ const mocks = vi.hoisted(() => {
 vi.mock('@opentui/core', () => ({
   SyntaxStyle: { fromStyles: () => ({}) },
   MouseButton: { LEFT: 0 },
+  decodePasteBytes: (bytes: Uint8Array) => Buffer.from(bytes).toString('utf8'),
 }));
 
 vi.mock('@opentui/react', async () => {
@@ -68,6 +79,18 @@ vi.mock('@opentui/react', async () => {
         return () => {
           const index = mocks.state.keyboardHandlers.indexOf(fn);
           if (index >= 0) mocks.state.keyboardHandlers.splice(index, 1);
+        };
+      }, []);
+    },
+    usePaste: (handler: (event: unknown) => void) => {
+      const ref = React.useRef(handler);
+      ref.current = handler;
+      React.useEffect(() => {
+        const fn = (event: unknown) => ref.current(event);
+        mocks.state.pasteHandlers.push(fn);
+        return () => {
+          const index = mocks.state.pasteHandlers.indexOf(fn);
+          if (index >= 0) mocks.state.pasteHandlers.splice(index, 1);
         };
       }, []);
     },
@@ -110,10 +133,90 @@ function renderPermissions(
   );
 }
 
+const temporaryDirectories: string[] = [];
+
+function paste(text: string) {
+  act(() => {
+    for (const handler of [...mocks.state.pasteHandlers]) {
+      handler({ bytes: Buffer.from(text), preventDefault: vi.fn() });
+    }
+  });
+}
+
 describe('OpenTuiPermissionsDialog rule rows', () => {
   beforeEach(() => {
     mocks.state.keyboardHandlers.length = 0;
+    mocks.state.pasteHandlers.length = 0;
     mocks.state.width = 100;
+  });
+
+  afterEach(() => {
+    for (const directory of temporaryDirectories.splice(0)) {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
+
+  it('edits a permission rule at its caret before submitting it', () => {
+    renderPermissions([]);
+    press('return');
+    for (const character of 'Bash(lx)') press(character);
+    press('left');
+    press('backspace');
+    press('s');
+    press('return');
+    expect(screen.getByText('Bash(ls)')).toBeTruthy();
+    expect(screen.getByText('Where should this rule be saved?')).toBeTruthy();
+  });
+
+  it('pastes a rule and removes a supplementary code point at its caret', () => {
+    renderPermissions([]);
+    press('return');
+    paste('Bash(😀x)');
+    press('left');
+    press('left');
+    press('backspace');
+    press('return');
+    expect(screen.getByText('Bash(x)')).toBeTruthy();
+    expect(screen.getByText('Where should this rule be saved?')).toBeTruthy();
+  });
+
+  it('lists directory candidates and applies the selected one with Tab', () => {
+    const directory = mkdtempSync(join(tmpdir(), 'qwen-permissions-complete-'));
+    temporaryDirectories.push(directory);
+    mkdirSync(join(directory, 'alpha'));
+    mkdirSync(join(directory, 'beta'));
+    mkdirSync(join(directory, '.hidden'));
+    writeFileSync(join(directory, 'ordinary.txt'), 'fixture');
+    const onAddDirectory = vi.fn();
+    render(
+      <OpenTuiPermissionsDialog
+        rules={[]}
+        directories={[]}
+        initialDirectories={[]}
+        onAddRule={vi.fn()}
+        onDeleteRule={vi.fn()}
+        onAddDirectory={onAddDirectory}
+        onRemoveDirectory={vi.fn()}
+        onExit={vi.fn()}
+      />,
+    );
+    press('tab');
+    press('tab');
+    press('tab');
+    press('return');
+    paste(directory + '/');
+    expect(screen.getByText(/^alpha\/\s+directory$/)).toBeTruthy();
+    expect(screen.getByText(/^beta\/\s+directory$/)).toBeTruthy();
+    expect(screen.queryByText(/^\.hidden\/\s+directory$/)).toBeNull();
+    expect(screen.queryByText(/^ordinary\.txt\/\s+directory$/)).toBeNull();
+    const candidates = screen.getAllByText(/^(alpha|beta)\/\s+directory$/);
+    const selectedName = candidates[1].textContent!.split('/')[0];
+    press('down');
+    press('tab');
+    press('return');
+    expect(onAddDirectory).toHaveBeenCalledExactlyOnceWith(
+      realpathSync(join(directory, selectedName)),
+    );
   });
 
   it('clips the add-rule scope row to the framed width, so it cannot wrap', () => {
