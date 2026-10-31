@@ -24,13 +24,14 @@ use super::bindings::{
 use super::tree::AXIdentity;
 use crate::windows::{all_windows, resolve_window_owner, WindowOwner};
 
-/// Bounded `AXParent` ascent used when an element does not expose `AXWindow`.
+/// Bounded `AXParent` ascent to the nearest window or sheet.
 const MAX_ANCESTRY_DEPTH: usize = 40;
 
 /// Resolve the CGWindowID of the top-level AX window that owns `element`.
 ///
-/// Prefers its native window mapping, then `AXWindow` and a bounded
-/// `AXParent` walk. `None` means ancestry could not be proven — callers must
+/// Prefers the nearest `AXWindow`/`AXSheet` ancestor. Hosted save-panel controls
+/// can map to an internal native window instead of their enclosing sheet.
+/// `None` means ancestry could not be proven — callers must
 /// treat that as "not the requested window", never as a wildcard.
 ///
 /// # Safety
@@ -38,29 +39,17 @@ const MAX_ANCESTRY_DEPTH: usize = 40;
 /// `element` must be a valid `AXUIElementRef` for the duration of the call.
 pub unsafe fn element_window_id(element: AXUIElementRef) -> Option<u32> {
     let _ = AXUIElementSetMessagingTimeout(element, 0.1);
-    // AppKit sheet fields can expose their parent in AXWindow, while their
-    // native mapping identifies the actual sheet receiving keyboard input.
-    let mut window_id = 0;
-    if _AXUIElementGetWindow(element, &mut window_id) == kAXErrorSuccess && window_id != 0 {
-        return Some(window_id);
-    }
-    if let Some(window) = copy_element_attr(element, "AXWindow") {
-        let window_id = ax_get_window_id(window);
-        CFRelease(window as CFTypeRef);
-        if window_id.is_some() {
-            return window_id;
-        }
-    }
-    // Fallback: ascend AXParent until a window role, then map it.
     let mut current: AXUIElementRef = element;
     let mut owned = false;
-    let mut resolved = None;
     for _ in 0..MAX_ANCESTRY_DEPTH {
         let _ = AXUIElementSetMessagingTimeout(current, 0.1);
         match copy_string_attr(current, "AXRole").as_deref() {
             Some("AXWindow") | Some("AXSheet") => {
-                resolved = ax_get_window_id(current);
-                break;
+                let resolved = ax_get_window_id(current);
+                if owned {
+                    CFRelease(current as CFTypeRef);
+                }
+                return resolved;
             }
             Some("AXApplication") | None => break,
             _ => {}
@@ -68,19 +57,27 @@ pub unsafe fn element_window_id(element: AXUIElementRef) -> Option<u32> {
         let parent = copy_element_attr(current, "AXParent");
         if owned {
             CFRelease(current as CFTypeRef);
+            owned = false;
         }
         match parent {
             Some(parent) => {
                 current = parent;
                 owned = true;
             }
-            None => return None,
+            None => break,
         }
     }
     if owned {
         CFRelease(current as CFTypeRef);
     }
-    resolved
+    let mut window_id = 0;
+    if _AXUIElementGetWindow(element, &mut window_id) == kAXErrorSuccess && window_id != 0 {
+        return Some(window_id);
+    }
+    let window = copy_element_attr(element, "AXWindow")?;
+    let window_id = ax_get_window_id(window);
+    CFRelease(window as CFTypeRef);
+    window_id
 }
 
 unsafe fn is_app_menu(
@@ -159,6 +156,68 @@ pub unsafe fn focused_element_in_window(pid: i32, window_id: u32) -> Option<AXUI
         CFRelease(element as CFTypeRef);
         None
     }
+}
+
+/// Resolve a ViewBridge keyboard receiver without changing the logical window target.
+pub(crate) unsafe fn keyboard_recipient_pid(
+    pid: i32,
+    window_id: Option<u32>,
+    explicit_element: Option<usize>,
+) -> anyhow::Result<i32> {
+    use objc2_app_kit::{NSApplicationActivationPolicy, NSRunningApplication};
+
+    let Some(wid) = window_id else {
+        return Ok(pid);
+    };
+    let element = match explicit_element {
+        Some(ptr) => AXIdentity::retained(ptr as AXUIElementRef),
+        None => {
+            let Some(ptr) = focused_element_in_window(pid, wid) else {
+                return Ok(pid);
+            };
+            let element = AXIdentity::retained(ptr);
+            CFRelease(ptr as CFTypeRef);
+            element
+        }
+    };
+    let ptr = element.as_ptr() as AXUIElementRef;
+    let _ = AXUIElementSetMessagingTimeout(ptr, 0.1);
+    let Some(actual_pid) = super::bindings::actual_pid_of_element(ptr)
+        .map_err(|error| anyhow::anyhow!("keyboard receiver query failed: {error}"))?
+    else {
+        return Ok(pid);
+    };
+    if actual_pid == pid {
+        return Ok(pid);
+    }
+
+    // Open/Save fields can expose the app PID while their key events belong to
+    // an auxiliary process. Admit only the same focused, exact-window AX object.
+    let mut owner = 0;
+    let focused = focused_element_in_window(pid, wid).map(|focused| {
+        let same = CFEqual(focused as CFTypeRef, ptr as CFTypeRef) != 0;
+        CFRelease(focused as CFTypeRef);
+        same
+    });
+    if AXUIElementGetPid(ptr, &mut owner) != kAXErrorSuccess
+        || owner != pid
+        || element_window_id(ptr) != Some(wid)
+        || copy_bool_attr(ptr, "AXFocused") != Some(true)
+        || focused != Some(true)
+        || !crate::windows::window_info_by_id(wid).is_some_and(|window| window.pid == pid)
+    {
+        anyhow::bail!("keyboard receiver no longer belongs to the focused target window");
+    }
+    let auxiliary = NSRunningApplication::runningApplicationWithProcessIdentifier(actual_pid)
+        .is_some_and(|app| {
+            !app.isTerminated()
+                && app.isFinishedLaunching()
+                && app.activationPolicy() == NSApplicationActivationPolicy::Prohibited
+        });
+    if !auxiliary {
+        anyhow::bail!("keyboard receiver is not a live auxiliary process");
+    }
+    Ok(actual_pid)
 }
 
 // WKWebView can expose AXFocused on its input while the application's
@@ -465,6 +524,14 @@ pub fn gather_background_facts(
 #[cfg(test)]
 mod tests {
     use super::{attached_sheet_record, count_competing_keyboard_destinations, AxWindowRecord};
+
+    #[test]
+    fn windowless_keyboard_delivery_does_not_follow_an_unbound_element() {
+        assert_eq!(
+            unsafe { super::keyboard_recipient_pid(42, None, Some(usize::MAX)) }.unwrap(),
+            42
+        );
+    }
 
     fn ax_window(window_id: u32, minimized: Option<bool>) -> AxWindowRecord {
         AxWindowRecord {

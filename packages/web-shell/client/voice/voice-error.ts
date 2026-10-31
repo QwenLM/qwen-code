@@ -8,6 +8,7 @@ import type { getTranslator } from '../i18n';
 
 // Keep the transport vocabulary compatible with existing daemons.
 const ERROR_KEYS: Record<string, string> = {
+  'Cannot reach the service.': 'daemon.connection.unavailable',
   'No voice model is configured for this workspace.': 'voice.error.noModel',
   'Voice transcription failed. Please try again.': 'voice.error.transcription',
   'Voice transcription failed.': 'voice.error.transcription',

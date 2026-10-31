@@ -191,6 +191,7 @@ export interface CliArgs {
   bare: boolean | undefined;
   safeMode?: boolean | undefined;
   approvalMode: string | undefined;
+  workflowMode?: 'on' | 'off';
   telemetry: boolean | undefined;
   telemetryTarget: string | undefined;
   telemetryOtlpEndpoint: string | undefined;
@@ -626,6 +627,7 @@ export async function parseArguments(): Promise<CliArgs> {
         .positional('query', QUERY_POSITIONAL)
         .option('model', DEFAULT_COMMAND_OPTIONS.model)
         .option('advisor', DEFAULT_COMMAND_OPTIONS.advisor)
+        .option('workflow-mode', DEFAULT_COMMAND_OPTIONS['workflow-mode'])
         .option('fallback-model', {
           ...DEFAULT_COMMAND_OPTIONS['fallback-model'],
           string: true,
@@ -2837,6 +2839,8 @@ export async function loadCliConfig(
     useRipgrep: settings.tools?.useRipgrep,
     useBuiltinRipgrep: settings.tools?.useBuiltinRipgrep,
     workflowsEnabled: settings.tools?.workflowsEnabled,
+    workflowMode:
+      argv.workflowMode === undefined ? undefined : argv.workflowMode === 'on',
     workflowKeywordTriggerEnabled:
       settings.ui?.disableWorkflowKeywordTrigger !== true,
     workflowSizeGuideline: settings.tools?.workflowSizeGuideline,
@@ -3075,6 +3079,14 @@ export async function loadCliConfig(
         );
       }
     } catch (err) {
+      // Servers may already be running when a later step (e.g. a sandbox
+      // policy rejecting the client install) throws; stop what we started so
+      // a failed init doesn't leave orphaned language-server processes.
+      try {
+        await lspClient?.stop?.();
+      } catch {
+        debugLogger.warn('Failed to stop LSP client after init failure');
+      }
       try {
         config.setLspInitializationError(
           err instanceof Error ? err : String(err),

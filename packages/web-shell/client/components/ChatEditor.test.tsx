@@ -408,6 +408,7 @@ interface ChatEditorRenderProps
     | 'btwEnabled'
     | 'isPreparing'
     | 'contextChipPlacement'
+    | 'gitContextControl'
     | 'standaloneTargetSupported'
     | 'onSelectStandaloneTarget'
     | 'workspaceSelectionDisabled'
@@ -415,6 +416,10 @@ interface ChatEditorRenderProps
     | 'contextUsageAlwaysVisible'
     | 'contextUsageControls'
     | 'onOpenContextUsage'
+    | 'workflowMode'
+    | 'workflowModeStatus'
+    | 'workflowModePending'
+    | 'onWorkflowModeChange'
   > {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
@@ -556,6 +561,274 @@ function rerenderChatEditor(
   if (!entry) throw new Error('container is not mounted by renderChatEditor');
   renderChatEditorInto(entry.root, entry.portalRoot, props);
 }
+
+describe('ChatEditor simple composer', () => {
+  const simple = { composerVariant: 'simple' } as const;
+
+  async function openSimpleMenu(container: HTMLDivElement) {
+    const portalRoot = mounted.find(
+      (entry) => entry.container === container,
+    )!.portalRoot;
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          '[data-testid="composer-add-menu-trigger"]',
+        )!
+        .dispatchEvent(
+          new MouseEvent('pointerdown', { bubbles: true, button: 0 }),
+        );
+    });
+    return portalRoot;
+  }
+
+  it('provides the add entry in simple mode without changing the default', () => {
+    const defaults = renderChatEditor({});
+    const explicitDefault = renderChatEditor({
+      customization: { composerVariant: 'default' },
+    });
+    const compact = renderChatEditor({
+      customization: simple,
+      visibleToolbarActions: ['voice'],
+    });
+
+    for (const container of [defaults, explicitDefault]) {
+      expect(
+        container.querySelector('[data-web-shell-composer-variant="simple"]'),
+      ).toBeNull();
+      expect(
+        container.querySelector('[data-testid="composer-add-menu-trigger"]'),
+      ).toBeNull();
+    }
+    expect(
+      compact.querySelector('[data-web-shell-composer-variant="simple"]'),
+    ).not.toBeNull();
+    expect(
+      compact.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).not.toBeNull();
+    expect(
+      compact.querySelector('[data-web-shell-composer-editor]'),
+    ).not.toBeNull();
+  });
+
+  it('preserves the editor mount when switching between variants', () => {
+    const container = renderChatEditor({});
+    const editor = container.querySelector('[data-web-shell-composer-editor]');
+    expect(editor).not.toBeNull();
+
+    rerenderChatEditor(container, { customization: simple });
+    expect(container.querySelector('[data-web-shell-composer-editor]')).toBe(
+      editor,
+    );
+
+    rerenderChatEditor(container, {
+      customization: { composerVariant: 'default' },
+    });
+    expect(container.querySelector('[data-web-shell-composer-editor]')).toBe(
+      editor,
+    );
+  });
+
+  it('keeps the editor and controls mounted throughout simple voice capture', () => {
+    const container = renderChatEditor({
+      customization: simple,
+      visibleToolbarActions: ['voice'],
+    });
+    const composer = container.querySelector('[data-web-shell-composer]')!;
+    const editor = composer.querySelector('[data-web-shell-composer-editor]');
+    const add = composer.querySelector(
+      '[data-testid="composer-add-menu-trigger"]',
+    );
+    const submit = composer.querySelector('[data-web-shell-composer-submit]');
+    expect(editor).not.toBeNull();
+    expect(add).not.toBeNull();
+    expect(submit).not.toBeNull();
+
+    act(() => voiceButtonState.onActiveChange?.(true));
+    expect(composer.hasAttribute('data-web-shell-simple-voice-active')).toBe(
+      true,
+    );
+    expect(composer.querySelector('[data-web-shell-composer-editor]')).toBe(
+      editor,
+    );
+    expect(
+      composer.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).toBe(add);
+    expect(composer.querySelector('[data-web-shell-composer-submit]')).toBe(
+      submit,
+    );
+
+    act(() => voiceButtonState.onActiveChange?.(false));
+    expect(composer.hasAttribute('data-web-shell-simple-voice-active')).toBe(
+      false,
+    );
+    expect(composer.querySelector('[data-web-shell-composer-editor]')).toBe(
+      editor,
+    );
+    expect(
+      composer.querySelector('[data-testid="composer-add-menu-trigger"]'),
+    ).toBe(add);
+    expect(composer.querySelector('[data-web-shell-composer-submit]')).toBe(
+      submit,
+    );
+  });
+
+  it.each(['session', 'images'] as const)(
+    'keeps the idle microphone hidden while preparing %s without hiding active capture',
+    (source) => {
+      composerCoreState.hasContent = false;
+      composerCoreState.pendingImageBatchCount = source === 'images' ? 1 : 0;
+      const props = {
+        customization: simple,
+        visibleToolbarActions: ['voice'] as const,
+        isPreparing: source === 'session',
+      };
+      const container = renderChatEditor(props);
+      const voice = container.querySelector<HTMLElement>(
+        '[data-web-shell-simple-voice]',
+      )!;
+      expect(voice.hidden).toBe(true);
+      expect(
+        container.querySelector('[data-web-shell-simple-idle]'),
+      ).toBeNull();
+      const submit = container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-composer-submit]',
+      )!;
+      expect(submit.disabled).toBe(true);
+      expect(submit.getAttribute('aria-label')).toBe('Loading...');
+
+      act(() => voiceButtonState.onActiveChange?.(true));
+      expect(voice.hidden).toBe(false);
+      act(() => voiceButtonState.onActiveChange?.(false));
+      expect(voice.hidden).toBe(true);
+
+      composerCoreState.pendingImageBatchCount = 0;
+      rerenderChatEditor(container, { ...props, isPreparing: false });
+      expect(voice.hidden).toBe(false);
+      expect(
+        container.querySelector('[data-web-shell-simple-idle]'),
+      ).not.toBeNull();
+    },
+  );
+
+  it('keeps advanced and host controls out of the simple menu', async () => {
+    const props: ChatEditorRenderProps = {
+      customization: {
+        ...simple,
+        renderComposerToolbarStart: () => <button>Host start action</button>,
+        renderComposerToolbarEnd: () => <button>Host end action</button>,
+        renderComposerToolbarRight: () => <button>Host right action</button>,
+      },
+      visibleToolbarActions: ['approvalMode', 'model', 'contextUsage'],
+      availableModels: [{ id: 'qwen', label: 'Qwen' }],
+      contextUsageAlwaysVisible: true,
+      onShowContextUsage: vi.fn(),
+    };
+    const container = renderChatEditor(props);
+
+    expect(container.querySelector('[data-web-shell-mode-button]')).toBeNull();
+    expect(container.querySelector('[data-web-shell-model-button]')).toBeNull();
+    expect(container.textContent).not.toContain('Host start action');
+    const menu = await openSimpleMenu(container);
+    expect(menu.querySelector('[data-web-shell-mode-button]')).toBeNull();
+    expect(menu.querySelector('[data-web-shell-model-button]')).toBeNull();
+    expect(menu.querySelector('[data-web-shell-context-usage]')).toBeNull();
+    expect(menu.textContent).not.toContain('Host start action');
+    expect(menu.textContent).not.toContain('Host end action');
+    expect(menu.textContent).not.toContain('Host right action');
+
+    rerenderChatEditor(container, {
+      ...props,
+      customization: { ...props.customization, composerVariant: 'default' },
+    });
+    expect(
+      container.querySelector('[data-web-shell-mode-button]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-model-button]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('[data-web-shell-context-usage]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain('Host start action');
+    expect(container.textContent).toContain('Host end action');
+    expect(container.textContent).toContain('Host right action');
+  });
+
+  it('keeps excluded optional actions out of the simple input and menu', async () => {
+    const container = renderChatEditor({
+      customization: simple,
+      visibleToolbarActions: [],
+      availableModels: [{ id: 'qwen' }],
+    });
+    const menu = await openSimpleMenu(container);
+    for (const root of [container, menu]) {
+      expect(root.querySelector('[data-web-shell-mode-button]')).toBeNull();
+      expect(root.querySelector('[data-web-shell-model-button]')).toBeNull();
+      expect(root.querySelector('[data-testid="voice-button"]')).toBeNull();
+    }
+  });
+
+  it('preserves send, disabled, and running cancellation behavior', () => {
+    composerCoreState.hasContent = true;
+    const onCancel = vi.fn();
+    const props = { customization: simple, onCancel };
+    const container = renderChatEditor(props);
+    const submit = () =>
+      container.querySelector<HTMLButtonElement>(
+        '[data-web-shell-composer-submit]',
+      )!;
+    expect(submit().disabled).toBe(false);
+    act(() => submit().click());
+    expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+
+    rerenderChatEditor(container, { ...props, disabled: true });
+    expect(submit().disabled).toBe(true);
+    expect(
+      container.querySelector<HTMLButtonElement>(
+        '[data-testid="composer-add-menu-trigger"]',
+      )!.disabled,
+    ).toBe(true);
+
+    composerCoreState.hasContent = false;
+    rerenderChatEditor(container, { ...props, isRunning: true });
+    expect(submit().disabled).toBe(false);
+    act(() => submit().click());
+    expect(onCancel).toHaveBeenCalledOnce();
+    expect(composerCoreState.submitText).toHaveBeenCalledOnce();
+  });
+
+  it('ingests session attachments from the simple add menu', async () => {
+    const container = renderChatEditor({
+      customization: simple,
+      workspaceFeaturesEnabled: false,
+      attachmentsEnabled: true,
+    });
+    const menu = await openSimpleMenu(container);
+    await act(async () => {
+      menu
+        .querySelector<HTMLElement>('[data-testid="composer-add-menu-file"]')!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+    });
+    const file = new File(['simple attachment'], 'note.txt', {
+      type: 'text/plain',
+    });
+    const input =
+      container.querySelector<HTMLInputElement>('input[type=file]')!;
+    Object.defineProperty(input, 'files', {
+      value: [file],
+      configurable: true,
+    });
+    await act(async () => {
+      menu
+        .querySelector<HTMLElement>(
+          '[data-testid="composer-add-menu-file-attach"]',
+        )!
+        .dispatchEvent(new MouseEvent('click', { bubbles: true, button: 0 }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    expect(composerCoreState.ingestFiles).toHaveBeenCalledWith([file]);
+  });
+});
 
 describe('ChatEditor voice toolbar integration', () => {
   it('keeps dictation and Live together when the host toolbar allows voice', () => {
@@ -1585,9 +1858,11 @@ describe('ChatEditor attachment reporting', () => {
       '[data-web-shell-composer-images]',
     );
     const editor = container.querySelector('[data-web-shell-composer-editor]');
-    expect(imageStrip?.parentElement).toBe(
-      editor?.parentElement?.parentElement,
+    const content = container.querySelector(
+      '[data-web-shell-composer-content]',
     );
+    expect(imageStrip?.parentElement).toBe(content);
+    expect(editor?.closest('[data-web-shell-composer-content]')).toBe(content);
     act(() => img!.click());
     expect(onImagePreview).toHaveBeenCalledWith('data:image/png;base64,abc');
   });
@@ -1923,6 +2198,30 @@ describe('ChatEditor context chip placement', () => {
     expect(
       toolbar!.querySelector('[aria-label^="Current Git branch:"]'),
     ).toBeNull();
+  });
+
+  it('places a service-owned Git control beside the workspace without a Local Git picker', () => {
+    const container = renderChatEditor({
+      ...workspaceProps,
+      contextChipPlacement: 'below',
+      gitContextControl: <button type="button">Managed worktree</button>,
+    });
+    const row = container.querySelector(
+      '[data-web-shell-composer-context-row]',
+    )!;
+    expect(row.querySelector('button[aria-label="Workspace"]')).not.toBeNull();
+    expect(row.textContent).toContain('Managed worktree');
+    expect(
+      container
+        .querySelector('[data-web-shell-composer-surface]')!
+        .contains(row),
+    ).toBe(false);
+    expect(
+      [...container.querySelectorAll('button')].filter(
+        (button) => button.textContent === 'Managed worktree',
+      ),
+    ).toHaveLength(1);
+    expect(container.querySelector('[data-testid="branch-picker"]')).toBeNull();
   });
 
   it('leaves the workspace to the header and keeps git in the toolbar', () => {
@@ -4685,6 +4984,25 @@ describe('ChatEditor mobile composer actions', () => {
     ).not.toBeNull();
   });
 
+  it('keeps the service-owned Git control once in the mobile context row', () => {
+    mobileComposer();
+    const container = renderChatEditor({
+      contextChipPlacement: 'below',
+      gitContextControl: <button type="button">Managed worktree</button>,
+      visibleToolbarActions: [],
+    });
+    const row = container.querySelector('[class*="mobileContextRow"]')!;
+    expect(row.textContent).toContain('Managed worktree');
+    expect(
+      [...container.querySelectorAll('button')].filter(
+        (button) => button.textContent === 'Managed worktree',
+      ),
+    ).toHaveLength(1);
+    expect(
+      container.querySelector('[data-web-shell-composer-context-row]'),
+    ).toBeNull();
+  });
+
   it.each([{ sessionId: 'b' }, { atWorkspaceCwd: '/b' }, { disabled: true }])(
     'closes expanded editing only when its owner changes: %j',
     async (change) => {
@@ -6546,5 +6864,57 @@ describe('ChatEditor file upload gating', () => {
       // come back instead of vanishing silently.
       expect(restore).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('ChatEditor Workflow mode', () => {
+  const ready = {
+    workflowModeStatus: 'ready' as const,
+    workflowMode: { requested: true, available: true, effective: true },
+  };
+
+  it('keeps Workflow independent of reasoning and a running response', () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      ...ready,
+      isRunning: true,
+      disabled: true,
+      visibleToolbarActions: ['plan', 'workflowMode', 'model'],
+      onTogglePlan: vi.fn(),
+      onWorkflowModeChange,
+    });
+    const control = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Workflow mode"]',
+    )!;
+    expect(control.disabled).toBe(false);
+    act(() => control.click());
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+    const plan = container.querySelector('[data-web-shell-plan-control]')!;
+    const workflow = container.querySelector(
+      '[data-web-shell-workflow-mode-control]',
+    )!;
+    const model = container.querySelector('[data-web-shell-model-button]')!;
+    expect(
+      plan.compareDocumentPosition(workflow) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      workflow.compareDocumentPosition(model) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('honors explicit toolbar allowlists without fabricating support', () => {
+    const container = renderChatEditor({
+      ...ready,
+      visibleToolbarActions: ['model'],
+    });
+    expect(
+      container.querySelector('[data-web-shell-workflow-mode-control]'),
+    ).toBeNull();
+    rerenderChatEditor(container, { visibleToolbarActions: ['workflowMode'] });
+    expect(
+      container.querySelector('[data-web-shell-workflow-mode-control]'),
+    ).toBeNull();
   });
 });

@@ -179,17 +179,30 @@ function DetailRow({
   name,
   tokens,
   tokenLabel,
+  onOpen,
 }: {
   name: string;
   tokens: number;
   tokenLabel: string;
+  onOpen?: () => void;
 }) {
   return (
     <div className={styles.detailRow}>
       <span className={styles.secondary}>{'\u2514'} </span>
-      <span className={styles.detailName} title={name}>
-        {name}
-      </span>
+      {onOpen ? (
+        <button
+          type="button"
+          className={styles.detailNameButton}
+          title={name}
+          onClick={onOpen}
+        >
+          {name}
+        </button>
+      ) : (
+        <span className={styles.detailName} title={name}>
+          {name}
+        </span>
+      )}
       <span className={styles.value}>
         {formatTokens(tokens)} {tokenLabel}
       </span>
@@ -201,25 +214,36 @@ function DetailSection({
   items,
   getName,
   tokenLabel,
+  onOpen,
 }: {
   items: readonly (DaemonContextToolDetail | DaemonContextMemoryDetail)[];
   getName: (
     item: DaemonContextToolDetail | DaemonContextMemoryDetail,
   ) => string;
   tokenLabel: string;
+  onOpen?: (item: DaemonContextMemoryDetail) => void;
 }) {
   const sorted = sortByTokens(items);
   if (sorted.length === 0) return null;
   return (
     <>
-      {sorted.map((item) => (
-        <DetailRow
-          key={getName(item)}
-          name={getName(item)}
-          tokens={item.tokens}
-          tokenLabel={tokenLabel}
-        />
-      ))}
+      {sorted.map((item) => {
+        // Only real files (those carrying an absolute path) are openable;
+        // synthetic aggregates such as the auto-memory prompt are not.
+        const handleOpen =
+          onOpen && 'absolutePath' in item && item.absolutePath
+            ? () => onOpen(item)
+            : undefined;
+        return (
+          <DetailRow
+            key={getName(item)}
+            name={getName(item)}
+            tokens={item.tokens}
+            tokenLabel={tokenLabel}
+            onOpen={handleOpen}
+          />
+        );
+      })}
     </>
   );
 }
@@ -272,11 +296,14 @@ export function ContextUsageMessage({
   status,
   onShowDetail,
   compact = false,
+  onOpenMemoryFile,
 }: {
   status: DaemonSessionContextUsageStatus;
   /** Run /context detail, exactly like typing it. */
   onShowDetail?: () => void;
   compact?: boolean;
+  /** Open a memory file row in a read-only preview. */
+  onOpenMemoryFile?: (file: DaemonContextMemoryDetail) => void;
 }) {
   const { t } = useI18n();
   const [collapsed, setCollapsed] = useState(false);
@@ -454,9 +481,29 @@ export function ContextUsageMessage({
               ) : undefined}
             </CategoryRow>
           )}
+          {breakdown.instructionFiles !== undefined && (
+            <CategoryRow
+              {...categoryProps}
+              label={t('contextUsage.instructionFiles')}
+              tokens={breakdown.instructionFiles}
+            >
+              {hasDetails && (usage.instructionFiles?.length ?? 0) > 0 ? (
+                <DetailSection
+                  items={usage.instructionFiles!}
+                  getName={(item) => ('path' in item ? item.path : item.name)}
+                  tokenLabel={t('contextUsage.tokens')}
+                  onOpen={onOpenMemoryFile}
+                />
+              ) : undefined}
+            </CategoryRow>
+          )}
           <CategoryRow
             {...categoryProps}
-            label={t('contextUsage.memoryFiles')}
+            label={t(
+              breakdown.instructionFiles === undefined
+                ? 'contextUsage.memoryFiles'
+                : 'contextUsage.autoMemory',
+            )}
             tokens={breakdown.memoryFiles}
           >
             {hasDetails && usage.memoryFiles.length > 0 ? (
@@ -464,6 +511,7 @@ export function ContextUsageMessage({
                 items={usage.memoryFiles}
                 getName={(item) => ('path' in item ? item.path : item.name)}
                 tokenLabel={t('contextUsage.tokens')}
+                onOpen={onOpenMemoryFile}
               />
             ) : undefined}
           </CategoryRow>

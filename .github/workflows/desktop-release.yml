@@ -101,6 +101,11 @@ jobs:
       tag: '${{ steps.version.outputs.tag }}'
       version: '${{ steps.version.outputs.version }}'
     steps:
+      - name: 'Recreate runner Git metadata'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          rm -rf -- "$GITHUB_WORKSPACE/.git"
+
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           fetch-depth: 0
@@ -767,7 +772,7 @@ jobs:
       - 'prepare'
       - 'desktop_shell'
       - 'build'
-    runs-on: 'ubuntu-latest'
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.ECS_RELEASE_HOST_RUNNER_ENABLED == ''true'') && fromJSON(''["self-hosted", "linux", "ecs-qwen-release-host"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 20
     # The feed move below overwrites desktop-latest.json with --clobber, so it
     # sits behind the same deployment gate as the OSS mirror job.
@@ -776,6 +781,8 @@ jobs:
     permissions:
       contents: 'write'
     steps:
+      - uses: '$/.github/actions/prepare-release-runner'
+
       - uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
           ref: '${{ needs.prepare.outputs.qwen_code_sha }}'

@@ -23,6 +23,7 @@
 import { randomUUID } from 'node:crypto';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type { Config } from '@qwen-code/qwen-code-core/config/config.js';
+import type { WorkflowModeSnapshot } from '@qwen-code/qwen-code-core/core/workflow-mode.js';
 import { buildSessionRecoveryPlan } from '@qwen-code/qwen-code-core/core/session-recovery.js';
 import { SessionStartSource } from '@qwen-code/qwen-code-core/hooks/types.js';
 import type { ChatRecord } from '@qwen-code/qwen-code-core/services/chatRecordingService.js';
@@ -131,11 +132,13 @@ export async function handleResumeSession(
   }
 
   const oldSessionId = config.getSessionId();
+  let oldWorkflowMode: WorkflowModeSnapshot | undefined;
   let coreSwapped = false;
   let uiSwapped = false;
   let toolsInvalidated = false;
 
   try {
+    oldWorkflowMode = await config.captureWorkflowModeState?.();
     const cwd = config.getTargetDir();
     const sessionService = new SessionService(cwd);
     sessionService.assertLegacySessionExecution(sessionId);
@@ -214,6 +217,7 @@ export async function handleResumeSession(
         resetBackgroundStateForSessionSwitch(config);
         getInteractiveModSession(config)?.invalidateTools();
         config.startNewSession(oldSessionId, undefined);
+        if (oldWorkflowMode) config.restoreWorkflowModeState(oldWorkflowMode);
         await config.loadPausedBackgroundAgents(oldSessionId).catch(() => {});
         // Re-hydrate the client against the restored session, mirroring the
         // other three rollback routes (useResumeCommand, useBranchCommand,
@@ -324,6 +328,7 @@ export async function handleBranchSession(
   }
 
   const oldSessionId = config.getSessionId();
+  let oldWorkflowMode: WorkflowModeSnapshot | undefined;
   const newSessionId = randomUUID();
   const sessionService = config.getSessionService();
 
@@ -334,6 +339,7 @@ export async function handleBranchSession(
   let prevSessionData: ResumedSessionData | undefined;
 
   try {
+    oldWorkflowMode = await config.captureWorkflowModeState?.();
     // 1. Flush the outgoing recorder so the source tail is on disk before
     //    the fork (a degraded source must not fork).
     const outgoingRecording = config.getChatRecordingService();
@@ -430,6 +436,7 @@ export async function handleBranchSession(
       try {
         getInteractiveModSession(config)?.invalidateTools();
         config.startNewSession(oldSessionId, prevSessionData);
+        if (oldWorkflowMode) config.restoreWorkflowModeState(oldWorkflowMode);
         await config.getGeminiClient()?.initialize?.();
       } catch (rollbackErr) {
         config
