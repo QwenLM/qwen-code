@@ -27668,6 +27668,127 @@ describe('Hosted Harness Runtime turn takeover', () => {
     );
   }, 8000);
 
+  // A6 (R1-4): the ledger-less gap block's observable outcome at the real
+  // continue route — the family error becomes a retriable recovery block,
+  // never a fabricated never-ran fold. The drift is built into the load
+  // (suppressChildAgents on a version-0 lane), not hand-passed.
+  it('blocks the ledger-less child gap on continue and keeps the block retriable (A6)', async () => {
+    await parkAgentWaitResumeShape('orphan');
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();
+    acquireSpy = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'acquire')
+      .mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'cancel').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const server = await replacementApp();
+    const loaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: 'hosted-workspace-shell/1',
+      driveRuntimeRecovery: true,
+      // The drift the guard exists for: the replacement loads without the
+      // child lane the original admitted its children under.
+      suppressChildAgents: true,
+    });
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as {
+      phase: string;
+      checkpointId: string;
+      activationId: string;
+    };
+    const continued = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(continued.status).toBe(200);
+    await vi.waitFor(
+      async () => {
+        const status = await replacementHeaders(
+          supertest(server).get(`/session/${SESSION_ID}/status`),
+        ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+        expect(status.body.hasActivePrompt).toBe(false);
+        expect(status.body.recoveryBlocked).toBe(true);
+      },
+      { timeout: settleTimeoutMs() },
+    );
+    const retried = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/continue`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(retried.status).toBe(409);
+    expect(retried.body.code).toBe('hosted_turn_recovery_required');
+    const transcript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    // The gap owes an answer; it must not receive a fabricated one.
+    expect(JSON.stringify(transcript.body)).not.toContain(
+      'interrupted before this child agent was admitted',
+    );
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  }, 30_000);
+
+  // A6 (R1-2): the cancel route pre-aborts the gap fill so the cancel
+  // settles at once. Under the same drift the guard must stay exempt there
+  // — a throwing fill would wedge the cancel in a deterministic 503 loop
+  // and the Turn could never settle.
+  it('still settles the cancelled takeover when the child ledger drifted away (A6)', async () => {
+    await parkAgentWaitResumeShape('orphan');
+    const server = await replacementApp();
+    const loaded = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/load`),
+    ).send({
+      managedSessionStore: storeFor(BOOT_ID_2),
+      toolProfile: 'hosted-workspace-shell/1',
+      passiveManagedRuntimeRecovery: true,
+      suppressChildAgents: true,
+    });
+    expect(loaded.status).toBe(200);
+    const recovery = loaded.body._meta?.[
+      'qwen.daemon.managedRuntimeRecovery'
+    ] as {
+      phase: string;
+      checkpointId: string;
+      activationId: string;
+    };
+    const cancelled = await replacementHeaders(
+      supertest(server).post(`/session/${SESSION_ID}/managed-runtime/cancel`),
+    )
+      .set('X-Qwen-Client-Id', loaded.body.clientId as string)
+      .send({
+        promptId: PROMPT_ID,
+        checkpointId: recovery.checkpointId,
+        activationId: recovery.activationId,
+      });
+    expect(cancelled.status).toBe(200);
+    expect(cancelled.body.accepted).toBe(true);
+    const transcript = await replacementHeaders(
+      supertest(server).get(`/session/${SESSION_ID}/transcript`),
+    ).set('X-Qwen-Client-Id', loaded.body.clientId as string);
+    // Without the ledger the pre-aborted fill answers the unknown outcome
+    // — terminating, but claiming nothing about a child it cannot see.
+    const cancelledBody = JSON.stringify(transcript.body);
+    expect(cancelledBody).toContain('outcome is unknown');
+    expect(cancelledBody).not.toContain('never ran');
+    await replacementHeaders(
+      supertest(server).delete(`/session/${SESSION_ID}`),
+    );
+  }, 20_000);
+
   it('the carried all-consumed continue adopts the takeover without claiming the mount (R2-1/R2-3)', async () => {
     await parkAgentWaitResumeShape('carried');
     vi.spyOn(HostedWorkspaceBroker.prototype, 'warm').mockResolvedValue();

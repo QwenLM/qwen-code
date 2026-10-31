@@ -11070,6 +11070,7 @@ export function registerHostedHarnessSessionRoutes(
               commands: session.commands,
               children: session.childAgents,
               messages: session.messages,
+              signal: abort.signal,
             });
             if (outstanding.length > 0 || filled > 0) {
               projected = await session.managed.sink.project();
@@ -11621,6 +11622,8 @@ export function registerHostedHarnessSessionRoutes(
                 commands: session.commands,
               });
             }
+            const cancelCommandFillAbort = new AbortController();
+            cancelCommandFillAbort.abort();
             await fillParkedRoundCommandGaps({
               managed: session.managed,
               sessionId,
@@ -11630,6 +11633,7 @@ export function registerHostedHarnessSessionRoutes(
               commands: session.commands,
               children: session.childAgents,
               messages: session.messages,
+              signal: cancelCommandFillAbort.signal,
             });
           }
         } else if (agentWait !== null) {
