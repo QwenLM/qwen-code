@@ -595,21 +595,39 @@ export function trimCapture(s: string): { text: string; truncated: boolean } {
   };
 }
 
+/**
+ * The report for a run that never started anything: every observation field is
+ * its zero, because nothing was driven and nothing was measured.
+ *
+ * ONE factory rather than a literal per exit. These paths differed only in
+ * `note`, and hand-copied copies are how a field added later lands in some of
+ * them. `note` stays required so each exit still says WHY it stopped.
+ *
+ * Exits that DID start something — the readiness timeout and a failed
+ * `new-session` — carry live `readyAfterMs` / `killedStale`, so they build
+ * their own report and are deliberately not this shape.
+ */
+export function notStartedReport(note: string): DriveReport {
+  return {
+    outcome: 'unavailable',
+    observed: false,
+    exitCode: null,
+    readyAfterMs: null,
+    droveForMs: 0,
+    output: '',
+    truncated: false,
+    killedStale: false,
+    note,
+  };
+}
+
 export function runDrive(args: DriveArgs): DriveReport {
   const exec = args.exec ?? spawnExec;
   const server = args.server;
   if (!SERVER_NAME_RE.test(server)) {
-    return {
-      outcome: 'unavailable',
-      observed: false,
-      exitCode: null,
-      readyAfterMs: null,
-      droveForMs: 0,
-      output: '',
-      truncated: false,
-      killedStale: false,
-      note: `--server ${JSON.stringify(server)} is not a name this command will own: it becomes both a path under the temp dir and a word in the shell line tmux runs, so it is restricted to letters, digits, dot, dash and underscore (max 64). Nothing was started.`,
-    };
+    return notStartedReport(
+      `--server ${JSON.stringify(server)} is not a name this command will own: it becomes both a path under the temp dir and a word in the shell line tmux runs, so it is restricted to letters, digits, dot, dash and underscore (max 64). Nothing was started.`,
+    );
   }
   // Non-finite or non-positive time budgets disable every deadline below
   // (`Date.now() >= NaN` is never true) — and, since the readiness probe's
@@ -626,17 +644,9 @@ export function runDrive(args: DriveArgs): DriveReport {
     // drives timed-out shapes that way), so only NEGATIVE or non-finite is
     // refused; the probe's budget is clamped to an integer below.
     if (!Number.isFinite(v) || v < 0) {
-      return {
-        outcome: 'unavailable',
-        observed: false,
-        exitCode: null,
-        readyAfterMs: null,
-        droveForMs: 0,
-        output: '',
-        truncated: false,
-        killedStale: false,
-        note: `${flag} must be a non-negative, finite number of seconds (got ${v}) — nothing was started.`,
-      };
+      return notStartedReport(
+        `${flag} must be a non-negative, finite number of seconds (got ${v}) — nothing was started.`,
+      );
     }
   }
   // Before anything is started, like the server-name check above: a caller who
@@ -644,33 +654,15 @@ export function runDrive(args: DriveArgs): DriveReport {
   // was malformed after a 300-second drive costs the drive.
   const parsed = parseCaptureSpecs(args.capture);
   if ('error' in parsed) {
-    return {
-      outcome: 'unavailable',
-      observed: false,
-      exitCode: null,
-      readyAfterMs: null,
-      droveForMs: 0,
-      output: '',
-      truncated: false,
-      killedStale: false,
-      note: `${parsed.error} Nothing was started.`,
-    };
+    return notStartedReport(`${parsed.error} Nothing was started.`);
   }
   const captureSpecs = parsed.specs;
   const tmux = (...a: string[]) => exec('tmux', ['-L', server, ...a]);
 
   if (exec('tmux', ['-V']).status !== 0) {
-    return {
-      outcome: 'unavailable',
-      observed: false,
-      exitCode: null,
-      readyAfterMs: null,
-      droveForMs: 0,
-      output: '',
-      truncated: false,
-      killedStale: false,
-      note: 'tmux is not available, so nothing could be driven — an environment gap, not a finding about the diff',
-    };
+    return notStartedReport(
+      'tmux is not available, so nothing could be driven — an environment gap, not a finding about the diff',
+    );
   }
 
   // A server under this name from an earlier run is killed before anything
