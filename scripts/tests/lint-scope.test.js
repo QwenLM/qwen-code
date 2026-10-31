@@ -409,6 +409,47 @@ describe.skipIf(process.platform === 'win32')(
       ).toBe(true);
     });
 
+    it('groups a package by its own .gitignore', () => {
+      // 26 tracked -gitignore files are nested in this repository and no
+      // prettier config is, so this arm is the one that actually decides a
+      // non-root group. The experimental CLI does not read a nested .gitignore
+      // from a cwd above it.
+      put('packages/core/.gitignore', 'dist\n');
+      baseSha = commit();
+      put('root-file.ts');
+      put('packages/core/changed.ts');
+      commit();
+      const result = run(['prettier']);
+      expect(result.status, result.stderr).toBe(0);
+      const groups = result.calls
+        .filter(({ name }) => name === 'prettier')
+        .map(({ args }) => args.slice(3).sort());
+      expect(groups).toHaveLength(2);
+      expect(groups.flat().sort()).toEqual(
+        ['./changed.ts', './root-file.ts'].sort(),
+      );
+    });
+
+    it('checks every target when a group spans more than one batch', () => {
+      const files = Array.from(
+        { length: 51 },
+        (_, index) => `file-${String(index).padStart(2, '0')}.ts`,
+      );
+      for (const name of files) put(name);
+      commit();
+      const result = run(['prettier']);
+      expect(result.status, result.stderr).toBe(0);
+      const calls = result.calls.filter(({ name }) => name === 'prettier');
+      // 51 targets at the root group means two spawns of at most 50; the union
+      // must be the whole selection, or a stride/slice edit silently skips
+      // files while the lane still exits 0.
+      expect(calls).toHaveLength(2);
+      expect(calls.every(({ args }) => args.length - 3 <= 50)).toBe(true);
+      expect(calls.flatMap(({ args }) => args.slice(3)).sort()).toEqual(
+        files.map((name) => `./${name}`).sort(),
+      );
+    });
+
     it('passes whole filenames as arguments and keeps each lane’s flags', () => {
       const special = '-space [x] $(touch injected).ts';
       put(special);
@@ -469,8 +510,6 @@ describe.skipIf(process.platform === 'win32')(
         commit();
         const result = run([lane], lane);
         expect(result.status).toBe(1);
-        // Prettier runs once per selected directory and now reports all of
-        // them in one pass; every other lane is a single invocation.
         // No fixture directory carries a Prettier config, so every lane is a
         // single invocation; accumulate-across-groups is covered by
         // 'reports every failing Prettier config group in one run'.

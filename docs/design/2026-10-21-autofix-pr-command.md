@@ -61,8 +61,8 @@ Goals:
 - Never touch the user's working tree, and never force-push or push to the
   default branch.
 - Reply to the feedback it handled, so reviewers can see what changed.
-- Stop on its own when the PR is merged or closed, or when the attempt budgets
-  run out, and report why.
+- Stop on its own when the PR is merged or closed, or when a budget that ends
+  the watch runs out (Section 10), and report why.
 - Wake the session only when something changed; a quiet check costs no model
   turn.
 
@@ -72,6 +72,9 @@ Non-goals (first version):
 - PRs in repositories without a matching local remote.
 - Resolving review threads. Reviewers keep that decision.
 - Opening new PRs or rewriting PR titles and descriptions.
+- Approving, merging or closing the PR, changing its review state, or turning
+  on auto-merge. Getting the PR ready to merge is the whole job; the
+  repository's own requirements and a person decide the rest.
 
 ## 4. User experience
 
@@ -96,6 +99,9 @@ Before it starts, the command shows one confirmation:
 - It will push commits to `<owner>/<repo>:<headRef>` and post replies on the
   PR, both under the user's own git and `gh` identity.
 - Verification runs repository-defined build and test commands.
+- It gets the PR ready to merge and no further: it never approves, changes
+  the review state, merges or turns on auto-merge, so the repository's
+  reviews and checks still decide and merging stays the user's.
 
 The confirmation is asked on every start, not on scheduled checks. A session
 that cannot show the confirmation needs `--yes`.
@@ -143,9 +149,11 @@ Helpers live under `packages/cli/src/commands/autofix-pr.ts` and
 `packages/cli/src/commands/autofix-pr/`, and the skill runs them through the
 `autofix_pr` core tool (Section 6.12); the reviewer probe lives with the
 other `qwen review` helpers. Per-PR state lives next to the worktree, outside
-it, under the clone's main worktree. Branches are shared by every worktree of
-a clone, so each helper finds the same watch from any of them, the autofix
-worktree included:
+it, under the worktree the watch was prepared from — the session's own
+worktree in a daemon session, else the clone's main worktree (see
+[2026-10-29-autofix-pr-worktree-rooted-storage.md](2026-10-29-autofix-pr-worktree-rooted-storage.md)).
+Branches are shared by every worktree of a clone; the watch listing scans them
+all, so a watch is found whichever of them holds it:
 
 - worktree: `.qwen/tmp/autofix-pr-<n>/`
 - state: `.qwen/tmp/autofix-pr-<n>-state.json`
@@ -155,7 +163,9 @@ worktree included:
 - what GitHub said of bot comments: `.qwen/tmp/autofix-pr-<n>-replies.json`
 - logs, briefs and reply plans: `.qwen/tmp/autofix-pr-<n>-*.{log,md,json}`
 - the user's instructions for every round: `.qwen/tmp/autofix-pr-<n>-instructions.txt`
-- reviewer cursor: `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json`
+- reviewer cursor: `.qwen/tmp/review-watch/<host>/<owner>/<repo>.json` — this
+  one stays under the clone's **main** worktree (`repoRoot()`), not the watch
+  root: `qwen review watch-repo` is a clone-level probe, not a per-session watch
 
 ## 6. Helper contracts
 
@@ -205,7 +215,8 @@ worktree included:
    worktree was removed (also with `rm -rf`, which `git worktree prune`
    clears), it is recreated and the recorded `pushedShas`,
    `handledCommentIds` and `postedCommentIds` are kept, with the budgets,
-   the recorded task (`watch`) and `needsHuman`, and the report says
+   the recorded task (`watch`), `needsHuman` and what a delivered summary
+   reported (`reportedNeedsHuman`), and the report says
    `recreated: true`: a start that is then cancelled must not clean up a
    watch it did not make. A watch `stop` had ended is resumed the same way
    (`wasEnded`, as on the path that keeps the worktree). With `--take-over`, the
@@ -214,17 +225,37 @@ worktree included:
    another repository's PR of the same number is a refusal. Repositories
    compare as on GitHub: owner and name without case, and the host without
    case or the default port, but with any other port, which may name another
-   instance. In a daemon session (`QWEN_CODE_SERVE=1`), a worktree outside
-   the session's working directory is a refusal before the state file is
-   read, on a resume or take-over as on a new watch: the daemon runs a fix
-   agent's commands only inside that directory, so a round there could not
-   test, commit or push. The refusal names the clone root to prepare from.
+   instance. In a daemon session (`QWEN_CODE_SERVE=1`), the watch is rooted
+   at the session's own worktree toplevel, so a session in a linked worktree
+   of the clone prepares it inside its own directory. A worktree that would
+   still fall outside the session's working directory (the session sits in a
+   subdirectory of the worktree, or in another clone) is a refusal before the
+   state file is read, on a resume or take-over as on a new watch: the daemon
+   runs a fix agent's commands only inside that directory, so a round there
+   could not test, commit or push. The refusal names the directory to prepare
+   from.
 8. Print a JSON report: worktree path, branch, head SHA, base/head refs, push
    target, viewer and PR author logins, draft and fork flags, and
    `localUnpushedCommits`, the number of commits on the user's own copy of the
    head branch that the PR does not have. The worktree never sees them. Only a
    local branch whose upstream is the head branch on the push remote counts as
    that copy, so a fork's `main` is never compared with the user's `main`.
+   The report also carries `localUncommittedChanges`: whether a worktree of
+   this clone has that copy checked out and holds changes git reports. It is
+   read with `--no-optional-locks`, `--untracked-files=normal` and
+   `--ignore-submodules=none`, so a user's `status.showUntrackedFiles` or
+   submodule `ignore` setting cannot hide work; only `.qwen/tmp`, where the
+   helpers write, is left out, and anything else under `.qwen` is the user's.
+   It is computed only when the copy exists and only for checkouts of that
+   branch; work in a checkout of another branch is not work on that copy.
+   `worktree list --porcelain -z` keeps a path git would quote, with the line
+   form as the fallback where git has no `-z` (before 2.36): a path it quotes
+   then reads as unknown, not as no work. `localWorkUnknown` says the
+   comparison could not be made at all — the PR head is not in this clone, or
+   git could not read a checkout — which is never reported as "no work". The
+   helper reports them and does not refuse: the skill's start does not go on
+   while the work or that flag is set, unless the user asks once told, because
+   the watch's push and the user's own go to the same head branch.
 
 ### 6.2 `snapshot <pr> [--repo <owner>/<repo>] [--host <host>] [--gate] [--session <id>] [--task <id>]`
 
@@ -346,6 +377,59 @@ Event rules:
   and the run's id, once per head
   (`<workflow>@<head>@#startup:<workflow id>:<event>`), with no log and
   nothing to re-run, so the skill answers it as needing a human.
+- The budget of fix pushes per failing check (Section 10) is the one record
+  a prepared snapshot keeps, in `failingChecks` of the state file: one entry
+  per check (by its identity, as above) that a round saw fail and has not
+  seen pass since, with the head it last failed on, the number of the
+  watch's later pushes it failed on, and the push the count runs to
+  (`lastPush`). It counts pushes, not fixes: a push for a review comment
+  that the check fails on counts too. A pass (`SUCCESS` or `NEUTRAL`; a
+  status's `SUCCESS`) ends the entry. Someone else's push gives every entry
+  its pushes back, counted again from the watch's latest push: `sync` and
+  `prepare` do so when they adopt one, whether or not a round reads it,
+  and so does a read of such a head. A return to an earlier push of the
+  watch spends nothing. Only a read of the head the watch knows (the one
+  `sync` or `push` recorded) counts: any other is the API lagging behind
+  the branch, or a push the round syncs to and reads again. A read whose
+  head rollup is cut short (at the page limit, the time limit, or by the
+  head moving while it pages) changes nothing either: a later run of a
+  check may be on the pages not read. The gate wakes no round for a pass,
+  so a round may never read one:
+  the watch can push again (for a comment) before its fix's checks end, or
+  a re-run can pass after the round moved on. So when a check fails on a
+  later push of the watch, the snapshot asks GitHub what it ended in on the
+  watch's pushes in between that the entry did not count, and — when a
+  round re-ran it there (not one only held for a run still going, which
+  starts on its own head only) — on the head it last failed on
+  (`commitCheckResults`: one GraphQL read of a commit's rollup, paged like
+  the PR's, a rollup cut at the page limit taken for no answer; at most 4
+  commits a read, shared by every check and each asked once: every entry's
+  re-run first, then its pushes in between newest first, before any head
+  asked about again). A pass there ends the entry as a pass a round reads would, so
+  this failure is a first one again; a failure on a push in between spends
+  one (a re-run that failed again on the last head spends nothing more). A
+  head with no result spends nothing. One that may still get one — still
+  running, a re-run GitHub has not listed yet (no check run after the one
+  it re-ran), not listed while other checks of the commit still run (a job
+  that needs another, a status posted once CI ends), or no answer from
+  GitHub or past a read's 4 commits — stays
+  on the entry (`unanswered`, at most 10, as many as a watch's pushes) and
+  is asked about again on its next push: a pass found there then leaves
+  only the pushes counted since a round next saw the check fail, and a
+  failure found there spends nothing — only a result known when a push is
+  counted spends. One that ended with none (cancelled, skipped, or not
+  listed once the commit's checks have all ended) is dropped, and so is a head the round then sees fail on a return
+  to it. Only a read that changes an entry takes the watch's lock, to
+  re-read the state and write it; the entries a read changed go last, and
+  at most 100 are kept. Once 3 pushes left a check failing, its `ci_failed`
+  carries `exhausted: true`, and the skill answers it as needing a human
+  instead of fixing it again — once per head, like any failure handled
+  without a push — until a pass ends the entry or someone else's push gives
+  it back. A pass someone saw only on a head the watch counted (a re-run
+  started by hand there) is not asked about. The entry stays with the
+  watch through a take-over, a resume and a recreated worktree; a new start
+  begins without it, as the push budget does, and so does every
+  `--in-place` start (one round each).
 - A comment of a review not submitted yet (`PENDING`) is a draft only its
   author sees, and is skipped. A bot asks in the comment that opens a
   thread (and in a review); its replies answer someone and are not
@@ -399,9 +483,14 @@ Event rules:
 
 Action precedence: `stop` (merged or closed) → `resync` (head moved
 externally) → `fix` (a conflict, a failed check or a trusted comment) →
-`wait`. The loop adds two more inputs: an exhausted budget means `stop`, and a
-fix in flight (`inFlight` in the state file) means `wait`, until the attempt
-ends (Section 7).
+`wait`. The loop adds three more inputs: an exhausted budget that ends the
+watch (Section 10) means `stop` — a check out of fix pushes is answered as
+needing a human and leaves the action as it was; a
+background fix in flight (its attempt marker, Section 6.14) keeps the gate
+quiet and the prepared snapshot refused until the attempt ends; and an
+attempt its session left behind (a stale marker) is a source of `fix` too —
+the watch's own gate reports it once as an `abandoned_fix` event, so a round
+discards the attempt's work and redoes the fix though nothing else changed.
 
 #### Gate mode (`--gate`)
 
@@ -505,6 +594,14 @@ when there are none, so the session is woken only for them:
   always goes, so every run makes progress.
 - The first run reports what is outstanding: failed checks, a conflict, and
   comments no one has handled.
+- An attempt of a background fix its session left behind (a stale marker,
+  Section 6.14) is reported once per attempt id as an `abandoned_fix` event,
+  recorded in the cursor (`reportedAbandonedFix`), and only by the watch's
+  own gate (a run with `--session`): a probe by hand or a Managed
+  automation's gate wakes no round to handle it. It goes after the other
+  events, outside the 12 KiB they are fitted to — it is a few dozen bytes —
+  and makes the action `fix` though nothing else changed. While a marker is
+  fresh the gate prints nothing at all.
 
 The cursor is written before the output, so a probe that prints and then
 dies cannot report the same transitions twice. `ci_pending` and the `wait`
@@ -612,7 +709,9 @@ The helper decides what may be posted, against one fresh read of the PR
   trusted author, and `handled` names comments of that thread. Untrusted
   comments cannot be marked handled; a check key must be one a `ci_failed`
   event reports on the head (prepared mode prints its `key`) — now, or in
-  the round's prepared snapshot file: the head can move on from a failure
+  the round's prepared snapshot file (or, once a background fix's claim
+  moved that file, the claimed `autofix-pr-<n>-fix-snapshot.json`, read
+  until a round prepares another; Section 6.14): the head can move on from a failure
   while the round runs (a re-run, a run a review starts), and the round's
   answer still stands, under the key the next failure of a review-started
   workflow on that head carries. A failure a deferral holds while its run
@@ -636,10 +735,16 @@ The helper decides what may be posted, against one fresh read of the PR
 - Each POST is announced in the state file first (`pendingPosts`: where it
   goes, the comments it answers, a hash of its body, the head it is posted
   on — a summary adopted later counts for that head's push, not a later
-  one's). The next run looks for
+  one's — and, for a summary, the `needsHuman` lines its body reports). The
+  next run looks for
   each announced reply on the PR: one that is there — a POST that reached
   GitHub although its answer was lost — is recorded with exactly the
-  comments it was posted for (`adopted`); one that is not was never posted.
+  comments it was posted for (`adopted`), and a summary with exactly the
+  items it reported, merged with what an earlier delivered summary already
+  reported on that head: adopting a later summary never makes an earlier
+  item reportable again, and a summary that reported no items erases none.
+  A record of another head is superseded, not merged. One that is not on the
+  PR was never posted.
   A reply is never recognized by a later plan's wording, and a reply the
   tool posted for other comments is never taken for the answer to new ones.
 - A comment a reply names that is answered already is left out of it; the
@@ -652,7 +757,19 @@ The helper decides what may be posted, against one fresh read of the PR
   posted (above) and skips a reply whose comments are all handled, and the
   summary when its comments are — unless the head is a push of the watch's
   that has no summary yet: each push gets one, once per head
-  (`summarizedSha`), whether or not it answers comments.
+  (`summarizedSha`), whether or not it answers comments. A summary is due
+  as well whenever the plan names a `needsHuman` line that no delivered
+  summary has reported on this head, so a round that pushed nothing still
+  reports what blocks it on a head an earlier round already summarized.
+  What a delivered summary reported is its own key (`reportedNeedsHuman`:
+  the head and the lines), advanced only once the summary posted — or was
+  adopted, from the items its own intent recorded. It is deliberately not
+  the `needsHuman` list, which is written before any POST so `status`
+  survives a later failure: a trigger read from that list is spent before
+  delivery, and a summary whose POST never reached GitHub would then be
+  suppressed on every retry while the round still recorded its failures
+  handled. An undelivered report stays due; a delivered one is not posted
+  twice.
 - `handledChecks` and `handledConflict` record failures and a conflict the
   round did not fix with a push, so prepared snapshots stop reporting them:
   a failure by its attempt (a re-run that fails again is new), a conflict by
@@ -661,7 +778,9 @@ The helper decides what may be posted, against one fresh read of the PR
   keeps each in the state file with the head it was answered on and the
   time, newest last and at most 20, for `status`. Whitespace is folded, a
   line over 300 characters is cut, and the same line on the same head is
-  kept once, so running a plan again adds nothing.
+  kept once, so running a plan again adds nothing. This list is the record
+  `status` reads, written before any POST; it is not what decides whether a
+  summary is due (above).
 - `--no-post` (the skill's `--no-reply`) records the same, the summary's
   `summarizedSha` included, and posts nothing.
 
@@ -893,7 +1012,9 @@ treated as real once the run has ended. That is a known limit.
 two helper calls the model issues at once would otherwise each write back
 what they read, undoing the other's record of a push, a reply or a re-run.
 `prepare` holds it while it creates the worktree and the state file, so two
-starts at once cannot roll back or take over each other's worktree.
+starts at once cannot roll back or take over each other's worktree, and
+`snapshot` holds it while it writes the fix budget of a check, and only
+when a read changes it (Section 6.2).
 The lock is created whole, as a hard link to a file already holding its
 token, and removed only while it still holds that token. A sandbox may run
 each command in a pid namespace of its own, where pids repeat, so the
@@ -908,10 +1029,12 @@ into, and a fresh lock is never touched.
 
 ### 6.10 `status [<pr>]`
 
-Lists the watches of the clone, read from their files under the main
-worktree's `.qwen/tmp` (`--no-work` leaves `worktreeWork` null, skipping
-its git scan): no lock is taken and GitHub is not asked, so it
-answers while a helper runs and whichever session owns a watch. Output:
+Lists the watches of the clone, read from their files under each worktree's
+`.qwen/tmp` — every worktree of the clone is scanned, so a watch rooted in any
+of them is listed (`--no-work` leaves `worktreeWork` null, skipping its git
+scan): no lock is taken and GitHub is not asked, so it answers while a helper
+runs and whichever session owns a watch. An explicit root scans just that one
+worktree. Output:
 `{ "now": "<time>", "watches": [...] }`, and `unreadable` with the PR and
 the reason for a state file that could not be read. Each watch carries:
 
@@ -922,7 +1045,8 @@ the reason for a state file that could not be read. Each watch carries:
 - `preparedAt`, when `prepare` made the watch (null for one from before it
   recorded that), which `prepare` reports too;
 - `lastCheck`, the last run of the watch's own gate (one with a
-  `--session`) that read the PR — it touches
+  `--session`), whether it read the PR or, with a background fix in
+  flight, skipped reading it (Section 6.14) — it touches
   `.qwen/tmp/autofix-pr-<n>-gate.checked` on every such run, which
   `cleanup` removes with the watch, while a gate with no session, which
   shares the cursor, leaves it — and `lastRound`, the time of the last
@@ -942,7 +1066,12 @@ the reason for a state file that could not be read. Each watch carries:
   worktree or its branch holds that the PR does not, judged as `cleanup`
   judges it without asking the remote or taking the index lock, or null.
   A round that starts on it
-  discards it, so a take-over or a resume says so before it asks.
+  discards it, so a take-over or a resume says so before it asks;
+- `fix`: `{ attempt, startedAt, fresh }` for a background fix's attempt
+  marker, or null. `fresh` is an attempt that has not ended: its agent works
+  in the worktree, or has ended — finished or stopped — and the round may
+  still claim the attempt; either way the round's helpers refuse. Otherwise its session left it
+  behind, and the next round's `sync` removes it (Section 6.14).
 
 The gate cursor outlives a watch (Section 6.6), so it is read only when it
 names the watch's repository and is no older than the watch (`preparedAt`,
@@ -1006,10 +1135,12 @@ gate and the prompt are not composed in a prompt.
 
 A core tool runs the helpers, so that a rule can name them. One call runs
 one helper: `command` names it (`prepare`, `snapshot`, `ci-log`, `push`,
-`sync`, `reply`, `rerun`, `schedule`, `status`, `cleanup`), and typed
+`sync`, `reply`, `rerun`, `schedule`, `status`, `cleanup`; `fix-end`,
+Section 6.14; `unattended` and `attended`, Section 6.13 — `fix-start` is
+no command of the tool: the launch of a background fix runs it), and typed
 parameters carry its options (`pr`, `repo`, `host`, `take_over`, `task`,
 `run_id`, `lines`, `plan`, `no_post`, `discard`, `every`, `no_reply`,
-`instructions`, `again`). The tool builds the arguments itself, options as
+`instructions`, `again`, and `attempt`, which `fix-end` requires). The tool builds the arguments itself, options as
 `--name=value`, and starts the CLI without a shell, so nothing in a
 parameter is read as shell syntax or as an option; a parameter the command
 does not take is a refusal before anything runs. `reply`'s plan must be the
@@ -1189,6 +1320,275 @@ says so, and the trust rule of Section 8 is what keeps someone else's code
 out of it. A watch whose task expired or was deleted keeps the grant until
 one of the above ends it.
 
+### 6.14 Background fixes and `fix-end`
+
+A watch whose fixes run unattended (Section 6.13) runs its fix agent in the
+background, so the session stays usable while it works. Any other fix keeps
+the foreground agent of Section 7 — a background agent cannot ask, and
+every command of such a fix asks — and so do the merge agent of a round,
+every `--once` round (even on a PR whose watch runs unattended: the grant
+and the attempt are the watch's, with its options), a round restarted within its
+turn, and the fix of a round whose previous attempt was abandoned (below).
+`status`, run through the tool, says which watches this session runs
+unattended (`unattended`); a YOLO session records no grant, so its fixes
+stay in the foreground.
+
+**The launch.** The `agent` tool refuses `working_dir` with
+`run_in_background` because the caller owns the worktree and could remove it
+under a running agent. It allows the pair for one launch only: the
+top-level, built-in `general-purpose` agent the session starts at a worktree
+it holds an unattended grant for, outside plan mode and in a trusted folder
+— the agent Section 6.13 runs in YOLO mode. Its parameter check sees the
+grant without checking it; the launch checks the whole condition as for a
+foreground fix and fails the launch, rather than run in the background
+without it, when any part fails. The launch itself, not the skill, then opens the fix's
+attempt: the grant runs `fix-start <n> --attempt <id>` (a helper only the
+session runs). It refuses unless this session owns the watch, the watch has
+not ended, no marker of an attempt is there (a fresh one runs; a stale one
+is the round's `sync` to remove), and the round prepared a snapshot to fix
+at the watch's head in the last 30 minutes, under the watch's task (the
+prepared snapshot records the task it ran under, so a `--once` round's
+never qualifies), and every run of the gate that printed something had
+finished reading the PR before that snapshot began to (the gate's cursor
+records when its last such run finished reading, `reportedAt`, and the
+snapshot when it began, `readAt`; a quiet run, which may still move the
+cursor, records nothing) — otherwise
+the gate's fire waits in the queue, and its round, run while the
+fix worked, would find nothing to do and the events it reported would not
+come again; with a foreground fix it runs after. It writes the attempt
+marker `autofix-pr-<n>-fix.json` beside the state file: the attempt id, the
+watch's task, the head and when. The claim (`fix-end`) moves the round's
+snapshot to `autofix-pr-<n>-fix-snapshot.json`, which `reply` reads until
+a round prepares another, and a `sync` that removes an abandoned attempt
+removes its snapshot: no later attempt starts from it. A refusal refuses the launch, and a launch
+that fails after it ends the attempt (`fix-end --abandon`, which removes
+the marker and leaves the round's snapshot to the foreground fix the round
+then runs). The round falls back to that foreground fix only when the
+grant no longer holds or no round has a fix to start; any other refusal (a
+fix in flight, one left behind, a watch no longer the round's) ends the
+round. So every background agent at a worktree has an attempt tied to the
+round that prepared it, and while one lives no other agent, teammate or
+workflow agent launches there, in the foreground or the background — but
+one the fix agent starts, itself or through an agent it started, is its
+own: a subagent starts agents through the `agent` tool only (workflows and
+teammates are the top-level session's), and the registry's parent links tie
+each such agent to the fix agent. The session's own `edit`,
+`write_file` and `notebook_edit` into the worktree — any but those of the
+fix's own agents — the path resolved as
+the kernel will, each link followed as written before a `..` after it, and
+also as Windows will, which folds `..` as text first; inside either way is
+inside — ask the user whatever the approval mode,
+as the fix agent builds and runs what is there without asking; an agent,
+teammate or workflow agent the session starts in its own directory after a
+`/cd` into the worktree is refused. Only this process
+knows of the attempt: an agent another process pins to the worktree is not
+refused, and the launch does not see one pinned there before it — as two
+sessions' foreground fixes of one watch before this step.
+
+A background fix agent takes no `send_message` while it runs (its registry
+entry carries a reason that refuses it, though the events of a Monitor it
+starts still reach it), and is never continued: once it ends, `send_message` to
+it, a revival of its transcript and a resume after a restart are refused,
+through the reason its saved record carries and, once it ends, its
+registry entry (not while it runs, which would refuse the events of a
+Monitor it starts), and it never stays resident, so no later turn
+gives the agent work outside an attempt — or in the session's own
+directory, where a revived agent would run. Its saved record keeps the
+approval mode it would have had without the grant.
+
+**The attempt.** The session keeps the attempt in memory, beside the grant,
+with the watch's `--no-reply` and instructions as the session's own
+`schedule` printed them. That record decides for this session: while the
+agent runs, the `autofix_pr` tool refuses every helper of the PR but
+`status` and `cleanup` (which stops the agent, below), and `fix-end` until
+the agent has ended — its registry entry
+reached a terminal state, which a stopped agent does once its tools settle
+or its cancellation's grace runs out; a claim then waits up to 15 seconds
+more for the agent's body to settle. A stop asked for while the agent
+launches stops it as it registers. The marker is for the gate and for
+other sessions and processes: every 30 seconds the session refreshes the
+modification time of the marker (opened without following a link or
+blocking, and only when it is a regular file) while it still names the
+attempt, and stops the agent when it does not, when the
+attempt it names started more than a minute ahead of the clock (the clock
+was set back, and the helpers would read the marker as stale), or when a
+refresh comes more than a minute late (the process was suspended, and another
+session may have taken the worktree meanwhile). A late refresh is also found as the tool or the
+agent tool looks the attempt up: after a laptop's sleep the gate can find the
+marker stale before the session's timer runs again, and the round it starts
+must not be refused for an attempt that is already over. Whoever acts on the
+worktree next — a helper through the tool, a launch of the agent tool, of
+a teammate or of a workflow agent, whether pinned there or started in the
+session's own directory inside it — first waits, up to 15 seconds from when an attempt was dropped (by a late
+refresh, its deadline or a revoked grant), for its stopped agent to settle;
+a stop and a claim wait so themselves, and the session's own writes into
+the worktree ask until then. The heartbeat counts no refresh as
+late before it starts. A helper takes the marker as
+fresh when it was refreshed within the last 90 seconds and its attempt
+started neither more than a minute ahead of the clock nor more than 45
+minutes ago. While it
+is fresh:
+
+- `sync` (with `--discard` too), the prepared `snapshot`, `ci-log`, `push`,
+  `reply`, `rerun`, `schedule`, `cleanup` (with `--force` too) and `prepare`
+  refuse, naming the attempt and when it started: a reset, a push, a reply
+  or a removal now would act on work half made;
+- the gate prints nothing, asks GitHub nothing and keeps its cursor, so a
+  fire costs no turn and what changed meanwhile reaches the round after
+  the attempt; it still marks its check, so `status` does not read the watch
+  as left behind;
+- `status` shows it (`fix`), with whether it is fresh; a scheduled round
+  whose `status` shows a fresh one ends without a message.
+
+The session stops the agent when it runs past the attempt time limit
+(Section 10, 30 minutes from when the attempt opened); such an attempt stays
+the round's to claim, as an agent that was stopped. When the grant ends
+(Section 6.13: `attended`, a failed launch check) it stops the agent and
+drops the attempt: the next round redoes the fix in the foreground, asking
+as the user now wants. `/autofix-pr stop` in this session — `cleanup`
+through the tool — stops the agent without a notification, waits up to 15
+seconds for its body to settle (outside the helpers' queue; also when the
+agent had ended already, as its grace can end it first), ends the attempt
+and then cleans up; a refusal of the helper that ends it keeps the attempt
+for the next stop. The session drops the
+attempt, and with it the marker's refreshes, when no claim came within 40
+minutes of the attempt's opening — a notification waits for the session to
+be idle, so the deadline does not run from the agent's end — and when the
+session or its process ends, or its conversation is reset (`/clear`,
+`/resume`), when the agent is stopped with no notification: one would
+reach the next conversation. A dropped attempt's marker is made stale once
+its stopped agent has settled (at most 15 seconds), while it still names
+that attempt, so the helpers let the next round in then rather than 90
+seconds later.
+Another session cannot stop the agent: its `cleanup`, `prepare --take-over`
+and `resume` refuse while the marker is fresh, saying that a fix of the
+session that owns the watch is running there. A marker no longer fresh is
+one its session left behind: the gate prints an `abandoned_fix` event once
+for it, so a round runs even when nothing else changed; that round's `sync`, once it answered,
+removes it and reports `abandonedFix` (a `sync` that fails leaves it to the
+next), and the round discards what the
+worktree holds, as for any round that never finished, and handles the
+attempt's items again with its fix in the foreground — a session whose
+notifications do not reach the model would otherwise abandon one background
+attempt after another. A `cleanup` that removes the watch and a
+`prepare --take-over` remove such a marker too (a `cleanup` that keeps the
+worktree leaves it to the next `sync`).
+
+**The continuation.** The round launches the agent with
+`run_in_background: true` and `description` = `autofix-pr <owner>/<repo>#<n>
+round`. A scheduled round then ends its turn with one line; a start or a
+resume goes back to the step that ran the round, so the watch is scheduled
+before its fix ends. When the agent ends, its completion notification
+carries a `<follow-up>` element the session writes, beside the agent's
+escaped `<result>` and only while the attempt is still the round's to
+claim: invoke the skill with
+`after-fix <owner>/<repo>#<n> --task <task> --attempt <id>`, with
+`--no-reply` and the instructions from the record. That turn enters the
+skill again, whatever the conversation kept of the round, and runs
+`fix-end <n> --task <task> --attempt <id>`, which removes the marker of
+that attempt only and prints the snapshot the attempt took, its brief and
+the head it started from; the tool adds how the agent ended, its report and
+the watch's options, from memory, which the turn uses whatever the
+follow-up said. A refusal of the helper leaves the attempt to claim again; one that says
+the round's snapshot is gone drops it, to go stale. The tool reads a
+helper's refusal from the line of the CLI's error that names it, not from
+the stack printed after it.
+The brief lists, besides the agent's items, the round's own — the re-runs
+and the items needing a human that the round decided before the fix — so
+the turn answers them too. Then it goes on with Section 7's re-runs, push
+and reply, exactly as after a foreground agent. Nothing an agent that failed or
+was stopped made is pushed: the turn runs `sync --discard` and answers the
+brief's items as needing a human — on the PR with a fixed sentence, the
+agent's report only in the session — as for a fix that did not verify, so
+they are recorded and not lost to a gate that reported them already. A claim
+the helper refuses — the attempt was dropped, or a round discarded it —
+ends with one line. In plan mode the tool refuses `fix-end`; the turn says
+so, and the attempt ends as an unclaimed one. A notification that never
+comes, or comes too late, leaves the attempt to the `abandoned_fix` round.
+
+`reply` without `--no-post` refuses on a watch started with `--no-reply`, so
+that option holds even when a turn forgets it.
+
+The budget of fix pushes per failing check (Section 10) came after this
+step: prepared snapshots record which checks failed and passed (Section 6.2).
+
+### 6.15 The Web Shell: watches and their tasks
+
+The Web Shell shows a watch where its owner already looks — the card of its
+scheduled task — and on a page of its own, **PR watches**, which lists every
+watch of the workspaces it reaches.
+
+**What the daemon serves.** `GET /autofix-pr/watches` (the primary
+workspace) and `GET /workspaces/:workspace/autofix-pr/watches` (a registered,
+trusted one), advertised as `autofix_pr_watches`, answer what `status`
+lists for the workspace's clone. One `git worktree list` finds every
+worktree of the clone, so a workspace that is a linked worktree or a
+subdirectory reads the clone's watches; the answer still names the main
+worktree as `root` (for display). `runStatus` takes that set of worktrees
+(`roots`) and no session, rather than the daemon's own directory and
+environment, and runs no git command (`git: false`): the daemon lists the
+watches on its own thread, where a git command that hangs would hold every
+request. It reads the files only, each opened without
+following a link and without blocking, so a FIFO put in place of one cannot
+hold the daemon either (the helpers read them so too). No lock is taken and
+GitHub is not asked, so the answer comes back while a helper runs. Left out
+are `thisSession` (the daemon is no session), the worktree's path and what
+only git tells (`gitTrusted`, `worktreeWork`). `available` is false when no
+git repository is found for the workspace, or git cannot run there. The
+routes change nothing.
+
+**Which watch is a task's.** A scheduled task carries no kind: a watch's
+task is known by the prompt `schedule` writes,
+`Run /autofix-pr tick <owner>/<repo>#<n> [--task <id>]…`, matched to the
+watch of that repository and number in the task's workspace. The task is
+stale as its gate judges it: the watch ended, it records no task where the
+task has an id, or it records another task (a later `schedule` replaced
+it; a task from before task ids is not the one recorded either), or the
+watch is another session's (a take-over moved it). Its gate stops it at its
+next fire, and the card says so.
+
+**What is shown.** The PR, as a link, with where the watch is, the first
+that holds:
+
+- the PR merged or closed (`stopped`);
+- ended by a `cleanup` that kept the worktree (`ended`);
+- no task (`watch` null: a `--once` check's state);
+- fixing in the background (a fresh attempt, with its age);
+- a background fix left behind (a stale one: the next round redoes it);
+- checked within two intervals (`checkedRecently`);
+- otherwise, not checked recently.
+
+Then its pushes and maximum, when its gate last checked and its last round
+ran, and the items left for a person (`needsHuman`). The page lists the
+state files it cannot read with their reason, as `status` does.
+
+**Actions.** Only for a watch whose owning session is a session of this Web
+Shell: a task of it, not stale, is bound to the session the state file
+names. The page looks for that task in every workspace it lists, and lists
+a clone's watch once, as two checkouts of one clone can both be registered.
+
+- **Open session** opens that conversation.
+- **Stop watch** sends `/autofix-pr stop <n>` to it the way a scheduled
+  task's manual run sends its prompt — the session switches there and the
+  prompt goes through the same path as one typed — so the skill runs it,
+  with every confirmation it asks for there. The Web Shell does not write a
+  watch's files or delete its task itself.
+
+Both restore the session in the workspace of its task — the one workspace
+of a single-project daemon included — whatever workspace the watch is
+listed under and whatever the current conversation is (another workspace's,
+a standalone or a Live one).
+
+A watch no session of this Web Shell runs, but whose gate checked within
+two intervals, runs in another process (a terminal session) and is stopped
+there; the page says so. Any other — ended, with no task, or checked by
+nothing lately — is cleaned up or started again with `/autofix-pr stop <n>`
+or `resume <n>` in a session of its workspace, which the page names.
+
+**Refresh.** The page and the cards read the watches again every 15
+seconds while shown. The cards read them only while a watch's task is
+listed, and only from a daemon advertising the tag.
+
 ## 7. One check (`tick`)
 
 The gate already ran `snapshot --gate`; a fire that reaches the model carries
@@ -1220,20 +1620,20 @@ snapshot --gate (in the gate)
 
 The fix runs in an `agent` with `working_dir` set to the worktree.
 Its brief is a file listing the events, log paths, the trust rules, the user's
-extra instructions and the verification requirement. In delivery step 3 the
-agent runs in the foreground — the `agent` tool runs a `working_dir` agent
-only so, since the caller owns the worktree — and the main session runs
-`push` and `reply` when it returns; a background fix, with the main session
-usable meanwhile, is delivery step 4. If verification fails, nothing is pushed; the attempt
-counts against the budget and the failure is reported.
+extra instructions and the verification requirement. The agent runs in the
+foreground — the `agent` tool refuses `working_dir` with
+`run_in_background`, since the caller owns the worktree — and the main
+session runs `push` and `reply` when it returns. The one exception is a
+watch whose fixes run unattended: there the tool allows the pair for the
+built-in `general-purpose` agent at that watch's worktree, outside plan mode
+in a trusted folder, the agent runs in the background and the round goes on
+from its completion notification (Section 6.14). If verification fails, nothing is pushed and the failure is
+reported.
 
-`inFlight` records the head an attempt started on and when. Every end of an
-attempt clears it, after counting the attempt: a push, a failed
-verification, an agent that errors or is stopped, a push the lease refuses,
-and a resync. A tick that finds one started on a head that is no longer the
-PR's, or longer ago than the attempt time limit (Section 10), counts it as
-failed and clears it, so an attempt whose agent died cannot keep the watch
-waiting.
+A background fix's attempt marker (Section 6.14) keeps the gate quiet and
+the round's helpers refused while its agent works. An attempt whose session
+ended cannot keep the watch waiting: its marker goes stale, and the next
+round removes it and discards what the worktree holds.
 
 A resync whose new head does not contain the worktree's `HEAD` (the author
 rebased or force-pushed) resets the worktree to the new head instead of
@@ -1247,7 +1647,9 @@ disagreement, contradictory comments, a request outside the PR's scope) is
 replied to as "needs a human decision" and recorded in `needsHuman`. The loop
 keeps watching other events. The round answers such items on the PR, reports
 them in its message and names them in the reply plan's `needsHuman`, which
-`status` lists (Sections 6.5, 6.10).
+`status` lists (Sections 6.5, 6.10). A round that pushed nothing posts them
+as its summary too, so the PR shows that the watch stopped instead of going
+quiet (Section 9).
 
 ## 8. Trust model
 
@@ -1313,6 +1715,11 @@ Replies are on by default; `--no-reply` turns them off.
   or `Not changed: <reason>`, or `Needs a human decision: <question>`.
 - Each push gets one PR comment summarizing what it addressed: checks fixed or
   re-run, comments addressed, conflict resolved, and how it was verified.
+- A round that pushed nothing and left something for a person gets one too:
+  what it attempted, what blocks it and what a person has to decide. It goes
+  out once per head, and again only when the round names an item no delivered
+  summary has reported on that head (Section 6.5). One whose POST never
+  reached the PR is still owed, so the next run of the plan posts it.
 - Replies use the language of the comment they answer; the summary uses the
   language of the PR's title, which `snapshot` reports (`title`).
 - Every body ends with `<!-- qwen-autofix-pr:v1 -->`.
@@ -1370,14 +1777,14 @@ Replies are on by default; `--no-reply` turns them off.
 
 Budgets, stored in the state file:
 
-| Budget                                               | Default | When exhausted                 |
-| ---------------------------------------------------- | ------- | ------------------------------ |
-| Fix attempts per failing check without turning green | 3       | stop the loop                  |
-| Re-runs per check per head SHA                       | 1       | treat the next failure as real |
-| Fix attempts per review comment                      | 1       | never offered again            |
-| Pushes per start                                     | 10      | stop the loop                  |
-| Consecutive external head moves                      | 2       | stop the loop                  |
-| Minutes one fix attempt may run                      | 30      | count it failed, clear it      |
+| Budget                                             | Default | When exhausted                                           |
+| -------------------------------------------------- | ------- | -------------------------------------------------------- |
+| Fix pushes per failing check without turning green | 3       | left for a person until it passes or someone else pushes |
+| Re-runs per check per head SHA                     | 1       | treat the next failure as real                           |
+| Fix attempts per review comment                    | 1       | never offered again                                      |
+| Pushes per start                                   | 10      | stop the loop                                            |
+| Consecutive external head moves                    | 2       | stop the loop                                            |
+| Minutes one background fix may run                 | 30      | stop its agent, discard it                               |
 
 Stop conditions: the PR is merged or closed; `/autofix-pr stop`; a budget in
 the table says stop; the cron job expires. Every stop but the scheduled task's expiry (7 days by default: `experimental.cronRecurringMaxAgeDays`, or `QWEN_CODE_CRON_MAX_AGE_DAYS`), which ends the watch without a round, runs `cleanup` and
@@ -1456,7 +1863,8 @@ Delivery plan:
    (Section 6.8), `reply`, `rerun` (Section 6.9), the bundled skill with
    `--once`, watch mode, `stop` and a minimal `status`. In this step the fix
    agent runs in the foreground: the session waits for it, so no fire can
-   start a second attempt and `inFlight` is not needed yet. The budgets it
+   start a second attempt (the background fix of step 4 adds the attempt
+   marker of Section 6.14). The budgets it
    enforces are the pushes per start (`push`), one re-run per check and head
    (`rerun`), and one attempt per review comment (every comment a round
    handled is recorded, whatever its outcome; the round after the last
@@ -1484,8 +1892,14 @@ Delivery plan:
    The `autofix_pr` tool (Section 6.12) runs the helpers, so the skill's
    `allowedTools` name a round's helpers and those run without asking;
    `unattended` (Section 6.13) lets the fix agent of a confirmed watch run
-   its commands without asking too. Still to come: the fix agent in the background with an `inFlight`
-   record, and the budgets of Section 10 not enforced yet.
+   its commands without asking too, and such a watch's fix agent runs in the
+   background (Section 6.14), stopped at the 30-minute limit of Section 10.
+   The Web Shell shows each watch on its task's card and on a PR watches
+   page, and stops one in the session that owns it (Section 6.15).
+   Delivered later (2026-10-31): the budget of fix pushes per failing check
+   of Section 10. When it runs out, the check is answered as needing a human
+   and the watch goes on, rather than stopping: the watch still answers
+   review feedback and the other checks.
 5. Follow-ups: a configurable bot allowlist.
 
 Open questions:

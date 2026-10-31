@@ -283,7 +283,6 @@ vi.mock('./hooks/useWorktreeSession.js');
 vi.mock('./hooks/useProviderUpdates.js', () => ({
   useProviderUpdates: vi.fn(() => ({
     providerUpdateRequest: undefined,
-    dismissProviderUpdate: vi.fn(),
   })),
 }));
 vi.mock('./contexts/VimModeContext.js');
@@ -377,16 +376,23 @@ describe('AppContainer State Management', () => {
   // timeout without any real hang.
   vi.setConfig({ testTimeout: 30000, hookTimeout: 30000 });
 
-  // That same initialize() creates a real ExtensionStore under ~/.qwen; some
-  // runners — including the review-address verification gate's clean child —
-  // inherit a HOME the test process cannot write to. Ordinary CI already
-  // overrides HOME, so point it at a scratch directory for this suite, and
-  // leave that directory alone: the mount effect's initialize() is un-awaited,
-  // so store work can still be in flight at afterAll, and deleting the tree
+  // That same initialize() creates a real ExtensionStore under the resolved
+  // QWEN_HOME (~/.qwen when unset); some runners — including the
+  // review-address verification gate's clean child — inherit a HOME the test
+  // process cannot write to. Ordinary CI already overrides HOME, so point
+  // both HOME and QWEN_HOME at a scratch directory for this suite, and leave
+  // that directory alone: the mount effect's initialize() is un-awaited, so
+  // store work can still be in flight at afterAll, and deleting the tree
   // there fails it with ENOENT — an unhandled rejection that fails the run.
+  // QWEN_HOME must be pinned here explicitly: test-setup.ts otherwise pins it
+  // to a per-file directory that it deletes at afterAll, and QWEN_HOME
+  // outranks HOME for the store root, so the in-flight chain would target
+  // exactly the tree the suite pin deletes.
   const savedHome = process.env['HOME'];
+  const savedQwenHome = process.env['QWEN_HOME'];
   const suiteHome = mkdtempSync(join(tmpdir(), 'qwen-appcontainer-home-'));
   process.env['HOME'] = suiteHome;
+  process.env['QWEN_HOME'] = suiteHome;
 
   afterAll(() => {
     if (savedHome === undefined) {
@@ -394,6 +400,20 @@ describe('AppContainer State Management', () => {
     } else {
       process.env['HOME'] = savedHome;
     }
+    if (savedQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = savedQwenHome;
+    }
+  });
+
+  it('keeps the extension store root on the never-deleted suite scratch home', () => {
+    // The mount effect's initialize() runs real store work against the
+    // resolved QWEN_HOME that can still be in flight at afterAll;
+    // test-setup.ts deletes its per-file pin there. If this redirect is
+    // lost, that work fails ENOENT as an unhandled rejection and fails the
+    // whole run — so pin the redirect itself down deterministically.
+    expect(process.env['QWEN_HOME']).toBe(suiteHome);
   });
 
   let mockConfig: Config;
@@ -783,6 +803,7 @@ describe('AppContainer State Management', () => {
           initialize,
           subscribe: () => () => {},
           setPresentation: vi.fn(),
+          setRenderInput: vi.fn(),
         } as unknown as interactiveMods.InteractiveModSession);
       vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
       vi.spyOn(mockConfig, 'isInteractive').mockReturnValue(true);
@@ -880,6 +901,10 @@ describe('AppContainer State Management', () => {
     ['unknown', 'workflow inspect', false, false, true, true],
     ['opt-out', 'workflow inspect', true, true, true, true],
     ['missing tool', 'workflow inspect', true, false, false, true],
+    ['mode', 'Run the tests', false, false, true, false],
+    ['mode running', 'Run the tests', false, false, true, false],
+    ['pending exit', 'Run the tests', false, false, true, false],
+    ['late mode transition', 'Run the tests', false, false, true, false],
   ] as const)(
     'accepts completed speculation only without a current workflow intent: %s',
     async (_label, text, human, optOut, reachable, acceptCached) => {
@@ -912,16 +937,33 @@ describe('AppContainer State Management', () => {
       mockSettings.merged.ui!.disableWorkflowKeywordTrigger = optOut;
       generatePromptSuggestionMock.mockResolvedValue({ suggestion: text });
       const controller = new AbortController();
+      const cleanupOverlay = vi.fn().mockResolvedValue(undefined);
       const speculation = {
-        status: 'completed',
+        status: _label === 'mode running' ? 'running' : 'completed',
         suggestion: text,
         messages: [{ role: 'model', parts: [{ text: 'cached result' }] }],
-        overlayFs: null,
+        overlayFs: acceptCached ? null : { cleanup: cleanupOverlay },
         abortController: controller,
         startTime: Date.now(),
         toolUseCount: 0,
       };
-      startSpeculationMock.mockResolvedValue(speculation);
+      let resolveSpeculation!: (state: typeof speculation) => void;
+      if (_label === 'late mode transition') {
+        startSpeculationMock.mockReturnValue(
+          new Promise((resolve) => {
+            resolveSpeculation = resolve;
+          }),
+        );
+      } else {
+        startSpeculationMock.mockResolvedValue(speculation);
+      }
+      let modeChanged: (() => void) | undefined;
+      vi.spyOn(mockConfig, 'onWorkflowModeChange').mockImplementation(
+        (listener) => {
+          modeChanged = () => listener(mockConfig.getWorkflowMode());
+          return () => {};
+        },
+      );
       const queue = vi.fn();
       mockedUseMessageQueue.mockReturnValue({
         ...mockedUseMessageQueue(),
@@ -956,6 +998,28 @@ describe('AppContainer State Management', () => {
       await vi.waitFor(() =>
         expect(startSpeculationMock).toHaveBeenCalledOnce(),
       );
+      if (
+        _label === 'mode' ||
+        _label === 'mode running' ||
+        _label === 'pending exit' ||
+        _label === 'late mode transition'
+      ) {
+        const modeContext = vi
+          .spyOn(mockConfig, 'hasWorkflowModeContext')
+          .mockReturnValue(true);
+        if (_label !== 'mode') {
+          await act(async () => modeChanged?.());
+          if (_label === 'late mode transition') {
+            modeContext.mockReturnValue(false);
+            await act(async () => {
+              modeChanged?.();
+              resolveSpeculation(speculation);
+            });
+          }
+          expect(controller.signal.aborted).toBe(true);
+          expect(cleanupOverlay).toHaveBeenCalledOnce();
+        }
+      }
       await act(async () => {
         capturedUIActions.handleFinalSubmit(text, {
           submittedPrompt: text,
@@ -973,9 +1037,10 @@ describe('AppContainer State Management', () => {
         expect(addHistory).not.toHaveBeenCalled();
         expect(queue).toHaveBeenCalledWith(text, false, text, false, {
           displayText: text,
-          humanInput: { text },
+          humanInput: human ? { text } : undefined,
         });
         expect(controller.signal.aborted).toBe(true);
+        expect(cleanupOverlay).toHaveBeenCalledOnce();
       }
     },
   );
@@ -5154,7 +5219,7 @@ describe('AppContainer State Management', () => {
       // Third cleanup leg: in-memory chat history is stripped so the
       // cancelled prompt doesn't ride along on the next request as an
       // orphan user turn.
-      expect(mockStripOrphans).toHaveBeenCalled();
+      expect(mockStripOrphans).toHaveBeenCalledWith(true);
       // Fourth cleanup leg: Ink's static-rendered transcript region
       // is append-only — shrinking the underlying array doesn't unprint
       // already-flushed lines. `refreshStatic` writes the clear-terminal
@@ -5305,7 +5370,7 @@ describe('AppContainer State Management', () => {
         wasGoalTurn: true,
       });
 
-      expect(mockStripOrphans).toHaveBeenCalled();
+      expect(mockStripOrphans).toHaveBeenCalledWith(true);
       // Auto-restore itself bailed: there was no user item to rewind.
       expect(mockTruncateToItem).not.toHaveBeenCalled();
     });
@@ -7361,6 +7426,70 @@ describe('AppContainer State Management', () => {
       expect(lastCall[2]).toBe(1);
     });
 
+    it('reports the Mod band input and measures the controls again for a new tree', () => {
+      mockedUseTerminalSize.mockReturnValue({ columns: 100, rows: 30 });
+      mockedMeasureElement.mockReturnValue({ width: 100, height: 5 });
+      let band: interactiveMods.ModBand | undefined;
+      let notify = () => {};
+      const setRenderInput = vi.fn();
+      const modSession = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        subscribe: () => () => {},
+        setPresentation: vi.fn(),
+        setRenderInput,
+        subscribeBand: (listener: () => void) => {
+          notify = listener;
+          return () => {};
+        },
+        getBand: () => band,
+      } as unknown as interactiveMods.InteractiveModSession;
+      const getModSession = interactiveMods.getInteractiveModSession;
+      const owner = vi
+        .spyOn(interactiveMods, 'getInteractiveModSession')
+        .mockImplementation((config) =>
+          config === mockConfig ? modSession : getModSession(config),
+        );
+      try {
+        render(
+          <AppContainer
+            config={mockConfig}
+            settings={mockSettings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />,
+        );
+        expect(setRenderInput).toHaveBeenLastCalledWith({
+          surface: 'terminal',
+          component: 'AbovePrompt',
+          requestId: 'above-prompt',
+          viewport: { columns: 100, rows: 30, isFullscreen: false },
+          props: {
+            hasSurvey: false,
+            isWorking: false,
+            maxRows: 10,
+            bodyColumns: 95,
+            scroll: { offset: 0, bodyRows: 9 },
+            view: {},
+          },
+        });
+        const measured = mockedMeasureElement.mock.calls.length;
+        act(() => {
+          band = {
+            tree: { type: 'Text', children: ['☀'] },
+            owner: 'token-weather',
+            revision: 1,
+          };
+          notify();
+        });
+        expect(mockedMeasureElement.mock.calls.length).toBeGreaterThan(
+          measured,
+        );
+      } finally {
+        owner.mockRestore();
+        mockedMeasureElement.mockReset();
+      }
+    });
+
     it('hands ink the shared STATIC_EXTRA_HEIGHT for its dialog budget', () => {
       render(
         <AppContainer
@@ -7592,6 +7721,7 @@ describe('AppContainer State Management', () => {
         const runtime = {
           initialize: vi.fn().mockResolvedValue(undefined),
           loadCommands: vi.fn().mockResolvedValue([]),
+          setRenderInput: vi.fn(),
           close: vi.fn().mockResolvedValue(undefined),
         };
         const create = vi
@@ -7705,6 +7835,7 @@ describe('AppContainer State Management', () => {
             return () => {};
           },
           setPresentation: vi.fn(),
+          setRenderInput: vi.fn(),
         } as unknown as interactiveMods.InteractiveModSession;
         // Scope the mock to this test's own Config: mount effects from
         // earlier tests can still be in flight (they run the real

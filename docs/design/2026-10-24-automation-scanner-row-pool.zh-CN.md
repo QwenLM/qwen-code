@@ -38,8 +38,9 @@ NULL OR lease_until < ?`）下逐行上租约，账本写入全部带 fence 校�
    `managedAutomationScheduler`。tick 在 join 期间占着调度器的线程，因此用
    同一个调度器跑扫描会在池大小为 1 时把 tick 锁死在自己唯一的线程上，调大
    也只会为每个 pending 的 join 空占一条线程。
-5. 关闭时让进行中的工作收尾；绝不中断它。线程池的 `destroy()` 立即返回
-   （`awaitTerminationSeconds(0)`），本身不引入任何关闭等待。卡在 join 里的
+5. 关闭时线程池不会中断任务，但也不等待任务完成，更不保证它们能在 JVM 退出前
+   完成。`destroy()` 立即返回（`awaitTerminationSeconds(0)`），本身不引入任何
+   关闭等待。卡在 join 里的
    tick 仍受调用它的调度器约束（`managedAutomationScheduler`，本身是
    `SmartLifecycle`）：生命周期处理器把该 Bean 的 stop 上限设为
    `spring.lifecycle.timeout-per-shutdown-phase`（此处 30 秒）。这是关闭的上界，
@@ -70,16 +71,23 @@ scanner-threads`，它仍是正确的后续方向。
   里串行执行，所以一个 Session 的执行仍然一次一个。这是接受的语义，由
   `twoDefinitionsSharingOneSessionBothFireWhenDueTogether` 钉住（#15442 验证
   lane 发现 1）。
+- 关于共享 Session 排队的决定（#15667）：线程池不按 Session 对行分组。第二个
+  fire 因此会在前一个探针之后、在自己 30 秒的中继预算内排队，并可能丢掉应答；
+  该 occurrence 会按退避重新驱动，Harness 仍会完成这次运行，重驱动要么重放已
+  认领的运行、要么读回已结算的收据，因此同一修订内不会运行两次。在 Harness
+  池中，一次丢失的应答还可能让该 Harness 退出选择，直到下一次成功刷新
+  （#15666）。这里判定为预期语义而不串行化：funnel 跨节点共享、也公共中继共享，
+  单节点排序并不能消除排队。运维建议：探针较慢的带闸门定义单独使用一个 Session。
 - 冷 Session 加载时（中继开始前最长 120 秒），一次 fire 仍可能超过 60 秒租约。
   fence 会拒绝旧持有者的写入，occurrence 保持 `firing`，后续 tick 用派生 run id
   幂等地重新驱动它。本次改动不增加续期运行。
 - 同一行内，时间槽、重驱动和 reconcile 调用保持串行；线程池只并行行之间。
   `SCAN_LIMIT`（100）是 tick 两次行查询各自的上限，因此单次 tick 最多提交
   2 × `SCAN_LIMIT`（200）个任务；两次查询都返回的行只提交一次。
-- 上下文关闭时，线程池除了进行中的行，还会在非 daemon 线程上把**排队中**的行
-  也运行完：`destroy()` 仍然立即返回，但进程退出会等待排队的工作。每个排队的
-  行都在同一 fence 下认领与触发，丢失的应答会由后续 tick 重新驱动（#15442 验证
-  lane 发现 3）。
+- 上下文关闭时，线程池除了进行中的行，也会在非 daemon 线程上跑**排队中**的行：
+  `destroy()` 立即返回，而关机钩子返回后 JVM 不会等待这份积压，因此排队的行
+  可能既不会运行、也不会被等待。真正运行的行都在同一 fence 下认领与触发，丢失
+  的应答会由后续 tick 重新驱动（#15442 验证 lane 发现 3；#15527 评审后修正）。
 
 ## 验证
 
@@ -90,7 +98,7 @@ scanner-threads`，它仍是正确的后续方向。
   `aBacklogDeeperThanThePoolStillCompletesWithinTheTick`、
   `aTickJoinsEveryRowBeforeItReportsOneFailure`、
   `theScannerWorksRowsOnItsOwnBoundedPool`、
-  `theScannerRowPoolFinishesInFlightWorkInsteadOfInterruptingIt`、
+  `theScannerRowPoolNeverInterruptsRowTasksAndClosesWithoutWaiting`、
   `theScannerRowPoolStillBootsWithAnUnvalidatedSizeWhileAutomationIsOff`、
   `twoDefinitionsSharingOneSessionBothFireWhenDueTogether`、
   `aRowBothQueriesReturnIsSubmittedOnce`、
@@ -99,6 +107,10 @@ scanner-threads`，它仍是正确的后续方向。
   同一套分发与 join 的串行形态。`aTickJoinsEveryRowBeforeItReportsOneFailure`
   在真实的单线程池上运行，第一个认领抛出时第二个行的认领仍在飞行中：直接执行器
   钉不住 join，因为它的任务在提交阶段就已跑完（#15442 验证 lane 发现 2）。
+- `commonClaimFailuresProduceOneBoundedSummary` 钉住统一的认领故障：五行已提交
+  任务产生四个额外的已观测任务异常，一条 WARN 只带前三条 tenant/schedule 身份，
+  不带 throwable 负载，并原样抛回第一个异常。计数覆盖已观测的行任务异常，不统计
+  已在行内处理的 fire/decide 错误；即使中断提前停止 join，`submitted` 仍是已提交行总数。
 - MySQL（`AutomationScannerConcurrencyMySqlIT`，`mysql-integration` profile）：
   InnoDB 行锁下竞争认领只有一个 fence 赢家；接管后旧所有者无法移动账本；两个
   扫描器跨线程池对每个 occurrence 只结算一次。

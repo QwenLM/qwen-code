@@ -133,6 +133,12 @@ jobs:
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
       ubuntu_runner: '${{ steps.pick_runner.outputs.ubuntu_runner }}'
+      # Lint & Static's own routing: every pull request reaches the fleet,
+      # including untrusted forks (maintainer decision 2026-10-31 — the lane
+      # executes PR code on the shared pool and that risk is accepted). The
+      # association gate in ubuntu_runner still governs every other Linux
+      # lane; do not "simplify" the two outputs into one.
+      lint_runner: '${{ steps.pick_runner.outputs.lint_runner }}'
       ci_profile: '${{ steps.ci_profile.outputs.ci_profile }}'
     steps:
       - name: 'Detect release version-sync PR'
@@ -179,6 +185,12 @@ jobs:
       #
       # Keep push routing aligned with the classifier above so a hosted queue
       # does not delay the downstream ECS jobs.
+      #
+      # lint_runner is the one deliberate divergence: Lint & Static routes
+      # EVERY pull request to the fleet, untrusted forks included (maintainer
+      # decision 2026-10-31, risk accepted — see the classify_pr outputs
+      # comment). The kill-switch and LINUX_RUNNER_FLEET=hosted still force
+      # hosted, and non-PR events inherit ubuntu_runner unchanged.
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
@@ -197,6 +209,11 @@ jobs:
           case "${AUTHOR_ASSOCIATION}" in
             OWNER|MEMBER|COLLABORATOR) trusted_author=true ;;
           esac
+          # Resolve fleet labels once; both outputs assign from this.
+          fleet_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
+          if [[ "${LINUX_RUNNER_FLEET}" == "arm64" ]]; then
+            fleet_runner='["self-hosted", "linux", "arm64"]'
+          fi
           # Dispatch input wins over the fleet variable; MAINTAINER_ECS_RUNNER_
           # DISABLED=true still hard-forces hosted runners everywhere.
           if [[ "${EVENT_NAME}" == "workflow_dispatch" ]]; then
@@ -211,14 +228,18 @@ jobs:
           elif [[ "${ECS_DISABLED}" == "true" || "${LINUX_RUNNER_FLEET}" == "hosted" ]]; then
             ubuntu_runner='["ubuntu-latest"]'
           elif [[ "${SAME_REPO}" == "true" || "${trusted_author}" == "true" || "${EVENT_NAME}" == "merge_group" || "${EVENT_NAME}" == "push" ]]; then
-            if [[ "${LINUX_RUNNER_FLEET}" == "arm64" ]]; then
-              ubuntu_runner='["self-hosted", "linux", "arm64"]'
-            else
-              ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
-            fi
+            ubuntu_runner="${fleet_runner}"
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
           echo "Selected Linux runner: ${ubuntu_runner}"
+          # Lint & Static routes every pull request to the fleet (maintainer
+          # decision 2026-10-31); non-PR events inherit ubuntu_runner unchanged.
+          lint_runner="${ubuntu_runner}"
+          if [[ "${EVENT_NAME}" == "pull_request" && "${ECS_DISABLED}" != "true" && "${LINUX_RUNNER_FLEET}" != "hosted" ]]; then
+            lint_runner="${fleet_runner}"
+          fi
+          echo "lint_runner=${lint_runner}" >> "${GITHUB_OUTPUT}"
+          echo "Selected lint runner: ${lint_runner}"
 
       # The product jobs later check out the PR head. Classify before that
       # from an explicit base-SHA checkout so no fork can replace the
@@ -543,10 +564,9 @@ jobs:
                 done || true
           fi
 
-      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
-      # instant the branch is pushed) instead of github.ref. github.ref is the
-      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
-      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Pin PRs to the event head SHA: refs/pull/N/head can advance before a
+      # retry, while github.ref is the asynchronously rebuilt merge ref and
+      # can lag behind a push. Neither mutable ref identifies this run's head.
       # Merge queue refs are ephemeral; check out the event head SHA directly so
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
@@ -570,7 +590,7 @@ jobs:
           # the tested tree is a descendant — but attribution breaks: red on a
           # clean commit, autofix filed against the wrong merge. `e2e.yml` pins
           # the event SHA by taking actions/checkout's default.
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
           # Shallow: nothing here walks git history except on demand (the
           # verify guard below checks head.sha == HEAD; the size gate and its
           # vitest mirror fetch the PR's base commit at depth 1 when the
@@ -635,7 +655,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       # The test step's side lane (.github/scripts/ci/run-unit-test-lanes.sh)
@@ -742,6 +762,41 @@ jobs:
             echo '::warning::tmux/zip unavailable; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
           fi
 
+      - name: 'Provision linters for real-binary tests'
+        # The script-lint real-binary regressions (the #15974 unloadable
+        # workflow, the PR-planted ignore-all config, the merge-base trust
+        # boundary) are skipIf-gated on actionlint/shellcheck being on PATH;
+        # without this step they silently skip on every CI run (PR #16001
+        # review). Same pinned, SHA-256-verified installer the lint lane
+        # uses, promoted onto GITHUB_PATH ahead of anything a shared runner
+        # left there. Advisory: a failed install degrades to the skips, not
+        # a red required check. Windows is excluded — the installer ships
+        # linux/darwin archives only.
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os != 'Windows' }}"
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |-
+          node --input-type=module -e '
+            import { execSync } from "node:child_process";
+            import { appendFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+            import { getLinters, getLinterTempDir } from "./scripts/lint.js";
+            const tempDir = getLinterTempDir();
+            rmSync(tempDir, { recursive: true, force: true });
+            mkdirSync(tempDir, { recursive: true });
+            const linters = getLinters();
+            for (const name of ["actionlint", "shellcheck"]) {
+              execSync(linters[name].installer, { stdio: "inherit" });
+              // Verify the install produced its binary BEFORE promoting the
+              // dir: a silent no-op install must fail this step visibly
+              // (continue-on-error tolerates it, the UI shows it), not
+              // degrade to skipped tests nobody notices (PR #16001 F2).
+              const bin = tempDir + "/" + name + "/" + name;
+              if (!existsSync(bin)) throw new Error(name + " installer produced no binary at " + bin);
+              appendFileSync(process.env.GITHUB_PATH, tempDir + "/" + name + "\n");
+            }
+            console.log("PROVISIONED actionlint + shellcheck into " + tempDir);
+          '
+
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
@@ -788,6 +843,10 @@ jobs:
           # work runs 5x apart depending on placement (#10490). Skip those
           # assertions here — they still run locally and on the hosted lanes.
           QWEN_SKIP_LATENCY_BUDGETS: "${{ startsWith(runner.name, 'ecs-qwen-') && '1' || '' }}"
+          # The lane script's side-lane log, outside the TMPDIR this step
+          # removes. The script deletes it once replayed, so it is left only
+          # when this step is killed first; the next step prints it.
+          SIDE_LANE_LOG: '${{ runner.temp }}/side-lane-tests.log'
         run: |-
           node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
           test_runner=()
@@ -837,6 +896,17 @@ jobs:
           kill "$SAMPLER_PID" 2>/dev/null || true
           if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
           exit "$RC"
+
+      # A timeout or a cancel kills the test step before the lane script
+      # replays its side lane, which runs every suite but the CLI and core
+      # ones. Print what the side lane got through.
+      - name: 'Print the side lane of a killed test step'
+        if: '${{ failure() || cancelled() }}'
+        run: |-
+          side_log="${RUNNER_TEMP}/side-lane-tests.log"
+          if [ -f "${side_log}" ]; then
+            cat "${side_log}"
+          fi
 
       # The host looks healthy after cleanup, so persist the disk-pressure
       # timeline from a failed run (#10035): the artifact keeps the samples
@@ -930,8 +1000,14 @@ jobs:
     # same release-sync convention: stay running on skip_ci PRs so a required
     # context still reports, with the per-step guards making it a no-op pass.
     if: "${{ !cancelled() && github.event_name != 'schedule' }}"
-    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
-    # Routed like test's, not a bare constant: this lane was beheaded twice
+    # Reads lint_runner, NOT ubuntu_runner: this lane routes every pull
+    # request to the fleet, untrusted forks included (maintainer decision
+    # 2026-10-31 — the lane executes PR code and the shared-pool risk is
+    # accepted). test and the integration lanes keep the association-gated
+    # ubuntu_runner. The kill-switch and hosted-fleet overrides still apply,
+    # inside pick_runner.
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'') }}'
+    # Pool-scoped like test's, not a bare constant: this lane was beheaded twice
     # running honestly on cold-cache hk3-pool runners — at 30 minutes flat
     # (install 892s vs the sibling Test job's 347s) and again at 45 (install
     # 940s, bundle closure 681s vs a warm 171s, every step 2–4x). The pool's
@@ -941,13 +1017,30 @@ jobs:
     # Keyed on `self-hosted`, not on the x64 fleet's `ecs-qwen` label: the
     # ARM64 fleet renders ["self-hosted", "linux", "arm64"], so a
     # fleet-specific substring priced those reserved machines as hosted.
-    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''90'' || ''45'') }}'
+    # Reads the same lint_runner as runs-on so the ceiling always prices the
+    # pool the job actually lands on.
+    timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''90'' || ''45'') }}'
     env:
       LINT_BASE_SHA: "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}"
     permissions:
       contents: 'read'
       pull-requests: 'read'
     steps:
+      # Untrusted fork code runs here; job env cannot read the runner context
+      # and RUNNER_TEMP survives across jobs, so publish a run-unique HOME via
+      # GITHUB_ENV. Rationale: docs/design/2026-10-31-lint-static-ecs-routing.md.
+      - name: 'Create isolated HOME'
+        run: |-
+          home="${RUNNER_TEMP}/qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          rm -rf -- "$home"
+          mkdir -p "$home" "${RUNNER_TOOL_CACHE}/qwen-ci-cache"
+          printf 'HOME=%s\nUSERPROFILE=%s\n' "$home" "$home" >> "${GITHUB_ENV}"
+          # Linter archives are SHA-256-verified on every cache hit, so sharing
+          # them is safe; corepack does NOT re-verify extracted entries on hit,
+          # so its home stays per-run (a shared one is a poisoning channel).
+          printf 'XDG_CACHE_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"
+          printf 'COREPACK_HOME=%s\n' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"
+
       # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
       # verify) may leave root-owned, read-only files anywhere in the workspace.
       # Restore ownership and write permission unconditionally so the checkout
@@ -1073,10 +1166,9 @@ jobs:
                 done || true
           fi
 
-      # On PRs, check out refs/pull/N/head (the immutable PR head, published the
-      # instant the branch is pushed) instead of github.ref. github.ref is the
-      # merge ref (refs/pull/N/merge), which GitHub rebuilds asynchronously and
-      # can serve stale for minutes after a push, repeatedly flaking this gate.
+      # Pin PRs to the event head SHA: refs/pull/N/head can advance before a
+      # retry, while github.ref is the asynchronously rebuilt merge ref and
+      # can lag behind a push. Neither mutable ref identifies this run's head.
       # Merge queue refs are ephemeral; check out the event head SHA directly so
       # slow hosted runners do not fail after the queue branch is removed.
       # Non-PR/non-queue events keep github.ref.
@@ -1100,7 +1192,7 @@ jobs:
           # the tested tree is a descendant — but attribution breaks: red on a
           # clean commit, autofix filed against the wrong merge. `e2e.yml` pins
           # the event SHA by taking actions/checkout's default.
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}"
           # Shallow: nothing here walks git history except on demand (the
           # verify guard below checks head.sha == HEAD; the size gate and its
           # vitest mirror fetch the PR's base commit at depth 1 when the
@@ -1151,7 +1243,7 @@ jobs:
         run: 'node .github/scripts/check-ci-budget.mjs'
 
       # A green lane proves the branch passes the gate AS THE BRANCH defines
-      # it — the checkout above is refs/pull/N/head by deliberate trade-off —
+      # it — the checkout above is the event PR head by deliberate trade-off —
       # not as the base defines it. #11117 flipped Prettier --write →
       # --check on main while #11216's branch still ran --write; it merged
       # green and reddened every later full-profile PR (#11378 cleaned up).
@@ -1183,7 +1275,7 @@ jobs:
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
-          DOCUMENT='packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json'
+          DOCUMENT='packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json'
           gh api "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" --paginate --jq '.[] | .filename, .previous_filename // empty' > "${RUNNER_TEMP}/contract-pr-files.txt"
           if ! grep -qxF "${DOCUMENT}" "${RUNNER_TEMP}/contract-pr-files.txt"; then
             exit 0
@@ -1191,7 +1283,7 @@ jobs:
           BASE_DOCUMENT="${RUNNER_TEMP}/contract-base.json"
           git fetch --quiet --depth=1 --filter=blob:none origin "refs/heads/${BASE_REF}"
           if ! git show "FETCH_HEAD:${DOCUMENT}" > "${BASE_DOCUMENT}" 2>/dev/null; then
-            PREVIOUS_DOCUMENT="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" --paginate --jq '.[] | select(.filename == "packages/managed-agent-server/src/main/resources/openapi/managed-agent-public-api.openapi.json") | .previous_filename // empty')"
+            PREVIOUS_DOCUMENT="$(gh api "repos/${REPO}/pulls/${PR_NUMBER}/files?per_page=100" --paginate --jq '.[] | select(.filename == "packages/managed-agent-server/contracts/src/main/resources/openapi/managed-agent-public-api.openapi.json") | .previous_filename // empty')"
             if [ -n "${PREVIOUS_DOCUMENT}" ]; then
               git show "FETCH_HEAD:${PREVIOUS_DOCUMENT}" > "${BASE_DOCUMENT}"
             else
@@ -1222,27 +1314,46 @@ jobs:
         env:
           LINT_HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
         run: |-
-          # Blobless: `Report test growth` may already have fetched the merge
-          # base with --filter=blob:none, and a plain fetch then dies resolving
-          # thin-pack deltas against blobs this checkout lacks. lint-scope
-          # reads only commits and trees.
+          # Blobless: an earlier blobless merge-base fetch leaves this
+          # checkout without those blobs, and lint-scope reads only commits and
+          # trees anyway.
           partial=(-c extensions.partialClone=origin -c remote.origin.promisor=true)
           git "${partial[@]}" fetch --no-tags --depth=100 --filter=blob:none \
             origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}"
-          # Deepen until Git can prove the merge base. A fixed 100-commit
-          # window expires in about a day at this merge rate, after which every
-          # longer-lived PR silently paid for a full scan; each deepen is
-          # blobless, so the extra transfer is trees, not the whole pack.
+          # Match lint-scope's merge-base and shallow-boundary checks.
+          # Ambiguity stops deepening but still announces full-lint fallback.
+          history_usable() {
+            local merge_base above shallow
+            merge_base="$(git merge-base --all "${LINT_BASE_SHA}" HEAD 2>/dev/null)" || return 1
+            case "${merge_base}" in
+              '') return 1 ;;
+              *$'\n'*) return 2 ;;
+            esac
+            [ "$(git rev-parse --is-shallow-repository)" = 'true' ] || return 0
+            shallow="$(git rev-parse --git-path shallow)"
+            above="$(git rev-list "${merge_base}..HEAD" "${merge_base}..${LINT_BASE_SHA}")" || return 1
+            ! grep -qxF -f "${shallow}" <<< "${above}"
+          }
+          deepens=0
+          reason='deepen cap reached'
           for _attempt in 1 2 3; do
-            if git merge-base --all "${LINT_BASE_SHA}" HEAD >/dev/null 2>&1; then
-              break
-            fi
+            state=0
+            history_usable || state=$?
+            case "${state}" in 0|2) break ;; esac
             git "${partial[@]}" fetch --no-tags --deepen=300 --filter=blob:none \
-              origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}" || break
+              origin "${LINT_BASE_SHA}" "${LINT_HEAD_SHA}" || { reason='deepen fetch aborted'; break; }
+            deepens=$((deepens + 1))
           done
-          # Recorded on the remote by the filtered fetch; later fetches in this
-          # checkout must stay ordinary.
+          # Later fetches in this checkout must stay ordinary.
           git config --unset remote.origin.partialclonefilter || true
+          state=0
+          history_usable || state=$?
+          if [ "${state}" != 0 ]; then
+            [ "${state}" != 2 ] || reason='ambiguous merge base'
+            message="Incremental lint history: ${deepens} deepen(s), base depth $(git rev-list --count "${LINT_BASE_SHA}") — ${reason}"
+            echo "::warning::${message}"
+            echo "- ${message}" >>"${GITHUB_STEP_SUMMARY}"
+          fi
 
       # Avoid setup-node downloads on ECS, where nodejs.org may be unreachable
       # through the egress proxy; reuse the machine's Node instead.
@@ -1268,7 +1379,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Configure npm for rate limiting'
@@ -1444,10 +1555,30 @@ jobs:
       - name: 'Run .github/scripts helper tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
+          # Route os.tmpdir() off the host /tmp tmpfs: its inode quota is
+          # small and shared across the pool, and e2e-build.test.mjs creates
+          # thousands of chunk files there (#15965 ENOSPC with 202G free).
+          # Same routing as the unit lanes (#10035), private per-run dir
+          # included: RUNNER_TEMP is shared, and a cancelled battery never
+          # reaches its own after() cleanup, so the fixture tree would stick
+          # around in _work/_temp. A hard kill stays uncovered either way.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          HELPER_TMPDIR="$(mktemp -d "${TMPDIR}/helper-tests-XXXXXX" 2>/dev/null)" || HELPER_TMPDIR=""
+          if [ -n "$HELPER_TMPDIR" ]; then
+            TMPDIR="$HELPER_TMPDIR"
+            export TMPDIR
+            trap 'rm -rf "$HELPER_TMPDIR"' EXIT
+          fi
           node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} 2>&1 | tee "${RUNNER_TEMP}/helper-attempt1.log" || {
             node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} &&
               echo "::warning::helper tests failed once and the retry absorbed it; attempt-1 failures: $(grep -E '^not ok' "${RUNNER_TEMP}/helper-attempt1.log" | head -5 | paste -sd ';' -) — count this toward the #12772 helper-battery recurrence threshold"
           }
+
+      # Reclaim the run-unique HOME (constructed path, never $HOME) before the
+      # failure collector, which must stay last.
+      - name: 'Clean isolated HOME'
+        if: '${{ always() }}'
+        run: 'rm -rf -- "${RUNNER_TEMP}/qwen-lint-home-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"'
 
       # State-at-failure dump for the 19 substantive steps after install: the
       # install sampler is reaped by that step's `trap … EXIT`, so a death in
@@ -1637,7 +1768,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
-          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.ref }}"
           fetch-depth: 1
 
       - name: 'Verify checkout includes expected head commit'
@@ -1669,7 +1800,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Configure npm for rate limiting'
@@ -1746,9 +1877,15 @@ jobs:
           echo "Using web-shell Playwright port ${port}"
 
       - name: 'Run transcript document browser gate'
+        env:
+          # Avoid the pool's shared /tmp tmpfs for Chromium temporary files.
+          TMPDIR: '${{ runner.temp }}'
         run: 'npx vitest run --root ./integration-tests ./chat-transcript-document.test.ts --retry=0'
 
       - name: 'Run web-shell browser smoke'
+        env:
+          # Avoid the pool's shared /tmp tmpfs for Chromium temporary files.
+          TMPDIR: '${{ runner.temp }}'
         # Two workers is the hosted default (half of 4 vCPUs). Unpinned, a pool
         # job would start browsers for half the host's cores while the host
         # runs its other jobs.
@@ -1805,14 +1942,32 @@ jobs:
   # is most of the traffic here and most of what the macOS queue was spent
   # on.
   #
-  # Two named jobs, not a matrix: a skipped matrix job reports one collapsed
-  # check name, never the per-OS contexts, so a required-check configuration
-  # would sit "Expected" forever. A skipped named job reports under its exact
-  # name. (No status check is required on `main` today — the ruleset carries
-  # only deletion, non-fast-forward and pull_request rules — so this shape is
-  # currently insurance, not a live constraint.)
+  # Preserve the original macOS check name while running its complete suites
+  # in bounded groups. The aggregate rejects failed, skipped or cancelled
+  # groups, including when one group fails before the others finish.
   test_macos:
     name: 'Test (macos-latest, Node 22.x)'
+    needs: 'test_macos_shards'
+    if: |-
+      ${{
+        always() && (
+          github.event_name == 'merge_group' ||
+          github.event_name == 'schedule' ||
+          github.event_name == 'workflow_dispatch'
+        )
+      }}
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Require every macOS test group to pass'
+        env:
+          MACOS_RESULT: '${{ needs.test_macos_shards.result }}'
+        run: 'test "$MACOS_RESULT" = success'
+
+  test_macos_shards:
+    name: 'macOS unit tests (${{ matrix.group }} ${{ matrix.shard }})'
     needs: 'classify_pr'
     if: |-
       ${{
@@ -1822,13 +1977,31 @@ jobs:
           github.event_name == 'workflow_dispatch'
         )
       }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - group: 'cli'
+            shard: '1/3'
+          - group: 'cli'
+            shard: '2/3'
+          - group: 'cli'
+            shard: '3/3'
+          - group: 'core'
+            shard: '1/2'
+          - group: 'core'
+            shard: '2/2'
+          - group: 'rest'
+            shard: ''
+          - group: 'scripts'
+            shard: ''
     runs-on: 'macos-latest'
     timeout-minutes: 60
     permissions:
       contents: 'read'
     steps:
-      # See the Ubuntu gate's checkout: PRs use the immutable refs/pull/N/head
-      # and merge queue uses the event head SHA.
+      # merge_group/schedule/dispatch only: this lane keeps
+      # refs/pull/N/head; the PR lanes pin the event head SHA.
       - name: 'Checkout'
         id: 'checkout'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -1857,19 +2030,22 @@ jobs:
           npm config set fetch-timeout 300000
 
       - name: 'Install dependencies'
+        id: 'install'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           corepack pnpm install --frozen-lockfile --prefer-offline --reporter=append-only
 
       - name: 'Hosted portable process smoke'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && matrix.group == 'scripts' }}"
         timeout-minutes: 5
         run: |-
           npm run test:integration:hosted:sandbox:none -- -t 'portable startup'
 
       - name: 'Run tests and generate reports'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        if: "${{ !cancelled() && steps.install.outcome == 'success' && needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
+          MACOS_TEST_GROUP: '${{ matrix.group }}'
+          MACOS_TEST_SHARD: '${{ matrix.shard }}'
           NO_COLOR: true
           HOME: '${{ runner.temp }}/qwen-ci-home'
           USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
@@ -1898,7 +2074,7 @@ jobs:
           ( while true; do hosttests=$(pgrep -fc '[v]itest' 2>/dev/null || true); echo "DFSAMPLE $(date -u +%H:%M:%S 2>/dev/null) tmpdir[${TMPDIR}] load[$(cut -d' ' -f1-3 /proc/loadavg 2>/dev/null)] hosttests[${hosttests:-unknown}] space[$(df -h "${TMPDIR}" 2>/dev/null | tail -1)] inodes[$(df -i "${TMPDIR}" 2>/dev/null | tail -1)] memavail[$(awk '/MemAvailable/ {print $2, $3}' /proc/meminfo 2>/dev/null)]" 2>/dev/null; sleep 10; done ) &
           SAMPLER_PID=$!
           set +e
-          npm run test:ci
+          node scripts/run-macos-ci-group.js "$MACOS_TEST_GROUP" "$MACOS_TEST_SHARD"
           RC=$?
           set -e
           pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
@@ -2026,7 +2202,7 @@ jobs:
           # so create the directory through the Node the preflight verified.
           node -e "require('node:fs').mkdirSync(process.argv[1], { recursive: true })" "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Configure npm for rate limiting'
@@ -2091,7 +2267,7 @@ jobs:
           if [ "$SCRIPTS_RC" -ne 0 ]; then
             echo '::warning::The complete Windows script suite has known baseline failures; its full result remains visible above.'
           fi
-          npx vitest run scripts/tests/install-script.test.js --config scripts/tests/vitest.config.ts
+          npx vitest run scripts/tests/install-script.test.js scripts/tests/opentui-preview-install.test.js --config scripts/tests/vitest.config.ts --retry=0 --bail=1 --maxWorkers=1 --minWorkers=1 --dangerouslyIgnoreUnhandledErrors=false
           INSTALLER_RC=$?
           set -e
           pkill -TERM -P "$SAMPLER_PID" 2>/dev/null || true
@@ -2140,7 +2316,8 @@ jobs:
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.
-    # Same self-hosted scoping as `lint_and_static`: hosted fallback routing
+    # Same self-hosted scoping as `test` (this lane keeps the association-gated
+    # ubuntu_runner, unlike lint_and_static): hosted fallback routing
     # keeps the pre-contention ceiling, and the ARM64 fleet — which carries
     # no `ecs-qwen` label — gets the contended-pool allowance it runs under.
     timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''60'' || ''30'') }}'
@@ -2259,7 +2436,7 @@ jobs:
       - name: 'Checkout'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
-          ref: "${{ (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
+          ref: "${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}"
           fetch-depth: 1
 
       - name: 'Verify checkout includes expected head commit'
@@ -2302,7 +2479,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Disk floor gate (self-hosted)'
@@ -2529,7 +2706,7 @@ jobs:
           cache_dir="${HOME}/.cache/qwen-code/npm"
           mkdir -p "${cache_dir}"
           echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
-          echo "Using persistent npm cache at ${cache_dir}"
+          echo "Using npm cache at ${cache_dir}"
           du -sh "${cache_dir}" 2>/dev/null || true
 
       # Same pre-install admission check as the test job (#10035): this job

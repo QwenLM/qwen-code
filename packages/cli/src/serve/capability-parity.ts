@@ -143,6 +143,12 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     standing: 'managed',
     evidence: 'surface:ARTIFACT_GET',
   },
+  workspace_artifact_library: NO_MANAGED_EQUIVALENT(
+    'no Managed workspace-wide artifact query or explicit-pair batch removal',
+  ),
+  workspace_artifact_library_stream: NO_MANAGED_EQUIVALENT(
+    'no Managed progressive workspace artifact query with session summaries',
+  ),
   session_sources: NO_MANAGED_EQUIVALENT('no Managed session source list'),
   slow_client_warning: LEGACY_ONLY(
     'SSE backpressure is a legacy transport knob',
@@ -229,6 +235,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   // and catch-up limits, so a quiet watch still spends a turn there.
   scheduled_task_gate: NO_MANAGED_EQUIVALENT(
     'no scheduled-task gate in Managed automations',
+  ),
+  autofix_pr_watches: NO_MANAGED_EQUIVALENT(
+    'no /autofix-pr watch in a Managed workspace',
   ),
   session_monitor_tool_correlation: {
     standing: 'managed',
@@ -380,6 +389,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
     'no Managed stateless generation route',
   ),
   session_btw: NO_MANAGED_EQUIVALENT('no Managed side-question route'),
+  session_btw_stream: NO_MANAGED_EQUIVALENT(
+    'no Managed streaming side-question route',
+  ),
   session_shell_command: {
     standing: 'managed',
     evidence: 'tool:run_shell_command',
@@ -518,6 +530,9 @@ export const CAPABILITY_PARITY: Record<ServeFeature, ParityRow> = {
   workspace_session_live_state: NO_MANAGED_EQUIVALENT(
     'no Managed live-state snapshot',
   ),
+  workspace_session_live_state_batch: NO_MANAGED_EQUIVALENT(
+    'no Managed live-state snapshot',
+  ),
   workspace_session_metadata: NO_MANAGED_EQUIVALENT(
     'Managed renames a Session and has no metadata bag',
   ),
@@ -555,7 +570,6 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'SESSION_GET',
   'SESSION_RENAME',
   'SESSION_DELETE',
-  'SESSION_CWD_CHANGE',
   'SESSION_OPERATION_GET',
   'SESSION_MODELS',
   'SESSION_MCP',
@@ -609,6 +623,9 @@ export const MANAGED_ONLY_NOT_A_GAP = new Set([
   'STORE_RECOVERY_BLOCK',
   'STORE_RESOURCE_GET',
   'STORE_RESTORE',
+  'STORE_SNAPSHOT_GET',
+  'STORE_SNAPSHOT_PAGES',
+  'STORE_SNAPSHOT_PUBLISH',
   'STORE_TOOL_RESULT_PUBLISH',
   'STORE_TRANSACTION_COMMIT',
   'STORE_TRANSACTION_LIST',
@@ -643,6 +660,7 @@ export const MANAGED_ONLY_REPORTED: readonly string[] = [
   'SESSION_CONTEXT_COMPRESSION',
   'SESSION_RECOVERY_QUERY',
   'SESSION_RECOVERY_RECHECK',
+  'SESSION_WORKTREE',
 ];
 
 /**

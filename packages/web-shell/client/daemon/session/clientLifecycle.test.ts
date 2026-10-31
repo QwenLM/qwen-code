@@ -169,10 +169,12 @@ describe('detachDaemonClient', () => {
       expect.objectContaining({
         method: 'POST',
         keepalive: true,
-        headers: expect.objectContaining({
-          'X-Qwen-Client-Id': 'client-1',
-          Authorization: 'Bearer tok',
-        }),
+      }),
+    );
+    expect(new Headers(vi.mocked(fetch).mock.calls[0]?.[1]?.headers)).toEqual(
+      new Headers({
+        'X-Qwen-Client-Id': 'client-1',
+        Authorization: 'Bearer tok',
       }),
     );
   });

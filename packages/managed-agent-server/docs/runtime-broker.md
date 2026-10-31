@@ -1,16 +1,8 @@
 # Qwen Managed Runtime Broker Core
 
-The `com.alibaba.qwen.code.runtimebroker` package defines the state and orchestration core for a
-Managed Agent Runtime Broker. It contains Runtime binding, Runtime Session,
-and Tool execution records; repository contracts; thread-safe in-memory
-and JDBC implementations; and a framework-neutral service that composes
-authoritative scope resolution, Runtime provisioning, and Runtime transport
-adapters.
+The `contracts` module owns `com.alibaba.qwen.code.runtimebroker` values and interfaces. The `runtime-broker` module owns the framework-neutral `runtimebroker.service.RuntimeBrokerService`. JDBC and memory implementations are in the `persistence` module; providers, HTTP clients and credential encryption are in `adapters`. The `server` module composes these implementations through the contracts, hosts HTTP endpoints, and owns resource lifecycle.
 
-Runtime providers and their deployment protocols are in `runtimebroker.provisioning`,
-HTTP adapters and wire protocols in `runtimebroker.transport`, and credential
-encryption in `runtimebroker.security`. The execution and repository core stays
-in the parent package; the application still builds all of them in one Maven module.
+None of the four implementation modules depends on another implementation module. In particular the Broker consumes `NativeCsiExecutionRepository` capability rather than a concrete JDBC class. Memory repositories do not provide private CSI execution capability. Capability checks do not replace transactional admission, same-DataSource identity or generation fencing.
 
 The service acquires operation and dispatch leases, renews them while external
 work is in flight, converges idempotent Tool execution, records cancellation
@@ -32,7 +24,7 @@ The embedding service still owns the worker command wiring, recovery-capable
 provisioners, and deployment configuration. The experimental Kubernetes provider
 below supports disposable scratch only. The Broker core stays independent of Spring and public Agent resources; the enclosing Managed Agent Server wires its HTTP and application adapters.
 
-Broker sources, classpath resources and tests are built as part of `packages/managed-agent-server`, which requires JDK 21 or later and Maven 3.8.9+ (the SpotBugs plugin floor). There is no separate Broker JAR or test JAR. Install the Java SDK first, as described in the [application README](../README.md).
+Broker sources, classpath resources and tests are built as part of `packages/managed-agent-server`, which requires JDK 21 or later and Maven 3.8.9+ (the SpotBugs plugin floor). The Broker has an ordinary reactor JAR; its tests live in `verification`, without a test-JAR dependency. Install the Java SDK first, as described in the [application README](../README.md).
 
 From `packages/managed-agent-server`, build and test with:
 
@@ -51,7 +43,7 @@ the arbiter.
 
 ## JDBC persistence
 
-`JdbcRuntimeBrokerSchema.initialize(DataSource)` initializes or validates the shared 32-table fresh-database baseline used by Broker and Managed Server. It rejects legacy, foreign, partial and system catalogs before mutation; it does not upgrade or copy existing data. The JDBC implementations use `javax.sql.DataSource` for
+`JdbcRuntimeBrokerSchema.initialize(DataSource)` initializes or validates the shared 38-table fresh-database baseline used by Broker and Managed Server. It rejects legacy, foreign, partial and system catalogs before mutation; it does not upgrade or copy existing data. The JDBC implementations use `javax.sql.DataSource` for
 database access and fastjson2 (2.0.65) as the `reference_json`/`result_json`
 codec; the embedding service owns the connection pool and schema lifecycle.
 `JdbcRuntimeBindingRepository` additionally requires a `SecretProtector`
@@ -102,7 +94,7 @@ publications. After records are removed, callers must not reuse expired
 Runtime Session identifiers or idempotency keys. A missing execution is not
 permission to replay it. No permanent execution-key tombstone is retained.
 
-The Broker and Managed Server share the canonical 32-table V1 baseline. Initialize
+The Broker and Managed Server share the canonical 38-table V1 baseline. Initialize
 a fresh database; old catalogs are refused rather than upgraded. Keep the old
 environment for historical reads and settle its work before cutover. Repeated
 initialization validates structure without repairing it or changing receipts.

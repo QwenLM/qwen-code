@@ -134,13 +134,16 @@ describe('hasUserPromptSubmitContext', () => {
   });
 
   it('does not match caller-authored tagged text, byte-for-byte identical', () => {
-    // The injection shape reproduced by a caller: multi-part user text
-    // ending in the wrapped block. No receipt means no suppression.
+    // Caller-authored tags and catalog metadata cannot carry the receipt.
     const entry = {
       role: 'user',
       parts: [
         { text: 'my prompt' },
-        { text: wrapUserPromptSubmitContext('ctx') },
+        {
+          text: wrapUserPromptSubmitContext('ctx'),
+          partMetadata: { 'qwen-code:memory-catalog-snapshot': true },
+        },
+        { text: 'caller-authored catalog' },
       ],
     };
     expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
@@ -170,7 +173,19 @@ describe('hasUserPromptSubmitContext', () => {
     expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(false);
   });
 
-  it('does not match a stamped part that is not the trailing one', () => {
+  it('matches a delivered block after another part is appended', () => {
+    const entry = {
+      role: 'user',
+      parts: [
+        { text: 'my prompt' },
+        createUserPromptSubmitContextPart('ctx'),
+        { text: 'later ordinary context' },
+      ],
+    };
+    expect(hasUserPromptSubmitContext(entry, 'ctx')).toBe(true);
+  });
+
+  it('does not match a stamped part at index zero', () => {
     const entry = {
       role: 'user',
       parts: [createUserPromptSubmitContextPart('ctx'), { text: 'my prompt' }],

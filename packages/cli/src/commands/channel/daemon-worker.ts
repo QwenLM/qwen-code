@@ -349,6 +349,10 @@ export function createDaemonChannelBridgeFacade(
       bridge.registerChannelLoopToolHandler.bind(bridge);
   }
 
+  if (bridge.registerChannelTool) {
+    facade.registerChannelTool = bridge.registerChannelTool.bind(bridge);
+  }
+
   return facade;
 }
 
@@ -665,9 +669,7 @@ export async function runChannelDaemonWorker(
     for (const { name, config } of parsed) {
       createdRouter.setChannelScope(name, config.sessionScope);
       createdRouter.setChannelLoopsEnabled(name, !config.multiSession);
-      if (config['webhooks']) {
-        createdRouter.setChannelApprovalMode(name, config.approvalMode);
-      }
+      createdRouter.setChannelApprovalMode(name, config.approvalMode);
     }
     const restoredRoutes = createdRouter.restoreRoutes();
     writeStdoutLine(
