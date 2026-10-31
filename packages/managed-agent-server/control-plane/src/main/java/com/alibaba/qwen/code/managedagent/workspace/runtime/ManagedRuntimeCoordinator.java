@@ -52,7 +52,8 @@ public final class ManagedRuntimeCoordinator implements RuntimeWarmer {
         this.extensionBindings = extensionBindings;
         this.extensionTransport = extensionTransport;
     }
-public static HarnessSessionResolver resolver(SessionQueryStore store, WorkspaceRuntimeResolver workspaces,
+
+    public static HarnessSessionResolver resolver(SessionQueryStore store, WorkspaceRuntimeResolver workspaces,
             ManagedAgentSettings properties, String workspaceId, String workspaceCwd,
             com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore workspaceExecutionStore) {
         var broker = properties.getRuntimeBroker();
