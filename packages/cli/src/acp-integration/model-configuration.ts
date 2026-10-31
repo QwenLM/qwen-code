@@ -17,7 +17,6 @@ import {
   type ReasoningEffort,
 } from '@qwen-code/qwen-code-core';
 import {
-  resolveReasoningDeclaration,
   resolveReasoningForModel,
   getEffectiveReasoning,
   type ReasoningProfile,
@@ -408,7 +407,6 @@ export function clearReasoningRequestOverrides(
   const deepSeek = getDeepSeekReasoningState(
     generation,
     resolveReasoningForModel(config, generation),
-    resolveReasoningDeclaration(config, generation) !== undefined,
   );
   if (
     getGptReasoningCapabilities(getRequestModel(generation)) ||
@@ -684,13 +682,11 @@ export function buildModelReasoningRoutePreview(
           | undefined)
       : undefined;
   const routeReasoning = reasoning ?? qwenManifest;
-  const declared =
-    resolveReasoningDeclaration(undefined, generation) !== undefined;
   if (
     opaqueRoute &&
     !routeReasoning?.profile &&
     !qwenManifest &&
-    !getDeepSeekReasoningState(generation, routeReasoning, declared)
+    !getDeepSeekReasoningState(generation, routeReasoning)
   )
     return undefined;
   const parsedSelection = parseReasoningSelection(selection);
@@ -717,7 +713,6 @@ export function buildModelReasoningRoutePreview(
             : {}),
         },
         routeReasoning,
-        declared,
       )
     : undefined;
   return buildModelReasoningConfigPreview(
@@ -744,11 +739,7 @@ export function getReasoningForDisplay(
 ) {
   const resolved = resolveReasoningForModel(config, generation);
   if (!resolved) return generation.reasoning;
-  const deepSeek = getDeepSeekReasoningState(
-    generation,
-    resolved,
-    resolveReasoningDeclaration(config, generation) !== undefined,
-  );
+  const deepSeek = getDeepSeekReasoningState(generation, resolved);
   if (deepSeek) return deepSeek.enabled ? { effort: deepSeek.effort } : false;
   const override = getGptReasoningOverrideState(generation, resolved);
   if (override) return override.enabled ? { effort: override.effort } : false;

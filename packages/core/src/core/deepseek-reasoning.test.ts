@@ -10,6 +10,7 @@ import {
   applyDeepSeekReasoningEffort,
   getBuiltinDeepSeekReasoning,
   getDeepSeekReasoningState,
+  isDeepSeekEstablishedHost,
   normalizeDeepSeekReasoningEffort,
 } from './deepseek-reasoning.js';
 import { getEffectiveReasoning } from './reasoning-overrides.js';
@@ -264,6 +265,46 @@ describe('built-in DeepSeek reasoning', () => {
     ).toBe('max');
   });
 
+  it('limits the established-route exemption to pre-PR model/host pairs', () => {
+    expect(isDeepSeekEstablishedHost(maas, 'deepseek-v4.1-flash-1017')).toBe(
+      true,
+    );
+    expect(isDeepSeekEstablishedHost(maas, 'DEEPSEEK-V4.1-FLASH-1017')).toBe(
+      true,
+    );
+    expect(isDeepSeekEstablishedHost(maas, 'deepseek-v4-pro')).toBe(true);
+    expect(isDeepSeekEstablishedHost(maas, 'deepseek-v4.1-flash-custom')).toBe(
+      false,
+    );
+    expect(
+      isDeepSeekEstablishedHost(official, 'deepseek-v4.1-flash-custom'),
+    ).toBe(false);
+    expect(
+      isDeepSeekEstablishedHost(official, 'deepseek-v4-flash-vision-exp'),
+    ).toBe(true);
+    expect(
+      isDeepSeekEstablishedHost(maas, 'deepseek-v4-flash-vision-exp'),
+    ).toBe(false);
+    expect(
+      isDeepSeekEstablishedHost(
+        'https://model-proxy.alibaba-inc.com/v1',
+        'deepseek-v4.1-flash-1017',
+      ),
+    ).toBe(true);
+    expect(
+      isDeepSeekEstablishedHost(
+        'https://model-proxy.alibaba-inc.com/v1',
+        'deepseek-v4.1-flash-custom',
+      ),
+    ).toBe(false);
+    expect(
+      isDeepSeekEstablishedHost(
+        'https://gateway.example.com/v1',
+        'deepseek-v4.1-flash-1017',
+      ),
+    ).toBe(false);
+  });
+
   it('stands the state normalizer down for a declared third-party route', () => {
     const declaration = {
       thinking: true,
@@ -277,23 +318,24 @@ describe('built-in DeepSeek reasoning', () => {
       baseUrl: 'https://gateway.example.com/v1',
     };
     expect(
-      getDeepSeekReasoningState(gatewayGeneration, declaration, true),
+      getDeepSeekReasoningState(gatewayGeneration, declaration),
     ).toBeUndefined();
     expect(
-      getDeepSeekReasoningState(gatewayGeneration, declaration, false),
+      getDeepSeekReasoningState(gatewayGeneration, {
+        ...declaration,
+        profile: 'deepseek-openai',
+      }),
     ).toBeDefined();
     expect(
       getDeepSeekReasoningState(
         { ...gatewayGeneration, baseUrl: maas },
         declaration,
-        true,
       ),
     ).toBeDefined();
     expect(
       getDeepSeekReasoningState(
         { ...gatewayGeneration, baseUrl: official },
         declaration,
-        true,
       ),
     ).toMatchObject({ enabled: true, effort: 'medium' });
   });

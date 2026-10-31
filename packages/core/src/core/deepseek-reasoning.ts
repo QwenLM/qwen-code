@@ -19,6 +19,11 @@ const FLASH_MODELS = new Set([
   'deepseek-v4.1-flash',
   'deepseek-v4.1-flash-1017',
 ]);
+const LEGACY_MODELS = new Set([
+  'deepseek-v4-pro',
+  'deepseek-v4-pro-0813',
+  'deepseek-v4-flash-0731',
+]);
 
 // The one case-insensitive choke point for the DeepSeek-V4 family: every id
 // under the prefix (dated snapshots and gateway aliases included) speaks the
@@ -66,12 +71,13 @@ function isDeepSeekMaasHostname(hostname: string): boolean {
 }
 
 /**
- * Routes where the built-in DeepSeek contract shipped before third-party
- * prefix recognition: the official endpoint, the MaaS/DashScope whitelist,
- * and the internal-proxy exception for the V4.1 Flash aliases. There the
+ * The exact model/host combinations the built-in DeepSeek recognizer
+ * accepted before third-party prefix recognition: known ids on the official
+ * endpoint (plus the retired vision alias), known ids on the MaaS/DashScope
+ * whitelist, and the exact V4.1 Flash ids on the internal proxies. There the
  * normalizer keeps its established interaction with explicit declarations;
- * only on newly recognized third-party hosts does a declaration stand it
- * down.
+ * every newly recognized combination stands it down, so a declaration on a
+ * new alias keeps its own wire semantics even on a MaaS host.
  */
 export function isDeepSeekEstablishedHost(
   baseUrl: string | undefined,
@@ -79,11 +85,13 @@ export function isDeepSeekEstablishedHost(
 ): boolean {
   const hostname = hostnameOf(baseUrl);
   if (hostname === undefined) return false;
-  if (hostname === 'api.deepseek.com' || hostname.endsWith('.api.deepseek.com'))
-    return true;
-  if (isDeepSeekMaasHostname(hostname)) return true;
+  const normalized = (model ?? '').toLowerCase();
+  const known = FLASH_MODELS.has(normalized) || LEGACY_MODELS.has(normalized);
+  if (isDeepSeekOfficialBaseUrl(baseUrl))
+    return known || normalized === 'deepseek-v4-flash-vision-exp';
+  if (isDeepSeekMaasHostname(hostname)) return known;
   return (
-    /^deepseek-v4\.1-flash(?:-1017)?$/i.test(model ?? '') &&
+    /^deepseek-v4\.1-flash(?:-1017)?$/.test(normalized) &&
     (hostname.endsWith('.alibaba-inc.com') ||
       hostname.endsWith('.aliyun-inc.com') ||
       hostname.endsWith('.alicloudapi.com'))
@@ -96,8 +104,7 @@ function getDeepSeekEndpoint(
 ): 'official' | 'maas' | undefined {
   const hostname = hostnameOf(baseUrl);
   if (hostname === undefined) return undefined;
-  if (hostname === 'api.deepseek.com' || hostname.endsWith('.api.deepseek.com'))
-    return 'official';
+  if (isDeepSeekOfficialBaseUrl(baseUrl)) return 'official';
   if (isDeepSeekMaasHostname(hostname)) return 'maas';
   // DeepSeek-V4 models are hosted by many third-party OpenAI-compatible
   // gateways (PAI-EAS, internal proxies, ...); the model id alone identifies
@@ -191,7 +198,6 @@ export function applyDeepSeekReasoningEffort<T extends object>(
 export function getDeepSeekReasoningState(
   config: Partial<ContentGeneratorConfig>,
   resolved: ResolvedReasoning | undefined,
-  declared = false,
 ): { enabled: boolean; effort?: ReasoningEffort } | undefined {
   const model = getRequestModel(config);
   if (
@@ -200,10 +206,11 @@ export function getDeepSeekReasoningState(
     (resolved.profile !== undefined &&
       resolved.profile !== 'deepseek-openai') ||
     resolved.toggleOnly ||
-    // An explicit declaration governs the wire on newly recognized
-    // third-party hosts; the built-in normalizer must not override its
-    // declared/static effort there.
-    (declared && !isDeepSeekEstablishedHost(config.baseUrl, model))
+    // A profile-less resolved capability is an explicit declaration; on
+    // newly recognized model/host combinations it governs the wire, so the
+    // built-in normalizer stands down.
+    (resolved.profile === undefined &&
+      !isDeepSeekEstablishedHost(config.baseUrl, model))
   )
     return undefined;
   const defaultEffort = resolved.defaultEffort;

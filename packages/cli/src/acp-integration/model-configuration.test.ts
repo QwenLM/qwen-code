@@ -819,6 +819,35 @@ describe('model configuration manifest', () => {
     ).toBeUndefined();
   });
 
+  it('keeps display aligned with the wire for a declared new-alias route', () => {
+    const generation = {
+      model: 'deepseek-v4.1-flash-custom',
+      authType: 'openai',
+      baseUrl:
+        'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+      reasoning: { effort: 'xhigh' },
+    } as ContentGeneratorConfig;
+    const config = {
+      getModel: () => generation.model,
+      getContentGeneratorConfig: () => generation,
+      getResolvedModelConfig: () => ({
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['low', 'medium', 'high'],
+            defaultEffort: 'medium',
+            disableField: 'reasoning_effort',
+          },
+        },
+      }),
+    } as unknown as Config;
+    // The wire ships the declared route's static tier verbatim; the display
+    // must not normalize it to a different tier.
+    expect(getReasoningForDisplay(config, generation)).toEqual({
+      effort: 'xhigh',
+    });
+  });
+
   it('builds the stable qwen3.8-max default reasoning option', () => {
     expect(buildModelReasoningConfigOption('qwen3.8-max')).toMatchObject({
       id: 'reasoning_effort',

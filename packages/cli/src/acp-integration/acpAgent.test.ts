@@ -13755,6 +13755,89 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it('keeps a declared Qwen capability on duplicate-endpoint routes in an ACP session', async () => {
+    const sessionId = 'qwen4-declared-routes';
+    const maasA =
+      'https://llm-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    const maasB =
+      'https://llm-b.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation = innerConfig.getContentGeneratorConfig();
+    Object.assign(generation, {
+      model: 'qwen4-plus',
+      authType: AuthType.USE_OPENAI,
+      baseUrl: maasA,
+    });
+    innerConfig.getModel = vi.fn(() => generation.model);
+    innerConfig.getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+    innerConfig.getCurrentModelRegistryBaseUrl = vi.fn().mockReturnValue(maasA);
+    innerConfig.getAllConfiguredModels = vi.fn().mockReturnValue([
+      {
+        id: 'qwen4-plus',
+        label: 'Qwen4 A',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: maasA,
+      },
+      {
+        id: 'qwen4-plus',
+        label: 'Qwen4 B',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: maasB,
+      },
+    ]);
+    Object.assign(innerConfig, {
+      getResolvedModelConfig: vi.fn(() => ({
+        baseUrl: maasA,
+        generationConfig: {},
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['high'],
+            defaultEffort: 'high',
+            canDisable: false,
+            disableField: 'reasoning_effort',
+          },
+        },
+      })),
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const response = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as NewSessionResponse;
+      // The duplicate endpoints make the selected route opaque; the declared
+      // high-only, non-disableable capability must survive the routing rather
+      // than being replaced by the tiered manifest.
+      const option = response.configOptions?.find(
+        (entry) => entry.id === 'reasoning_effort',
+      );
+      expect(option?.currentValue).toBe('high');
+      expect(
+        option?.options.flatMap((entry) =>
+          'value' in entry ? [entry.value] : [],
+        ),
+      ).toEqual(['high']);
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'low',
+        }),
+      ).rejects.toThrow('Unknown reasoning effort: low');
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'none',
+        }),
+      ).rejects.toThrow();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('exposes and applies the ACP reasoning effort selector', async () => {
     const sessionId = 'reasoning-effort-session';
     const innerConfig = await setupSessionMocks(sessionId);

@@ -262,10 +262,11 @@ export class DefaultOpenAICompatibleProvider
       (resolved.profile !== undefined && resolved.profile !== 'deepseek-openai')
     )
       return body;
-    // On newly recognized third-party hosts an explicit declaration governs
-    // the wire shape: the built-in normalizer must not flatten or re-tier its
-    // declared or static effort. Established DeepSeek hosts keep their
-    // shipped interaction.
+    // On newly recognized routes (third-party hosts, or new aliases on
+    // established hosts) a profile-less declaration governs the wire shape:
+    // the built-in normalizer must not flatten or re-tier its declared or
+    // static effort. Established model/host pairs keep their shipped
+    // interaction.
     if (
       !isDeepSeekEstablishedHost(this.contentGeneratorConfig.baseUrl, model) &&
       resolveReasoningDeclaration(

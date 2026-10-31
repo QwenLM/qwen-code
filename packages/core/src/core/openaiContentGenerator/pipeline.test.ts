@@ -1561,6 +1561,50 @@ describe('ContentGenerationPipeline', () => {
       },
     );
 
+    it('preserves a declared static effort for a newly recognized MaaS alias', async () => {
+      // The alias was not a known id before prefix recognition, so even on a
+      // MaaS host the declaration governs: the built-in normalizer must not
+      // flatten or re-tier the static nested effort.
+      const wire = await deepSeekWire(
+        {
+          baseUrl:
+            'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          samplingParams: { reasoning: { effort: 'medium' } },
+        },
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'high'],
+          defaultEffort: 'medium',
+          disableField: 'reasoning_effort',
+        },
+        'deepseek-v4.1-flash-custom',
+      );
+      expect(wire.reasoning).toEqual({ effort: 'medium' });
+      expect(wire.reasoning_effort).toBeUndefined();
+    });
+
+    it('preserves a declared configured effort for a newly recognized MaaS alias', async () => {
+      // A tier outside the declaration is dropped by the declared-capability
+      // path (the pre-PR contract); the new built-in must not normalize it
+      // into a declared tier and ship that instead.
+      const wire = await deepSeekWire(
+        {
+          baseUrl:
+            'https://workspace.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
+          reasoning: { effort: 'xhigh' },
+        },
+        {
+          thinking: true,
+          efforts: ['low', 'medium', 'high'],
+          defaultEffort: 'medium',
+          disableField: 'reasoning_effort',
+        },
+        'deepseek-v4.1-flash-custom',
+      );
+      expect(wire.reasoning).toBeUndefined();
+      expect(wire.reasoning_effort).toBeUndefined();
+    });
+
     it('uses the requested wire model for DeepSeek aliases and avoids leaking its knobs', async () => {
       const legacy = await deepSeekWire(
         {

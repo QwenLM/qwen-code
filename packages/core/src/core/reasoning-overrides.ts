@@ -15,6 +15,7 @@ import { ALL_PROVIDERS } from '../providers/all-providers.js';
 import { normalize } from './tokenLimits.js';
 import {
   getBuiltinDeepSeekReasoning,
+  isDeepSeekEstablishedHost,
   normalizeDeepSeekReasoningEffort,
 } from './deepseek-reasoning.js';
 import { isOpenRouterHostname } from './openaiContentGenerator/provider/openrouter.js';
@@ -386,6 +387,14 @@ export function resolveReasoningForModel(
   );
 }
 
+/**
+ * The effective reasoning setting for display and request shaping. A
+ * profile-less resolved capability means an explicit declaration governs the
+ * route; on newly recognized model/host combinations the built-in DeepSeek
+ * normalizer stands down so the declared/static tier is neither re-tiered for
+ * the wire nor for the display. Established combinations keep their shipped
+ * interaction.
+ */
 export function getEffectiveReasoning(
   generation: Pick<ContentGeneratorConfig, 'reasoning'> &
     Partial<
@@ -410,8 +419,9 @@ export function getEffectiveReasoning(
     return selected ?? (resolved.profile ? {} : undefined);
   const model = getRequestModel(generation);
   const knownDeepSeek =
-    (resolved.profile === undefined ||
-      resolved.profile === 'deepseek-openai') &&
+    (resolved.profile === 'deepseek-openai' ||
+      (resolved.profile === undefined &&
+        isDeepSeekEstablishedHost(generation.baseUrl, model))) &&
     getBuiltinDeepSeekReasoning({ ...generation, model });
   let effort = selected?.effort ?? resolved.defaultEffort;
   if (effort && knownDeepSeek && !resolved.efforts.includes(effort))

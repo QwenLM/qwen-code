@@ -330,7 +330,6 @@ import {
 } from './child-heap-probe.js';
 import {
   captureReasoningSnapshot,
-  resolveReasoningDeclaration,
   resolveReasoningForModel,
 } from '@qwen-code/qwen-code-core/core/reasoning-overrides.js';
 import { getDeepSeekReasoningState } from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
@@ -16843,7 +16842,6 @@ class QwenAgent implements Agent {
         getDeepSeekReasoningState(
           generation,
           resolveReasoningForModel(config, generation),
-          resolveReasoningDeclaration(config, generation) !== undefined,
         ))
     ) {
       applyReasoningSelection(config, selection);
@@ -17672,7 +17670,6 @@ class QwenAgent implements Agent {
       getDeepSeekReasoningState(
         generation,
         resolveReasoningForModel(config, generation),
-        resolveReasoningDeclaration(config, generation) !== undefined,
       );
     if (
       activeRuntimeSnapshot ||
@@ -17843,15 +17840,16 @@ class QwenAgent implements Agent {
       getDeepSeekReasoningState(
         generation,
         resolveReasoningForModel(config, generation),
-        resolveReasoningDeclaration(config, generation) !== undefined,
       );
     if (
       completeModelId.startsWith(ACP_ROUTE_ID_PREFIX) &&
       !reasoning?.profile &&
       !deepSeekState
     ) {
-      // The new tiered Qwen families carry their contract in the manifest;
-      // routed selectors must not hide it.
+      // Keep an already-resolved declaration; the new tiered Qwen families
+      // fall back to their manifest only when nothing resolved, so routed
+      // selectors neither hide the controls nor replace a declaration.
+      if (reasoning) return reasoning;
       const wireModel = getRequestModel(generation ?? {});
       return isTieredEffortQwenPrefix(wireModel)
         ? getModelConfiguration(wireModel)?.reasoning
