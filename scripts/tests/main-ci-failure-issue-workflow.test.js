@@ -2707,7 +2707,7 @@ printf '%s\\n' '{"jobs":[]}'
       try {
         const step = jobs.report_pr.steps[0];
         const comment = renderFailureComment({
-          analysis: { workflow: 'Managed Agent gate', tests: [] },
+          analysis: { workflow: 'Managed Agent gate', logCount: 0, tests: [] },
           occurrence: {
             sha: 'abc123456789',
             runId: '39045740099',

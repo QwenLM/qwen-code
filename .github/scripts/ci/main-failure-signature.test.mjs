@@ -37,6 +37,7 @@ test('reports failed jobs, steps and tests directly on a PR', () => {
   const comment = renderFailureComment({
     analysis: {
       workflow: 'Managed Agent gate',
+      logCount: 1,
       tests: [{ id: 'com.example.HostedExtensionsIT.closes' }],
     },
     occurrence: {
@@ -68,6 +69,7 @@ test('keeps contributor text on one line and reports cancelled steps and test ov
   const comment = renderFailureComment({
     analysis: {
       workflow: 'Managed Agent gate',
+      logCount: 1,
       tests: Array.from({ length: MAX_BODY_TESTS + 1 }, () => ({
         id: hostile,
       })),
@@ -113,7 +115,7 @@ test('runCli comment tolerates a missing or empty jobs listing', () => {
   const dir = mkdtempSync(join(tmpdir(), 'sig-comment-'));
   try {
     const analysisPath = join(dir, 'analysis.json');
-    writeFileSync(analysisPath, JSON.stringify({ tests: [] }));
+    writeFileSync(analysisPath, JSON.stringify({ logCount: 0, tests: [] }));
     const occurrence = [
       '--sha',
       'abc123456789',
@@ -1185,6 +1187,125 @@ const WINDOWS_JOB = {
   name: 'Test (windows-latest, Node 22.x)',
   steps: ['Run tests and generate reports'],
 };
+
+for (const { name, logs, jobs, coverage } of [
+  {
+    name: 'unavailable logs',
+    logs: [],
+    jobs: [WINDOWS_JOB],
+    coverage: '0 of 1 failed-job logs (incomplete coverage).',
+  },
+  {
+    name: 'available logs without recognized failures',
+    logs: ['Tests run: 12, all passed\nProcess exited with code 1'],
+    jobs: [WINDOWS_JOB],
+    coverage: '1 of 1 failed-job logs.',
+  },
+  {
+    name: 'empty failed-job entries and no logs',
+    logs: [],
+    jobs: [],
+    coverage: '0; failed-job entries empty or unavailable.',
+  },
+  {
+    name: 'empty downloaded log',
+    logs: [''],
+    jobs: [WINDOWS_JOB],
+    coverage: '1 of 1 failed-job logs.',
+  },
+  {
+    name: 'partial logs with identified failures',
+    logs: [VITEST_LOG],
+    jobs: [WINDOWS_JOB, { name: 'Test (ubuntu-latest)', steps: ['Run tests'] }],
+    coverage: '1 of 2 failed-job logs (incomplete coverage).',
+  },
+  {
+    name: 'more logs than recorded failed jobs',
+    logs: [VITEST_LOG, VITEST_LOG, VITEST_LOG],
+    jobs: [WINDOWS_JOB],
+    coverage: '3 of 1 failed-job logs (incomplete coverage).',
+  },
+]) {
+  test(`analyze and comment report log coverage for ${name}`, (t) => {
+    const dir = mkdtempSync(join(tmpdir(), 'sig-log-coverage-'));
+    t.after(() => rmSync(dir, { recursive: true, force: true }));
+    const jobsPath = join(dir, 'jobs.tsv');
+    const jobsJsonPath = join(dir, 'jobs.json');
+    const analysisPath = join(dir, 'analysis.json');
+    writeFileSync(
+      jobsPath,
+      jobs.map((job) => [job.name, ...job.steps].join('\t')).join('\n'),
+    );
+    writeFileSync(
+      jobsJsonPath,
+      JSON.stringify({
+        jobs: [
+          ...jobs.map((job) => ({
+            name: job.name,
+            conclusion: 'failure',
+            html_url: `${OCCURRENCE.runUrl}/job/1`,
+            steps: job.steps.map((name) => ({ name, conclusion: 'failure' })),
+          })),
+          { name: 'Successful job', conclusion: 'success', steps: [] },
+        ],
+      }),
+    );
+    const logPaths = logs.map((log, index) => {
+      const path = join(dir, `${index}.log`);
+      writeFileSync(path, log);
+      return path;
+    });
+    const helper = fileURLToPath(
+      new URL('./main-failure-signature.mjs', import.meta.url),
+    );
+    const analyzed = spawnSync(
+      process.execPath,
+      [
+        helper,
+        'analyze',
+        '--workflow',
+        'Qwen Code CI',
+        '--jobs',
+        jobsPath,
+        ...logPaths,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(analyzed.status, 0, analyzed.stderr);
+    assert.equal(JSON.parse(analyzed.stdout).logCount, logs.length);
+    writeFileSync(analysisPath, analyzed.stdout);
+    const commented = spawnSync(
+      process.execPath,
+      [
+        helper,
+        'comment',
+        '--analysis',
+        analysisPath,
+        '--jobs-json',
+        jobsJsonPath,
+        '--sha',
+        OCCURRENCE.sha,
+        '--run-url',
+        OCCURRENCE.runUrl,
+        '--run-id',
+        OCCURRENCE.runId,
+      ],
+      { encoding: 'utf8' },
+    );
+    assert.equal(commented.status, 0, commented.stderr);
+    const body = commented.stdout;
+    assert.ok(body.includes(`- Job logs analyzed: ${coverage}`));
+    assert.ok(body.includes(OCCURRENCE.runUrl));
+    assert.ok(!body.includes('Successful job'));
+    assert.ok(!body.includes('before any test result was'));
+    if (jobs.length) assert.ok(body.includes(WINDOWS_JOB.name));
+    if (logs.includes(VITEST_LOG)) {
+      assert.ok(body.includes(VITEST_TEST_ID));
+    } else {
+      assert.ok(body.includes('No test identifier was available'));
+    }
+  });
+}
 
 function captureStdout(argv) {
   let output = '';
