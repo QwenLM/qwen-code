@@ -16,12 +16,12 @@ use crate::ax::bindings::{copy_action_names, kAXErrorSuccess, perform_action, AX
 use super::ToolState;
 
 pub struct PerformSecondaryActionTool {
-    state: Arc<ToolState>,
+    _state: Arc<ToolState>,
 }
 
 impl PerformSecondaryActionTool {
     pub fn new(state: Arc<ToolState>) -> Self {
-        Self { state }
+        Self { _state: state }
     }
 }
 
@@ -54,12 +54,10 @@ fn resolve_advertised_action(actions: &[String], requested: &str) -> Result<Stri
         return Err("empty");
     }
     let mut matches = actions.iter().filter(|action| {
-        let alias = action
-            .strip_prefix("AX")
-            .unwrap_or(action)
-            .to_ascii_lowercase();
+        let alias = action.strip_prefix("AX").unwrap_or(action);
         action.as_str() == requested
             || alias == requested
+            || alias.to_ascii_lowercase() == requested
             || (action.as_str() == "AXShowMenu" && requested == "show_menu")
     });
     let Some(action) = matches.next() else {
@@ -116,6 +114,7 @@ impl Tool for PerformSecondaryActionTool {
             Ok(resolved) => resolved,
             Err(error) => return error,
         };
+        let element_cache = crate::ax::cache::BoundElementCache::from_resolved(&resolved);
         let cua_driver_core::element_token::ResolvedElement::Element {
             window_id: Some(window_id),
             element_index,
@@ -125,20 +124,15 @@ impl Tool for PerformSecondaryActionTool {
             return ToolResult::error("perform_secondary_action requires a current element_token")
                 .with_structured(json!({ "code": "invalid_element_target" }));
         };
-        let element =
-            match self
-                .state
-                .element_cache
-                .get_element_retained(pid, window_id, element_index)
-            {
-                Some(element) => element,
-                None => {
-                    return ToolResult::error(
-                        "element_token no longer resolves in the current AX snapshot",
-                    )
-                    .with_structured(json!({ "code": "stale_element_token" }))
-                }
-            };
+        let element = match element_cache.get_element_retained(pid, window_id, element_index) {
+            Some(element) => element,
+            None => {
+                return ToolResult::error(
+                    "element_token no longer resolves in the current AX snapshot",
+                )
+                .with_structured(json!({ "code": "stale_element_token" }))
+            }
+        };
         let element_ptr = element.as_ptr();
         let _lease = match super::gate_background_window_action(
             pid,
@@ -198,6 +192,31 @@ mod tests {
         assert_eq!(resolve_advertised_action(&actions, "press"), Err("missing"));
         assert_eq!(
             resolve_advertised_action(&["AXRaise".into(), "raise".into()], "raise"),
+            Err("ambiguous")
+        );
+    }
+
+    #[test]
+    fn actions_accept_the_case_preserved_alias_displayed_by_the_tree() {
+        let actions = vec!["AXCancel".into(), "AXShowMenu".into()];
+        assert_eq!(
+            resolve_advertised_action(&actions, "Cancel"),
+            Ok("AXCancel".into())
+        );
+        assert_eq!(
+            resolve_advertised_action(&actions, "ShowMenu"),
+            Ok("AXShowMenu".into())
+        );
+        assert_eq!(
+            resolve_advertised_action(&actions, "cancel"),
+            Ok("AXCancel".into())
+        );
+        assert_eq!(
+            resolve_advertised_action(&actions, "CANCEL"),
+            Err("missing")
+        );
+        assert_eq!(
+            resolve_advertised_action(&["AXCancel".into(), "Cancel".into()], "Cancel"),
             Err("ambiguous")
         );
     }

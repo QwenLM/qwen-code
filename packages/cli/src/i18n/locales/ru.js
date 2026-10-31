@@ -8,6 +8,10 @@
 // Ключ служит одновременно ключом перевода и текстом по умолчанию
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Включает встроенный Generated UI в поддерживаемых локальных сеансах. Перезапустите соответствующий сеанс, чтобы применить изменения.',
+
   // ============================================================================
   // Справка / Компоненты интерфейса
   // ============================================================================
@@ -1820,6 +1824,8 @@ export default {
   'System prompt': 'Системная подсказка',
   'Built-in tools': 'Встроенные инструменты',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Файлы инструкций',
+  'Auto memory': 'Автопамять',
   'Memory files': 'Файлы памяти',
   Skills: 'Навыки',
   Messages: 'Сообщения',

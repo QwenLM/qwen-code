@@ -1,5 +1,10 @@
 # Cursor modifier badge restructuring plan
 
+> Historical record, superseded by the 2026-10 X11-only upgrade. Native Wayland
+> implementations, helpers, dependencies and validation lanes described below
+> have been removed; these historical results do not describe current support.
+
+
 **Status:** Implemented in [PR #2677](https://github.com/trycua/cua/pull/2677); validation complete
 **Base:** `main` at `b249df857994ebaebf9f02248e8312b3bd2a5dd2`
 **Scope:** Move delivery and target modifiers from around the agent pointer into the session badge while preserving action animations beside the pointer.

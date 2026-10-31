@@ -67,7 +67,12 @@ export function getArtifactsByTurn(
       artifact,
       workspaceCwd,
     );
-    if (turnIds.size === 0 && artifact.toolCallId) {
+    // A workspace file's toolCallId follows its latest agent write, so it
+    // joins that turn as well as the turns that recorded it.
+    if (
+      artifact.toolCallId &&
+      (turnIds.size === 0 || artifact.storage === 'workspace')
+    ) {
       const turnId = toolCallTurn.get(artifact.toolCallId);
       if (turnId) turnIds.add(turnId);
     }

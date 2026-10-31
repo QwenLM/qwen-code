@@ -264,6 +264,17 @@ describe('DaemonIdeConnection', () => {
       expect.any(AbortSignal),
     );
 
+    await connection.sendPrompt(blocks, {
+      submittedPrompt: 'inspect the original input',
+    });
+    expect(session.prompt).toHaveBeenLastCalledWith(
+      {
+        prompt: blocks,
+        _meta: { 'qwen.submittedPrompt': 'inspect the original input' },
+      },
+      expect.any(AbortSignal),
+    );
+
     session.prompt.mockRejectedValueOnce(new Error('prompt failed'));
     await expect(connection.sendPrompt('will fail')).rejects.toThrow(
       'prompt failed',

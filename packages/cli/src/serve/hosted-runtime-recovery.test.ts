@@ -22,6 +22,7 @@ import {
   settleParkedTurnCancelled,
   answerCommittedTurnCalls,
   recoverHostedRuntimeTurn,
+  HostedRecoveryQuiescingError,
   RecoveryDeclined,
   settleInterruptedTurnRuntime,
   type HostedRecoveryTurn,
@@ -36,6 +37,8 @@ import {
 import { HARNESS_MODEL_START_PHASES } from '@qwen-code/qwen-code-core/managed-runtime/managed-harness-checkpoint.js';
 import {
   HostedWorkspaceBroker,
+  HostedWorkspaceBrokerExecutionUnresolved,
+  HostedWorkspaceBrokerRejection,
   type HostedBrokerExecutionState,
 } from './hosted-workspace-broker.js';
 import { hostedRuntimeSessionId } from './hosted-workspace-tool-turn.js';
@@ -748,6 +751,9 @@ describe('recoverHostedRuntimeTurn', () => {
       expect(recovered).toBeDefined();
       expect(execute).toHaveBeenCalledOnce();
       expect(execute.mock.calls[0]?.[0]).toBe(EXECUTION_ID);
+      // The continuation asks for one evidence read when the record is still
+      // UNKNOWN (the sixth argument is the reconcile-once flag).
+      expect(execute.mock.calls[0]?.[5]).toBe(true);
       expect(recovered!.report).toMatchObject({
         phase: 'results_ready',
         checkpointId: replacement.authority.latestCheckpoint?.checkpointId,
@@ -997,6 +1003,153 @@ describe('recoverHostedRuntimeTurn', () => {
         }),
       ]);
       expect(recovered.drivable).toBe(true);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('reconciles each parked execution once on a passive load', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+    const status = vi
+      .spyOn(HostedWorkspaceBroker.prototype, 'status')
+      .mockResolvedValue({ state: 'settled', executionStatus: 'cancelled' });
+    const replacement = await open('boot-2', false);
+    try {
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: true,
+        }),
+      );
+      // The dead owner left the record UNKNOWN: the read must ask the
+      // original Runtime for its evidence, not read the stale state back.
+      expect(status).toHaveBeenCalledWith(EXECUTION_ID, { reconcile: true });
+      expect(recovered.report.executions).toEqual([
+        expect.objectContaining({
+          executionCallId: EXECUTION_ID,
+          outcome: 'known',
+          status: { state: 'settled' },
+        }),
+      ]);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it.each([
+    new HostedWorkspaceBrokerRejection(
+      409,
+      'runtime_execution_evidence_unavailable',
+    ),
+    new HostedWorkspaceBrokerRejection(503, 'runtime_reconciliation_required'),
+  ])(
+    'reports an execution whose evidence cannot be read as unknown (%s)',
+    async (refusal) => {
+      await parkAtAwaitRuntime();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'release').mockResolvedValue();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'status').mockRejectedValue(
+        refusal,
+      );
+      const replacement = await open('boot-2', false);
+      try {
+        const recovered = mustRecover(
+          await recoverHostedRuntimeTurn({
+            session: replacement,
+            sessionId: SESSION_ID,
+            cwd: root,
+            promptId: PROMPT_ID,
+            brokerOptions,
+            passive: true,
+          }),
+        );
+        // The Broker proved neither commit nor non-commit: the takeover must
+        // report the outcome unknown rather than fail the load as a fault.
+        expect(recovered.report.executions).toEqual([
+          expect.objectContaining({
+            executionCallId: EXECUTION_ID,
+            outcome: 'unknown',
+          }),
+        ]);
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
+
+  it('reports a parked execution reconciliation cannot settle as unknown', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockRejectedValue(
+      new HostedWorkspaceBrokerExecutionUnresolved(),
+    );
+    const replacement = await open('boot-2', false);
+    try {
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
+      expect(recovered.report.executions).toEqual([
+        expect.objectContaining({
+          executionCallId: EXECUTION_ID,
+          outcome: 'unknown',
+        }),
+      ]);
+      expect(recovered.drivable).toBe(false);
+      // Acceptance unknown is never a settled effect: nothing is journaled.
+      expect(
+        (await replacement.sink.project()).filter(
+          (entry) =>
+            entry.daemonPromptId === PROMPT_ID && entry.type === 'tool_result',
+        ),
+      ).toHaveLength(0);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('keeps an abandoned execution in a continuation report', async () => {
+    await parkAtAwaitRuntime();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+    vi.spyOn(HostedWorkspaceBroker.prototype, 'execute').mockRejectedValue(
+      new HostedWorkspaceBrokerRejection(
+        409,
+        'runtime_broker_execution_unknown',
+        { terminal: true },
+      ),
+    );
+    const replacement = await open('boot-2', false);
+    try {
+      const recovered = mustRecover(
+        await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+        }),
+      );
+      expect(recovered.report.executions).toEqual([
+        expect.objectContaining({
+          executionCallId: EXECUTION_ID,
+          outcome: 'known',
+          status: { state: 'abandoned' },
+        }),
+      ]);
+      expect(recovered.drivable).toBe(false);
     } finally {
       await replacement.close();
     }
@@ -1273,36 +1426,23 @@ describe('recoverHostedRuntimeTurn', () => {
   );
 
   it('declines a decided wait whose checkpoint the drive cannot resume', async () => {
-    // With the durable action decided, the approval wait is over — the
-    // drive load winds past inapplicable into the continuation whose own
-    // checkpoint cannot drive (P1-2); its honest answer is the typed
-    // checkpoint_blocked decline, never a lie-attach.
-    await parkAtAwaitRuntime();
+    // Advance a real decided wait through its gate, then keep a schema-valid
+    // stale authorization visible to exercise the typed continuation decline.
+    await parkAtAwaitAction();
     const replacement = await open('boot-2', false);
-    vi.spyOn(
-      replacement.authority,
-      'harnessRunAuthorization',
-    ).mockResolvedValue({
-      status: 'runnable',
-      checkpoint: {
-        identity: {
-          turnId: PROMPT_ID,
-          promptId: PROMPT_ID,
-          checkpointId: 'checkpoint-await-action',
-        },
-        attempt: {},
-        continuation: { phase: 'await_action' },
-        approval: { state: 'requested', requestId: 'request-1' },
-        output: {},
-        followUp: {},
-        runtime: {},
-        tools: { items: [] },
-      },
-    } as never);
-    vi.spyOn(replacement.authority, 'action').mockReturnValue({
-      state: 'decided',
-    } as never);
     try {
+      await endAction(replacement, 'decided');
+      const authorization =
+        await replacement.authority.harnessRunAuthorization();
+      if (authorization.status !== 'runnable')
+        throw new Error('Expected runnable approval checkpoint');
+      expect(authorization.checkpoint.continuation.phase).toBe('await_action');
+      const previousCheckpointId =
+        replacement.authority.latestCheckpoint!.checkpointId;
+      vi.spyOn(
+        replacement.authority,
+        'harnessRunAuthorization',
+      ).mockResolvedValue(authorization);
       const outcome = await recoverHostedRuntimeTurn({
         session: replacement,
         sessionId: SESSION_ID,
@@ -1315,6 +1455,15 @@ describe('recoverHostedRuntimeTurn', () => {
         kind: 'declined',
         reason: 'checkpoint_blocked',
       });
+      expect(replacement.authority.latestCheckpoint!.checkpointId).not.toBe(
+        previousCheckpointId,
+      );
+      const committed = await replacement.authority.readParsedCheckpointState();
+      if (!committed?.ok)
+        throw new Error('Expected readable advanced checkpoint');
+      expect(committed.checkpoint.continuation.phase).toBe(
+        'model_output_committed',
+      );
     } finally {
       await replacement.close();
     }
@@ -1487,6 +1636,48 @@ describe('recoverHostedRuntimeTurn', () => {
       await replacement.close();
     }
   });
+
+  it.each([false, true])(
+    'keeps quiescing recovery retryable without executing tools (lease already held: %s)',
+    async (leaseAlreadyHeld) => {
+      await parkAtAwaitRuntime();
+      vi.spyOn(HostedWorkspaceBroker.prototype, 'acquire').mockResolvedValue();
+      const release = vi
+        .spyOn(HostedWorkspaceBroker.prototype, 'release')
+        .mockResolvedValue();
+      const execute = vi.spyOn(HostedWorkspaceBroker.prototype, 'execute');
+      const replacement = await open('boot-2', false);
+      try {
+        const checkpoint =
+          await replacement.authority.harnessRunAuthorization();
+        const sequence = replacement.authority.committedSequence;
+        const cause = await recoverHostedRuntimeTurn({
+          session: replacement,
+          sessionId: SESSION_ID,
+          cwd: root,
+          promptId: PROMPT_ID,
+          brokerOptions,
+          passive: false,
+          canStart: () => false,
+          leaseAlreadyHeld,
+        }).then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        expect(cause).toBeInstanceOf(HostedRecoveryQuiescingError);
+        expect(cause).not.toBeInstanceOf(RecoveryDeclined);
+        expect(cause).toHaveProperty('message', 'The Harness is quiescing.');
+        expect(execute).not.toHaveBeenCalled();
+        expect(release).toHaveBeenCalledTimes(leaseAlreadyHeld ? 0 : 1);
+        expect(replacement.authority.committedSequence).toBe(sequence);
+        expect(await replacement.authority.harnessRunAuthorization()).toEqual(
+          checkpoint,
+        );
+      } finally {
+        await replacement.close();
+      }
+    },
+  );
 
   it('declines to re-dispatch a parked execution whose intent is missing', async () => {
     // No tool.intent: the recovery cannot rebuild the original arguments, so
