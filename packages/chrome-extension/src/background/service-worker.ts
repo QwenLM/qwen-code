@@ -21,6 +21,11 @@ import {
 } from './cdp-bridge';
 import { getDaemonConfig } from '../daemon/config.js';
 import { checkDaemonHealth } from '../daemon/discovery.js';
+import {
+  clearReconnectState,
+  isBackingOff,
+  recordFailure,
+} from '../daemon/reconnect-backoff.js';
 import './browser-use-bridge.js';
 
 /* global WebSocket, console, setTimeout, chrome, TextEncoder, btoa */
@@ -61,14 +66,12 @@ const ACP_INIT_ID = 'browser-tools-acp-init';
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
 
-/** Reconnect backoff bounds (ms). */
-const RECONNECT_MIN_MS = 1_000;
-const RECONNECT_MAX_MS = 30_000;
-
 let socket: WebSocket | null = null;
 let started = false;
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-let reconnectDelay = RECONNECT_MIN_MS;
+// Base URL of the in-flight/last attempt, so the failure paths know which
+// config's ladder to bump.
+let attemptBaseUrl = '';
 
 /** Translate the daemon's HTTP base URL into the `/acp` WebSocket URL. */
 function toWebSocketUrl(baseUrl: string): string {
@@ -116,6 +119,7 @@ function onWsMessage(ws: WebSocket, data: unknown): void {
       );
       ws.close();
     } else {
+      void clearReconnectState();
       console.log(LOG_PREFIX, 'ACP initialized; CDP tunnel ready');
     }
     return;
@@ -130,16 +134,22 @@ function onWsMessage(ws: WebSocket, data: unknown): void {
   // Other frame types (chat/session traffic) aren't ours; ignore.
 }
 
-/** Schedule a reconnect with capped exponential backoff. */
+/**
+ * Schedule a reconnect with capped exponential backoff. The delay ladder is
+ * persisted (see reconnect-backoff.ts): an MV3 worker rarely lives long
+ * enough for its own timer, so the keepalive alarm consults the same state.
+ */
 function scheduleReconnect(): void {
   if (!started || reconnectTimer) return;
-  const delay = reconnectDelay;
-  reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
-  console.log(LOG_PREFIX, `Reconnecting in ${delay}ms`);
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    void connect();
-  }, delay);
+  void (async () => {
+    const delay = await recordFailure(attemptBaseUrl);
+    if (!started || reconnectTimer) return;
+    console.log(LOG_PREFIX, `Reconnecting in ${delay}ms`);
+    reconnectTimer = setTimeout(() => {
+      reconnectTimer = null;
+      void connect();
+    }, delay);
+  })();
 }
 
 /** Open the WebSocket and wire up handlers. */
@@ -161,6 +171,7 @@ async function connect(): Promise<void> {
     const config = await getDaemonConfig();
     url = toWebSocketUrl(config.baseUrl);
     token = config.token;
+    attemptBaseUrl = config.baseUrl;
   } catch (error) {
     console.warn(LOG_PREFIX, 'Failed to read daemon config:', error);
     scheduleReconnect();
@@ -189,7 +200,6 @@ async function connect(): Promise<void> {
       ws.close();
       return;
     }
-    reconnectDelay = RECONNECT_MIN_MS;
     console.log(LOG_PREFIX, 'Connected; sending ACP initialize');
     sendRaw(ws, {
       jsonrpc: '2.0',
@@ -236,8 +246,20 @@ async function connect(): Promise<void> {
  */
 async function start(): Promise<void> {
   if (started) return;
+  let config;
   try {
-    const config = await getDaemonConfig();
+    config = await getDaemonConfig();
+  } catch (error) {
+    console.warn(LOG_PREFIX, 'Failed to read daemon config:', error);
+    return;
+  }
+  // A fresh worker inherits whatever ladder the last one left behind; without
+  // this gate every keepalive tick retried immediately (#13966).
+  if (await isBackingOff(config.baseUrl)) {
+    console.log(LOG_PREFIX, 'Reconnect backoff in effect; staying idle');
+    return;
+  }
+  try {
     const health = await checkDaemonHealth(config);
     if (!health.reachable) {
       console.log(
@@ -253,7 +275,6 @@ async function start(): Promise<void> {
     return;
   }
   started = true;
-  reconnectDelay = RECONNECT_MIN_MS;
   void connect();
 }
 
@@ -270,10 +291,20 @@ chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
   if (alarm.name !== KEEPALIVE_ALARM) return;
   if (socket && socket.readyState === WebSocket.OPEN) return;
-  // Reconnect: a fresh worker has started===false (top-level start() also runs);
-  // a still-alive worker whose socket dropped has started===true.
-  if (started) void connect();
-  else void start();
+  void (async () => {
+    // The alarm fires every 30s regardless of where the backoff ladder sits;
+    // skip the wake-up connect while a persisted backoff is still pending.
+    try {
+      const config = await getDaemonConfig();
+      if (await isBackingOff(config.baseUrl)) return;
+    } catch {
+      // Config unreadable; fall through and let connect() deal with it.
+    }
+    // Reconnect: a fresh worker has started===false (top-level start() also
+    // runs); a still-alive worker whose socket dropped has started===true.
+    if (started) void connect();
+    else void start();
+  })();
 });
 
 // No UI of its own: clicking the toolbar icon opens the side panel, which hosts
