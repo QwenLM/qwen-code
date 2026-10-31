@@ -35,6 +35,7 @@ import {
 import type {
   ModCommandPresentation,
   ModLog,
+  ModPromptSubmit,
   ModSessionFacts,
   ModTurnComplete,
   ModTurnStart,
@@ -403,6 +404,8 @@ export class ModSession implements ICommandLoader {
           sites.length
             ? { sites, invalidate: () => this.requestRender() }
             : undefined,
+          // The terminals raise no prompt.submit yet.
+          !this.terminal,
         );
         this.mods.push(
           ...ordered.map(({ extension }) => ({
@@ -695,6 +698,74 @@ export class ModSession implements ICommandLoader {
       });
       this.toolQueue = task.catch(() => {});
       return task;
+    };
+  }
+
+  /**
+   * Raises `prompt.submit` for a prompt a person submitted, before
+   * UserPromptSubmit. Returns the prompt that enters, with the context the
+   * hooks attached, or the line saying why it was dropped. A hook that fails
+   * never blocks a prompt, and neither does a prompt too long for a Mod
+   * payload, which no hook hears. `signal` is the prompt's own.
+   */
+  async submitPrompt(
+    text: string,
+    signal: AbortSignal,
+  ): Promise<{ text: string; context?: string[] } | { drop: string }> {
+    const plugins = this.runtime?.promptHooks ?? [];
+    if (!plugins.length || this.closing) return { text };
+    const input: ModPromptSubmit = {
+      text,
+      wait: false,
+      origin: { kind: this.terminal ? 'composer' : 'sdk' },
+    };
+    if (fitTurnText(text).truncated) {
+      this.pendingLogs.push({
+        text: 'prompt.submit hook skipped: the prompt is too long for a Mod payload',
+        to: 'transcript',
+        plugin: plugins.join('+'),
+        sessionId: this.sessionId,
+      });
+      this.flushLogs();
+      return { text };
+    }
+    const sessionId = this.sessionId;
+    const task = this.toolQueue.then(async () => {
+      signal.throwIfAborted();
+      if (
+        this.closing ||
+        sessionId !== this.config.getSessionId() ||
+        !this.allowed() ||
+        !this.active()
+      )
+        return { text };
+      try {
+        return await this.runtime!.submitPrompt(
+          input,
+          AbortSignal.any([signal, this.lifetime.signal]),
+        );
+      } catch (error) {
+        signal.throwIfAborted();
+        logger.debug(`Mod prompt.submit: ${String(error)}`);
+        return { text };
+      } finally {
+        this.flushLogs();
+      }
+    });
+    this.toolQueue = task.catch(() => {});
+    const result = await task;
+    if (!('drop' in result)) return result;
+    if (!result.byHook) return { drop: `Prompt not submitted: ${result.drop}` };
+    // A drop's reason is one line, kept to its first 4,096 characters.
+    const reason = (this.terminal ? sanitizeTerminalLine : stripAnsiAndControl)(
+      result.drop.replace(/\r?\n/g, ' ').trim(),
+    );
+    if (cpLen(reason) > 4096)
+      logger.debug(
+        `${plugins.join('+')}: prompt.submit hook: a drop of ${cpLen(reason)} characters, kept up to its first 4096`,
+      );
+    return {
+      drop: `Prompt dropped by a hook: ${cpLen(reason) > 4096 ? `${cpSlice(reason, 0, 4096)}…` : reason}`,
     };
   }
 

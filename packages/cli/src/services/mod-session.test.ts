@@ -14,8 +14,11 @@ import { convertClaudePluginPackage } from '@qwen-code/qwen-code-core/extension/
 import { OutputFormat } from '@qwen-code/qwen-code-core/output/types.js';
 import {
   MOD_END_TIMEOUT_MS,
+  MOD_MAX_BYTES,
   type ModCommand,
   type ModLog,
+  type ModPromptSubmit,
+  type ModPromptSubmitted,
   type ModSessionFacts,
   type ModTurnComplete,
   type ModTurnStart,
@@ -106,6 +109,14 @@ describe('Mod session ownership', () => {
       end: vi.fn().mockResolvedValue(undefined),
       dispose: vi.fn().mockResolvedValue(undefined),
       turnHooks: { start: false, complete: [] as string[] },
+      promptHooks: [] as string[],
+      submitPrompt:
+        vi.fn<
+          (
+            input: ModPromptSubmit,
+            signal: AbortSignal,
+          ) => Promise<ModPromptSubmitted>
+        >(),
       startTurn:
         vi.fn<(input: ModTurnStart, signal: AbortSignal) => Promise<void>>(),
       completeTurn:
@@ -302,6 +313,7 @@ describe('Mod session ownership', () => {
     });
     const commands = await session.loadCommands(signal);
     expect(mocks.create).toHaveBeenCalledTimes(1);
+    expect(mocks.create.mock.calls[0][10]).toBe(true);
     expect(await commands[0].action!({} as CommandContext, 'hello')).toEqual({
       type: 'message',
       messageType: 'info',
@@ -357,6 +369,8 @@ describe('Mod session ownership', () => {
       presentation,
     );
     expect(mocks.create.mock.calls[0][5]).toBe('terminal');
+    // The terminals raise no prompt.submit yet.
+    expect(mocks.create.mock.calls[0][10]).toBe(false);
   });
 
   it.each([false, true])(
@@ -673,6 +687,88 @@ describe('Mod session ownership', () => {
       loaded.runtime.completeTurn.mock.calls.at(-1)?.[0] as ModTurnComplete;
     return { ...loaded, abortTurn, ended };
   };
+
+  const loadPrompts = async () => {
+    const loaded = setup();
+    loaded.runtime.promptHooks = ['hello-mod'];
+    await loaded.session.initialize(new AbortController().signal);
+    return loaded;
+  };
+
+  it('passes a prompt through when no hook hears prompt.submit', async () => {
+    const { session, runtime } = setup();
+    await session.initialize(new AbortController().signal);
+    expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+      text: 'hi',
+    });
+    expect(runtime.submitPrompt).not.toHaveBeenCalled();
+  });
+
+  it('enters the prompt and context the hooks passed on', async () => {
+    const { session, runtime } = await loadPrompts();
+    runtime.submitPrompt.mockResolvedValue({ text: 'HI', context: ['note'] });
+    expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+      text: 'HI',
+      context: ['note'],
+    });
+    expect(runtime.submitPrompt).toHaveBeenCalledWith(
+      { text: 'hi', wait: false, origin: { kind: 'sdk' } },
+      expect.any(AbortSignal),
+    );
+  });
+
+  it('says why a prompt was dropped, in one line of 4,096 characters', async () => {
+    const { session, runtime } = await loadPrompts();
+    runtime.submitPrompt.mockResolvedValueOnce({
+      drop: 'it holds\na secret\u001b[31m',
+      byHook: true,
+    });
+    expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+      drop: 'Prompt dropped by a hook: it holds a secret',
+    });
+    runtime.submitPrompt.mockResolvedValueOnce({
+      drop: 'x'.repeat(5000),
+      byHook: true,
+    });
+    expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+      drop: `Prompt dropped by a hook: ${'x'.repeat(4096)}…`,
+    });
+    runtime.submitPrompt.mockResolvedValueOnce({
+      drop: 'a hook answered without passing the prompt on',
+      byHook: false,
+    });
+    expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+      drop: 'Prompt not submitted: a hook answered without passing the prompt on',
+    });
+  });
+
+  it('lets a prompt through when the hooks fail, but not when it is cancelled', async () => {
+    const { session, runtime } = await loadPrompts();
+    runtime.submitPrompt.mockRejectedValueOnce(new Error('worker failed'));
+    expect(await session.submitPrompt('hi', turnSignal)).toEqual({
+      text: 'hi',
+    });
+    const cancel = new AbortController();
+    runtime.submitPrompt.mockImplementationOnce(async (_input, signal) => {
+      cancel.abort();
+      signal.throwIfAborted();
+      return { text: 'unreached' };
+    });
+    await expect(session.submitPrompt('hi', cancel.signal)).rejects.toThrow();
+  });
+
+  it('runs no hook on a prompt too long for a Mod payload, and says so', async () => {
+    const { session, runtime, adapter } = await loadPrompts();
+    const long = 'x'.repeat(MOD_MAX_BYTES);
+    expect(await session.submitPrompt(long, turnSignal)).toEqual({
+      text: long,
+    });
+    expect(runtime.submitPrompt).not.toHaveBeenCalled();
+    expect(adapter.emitSystemMessage).toHaveBeenLastCalledWith('ui_log', {
+      plugin: 'hello-mod',
+      text: 'prompt.submit hook skipped: the prompt is too long for a Mod payload',
+    });
+  });
 
   it('starts no turn when no hook hears the turn events', async () => {
     const { session, runtime } = setup();

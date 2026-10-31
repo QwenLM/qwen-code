@@ -13610,6 +13610,42 @@ Other open files:
         expect(promptId).toBe('prompt-hook-context-tag');
       });
 
+      it('puts the Mods prompt context ahead of the hook context, escaped', async () => {
+        const recordUserMessage = vi.fn();
+        vi.mocked(mockConfig.getChatRecordingService).mockReturnValue({
+          recordUserMessage,
+          recordCronPrompt: vi.fn(),
+          recordAttributionSnapshot: vi.fn(),
+        } as unknown as ReturnType<Config['getChatRecordingService']>);
+        mockTurnRunFn.mockReturnValue(textTurn('ok'));
+        const tag = (context: string) =>
+          `<qwen:user-prompt-submit-context>\n${context}\n</qwen:user-prompt-submit-context>`;
+
+        // Without UserPromptSubmit hooks the Mods' context still enters.
+        await run([{ text: 'my prompt' }], 'prompt-mod-context', {
+          type: SendMessageType.UserQuery,
+          promptContext: ['<mod> note', ' '],
+        });
+        expect(
+          recordUserMessage.mock.calls[0]![0].map(
+            (part: { text: string }) => part.text,
+          ),
+        ).toEqual(['my prompt', tag('&lt;mod&gt; note')]);
+        expect(recordUserMessage.mock.calls[0]![2]).toEqual({
+          displayText: 'my prompt',
+          hookContext: '&lt;mod&gt; note',
+        });
+
+        promptSubmitBus(extraHookContext());
+        await run([{ text: 'next prompt' }], 'prompt-both-contexts', {
+          type: SendMessageType.UserQuery,
+          promptContext: ['first', 'second'],
+        });
+        expect(getLastTurnRequestText()).toContain(
+          tag('first\n\nsecond\n\nextra hook context'),
+        );
+      });
+
       it.each([
         { name: 'with a stable catalog', catalogOn: true },
         { name: 'without a catalog', catalogOn: false },

@@ -204,14 +204,24 @@ class Realm {
     const status = this.vm.newFunction('modStatus', (id, key, input) => {
       const call = calls.get(this.vm.getNumber(id));
       const name = this.vm.getString(key);
-      if (name === 'validate' || name === 'validateResult') {
+      if (
+        name === 'validate' ||
+        name === 'validateResult' ||
+        name === 'promptFallback'
+      ) {
         if (!call?.live || callAbandoned(call))
           throw new Error('Mod continuation is no longer active.');
         const json = this.vm.getString(input);
+        if (name !== 'validate' && Buffer.byteLength(json) > MOD_MAX_BYTES)
+          throw new Error('Mod result is too large.');
         assertModDepth(json, 'Mod value');
         const value = JSON.parse(json);
-        if (name === 'validateResult') validateResult(call.event, value);
-        else validateInput(call.event, value, call.input);
+        if (name === 'validate') validateInput(call.event, value, call.input);
+        else {
+          validateResult(call.event, value, call.input);
+          if (name === 'promptFallback')
+            call.promptFallback = Promise.resolve(value);
+        }
         return this.vm.undefined;
       }
       if (name === 'aborted')
@@ -507,6 +517,7 @@ async function dispatch(
       assertLive(call);
       recovery = {
         ...call,
+        last: call.last ? (call.promptFallback ?? call.last) : undefined,
         id: ++serial,
         budget: new ModBudget(1000),
         live: true,
@@ -529,6 +540,9 @@ async function dispatch(
         );
         if (value !== undefined) {
           validateResult(event, value, call.input);
+          await assertDropBeforeNext(event, value, recovery.last ?? call.last);
+          if (event === 'prompt.submit' && (recovery.last ?? call.last))
+            return await (recovery.last ?? call.last);
           if (event === 'tool.check')
             return await ownCheck(
               value as ModToolCheckResult,
@@ -556,7 +570,10 @@ async function dispatch(
           text: event + ' hook skipped: ' + why.slice(0, 2000),
         });
       }
-      return await (recovery.last ?? call.last ?? next(input, frames));
+      return await (recovery.last ??
+        call.last ??
+        call.promptFallback ??
+        next(input, frames));
     }
   } finally {
     call.live = false;
@@ -572,6 +589,26 @@ async function dispatch(
       calls.delete(recovery.id);
     }
   }
+}
+
+// A prompt a hook passed on has entered beneath it, so the hook cannot then
+// drop it; it fails, and its last next stands. Handing on the drop its next
+// resolved to is no drop of its own.
+async function assertDropBeforeNext(
+  event: ModEvent,
+  value: unknown,
+  last: Promise<unknown> | undefined,
+): Promise<void> {
+  if (
+    event !== 'prompt.submit' ||
+    !last ||
+    !record(value) ||
+    !('drop' in value)
+  )
+    return;
+  const below = await last.catch(() => undefined);
+  if (!record(below) || below['drop'] !== value['drop'])
+    throw new Error('a drop after its next(e) was answered');
 }
 
 // A tree that does not validate is told in Claude Code's words, unprefixed.
@@ -881,7 +918,11 @@ port.on('message', async (request: ModWorkerRequest) => {
       version = request.version;
       sites = request.sites ?? [];
       supported = MOD_EVENTS.filter(
-        (event) => !MOD_HOST_EVENTS.includes(event) || sites.length > 0,
+        (event) =>
+          !MOD_HOST_EVENTS.includes(event) ||
+          (event === 'prompt.submit'
+            ? request.prompts === true
+            : sites.length > 0),
       );
       for (const plugin of request.plugins) {
         assertLive();
@@ -938,6 +979,7 @@ port.on('message', async (request: ModWorkerRequest) => {
         commands: [...commands.values()],
         tools: hooked('tool.call').length + hooked('tool.check').length > 0,
         turnStart: hooked('turn.start').length > 0,
+        promptSubmit: hooked('prompt.submit'),
         turnComplete: hooked('turn.complete'),
         render: hooked('ui.render'),
       };
@@ -977,6 +1019,29 @@ port.on('message', async (request: ModWorkerRequest) => {
         [],
         async (e) => ({ turnId: e['turnId'] }),
       );
+    } else if (request.type === 'prompt-submit') {
+      // The prompt that enters is the one that arrives beneath the hooks.
+      let arrived: ModInput | undefined;
+      const settled = await dispatch(
+        'prompt.submit',
+        { ...request.input },
+        engineOrigin,
+        [],
+        async (e) => {
+          arrived = {
+            text: e['text'],
+            ...(e['context'] !== undefined && { context: e['context'] }),
+          };
+          return { ...arrived, origin: e['origin'] };
+        },
+      );
+      result =
+        record(settled) && typeof settled['drop'] === 'string'
+          ? { drop: settled['drop'], byHook: true }
+          : (arrived ?? {
+              drop: 'a hook answered without passing the prompt on',
+              byHook: false,
+            });
     } else if (request.type === 'render') {
       if (!sites.includes(request.input.component))
         throw new Error('This host draws no ' + request.input.component + '.');
