@@ -62,6 +62,18 @@ import { fnCall } from '../../test-utils/model-fixtures.js';
 const mockReportOpenAiRequest = vi.hoisted(() => vi.fn());
 const mockReportOpenAiResponse = vi.hoisted(() => vi.fn());
 const mockReportOpenAiChunk = vi.hoisted(() => vi.fn());
+const mockDebugLogger = vi.hoisted(() => ({
+  isEnabled: vi.fn(() => false),
+  debug: vi.fn(),
+  info: vi.fn(),
+  warn: vi.fn(),
+  error: vi.fn(),
+}));
+
+vi.mock('../../utils/debugLogger.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../utils/debugLogger.js')>()),
+  createDebugLogger: vi.fn(() => mockDebugLogger),
+}));
 
 vi.mock('./converter.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./converter.js')>();
@@ -122,6 +134,7 @@ const sideQuery = (model = 'test-model') =>
 /** Request config forcing the respond_in_schema tool (classifier shape). */
 function forcedToolConfig(
   includeThoughts: boolean | undefined,
+  mode: FunctionCallingConfigMode = FunctionCallingConfigMode.ANY,
 ): GenerateContentParameters['config'] {
   return {
     thinkingConfig: { includeThoughts },
@@ -136,7 +149,7 @@ function forcedToolConfig(
       },
     ],
     toolConfig: {
-      functionCallingConfig: { mode: FunctionCallingConfigMode.ANY },
+      functionCallingConfig: { mode },
     },
   };
 }
@@ -694,10 +707,12 @@ describe('ContentGenerationPipeline', () => {
         requestModel?: string;
         extraBody?: Record<string, unknown>;
         thinkingMandatory?: boolean;
+        supportsForcedToolChoice?: boolean;
         reasoning?: ContentGeneratorConfig['reasoning'];
         includeThoughts?: boolean;
         expectedThinking?: boolean;
         expectedToolChoice?: string;
+        expectedOptOutLogs?: number;
         expectedReasoningEffort?: string;
       }>({
         'keep thinking for a thinkingMandatory model on Token Plan side queries':
@@ -772,6 +787,26 @@ describe('ContentGenerationPipeline', () => {
           model: 'qwen3.7-max',
           expectedToolChoice: 'required',
         },
+        'suppress required tool selection when the model opts out of forced tool choice':
+          {
+            model: 'qwen3.7-max',
+            supportsForcedToolChoice: false,
+            expectedToolChoice: undefined,
+            expectedOptOutLogs: 1,
+          },
+        'suppress required tool selection on a non-DashScope endpoint': {
+          baseUrl: 'http://localhost:1976/v1',
+          model: 'system',
+          supportsForcedToolChoice: false,
+          expectedToolChoice: undefined,
+          expectedOptOutLogs: 1,
+        },
+        'force required tool selection when the model declares it supports it':
+          {
+            model: 'qwen3.7-max',
+            supportsForcedToolChoice: true,
+            expectedToolChoice: 'required',
+          },
         'emit the tier-native disable shape under the config-level reasoning opt-out':
           {
             model: 'qwen3.8-max',
@@ -855,6 +890,7 @@ describe('ContentGenerationPipeline', () => {
           model: testCase.model,
           extra_body: testCase.extraBody,
           thinkingMandatory: testCase.thinkingMandatory,
+          supportsForcedToolChoice: testCase.supportsForcedToolChoice,
           reasoning: testCase.reasoning,
         } as Partial<ContentGeneratorConfig>,
         userRequest(
@@ -866,9 +902,41 @@ describe('ContentGenerationPipeline', () => {
 
       expect(apiCall.enable_thinking).toBe(testCase.expectedThinking);
       expect(apiCall.tool_choice).toBe(testCase.expectedToolChoice);
+      expect(apiCall.tools).toEqual([
+        { type: 'function', function: { name: 'respond_in_schema' } },
+      ]);
+      const optOutLogs = mockDebugLogger.debug.mock.calls.filter(([message]) =>
+        String(message).includes('supportsForcedToolChoice=false'),
+      );
+      expect(optOutLogs).toHaveLength(testCase.expectedOptOutLogs ?? 0);
+      if (testCase.expectedOptOutLogs) {
+        expect(optOutLogs[0]).toEqual([
+          expect.stringContaining('omitting tool_choice="required"'),
+          { model: testCase.requestModel ?? testCase.model },
+        ]);
+      }
       if ('expectedReasoningEffort' in testCase) {
         expect(apiCall.reasoning_effort).toBe(testCase.expectedReasoningEffort);
       }
+    });
+
+    it('keeps tool_choice none when the model opts out of forced tool choice', async () => {
+      // The opt-out targets forced selection (`required`) only; the NONE
+      // mapping keeps its own contract.
+      mockForcedTool();
+      const apiCall = await executeWith(
+        {
+          baseUrl: DASHSCOPE_URL,
+          model: 'qwen3.7-max',
+          supportsForcedToolChoice: false,
+        },
+        userRequest(
+          'qwen3.7-max',
+          forcedToolConfig(true, FunctionCallingConfigMode.NONE),
+        ),
+      );
+
+      expect(apiCall.tool_choice).toBe('none');
     });
 
     it('keeps forced tool selection for a non-qwen preset shape end to end', async () => {

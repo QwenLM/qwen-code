@@ -11884,6 +11884,56 @@ describe('Model Switching and Config Updates', () => {
     expect(sources['enableRequestMetadata']?.detail).toBe('model');
   });
 
+  it.each([
+    [false, undefined],
+    [undefined, false],
+    [false, true],
+    [true, false],
+  ])(
+    'updates supportsForcedToolChoice from %s to %s on a qwen-oauth hot switch',
+    async (initialValue, nextValue) => {
+      const config = await authenticated(
+        qwenGenerator('qwen3-coder-plus', {
+          supportsForcedToolChoice: initialValue,
+        }),
+      );
+      const liveConfig = config.getContentGeneratorConfig();
+      expect(liveConfig.supportsForcedToolChoice).toBe(initialValue);
+
+      await switchTo(
+        config,
+        qwenGenerator('qwen-max', { supportsForcedToolChoice: nextValue }),
+      );
+
+      expect(config.getContentGeneratorConfig()).toBe(liveConfig);
+      expect(liveConfig.supportsForcedToolChoice).toBe(nextValue);
+    },
+  );
+
+  it('updates supportsForcedToolChoice source on a qwen-oauth hot switch', async () => {
+    const config = await authenticated(
+      qwenGenerator('qwen3-coder-plus', { supportsForcedToolChoice: false }),
+      {
+        supportsForcedToolChoice: { kind: 'settings', detail: 'initial model' },
+      },
+    );
+
+    await switchTo(
+      config,
+      qwenGenerator('qwen-max', { supportsForcedToolChoice: false }),
+      {
+        supportsForcedToolChoice: {
+          kind: 'settings',
+          detail: 'selected model',
+        },
+      },
+    );
+
+    expect(
+      config.getContentGeneratorConfigSources()['supportsForcedToolChoice'],
+    ).toEqual({ kind: 'settings', detail: 'selected model' });
+  });
+
   it('should trigger full refresh when switching to non-qwen-oauth provider', async () => {
     const config = await authenticated(
       qwenGenerator('qwen3-coder-plus', { contextWindowSize: 1_000_000 }),

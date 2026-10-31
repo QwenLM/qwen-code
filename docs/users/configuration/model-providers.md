@@ -740,6 +740,20 @@ The configuration resolution follows a strict layering model with one crucial ru
 | 3        | `settings.model.generationConfig`             | Only used for **Runtime Models** (when no provider model is selected)                                    |
 | 4        | Content-generator defaults                    | Provider-specific defaults (e.g., OpenAI vs Gemini) - only for Runtime Models                            |
 
+### Forced tool choice opt-out
+
+Some endpoints reject `tool_choice: "required"`, which Qwen Code's structured side queries (session titles, follow-up suggestions, memory selection, the permission classifier, and similar internal helpers) send to force a tool call. Text-mode side queries, including summaries, session recaps, and chat compression, never send `tool_choice` and are unaffected. Apple Foundation Models served through `fm serve` is one such endpoint. Set `supportsForcedToolChoice` to `false` on the provider entry that targets it:
+
+```json
+{
+  "generationConfig": {
+    "supportsForcedToolChoice": false
+  }
+}
+```
+
+The field defaults to `true` and affects only those structured side queries; the agent's normal tool use is unaffected. For Runtime Models it can also be set under `model.generationConfig` in settings. The setting is per model entry and is never inherited: a structured side query resolves to `fastModel` when one is configured (otherwise the main model) and reads only that entry's own value, so declare `supportsForcedToolChoice: false` on **every** entry that serves side queries — in particular the `fastModel` entry. The opt-out applies to the Chat Completions wire only: it does not affect `wireApi: 'responses'` or the Anthropic wire (a documented non-goal).
+
 ### Dynamic values in `customHeaders`
 
 A `customHeaders` value may contain the placeholder `${session_id}`, which is
