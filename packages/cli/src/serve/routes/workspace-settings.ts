@@ -91,6 +91,7 @@ const WEB_SHELL_SETTINGS = new Set([
   'ui.allowedApprovalModes',
   'ui.compactMode',
   'serve.maxSessions',
+  'ui.customWittyPhrases',
   'voiceModel',
   'imageModel',
   'advisorModel',

@@ -11,6 +11,7 @@ import { beforeEach, describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
 import {
+  getAllowedKeys,
   registerWorkspaceQualifiedSettingsRoutes,
   registerWorkspaceSettingsRoutes,
 } from './workspace-settings.js';
@@ -979,6 +980,12 @@ describe('POST /workspace/settings', () => {
     expect(write.status).toBe(400);
     expect(write.body).toMatchObject({ code: 'disallowed_key' });
     expect(persistSetting).not.toHaveBeenCalled();
+  });
+
+  it('includes enableLoadingPhrases and customWittyPhrases in allowed keys for web shell clients', () => {
+    const keys = getAllowedKeys();
+    expect(keys.has('ui.accessibility.enableLoadingPhrases')).toBe(true);
+    expect(keys.has('ui.customWittyPhrases')).toBe(true);
   });
 
   it.each(['ui.brand', 'ui.brand.name', 'ui.brand.logoPath'])(
