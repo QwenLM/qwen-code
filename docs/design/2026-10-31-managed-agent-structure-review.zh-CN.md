@@ -75,7 +75,8 @@ Managed Agent 服务端从首篇设计（2026-09-19）起，约两个月内长�
 MCP 管理、definition pin、skills 与 extension 投影。它的 7 个公开
 `set*`/`configure*` 方法是构造后的可变装配：Bean 在完全装配好之前就可能被
 观察到。`RuntimeBrokerService` 把 provisioning、绑定 CAS、租约、取消、恢复
-扫描、tool hold、extension 命令与 observation 冷却全部揉在一个类里。测试
+扫描与 extension 命令揉在一个类里；observation 冷却与 tool hold 清单是
+首批委托给已提取协作者的关注点（见下方 P1 提取切片）。测试
 镜像了同样的形状：`RuntimeBrokerServiceTest` 8,002 行，
 `HarnessCoordinatorTest` 4,910 行。
 
@@ -211,6 +212,18 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
   中"先 stamp 后释放
   在途槽位"的顺序没有测试钉住（base 上即存在的缺口）；待对账路径提取
   为独立协作者、该顺序成为缝级契约而非私有 lambda 内部时序时再钉。
+- 对账、恢复扫描与取消**不是**干净的独立缝（2026-10-31 调研）。与冷却、
+  hold 清单（各自拥有自己的状态）不同，这些路径共享服务的核心可变状态
+  与生命周期机制：`sessions`、`liveBindings`、`reconciliations` 三个并发
+  map，绑定生命周期助手（`requireAnswerableBinding`、`requireLiveBinding`、
+  `invalidateBinding`、`provisioner.isUsable`），以及 CAS 执行 settle
+  （`absorbRuntimeStatus` → `settleUnstartedBackgroundSiblings`）。现在
+  提取其中任何一个，都会把十来个 map/助手/回调注入一个换个名字的上帝类
+  "协作者"。前置条件是一个**共享状态注册表**切片：把三个 map 与绑定生命
+  周期助手移到一个拥有它们的 `RuntimeBindingRegistry`（或类似）之后，
+  服务转为委托。注册表就位后，对账/恢复/取消依赖的是一个窄所有者而非
+  服务内部，从而可提取，M6 顺序也成为测试可钉的缝级契约。该注册表切片
+  比两条干净缝更大、风险更高，应在实现前单独设计与评审。
 - 之后对 `ManagedSessionStore` 与 `QwenHostedHarnessConnector` 做同样处理，
   各自独立成切片。
 

@@ -1884,13 +1884,10 @@ public final class RuntimeBrokerService implements AutoCloseable, com.alibaba.qw
 
     /**
      * The runtime Session ids of this Harness Session still owed the close's
-     * drain: a hold row (a background Shell process or a Monitor watch)
-     * exists — terminal or not — and the Runtime Session's release was never
-     * durably recorded. A hold row settling (the run exited, the watch
-     * stopped) discharges nothing on its own; only the Session's RELEASED
-     * record does. Read-only: a reloaded Harness asks this to restore the
-     * close's drain obligation after a restart — restore, never discharge
-     * (#13930 R1-2).
+     * drain — restore the obligation after a restart, never discharge it
+     * (#13930 R1-2). The durable pagination and the RELEASED-only discharge
+     * invariant live in {@link RuntimeHoldInventory}; this method keeps the
+     * admission, tenant resolution and error-mapping boundary.
      */
     public CompletionStage<List<String>> listActiveHoldRuntimeSessionIds(
             String harnessSessionId) {
