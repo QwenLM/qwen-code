@@ -59,7 +59,7 @@ final class WorkspaceMigrationAdmission {
         if (!tenant.equals(alias.get("tenant_id")) || !storage.equals(alias.get("storage_id"))) {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
-        if ("EXTERNAL".equals(alias.get("storage_kind"))) {
+        if (java.util.Set.of("EXTERNAL", "EPHEMERAL").contains(alias.get("storage_kind"))) {
             requireExternalPhysicalOpen(jdbc, tenant, storage, lock);
             return;
         }
@@ -76,12 +76,15 @@ final class WorkspaceMigrationAdmission {
     }
 
     private static void requireExternalPhysicalOpen(JdbcTemplate jdbc, String tenant, String storage, boolean lock) {
-        var registrations = jdbc.query("SELECT registration_json, registration_revision, physical_key FROM ma_storage"
-                + " WHERE alias_key = ? AND storage_kind = 'EXTERNAL' AND registration_state = 'REGISTERED'"
+        var registrations = jdbc.query("SELECT registration_json, registration_revision, physical_key, storage_kind FROM ma_storage"
+                + " WHERE alias_key = ? AND storage_kind IN ('EXTERNAL', 'EPHEMERAL') AND registration_state = 'REGISTERED'"
                 + (lock ? " FOR UPDATE" : ""), (row, index) -> {
                     var registered = com.alibaba.qwen.code.runtimebroker.spi.ExternalStorageRegistry
                             .decodeRegistration(row.getString("registration_json"));
-                    if (!storage.equals(registered.tenantWorkspaceId()) || !registered.ownerKey().equals(row.getString("physical_key"))
+                    if (!registered.storageKind().equals(row.getString("storage_kind"))
+                            || registered.ephemeral() && !tenant.equals(registered.ephemeralTenantId())
+                            || !storage.equals(registered.tenantWorkspaceId())
+                            || !registered.ownerKey().equals(row.getString("physical_key"))
                             || registered.registrationRevision() != row.getLong("registration_revision")) {
                         throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
                     }
@@ -93,7 +96,7 @@ final class WorkspaceMigrationAdmission {
         var registered = registrations.getFirst();
         var owners = jdbc.query("SELECT * FROM ma_storage_owner WHERE storage_key = ?" + (lock ? " FOR UPDATE" : ""),
                 (row, index) -> registered.ownerKey().equals(row.getString("physical_key"))
-                        && "EXTERNAL".equals(row.getString("storage_kind"))
+                        && registered.storageKind().equals(row.getString("storage_kind"))
                         && tenant.equals(row.getString("tenant_id")) && storage.equals(row.getString("storage_id"))
                         && registered.mountRoot().equals(row.getString("mount_root"))
                         && registered.registrationRevision() == row.getLong("mount_revision")

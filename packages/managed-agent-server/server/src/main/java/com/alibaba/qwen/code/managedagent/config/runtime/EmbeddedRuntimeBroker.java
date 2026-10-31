@@ -464,12 +464,6 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
         }
     }
 
-    /**
-     * The owned Runtime Broker Service, exposed for the child result relay
-     * and the close cascade's binding probe at registration time. The
-     * closing lifecycle stays with this Broker alone — the wiring uses
-     * {@code destroyMethod = ""} so Spring never closes it twice.
-     */
     @Override
     public void validateExternalTerminalOriginal(
             com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord binding) {
@@ -501,6 +495,12 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer,
                 bindingId, expectedGeneration, expectedVersion);
     }
 
+    /**
+     * The owned Runtime Broker Service, exposed for the child result relay
+     * and the close cascade's binding probe at registration time. The
+     * closing lifecycle stays with this Broker alone — the wiring uses
+     * {@code destroyMethod = ""} so Spring never closes it twice.
+     */
     public RuntimeBrokerService service() {
         return service;
     }

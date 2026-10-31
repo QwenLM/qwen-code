@@ -1216,13 +1216,18 @@ public final class JdbcRuntimeBindingRepository
     }
 
     /**
-     * The single read of "is this storage registered as EXTERNAL?"; admission and
-     * authorization must not drift apart on this answer.
+     * The single read of "is this storage routed through the external provider?";
+     * admission and authorization must not drift apart on this answer.
      */
     public static boolean externalStorage(org.springframework.jdbc.core.JdbcTemplate jdbc,
             com.alibaba.qwen.code.runtimebroker.managedworkspace.ContextBinding binding) {
-        return binding != null && jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE alias_key = ?",
-                String.class, storageAliasKey(binding.getTenantId(), binding.getStorageId())).contains("EXTERNAL");
+        if (binding == null) {
+            return false;
+        }
+        return jdbc.queryForList("SELECT storage_kind FROM ma_storage WHERE alias_key = ?",
+                        String.class, storageAliasKey(binding.getTenantId(), binding.getStorageId()))
+                .stream()
+                .anyMatch(kind -> java.util.Set.of("EXTERNAL", "EPHEMERAL").contains(kind));
     }
 
     private static String storageFence(Connection connection, String tenantId, String storageId) throws SQLException {
