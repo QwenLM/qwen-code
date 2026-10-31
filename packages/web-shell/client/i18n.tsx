@@ -8,6 +8,10 @@ import {
 } from './components/managed/managed-lifecycle-messages.js';
 import { plural } from './utils/plural.js';
 import {
+  ACTIVITY_MESSAGES_EN,
+  ACTIVITY_MESSAGES_ZH,
+} from './components/sidebar/activity-messages.js';
+import {
   MESSAGE_DELETION_MESSAGES_EN,
   MESSAGE_DELETION_MESSAGES_ZH,
 } from './components/message-deletion-messages.js';
@@ -2087,6 +2091,7 @@ const EN: Messages = {
   'localFiles.blocker.unsupportedDaemon':
     'This daemon does not advertise the client filesystem bridge (client_mcp_over_ws). Start the daemon with QWEN_SERVE_CLIENT_MCP_OVER_WS=1 to enable local files.',
   ...FILES_MESSAGES_EN,
+  ...ACTIVITY_MESSAGES_EN,
   'rightPanel.add': 'Add panel',
   'attachment.showPreview': 'Preview',
   'attachment.showSource': 'Source',
@@ -6601,6 +6606,7 @@ const ZH: Messages = {
   'localFiles.blocker.unsupportedDaemon':
     '该 daemon 未启用客户端文件桥（client_mcp_over_ws）。以 QWEN_SERVE_CLIENT_MCP_OVER_WS=1 启动 daemon 即可启用本地文件。',
   ...FILES_MESSAGES_ZH,
+  ...ACTIVITY_MESSAGES_ZH,
   'rightPanel.add': '添加页签',
   'attachment.showPreview': '预览',
   'attachment.showSource': '源码',
