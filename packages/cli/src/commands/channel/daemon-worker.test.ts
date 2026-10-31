@@ -894,6 +894,35 @@ describe('createDaemonChannelBridgeFacade', () => {
 
     expect(registerChannelLoopToolHandler).toHaveBeenCalledWith(handler);
   });
+
+  it('forwards adapter channel tool registration through the daemon facade', () => {
+    const registerChannelTool = vi.fn();
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      cancelSession: mockBridgeCancelSession,
+      registerChannelTool,
+    };
+
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeBtw: false,
+      exposeShellCommand: false,
+    });
+
+    const tool = {
+      name: 'qq_recall_message',
+      description: 'Recall a QQ message.',
+      inputSchema: { type: 'object', properties: {} },
+      handler: vi.fn(),
+    };
+    facade.registerChannelTool?.(tool);
+
+    expect(registerChannelTool).toHaveBeenCalledWith(tool);
+  });
 });
 
 describe('runChannelDaemonWorker', () => {
