@@ -66,17 +66,16 @@ for (const [file, original] of originalManifests) {
   }
 }
 
-// 5. Keep the published Mem0 Extension manifest aligned with its package.
-const mem0ManifestPath = resolve(
-  process.cwd(),
+// 5. Keep published extension manifests aligned with their packages.
+for (const manifestPath of [
   'integrations/external-context-mem0/qwen-extension.json',
-);
-const mem0Manifest = readJson(mem0ManifestPath);
-mem0Manifest.version = newVersion;
-writeJson(mem0ManifestPath, mem0Manifest);
-run(
-  'npx prettier --experimental-cli --write integrations/external-context-mem0/qwen-extension.json',
-);
+  'packages/channels/msteams/qwen-extension.json',
+]) {
+  const manifest = readJson(manifestPath);
+  manifest.version = newVersion;
+  writeJson(manifestPath, manifest);
+  run(`npx prettier --experimental-cli --write ${manifestPath}`);
+}
 
 // 6. Update the sandboxImageUri in the root package.json
 const rootPackageJson = readJson(rootPackageJsonPath);
@@ -109,9 +108,28 @@ for (const entry of readdirSync(channelsDir)) {
   const pkgPath = join(channelsDir, entry, 'package.json');
   if (!existsSync(pkgPath)) continue;
   const pkg = readJson(pkgPath);
-  const dep = pkg.dependencies?.['@qwen-code/channel-base'];
-  if (dep && !dep.startsWith('file:')) {
-    pkg.dependencies['@qwen-code/channel-base'] = newVersion;
+  let changed = false;
+  for (const field of ['dependencies', 'devDependencies']) {
+    const dep = pkg[field]?.['@qwen-code/channel-base'];
+    if (dep && !dep.startsWith('file:')) {
+      pkg[field]['@qwen-code/channel-base'] = newVersion;
+      changed = true;
+    }
+  }
+  const peer = pkg.peerDependencies?.['@qwen-code/channel-base'];
+  if (peer) {
+    const previousChannelVersion = JSON.parse(
+      originalManifests.get(`packages/channels/${entry}/package.json`),
+    ).version;
+    pkg.peerDependencies['@qwen-code/channel-base'] = peer
+      .split(' || ')
+      .map((version) =>
+        version === previousChannelVersion ? newVersion : version,
+      )
+      .join(' || ');
+    changed = true;
+  }
+  if (changed) {
     writeJson(pkgPath, pkg);
     console.log(
       `Pinned @qwen-code/channel-base to ${newVersion} in ${pkg.name}`,

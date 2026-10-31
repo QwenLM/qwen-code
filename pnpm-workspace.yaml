@@ -11,6 +11,7 @@ packages:
   - 'packages/channels/feishu'
   - 'packages/channels/github'
   - 'packages/channels/gitlab'
+  - 'packages/channels/msteams'
   - 'packages/channels/plugin-example'
   - 'packages/channels/qqbot'
   - 'packages/channels/telegram'

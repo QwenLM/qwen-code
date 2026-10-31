@@ -1171,7 +1171,7 @@ describe('package scripts', () => {
     expect(paths).not.toContain('packages/vscode-ide-companion');
   });
 
-  it('keeps the Mem0 Extension manifest aligned with release versions', () => {
+  it('keeps the Mem0 and Teams extension manifests aligned with release versions', () => {
     const versionScript = readFileSync(
       path.join(root, 'scripts/version.js'),
       'utf8',
@@ -1181,14 +1181,14 @@ describe('package scripts', () => {
       "'integrations/external-context-mem0/qwen-extension.json'",
     );
     expect(versionScript).toContain(
-      'const mem0Manifest = readJson(mem0ManifestPath);',
+      "'packages/channels/msteams/qwen-extension.json'",
     );
-    expect(versionScript).toContain('mem0Manifest.version = newVersion');
+    expect(versionScript).toContain('for (const manifestPath of [');
+    expect(versionScript).toContain('const manifest = readJson(manifestPath);');
+    expect(versionScript).toContain('manifest.version = newVersion');
+    expect(versionScript).toContain('writeJson(manifestPath, manifest);');
     expect(versionScript).toContain(
-      'writeJson(mem0ManifestPath, mem0Manifest);',
-    );
-    expect(versionScript).toContain(
-      "'npx prettier --experimental-cli --write integrations/external-context-mem0/qwen-extension.json'",
+      'run(`npx prettier --experimental-cli --write ${manifestPath}`);',
     );
   });
 

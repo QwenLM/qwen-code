@@ -239,3 +239,4 @@ Use `supportsProactiveDeliveryTarget()` when generic daemon delivery accepts a d
 - **Plugin example** (`packages/channels/plugin-example/`) — minimal WebSocket-based adapter, good starting point
 - **Telegram** (`packages/channels/telegram/`) — full-featured: images, files, formatting, typing indicators
 - **DingTalk** (`packages/channels/dingtalk/`) — stream-based with rich text handling
+- **Microsoft Teams** (`packages/channels/msteams/`) — SDK-authenticated webhook, private/group text and thread replies; also exposes awaited host acceptance and guarded delivery for applications that own persistence. See the [package guide](../../packages/channels/msteams/README.md) for the standalone and hosted contracts.
