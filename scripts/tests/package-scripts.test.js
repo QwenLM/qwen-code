@@ -1714,6 +1714,30 @@ describe('package scripts', () => {
     }
   });
 
+  it('keeps both copies of the slow-test-host predicate identical', () => {
+    // The predicate is copied, not shared, and each copy's header says to keep
+    // them in sync. The files are not byte-identical (only the cli copy also
+    // exports slowHostBudgetMs), so compare the shared function itself. A
+    // threshold tweak that reaches one copy and not the other silently splits
+    // the suites the two packages put on the raised budgets.
+    const copies = [
+      'packages/cli/src/test-utils/slow-test-host.ts',
+      'packages/core/src/test-utils/slow-test-host.ts',
+    ];
+    const bodies = copies.map((file) => {
+      const text = readFileSync(path.join(root, file), 'utf8');
+      const body = text.match(
+        /export function isSlowTestHost\(\): boolean \{[\s\S]*?\n\}\n/,
+      );
+      expect(body, `${file}: isSlowTestHost not found`).not.toBeNull();
+      return body[0];
+    });
+    const [reference, ...others] = bodies;
+    others.forEach((body, i) => {
+      expect(body, `${copies[i + 1]} vs ${copies[0]}`).toBe(reference);
+    });
+  });
+
   it('bounds the CI unit step so a hang fails instead of stalling', () => {
     // #10490's run 3 was cancelled at ~60 minutes, leaving behind
     // orphaned test processes; a stall reads as a timeout, not a failure.
@@ -2161,8 +2185,8 @@ describe('package scripts', () => {
       ) || [];
 
     // The validation jobs reuse the anchored install step; only the anchor
-    // definition plus prepare and publish appear as full textual copies.
-    expect(installSteps.length).toBe(3);
+    // definition plus prepare, build_release, and publish are textual copies.
+    expect(installSteps.length).toBe(4);
     for (const installStep of installSteps.slice(0, 2)) {
       expect(installStep).toContain('npm run generate');
     }
@@ -2203,6 +2227,19 @@ describe('package scripts', () => {
     );
 
     expect(checkoutStep).toContain('persist-credentials: false');
+    // The checkout only reads the release commit; a missing or rejected bot
+    // PAT must not abort the release before the push step that needs it.
+    expect(checkoutStep).not.toContain('CI_BOT_PAT');
+    expect(checkoutStep).toContain("token: '${{ github.token }}'");
+    expect(checkoutStep).not.toContain('secrets.');
+    // Nothing before the push step may reintroduce the bot PAT either: the
+    // job legitimately holds it later, so stop the slice at that step.
+    expect(
+      publishJob.slice(
+        0,
+        publishJob.indexOf("- name: 'Conditionally push release branch'"),
+      ),
+    ).not.toContain('CI_BOT_PAT');
     expect(releaseBranchStep).not.toContain('CI_BOT_PAT');
     expect(pushReleaseBranchStep).toContain(
       "CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'",

@@ -7,13 +7,13 @@
  */
 
 /**
- * Applies the publisher's consistency rules to a local `/verify-pr` round.
+ * Applies the publisher's consistency rules to a `/verify-pr` round.
  *
- * In CI the publish job refuses an artifact whose verdict contradicts its own
- * assertion counts, so a `merge-ready` report carrying `fail: 7` degrades to
- * "no usable structured verdict". A local round has no publisher: the skill
- * asks the maintainer to "keep the counts honest yourself", which is the one
- * step of that path a machine should own.
+ * The CI publish job runs this file from its trusted checkout and does not
+ * trust a verdict it refuses, so a `merge-ready` report carrying `fail: 7`
+ * degrades to "no usable structured verdict". A local round has no publisher,
+ * so the skill runs it before posting: the one step of that path a machine
+ * should own.
  *
  * Usage:
  *   node scripts/verify-pr-check.mjs <artifact-dir>
@@ -28,7 +28,25 @@ import { isEntryPoint } from './lib/entry-point.js';
 
 export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
 
+/**
+ * Who caused a failed assertion. `pr` is the only one that can stamp a defect
+ * on the PR: an `environment` red belongs in an expected-red assertion once an
+ * A/A control proves both arms fail, and a `harness` fault is `inconclusive`.
+ */
+export const ATTRIBUTIONS = ['pr', 'harness', 'environment'];
+
 const KEBAB_PNG = /^[a-z0-9]+(?:-[a-z0-9]+)*\.png$/;
+const OID = /^[0-9a-f]{7,40}$/;
+// GFM renders an ATX heading indented up to three spaces as a heading too
+// (four spaces become a code block), so the indent is part of the shape,
+// not a way around it.
+const HEADING = /^ {0,3}#{1,6}\s/;
+// A heading is a short title; past this it is a paragraph wearing a heading's
+// font size. GitHub renders an H1 at 2em, so a long heading line is a wall of
+// giant text however well-formed the Markdown is.
+const HEADING_TITLE_MAX = 120;
+const FOOTER =
+  /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
 const HELP = `Usage: node scripts/verify-pr-check.mjs <artifact-dir>
 
@@ -39,15 +57,118 @@ Checks a local round against the rules the CI publisher enforces:
   - assertions.json holds non-negative integers, a positive total, and
     total == pass + fail
   - a merge-ready verdict carries no failed assertion
+  - a findings/blocked verdict whose failures ledger attributes no failure to
+    the PR is a contradiction: expected reds are passes
+  - a mutations.json claiming per-commit coverage covers every commit it lists,
+    and lists at least one commit (an empty set makes the claim vacuous)
 
 and warns (without failing) when the report does not lead with its verdict and
-head OID, or when evidence/ carries no kebab-case PNG capture.
+head OID, when the verdict line is a heading (GitHub renders the whole
+paragraph as one giant H1), when evidence/ carries no kebab-case PNG capture,
+when a round with failures carries no failures ledger at all, or when
+comment.md — the exact body a local round posts, optional — repeats the
+heading shape or lacks the attribution footer.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
 
 function readIfExists(path) {
   return existsSync(path) ? readFileSync(path, 'utf8') : null;
+}
+
+/** OIDs are quoted at every length from 7 to 40; compare by prefix. */
+function sameCommit(a, b) {
+  return a.startsWith(b) || b.startsWith(a);
+}
+
+/**
+ * A coverage claim is universally quantified over an enumerable set, so it has
+ * to be checked against that set rather than believed. A round wrote "every
+ * production commit since the previous round was mutated on its own" while two
+ * commits had no row; only a self-audit caught it.
+ *
+ * The enumeration comes from `git log --no-merges <previous>..<head> --not
+ * <target>` in the round, not from this script: a checker with no repository
+ * cannot derive it, so an incomplete list is the skill rule's job. What is
+ * machine-checkable is the claim against the list the round itself supplies —
+ * plus the one incomplete list that would otherwise pass every check, the
+ * empty one.
+ */
+export function checkMutationCoverage(text) {
+  const errors = [];
+  if (text === null || text === undefined || text.trim() === '') {
+    return { errors };
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return { errors: ['mutations.json is not valid JSON'] };
+  }
+  if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return { errors: ['mutations.json must be an object with rows'] };
+  }
+  if (parsed.coverageClaim !== 'per-commit') return { errors };
+
+  const commits = parsed.productionCommits;
+  const rows = parsed.rows;
+  if (!Array.isArray(commits) || !Array.isArray(rows)) {
+    errors.push(
+      "mutations.json claims per-commit coverage: it needs productionCommits[] from git log and rows[] carrying each row's commit",
+    );
+    return { errors };
+  }
+  if (!commits.every((oid) => typeof oid === 'string' && OID.test(oid))) {
+    errors.push(
+      'mutations.json productionCommits must be hex commit ids (7-40 characters)',
+    );
+    return { errors };
+  }
+  // An empty enumeration is the cheapest way to make the claim uncheckable:
+  // "every commit was mutated" is vacuously true over no commits at all.
+  if (commits.length === 0) {
+    errors.push(
+      'mutations.json claims per-commit coverage over an empty productionCommits list: a claim over an empty set is vacuously true, so enumerate the commits (git log --no-merges <previous>..<head> --not <target>) or drop the claim',
+    );
+    return { errors };
+  }
+
+  const mutated = rows
+    .map((row) => row?.commit)
+    .filter((oid) => typeof oid === 'string' && OID.test(oid));
+  const uncovered = commits.filter(
+    (oid) => !mutated.some((seen) => sameCommit(seen, oid)),
+  );
+  if (uncovered.length > 0) {
+    errors.push(
+      `mutations.json claims per-commit coverage but ${uncovered.length} of ${commits.length} production commits have no row: ${uncovered.join(', ')}`,
+    );
+  }
+  return { errors };
+}
+
+// GitHub renders CRLF and LF identically, so a Windows-authored artifact
+// must not fail the line-anchored checks on a stray \r.
+function normalizeNewlines(text) {
+  return text.replace(/\r\n?/g, '\n');
+}
+
+/**
+ * The verdict line is a plain paragraph. Three rounds of PR #15984 opened
+ * with `# PR … — **Verdict: …** — <the whole verdict paragraph>` on one line,
+ * which GitHub renders as a single giant H1 — structurally valid Markdown,
+ * visually a wall of bold text. A heading carrying the verdict, or any
+ * over-long heading in the lead, is that defect's shape.
+ */
+function leadShapeWarnings(text, verdict, label) {
+  const first = text.split('\n').find((line) => line.trim() !== '');
+  if (!first || !HEADING.test(first)) return [];
+  const holdsVerdict = verdict !== null && first.includes(verdict);
+  if (!holdsVerdict && first.length <= HEADING_TITLE_MAX) return [];
+  return [
+    `${label} opens with a heading${holdsVerdict ? ' carrying the verdict' : ` of ${first.length} characters`}: GitHub renders the whole line as one giant H1 — the verdict line is a plain paragraph (no leading #), and a heading is a short title on its own line`,
+  ];
 }
 
 /**
@@ -82,6 +203,8 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
   }
 
   let counts = null;
+  let attributions = null;
+  let ledgerPresent = false;
   if (files.assertions && files.assertions.trim() !== '') {
     let parsed;
     let parsedOk = true;
@@ -120,6 +243,33 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
         );
       } else {
         counts = { pass: parsed.pass, fail: parsed.fail, total: parsed.total };
+        const ledger = parsed.failures;
+        if (ledger !== undefined) {
+          ledgerPresent = true;
+          if (!Array.isArray(ledger)) {
+            errors.push(
+              'assertions.json failures must be an array of { id, attribution } entries',
+            );
+          } else if (
+            ledger.some(
+              (entry) =>
+                !entry ||
+                typeof entry.id !== 'string' ||
+                entry.id.trim() === '' ||
+                !ATTRIBUTIONS.includes(entry.attribution),
+            )
+          ) {
+            errors.push(
+              `assertions.json failures entries each need an id and an attribution of ${ATTRIBUTIONS.join(' | ')}`,
+            );
+          } else if (ledger.length !== counts.fail) {
+            errors.push(
+              `assertions.json lists ${ledger.length} failure${ledger.length === 1 ? '' : 's'} but counts fail ${counts.fail}: the ledger and the count must agree`,
+            );
+          } else {
+            attributions = ledger.map((entry) => entry.attribution);
+          }
+        }
       }
     }
   }
@@ -130,8 +280,32 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
     );
   }
 
+  // The counting rule the prose taught only halfway: an A/A control proves a
+  // red is environmental, and nothing said how to count it afterwards. A round
+  // booked the same host red twice — head and its base control — and published
+  // `findings` while its own verdict line said neither reason was a PR defect.
+  if (counts && counts.fail > 0) {
+    const plural = counts.fail === 1 ? '' : 's';
+    if (attributions === null && !ledgerPresent) {
+      warnings.push(
+        `assertions.json carries no failures ledger for ${counts.fail} failed assertion${plural}: add failures[].attribution (${ATTRIBUTIONS.join(' | ')}) so a red the PR did not cause cannot decide the verdict`,
+      );
+    } else if (
+      attributions !== null &&
+      !attributions.includes('pr') &&
+      (verdict === 'findings' || verdict === 'blocked')
+    ) {
+      errors.push(
+        `${verdict} with ${counts.fail} failed assertion${plural} and none attributed to the PR (${[...new Set(attributions)].join(', ')}): re-encode an A/A-proven environment red as an expected-red pass and move the lost coverage to Not covered, and report a harness fault as inconclusive`,
+      );
+    }
+  }
+
+  errors.push(...checkMutationCoverage(files.mutations).errors);
+
   if (files.report && files.report.trim() !== '') {
-    const lead = files.report
+    const report = normalizeNewlines(files.report);
+    const lead = report
       .split('\n')
       .filter((line) => line.trim() !== '')
       .slice(0, 10);
@@ -150,6 +324,23 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
     } else if (cited.length === 0) {
       warnings.push(
         'report.md does not name a 40-character head OID in its first 10 non-empty lines',
+      );
+    }
+    warnings.push(...leadShapeWarnings(report, verdict, 'report.md'));
+  }
+
+  // comment.md is the exact body a local round posts: report content plus
+  // the attribution footer. report.md deliberately carries no footer (both
+  // publish paths append it at comment time), so this is the only artifact
+  // where the footer's presence is checkable. The workflow assembles its own
+  // body and never writes this file, so its absence is not a defect.
+  if (files.comment && files.comment.trim() !== '') {
+    const comment = normalizeNewlines(files.comment);
+    warnings.push(...leadShapeWarnings(comment, verdict, 'comment.md'));
+    const lines = comment.split('\n').filter((line) => line.trim() !== '');
+    if (!FOOTER.test(lines[lines.length - 1] ?? '')) {
+      warnings.push(
+        'comment.md does not end with the attribution footer `_— <model> via Qwen Code /verify-pr (v<version>; skill <12-hex>)_`: append the resolved footer before posting — omit it only when the model cannot be resolved',
       );
     }
   }
@@ -191,6 +382,8 @@ function main(argv) {
     report: readIfExists(join(dir, 'report.md')),
     verdict: readIfExists(join(dir, 'verdict.txt')),
     assertions: readIfExists(join(dir, 'assertions.json')),
+    mutations: readIfExists(join(dir, 'mutations.json')),
+    comment: readIfExists(join(dir, 'comment.md')),
   };
   const evidenceDir = join(dir, 'evidence');
   const evidence = existsSync(evidenceDir)
@@ -199,35 +392,38 @@ function main(argv) {
       )
     : [];
 
-  // When the round's own snapshot is beside the artifact directory, the report
+  // With the round's own snapshot, the report
   // has to cite the head it verified — not merely some 40-hex token, which a
   // base OID satisfies. A snapshot that exists but cannot be read is reported
   // rather than silently downgrading the check.
   let expectedHead = null;
   let snapshotWarning = null;
+  let snapshotPath = join(dir, 'context.json');
   const prNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
-  if (prNumber) {
-    const snapshotPath = join(
+  if (!existsSync(snapshotPath) && prNumber) {
+    snapshotPath = join(
       dirname(resolve(dir)),
       'verify-context',
       `pr${prNumber}.json`,
     );
-    if (existsSync(snapshotPath)) {
-      try {
-        const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
-        if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
-          expectedHead = snapshot.headRefOid;
-        }
-      } catch {
-        snapshotWarning =
-          'the verify-context snapshot is unreadable; the head-OID check fell back to presence-only';
+  }
+  if (existsSync(snapshotPath)) {
+    try {
+      const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+      if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
+        expectedHead = snapshot.headRefOid;
+      } else {
+        snapshotWarning = `snapshot ${snapshotPath} has no valid head OID; the head-OID check fell back to presence-only`;
       }
+    } catch {
+      snapshotWarning = `snapshot ${snapshotPath} is unreadable; the head-OID check fell back to presence-only`;
     }
   }
 
   const result = checkArtifacts({ files, evidence, expectedHead });
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);
   const lines = [`verify-pr check: ${dir}`];
+  if (expectedHead) lines.push(`  head source: ${snapshotPath}`);
   for (const warning of result.warnings) lines.push(`  warn  ${warning}`);
   for (const error of result.errors) lines.push(`  error ${error}`);
   const counts = result.counts

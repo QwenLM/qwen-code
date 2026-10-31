@@ -37,7 +37,12 @@ import type {
 import type { CommandDisplayCategoryOrder } from '../utils/commandDisplay';
 import type { SkillInfo } from '../completions/slashCompletion';
 import { useI18n } from '../i18n';
-import type { DaemonReasoningControls } from '@qwen-code/web-shell/daemon-react-sdk';
+import type {
+  DaemonReasoningControls,
+  DaemonWorkflowMode,
+  DaemonWorkflowModeStatus,
+} from '@qwen-code/web-shell/daemon-react-sdk';
+import { WorkflowModeControl } from './WorkflowModeControl';
 import { useWebShellPortalRoot } from '../portalRoot';
 import {
   useWebShellCustomization,
@@ -160,6 +165,7 @@ const MAX_DROP_DIALOG_ROWS = 100;
 export type ComposerToolbarAction =
   | 'approvalMode'
   | 'plan'
+  | 'workflowMode'
   | 'contextUsage'
   | 'gitBranch'
   | 'model'
@@ -191,6 +197,7 @@ function collectDroppedFiles(dataTransfer: DataTransfer): File[] {
 const ACTIVE_TOOLBAR_ACTIONS = [
   'approvalMode',
   'plan',
+  'workflowMode',
   'commands',
   'contextUsage',
   'gitBranch',
@@ -245,6 +252,8 @@ interface ChatEditorProps {
   currentModel?: string;
   modelControlsDisabled?: boolean;
   gitBranch?: string;
+  /** Service-owned Git control in the workspace row below the composer. */
+  gitContextControl?: ReactNode;
   /** Whether the session is in a worktree (styles the git chip purple). */
   gitWorktree?: boolean;
   /** Git working directory for worktree sessions; targets git operations. */
@@ -302,6 +311,10 @@ interface ChatEditorProps {
   mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   onSelectMode?: (mode: string) => void;
   onSelectModel?: (model: string) => void;
+  workflowMode?: DaemonWorkflowMode;
+  workflowModeStatus?: DaemonWorkflowModeStatus;
+  workflowModePending?: boolean;
+  onWorkflowModeChange?: (requested: boolean) => void;
   reasoning?: DaemonReasoningControls;
   onSelectReasoningEffort?: (
     value: ReasoningSelection,
@@ -1565,6 +1578,7 @@ export const ChatEditor = memo(
       currentModel = '',
       modelControlsDisabled = false,
       gitBranch,
+      gitContextControl,
       gitWorktree,
       gitCwd,
       gitModeIntent,
@@ -1596,6 +1610,10 @@ export const ChatEditor = memo(
       mountUnavailableModelTooltip,
       onSelectMode,
       onSelectModel,
+      workflowMode,
+      workflowModeStatus,
+      workflowModePending,
+      onWorkflowModeChange,
       reasoning,
       onSelectReasoningEffort,
       workspaces,
@@ -2696,7 +2714,9 @@ export const ChatEditor = memo(
       gitBranchVisible && contextChipPlacement !== 'below';
     const contextRowVisible =
       contextChipPlacement === 'below' &&
-      (workspaceSelectVisible || gitBranchVisible);
+      (workspaceSelectVisible ||
+        gitBranchVisible ||
+        Boolean(gitContextControl));
 
     useLayoutEffect(() => {
       if (currentModelLabel && currentModelLabel !== lastConfirmedModelLabel) {
@@ -2779,7 +2799,10 @@ export const ChatEditor = memo(
       isMobile &&
       !isSimple &&
       !mobileVoiceActive &&
-      (workspaceSelectVisible || workspaceIndicatorVisible || gitBranchVisible);
+      (workspaceSelectVisible ||
+        workspaceIndicatorVisible ||
+        gitBranchVisible ||
+        Boolean(gitContextControl));
     // The workspace/Git row lives inside the capped box and wraps on narrow
     // viewports, so its measured height is added back to the cap.
     const mobileContextRowRef = useRef<HTMLDivElement>(null);
@@ -2995,6 +3018,7 @@ export const ChatEditor = memo(
         )}
         {(inToolbar ? gitChipInToolbar : gitBranchVisible) &&
           renderGitBranchChip(inToolbar && !showGitBranchLabel)}
+        {!inToolbar && gitContextControl}
       </>
     );
 
@@ -3264,6 +3288,14 @@ export const ChatEditor = memo(
                 <TooltipContent side="top">{planTooltip}</TooltipContent>
               </Tooltip>
             </TooltipProvider>
+          )}
+          {showToolbarAction('workflowMode') && (
+            <WorkflowModeControl
+              workflowMode={workflowMode}
+              workflowModeStatus={workflowModeStatus}
+              workflowModePending={workflowModePending}
+              onWorkflowModeChange={onWorkflowModeChange}
+            />
           )}
           {showModelAction && (
             <div
@@ -4457,6 +4489,7 @@ export const ChatEditor = memo(
           >
             {workspaceSelectVisible && renderWorkspaceSelector(false)}
             {gitBranchVisible && renderGitBranchChip(false)}
+            {gitContextControl}
           </div>
         )}
         {core.mobileComposer && (

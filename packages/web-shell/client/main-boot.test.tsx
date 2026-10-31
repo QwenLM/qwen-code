@@ -43,6 +43,9 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 vi.mock('./components/WorkspaceSessionProvider', () => ({
   WorkspaceSessionProvider: () => null,
 }));
+vi.mock('./ManagedAgentWebShell', () => ({
+  ManagedAgentWebShell: () => null,
+}));
 vi.mock('./config/daemon', () => ({
   getDaemonBaseUrl: () => '',
   getAllowedDaemonOrigin: (value: string) => value,
@@ -207,9 +210,9 @@ describe('web shell boot', () => {
     );
     expect(probes.length).toBeGreaterThan(0);
     for (const [, init] of probes) {
-      expect(init).toMatchObject({
-        headers: { Authorization: 'Bearer still-valid-device-credential' },
-      });
+      expect(new Headers(init?.headers).get('Authorization')).toBe(
+        'Bearer still-valid-device-credential',
+      );
     }
   });
 
@@ -241,9 +244,9 @@ describe('web shell boot', () => {
     );
     expect(probes.length).toBeGreaterThan(0);
     for (const [, init] of probes) {
-      expect(init).toMatchObject({
-        headers: { Authorization: 'Bearer stale-device-credential' },
-      });
+      expect(new Headers(init?.headers).get('Authorization')).toBe(
+        'Bearer stale-device-credential',
+      );
     }
     // …but its rejection must surface the rescan recovery, not the
     // terminal-token copy a phone user cannot act on.

@@ -39,12 +39,18 @@ actor 授予 OPERATOR 或 OWNER。每个物理卷只能出现在一条常驻映�
 
 使用现有 Java 保护 operator 的 `<reviewed-registration-json>
 <policy-name> <binding-name>` 命令生成精确存储及命名空间保护对象。命令只打印
-Kubernetes JSON List，不访问集群或数据库。在 server 包目录中调用已构建的
-operator：
+Kubernetes JSON List，不访问集群或数据库。在 reference 发行包中这样调用：
 
 ```bash
-java -Dloader.main=com.alibaba.qwen.code.managedagent.workspace.runtime.WorkspaceCsiProtectionMain \
-  -cp target/qwen-managed-agent-server-0.1.0-alpha-csi-runtime.jar \
+bin/qwen-managed-agent-admin csi-protection \
+  /absolute/path/registration.json resident-protection resident-binding
+```
+
+使用模块构建产物时，在仓库根目录运行同一个入口：
+
+```bash
+java -Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.WorkspaceCsiProtectionMain \
+  -cp packages/managed-agent-server/server/target/qwen-managed-agent-server-<version>-exec.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   /absolute/path/registration.json resident-protection resident-binding
 ```
@@ -88,12 +94,20 @@ reservation 并阻止切换。每个 Session 的 cwd 固定，可在下一 Sessi
 }
 ```
 
-操作者须已控制可信维护主机及部署凭据；actor 字段本身不认证身份。在 server 包
-目录中使用既有 fat jar 和配置：
+操作者须已控制可信维护主机及部署凭据；actor 字段本身不认证身份。在 reference
+发行包中：
 
 ```bash
-java -Dloader.main=com.alibaba.qwen.code.managedagent.persistence.ResidentWorkspaceRetirementMain \
-  -cp target/qwen-managed-agent-server-0.1.0-alpha.jar \
+bin/qwen-managed-agent-admin resident-retirement \
+  inspect /absolute/path/retirement.json \
+  --spring.config.additional-location=file:/absolute/path/application.yaml
+```
+
+使用模块构建产物时，在仓库根目录运行，并使用相同的参数：
+
+```bash
+java -Dloader.main=com.alibaba.qwen.code.managedagent.maintenance.ResidentWorkspaceRetirementMain \
+  -cp packages/managed-agent-server/server/target/qwen-managed-agent-server-<version>-exec.jar \
   org.springframework.boot.loader.launch.PropertiesLauncher \
   inspect /absolute/path/retirement.json \
   --spring.config.additional-location=file:/absolute/path/application.yaml

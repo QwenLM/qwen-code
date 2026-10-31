@@ -10,7 +10,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { checkArtifacts } from '../../scripts/verify-pr-check.mjs';
+import {
+  checkArtifacts,
+  checkMutationCoverage,
+} from '../../scripts/verify-pr-check.mjs';
 
 const SCRIPT = fileURLToPath(
   new URL('../../scripts/verify-pr-check.mjs', import.meta.url),
@@ -42,6 +45,9 @@ function makeArtifactDir(files, evidence = []) {
   writeFileSync(join(dir, 'report.md'), files.report);
   writeFileSync(join(dir, 'verdict.txt'), files.verdict);
   writeFileSync(join(dir, 'assertions.json'), files.assertions);
+  if (files.comment !== undefined) {
+    writeFileSync(join(dir, 'comment.md'), files.comment);
+  }
   if (evidence.length > 0) {
     mkdirSync(join(dir, 'evidence'));
     for (const name of evidence) {
@@ -173,6 +179,376 @@ describe('checkArtifacts', () => {
   });
 });
 
+// A round proved a repo test red on both arms, booked that red twice (head and
+// its base control), and published `findings` while its own verdict line said
+// neither reason was a defect in the PR. The prose taught how to prove a red
+// environmental and never how to count it afterwards.
+describe('failures ledger', () => {
+  const withFailures = (
+    failures,
+    verdict = 'findings',
+    fail = failures.length,
+  ) =>
+    check({
+      verdict: `${verdict}\n`,
+      report: `${verdict} · ${4 - fail} passed · ${fail} failed · 4 total · ${HEAD}\n`,
+      assertions: JSON.stringify({ pass: 4 - fail, fail, total: 4, failures }),
+    });
+
+  it('refuses the exact shape that shipped: findings with only environment reds', () => {
+    const result = withFailures(
+      [
+        { id: 'gh-config-dir-head', attribution: 'environment' },
+        { id: 'gh-config-dir-base-aa', attribution: 'environment' },
+      ],
+      'findings',
+      2,
+    );
+    expect(result.errors.join('\n')).toMatch(
+      /findings with 2 failed assertions and none attributed to the PR \(environment\)/,
+    );
+    expect(result.errors.join('\n')).toMatch(/expected-red pass/);
+  });
+
+  it('accepts findings when a failure is attributed to the PR', () => {
+    expect(
+      withFailures([{ id: 'budget-halt', attribution: 'pr' }]).errors,
+    ).toEqual([]);
+    expect(
+      withFailures([
+        { id: 'budget-halt', attribution: 'pr' },
+        { id: 'host-path', attribution: 'environment' },
+      ]).errors,
+    ).toEqual([]);
+  });
+
+  it('accepts inconclusive for a harness fault, which is the prescribed pairing', () => {
+    expect(
+      withFailures(
+        [{ id: 'flaky-probe', attribution: 'harness' }],
+        'inconclusive',
+      ).errors,
+    ).toEqual([]);
+  });
+
+  it('refuses blocked on a harness fault too', () => {
+    expect(
+      withFailures(
+        [{ id: 'flaky-probe', attribution: 'harness' }],
+        'blocked',
+      ).errors.join('\n'),
+    ).toMatch(/blocked with 1 failed assertion and none attributed to the PR/);
+  });
+
+  it('validates the ledger against the count and the vocabulary', () => {
+    const cases = [
+      ['not-an-array', /failures must be an array/],
+      [
+        [{ id: 'x', attribution: 'unknown' }],
+        /need an id and an attribution of/,
+      ],
+      [[{ attribution: 'pr' }], /need an id and an attribution of/],
+      [[{ id: '  ', attribution: 'pr' }], /need an id and an attribution of/],
+      [[], /lists 0 failures but counts fail 1/],
+    ];
+    for (const [failures, message] of cases) {
+      expect(withFailures(failures, 'findings', 1).errors.join('\n')).toMatch(
+        message,
+      );
+    }
+  });
+
+  // A malformed ledger is not an absent one: "carries no ledger" sends the
+  // reader looking in the wrong place, and the branch that skips that warning
+  // must not then read a null attribution list.
+  it('does not call a malformed ledger absent, and does not crash on it', () => {
+    for (const failures of [
+      'not-an-array',
+      [{ id: 'x', attribution: 'nope' }],
+      [],
+    ]) {
+      const result = withFailures(failures, 'findings', 1);
+      expect(result.errors.length).toBeGreaterThan(0);
+      expect(result.warnings.join('\n')).not.toMatch(
+        /carries no failures ledger/,
+      );
+    }
+  });
+
+  it('warns rather than fails when an older round carries no ledger', () => {
+    const result = check({
+      verdict: 'findings\n',
+      report: `findings · 3 passed · 1 failed · 4 total · ${HEAD}\n`,
+      assertions: JSON.stringify({ pass: 3, fail: 1, total: 4 }),
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).toMatch(/carries no failures ledger/);
+  });
+
+  it('accepts an empty ledger on a clean round', () => {
+    const result = check({
+      assertions: JSON.stringify({ pass: 4, fail: 0, total: 4, failures: [] }),
+    });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings).toEqual([]);
+  });
+});
+
+// "Every production commit since the previous round was mutated on its own"
+// shipped while two commits had no row. A coverage claim is universally
+// quantified over an enumerable set, so it is checked against that set.
+describe('checkMutationCoverage', () => {
+  const A = 'a'.repeat(40);
+  const B = 'b'.repeat(40);
+  const C = 'c'.repeat(40);
+  const matrix = (overrides = {}) =>
+    JSON.stringify({
+      coverageClaim: 'per-commit',
+      productionCommits: [A, B, C],
+      rows: [
+        { id: 'M1', commit: A },
+        { id: 'M2', commit: B },
+        { id: 'M3', commit: C },
+      ],
+      ...overrides,
+    });
+
+  it('stays silent when the round makes no per-commit claim', () => {
+    expect(checkMutationCoverage(null).errors).toEqual([]);
+    expect(checkMutationCoverage('').errors).toEqual([]);
+    expect(checkMutationCoverage('{"rows":[]}').errors).toEqual([]);
+    expect(
+      checkMutationCoverage(
+        JSON.stringify({ coverageClaim: 'per-guard', rows: [] }),
+      ).errors,
+    ).toEqual([]);
+  });
+
+  it('accepts a claim every commit backs', () => {
+    expect(checkMutationCoverage(matrix()).errors).toEqual([]);
+  });
+
+  // "Every commit was mutated" over no commits is vacuously true, and an
+  // empty list is the cheapest enumeration to supply. It is also the one
+  // incomplete list that satisfies the coverage check without this refusal.
+  it('refuses a claim over an empty enumeration', () => {
+    const result = checkMutationCoverage(
+      matrix({ productionCommits: [], rows: [] }),
+    );
+    expect(result.errors.join('\n')).toMatch(
+      /empty productionCommits list: a claim over an empty set is vacuously true/,
+    );
+    // The refusal has to recommend the recipe the skill actually teaches: the
+    // one that cuts at the first parent drops the PR's own feature-merge
+    // commits, which is the under-count this rule exists to prevent.
+    expect(result.errors.join('\n')).toContain(
+      'git log --no-merges <previous>..<head> --not <target>',
+    );
+    expect(result.errors.join('\n')).not.toContain('--first-parent');
+    // Dropping the claim is the honest way out for a docs-only round.
+    expect(
+      checkMutationCoverage(JSON.stringify({ rows: [], productionCommits: [] }))
+        .errors,
+    ).toEqual([]);
+  });
+
+  it('names the commits that have no row', () => {
+    const result = checkMutationCoverage(
+      matrix({ rows: [{ id: 'M1', commit: A }] }),
+    );
+    expect(result.errors.join('\n')).toMatch(
+      /2 of 3 production commits have no row/,
+    );
+    expect(result.errors.join('\n')).toContain(B);
+    expect(result.errors.join('\n')).toContain(C);
+  });
+
+  it('matches abbreviated and full OIDs in either direction', () => {
+    expect(
+      checkMutationCoverage(
+        matrix({
+          productionCommits: [A.slice(0, 10)],
+          rows: [{ id: 'M1', commit: A }],
+        }),
+      ).errors,
+    ).toEqual([]);
+    expect(
+      checkMutationCoverage(
+        matrix({
+          productionCommits: [A],
+          rows: [{ id: 'M1', commit: A.slice(0, 10) }],
+        }),
+      ).errors,
+    ).toEqual([]);
+  });
+
+  it('refuses a claim with no enumeration, and a malformed matrix', () => {
+    expect(
+      checkMutationCoverage(
+        matrix({ productionCommits: undefined }),
+      ).errors.join('\n'),
+    ).toMatch(/needs productionCommits\[\] from git log and rows\[\]/);
+    expect(
+      checkMutationCoverage(matrix({ rows: null })).errors.join('\n'),
+    ).toMatch(/needs productionCommits\[\] from git log and rows\[\]/);
+    expect(
+      checkMutationCoverage(
+        matrix({ productionCommits: ['zzzzzzz'] }),
+      ).errors.join('\n'),
+    ).toMatch(/must be hex commit ids/);
+    expect(checkMutationCoverage('not json').errors).toContain(
+      'mutations.json is not valid JSON',
+    );
+    expect(checkMutationCoverage('[]').errors).toContain(
+      'mutations.json must be an object with rows',
+    );
+  });
+
+  it('reaches the verdict through checkArtifacts, not just on its own', () => {
+    const result = checkArtifacts({
+      files: {
+        ...validFiles(),
+        mutations: matrix({ rows: [{ id: 'M1', commit: A }] }),
+      },
+      evidence: ['01-ab-cells.png'],
+    });
+    expect(result.errors.join('\n')).toMatch(/claims per-commit coverage but/);
+  });
+});
+
+// Three rounds of PR #15984 opened with the title and the whole verdict
+// paragraph merged into one `#` line. The Markdown is structurally valid;
+// GitHub renders it as a single giant H1, a wall of bold text. The shape is
+// a warning, not an error: a cosmetic defect must not make the CI publisher
+// refuse an otherwise consistent verdict.
+describe('verdict line shape', () => {
+  const shippedLead = `# PR 15984 round 3 verification — **Verdict: merge-ready** — 63/63 scripted assertions passed, 0 failed. Verified head: \`${HEAD}\`.`;
+
+  it('warns when the verdict paragraph is a heading, without failing the round', () => {
+    const result = check({ report: `${shippedLead}\n` });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).toMatch(
+      /report\.md opens with a heading carrying the verdict/,
+    );
+  });
+
+  it('accepts the same line as a plain paragraph', () => {
+    const result = check({ report: `${shippedLead.slice(2)}\n` });
+    expect(result.warnings).toEqual([]);
+  });
+
+  it('accepts a short title heading that carries no verdict', () => {
+    const result = check({ report: `# Report\n\nmerge-ready · ${HEAD}\n` });
+    expect(result.warnings.join('\n')).not.toMatch(/opens with a heading/);
+  });
+
+  it('warns on an over-long heading even without the verdict word', () => {
+    const result = check({
+      report: `# ${'t'.repeat(130)}\n\nmerge-ready · ${HEAD}\n`,
+    });
+    expect(result.warnings.join('\n')).toMatch(
+      /opens with a heading of 132 characters/,
+    );
+  });
+
+  it('keeps the shape verdicts under CRLF line endings', () => {
+    const heading = check({ report: `${shippedLead}\r\n` });
+    expect(heading.warnings.join('\n')).toMatch(
+      /report\.md opens with a heading carrying the verdict/,
+    );
+    const plain = check({ report: `${shippedLead.slice(2)}\r\n` });
+    expect(plain.warnings).toEqual([]);
+  });
+
+  // GFM renders an ATX heading indented up to three spaces as a heading
+  // (verified against the GitHub markdown API); four spaces are a code
+  // block. The indent must not be a way around the shape check.
+  it('warns on a verdict heading indented up to three spaces', () => {
+    for (const indent of [' ', '  ', '   ']) {
+      const result = check({ report: `${indent}${shippedLead}\n` });
+      expect(result.warnings.join('\n')).toMatch(
+        /report\.md opens with a heading carrying the verdict/,
+      );
+    }
+    const codeBlock = check({ report: `    ${shippedLead}\n` });
+    expect(codeBlock.warnings.join('\n')).not.toMatch(/opens with a heading/);
+  });
+});
+
+// report.md deliberately carries no footer — both publish paths append it at
+// comment time — so the footer is checkable only on comment.md, the exact
+// body a local round posts. All three PR #15984 rounds shipped without it.
+describe('comment.md footer', () => {
+  const footer =
+    '_— test-model via Qwen Code /verify-pr (v0.1.2; skill 0123456789ab)_';
+  const body = `merge-ready · 4 passed · 0 failed · 4 total · ${HEAD}\n`;
+
+  it('accepts a body ending in the resolved footer', () => {
+    const result = check({ comment: `${body}\n${footer}\n` });
+    expect(result.warnings).toEqual([]);
+  });
+
+  // PR #16002 review: a Windows-authored comment.md with CRLF line endings
+  // failed the anchored footer regex on the stray \r, and the local publish
+  // gate sent a valid artifact back for unnecessary repair. GitHub renders
+  // CRLF and LF identically; the checker has to agree.
+  it('accepts the same footer with CRLF line endings (LF/CRLF parity)', () => {
+    const lf = check({ comment: `${body}\n${footer}\n` });
+    const crlf = check({
+      comment: `${body}\n${footer}\n`.replace(/\n/g, '\r\n'),
+    });
+    expect(lf.warnings).toEqual([]);
+    expect(crlf.warnings).toEqual([]);
+  });
+
+  it('still flags a missing footer and a heading lead under CRLF', () => {
+    const missing = check({ comment: body.replace(/\n/g, '\r\n') });
+    expect(missing.warnings.join('\n')).toMatch(
+      /does not end with the attribution footer/,
+    );
+    const heading = check({
+      comment: `# PR 15984 round 3 verification — **Verdict: merge-ready** — ${HEAD}\r\n\r\n${footer}\r\n`,
+    });
+    expect(heading.warnings.join('\n')).toMatch(
+      /comment\.md opens with a heading carrying the verdict/,
+    );
+  });
+
+  it('warns when the footer is missing', () => {
+    const result = check({ comment: body });
+    expect(result.errors).toEqual([]);
+    expect(result.warnings.join('\n')).toMatch(
+      /comment\.md does not end with the attribution footer/,
+    );
+  });
+
+  it('warns on a malformed footer', () => {
+    for (const bad of [
+      '_— test-model via Qwen Code /verify-pr (v0.1.2; skill xyz)_',
+      '_— test-model via Qwen Code /verify-pr (0.1.2; skill 0123456789ab)_',
+      '— test-model via Qwen Code /verify-pr (v0.1.2; skill 0123456789ab)',
+    ]) {
+      const result = check({ comment: `${body}\n${bad}\n` });
+      expect(result.warnings.join('\n')).toMatch(
+        /does not end with the attribution footer/,
+      );
+    }
+  });
+
+  it('checks the lead shape on the posted body too', () => {
+    const result = check({
+      comment: `# PR 15984 round 3 verification — **Verdict: merge-ready** — ${HEAD}\n\n${footer}\n`,
+    });
+    expect(result.warnings.join('\n')).toMatch(
+      /comment\.md opens with a heading carrying the verdict/,
+    );
+  });
+
+  it('stays silent when the round has no comment.md, which the workflow never writes', () => {
+    expect(check({}).warnings).toEqual([]);
+  });
+});
+
 // The CLI is the path a maintainer runs, so the exit codes are the contract.
 describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
   const run = (dir) =>
@@ -197,7 +573,43 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     expect(bad.stdout).toContain('failed: verdict=merge-ready');
   });
 
-  it('reads the verified head from the round snapshot', () => {
+  // The CI publisher parses the last stdout line; shape and footer warnings
+  // must stay above it and keep the exit code at 0.
+  it('warns without failing when comment.md lacks the footer', () => {
+    const dir = makeArtifactDir(
+      validFiles({ comment: `merge-ready · ${HEAD}\n` }),
+      ['01-ab-cells.png'],
+    );
+    const result = run(dir);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toContain(
+      'warn  comment.md does not end with the attribution footer',
+    );
+    expect(result.stdout).toContain(
+      'ok: verdict=merge-ready (4 passed · 0 failed · 4 total)',
+    );
+  });
+
+  // The reviewer's CLI probe: the same valid footer, only the line endings
+  // changed to CRLF, must not produce the footer warning.
+  it('accepts a CRLF comment.md with a valid footer end to end', () => {
+    const dir = makeArtifactDir(
+      validFiles({
+        comment: `merge-ready · ${HEAD}\r\n\r\n_— test-model via Qwen Code /verify-pr (v0.26.4; skill 0123456789ab)_\r\n`,
+      }),
+      ['01-ab-cells.png'],
+    );
+    const result = run(dir);
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain(
+      'does not end with the attribution footer',
+    );
+    expect(result.stdout).toContain(
+      'ok: verdict=merge-ready (4 passed · 0 failed · 4 total)',
+    );
+  });
+
+  it('names the legacy snapshot when the round has none', () => {
     const root = mkdtempSync(join(tmpdir(), 'verify-pr-check-snapshot-'));
     tmpDirs.push(root);
     const artifacts = join(root, 'tmp', 'pr7-verify-20261026-120000');
@@ -224,6 +636,20 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     });
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(`does not name the verified head ${head}`);
+    expect(result.stdout).toContain(
+      join(root, 'tmp', 'verify-context', 'pr7.json'),
+    );
+
+    for (const snapshot of ['{', '{}']) {
+      writeFileSync(join(artifacts, 'context.json'), snapshot);
+      const unreadable = run(artifacts);
+      expect(unreadable.status).toBe(0);
+      expect(unreadable.stdout).toContain(join(artifacts, 'context.json'));
+      expect(unreadable.stdout).toContain('fell back to presence-only');
+      expect(unreadable.stdout).not.toContain(
+        `does not name the verified head ${head}`,
+      );
+    }
   });
 
   it('exits 2 without a directory and 1 on a missing one', () => {

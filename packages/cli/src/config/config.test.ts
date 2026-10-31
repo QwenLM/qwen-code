@@ -1476,6 +1476,7 @@ describe('parseArguments', () => {
 
 describe('loadCliConfig', () => {
   const originalArgv = process.argv;
+  let originalDebugLogFile: string | undefined;
 
   beforeEach(() => {
     vi.resetAllMocks();
@@ -1498,11 +1499,21 @@ describe('loadCliConfig', () => {
     vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
     vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
     resetMcpApprovalsForTesting();
+    originalDebugLogFile = process.env['QWEN_DEBUG_LOG_FILE'];
   });
 
   afterEach(() => {
     process.argv = originalArgv;
     vi.unstubAllEnvs();
+    // vi.unstubAllEnvs cannot undo the direct `QWEN_DEBUG_LOG_FILE = '1'`
+    // assignment that loadCliConfig makes under --debug; a leaked '1' enables
+    // the debug logger's fire-and-forget writes for the rest of the file,
+    // and they land after the QWEN_HOME pin's afterAll sweep in test-setup.
+    if (originalDebugLogFile === undefined) {
+      delete process.env['QWEN_DEBUG_LOG_FILE'];
+    } else {
+      process.env['QWEN_DEBUG_LOG_FILE'] = originalDebugLogFile;
+    }
     resetMcpApprovalsForTesting();
     vi.restoreAllMocks();
   });
@@ -3007,7 +3018,7 @@ describe('loadCliConfig', () => {
   });
 
   it.each([undefined, false, true])(
-    'passes only the resolved Generated UI opt-in as a runtime candidate: %s',
+    'passes the resolved Generated UI setting, on by default, as a runtime candidate: %s',
     async (enabled) => {
       process.argv = ['node', 'script.js'];
       const argv = await parseArguments();
@@ -3015,7 +3026,7 @@ describe('loadCliConfig', () => {
       expect(mockConfigConstructorParams).toHaveBeenCalledWith(
         expect.objectContaining({
           bundledGeneratedUi: expect.objectContaining({
-            enabled: enabled === true,
+            enabled: enabled !== false,
           }),
         }),
       );
@@ -3031,6 +3042,7 @@ describe('loadCliConfig', () => {
         bundledGeneratedUi: {
           enabled: true,
           unavailableReason: 'unsupported-runtime',
+          explicit: true,
         },
       }),
     );

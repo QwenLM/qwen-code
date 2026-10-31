@@ -208,6 +208,11 @@ afterEach(() => {
 });
 
 describe('EmbeddedApp host wiring', () => {
+  it('allows the shared Workflow mode control in the modern webview', async () => {
+    const props = await renderApp();
+    expect(props.composerToolbarActions).toContain('workflowMode');
+  });
+
   it('attributes new sessions to the VS Code channel', async () => {
     const initialSessionId = document.body.dataset.qwenSessionId;
     delete document.body.dataset.qwenSessionId;
@@ -216,6 +221,21 @@ describe('EmbeddedApp host wiring', () => {
       expect(props['sessionSourceType']).toBe('vscode');
     } finally {
       document.body.dataset.qwenSessionId = initialSessionId;
+    }
+  });
+
+  it('never passes a language prop, so the shell resolves its own UI language', async () => {
+    // The shell resolves the UI language from its own sources (daemon setting,
+    // then browser locale). A language prop would pin the value read at mount
+    // and reset the pick back to the entry's stale readLanguage reading when
+    // the setting changes later; readLanguage still feeds the chrome copy.
+    const previousLang = document.documentElement.lang;
+    try {
+      document.documentElement.lang = 'ru';
+      const props = await renderApp();
+      expect(props.language).toBeUndefined();
+    } finally {
+      document.documentElement.lang = previousLang;
     }
   });
 
