@@ -57,6 +57,12 @@ interface MarkdownDisplayProps {
    * respects the same viewport budget the outer wrapper enforces. See #6867.
    */
   enforceHeightBudget?: boolean;
+  /**
+   * Give paragraph blocks an explicit width instead of letting yoga measure the
+   * wrapping `<Text>` implicitly. Pass it only where `contentWidth` is exactly
+   * the width the paragraph may use.
+   */
+  constrainParagraphWidth?: boolean;
 }
 
 export interface MarkdownSourceCopyIndexOffsets {
@@ -138,11 +144,15 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   textColor = theme.text.primary,
   sourceCopyIndexOffsets,
   enforceHeightBudget = false,
+  constrainParagraphWidth = false,
 }) => {
   const { renderMode } = useRenderMode();
   if (!text) return <></>;
 
   const renderVisualBlocks = renderMode === 'render';
+  const paragraphWidth = constrainParagraphWidth
+    ? Math.max(0, contentWidth)
+    : undefined;
   // Some models stream long runs of trailing newlines after useful content.
   // Trim them from the live preview so blank rows do not push stable streaming
   // text into scrollback on every repaint. The committed transcript still
@@ -513,7 +523,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       } else {
         // Not a table, treat as regular text
         addContentBlock(
-          <Box key={key}>
+          <Box key={key} width={paragraphWidth}>
             <Text wrap="wrap">
               <RenderInline
                 text={line}
@@ -590,7 +600,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       // Process current line as normal
       if (line.trim().length > 0) {
         addContentBlock(
-          <Box key={key}>
+          <Box key={key} width={paragraphWidth}>
             <Text wrap="wrap">
               <RenderInline
                 text={line}
@@ -718,7 +728,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         }
       } else {
         addContentBlock(
-          <Box key={key}>
+          <Box key={key} width={paragraphWidth}>
             <Text wrap="wrap" color={textColor}>
               <RenderInline
                 text={line}
