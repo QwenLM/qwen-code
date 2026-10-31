@@ -82,6 +82,41 @@ describe('DialogManager', () => {
     });
   });
 
+  describe('auth dialog', () => {
+    it('passes the constrained listDialogHeight into the auth dialog budget', async () => {
+      const terminalHeight = 14;
+      const state = createUIState({
+        terminalHeight,
+        mainAreaWidth: 36,
+        auth: { isAuthDialogOpen: true } as UIState['auth'],
+      });
+      const config = {
+        getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
+        getAuthType: vi.fn().mockReturnValue(undefined),
+      } as unknown as Config;
+      const actions = {
+        auth: {
+          closeAuthDialog: vi.fn(),
+          handleProviderSubmit: vi.fn(),
+          onAuthError: vi.fn(),
+        },
+      } as unknown as UIActions;
+      const { lastFrame } = renderWithProviders(
+        <UIStateContext.Provider value={state}>
+          <UIActionsContext.Provider value={actions}>
+            <DialogManager addItem={vi.fn()} terminalWidth={100} />
+          </UIActionsContext.Provider>
+        </UIStateContext.Provider>,
+        { config },
+      );
+
+      await vi.waitFor(() => {
+        const frame = lastFrame() ?? '';
+        expect(frame).toContain('Qwen');
+        expect(frame.split('\n').length).toBeLessThanOrEqual(terminalHeight);
+      });
+    });
+  });
   describe('provider update prompt', () => {
     const request = (id: number, providerLabel: string) => ({
       id,

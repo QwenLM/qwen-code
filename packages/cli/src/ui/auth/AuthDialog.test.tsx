@@ -352,6 +352,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         await moveDownAndWaitForSelection(stdin, lastFrame, label);
         expectReadableSelection(label);
       }
+
       expect(lastFrame()?.replace(/[│\s]/g, '')).toContain(
         'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/',
       );
@@ -466,7 +467,11 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       // when it fits.
       expect(painted).toBeGreaterThan(0);
       expect(frame).toContain('QwenCloud');
+      if (height === 14 && width === 80) {
+        expect(frame).toContain('Alibaba ModelStudio');
+      }
       const normalizedFrame = frame.replace(/[│\s]/g, '');
+
       if (expectedError) {
         expect(normalizedFrame).toContain(expectedError.replace(/\s/g, ''));
       } else {
