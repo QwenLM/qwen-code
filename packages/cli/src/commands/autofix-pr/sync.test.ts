@@ -303,6 +303,38 @@ describe('runSync (real git, bare remote)', () => {
     expect(run(repo, 'rev-parse', 'HEAD')).toBe(run(repo, 'rev-parse', 'main'));
   });
 
+  it("gives every check its fix pushes back when it adopts someone else's push", () => {
+    // The watch pushed `fix`; a check failed on it once.
+    const fix = commitIn(paths.worktreePath, 'fix.txt');
+    run(paths.worktreePath, 'push', '-q', 'origin', 'HEAD:feat');
+    run(remote, 'update-ref', 'refs/pull/7/head', fix);
+    // Recorded on the head before the watch's push, counting from none.
+    const red = {
+      identity: 'run:1:2:pull_request:Test',
+      check: 'Test',
+      head: featSha,
+      pushes: 2,
+    };
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      lastKnownHeadSha: featSha,
+      pushedShas: [fix],
+      failingChecks: [red],
+    });
+    // Following its own push spends and gives back nothing.
+    expect(runSync(7)).toMatchObject({ synced: true, headSha: fix });
+    expect(readState(paths.statePath)!.failingChecks).toEqual([red]);
+    // Someone else pushes on top: whether or not a round reads it, the
+    // check's pushes are back, counted from the watch's latest push.
+    run(repo, 'fetch', '-q', 'origin', 'feat');
+    run(repo, 'branch', '-f', 'feat', 'FETCH_HEAD');
+    const theirs = pushFromElsewhere('theirs.txt');
+    expect(runSync(7)).toMatchObject({ synced: true, headSha: theirs });
+    expect(readState(paths.statePath)!.failingChecks).toEqual([
+      { ...red, pushes: 0, lastPush: fix },
+    ]);
+  });
+
   it('asks for a merge when the worktree holds work the new head lacks, and changes nothing', () => {
     const ours = commitIn(paths.worktreePath, 'ours.txt');
     const theirs = pushFromElsewhere('theirs.txt');
@@ -535,12 +567,34 @@ describe('runSync (real git, bare remote)', () => {
     run(author, 'commit', '-q', '-m', 'bump to nowhere');
     run(author, 'push', '-q', 'origin', 'feat');
     expect(runSync(7)).toMatchObject({ synced: false, moved: true });
-    // Discarding cannot check it out either, and says the worktree is
-    // still not clean.
+    // The author pushes once more. Discarding cannot check it out either,
+    // and says the worktree is still not clean — having adopted the push
+    // all the same, which gives a spent check its pushes back.
+    const red = {
+      identity: 'run:1:2:pull_request:Test',
+      check: 'Test',
+      head: withSub,
+      pushes: 3,
+    };
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      failingChecks: [red],
+    });
+    run(
+      author,
+      'update-index',
+      '--cacheinfo',
+      `160000,${'d'.repeat(40)},vendor/sub`,
+    );
+    run(author, 'commit', '-q', '-m', 'bump to nowhere again');
+    run(author, 'push', '-q', 'origin', 'feat');
     expect(runSync(7, true)).toMatchObject({
       synced: false,
       reason: expect.stringContaining('still not clean after discarding'),
     });
+    expect(readState(paths.statePath)!.failingChecks).toEqual([
+      { ...red, pushes: 0 },
+    ]);
   });
 
   it('never recurses into a submodule the worktree has not checked out, whatever submodule.recurse says', () => {
