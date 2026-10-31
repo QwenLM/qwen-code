@@ -30,6 +30,11 @@ import type { WebShellTheme } from './themeContext';
 
 export type MarkdownContentSource = 'assistant' | 'thinking';
 
+/** Select an existing directory on the connected daemon, or cancel with undefined. */
+export type WebShellWorkspaceDirectoryPicker = (opts?: {
+  signal?: AbortSignal;
+}) => Promise<string | undefined>;
+
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;
   /**
@@ -703,6 +708,7 @@ export type FooterRenderer = ComponentType<WebShellFooterRenderInfo>;
  * resolved UI language. Return phrases to override the built-in defaults, an
  * empty array to hide the phrase entirely, or `undefined`/`null` to fall back
  * to the built-in defaults for that language.
+ * `ui.accessibility.enableLoadingPhrases: false` hides even custom phrases.
  */
 export type LoadingPhrasesResolver = (
   language: string,
@@ -721,6 +727,7 @@ export interface WebShellCustomization {
   parseUserMessageContent?: UserMessageContentParser;
   renderUserMessageContent?: UserMessageContentRenderer;
   composerTagIcons?: WebShellComposerTagIconMap;
+  composerVariant?: 'default' | 'simple';
   /**
    * Built-in / host @ mention providers. Split-view panes share this context
    * so they match the main composer without ChatPane prop drilling.

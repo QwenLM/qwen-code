@@ -26,6 +26,7 @@ export const workspacePackageNames = new Set([
   '@qwen-code/channel-wecom',
   '@qwen-code/channel-weixin',
   '@qwen-code/chrome-bridge',
+  '@qwen-code/cua-sdk',
   '@qwen-code/external-context',
   '@qwen-code/external-context-mem0',
   '@qwen-code/test-failure-explorer',

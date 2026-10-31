@@ -5,6 +5,8 @@ import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { DaemonHttpError } from '@qwen-code/sdk/daemon';
 import type { WebShellProps } from '../App';
+import { ManagedStandaloneApp } from '../ManagedStandaloneApp';
+import { inferStandaloneBasePath } from '../utils/sessionPath';
 
 const mocks = vi.hoisted(() => ({
   connection: {
@@ -33,6 +35,9 @@ const mocks = vi.hoisted(() => ({
   appProps: [] as Array<Record<string, unknown>>,
 }));
 
+vi.mock('../ManagedAgentWebShell', () => ({
+  ManagedAgentWebShell: () => null,
+}));
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DaemonSessionProvider: ({
     children,
@@ -68,6 +73,7 @@ describe('WorkspaceSessionProvider targets', () => {
   let root: Root;
 
   beforeEach(() => {
+    window.history.replaceState(null, '', '/');
     mocks.connection = {
       status: 'connected',
       sessionId: 'session-a',
@@ -104,6 +110,8 @@ describe('WorkspaceSessionProvider targets', () => {
   afterEach(() => {
     act(() => root.unmount());
     container.remove();
+    window.history.replaceState(null, '', '/');
+    vi.unstubAllGlobals();
   });
 
   async function renderTarget(
@@ -453,6 +461,128 @@ describe('WorkspaceSessionProvider targets', () => {
     expect(location.pathname).toBe('/');
     expect(location.search).toBe('');
     expect(mocks.providerProps.at(-1)).toMatchObject({ sessionId: undefined });
+  });
+
+  async function renderManagedShell() {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () =>
+        Response.json({
+          mode: 'managed',
+          productScope: 'local:installation-1',
+          agentId: 'qwen-code',
+          enableWorkspaceBinding: true,
+        }),
+      ),
+    );
+    await act(async () =>
+      root.render(
+        <ManagedStandaloneApp daemonToken="browser-token">
+          {(managedAgentProvider) => (
+            <WorkspaceSessionProvider
+              urlNavigation={{
+                basePath: inferStandaloneBasePath(window.location.pathname),
+              }}
+              webShellProps={{ managedAgentProvider }}
+            />
+          )}
+        </ManagedStandaloneApp>,
+      ),
+    );
+  }
+
+  it.each([
+    '/session/old-runtime?workspace=missing',
+    '/app/session/old-runtime?workspace=missing',
+    '/session/old-runtime?context=standalone',
+    '/session/old-runtime?context=live',
+  ])(
+    'restores Managed history without a stale Local target from %s',
+    async (path) => {
+      window.history.replaceState(
+        null,
+        '',
+        `${path}&managed=1&managedSession=gateway-session`,
+      );
+      await renderManagedShell();
+      expect(mocks.providerMounts).toBe(1);
+      expect(mocks.providerProps.at(-1)).toMatchObject({
+        sessionId: undefined,
+        sessionContext: undefined,
+        workspaceCwd: undefined,
+      });
+      expect(mocks.appProps.at(-1)?.['managedAgentProvider']).toMatchObject({
+        canCancel: true,
+      });
+      expect(mocks.getStandaloneSession).not.toHaveBeenCalled();
+      expect(window.location.pathname).toBe(
+        path.startsWith('/app/') ? '/app' : '/',
+      );
+      const params = new URLSearchParams(window.location.search);
+      expect(params.get('managed')).toBe('1');
+      expect(params.get('managedSession')).toBe('gateway-session');
+      expect(params.has('workspace')).toBe(false);
+      expect(params.has('context')).toBe(false);
+    },
+  );
+
+  it('restores a Managed settings page without a stale Local history target', async () => {
+    window.history.replaceState(
+      {
+        __qwenWebShellNavigation: {
+          basePath: '',
+          source: `${window.location.origin}/session/old-runtime?workspace=missing`,
+        },
+      },
+      '',
+      '/settings?managed=1&managedSession=gateway-session',
+    );
+    await renderManagedShell();
+    expect(mocks.providerMounts).toBe(1);
+    expect(mocks.providerProps.at(-1)?.['sessionId']).toBeUndefined();
+    expect(window.location.pathname).toBe('/settings');
+    expect(
+      new URLSearchParams(window.location.search).get('managedSession'),
+    ).toBe('gateway-session');
+  });
+
+  it('keeps an explicit Local session target when Managed is also available', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/session/session-b?workspace=b&managed=0&managedSession=gateway-session',
+    );
+    await renderManagedShell();
+    expect(mocks.providerProps.at(-1)).toMatchObject({
+      sessionId: 'session-b',
+      workspaceCwd: '/work/b',
+    });
+    expect(mocks.appProps.at(-1)).toMatchObject({
+      initialSelectedWorkspaceCwd: '/work/b',
+      managedAgentProvider: expect.objectContaining({ canCancel: true }),
+    });
+    expect(window.location.pathname).toBe('/session/session-b');
+    expect(new URLSearchParams(window.location.search).get('workspace')).toBe(
+      'b',
+    );
+    expect(new URLSearchParams(window.location.search).get('managed')).toBe(
+      '0',
+    );
+  });
+
+  it('keeps the unavailable workspace refusal for an explicit Local session', async () => {
+    window.history.replaceState(
+      null,
+      '',
+      '/session/session-missing?workspace=missing&managed=0',
+    );
+    await renderManagedShell();
+    expect(mocks.providerMounts).toBe(0);
+    expect(container.textContent).toContain('Workspace not found');
+    expect(window.location.pathname).toBe('/session/session-missing');
+    expect(new URLSearchParams(window.location.search).get('managed')).toBe(
+      '0',
+    );
   });
 
   it('drops an unavailable explicit context for a primary new session', async () => {

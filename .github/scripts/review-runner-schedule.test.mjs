@@ -82,7 +82,78 @@ describe('review runner schedule', () => {
       [],
     );
     assert.deepEqual(planLabels([runner(1, ['ecs-qwen'])], 'ci'), []);
-    assert.throws(() => planLabels([], 'invalid'), /mode must be review or ci/);
+    assert.throws(
+      () => planLabels([], 'invalid'),
+      /mode must be review, day or ci/,
+    );
+  });
+
+  it('keeps the named runners on review and returns the rest to CI in day mode', () => {
+    assert.deepEqual(
+      planLabels(
+        [
+          runner(1, ['ecs-qwen', 'ecs-autofix'], { name: 'ecs-qwen-hk2-1' }),
+          runner(2, ['ecs-qwen'], { name: 'ecs-qwen-hk2-2' }),
+          runner(3, ['ecs-review'], { name: 'ecs-qwen-hk1-7' }),
+          runner(4, ['ecs-qwen'], { name: 'ecs-qwen-hk1-8' }),
+          runner(5, ['ecs-qwen'], { name: 'ecs-qwen-hk3-9' }),
+        ],
+        'day',
+        ['ecs-qwen-hk2-1'],
+      ),
+      [
+        {
+          id: 1,
+          name: 'ecs-qwen-hk2-1',
+          add: ['ecs-review'],
+          remove: ['ecs-qwen'],
+        },
+        {
+          id: 3,
+          name: 'ecs-qwen-hk1-7',
+          add: ['ecs-qwen'],
+          remove: ['ecs-review'],
+        },
+      ],
+    );
+  });
+
+  it('is idempotent for day mode and rejects a review-day name the fleet lacks', () => {
+    assert.deepEqual(
+      planLabels(
+        [runner(1, ['ecs-review'], { name: 'ecs-qwen-hk2-1' })],
+        'day',
+        ['ecs-qwen-hk2-1'],
+      ),
+      [],
+    );
+    // A typo would otherwise shrink the daytime pool on every morning tick
+    // while the run stays green.
+    assert.throws(
+      () => planLabels([runner(1, ['ecs-qwen'])], 'day', ['ecs-qwen-hk9-1']),
+      /match no registered hk1\/hk2 runner/,
+    );
+    assert.throws(
+      () => planLabels([], 'day', []),
+      /needs at least one review-day runner name/,
+    );
+  });
+
+  it('leaves an offline review-day runner untouched', () => {
+    assert.deepEqual(
+      planLabels(
+        [
+          runner(1, ['ecs-review'], {
+            name: 'ecs-qwen-hk2-1',
+            status: 'offline',
+          }),
+          runner(2, ['ecs-qwen'], { name: 'ecs-qwen-hk2-2' }),
+        ],
+        'day',
+        ['ecs-qwen-hk2-1'],
+      ),
+      [],
+    );
   });
 
   it('wires two daily UTC switches and manual pool selection', () => {
@@ -101,11 +172,20 @@ describe('review runner schedule', () => {
     );
     assert.ok(
       schedule.includes(
-        "github.event.schedule == '0 9 * * *' && 'review' || 'ci'",
+        "github.event.schedule == '0 9 * * *' && 'review' || 'day'",
       ),
     );
     assert.ok(schedule.includes('"$GITHUB_REPOSITORY" "$POOL"'));
     assert.ok(schedule.includes('secrets.RUNNER_ADMIN_PAT'));
+    // The daytime pool. Four names stay on review after the 05:00 switch; an
+    // unset override falls back to them, and a name the fleet does not have
+    // fails the tick instead of shrinking the pool silently.
+    assert.ok(schedule.includes("- 'day'"));
+    assert.match(
+      schedule,
+      /REVIEW_DAY_HOSTS: .*'ecs-qwen-hk2-1 ecs-qwen-hk2-2 ecs-qwen-hk2-3 ecs-qwen-hk2-4'/,
+    );
+    assert.ok(schedule.includes('"${day_hosts[@]}"'));
     // The in-repo half of the fence on the admin PAT. Losing it is silent:
     // a dispatch from any other branch still runs, now executing that
     // branch's copy of the planner with the token in its environment. The

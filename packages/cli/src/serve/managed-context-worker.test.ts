@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
+import * as tar from 'tar';
+import { compileManagedExtensionPackage } from '@qwen-code/qwen-code-core/extension/managed-package.js';
+import {
+  MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+  MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST,
+} from './managed-extension-profile.js';
+import { extensionToolInput } from './hosted-extension-tool-context.js';
 import express from 'express';
 import fs from 'node:fs';
 import os from 'node:os';
@@ -373,6 +380,268 @@ describe('Managed context worker boot', () => {
       readManagedRuntimeWorkerBoot(Readable.from([document])),
     ).rejects.toThrow('Managed Runtime worker boot payload is invalid.');
   });
+
+  it.skipIf(process.platform !== 'darwin')(
+    'routes exact extension assets read-only and native Shell with private settings through the selected worker',
+    async () => {
+      const root = workspace(['services/api', 'services/web']);
+      const cache = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'extension-worker-cache-'),
+      );
+      const source = fs.mkdtempSync(
+        path.join(os.tmpdir(), 'extension-worker-source-'),
+      );
+      onTestFinished(() => {
+        fs.rmSync(cache, { recursive: true, force: true });
+        fs.rmSync(source, { recursive: true, force: true });
+        vi.unstubAllEnvs();
+      });
+      fs.writeFileSync(
+        path.join(source, 'qwen-extension.json'),
+        JSON.stringify({
+          name: 'native-test',
+          version: '1.0.0',
+          settings: [
+            { name: 'Token', envVar: 'SELECTED_SECRET', sensitive: true },
+          ],
+        }),
+      );
+      fs.writeFileSync(
+        path.join(source, 'resource.txt'),
+        'private package resource',
+      );
+      const target = {
+        platform: 'darwin' as const,
+        arch: process.arch as 'arm64' | 'x64',
+      };
+      const compiled = await compileManagedExtensionPackage(source, {
+        target,
+        resolveRecipes: false,
+      });
+      const archive = path.join(cache, 'upload.tgz');
+      await tar.c({ cwd: source, file: archive, gzip: true }, [
+        'qwen-extension.json',
+        'resource.txt',
+      ]);
+      const bytes = fs.readFileSync(archive);
+      const pin = {
+        extensionId: 'one',
+        packageRevision: 1,
+        packageDigest: createHash('sha256').update(bytes).digest('hex'),
+        settingsRevision: 1,
+      };
+      vi.stubEnv('OTHER_EXTENSION_SECRET', 'must-not-inherit');
+      const origin = await startWorker({
+        ...BOOT,
+        mountRoot: root,
+        capabilityDigest: MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+        managedExtensions: {
+          enabled: true,
+          mode: 'developer-process-group',
+          cacheDirectory: cache,
+        },
+      });
+      const attested = await post(origin, ATTEST, {
+        ...(CANONICAL_ATTESTATION as Record<string, unknown>),
+        mountRoot: root,
+        capabilityDigest: MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+        managedExtensions: {
+          enabled: true,
+          mode: 'developer-process-group',
+          cacheDirectory: cache,
+        },
+      });
+      expect(attested.status).toBe(200);
+      expect((await attested.json()).managedExtensions).toStrictEqual({
+        enabled: true,
+        mode: 'developer-process-group',
+        cacheDirectory: cache,
+      });
+      const uploaded = await fetch(
+        `${origin}/internal/managed-runtime/v3/extensions/packages/${pin.packageDigest}`,
+        {
+          method: 'PUT',
+          headers: { ...HEADERS, 'content-type': 'application/gzip' },
+          body: bytes,
+        },
+      );
+      expect(uploaded.status).toBe(200);
+      const installed = workspaceInstallation(
+        '550e8400-e29b-41d4-a716-446655440101',
+        'services/api',
+      );
+      const operationId = randomUUID();
+      const command = {
+        operationId,
+        actorKey: 'a'.repeat(64),
+        expectedRevision: 0,
+        extensions: [pin],
+      };
+      const control = (operation: Record<string, unknown>) =>
+        post(origin, '/internal/managed-runtime/v3/extensions', {
+          protocolVersion: 1,
+          sessionKey: {
+            tenantId: BOOT.tenantId,
+            workspaceId: BOOT.workspaceId,
+            sessionId: '550e8400-e29b-41d4-a716-446655440201',
+          },
+          contextBinding: installed.binding,
+          operation,
+        });
+      const prepared = await control({
+        kind: 'extension-prepare',
+        operationId,
+        command,
+        expectedRevision: 0,
+        extensions: [pin],
+        baseMcpServers: [],
+        baseHookCatalog: null,
+        settings: { one: { SELECTED_SECRET: 'owned-secret' } },
+        toolProfile: 'hosted-workspace-shell/1',
+        packageManifests: { one: compiled.manifest },
+      });
+      expect(prepared.status).toBe(200);
+      expect(JSON.stringify(await prepared.json())).not.toContain(
+        'owned-secret',
+      );
+      expect(
+        (
+          await control({
+            kind: 'extension-activate',
+            operationId,
+            expectedRevision: 0,
+            revision: 1,
+          })
+        ).status,
+      ).toBe(200);
+      expect((await post(origin, CONTEXT, installed)).status).toBe(200);
+      expect(
+        (await post(origin, ACTIVATION, workspaceActivation(installed))).status,
+      ).toBe(200);
+      const globalHistory = vi
+        .spyOn(Storage, 'getGlobalQwenDir')
+        .mockReturnValue(path.join(cache, 'global-history'));
+      onTestFinished(() => globalHistory.mockRestore());
+      const historyBound = await post(
+        origin,
+        MANAGED_RUNTIME_PROVIDER_ROUTE.path,
+        {
+          protocolVersion: 1,
+          providerProtocol: MANAGED_RUNTIME_PROVIDER_PROTOCOL,
+          session: {
+            harnessSessionId: '550e8400-e29b-41d4-a716-446655440201',
+            runtimeSessionId: '550e8400-e29b-41d4-a716-446655440101',
+            turnKind: 'continuation',
+          },
+          operation: { kind: 'raw-file-history', action: 'bind', state: null },
+        },
+      );
+      expect(historyBound.status).toBe(200);
+      const config = {
+        revision: 1,
+        packages: [{ pin, assetRoot: 'extension://one/' }],
+      };
+      const call = async (
+        id: string,
+        toolName: string,
+        input: Record<string, unknown>,
+      ) =>
+        post(origin, EXECUTE, {
+          ...shell('550e8400-e29b-41d4-a716-446655440101', id, ''),
+          toolName,
+          input: extensionToolInput(
+            '550e8400-e29b-41d4-a716-446655440201',
+            config,
+            toolName,
+            input,
+          ),
+        });
+      const selector = {
+        extensionId: pin.extensionId,
+        packageRevision: pin.packageRevision,
+        packageDigest: pin.packageDigest,
+      };
+      const read = await call('extension-read', 'read_file', {
+        file_path: 'resource.txt',
+        extension_source: selector,
+      });
+      expect(read.status).toBe(200);
+      expect(JSON.stringify(await read.json())).toContain(
+        'private package resource',
+      );
+      expect(fs.existsSync(path.join(root, 'services/api/resource.txt'))).toBe(
+        false,
+      );
+      fs.writeFileSync(
+        path.join(root, 'services/api/workspace-only.txt'),
+        'workspace',
+      );
+      const globbed = await call('extension-glob', 'glob', {
+        pattern: '*.txt',
+        extension_source: selector,
+      });
+      expect(globbed.status).toBe(200);
+      const globBody = JSON.stringify(await globbed.json());
+      expect(globBody).toContain('resource.txt');
+      expect(globBody).not.toContain('workspace-only.txt');
+      const writeAttempt = await post(origin, EXECUTE, {
+        ...shell('550e8400-e29b-41d4-a716-446655440101', 'extension-write', ''),
+        toolName: 'write_file',
+        input: {
+          file_path: 'resource.txt',
+          content: 'must not write',
+          managedExtension: {
+            harnessSessionId: '550e8400-e29b-41d4-a716-446655440201',
+            configRevision: 1,
+            pin,
+          },
+        },
+      });
+      expect(writeAttempt.status).toBe(500);
+      const readAgain = await call('extension-read-again', 'read_file', {
+        file_path: 'resource.txt',
+        extension_source: selector,
+      });
+      expect(JSON.stringify(await readAgain.json())).toContain(
+        'private package resource',
+      );
+
+      const escaped = await call('extension-escape', 'read_file', {
+        file_path: '../../../etc/passwd',
+        extension_source: selector,
+      });
+      expect(JSON.stringify(await escaped.json())).not.toContain('root:');
+      const shellResponse = await call('extension-shell', 'run_shell_command', {
+        command:
+          'printf "%s|%s|%s" "$SELECTED_SECRET" "${OTHER_EXTENSION_SECRET-unset}" "$PWD"',
+        extension_context: selector,
+      });
+      expect(shellResponse.status).toBe(200);
+      const shellBody = JSON.stringify(await shellResponse.json());
+      expect(shellBody).toContain('owned-secret|unset|');
+      expect(shellBody).toContain(realDirectory(root, 'services/api'));
+      const sibling = workspaceInstallation(
+        '550e8400-e29b-41d4-a716-446655440102',
+        'services/web',
+      );
+      await post(origin, CONTEXT, sibling);
+      await post(origin, ACTIVATION, workspaceActivation(sibling));
+      const crossScope = await post(origin, EXECUTE, {
+        ...shell('550e8400-e29b-41d4-a716-446655440102', 'cross-extension', ''),
+        toolName: 'read_file',
+        input: extensionToolInput(
+          '550e8400-e29b-41d4-a716-446655440201',
+          config,
+          'read_file',
+          {
+            file_path: 'resource.txt',
+            extension_source: selector,
+          },
+        ),
+      });
+      expect(crossScope.status).toBe(500);
+    },
+  );
 
   it('answers ready v2 and serves exactly the boot v2 routes', async () => {
     const worker = await startManagedRuntimeAttestationWorker(BOOT);
@@ -2845,6 +3114,82 @@ describe('Managed Workspace execution activation', () => {
     );
   });
 
+  it.each([
+    { name: 'protocolVersion 2', change: { protocolVersion: 2 } },
+    { name: 'protocolVersion "1"', change: { protocolVersion: '1' } },
+    {
+      name: 'a forged contextConfigRef with a valid digest',
+      change: { contextConfigRef: `sha256:${'f'.repeat(64)}` },
+    },
+  ])('refuses activation with $name', async ({ change }) => {
+    const root = workspace([]);
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = fixedInstallation('refused-activation');
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    const activate = activation(request);
+    const refused = await post(origin, ACTIVATION, { ...activate, ...change });
+
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({
+      code: 'managed_activation_conflict',
+    });
+    const call = shell(
+      request.sessionId,
+      'write',
+      'echo activated > proof.txt',
+    );
+    expect((await post(origin, EXECUTE, call)).status).toBe(409);
+    expect(fs.existsSync(path.join(root, 'proof.txt'))).toBe(false);
+
+    const accepted = await post(origin, ACTIVATION, activate);
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toMatchObject({ ...activate, active: true });
+    expect(
+      (await (await post(origin, EXECUTE, call)).json()).result.executionStatus,
+    ).toBe('success');
+    expect(fs.readFileSync(path.join(root, 'proof.txt'), 'utf8').trim()).toBe(
+      'activated',
+    );
+  });
+
+  it('refuses activation before a Session is installed', async () => {
+    const root = workspace([]);
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot: root,
+      capabilityDigest: WORKSPACE_CAPABILITY_DIGEST,
+    });
+    const request = fixedInstallation('never-installed');
+    const refused = await post(origin, ACTIVATION, activation(request));
+
+    expect(refused.status).toBe(409);
+    expect(await refused.json()).toEqual({
+      code: 'managed_activation_conflict',
+    });
+    const call = shell(
+      request.sessionId,
+      'write',
+      'echo installed > proof.txt',
+    );
+    expect((await post(origin, EXECUTE, call)).status).toBe(409);
+    expect(fs.existsSync(path.join(root, 'proof.txt'))).toBe(false);
+
+    expect((await post(origin, CONTEXT, request)).status).toBe(200);
+    expect((await post(origin, ACTIVATION, activation(request))).status).toBe(
+      200,
+    );
+    expect(
+      (await (await post(origin, EXECUTE, call)).json()).result.executionStatus,
+    ).toBe('success');
+    expect(fs.readFileSync(path.join(root, 'proof.txt'), 'utf8').trim()).toBe(
+      'installed',
+    );
+  });
+
   it('requires activation, writes from a subdirectory, and permanently closes on release', async () => {
     const root = workspace();
     fs.mkdirSync(path.join(root, 'child'));
@@ -3175,3 +3520,68 @@ describe('selectShellCapturePublisher', () => {
     expect(prepared.publisher).toBe(remotePublishers);
   });
 });
+
+it.skipIf(!['darwin', 'linux'].includes(process.platform))(
+  'admits extension command control through the negotiated strict worker gate',
+  async () => {
+    const mountRoot = workspace();
+    const cacheDirectory = fs.mkdtempSync(
+      path.join(os.tmpdir(), 'review-extension-route-'),
+    );
+    onTestFinished(() =>
+      fs.rmSync(cacheDirectory, { recursive: true, force: true }),
+    );
+    const origin = await startWorker({
+      ...BOOT,
+      mountRoot,
+      capabilityDigest:
+        process.platform === 'linux'
+          ? MANAGED_EXTENSION_LINUX_CAPABILITY_DIGEST
+          : MANAGED_EXTENSION_DEVELOPER_CAPABILITY_DIGEST,
+      managedExtensions: {
+        enabled: true,
+        mode:
+          process.platform === 'linux'
+            ? 'linux-cgroup'
+            : 'developer-process-group',
+        cacheDirectory,
+        ...(process.platform === 'linux'
+          ? { cgroupRoot: path.join(cacheDirectory, 'cgroup') }
+          : {}),
+      },
+    });
+    const observations = [];
+    for (const action of ['execute', 'status', 'cancel']) {
+      const response = await post(
+        origin,
+        '/internal/managed-runtime/v3/extensions/commands',
+        {
+          protocolVersion: 1,
+          runtimeSessionId: 'test-runtime-session',
+          operation: { kind: 'extension-command', action },
+        },
+      );
+      observations.push({
+        action,
+        status: response.status,
+        body: await response.text(),
+      });
+    }
+    for (const entry of observations) {
+      expect(entry.status).toBe(409);
+      expect(JSON.parse(entry.body)).toEqual({
+        code: 'managed_extension_command_refused',
+      });
+    }
+    const legacy = await startWorker({ ...BOOT, mountRoot });
+    expect(
+      (
+        await post(
+          legacy,
+          '/internal/managed-runtime/v3/extensions/commands',
+          {},
+        )
+      ).status,
+    ).toBe(404);
+  },
+);
