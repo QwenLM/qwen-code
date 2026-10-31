@@ -188,8 +188,11 @@ interface CommandMention {
 // characters, an optional `=value`, then whitespace or end — so a single
 // `-` (date-style `2026-08-25-notes.md`) and double-dash file names
 // (`42--diff.patch`, `2026--08-25-notes.md`), digit tails (`42--45`) and a
-// lone `--` all stay rejected. The URL alternative keeps `(?!\d)`: it
-// rejects 10+-digit numbers instead of truncating them to a 9-digit prefix.
+// lone `--` all stay rejected. parsePrCommand grants the tolerance to
+// /verify-pr only: /review also accepts extension-less file paths
+// (`42--notes`), which no tail grammar can tell from a flag. The URL
+// alternative keeps `(?!\d)`: it rejects 10+-digit numbers instead of
+// truncating them to a 9-digit prefix.
 // The bare-number alternative comes first: `/review 42 and fix #7` names 42.
 // Bare session git branches are NOT a source: they bind the workspace's
 // current branch PR onto every session — measured pure noise, removed with
@@ -206,16 +209,15 @@ const PR_COMMAND_PATTERN =
 // through to this workspace's PR. `--assets-repo` is a different flag of the
 // same command and must not count as one. `/review` takes no `--repo`, so a
 // stray occurrence in its prompt reads as a qualifier too — the safer
-// reading, and never a binding this workspace's number. A digit prefix is
-// admitted only for the command's own glued qualifier: the number token
-// accepts `77--repo`, so that spelling must count too — otherwise its
-// missing or next-line value would read as no qualifier and bind this
-// workspace's PR 77. The digit arm therefore requires a flag boundary
-// (whitespace, `=`, or end) after `--repo`; a digit elsewhere in the prose
-// (`docs/a1--repo.md`, a quoted `"77--repo"`) is not a qualifier and must
-// not decline a legitimate bare binding.
+// reading, and never a binding this workspace's number. The glued spelling
+// `77--repo` must count as well — otherwise its missing or next-line value
+// would read as no qualifier and bind this workspace's PR 77 — but ONLY
+// glued to the command's own number: the arm is anchored to the command
+// position, because a prose digit (`docs/a1--repo`, a quoted `"77--repo"`,
+// even line-final) is not a qualifier and must not decline a legitimate
+// bare binding. A right-hand boundary alone cannot tell those apart.
 const REPO_FLAG_PATTERN =
-  /(?:^|[^-\w])--repo(?![\w-])|\d--repo(?=[ \t\r\n=]|$)|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?/g;
+  /(?:^|[^-\w])--repo(?![\w-])|^\s*\/(?:review|verify-pr)[ \t]+#?\d{1,9}--repo(?=[ \t\r\n=]|$)|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?/g;
 const REPO_VALUE_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?[^\s"']+/g;
 const REPO_FORM_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?([^\s"']+)/;
 
@@ -242,6 +244,14 @@ function parsePrCommand(prompt: string): {
     // `\d{1,9}` admits 0; PR 0 does not exist and the sidecar write
     // declines it, so it must never count as a binding.
     if (Number(bareNumber) <= 0) return {};
+    // `/review <file-path>` is a documented invocation form, and an
+    // extension-less path (`42--notes`) is indistinguishable from a glued
+    // flag — so the glued-tail tolerance is /verify-pr's alone, the
+    // incident command, which takes no file path. The regex encodes the
+    // tail SHAPE; this is the per-command POLICY.
+    if (match[1] === 'review' && prompt.charAt(match[0].length) === '-') {
+      return {};
+    }
     const repoForm = REPO_FORM_PATTERN.exec(prompt)?.[1];
     // The TOKEN decides, not the VALUE: a qualifier this grammar cannot read
     // is still a qualifier, so the number must decline. Comparing the counts
