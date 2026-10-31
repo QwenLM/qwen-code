@@ -5,7 +5,9 @@
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import { Text } from 'ink';
+import { Static, Text } from 'ink';
+import stringWidth from 'string-width';
+import stripAnsi from 'strip-ansi';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { type HistoryItem, ToolCallStatus } from '../types.js';
 import { MessageType } from '../types.js';
@@ -105,6 +107,44 @@ describe('<HistoryItemDisplay />', () => {
     expect(output.startsWith('\n')).toBe(true);
     expect(output).toContain('◆\uFE0E Hello');
   });
+
+  // #14075: без собственной ширины абзац переносился по неявному измерению
+  // yoga и мог съесть правый маргин. Кадр тестовой библиотеки зафиксирован на
+  // 100 колонках (у `render` нет опций, у `stdout.columns` нет сеттера),
+  // поэтому ширину выше 100 здесь не проверить.
+  it.each(['gemini', 'user'] as const)(
+    'keeps %s lines inside the right margin on the static path',
+    (type) => {
+      for (const terminalWidth of [90, 100]) {
+        const item = {
+          id: 1,
+          type,
+          text: "This is a long paragraph about the history of computing from the earliest mechanical counting machines and Babbage's analytic engine through vacuum tube and transistor computers, integrated circuits and modern processors with many cores and caches.",
+        } as HistoryItem;
+        const { lastFrame } = renderWithProviders(
+          <Static
+            items={[
+              <HistoryItemDisplay
+                key="row"
+                item={item}
+                terminalWidth={terminalWidth}
+                isPending={false}
+              />,
+            ]}
+          >
+            {(row) => row}
+          </Static>,
+        );
+
+        // Row reserves marginLeft/marginRight=2, so nothing may render past
+        // terminalWidth - 2.
+        const overWide = stripAnsi(lastFrame() ?? '')
+          .split('\n')
+          .filter((line) => stringWidth(line) > terminalWidth - 2);
+        expect(overWide).toEqual([]);
+      }
+    },
+  );
 
   it.each(['gemini', 'gemini_content'] as const)(
     'passes images from a %s history item to the assistant renderer',
