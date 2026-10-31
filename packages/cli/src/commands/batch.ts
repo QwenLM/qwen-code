@@ -225,8 +225,6 @@ async function run(fn: () => Promise<void>): Promise<void> {
   );
 }
 
-// A session's auto-collector holds a task lock for a few seconds at most;
-// waiting beats failing a command the user or agent just ran.
 function loadLocalBatchEnvironment(): void {
   // Load env-file values for QWEN_BATCH_HOME without rewriting invalid
   // workspace settings or blocking local task inspection and cleanup.
@@ -238,6 +236,8 @@ function loadLocalBatchEnvironment(): void {
   }
 }
 
+// A session's auto-collector holds a task lock for a few seconds at most;
+// waiting beats failing a command the user or agent just ran.
 const LOCK_WAIT_MS = 15_000;
 
 /** Deps shared by the agent-prepared workflow subcommands. */
