@@ -7,13 +7,13 @@
  */
 
 /**
- * Applies the publisher's consistency rules to a local `/verify-pr` round.
+ * Applies the publisher's consistency rules to a `/verify-pr` round.
  *
- * In CI the publish job refuses an artifact whose verdict contradicts its own
- * assertion counts, so a `merge-ready` report carrying `fail: 7` degrades to
- * "no usable structured verdict". A local round has no publisher: the skill
- * asks the maintainer to "keep the counts honest yourself", which is the one
- * step of that path a machine should own.
+ * The CI publish job runs this file from its trusted checkout and does not
+ * trust a verdict it refuses, so a `merge-ready` report carrying `fail: 7`
+ * degrades to "no usable structured verdict". A local round has no publisher,
+ * so the skill runs it before posting: the one step of that path a machine
+ * should own.
  *
  * Usage:
  *   node scripts/verify-pr-check.mjs <artifact-dir>
@@ -37,6 +37,16 @@ export const ATTRIBUTIONS = ['pr', 'harness', 'environment'];
 
 const KEBAB_PNG = /^[a-z0-9]+(?:-[a-z0-9]+)*\.png$/;
 const OID = /^[0-9a-f]{7,40}$/;
+// GFM renders an ATX heading indented up to three spaces as a heading too
+// (four spaces become a code block), so the indent is part of the shape,
+// not a way around it.
+const HEADING = /^ {0,3}#{1,6}\s/;
+// A heading is a short title; past this it is a paragraph wearing a heading's
+// font size. GitHub renders an H1 at 2em, so a long heading line is a wall of
+// giant text however well-formed the Markdown is.
+const HEADING_TITLE_MAX = 120;
+const FOOTER =
+  /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
 const HELP = `Usage: node scripts/verify-pr-check.mjs <artifact-dir>
 
@@ -53,8 +63,11 @@ Checks a local round against the rules the CI publisher enforces:
     and lists at least one commit (an empty set makes the claim vacuous)
 
 and warns (without failing) when the report does not lead with its verdict and
-head OID, when evidence/ carries no kebab-case PNG capture, or when a round with
-failures carries no failures ledger at all.
+head OID, when the verdict line is a heading (GitHub renders the whole
+paragraph as one giant H1), when evidence/ carries no kebab-case PNG capture,
+when a round with failures carries no failures ledger at all, or when
+comment.md — the exact body a local round posts, optional — repeats the
+heading shape or lacks the attribution footer.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -133,6 +146,29 @@ export function checkMutationCoverage(text) {
     );
   }
   return { errors };
+}
+
+// GitHub renders CRLF and LF identically, so a Windows-authored artifact
+// must not fail the line-anchored checks on a stray \r.
+function normalizeNewlines(text) {
+  return text.replace(/\r\n?/g, '\n');
+}
+
+/**
+ * The verdict line is a plain paragraph. Three rounds of PR #15984 opened
+ * with `# PR … — **Verdict: …** — <the whole verdict paragraph>` on one line,
+ * which GitHub renders as a single giant H1 — structurally valid Markdown,
+ * visually a wall of bold text. A heading carrying the verdict, or any
+ * over-long heading in the lead, is that defect's shape.
+ */
+function leadShapeWarnings(text, verdict, label) {
+  const first = text.split('\n').find((line) => line.trim() !== '');
+  if (!first || !HEADING.test(first)) return [];
+  const holdsVerdict = verdict !== null && first.includes(verdict);
+  if (!holdsVerdict && first.length <= HEADING_TITLE_MAX) return [];
+  return [
+    `${label} opens with a heading${holdsVerdict ? ' carrying the verdict' : ` of ${first.length} characters`}: GitHub renders the whole line as one giant H1 — the verdict line is a plain paragraph (no leading #), and a heading is a short title on its own line`,
+  ];
 }
 
 /**
@@ -268,7 +304,8 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
   errors.push(...checkMutationCoverage(files.mutations).errors);
 
   if (files.report && files.report.trim() !== '') {
-    const lead = files.report
+    const report = normalizeNewlines(files.report);
+    const lead = report
       .split('\n')
       .filter((line) => line.trim() !== '')
       .slice(0, 10);
@@ -287,6 +324,23 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
     } else if (cited.length === 0) {
       warnings.push(
         'report.md does not name a 40-character head OID in its first 10 non-empty lines',
+      );
+    }
+    warnings.push(...leadShapeWarnings(report, verdict, 'report.md'));
+  }
+
+  // comment.md is the exact body a local round posts: report content plus
+  // the attribution footer. report.md deliberately carries no footer (both
+  // publish paths append it at comment time), so this is the only artifact
+  // where the footer's presence is checkable. The workflow assembles its own
+  // body and never writes this file, so its absence is not a defect.
+  if (files.comment && files.comment.trim() !== '') {
+    const comment = normalizeNewlines(files.comment);
+    warnings.push(...leadShapeWarnings(comment, verdict, 'comment.md'));
+    const lines = comment.split('\n').filter((line) => line.trim() !== '');
+    if (!FOOTER.test(lines[lines.length - 1] ?? '')) {
+      warnings.push(
+        'comment.md does not end with the attribution footer `_— <model> via Qwen Code /verify-pr (v<version>; skill <12-hex>)_`: append the resolved footer before posting — omit it only when the model cannot be resolved',
       );
     }
   }
@@ -329,6 +383,7 @@ function main(argv) {
     verdict: readIfExists(join(dir, 'verdict.txt')),
     assertions: readIfExists(join(dir, 'assertions.json')),
     mutations: readIfExists(join(dir, 'mutations.json')),
+    comment: readIfExists(join(dir, 'comment.md')),
   };
   const evidenceDir = join(dir, 'evidence');
   const evidence = existsSync(evidenceDir)
@@ -337,35 +392,38 @@ function main(argv) {
       )
     : [];
 
-  // When the round's own snapshot is beside the artifact directory, the report
+  // With the round's own snapshot, the report
   // has to cite the head it verified — not merely some 40-hex token, which a
   // base OID satisfies. A snapshot that exists but cannot be read is reported
   // rather than silently downgrading the check.
   let expectedHead = null;
   let snapshotWarning = null;
+  let snapshotPath = join(dir, 'context.json');
   const prNumber = /^pr(\d+)-verify-/.exec(basename(resolve(dir)))?.[1];
-  if (prNumber) {
-    const snapshotPath = join(
+  if (!existsSync(snapshotPath) && prNumber) {
+    snapshotPath = join(
       dirname(resolve(dir)),
       'verify-context',
       `pr${prNumber}.json`,
     );
-    if (existsSync(snapshotPath)) {
-      try {
-        const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
-        if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
-          expectedHead = snapshot.headRefOid;
-        }
-      } catch {
-        snapshotWarning =
-          'the verify-context snapshot is unreadable; the head-OID check fell back to presence-only';
+  }
+  if (existsSync(snapshotPath)) {
+    try {
+      const snapshot = JSON.parse(readFileSync(snapshotPath, 'utf8'));
+      if (/^[0-9a-f]{40}$/.test(snapshot?.headRefOid ?? '')) {
+        expectedHead = snapshot.headRefOid;
+      } else {
+        snapshotWarning = `snapshot ${snapshotPath} has no valid head OID; the head-OID check fell back to presence-only`;
       }
+    } catch {
+      snapshotWarning = `snapshot ${snapshotPath} is unreadable; the head-OID check fell back to presence-only`;
     }
   }
 
   const result = checkArtifacts({ files, evidence, expectedHead });
   if (snapshotWarning) result.warnings.unshift(snapshotWarning);
   const lines = [`verify-pr check: ${dir}`];
+  if (expectedHead) lines.push(`  head source: ${snapshotPath}`);
   for (const warning of result.warnings) lines.push(`  warn  ${warning}`);
   for (const error of result.errors) lines.push(`  error ${error}`);
   const counts = result.counts

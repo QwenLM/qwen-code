@@ -2185,8 +2185,8 @@ describe('package scripts', () => {
       ) || [];
 
     // The validation jobs reuse the anchored install step; only the anchor
-    // definition plus prepare and publish appear as full textual copies.
-    expect(installSteps.length).toBe(3);
+    // definition plus prepare, build_release, and publish are textual copies.
+    expect(installSteps.length).toBe(4);
     for (const installStep of installSteps.slice(0, 2)) {
       expect(installStep).toContain('npm run generate');
     }
@@ -2227,6 +2227,19 @@ describe('package scripts', () => {
     );
 
     expect(checkoutStep).toContain('persist-credentials: false');
+    // The checkout only reads the release commit; a missing or rejected bot
+    // PAT must not abort the release before the push step that needs it.
+    expect(checkoutStep).not.toContain('CI_BOT_PAT');
+    expect(checkoutStep).toContain("token: '${{ github.token }}'");
+    expect(checkoutStep).not.toContain('secrets.');
+    // Nothing before the push step may reintroduce the bot PAT either: the
+    // job legitimately holds it later, so stop the slice at that step.
+    expect(
+      publishJob.slice(
+        0,
+        publishJob.indexOf("- name: 'Conditionally push release branch'"),
+      ),
+    ).not.toContain('CI_BOT_PAT');
     expect(releaseBranchStep).not.toContain('CI_BOT_PAT');
     expect(pushReleaseBranchStep).toContain(
       "CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'",

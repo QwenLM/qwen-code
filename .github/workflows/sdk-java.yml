@@ -27,9 +27,8 @@ env:
   MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
 
 concurrency:
-  # Keyed by event and commit: a Managed Agent gate fast run and a full run
-  # on the same pull request must not queue behind each other, where a newer
-  # pending run would displace the older one.
+  # Event and commit keys prevent a new pending fast/full run from replacing
+  # an older one in the same queue.
   group: 'sdk-java-${{ github.workflow }}-${{ github.event_name }}-${{ inputs.ref || github.ref }}'
   # Release callers and daily runs must not displace each other's validation.
   cancel-in-progress: false
@@ -199,7 +198,7 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
       # The Broker process tests spawn the Node fixture worker.
@@ -294,7 +293,14 @@ jobs:
           # Maven runs would rewrite through into the host cache. Drop them
           # so the install writes fresh inodes.
           rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-parent" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-contracts" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-control-plane" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           # The suite resolves from the job-local copy above, so it does not
           # touch host-shared state and must not hold the per-host lock.
           # On 2026-10-22 run 39771949573's fast tier failed at its
@@ -425,7 +431,7 @@ jobs:
           mkdir -p "${HOME}/.m2/repository" 9>&-
           cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -466,8 +472,8 @@ jobs:
           path: |
             packages/sdk-java/qwencode/target/surefire-reports/*.txt
             packages/sdk-java/qwencode/target/surefire-reports/*.dumpstream
-            packages/managed-agent-server/target/surefire-reports/*.txt
-            packages/managed-agent-server/target/surefire-reports/*.dumpstream
+            packages/managed-agent-server/verification/target/surefire-reports/*.txt
+            packages/managed-agent-server/verification/target/surefire-reports/*.dumpstream
           if-no-files-found: 'ignore'
           retention-days: 7
 
@@ -776,7 +782,7 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/qwencode/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
 
       - name: 'Point Maven at the pool mirror'
@@ -927,7 +933,14 @@ jobs:
           # Maven runs would rewrite through into the host cache. Drop them
           # so the install writes fresh inodes.
           rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-parent" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-contracts" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-control-plane" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           # Both Maven runs resolve from the job-local copy above, so they do
           # not touch host-shared state and must not hold the per-host lock:
           # a MySQL verify can run for hours under pool contention, and the
@@ -1013,18 +1026,11 @@ jobs:
               exit 1
             fi
           fi
-          # Close the cache loop inside that lock: the one-way seed above
-          # alone does not recapture the Server dependency tree after a pom
-          # key rotation. The excludes name the two in-house fixed release
-          # coordinates rather than the whole com/alibaba group, so
-          # third-party artifacts under it (druid) still recapture into the
-          # host-shared ~/.m2. Best-effort like the seed: the warning arms
-          # keep a copy failure from reddening the gate after mvn has already
-          # passed.
-          # On a fresh ECS host nothing creates ~/.m2/repository anymore
-          # (the hosted-only cache no longer restores it), so create it
-          # before the write-back or every job re-resolves through the
-          # egress proxy instead of bootstrapping the shared repository.
+          # Under this lock, recapture dependencies after POM key changes.
+          # Exclude only our fixed coordinates so Alibaba third-party artifacts
+          # (e.g. druid) still enter shared ~/.m2. Copy failures only warn:
+          # Maven already passed. Fresh ECS hosts need the repository created
+          # first, or each job resolves through the proxy instead of seeding it.
           # Publish only this job's downloads: seeded files are hardlinks
           # (nlink >= 2), so the delta is nlink == 1. Taring the whole tree
           # took up to 61 minutes (run 39563394993). Each link is atomic and
@@ -1039,7 +1045,7 @@ jobs:
           mkdir -p "${HOME}/.m2/repository" 9>&-
           cd "${RUNNER_TEMP}/m2-repo"
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-server -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -1051,16 +1057,23 @@ jobs:
       - name: 'Check that every non-Hosted integration test class ran'
         run: 'node scripts/check-failsafe-reports.js non-hosted packages/managed-agent-server'
 
+      - name: 'Verify ordinary and enabled embedding hosts'
+        working-directory: 'packages/managed-agent-server'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
+        run: 'bash ../../.github/scripts/verify-managed-agent-embedding.sh'
+
       - name: 'Upload Maven test reports on failure'
         if: 'failure() || cancelled()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'sdk-java-test-reports-mysql-integration-java-21'
           path: |
-            packages/managed-agent-server/target/surefire-reports/*.txt
-            packages/managed-agent-server/target/surefire-reports/*.dumpstream
-            packages/managed-agent-server/target/failsafe-reports/*.txt
-            packages/managed-agent-server/target/failsafe-reports/*.dumpstream
+            packages/managed-agent-server/verification/src/test/embedding-host/target/surefire-reports/*
+            packages/managed-agent-server/verification/target/surefire-reports/*.txt
+            packages/managed-agent-server/verification/target/surefire-reports/*.dumpstream
+            packages/managed-agent-server/verification/target/failsafe-reports/*.txt
+            packages/managed-agent-server/verification/target/failsafe-reports/*.dumpstream
           if-no-files-found: 'ignore'
           retention-days: 7
 
@@ -1188,7 +1201,7 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -1281,13 +1294,14 @@ jobs:
         run: 'node scripts/check-failsafe-reports.js hosted packages/managed-agent-server'
       - name: 'Check Hosted latency measurements'
         run: |-
-          test -s packages/managed-agent-server/target/hosted-latency-baseline.json
+          test -s packages/managed-agent-server/verification/target/hosted-latency-baseline.json
           cd integration-tests
           npx vitest run cli/hosted-latency-baseline.test.ts
       - name: 'Run Runtime Broker fault gates'
         # The gates need only the CLI bundle and the installed SDK, so a red
-        # Hosted verify above must not skip them: without this it did on 11
-        # of the 14 nights to 10-27. A failed setup step still does.
+        # Hosted verify above must not skip them: without this it did on 10
+        # of the 14 nights to 10-27. The run cancelled on an 11th night still
+        # skips them through !cancelled(), and so does a failed setup step.
         if: "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}"
         # Outlive the 600 s surefire fork plus compilation and report teardown.
         timeout-minutes: 20
@@ -1302,16 +1316,16 @@ jobs:
         with:
           name: 'hosted-harness-mysql-reports'
           path: |
-            packages/managed-agent-server/target/failsafe-reports/
-            packages/managed-agent-server/target/hosted-latency-baseline.json
-            packages/managed-agent-server/target/fg7-cases/
-            packages/managed-agent-server/target/fg8-cases/
-            packages/managed-agent-server/target/fg9-cases/
-            packages/managed-agent-server/target/fg10-cases/
-            packages/managed-agent-server/target/fg11-cases/
-            packages/managed-agent-server/target/fg12-cases/
-            packages/managed-agent-server/target/fg13-cases/
-            packages/managed-agent-server/target/l4-shell-lifecycle/
+            packages/managed-agent-server/verification/target/failsafe-reports/
+            packages/managed-agent-server/verification/target/hosted-latency-baseline.json
+            packages/managed-agent-server/verification/target/fg7-cases/
+            packages/managed-agent-server/verification/target/fg8-cases/
+            packages/managed-agent-server/verification/target/fg9-cases/
+            packages/managed-agent-server/verification/target/fg10-cases/
+            packages/managed-agent-server/verification/target/fg11-cases/
+            packages/managed-agent-server/verification/target/fg12-cases/
+            packages/managed-agent-server/verification/target/fg13-cases/
+            packages/managed-agent-server/verification/target/l4-shell-lifecycle/
           retention-days: 7
 
       - name: 'Verify Hosted admission gates'
@@ -1362,7 +1376,7 @@ jobs:
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'o4-mysql-gate-reports'
-          path: 'packages/managed-agent-server/target/failsafe-reports/'
+          path: 'packages/managed-agent-server/verification/target/failsafe-reports/'
           retention-days: 7
 
   hosted-failover-e2e:
@@ -1373,9 +1387,9 @@ jobs:
     # that a failing integration test there no longer skips them: they need
     # only the bundled CLI, the server jar and a runner-private mysqld, not
     # its MySQL service or cgroup root. Each arm also runs when an earlier
-    # one failed. Ceilings: 22 arms × 10 = 220 plus ~13 minutes for the
-    # uncapped setup steps (Checkout.. Install MySQL binaries): 233 + 2.
-    timeout-minutes: 235
+    # one failed. Ceilings: 27 arms × 10 = 270 plus ~13 minutes for the
+    # uncapped setup steps (Checkout.. Install MySQL binaries): 283 + 2.
+    timeout-minutes: 285
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     steps:
@@ -1391,7 +1405,7 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
@@ -1514,6 +1528,21 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-after-result
+      - name: 'Run finished-before-commit crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-finished-before-commit
+      - name: 'Run sibling-approval crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-sibling-approval
+      - name: 'Run after-earlier-tools crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-after-earlier-tools
       - name: 'Run approval decision reply-loss E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
@@ -1524,6 +1553,11 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-admission-reply-lost
+      - name: 'Run takeover load reply-loss E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-load-reply-lost
       - name: 'Run committed terminal reply-loss E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
@@ -1534,6 +1568,11 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-terminal-write-failed
+      - name: 'Run refused cleanup release E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-cleanup-failed
       - name: 'Run Harness-restart continuation closeout E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10
@@ -1700,7 +1739,7 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
       - name: 'Point Maven at the pool mirror'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -1763,7 +1802,14 @@ jobs:
           # Maven runs would rewrite through into the host cache. Drop them
           # so the install writes fresh inodes.
           rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-parent" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-contracts" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-control-plane" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Cache the RocketMQ distribution'
         uses: 'actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9' # v6.1.0
@@ -1806,9 +1852,9 @@ jobs:
         with:
           name: 'event-transport-broker-gate-reports'
           path: |-
-            packages/managed-agent-server/target/failsafe-reports/
-            packages/managed-agent-server/target/event-transport-latency*.json
-            packages/managed-agent-server/target/event-transport-latency.jfr
+            packages/managed-agent-server/verification/target/failsafe-reports/
+            packages/managed-agent-server/verification/target/event-transport-latency*.json
+            packages/managed-agent-server/verification/target/event-transport-latency.jfr
             ${{ runner.temp }}/rocketmq/logs/
             ${{ runner.temp }}/rocketmq/home/logs/
           retention-days: 7
@@ -1960,7 +2006,7 @@ jobs:
           cache: "${{ runner.environment == 'github-hosted' && 'maven' || '' }}"
           cache-dependency-path: |-
             packages/sdk-java/**/pom.xml
-            packages/managed-agent-server/pom.xml
+            packages/managed-agent-server/**/pom.xml
           settings-path: '${{ runner.temp }}/setup-java-m2'
       - name: 'Point Maven at the pool mirror'
         if: "${{ runner.environment == 'self-hosted' }}"
@@ -2045,7 +2091,14 @@ jobs:
           # Maven runs would rewrite through into the host cache. Drop them
           # so the install writes fresh inodes.
           rm -rf -- "${RUNNER_TEMP}/m2-repo/com/alibaba/qwencode-sdk" \
-            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server"
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-parent" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-contracts" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-control-plane" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-runtime-broker" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-persistence" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-adapters" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-server" \
+            "${RUNNER_TEMP}/m2-repo/com/alibaba/qwen-managed-agent-verification"
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
       - name: 'Install libfaketime'
         # The clock-skew row moves one node's whole wall clock. A pool host
@@ -2142,8 +2195,8 @@ jobs:
         with:
           name: 'event-transport-multi-node-gate-reports'
           path: |-
-            packages/managed-agent-server/target/failsafe-reports/
-            packages/managed-agent-server/target/mq3-multi-node/
+            packages/managed-agent-server/verification/target/failsafe-reports/
+            packages/managed-agent-server/verification/target/mq3-multi-node/
             ${{ runner.temp }}/rocketmq/logs/
             ${{ runner.temp }}/rocketmq/home/logs/
           retention-days: 7

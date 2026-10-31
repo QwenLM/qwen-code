@@ -679,6 +679,10 @@ describe('serve fast path argument parsing', () => {
     const sampleArgvByOption = new Map<string, string[]>([
       ['managed', ['--managed']],
       ['managed-data-dir', ['--managed-data-dir', '/tmp/qwen-managed-data']],
+      [
+        'managed-web-config',
+        ['--managed-web-config', '/etc/qwen-web/gateway.json'],
+      ],
       ['port', ['--port', '0']],
       ['hostname', ['--hostname', '127.0.0.1']],
       ['token', ['--token', 'token']],
@@ -802,6 +806,7 @@ describe('serve fast path argument parsing', () => {
       'channel',
       'managed',
       'managed-data-dir',
+      'managed-web-config',
       'profile',
       'hosted-harness-capability-digest',
       'experimental-paired-engines',
