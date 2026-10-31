@@ -13,6 +13,13 @@ export function createChannelLoopController(
       store.createForTarget(input, maxEnabledLoops),
     listForTarget: (channelName, target) =>
       store.listForTarget(channelName, target),
+    listForChat: async (channelName, chatId) => {
+      const jobs = await store.list();
+      return jobs.filter(
+        (job) =>
+          job.channelName === channelName && job.target.chatId === chatId,
+      );
+    },
     disable: (id) => store.disable(id),
     validateCron: (cron) => {
       parseCron(cron);

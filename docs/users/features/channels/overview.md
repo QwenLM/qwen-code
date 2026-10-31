@@ -550,8 +550,12 @@ Channel loops differ from the session-scoped tasks described in
 - They are scoped to the current channel chat or thread. Each target can have up
   to 10 enabled loops, and each prompt is limited to 4,000 characters.
 - They require an adapter and target that support proactive delivery. Telegram,
-  DingTalk, Feishu, and WeCom opt in, subject to platform-specific target
-  restrictions.
+  DingTalk, DingTalk Workspace, Feishu, WeCom, QQ, and Email opt in, subject to
+  platform-specific target restrictions. Email opts in only when
+  `proactiveRecipients` lists the exact target. QQ delivers loop results as
+  active group messages, supports no threaded targets, and requires the chat
+  type to be already learned: a delivery to a group whose type is unknown is
+  rejected.
 - They are unavailable with `sessionScope: "single"` because that scope is not
   tied to one chat target.
 - A saved loop is disabled if its target is no longer authorized when it is due.

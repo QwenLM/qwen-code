@@ -109,6 +109,12 @@ To use the bot in QQ groups:
 
 QQ Bot API V2 only delivers group messages that @mention the bot — the bot does not see all group messages. By default, `requireMention` is `true` and should be left that way for QQ.
 
+### Scheduled Loops and Proactive Delivery
+
+Loop, webhook-task, and background or named-task results are delivered back to the chat that created them as **active messages** — QQ posts them without a reply anchor, so they do not depend on a recent inbound message. In a group, each such delivery spends the group's platform active-message quota.
+
+If a group's admin has disabled active messages, these deliveries fail instead of silently falling back to an anchored passive reply: loop and webhook target checks refuse the run before the agent turn, background and named-task results are rejected at delivery with `ACTIVE_MSG_DISABLED`, and the loop scheduler counts consecutive failures and auto-disables the loop after 5. Proactive delivery also requires the chat type to be already learned: a loop or webhook target in a group the bot has never received a message from is rejected instead of sent.
+
 ### Session Isolation
 
 The QQ channel defaults to `sessionScope: "thread"`: members of the same group share a single conversation context keyed by `<channel>:<group_openid>`, while different groups are isolated from each other. Each direct message gets its own context keyed by `<channel>:<user_openid>`.
