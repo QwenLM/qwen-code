@@ -181,14 +181,17 @@ interface CommandMention {
 // `/verify-pr-watch …` are other commands and must not forge a binding. The
 // bare-number alternative closes its token against filename characters
 // (`(?!\w)`-class): `/review <file-path>` is another documented invocation
-// form, so `/review 001_init.sql` must not forge PR 1. The URL alternative
-// keeps `(?!\d)`: it rejects 10+-digit numbers instead of truncating them to
-// a 9-digit prefix. The bare-number alternative comes first: `/review 42 and
-// fix #7` names 42. Bare session git branches are NOT a source: they bind the
-// workspace's current branch PR onto every session — measured pure noise,
-// removed with cleanup.
+// form, so `/review 001_init.sql` must not forge PR 1. A glued `--flag` is
+// the one exception (`-(?!-)`): users type `/verify-pr 15979--publish`
+// without the space and the skill still runs, so the badge must bind too;
+// a single `-` keeps rejecting date-style file names (`2026-08-25-notes.md`).
+// The URL alternative keeps `(?!\d)`: it rejects 10+-digit numbers instead
+// of truncating them to a 9-digit prefix. The bare-number alternative comes
+// first: `/review 42 and fix #7` names 42. Bare session git branches are NOT
+// a source: they bind the workspace's current branch PR onto every session —
+// measured pure noise, removed with cleanup.
 const PR_COMMAND_PATTERN =
-  /^\s*\/(review|verify-pr)(?:[ \t]+#?(\d{1,9})(?![\w./-])|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
+  /^\s*\/(review|verify-pr)(?:[ \t]+#?(\d{1,9})(?![\w./]|-(?!-))|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
 
 // `/verify-pr --repo <owner>/<repo>` scopes the number to another repository;
 // a bare number beside it must never bind this workspace's same-numbered PR.

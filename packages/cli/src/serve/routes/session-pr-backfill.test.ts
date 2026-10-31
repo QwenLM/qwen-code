@@ -2631,6 +2631,29 @@ describe('backfillWorkspaceSessionPrs', () => {
     ]);
   });
 
+  it('binds a live /verify-pr number glued to its --flag', async () => {
+    // Measured incident: `/verify-pr 15979--publish` (missing space) ran the
+    // skill but left the session without a badge — the glued flag form must
+    // bind exactly like the spaced one.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr 77--publish',
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toMatchObject([{ number: 77, source: 'review' }]);
+  });
+
   it('binds a live /verify-pr whose --repo names this workspace', async () => {
     // `--repo o/r` is how a maintainer states the PR's repository explicitly;
     // when it is this workspace's own, the number is the same PR N.
@@ -3669,6 +3692,57 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(
       await readSessionPrs(
         sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('binds a transcript number glued to a --flag', async () => {
+    // The sweep reads the same grammar as the live path: a user record
+    // typing `/verify-pr 77--publish` without the space must still earn the
+    // badge on the next backfill.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77--publish');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.map((entry) => entry.number),
+    ).toEqual([77]);
+  });
+
+  it('does not bind a number followed by a single-dash suffix', async () => {
+    // The glued `--flag` exception must not widen into single-dash tokens:
+    // date-style file names (`2026-08-25-notes.md`, covered above) and a
+    // trailing lone dash are not flags and must not forge a binding.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77-publish');
+    await seedSession(SESSION_B);
+    await appendUserText(SESSION_B, '/review 78-');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77'), pr(78, 'fix/78')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0 });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_B, 'active'),
       ),
     ).toBeNull();
   });
