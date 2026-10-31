@@ -1089,6 +1089,7 @@ describe('Hosted Harness model boundary', () => {
     expect(args?.[9]?.toolInvocationGuard?.({} as never)).toMatchObject({
       allowed: false,
     });
+    expect(args?.[9]?.lspDisabled).toBe(true);
   });
 
   it('returns complete no-tool model Parts without aliasing provider history', async () => {

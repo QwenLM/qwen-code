@@ -1730,6 +1730,11 @@
           "type": "boolean",
           "default": false
         },
+        "lspEnabled": {
+          "description": "Experimental. Enable the LSP code-intelligence service without the `--experimental-lsp` flag: go-to-definition, find-references, hover, symbols, diagnostics and code actions. Off by default. Servers come from a workspace `.lsp.json` or an enabled extension and run with your permissions; in an untrusted folder (folder trust, or an IDE Restricted Mode report) a workspace-declared server is skipped. Refused at startup when `tools.executionSandbox` is set; `--safe-mode`, `QWEN_CODE_SAFE_MODE=1` and `--bare` start without LSP. `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` override the setting (disable wins); a project `.env` or `settings.env` cannot set them.",
+          "type": "boolean",
+          "default": false
+        },
         "workflowSizeGuideline": {
           "description": "Advisory size guideline for the dynamic workflows the model writes: \"small\" aims for fewer than 5 agents, \"medium\" (the default) fewer than 15, \"large\" fewer than 50, and \"unrestricted\" sends no guideline. It is a guideline, not an enforced limit. It also sets the agent count at which a running workflow is flagged as large (QWEN_CODE_WORKFLOW_SIZE_WARNING_AGENTS overrides that threshold). A change takes effect from your next message. Options: small, medium, large, unrestricted",
           "enum": [

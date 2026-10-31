@@ -95,6 +95,13 @@ describe('PROJECT_ENV_HARDCODED_EXCLUSIONS', () => {
     expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_DESKTOP');
   });
 
+  // Language servers run with the user's permissions, so a cloned repository
+  // must be able neither to turn them on nor to unset the operator's off-switch.
+  it('excludes the LSP opt-in pair so project files cannot start servers', () => {
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_ENABLE_LSP');
+    expect(PROJECT_ENV_HARDCODED_EXCLUSIONS).toContain('QWEN_CODE_DISABLE_LSP');
+  });
+
   // QWEN_CLI_ENTRY is the spawned session-process entrypoint; a project file
   // fixing it is arbitrary script execution as the daemon.
   // NODE_EXTRA_CA_CERTS adds a TLS trust anchor — the

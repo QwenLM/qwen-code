@@ -148,13 +148,6 @@ describe('evaluateManagedCompatibility', () => {
       'the workspace is not trusted',
     ],
     [
-      'forwarded LSP',
-      () => {
-        runtime.forwardedArgs = ['--experimental-lsp'];
-      },
-      'the daemon enables LSP for its sessions',
-    ],
-    [
       'restored user questions',
       () => {
         runtime.forwardedArgs = ['--restore-ask-user-question'];
@@ -300,6 +293,61 @@ describe('evaluateManagedCompatibility', () => {
     await arrange();
 
     await expect(evaluate()).resolves.toEqual({ status: 'deferred', reason });
+  });
+
+  it('certifies a forwarded LSP flag that the runtime resolves off', async () => {
+    // Only the kill switch produces this combination: the daemon still
+    // forwards `--experimental-lsp`, but every child inherits
+    // QWEN_CODE_DISABLE_LSP and resolves LSP off, so deferring would strand
+    // the session for a capability that will not start.
+    runtime.forwardedArgs = ['--experimental-lsp'];
+    runtime = {
+      ...runtime,
+      environment: {
+        ...runtime.environment,
+        QWEN_CODE_DISABLE_LSP: '1',
+      },
+    };
+
+    await expect(evaluate()).resolves.toEqual({ status: 'compatible' });
+  });
+
+  it('defers when a user-scoped setting enables LSP', async () => {
+    writeJson(userSettings(), { tools: { lspEnabled: true } });
+
+    await expect(evaluate()).resolves.toEqual({
+      status: 'deferred',
+      reason: 'the daemon enables LSP for its sessions',
+    });
+  });
+
+  it('defers when the runtime environment enables LSP', async () => {
+    runtime = {
+      ...runtime,
+      environment: {
+        ...runtime.environment,
+        QWEN_CODE_ENABLE_LSP: '1',
+      },
+    };
+
+    await expect(evaluate()).resolves.toEqual({
+      status: 'deferred',
+      reason: 'the daemon enables LSP for its sessions',
+    });
+  });
+
+  it('re-reads LSP enablement after the settings file changes', async () => {
+    // A daemon caches nothing between evaluations: a settings write that
+    // arrives after the runtime was constructed must be seen by the next
+    // selection, not only by the next process.
+    await expect(evaluate()).resolves.toEqual({ status: 'compatible' });
+
+    writeJson(userSettings(), { tools: { lspEnabled: true } });
+
+    await expect(evaluate()).resolves.toEqual({
+      status: 'deferred',
+      reason: 'the daemon enables LSP for its sessions',
+    });
   });
 
   it('defers plan mode requested by the session', async () => {

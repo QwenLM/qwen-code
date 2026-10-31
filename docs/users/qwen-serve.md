@@ -266,9 +266,13 @@ adds `updatedAt` plus a `displayName` derived from the stored title or first
 prompt. `/status` instead reports the live session's own `createdAt`, omits
 `updatedAt`, and returns `displayName` only when one is set on the live session.
 
-`GET /session/:id/lsp` returns structured per-session LSP status. Start the
-daemon with `--experimental-lsp` to enable LSP in spawned agent sessions;
-otherwise the route returns `enabled: false` with no servers.
+`GET /session/:id/lsp` returns structured per-session LSP status. Enable LSP for
+spawned agent sessions with `--experimental-lsp` or the user/system-scoped
+`tools.lspEnabled` setting. Each spawned session resolves the setting itself, so
+a host that builds its own argv (the Desktop client) can opt in without the
+daemon forwarding anything; the daemon reads the same setting when it decides
+whether a session may run on a paired managed engine host. Otherwise the route
+returns `enabled: false` with no servers.
 
 `GET /session/:id/resources` returns the sanitized Skill and MCP snapshots
 from that live session's own Config. Use it when a session may run from a

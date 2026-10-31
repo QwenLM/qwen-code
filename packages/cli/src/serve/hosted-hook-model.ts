@@ -159,7 +159,10 @@ export async function runHostedHookOperation<T>(
     undefined,
     undefined,
     true,
-    { toolInvocationGuard: () => ({ allowed: false }) },
+    {
+      toolInvocationGuard: () => ({ allowed: false }),
+      lspDisabled: true,
+    },
   );
   try {
     await config.initialize({

@@ -979,6 +979,9 @@ describe('LspServerManager', () => {
       NODE_OPTIONS: '--require /tmp/hook.js',
       node_options: '--require /tmp/lowercase-hook.js',
       Ld_PreLoad: '/tmp/preload.so',
+      BASH_ENV: '/tmp/bash-env.sh',
+      ENV: '/tmp/env.sh',
+      npm_config_node_options: '--require /tmp/npm-hook.js',
       SAFE_VALUE: '1',
     });
 
@@ -986,6 +989,9 @@ describe('LspServerManager', () => {
     expect(env['NODE_OPTIONS']).toBe(process.env['NODE_OPTIONS']);
     expect(env['node_options']).toBeUndefined();
     expect(env['Ld_PreLoad']).toBeUndefined();
+    expect(env['BASH_ENV']).toBeUndefined();
+    expect(env['ENV']).toBeUndefined();
+    expect(env['npm_config_node_options']).toBeUndefined();
     expect(env['SAFE_VALUE']).toBe('1');
   });
 

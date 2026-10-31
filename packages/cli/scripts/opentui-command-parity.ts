@@ -27,7 +27,18 @@ const KEY_COMMANDS = [
 async function main() {
   const cwd = process.cwd();
   const loaded = loadSettings(cwd);
-  const config = await loadCliConfig(loaded.merged as never, {} as never, cwd);
+  const config = await loadCliConfig(
+    loaded.merged as never,
+    {} as never,
+    cwd,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    false,
+    { lspDisabled: true },
+  );
   const cmds = await loadInteractiveCommands(config);
   const names = new Set(cmds.map((c) => c.name));
   console.log(`interactive commands loaded: ${names.size}`);

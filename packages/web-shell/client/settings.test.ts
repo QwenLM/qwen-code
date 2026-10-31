@@ -279,6 +279,7 @@ describe('settings presentation aliases', () => {
       'setting:todo-write': 'tools.todoWrite.enabled',
       'setting:interactive-shell': 'tools.shell.enableInteractiveShell',
       'setting:workflows': 'tools.workflowsEnabled',
+      'setting:lsp': 'tools.lspEnabled',
       'setting:workflow-size': 'tools.workflowSizeGuideline',
       'setting:workflow-name-only': 'tools.workflowNameOnly',
       'setting:permission-strategy': 'policy.permissionStrategy',

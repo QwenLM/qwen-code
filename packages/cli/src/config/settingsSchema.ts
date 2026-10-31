@@ -3438,6 +3438,20 @@ const SETTINGS_SCHEMA = {
           'Enable the Workflow tool, which lets the model author and run a script that orchestrates subagents in parallel. Off by default; a run can dispatch many subagents and spend tokens accordingly. The QWEN_CODE_ENABLE_WORKFLOWS=1 and QWEN_CODE_DISABLE_WORKFLOWS=1 environment variables override this setting (disable wins). Unrelated to the Session Workflow plan-and-review view; to stop the "workflow" keyword from steering a turn, see Disable Workflow Keyword Trigger.',
         showInDialog: true,
       },
+      lspEnabled: {
+        type: 'boolean',
+        label: 'LSP Code Intelligence',
+        category: 'Experimental',
+        // The native LSP service and its language-server subprocesses are built
+        // while the Config is constructed, and /lsp is gated when commands
+        // load, so a mid-session change cannot attach a client to a session
+        // that started without one.
+        requiresRestart: true,
+        default: false,
+        description:
+          'Experimental. Enable the LSP code-intelligence service without the `--experimental-lsp` flag: go-to-definition, find-references, hover, symbols, diagnostics and code actions. Off by default. Servers come from a workspace `.lsp.json` or an enabled extension and run with your permissions; in an untrusted folder (folder trust, or an IDE Restricted Mode report) a workspace-declared server is skipped. Refused at startup when `tools.executionSandbox` is set; `--safe-mode`, `QWEN_CODE_SAFE_MODE=1` and `--bare` start without LSP. `QWEN_CODE_ENABLE_LSP=1` / `QWEN_CODE_DISABLE_LSP=1` override the setting (disable wins); a project `.env` or `settings.env` cannot set them.',
+        showInDialog: true,
+      },
       workflowSizeGuideline: {
         type: 'enum',
         label: 'Dynamic Workflow Size',

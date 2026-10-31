@@ -84,6 +84,11 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   // it or override a user opt-in through settings.env or a project .env.
   'QWEN_CODE_ENABLE_WORKFLOWS',
   'QWEN_CODE_DISABLE_WORKFLOWS',
+  // LSP is the same class of opt-in with a larger blast radius: it spawns
+  // language servers that run with the user's permissions. A cloned repository
+  // must not be able to turn them on, nor to unset an operator's kill switch.
+  'QWEN_CODE_ENABLE_LSP',
+  'QWEN_CODE_DISABLE_LSP',
   // The name-only lock is a deployment policy. A project that wants it sets
   // tools.workflowNameOnly, which a workspace may only turn on; a project
   // .env must not be able to unset the operator's exported value.
@@ -409,10 +414,12 @@ export const HOME_ENV_BOOTSTRAP_KEYS = [
 // ACP child boot).
 //
 // Known adjacent surface: LSP `.lsp.json` env overrides carry their own
-// narrower denylist (`SECURITY_SENSITIVE_ENV_KEYS` in
-// core/lsp/LspServerManager.ts — missing BASH_ENV/ENV/npm_config_node_options).
-// Unifying the two lists is deferred: the LSP surface is experimental
-// (behind --experimental-lsp) and its keys were chosen independently.
+// denylist (`SECURITY_SENSITIVE_ENV_KEYS` in core/lsp/lsp-server-manager.ts).
+// Both lists now block the shell-startup (`BASH_ENV`, `ENV`) and npm
+// node-options (`NPM_CONFIG_NODE_OPTIONS`) vectors; the loader list keeps its
+// broader, non-LSP entries. Unifying them wholesale is still deferred because
+// legitimate language servers rely on ordinary `env` overrides passing
+// through.
 export const INHERITED_LOADER_ENV_KEYS = [
   'NODE_OPTIONS',
   'BUN_OPTIONS',

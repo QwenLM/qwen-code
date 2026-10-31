@@ -4233,6 +4233,28 @@ describe('Settings Loading and Merging', () => {
         ),
       ).toBe(true);
     });
+
+    it('should warn when workspace settings define lspEnabled', () => {
+      // A cloned repo must not enable the subsystem that spawns language
+      // servers with the user's permissions; the value is stripped, not
+      // honored, and the warning is the only signal the user gets.
+      (mockFsExistsSync as Mock).mockReturnValue(true);
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          if (p === MOCK_WORKSPACE_SETTINGS_PATH)
+            return JSON.stringify({ tools: { lspEnabled: true } });
+          return '{}';
+        },
+      );
+
+      const settings = loadSettings(MOCK_WORKSPACE_DIR);
+      expect(settings.merged.tools?.lspEnabled).toBeUndefined();
+      expect(
+        getSettingsWarnings(settings).some((warning) =>
+          warning.includes('tools.lspEnabled'),
+        ),
+      ).toBe(true);
+    });
   });
 
   describe('advisorModel scope handling', () => {

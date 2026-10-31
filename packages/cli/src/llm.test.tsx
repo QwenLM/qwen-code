@@ -510,6 +510,15 @@ describe('llm.tsx main function', () => {
         const provider =
           vi.mocked(loadCliConfig).mock.calls[0]?.[9]
             ?.workflowAncestorTrustProvider;
+        if (sandbox) {
+          // The pre-sandbox partialConfig validates auth for a configuration
+          // that never uses LSP, so it must refuse the service outright: the
+          // setting alone would otherwise start host-side language servers
+          // outside the container.
+          expect(vi.mocked(loadCliConfig).mock.calls[0]?.[9]?.lspDisabled).toBe(
+            true,
+          );
+        }
         if (capability === undefined) {
           expect(provider).toBeTypeOf('function');
           await expect(
