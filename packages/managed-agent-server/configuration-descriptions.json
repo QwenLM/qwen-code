@@ -79,8 +79,8 @@
       "zh": "内置 `qwen-code` agent 的修订号标签，会固定在使用它的每个 Session 上；请求中指定 `qwen-code` 的其他修订号会被拒绝。长度必须为 1 到 128 个字符（否则启动时拒绝）。"
     },
     "qwen.managed-agent.artifacts.enabled": {
-      "en": "Whether tool results are projected into public tool results and artifacts, and whether the artifact read API is served. Reads answer not found unless `qwen.managed-agent.tool-publication.enabled` is also true, and they require an authenticated actor. Even while it is false, committed tool receipts are still recorded for projection, so turning it on later also projects the tool results recorded while it was off.",
-      "zh": "是否将工具结果投影为公开工具结果和制品，以及是否提供制品读取 API。除非同时开启 `qwen.managed-agent.tool-publication.enabled`，否则读取返回未找到；读取还要求已认证的 actor。即使为 false，已提交的工具回执仍会被记录下来等待投影，因此之后开启时，关闭期间记录的工具结果也会被投影。"
+      "en": "Whether tool results are projected into public tool results and artifacts, and whether the artifact read API is served. Reads answer not found unless `qwen.managed-agent.tool-publication.enabled` is also true, and they require an authenticated actor. Even while it is false, committed tool receipts are still recorded for projection, so turning it on later also projects the tool results recorded while it was off. Sessions created through the private CSI lane (the `csi-session` admin command) are the exception: their receipts are never recorded, so their tool results are never projected.",
+      "zh": "是否将工具结果投影为公开工具结果和制品，以及是否提供制品读取 API。除非同时开启 `qwen.managed-agent.tool-publication.enabled`，否则读取返回未找到；读取还要求已认证的 actor。即使为 false，已提交的工具回执仍会被记录下来等待投影，因此之后开启时，关闭期间记录的工具结果也会被投影。私有 CSI 通道创建的 Session（`csi-session` 管理命令）例外：它们的回执从不记录，因此其工具结果从不投影。"
     },
     "qwen.managed-agent.artifacts.max-concurrent-reads": {
       "en": "How many artifact content downloads this server process serves at once; a download beyond that gets HTTP 429 `artifact_read_limit` with `Retry-After: 1`. Must be at least 1 (startup refusal).",
@@ -141,8 +141,8 @@
       "zh": "扫描器发现到期槽位时，允许其迟到多久仍按计划触发。更迟的槽位按定义的补跑策略（`none`、`latest` 或 `bounded`）处理，未被补跑的记为错过。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
     },
     "qwen.managed-agent.automation.lease": {
-      "en": "How long a scanner tick or a manual run holds an automation definition's lease, counted from its claim; once it lapses another node may claim the definition, and from that claim on the earlier holder's writes to it are refused. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
-      "zh": "扫描轮次或手动运行持有自动化定义租约的时长，从认领时起算；租约过期后其他节点即可认领该定义，自该认领起，原持有者对它的写入都会被拒绝。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
+      "en": "How long a scanner or a manual run holds an automation definition's lease, counted from its claim of that definition; once it lapses another node may claim the definition, and from that claim on the earlier holder's writes to it are refused. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
+      "zh": "扫描器或手动运行持有自动化定义租约的时长，从认领该定义时起算；租约过期后其他节点即可认领该定义，自该认领起，原持有者对它的写入都会被拒绝。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
     },
     "qwen.managed-agent.automation.lookback": {
       "en": "How far back the scanner derives a definition's due slots; slots older than this, or older than the definition's arming, are neither fired nor recorded, which bounds every catch-up. Startup refuses a non-positive value when automation is enabled. A plain number is milliseconds.",
