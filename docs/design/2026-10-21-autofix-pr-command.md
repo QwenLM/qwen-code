@@ -72,6 +72,9 @@ Non-goals (first version):
 - PRs in repositories without a matching local remote.
 - Resolving review threads. Reviewers keep that decision.
 - Opening new PRs or rewriting PR titles and descriptions.
+- Approving, merging or closing the PR, changing its review state, or turning
+  on auto-merge. Getting the PR ready to merge is the whole job; the
+  repository's own requirements and a person decide the rest.
 
 ## 4. User experience
 
@@ -96,6 +99,9 @@ Before it starts, the command shows one confirmation:
 - It will push commits to `<owner>/<repo>:<headRef>` and post replies on the
   PR, both under the user's own git and `gh` identity.
 - Verification runs repository-defined build and test commands.
+- It gets the PR ready to merge and no further: it never approves, changes
+  the review state, merges or turns on auto-merge, so the repository's
+  reviews and checks still decide and merging stays the user's.
 
 The confirmation is asked on every start, not on scheduled checks. A session
 that cannot show the confirmation needs `--yes`.
@@ -209,7 +215,8 @@ all, so a watch is found whichever of them holds it:
    worktree was removed (also with `rm -rf`, which `git worktree prune`
    clears), it is recreated and the recorded `pushedShas`,
    `handledCommentIds` and `postedCommentIds` are kept, with the budgets,
-   the recorded task (`watch`) and `needsHuman`, and the report says
+   the recorded task (`watch`), `needsHuman` and what a delivered summary
+   reported (`reportedNeedsHuman`), and the report says
    `recreated: true`: a start that is then cancelled must not clean up a
    watch it did not make. A watch `stop` had ended is resumed the same way
    (`wasEnded`, as on the path that keeps the worktree). With `--take-over`, the
@@ -728,10 +735,16 @@ The helper decides what may be posted, against one fresh read of the PR
 - Each POST is announced in the state file first (`pendingPosts`: where it
   goes, the comments it answers, a hash of its body, the head it is posted
   on — a summary adopted later counts for that head's push, not a later
-  one's). The next run looks for
+  one's — and, for a summary, the `needsHuman` lines its body reports). The
+  next run looks for
   each announced reply on the PR: one that is there — a POST that reached
   GitHub although its answer was lost — is recorded with exactly the
-  comments it was posted for (`adopted`); one that is not was never posted.
+  comments it was posted for (`adopted`), and a summary with exactly the
+  items it reported, merged with what an earlier delivered summary already
+  reported on that head: adopting a later summary never makes an earlier
+  item reportable again, and a summary that reported no items erases none.
+  A record of another head is superseded, not merged. One that is not on the
+  PR was never posted.
   A reply is never recognized by a later plan's wording, and a reply the
   tool posted for other comments is never taken for the answer to new ones.
 - A comment a reply names that is answered already is left out of it; the
@@ -744,7 +757,19 @@ The helper decides what may be posted, against one fresh read of the PR
   posted (above) and skips a reply whose comments are all handled, and the
   summary when its comments are — unless the head is a push of the watch's
   that has no summary yet: each push gets one, once per head
-  (`summarizedSha`), whether or not it answers comments.
+  (`summarizedSha`), whether or not it answers comments. A summary is due
+  as well whenever the plan names a `needsHuman` line that no delivered
+  summary has reported on this head, so a round that pushed nothing still
+  reports what blocks it on a head an earlier round already summarized.
+  What a delivered summary reported is its own key (`reportedNeedsHuman`:
+  the head and the lines), advanced only once the summary posted — or was
+  adopted, from the items its own intent recorded. It is deliberately not
+  the `needsHuman` list, which is written before any POST so `status`
+  survives a later failure: a trigger read from that list is spent before
+  delivery, and a summary whose POST never reached GitHub would then be
+  suppressed on every retry while the round still recorded its failures
+  handled. An undelivered report stays due; a delivered one is not posted
+  twice.
 - `handledChecks` and `handledConflict` record failures and a conflict the
   round did not fix with a push, so prepared snapshots stop reporting them:
   a failure by its attempt (a re-run that fails again is new), a conflict by
@@ -753,7 +778,9 @@ The helper decides what may be posted, against one fresh read of the PR
   keeps each in the state file with the head it was answered on and the
   time, newest last and at most 20, for `status`. Whitespace is folded, a
   line over 300 characters is cut, and the same line on the same head is
-  kept once, so running a plan again adds nothing.
+  kept once, so running a plan again adds nothing. This list is the record
+  `status` reads, written before any POST; it is not what decides whether a
+  summary is due (above).
 - `--no-post` (the skill's `--no-reply`) records the same, the summary's
   `summarizedSha` included, and posts nothing.
 
@@ -1620,7 +1647,9 @@ disagreement, contradictory comments, a request outside the PR's scope) is
 replied to as "needs a human decision" and recorded in `needsHuman`. The loop
 keeps watching other events. The round answers such items on the PR, reports
 them in its message and names them in the reply plan's `needsHuman`, which
-`status` lists (Sections 6.5, 6.10).
+`status` lists (Sections 6.5, 6.10). A round that pushed nothing posts them
+as its summary too, so the PR shows that the watch stopped instead of going
+quiet (Section 9).
 
 ## 8. Trust model
 
@@ -1686,6 +1715,11 @@ Replies are on by default; `--no-reply` turns them off.
   or `Not changed: <reason>`, or `Needs a human decision: <question>`.
 - Each push gets one PR comment summarizing what it addressed: checks fixed or
   re-run, comments addressed, conflict resolved, and how it was verified.
+- A round that pushed nothing and left something for a person gets one too:
+  what it attempted, what blocks it and what a person has to decide. It goes
+  out once per head, and again only when the round names an item no delivered
+  summary has reported on that head (Section 6.5). One whose POST never
+  reached the PR is still owed, so the next run of the plan posts it.
 - Replies use the language of the comment they answer; the summary uses the
   language of the PR's title, which `snapshot` reports (`title`).
 - Every body ends with `<!-- qwen-autofix-pr:v1 -->`.
