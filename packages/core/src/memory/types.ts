@@ -69,6 +69,7 @@ export interface AutoMemoryMetadata {
   lastDreamSessionId?: string;
   lastDreamTouchedTopics?: AutoMemoryType[];
   lastDreamStatus?: 'updated' | 'noop';
+  lastDreamAttemptAt?: string;
   recentSessionIdsSinceDream?: string[];
 }
 

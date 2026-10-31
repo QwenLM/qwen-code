@@ -37,6 +37,12 @@ const telemetryMocks = vi.hoisted(() => ({
   logMemoryMigration: vi.fn(),
 }));
 
+// Pass-through wrapper so a test can observe state when the dream lock is released.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, rm: vi.fn(actual.rm) };
+});
+
 vi.mock('../telemetry/index.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../telemetry/index.js')>()),
   logMemoryExtract: telemetryMocks.logMemoryExtract,
@@ -4309,6 +4315,119 @@ describe('MemoryManager', () => {
       expect(result).toEqual({ status: 'skipped', skippedReason: 'min_hours' });
     });
 
+    it('backs off after a failed dream instead of relaunching it on the next turn', async () => {
+      // The run fails 70 minutes after it was scheduled, so the backoff must
+      // count from the failure, not from the schedule time.
+      vi.useFakeTimers({ toFake: ['Date'] });
+      try {
+        vi.mocked(runManagedAutoMemoryDream).mockImplementationOnce(
+          async () => {
+            vi.setSystemTime(Date.now() + 70 * 60 * 1000);
+            throw new Error('dream agent failed');
+          },
+        );
+        const mgr = new MemoryManager(fiveSessions);
+
+        const first = await mgr.scheduleDream(
+          dreamParams('sess-a', APR1_10, 0, 1),
+        );
+        expect(first.status).toBe('scheduled');
+        expect(await first.promise).toMatchObject({
+          status: 'failed',
+          error: 'dream agent failed',
+        });
+
+        const soon = await mgr.scheduleDream(
+          dreamParams('sess-b', '2026-04-01T11:40:00.000Z', 0, 1),
+        );
+        expect(soon).toEqual({
+          status: 'skipped',
+          skippedReason: 'failure_backoff',
+        });
+
+        const later = await mgr.scheduleDream(
+          dreamParams('sess-c', '2026-04-01T12:20:00.000Z', 0, 1),
+        );
+        expect(later.status).toBe('scheduled');
+        await later.promise;
+        expect(runManagedAutoMemoryDream).toHaveBeenCalledTimes(2);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('persists the failure marker before releasing the dream lock', async () => {
+      const lockPath = getAutoMemoryConsolidationLockPath(tmp.projectRoot);
+      const realRm = (
+        await vi.importActual<typeof import('node:fs/promises')>(
+          'node:fs/promises',
+        )
+      ).rm;
+      let markerAtRelease: unknown = 'not-released';
+      vi.mocked(fs.rm).mockImplementation(async (p, o) => {
+        if (p === lockPath) {
+          markerAtRelease = (await readMeta(tmp.projectRoot))[
+            'lastDreamAttemptAt'
+          ];
+        }
+        return realRm(p, o);
+      });
+      try {
+        vi.mocked(runManagedAutoMemoryDream).mockRejectedValueOnce(
+          new Error('dream agent failed'),
+        );
+        const mgr = new MemoryManager(fiveSessions);
+        const first = await mgr.scheduleDream(
+          dreamParams('sess-a', APR1_10, 0, 1),
+        );
+        await first.promise;
+        expect(markerAtRelease).toEqual(expect.any(String));
+      } finally {
+        vi.mocked(fs.rm).mockImplementation(realRm);
+      }
+    });
+
+    it('resolves with the failed record when the failure metadata write also throws', async () => {
+      const metaPath = getAutoMemoryMetadataPath(tmp.projectRoot);
+      vi.mocked(runManagedAutoMemoryDream).mockImplementationOnce(async () => {
+        await fs.rm(metaPath);
+        await fs.mkdir(metaPath);
+        throw new Error('dream agent failed');
+      });
+      const mgr = new MemoryManager(fiveSessions);
+
+      const first = await mgr.scheduleDream(
+        dreamParams('sess-a', APR1_10, 0, 1),
+      );
+      await expect(first.promise).resolves.toMatchObject({
+        status: 'failed',
+        error: 'dream agent failed',
+        metadata: { metadataWriteError: expect.any(String) },
+      });
+    });
+
+    it('keeps lastDreamAt and lastDreamSessionId when recording a failed dream', async () => {
+      const metaPath = getAutoMemoryMetadataPath(tmp.projectRoot);
+      const seeded = await readMeta(tmp.projectRoot);
+      seeded['lastDreamAt'] = '2026-03-30T10:00:00.000Z';
+      seeded['lastDreamSessionId'] = 'sess-old';
+      await fs.writeFile(metaPath, JSON.stringify(seeded, null, 2), 'utf-8');
+      vi.mocked(runManagedAutoMemoryDream).mockRejectedValueOnce(
+        new Error('dream agent failed'),
+      );
+      const mgr = new MemoryManager(fiveSessions);
+
+      const first = await mgr.scheduleDream(
+        dreamParams('sess-a', APR1_10, 0, 1),
+      );
+      await first.promise;
+
+      const meta = await readMeta(tmp.projectRoot);
+      expect(meta['lastDreamAt']).toBe('2026-03-30T10:00:00.000Z');
+      expect(meta['lastDreamSessionId']).toBe('sess-old');
+      expect(meta['lastDreamAttemptAt']).toEqual(expect.any(String));
+    });
+
     it('skips when session count is below threshold (via session scanner)', async () => {
       // Only 1 session — need 5
       const mgr = new MemoryManager(async () => ['sess-0']);
@@ -4486,6 +4605,9 @@ describe('MemoryManager', () => {
       // it the record becomes failed with error="aborted").
       await mgr.drain({ timeoutMs: 1000 });
       expect(mgr.getTask(taskId)?.status).toBe('cancelled');
+      // A user cancel is not a failure: it must not start the retry backoff.
+      const meta = await readMeta(tmp.projectRoot);
+      expect(meta['lastDreamAttemptAt']).toBeUndefined();
     });
 
     it('keeps the record cancelled even when runManagedAutoMemoryDream resolves successfully after abort', async () => {
