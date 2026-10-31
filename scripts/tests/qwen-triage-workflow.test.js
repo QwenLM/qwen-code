@@ -4986,8 +4986,20 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     expect(flat).toContain('only `updated_at` moves');
     expect(flat).toContain('Keep the guard and the post in separate commands');
+    // #15984 rounds 1-3: the title and the whole verdict paragraph shared
+    // one `#` line, which GitHub renders as a single giant H1, and all three
+    // comments shipped without the attribution footer. The verdict line is
+    // pinned to a plain paragraph, and the posted body is assembled as
+    // comment.md so the read-back and the footer check compare against one
+    // local file — report.md carries no footer by contract.
     expect(flat).toContain(
-      'read the body back and compare it with the local file byte for byte',
+      'The verdict line is a **plain paragraph, never a heading**',
+    );
+    expect(flat).toContain(
+      'Assemble the exact comment body — report content plus the resolved footer — into `comment.md`',
+    );
+    expect(flat).toContain(
+      'read the body back and compare it with `comment.md` byte for byte',
     );
 
     // #13163 R7: a merge carried two review fixes in 507 hand-written lines
