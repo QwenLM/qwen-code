@@ -555,7 +555,7 @@ resync 时如果新 head 不包含 worktree 的 `HEAD`（作者 rebase 或 force
 
 - 用录制的 `gh` JSON fixture 做单元测试：事件对比、旧 SHA 上的过时检查、各信任类别、回复标记和 id 的自我排除、动作优先级、预算；闸门游标规则（每个 head 一次、重跑后的失败、冲突标记、当前用户自己的评论、合并与重新打开）和 check 汇总翻页；评审者探针的事件、过滤项和游标清理。
 - 用本地 bare 仓库测试推送保护：拒绝非 fast-forward、拒绝默认分支、别人推送后 lease 被拒。
-- 在 `PATH` 上放一个假的 `gh` 做集成测试，跑通 `prepare` → `snapshot` → `push` → `reply` → `cleanup`——尚未编写；目前每个辅助命令各自用真实 git、裸远端仓库和打桩的 `gh` 测试。
+- 在 `PATH` 上放一个假的 `gh` 做集成测试（`autofix-pr/chain.integration.test.ts`）：按监视运行它们的顺序依次运行各辅助命令——`prepare` 和 `schedule`；一轮里的 `sync`、`snapshot`、`ci-log`、`rerun`、`push` 和 `reply`；按 `schedule` 打印的原样执行的 gate；`status` 和 `cleanup`——用真实 git 和裸远端仓库，修复 agent 的提交由测试代为完成。用例：从启动到合入的一次监视，其中有一次回复的应答丢失；一轮进行中别人推送；重跑用掉一次后被拒；三次推送后仍失败的检查交给人，其中一个 head 的结果按提交向 GitHub 查询；向 GitHub 查询 PR 作者能否推送。每个辅助命令另有各自的测试，`gh` 在进程内打桩。
 - 在沙箱仓库上手工端到端验证：失败的测试被修复并推送；协作者的评论被修复并回复；陌生人的评论被忽略；合并 PR 后循环结束，worktree 被删除。
 
 验收标准：
