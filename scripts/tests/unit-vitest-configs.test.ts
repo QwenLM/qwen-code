@@ -381,15 +381,12 @@ describe('autofix gate load clamps', () => {
     vi.resetModules();
     // Re-imported under the stub: the configs read the env at import time,
     // and the static imports above already resolved the non-ECS branch.
-    const [core, cli, acpBridge, webShell, vscodeCompanion] = await Promise.all(
-      [
-        import('../../packages/core/vitest.config.js'),
-        import('../../packages/cli/vitest.config.js'),
-        import('../../packages/acp-bridge/vitest.config.js'),
-        import('../../packages/web-shell/vitest.config.js'),
-        import('../../packages/vscode-ide-companion/vitest.config.js'),
-      ],
-    );
+    const [core, cli, acpBridge, webShell] = await Promise.all([
+      import('../../packages/core/vitest.config.js'),
+      import('../../packages/cli/vitest.config.js'),
+      import('../../packages/acp-bridge/vitest.config.js'),
+      import('../../packages/web-shell/vitest.config.js'),
+    ]);
     vi.unstubAllEnvs();
 
     const script = readFileSync(
@@ -414,12 +411,8 @@ describe('autofix gate load clamps', () => {
         .map((flag) => flag.split('=') as [string, string]),
     );
 
-    // 60_000 / 60_000 / '25%' on the ECS branch of core, cli and
-    // vscode-ide-companion; acp-bridge and web-shell set the two timeouts but
-    // define no maxWorkers. This config value is a default, not the lane
-    // ceiling: run-unit-test-lanes.sh exports VITEST_MAX_THREADS, vitest reads
-    // it into poolOptions.threads.maxThreads, and that resolves before
-    // config.maxWorkers. The branch covers runs carrying no such env.
+    // 60_000 / 60_000 / '25%' on the ECS branch of core and cli;
+    // acp-bridge and web-shell set the two timeouts but define no maxWorkers.
     for (const config of [
       core.default,
       cli.default,
@@ -429,29 +422,8 @@ describe('autofix gate load clamps', () => {
       expect(String(config.test?.testTimeout)).toBe(clamps['testTimeout']);
       expect(String(config.test?.hookTimeout)).toBe(clamps['hookTimeout']);
     }
-    for (const config of [core.default, cli.default, vscodeCompanion.default]) {
+    for (const config of [core.default, cli.default]) {
       expect(config.test?.maxWorkers).toBe(clamps['maxWorkers']);
-    }
-    // Off the pool the config must leave maxWorkers alone, or a developer
-    // machine runs the workspace at 25% of its cores for no reason. The arms
-    // above cannot see that: they all stub a pool RUNNER_NAME, where
-    // `maxWorkers: '25%'` flattened out of the ternary is indistinguishable
-    // from the gated value.
-    // Re-stub and re-import: `vi.unstubAllEnvs()` above restored the ambient
-    // value, and the modules resolved under the ECS stub are already fixed at
-    // it, so a second import round is the only way to read the other branch.
-    vi.stubEnv('RUNNER_NAME', undefined);
-    vi.resetModules();
-    try {
-      const offPool = await import(
-        '../../packages/vscode-ide-companion/vitest.config.js'
-      );
-      expect(
-        offPool.default.test?.maxWorkers,
-        'RUNNER_NAME unset',
-      ).toBeUndefined();
-    } finally {
-      vi.unstubAllEnvs();
     }
     // Nothing in the gate or its report path consumes coverage, and
     // collecting it was the bulk of the 60-minute overruns.
@@ -513,12 +485,18 @@ describe('autofix gate load clamps', () => {
 });
 
 describe('bundle-guard timeout ceiling', () => {
-  it('keeps the bundle-guard timeout ceiling in packages/vscode-ide-companion', async () => {
+  it('keeps the bundle-guard timeout ceiling and worker cap in packages/vscode-ide-companion', async () => {
     // The config reads RUNNER_NAME at import time, so re-import it under
-    // each stub to pin both branches, not only the ambient one.
-    for (const [runnerName, expected] of [
-      ['ecs-qwen-parity', 60_000],
-      ['ubuntu-latest-runner', 15_000],
+    // each stub to pin both branches, not only the ambient one; the unset
+    // arm also catches a ternary that treats a missing variable as pool.
+    // maxWorkers is the default for runs carrying no VITEST_MAX_THREADS —
+    // CI lanes export it and vitest resolves it before config.maxWorkers —
+    // and must stay undefined off the pool so a flat '25%' cannot cap
+    // developer machines.
+    for (const [runnerName, expectedTimeout, expectedWorkers] of [
+      ['ecs-qwen-parity', 60_000, '25%'],
+      ['ubuntu-latest-runner', 15_000, undefined],
+      [undefined, 15_000, undefined],
     ] as const) {
       vi.stubEnv('RUNNER_NAME', runnerName);
       vi.resetModules();
@@ -526,7 +504,10 @@ describe('bundle-guard timeout ceiling', () => {
         '../../packages/vscode-ide-companion/vitest.config.js'
       );
       expect(mod.default.test?.testTimeout, `RUNNER_NAME=${runnerName}`).toBe(
-        expected,
+        expectedTimeout,
+      );
+      expect(mod.default.test?.maxWorkers, `RUNNER_NAME=${runnerName}`).toBe(
+        expectedWorkers,
       );
       vi.unstubAllEnvs();
     }
