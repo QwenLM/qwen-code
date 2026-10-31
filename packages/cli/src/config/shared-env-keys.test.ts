@@ -414,6 +414,10 @@ describe('isHardcodedProjectEnvExclusion', () => {
     expect(isHardcodedProjectEnvExclusion('tmpdir')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('TMP')).toBe(true);
     expect(isHardcodedProjectEnvExclusion('TEMP')).toBe(true);
+    // APPDATA selects the npm-cli.js the Windows update resolver executes.
+    expect(isHardcodedProjectEnvExclusion('APPDATA')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('appdata')).toBe(true);
+    expect(isHardcodedProjectEnvExclusion('LOCALAPPDATA')).toBe(true);
   });
 
   // Numbered GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n> pairs are an unbounded

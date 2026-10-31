@@ -124,6 +124,7 @@ const TRACKED_ENV = [
   'TMPDIR',
   'TMP',
   'TEMP',
+  'APPDATA',
   'QWEN_SANDBOX',
   'QWEN_SANDBOX_IMAGE',
   'QWEN_SANDBOX_PROXY_COMMAND',
@@ -1990,6 +1991,27 @@ describe('loadEnvironment', () => {
     expect(snapshot.effectiveEnv['RUNTIME_SETTINGS_ONLY']).toBe(
       'from-settings',
     );
+  });
+
+  // The Windows npm resolver (utils/installationInfo.ts getNpmCliPath) executes
+  // the npm-cli.js under the %APPDATA%\npm prefix, so APPDATA is a
+  // script-selection input like the sandbox keys above: repository content must
+  // not move it, on the initial load or on the reload that force-writes every
+  // key surviving the gates.
+  it('never applies APPDATA from a project .env, including reload', () => {
+    resetEnvironmentTrackingForTesting();
+    const workspace = makeWorkspace();
+    fs.writeFileSync(
+      path.join(workspace, '.env'),
+      ['APPDATA=/workspace-a/roaming', 'RUNTIME_DOTENV=allowed', ''].join('\n'),
+    );
+
+    loadEnvironment(testSettings({}), workspace);
+    expect(process.env['APPDATA']).not.toBe('/workspace-a/roaming');
+    expect(process.env['RUNTIME_DOTENV']).toBe('allowed');
+
+    reloadEnvironment(testSettings({}), workspace);
+    expect(process.env['APPDATA']).not.toBe('/workspace-a/roaming');
   });
 
   // The numbered GIT_CONFIG_KEY_/VALUE_ pairs are hardcoded exclusions via

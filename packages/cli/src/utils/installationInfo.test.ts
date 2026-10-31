@@ -19,12 +19,20 @@ import * as path from 'node:path';
 import * as childProcess from 'node:child_process';
 import { isGitRepository } from '@qwen-code/qwen-code-core';
 
+const { debugSpy } = vi.hoisted(() => ({ debugSpy: vi.fn() }));
+
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('@qwen-code/qwen-code-core')>();
   return {
     ...actual,
     isGitRepository: vi.fn(),
+    createDebugLogger: () => ({
+      debug: debugSpy,
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+    }),
   };
 });
 
@@ -798,8 +806,112 @@ describe('formatUpdateInstructions', () => {
 });
 
 describe('getNpmCliPath', () => {
+  const nodePathWin32 = 'C:\\Program Files\\nodejs\\node.exe';
+  const bundledWin32 =
+    'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js';
+  const appDataWin32 = 'C:\\Users\\dev\\AppData\\Roaming';
+  const userNpmWin32 =
+    'C:\\Users\\dev\\AppData\\Roaming\\npm\\node_modules\\npm\\bin\\npm-cli.js';
+  const hostilePrefix = 'C:\\repo\\chosen\\prefix';
+  const hostileNpmWin32 = path.win32.join(
+    hostilePrefix,
+    'node_modules',
+    'npm',
+    'bin',
+    'npm-cli.js',
+  );
+
+  // npm exports a prefix to its children; a repository-controlled .env can too.
+  const stubInheritedPrefixes = (value = '') => {
+    vi.stubEnv('npm_config_global_prefix', value);
+    vi.stubEnv('npm_config_prefix', value);
+  };
+
   beforeEach(() => {
     vi.resetAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("prefers npm in npm's default %APPDATA%\\npm prefix when it exists", () => {
+    stubInheritedPrefixes();
+    vi.stubEnv('APPDATA', appDataWin32);
+    mockedExistsSync.mockImplementation(
+      (candidate) => String(candidate) === userNpmWin32,
+    );
+
+    const result = getNpmCliPath(nodePathWin32, 'win32');
+
+    expect(result).toBe(userNpmWin32);
+    expect(mockedExistsSync).toHaveBeenCalledWith(userNpmWin32);
+    // A run that executes the wrong npm is otherwise completely silent, so the
+    // choice has to be reconstructible from the log.
+    expect(debugSpy).toHaveBeenCalledWith(
+      expect.stringContaining(userNpmWin32),
+    );
+    // Resolution stays synchronous: the posix branch's realpath walk must not
+    // start running on Windows as a side effect of preferring the user's npm.
+    expect(mockedRealPathSync).not.toHaveBeenCalled();
+  });
+
+  it('keeps the bundled npm without probing the filesystem when APPDATA is unset', () => {
+    stubInheritedPrefixes();
+    vi.stubEnv('APPDATA', '');
+
+    const result = getNpmCliPath(nodePathWin32, 'win32');
+
+    expect(result).toBe(bundledWin32);
+    expect(mockedExistsSync).not.toHaveBeenCalled();
+  });
+
+  it('rejects a relative APPDATA so the probe cannot follow the caller cwd', () => {
+    stubInheritedPrefixes();
+    vi.stubEnv('APPDATA', '.');
+    mockedExistsSync.mockReturnValue(true);
+
+    const result = getNpmCliPath(nodePathWin32, 'win32');
+
+    expect(result).toBe(bundledWin32);
+    expect(mockedExistsSync).not.toHaveBeenCalled();
+    expect(debugSpy).toHaveBeenCalledWith(
+      expect.stringContaining(bundledWin32),
+    );
+  });
+
+  it('ignores npm_config_prefix and npm_config_global_prefix with a live APPDATA', () => {
+    // A repository-controlled .env can set both. Honouring them would pick the
+    // script qwen hands to process.execPath even though APPDATA is set, which is
+    // the state every interactive Windows machine runs in.
+    stubInheritedPrefixes(hostilePrefix);
+    vi.stubEnv('APPDATA', appDataWin32);
+    mockedExistsSync.mockImplementation((candidate) =>
+      [userNpmWin32, hostileNpmWin32].includes(String(candidate)),
+    );
+
+    const result = getNpmCliPath(nodePathWin32, 'win32');
+
+    expect(result).toBe(userNpmWin32);
+    expect(mockedExistsSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('repo'),
+    );
+  });
+
+  it('keeps the bundled npm when APPDATA holds no npm and a hostile prefix exists', () => {
+    stubInheritedPrefixes(hostilePrefix);
+    vi.stubEnv('APPDATA', appDataWin32);
+    mockedExistsSync.mockImplementation(
+      (candidate) => String(candidate) === hostileNpmWin32,
+    );
+
+    const result = getNpmCliPath(nodePathWin32, 'win32');
+
+    expect(result).toBe(bundledWin32);
+    expect(mockedExistsSync).toHaveBeenCalledTimes(1);
+    expect(mockedExistsSync).not.toHaveBeenCalledWith(
+      expect.stringContaining('repo'),
+    );
   });
 
   it('returns the resolved path when adjacent npm is a .js file', () => {
@@ -846,13 +958,17 @@ describe('getNpmCliPath', () => {
   });
 
   it('returns win32 npm-cli.js path on Windows', () => {
-    const nodePath = 'C:\\Program Files\\nodejs\\node.exe';
+    // Pin the fallback instead of relying on vi.fn()'s undefined default: with
+    // APPDATA set (as on CI Windows runners) the resolver probes
+    // %APPDATA%\npm\node_modules\npm\bin\npm-cli.js, so the miss has to be
+    // explicit for this assertion to mean what it says.
+    stubInheritedPrefixes();
+    vi.stubEnv('APPDATA', appDataWin32);
+    mockedExistsSync.mockReturnValue(false);
 
-    const result = getNpmCliPath(nodePath, 'win32');
+    const result = getNpmCliPath(nodePathWin32, 'win32');
 
-    expect(result).toBe(
-      'C:\\Program Files\\nodejs\\node_modules\\npm\\bin\\npm-cli.js',
-    );
+    expect(result).toBe(bundledWin32);
     expect(mockedRealPathSync).not.toHaveBeenCalled();
   });
 });

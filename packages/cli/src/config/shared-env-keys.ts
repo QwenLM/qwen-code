@@ -214,6 +214,16 @@ export const PROJECT_ENV_HARDCODED_EXCLUSIONS = [
   'TMPDIR',
   'TMP',
   'TEMP',
+  // `%APPDATA%\npm` is where the Windows npm resolver
+  // (utils/installationInfo.ts getNpmCliPath) looks for a self-updated npm, and
+  // the file it finds there is executed through `process.execPath` by the
+  // update check and by the staged managed-npm install. A project `.env` that
+  // redirected APPDATA would therefore choose the script qwen runs, so both
+  // Windows profile roots are rejected from repository content. They are not
+  // loader keys: the OS sets them for every process, and daemon children need
+  // the real values (scrubInheritedLoaderEnv must leave them alone).
+  'APPDATA',
+  'LOCALAPPDATA',
   // git falls back to executing $SSH_ASKPASS for passphrase prompts (its
   // askpass order is GIT_ASKPASS > core.askPass > SSH_ASKPASS, and ssh runs
   // it whenever SSH_ASKPASS_REQUIRE=force or no terminal is available), so a
