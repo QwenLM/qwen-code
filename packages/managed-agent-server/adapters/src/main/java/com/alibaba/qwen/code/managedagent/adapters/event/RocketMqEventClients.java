@@ -11,6 +11,7 @@ import org.apache.rocketmq.client.apis.consumer.ConsumeResult;
 import org.apache.rocketmq.client.apis.consumer.LitePushConsumer;
 import org.apache.rocketmq.client.apis.producer.Producer;
 import org.apache.rocketmq.client.java.exception.InternalErrorException;
+import org.apache.rocketmq.client.java.exception.ProxyTimeoutException;
 public final class RocketMqEventClients {
     public static final String CAPABILITY_PROBE_LITE = "capability-probe";
     private final ClientServiceProvider provider;
@@ -137,12 +138,15 @@ public final class RocketMqEventClients {
                     .setKeys(CAPABILITY_PROBE_LITE)
                     .setBody("{}".getBytes(java.nio.charset.StandardCharsets.UTF_8))
                     .build());
-        } catch (InternalErrorException unavailable) {
+        } catch (InternalErrorException | ProxyTimeoutException unavailable) {
             // The broker answered and refused the write itself — a full
-            // disk, a stopped store, an HA failover — so the topic's message
-            // type is not in question. A type conflict arrives as a
-            // BadRequestException instead; naming mqadmin here would send an
-            // operator to reconfigure a topic that is already correct.
+            // disk, a stopped or timed-out store, an HA failover — so the
+            // topic's message type is not in question. The two are siblings
+            // under ClientException, not parent and child, so naming only one
+            // would leave the persistence timeouts on the topic remedy. A
+            // type conflict arrives as a BadRequestException instead; naming
+            // mqadmin here would send an operator to reconfigure a topic
+            // that is already correct.
             throw new IllegalStateException("the event-transport broker"
                     + " is reachable but could not write the probe message"
                     + " to topic " + topic + ": check the broker's disk"

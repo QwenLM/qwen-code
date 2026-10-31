@@ -12,6 +12,7 @@ import org.apache.rocketmq.client.apis.producer.Producer;
 import org.apache.rocketmq.client.apis.producer.ProducerBuilder;
 import org.apache.rocketmq.client.java.exception.BadRequestException;
 import org.apache.rocketmq.client.java.exception.InternalErrorException;
+import org.apache.rocketmq.client.java.exception.ProxyTimeoutException;
 import org.apache.rocketmq.client.java.exception.StatusChecker;
 import org.apache.rocketmq.client.java.rpc.Context;
 import org.apache.rocketmq.client.java.rpc.RpcFuture;
@@ -86,11 +87,41 @@ public class RocketMqEventClientsTest {
                 + " message to topic " + TOPIC), failure.getMessage());
         assertTrue(failure.getMessage().contains("disk space"),
                 failure.getMessage());
+        assertTrue(failure.getMessage().contains("message store"),
+                failure.getMessage());
+        assertTrue(failure.getMessage().contains("HA state"),
+                failure.getMessage());
         assertFalse(failure.getMessage().contains("mqadmin updateTopic"),
                 failure.getMessage());
         assertFalse(failure.getMessage().contains("refused a LiteTopic"
                 + " message"), failure.getMessage());
         assertSame(unavailable, failure.getCause());
+        verify(producer).close();
+    }
+
+    // A master or slave store that times out on the probe write is the same
+    // class of failure as a full disk: the broker answered and could not
+    // persist. The client reports it as ProxyTimeoutException, a sibling of
+    // InternalErrorException rather than a subclass, so the arm has to name
+    // both or the stopped-store case keeps the topic remedy.
+    @Test
+    public void aPersistenceTimeoutNamesTheBrokerNotTheTopicType()
+            throws Exception {
+        ProxyTimeoutException timedOut = new ProxyTimeoutException(50401,
+                "req-3", "master persistence timeout");
+        when(producer.send(any(Message.class))).thenThrow(timedOut);
+
+        IllegalStateException failure = assertThrows(
+                IllegalStateException.class,
+                () -> new RocketMqEventClients(provider).producer(settings));
+
+        assertTrue(failure.getMessage().contains("could not write the probe"
+                + " message to topic " + TOPIC), failure.getMessage());
+        assertFalse(failure.getMessage().contains("mqadmin updateTopic"),
+                failure.getMessage());
+        assertFalse(failure.getMessage().contains("refused a LiteTopic"
+                + " message"), failure.getMessage());
+        assertSame(timedOut, failure.getCause());
         verify(producer).close();
     }
 
@@ -135,6 +166,9 @@ public class RocketMqEventClientsTest {
         assertEquals(InternalErrorException.class, refusalType(50000, future));
         assertEquals(InternalErrorException.class, refusalType(50001, future));
         assertEquals(InternalErrorException.class, refusalType(50002, future));
+        assertEquals(ProxyTimeoutException.class, refusalType(50400, future));
+        assertEquals(ProxyTimeoutException.class, refusalType(50401, future));
+        assertEquals(ProxyTimeoutException.class, refusalType(50402, future));
     }
 
     private static Class<?> refusalType(int code, RpcFuture<?, ?> future) {
