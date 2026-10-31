@@ -37,6 +37,16 @@ export const ATTRIBUTIONS = ['pr', 'harness', 'environment'];
 
 const KEBAB_PNG = /^[a-z0-9]+(?:-[a-z0-9]+)*\.png$/;
 const OID = /^[0-9a-f]{7,40}$/;
+// GFM renders an ATX heading indented up to three spaces as a heading too
+// (four spaces become a code block), so the indent is part of the shape,
+// not a way around it.
+const HEADING = /^ {0,3}#{1,6}\s/;
+// A heading is a short title; past this it is a paragraph wearing a heading's
+// font size. GitHub renders an H1 at 2em, so a long heading line is a wall of
+// giant text however well-formed the Markdown is.
+const HEADING_TITLE_MAX = 120;
+const FOOTER =
+  /^_— .+ via Qwen Code \/verify-pr \(v[^;]+; skill [0-9a-f]{12}\)_$/;
 
 const HELP = `Usage: node scripts/verify-pr-check.mjs <artifact-dir>
 
@@ -53,8 +63,11 @@ Checks a local round against the rules the CI publisher enforces:
     and lists at least one commit (an empty set makes the claim vacuous)
 
 and warns (without failing) when the report does not lead with its verdict and
-head OID, when evidence/ carries no kebab-case PNG capture, or when a round with
-failures carries no failures ledger at all.
+head OID, when the verdict line is a heading (GitHub renders the whole
+paragraph as one giant H1), when evidence/ carries no kebab-case PNG capture,
+when a round with failures carries no failures ledger at all, or when
+comment.md — the exact body a local round posts, optional — repeats the
+heading shape or lacks the attribution footer.
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -133,6 +146,23 @@ export function checkMutationCoverage(text) {
     );
   }
   return { errors };
+}
+
+/**
+ * The verdict line is a plain paragraph. Three rounds of PR #15984 opened
+ * with `# PR … — **Verdict: …** — <the whole verdict paragraph>` on one line,
+ * which GitHub renders as a single giant H1 — structurally valid Markdown,
+ * visually a wall of bold text. A heading carrying the verdict, or any
+ * over-long heading in the lead, is that defect's shape.
+ */
+function leadShapeWarnings(text, verdict, label) {
+  const first = text.split('\n').find((line) => line.trim() !== '');
+  if (!first || !HEADING.test(first)) return [];
+  const holdsVerdict = verdict !== null && first.includes(verdict);
+  if (!holdsVerdict && first.length <= HEADING_TITLE_MAX) return [];
+  return [
+    `${label} opens with a heading${holdsVerdict ? ' carrying the verdict' : ` of ${first.length} characters`}: GitHub renders the whole line as one giant H1 — the verdict line is a plain paragraph (no leading #), and a heading is a short title on its own line`,
+  ];
 }
 
 /**
@@ -289,6 +319,24 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
         'report.md does not name a 40-character head OID in its first 10 non-empty lines',
       );
     }
+    warnings.push(...leadShapeWarnings(files.report, verdict, 'report.md'));
+  }
+
+  // comment.md is the exact body a local round posts: report content plus
+  // the attribution footer. report.md deliberately carries no footer (both
+  // publish paths append it at comment time), so this is the only artifact
+  // where the footer's presence is checkable. The workflow assembles its own
+  // body and never writes this file, so its absence is not a defect.
+  if (files.comment && files.comment.trim() !== '') {
+    warnings.push(...leadShapeWarnings(files.comment, verdict, 'comment.md'));
+    const lines = files.comment
+      .split('\n')
+      .filter((line) => line.trim() !== '');
+    if (!FOOTER.test(lines[lines.length - 1] ?? '')) {
+      warnings.push(
+        'comment.md does not end with the attribution footer `_— <model> via Qwen Code /verify-pr (v<version>; skill <12-hex>)_`: append the resolved footer before posting — omit it only when the model cannot be resolved',
+      );
+    }
   }
 
   if (evidence.length === 0) {
@@ -329,6 +377,7 @@ function main(argv) {
     verdict: readIfExists(join(dir, 'verdict.txt')),
     assertions: readIfExists(join(dir, 'assertions.json')),
     mutations: readIfExists(join(dir, 'mutations.json')),
+    comment: readIfExists(join(dir, 'comment.md')),
   };
   const evidenceDir = join(dir, 'evidence');
   const evidence = existsSync(evidenceDir)
