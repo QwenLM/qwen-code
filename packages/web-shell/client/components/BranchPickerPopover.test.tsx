@@ -4395,10 +4395,7 @@ describe('BranchPickerPopover remotes view', () => {
       () => new Promise((resolve) => (release = resolve)),
     );
     const onBranchChanged = vi.fn();
-    mountWithBranches(undefined, { gitCwd: '/repo', onBranchChanged });
-    await flush();
-    clickTestId('branch-picker-manage-remotes');
-    await flush();
+    await openRemotesView({ gitCwd: '/repo', onBranchChanged });
     const button = document.body.querySelector<HTMLButtonElement>(
       '[data-testid="remote-remove-origin"]',
     );
@@ -4424,6 +4421,13 @@ describe('BranchPickerPopover remotes view', () => {
     // equality on the pre-settle element falsifies every restore shape
     // that could reach an attached node, where `not.toBe(one testid)`
     // falsified none.
+    // Switching gitCwd also re-runs the open effect (its fetch callbacks
+    // changed), scheduling another 50ms search autofocus. Let it land
+    // before sampling, so the assertion measures the settle effect rather
+    // than that timer.
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 60));
+    });
     const activeBefore = document.activeElement;
     await act(async () => {
       release?.({ v: 1, workspaceCwd: '/repo2', remotes: [] });

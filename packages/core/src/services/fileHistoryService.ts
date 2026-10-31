@@ -73,6 +73,8 @@ async function readRetainedText(
 export interface FileHistorySnapshot {
   promptId: string;
   trackedFileBackups: Record<string, FileHistoryBackup>;
+  /** Original turn endpoint when the following turn has been deleted. */
+  diffAfterBackups?: Record<string, FileHistoryBackup>;
   timestamp: Date;
 }
 
@@ -141,6 +143,7 @@ export const FILE_HISTORY_DIR = 'file-history';
 export interface SerializedFileHistorySnapshot {
   promptId: string;
   trackedFileBackups: Record<string, SerializedFileHistoryBackup>;
+  diffAfterBackups?: Record<string, SerializedFileHistoryBackup>;
   timestamp: string;
 }
 
@@ -151,23 +154,30 @@ export interface SerializedFileHistoryBackup {
   failed?: boolean;
 }
 
+function serializeBackups(backups: Record<string, FileHistoryBackup>) {
+  return Object.fromEntries(
+    Object.entries(backups).map(([path, backup]) => [
+      path,
+      {
+        backupFileName: backup.backupFileName,
+        version: backup.version,
+        backupTime: backup.backupTime.toISOString(),
+        failed: backup.failed || undefined,
+      },
+    ]),
+  );
+}
+
 export function serializeSnapshot(
   s: FileHistorySnapshot,
 ): SerializedFileHistorySnapshot {
   return {
     promptId: s.promptId,
     timestamp: s.timestamp.toISOString(),
-    trackedFileBackups: Object.fromEntries(
-      Object.entries(s.trackedFileBackups).map(([path, backup]) => [
-        path,
-        {
-          backupFileName: backup.backupFileName,
-          version: backup.version,
-          backupTime: backup.backupTime.toISOString(),
-          failed: backup.failed || undefined,
-        },
-      ]),
-    ),
+    trackedFileBackups: serializeBackups(s.trackedFileBackups),
+    ...(s.diffAfterBackups
+      ? { diffAfterBackups: serializeBackups(s.diffAfterBackups) }
+      : {}),
   };
 }
 
@@ -176,23 +186,32 @@ function safeParseDate(iso: string): Date {
   return Number.isNaN(d.getTime()) ? new Date(0) : d;
 }
 
+function deserializeBackups(
+  backups: Record<string, SerializedFileHistoryBackup>,
+) {
+  return Object.fromEntries(
+    Object.entries(backups).map(([path, backup]) => [
+      path,
+      {
+        backupFileName: backup.backupFileName,
+        version: backup.version,
+        backupTime: safeParseDate(backup.backupTime),
+        failed: backup.failed,
+      },
+    ]),
+  );
+}
+
 export function deserializeSnapshots(
   arr: SerializedFileHistorySnapshot[],
 ): FileHistorySnapshot[] {
   return arr.map((s) => ({
     promptId: s.promptId,
     timestamp: safeParseDate(s.timestamp),
-    trackedFileBackups: Object.fromEntries(
-      Object.entries(s.trackedFileBackups).map(([path, backup]) => [
-        path,
-        {
-          backupFileName: backup.backupFileName,
-          version: backup.version,
-          backupTime: safeParseDate(backup.backupTime),
-          failed: backup.failed,
-        },
-      ]),
-    ),
+    trackedFileBackups: deserializeBackups(s.trackedFileBackups),
+    ...(s.diffAfterBackups
+      ? { diffAfterBackups: deserializeBackups(s.diffAfterBackups) }
+      : {}),
   }));
 }
 /** Per-turn read-fanout cap. Each candidate file may read up to two backups,
@@ -672,7 +691,21 @@ export class FileHistoryService {
         trackedFiles.add(trackingPath);
         trackedFileBackups[trackingPath] = backup;
       }
-      migrated.push({ ...snapshot, trackedFileBackups });
+      migrated.push({
+        ...snapshot,
+        trackedFileBackups,
+        ...(snapshot.diffAfterBackups
+          ? {
+              diffAfterBackups: Object.fromEntries(
+                Object.entries(snapshot.diffAfterBackups).map(([p, backup]) => {
+                  const trackingPath = this.maybeShortenFilePath(p);
+                  trackedFiles.add(trackingPath);
+                  return [trackingPath, backup];
+                }),
+              ),
+            }
+          : {}),
+      });
     }
     this.state = {
       snapshots: migrated,
@@ -685,7 +718,10 @@ export class FileHistoryService {
     // the same backup file via the inheritance optimization in makeSnapshot).
     const uniqueNames = new Set<string>();
     for (const snapshot of this.state.snapshots) {
-      for (const backup of Object.values(snapshot.trackedFileBackups)) {
+      for (const backup of [
+        ...Object.values(snapshot.trackedFileBackups),
+        ...Object.values(snapshot.diffAfterBackups ?? {}),
+      ]) {
         if (this.retainedStorage && backup.failed)
           throw new Error('Retained backup is unavailable.');
         if (backup.backupFileName !== null && !backup.failed) {
@@ -736,7 +772,10 @@ export class FileHistoryService {
     // window so concurrent makeSnapshot/trackEdit see a consistent state.
     const affectedSnapshots = new Set<FileHistorySnapshot>();
     for (const snapshot of this.state.snapshots) {
-      for (const backup of Object.values(snapshot.trackedFileBackups)) {
+      for (const backup of [
+        ...Object.values(snapshot.trackedFileBackups),
+        ...Object.values(snapshot.diffAfterBackups ?? {}),
+      ]) {
         if (backup.backupFileName && missing.has(backup.backupFileName)) {
           backup.failed = true;
           affectedSnapshots.add(snapshot);
@@ -986,9 +1025,10 @@ export class FileHistoryService {
         const removed = this.state.snapshots.slice(targetIdx + 1);
         this.state.snapshots = this.state.snapshots.slice(0, targetIdx + 1);
         this.state.trackedFiles = new Set(
-          this.state.snapshots.flatMap((s) =>
-            Object.keys(s.trackedFileBackups),
-          ),
+          this.state.snapshots.flatMap((s) => [
+            ...Object.keys(s.trackedFileBackups),
+            ...Object.keys(s.diffAfterBackups ?? {}),
+          ]),
         );
         await this.cleanupOrphanedBackups(removed);
       }
@@ -1094,8 +1134,9 @@ export class FileHistoryService {
     if (targetIdx < 0) return undefined;
 
     const target = this.state.snapshots[targetIdx]!;
-    const nextSnapshot =
-      targetIdx + 1 < this.state.snapshots.length
+    const nextSnapshot = target.diffAfterBackups
+      ? { ...target, trackedFileBackups: target.diffAfterBackups }
+      : targetIdx + 1 < this.state.snapshots.length
         ? this.state.snapshots[targetIdx + 1]
         : undefined;
 
@@ -1476,9 +1517,12 @@ export class FileHistoryService {
     trackingPath: string,
   ): BackupFileName | undefined {
     for (const snapshot of this.state.snapshots) {
-      const backup = snapshot.trackedFileBackups[trackingPath];
-      if (backup !== undefined && backup.version === 1) {
-        return backup.backupFileName;
+      for (const backup of [
+        snapshot.trackedFileBackups[trackingPath],
+        snapshot.diffAfterBackups?.[trackingPath],
+      ]) {
+        if (backup !== undefined && backup.version === 1)
+          return backup.backupFileName;
       }
     }
     return undefined;
@@ -1487,9 +1531,12 @@ export class FileHistoryService {
   private getMaxVersion(trackingPath: string): number {
     let maxVersion = 0;
     for (const snapshot of this.state.snapshots) {
-      const existing = snapshot.trackedFileBackups[trackingPath];
-      if (existing && existing.version > maxVersion) {
-        maxVersion = existing.version;
+      for (const existing of [
+        snapshot.trackedFileBackups[trackingPath],
+        snapshot.diffAfterBackups?.[trackingPath],
+      ]) {
+        if (existing && existing.version > maxVersion)
+          maxVersion = existing.version;
       }
     }
     return maxVersion;
@@ -1506,14 +1553,20 @@ export class FileHistoryService {
       throw new Error('Retained history cannot delete backups.');
     const liveBackups = new Set<string>();
     for (const s of this.state.snapshots) {
-      for (const b of Object.values(s.trackedFileBackups)) {
+      for (const b of [
+        ...Object.values(s.trackedFileBackups),
+        ...Object.values(s.diffAfterBackups ?? {}),
+      ]) {
         if (b.backupFileName !== null) liveBackups.add(b.backupFileName);
       }
     }
 
     const toDelete = new Set<string>();
     for (const s of removedSnapshots) {
-      for (const b of Object.values(s.trackedFileBackups)) {
+      for (const b of [
+        ...Object.values(s.trackedFileBackups),
+        ...Object.values(s.diffAfterBackups ?? {}),
+      ]) {
         if (b.backupFileName !== null && !liveBackups.has(b.backupFileName)) {
           toDelete.add(b.backupFileName);
         }

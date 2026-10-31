@@ -273,6 +273,42 @@ const renderMainContent = (uiState: UIState) =>
   );
 
 describe('<MainContent />', () => {
+  it.each([false, true])(
+    'preserves completed summary state and group identity in pending rows (VP: %s)',
+    (useTerminalBuffer) => {
+      historyItemDisplayPropsSpy.mockClear();
+      renderMainContent(
+        createUIState({
+          useTerminalBuffer,
+          pendingHistoryItems: [
+            { type: 'gemini', text: 'before' },
+            {
+              type: 'gemini_thought',
+              text: 'summary',
+              thoughtGroupId: -7,
+              isStreaming: false,
+            },
+            {
+              type: 'gemini_thought_content',
+              text: 'continuation',
+              thoughtGroupId: -7,
+              isStreaming: false,
+            },
+            { type: 'gemini_content', text: 'after' },
+          ],
+        }),
+      );
+      const thoughtProps = historyItemDisplayPropsSpy.mock.calls
+        .map(([props]) => props)
+        .filter((props) => props.item.thoughtGroupId === -7);
+      expect(thoughtProps).toHaveLength(2);
+      for (const props of thoughtProps) {
+        expect(props.isPending).toBe(true);
+        expect(props.item.isStreaming).toBe(false);
+      }
+    },
+  );
+
   it('renders AppHeader inside Static at the top of the static content', () => {
     staticPropsSpy.mockClear();
     staticItemsSpy.mockClear();

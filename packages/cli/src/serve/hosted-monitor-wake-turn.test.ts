@@ -13,6 +13,7 @@ import {
 import { HostedToolRecoveryRequiredError } from './hosted-workspace-tool-turn.js';
 import {
   HostedMonitorWakeScheduler,
+  MonitorWakeTransientReadError,
   type HostedMonitorWakeTurn,
 } from './hosted-monitor-wake.js';
 import type { HostedChildAgentSession } from './hosted-child-agent-session.js';
@@ -56,6 +57,26 @@ function harness(
 }
 
 describe('withChildAgentConsumption', () => {
+  it('retries a transient cancellation read before claiming or starting a wake', async () => {
+    const { session } = world();
+    const execute = vi.fn();
+    const runTurn = createMonitorWakeRunTurn({
+      session,
+      sessionId: 'session-1',
+      cwd: '/work',
+      executeHostedTurn: execute,
+      busy: () => false,
+      needsRecovery: () => false,
+      writeStderr: () => {},
+      cancelled: async () => {
+        throw new MonitorWakeTransientReadError('offline');
+      },
+    });
+    await expect(runTurn(TURN)).resolves.toBe('busy');
+    expect(execute).not.toHaveBeenCalled();
+    expect(session.blocked).toBe(false);
+    expect(session.managed.sink.write).not.toHaveBeenCalled();
+  });
   it('settles a queued cancellation without entering the model', async () => {
     const { session } = world();
     const execute = vi.fn();
@@ -199,6 +220,22 @@ describe('withChildAgentConsumption', () => {
     );
     expect(agents.markConsumed).toHaveBeenCalledWith('run-1');
     expect(agents.markConsumed).toHaveBeenCalledTimes(1);
+  });
+
+  it('consumes the original child notification after its continuation completes', async () => {
+    const { session, agents } = world();
+    const turn = withChildAgentConsumption(
+      harness(session, async () => ({ systemPayload: { state: 'completed' } })),
+      session,
+    );
+    await expect(
+      turn({
+        ...TURN,
+        turnId: 'wake-recovery:replacement',
+        notificationTurnId: TURN.turnId,
+      }),
+    ).resolves.toBe('settled');
+    expect(agents.markConsumed).toHaveBeenCalledExactlyOnceWith('run-1');
   });
 
   // R1-74: a cancelled or errored wake burns the input, so the pump still

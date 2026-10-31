@@ -26,6 +26,8 @@ The existing actor-scoped WORKSPACE_CREATE receipt persists the selected source,
 
 Reuse the shared directory-browser dialog and its stale-response protection. Directory requests use the Java Managed provider. The browser preserves the pending name, source, directory, and idempotency key before submission. An uncertain operation remains retryable with the exact same request. An explicit abandon-local-confirmation action removes only the persisted browser record and unlocks directory/name editing, including after reload. It warns that a Workspace may already exist and is not deleted; a new creation uses a new key. A browser storage failure preserves the frozen request. Selecting, refreshing, or newly creating a Workspace initializes the composer directory from its persisted default without changing its prompt or model.
 
+The direct-input composer uses this default automatically and has no separate relative-directory section. Its Workspace menu contains Working directory, Refresh, and Load more when another page is available. Working directory opens the shared scoped dialog; Save applies the override and Cancel discards the edit. Switching away from an overridden directory still requires confirmation. Refresh remains available after failed Workspace discovery, while selection and directory editing remain unavailable until discovery succeeds. The empty-session compatibility form keeps its existing directory field.
+
 ## Affected areas
 
 | Area                              | Change                                                                          |
@@ -47,6 +49,7 @@ This change covers the existing trusted Linux local-process deployment. It does 
 4. Reader, operator, other actor, other tenant, inactive source, traversal, symlink, maintenance directory, and unconfigured storage requests are refused without disclosing directory contents.
 5. Same-key and concurrent retries create one Workspace; changed requests conflict; pending source changes fail; completed replay does not regrant access or register held storage.
 6. Empty creation, model selection, prompt preservation, ordinary daemon behavior, and original Workspace recovery continue to work.
+7. At desktop and mobile widths, the direct-input composer hides the separate directory section, uses the server default in creation requests, and supports directory save/cancel and list refresh/pagination through the Workspace menu without changing the prompt or model.
 
 ## Local UI evidence
 

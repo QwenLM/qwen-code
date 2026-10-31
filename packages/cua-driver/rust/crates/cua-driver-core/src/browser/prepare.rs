@@ -328,15 +328,9 @@ fn cleanup_created_profile(profile: &PreparedProfile) {
 }
 
 #[cfg(target_os = "linux")]
-fn configure_linux_isolated_browser_command(
-    command: &mut Command,
-    native_wayland: bool,
-    no_sandbox: bool,
-) {
+fn configure_linux_isolated_browser_command(command: &mut Command, no_sandbox: bool) {
     command.arg("--password-store=basic");
-    if native_wayland {
-        command.arg("--ozone-platform=wayland");
-    }
+    command.arg("--ozone-platform=x11");
     if no_sandbox {
         command.arg("--no-sandbox");
     }
@@ -364,12 +358,8 @@ fn isolated_browser_command(executable: &str, profile: &Path) -> Command {
         .arg("--window-size=900,640");
     #[cfg(target_os = "linux")]
     {
-        let native_wayland = std::env::var("XDG_SESSION_TYPE")
-            .is_ok_and(|session| session.eq_ignore_ascii_case("wayland"))
-            && std::env::var_os("WAYLAND_DISPLAY").is_some()
-            && std::env::var_os("DISPLAY").is_none();
         let no_sandbox = std::env::var("CUA_E2E_BROWSER_NO_SANDBOX").as_deref() == Ok("1");
-        configure_linux_isolated_browser_command(&mut command, native_wayland, no_sandbox);
+        configure_linux_isolated_browser_command(&mut command, no_sandbox);
     }
     let stderr = if std::env::var_os("CUA_E2E_BROWSER_STDERR").is_some() {
         Stdio::inherit()
@@ -1444,15 +1434,15 @@ mod tests {
 
     #[cfg(target_os = "linux")]
     #[test]
-    fn isolated_launch_can_select_native_wayland_and_test_vm_sandbox_mode() {
+    fn isolated_launch_selects_x11_and_test_vm_sandbox_mode() {
         let mut command = Command::new("chromium-under-test");
-        configure_linux_isolated_browser_command(&mut command, true, true);
+        configure_linux_isolated_browser_command(&mut command, true);
         let args = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
         assert!(args.iter().any(|arg| arg == "--password-store=basic"));
-        assert!(args.iter().any(|arg| arg == "--ozone-platform=wayland"));
+        assert!(args.iter().any(|arg| arg == "--ozone-platform=x11"));
         assert!(args.iter().any(|arg| arg == "--no-sandbox"));
     }
 }
