@@ -10,6 +10,7 @@ export type {
   ManagedPackagePreparation,
 } from './managed-extension-package-types.js';
 export { DaemonAttachmentUploadError } from './DaemonAttachmentUploadError.js';
+export { DaemonSkillInstallError } from './DaemonSkillInstallError.js';
 export {
   DaemonClient,
   DaemonHttpError,
@@ -508,6 +509,11 @@ export type {
   DaemonSkillScope,
   DaemonSkillInstallSource,
   DaemonSkillInstallRequest,
+  DaemonSkillConfigInstallRequest,
+  DaemonSkillArchiveInstallRequest,
+  DaemonSkillArchiveInstallResult,
+  DaemonSkillInstallAttempt,
+  DaemonSkillInstallOptions,
   DaemonSkillMutationResult,
   DaemonSettingDescriptor,
   DaemonPermissionRuleSet,

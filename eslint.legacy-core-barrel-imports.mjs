@@ -185,7 +185,6 @@ export const legacyCoreBarrelImports = [
   'packages/cli/src/serve/workspace-providers-status.ts',
   'packages/cli/src/serve/workspace-remember.ts',
   'packages/cli/src/serve/workspace-runtime-storage.ts',
-  'packages/cli/src/serve/workspace-skill-management.ts',
   'packages/cli/src/serve/workspace-skills-status.ts',
   'packages/cli/src/services/BuiltinCommandLoader.ts',
   'packages/cli/src/services/BundledSkillLoader.ts',

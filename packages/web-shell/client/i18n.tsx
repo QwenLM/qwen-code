@@ -3441,6 +3441,32 @@ const EN: Messages = {
   'skills.install.action': 'Upload',
   'skills.install.description':
     'Install a skill from GitHub, a local folder, or a ZIP archive.',
+  'skills.install.archiveHelp': (v) =>
+    `ZIP: ${v?.compressed ?? ''} MiB compressed, ${v?.expanded ?? ''} MiB extracted, ${v?.entries ?? ''} entries; root SKILL.md up to ${v?.manifest ?? ''} MiB. Installation continues after upload finishes.`,
+  'skills.install.legacyHelp':
+    'Up to 64 MiB total, 32 MiB per file, and 2000 files.',
+  'skills.install.legacyZipHelp':
+    'ZIP up to 7,864,071 bytes; 64 MiB extracted, 32 MiB per file, and 2000 files.',
+  'skills.install.error.archiveTooLarge': (v) =>
+    `The ZIP archive exceeds the ${v?.limit ?? ''} MiB compressed limit.`,
+  'skills.install.error.archivePackageTooLarge':
+    'The archive exceeds 200 MiB extracted, or its root SKILL.md exceeds 32 MiB.',
+  'skills.install.error.archiveEntries':
+    'The archive contains too many ZIP entries (max 4096, including folders and ignored metadata).',
+  'skills.install.error.zipUpgrade':
+    'This daemon accepts ZIP files up to 7,864,071 bytes. Upgrade the daemon to upload larger archives.',
+  'skills.install.checkingResult': 'Checking the installation result…',
+  'skills.install.stillRunning':
+    'The installation is still running. Check the result again; the archive will not be uploaded again.',
+  'skills.install.resultUnknown':
+    'The installation result could not be confirmed. Check again; this does not mean the installation failed.',
+  'skills.install.notCommitted': 'This archive was not installed.',
+  'skills.install.recoveryRequired':
+    'Installation recovery is required. Preserve the recovery paths shown below.',
+  'skills.install.checkResult': 'Check result',
+  'skills.install.cancelRequest': 'Cancel installation',
+  'skills.install.activationWarning': (v) =>
+    `Installed, but runtime activation failed: ${v?.detail ?? ''}`,
   'skills.install.error.authentication':
     'Authentication is required to upload skills.',
   'skills.install.error.folderRequired': 'Enter a folder path.',
@@ -3487,7 +3513,7 @@ const EN: Messages = {
   'skills.install.selectZip': 'Select a ZIP archive.',
   'skills.install.title': 'Upload skill',
   'skills.install.succeeded': (v) =>
-    `Skill “${v?.name ?? ''}” uploaded successfully.`,
+    `Skill “${v?.name ?? ''}” installed successfully.`,
   'skills.install.zipSelected': (v) => `Selected: ${v?.name ?? ''}`,
   'skills.delete.action': 'Delete skill',
   'skills.delete.description': (v) =>
@@ -7840,6 +7866,31 @@ const ZH: Messages = {
   'skills.enabled': 'Skill 已启用。',
   'skills.install.action': '上传',
   'skills.install.description': '从 GitHub、本地文件夹或 ZIP 压缩包安装技能。',
+  'skills.install.archiveHelp': (v) =>
+    `ZIP 压缩大小最多 ${v?.compressed ?? ''} MiB，展开最多 ${v?.expanded ?? ''} MiB、${v?.entries ?? ''} 个条目；根 SKILL.md 最多 ${v?.manifest ?? ''} MiB。上传结束后仍需完成安装。`,
+  'skills.install.legacyHelp':
+    '合计最多 64 MiB，单文件最多 32 MiB、2000 个文件。',
+  'skills.install.legacyZipHelp':
+    'ZIP 最多 7,864,071 字节；展开最多 64 MiB，单文件最多 32 MiB、2000 个文件。',
+  'skills.install.error.archiveTooLarge': (v) =>
+    `ZIP 压缩大小超过 ${v?.limit ?? ''} MiB 上限。`,
+  'skills.install.error.archivePackageTooLarge':
+    '归档展开大小超过 200 MiB，或根 SKILL.md 超过 32 MiB。',
+  'skills.install.error.archiveEntries':
+    'ZIP 条目超过 4096 个（包含目录和忽略的元数据）。',
+  'skills.install.error.zipUpgrade':
+    '当前 daemon 接受的 ZIP 最多为 7,864,071 字节。请升级 daemon 以上传更大的归档。',
+  'skills.install.checkingResult': '正在确认安装结果…',
+  'skills.install.stillRunning':
+    '安装仍在进行，请再次检查结果；不会重新上传归档。',
+  'skills.install.resultUnknown':
+    '暂时无法确认安装结果，请再次检查；这不代表安装失败。',
+  'skills.install.notCommitted': '本次归档未安装。',
+  'skills.install.recoveryRequired': '安装需要恢复处理，请保留下列恢复路径。',
+  'skills.install.checkResult': '检查结果',
+  'skills.install.cancelRequest': '取消安装',
+  'skills.install.activationWarning': (v) =>
+    `已安装，但运行时激活失败：${v?.detail ?? ''}`,
   'skills.install.error.authentication': '上传技能需要身份认证。',
   'skills.install.error.folderRequired': '请输入文件夹路径。',
   'skills.install.error.githubRequired': '请输入 GitHub SKILL.md 地址。',
@@ -7880,7 +7931,7 @@ const ZH: Messages = {
   'skills.install.scope.workspace': '工作区',
   'skills.install.selectZip': '请选择 ZIP 压缩包。',
   'skills.install.title': '上传技能',
-  'skills.install.succeeded': (v) => `技能“${v?.name ?? ''}”上传成功。`,
+  'skills.install.succeeded': (v) => `技能“${v?.name ?? ''}”安装成功。`,
   'skills.install.zipSelected': (v) => `已选择：${v?.name ?? ''}`,
   'skills.delete.action': '删除技能',
   'skills.delete.description': (v) =>

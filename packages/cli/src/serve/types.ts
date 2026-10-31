@@ -561,6 +561,11 @@ export interface CapabilitiesEnvelope {
     sessionRestoreTimeoutMs?: number;
     /** Present when `workspace_file_upload` is advertised. */
     maxWorkspaceFileUploadBytes?: number;
+    /** Only raw Skill archives and zip-file sources; legacy limits are unchanged. */
+    maxSkillArchiveBytes?: number;
+    maxSkillArchiveExpandedBytes?: number;
+    maxSkillArchiveEntries?: number;
+    maxSkillArchiveManifestBytes?: number;
   };
   /**
    * Language codes accepted by `POST /session/:id/language`.

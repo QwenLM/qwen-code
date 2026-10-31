@@ -856,8 +856,8 @@ importers:
         specifier: ^17.7.2
         version: 17.7.2
       yauzl:
-        specifier: ^2.10.0
-        version: 2.10.0
+        specifier: ^3.4.0
+        version: 3.4.0
       zod:
         specifier: ^3.23.8
         version: 3.25.76

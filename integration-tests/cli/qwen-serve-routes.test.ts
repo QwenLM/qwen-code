@@ -480,6 +480,8 @@ describe('qwen serve — capabilities envelope', () => {
       'extension_batch_activation_v2',
       'extension_activation_explicit_refresh',
       'workspace_skill_manage',
+      'skill_archive_install',
+      'skill_zip_file_source',
       'web_shell_brand',
       'workspace_settings',
       'workspace_permissions',

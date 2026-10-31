@@ -1,3 +1,7 @@
+import { createHash, randomUUID } from 'node:crypto';
+import { promises as fs } from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import express, {
   type NextFunction,
   type Request,
@@ -6,13 +10,20 @@ import express, {
 import request from 'supertest';
 import { SessionNotFoundError } from '@qwen-code/acp-bridge/bridgeErrors';
 import { BridgeChannelClosedError } from '@qwen-code/acp-bridge/status';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { sendBridgeError } from '../server/error-response.js';
+import type { DaemonTrustPolicySnapshot } from '../../config/daemon-trust-policy.js';
+import { SkillInstallAttemptStore } from '../skill-install-attempts.js';
 import {
   createWorkspaceRegistry,
   type WorkspaceRuntime,
 } from '../workspace-registry.js';
-import { WorkspaceSkillManagementError } from '../workspace-skill-management.js';
+import {
+  WorkspaceSkillManagementError,
+  WorkspaceSkillRecoveryError,
+  type WorkspaceSkillInstallOptions,
+  type WorkspaceSkillInstallRequest,
+} from '../workspace-skill-management.js';
 import {
   WorkspaceSkillNotFoundError,
   type WorkspaceSkillBatchToggleResult,
@@ -23,7 +34,11 @@ import {
   registerWorkspaceSkillsRoutes,
 } from './workspace-skills.js';
 
-function createHarness(trusted = true, runtimeLive = false) {
+function createHarness(
+  trusted = true,
+  runtimeLive = false,
+  getWorkspaceTrustPolicySnapshot?: () => DaemonTrustPolicySnapshot,
+) {
   const configStatus = {
     v: 1 as const,
     workspaceCwd: '/workspace',
@@ -68,11 +83,22 @@ function createHarness(trusted = true, runtimeLive = false) {
   }));
   const invalidateSkillsConfigStatus = vi.fn();
   const invalidateWorkspaceSkillsStatus = vi.fn();
-  const installWorkspaceSkill = vi.fn().mockResolvedValue({
-    skillName: 'demo-skill',
-    scope: 'workspace',
-    installedPath: '/workspace/.qwen/skills/demo-skill/SKILL.md',
-  });
+  const installWorkspaceSkill = vi.fn(
+    async (
+      _ctx: unknown,
+      input: WorkspaceSkillInstallRequest,
+      options?: WorkspaceSkillInstallOptions,
+    ) => {
+      options?.beforePublish?.();
+      const result = {
+        skillName: input.name,
+        scope: input.scope,
+        installedPath: '/workspace/.qwen/skills/demo-skill/SKILL.md',
+      };
+      options?.onCommitted?.(result);
+      return result;
+    },
+  );
   const deleteWorkspaceSkill = vi.fn().mockResolvedValue({
     skillName: 'demo-skill',
     scope: 'global',
@@ -151,6 +177,8 @@ function createHarness(trusted = true, runtimeLive = false) {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
   const routeDeps = {
+    archiveInstalls: new SkillInstallAttemptStore(),
+    getWorkspaceTrustPolicySnapshot,
     mutate: () => (_req: Request, _res: Response, next: NextFunction) => next(),
     safeBody: (req: Request) => req.body as Record<string, unknown>,
     sendBridgeError,
@@ -162,8 +190,10 @@ function createHarness(trusted = true, runtimeLive = false) {
     ...routeDeps,
     workspaceRuntime: runtime,
     workspaceRegistry,
-    installSkillConfig: (workspaceCwd, request) =>
-      installWorkspaceSkill(workspaceCwd, request),
+    installSkillConfig: (workspaceCwd, request, options) =>
+      options
+        ? installWorkspaceSkill(workspaceCwd, request, options)
+        : installWorkspaceSkill(workspaceCwd, request),
     deleteSkillConfig: (workspaceCwd, scope, skillName, installedPath) =>
       deleteWorkspaceSkill(workspaceCwd, scope, skillName, installedPath),
     parseAndValidateClientId: () => 'client-1',
@@ -174,6 +204,7 @@ function createHarness(trusted = true, runtimeLive = false) {
   });
   return {
     app,
+    archiveInstalls: routeDeps.archiveInstalls,
     runtime,
     refreshWorkspaceSkills,
     workspaceRegistry,
@@ -776,7 +807,7 @@ describe('workspace Skill management routes', () => {
     let maxActive = 0;
     harness.installWorkspaceSkill.mockImplementation(
       async (...args: unknown[]) => {
-        const install = args[1] as { name: string; scope: string };
+        const install = args[1] as WorkspaceSkillInstallRequest;
         active += 1;
         maxActive = Math.max(maxActive, active);
         if (install.scope === 'workspace') {
@@ -1086,5 +1117,567 @@ describe('workspace Skill management routes', () => {
     expect(response.status).toBe(503);
     expect(response.body.code).toBe('workspace_runtime_unavailable');
     expect(harness.setWorkspaceSkillsEnabled).toHaveBeenCalledOnce();
+  });
+});
+
+describe('native Skill archive routes', () => {
+  afterEach(() => vi.restoreAllMocks());
+  const payload = Buffer.from('owned binary archive fixture');
+  const sha256 = createHash('sha256').update(payload).digest('hex');
+
+  it.each([
+    ['/workspace/config/skills', true],
+    ['/workspaces/workspace-1/config/skills', false],
+  ])(
+    'refreshes the owned runtime inventory after an archive install at %s',
+    async (base, globalScope) => {
+      const h = createHarness();
+      const invalidateInternal = vi.fn();
+      const internal = {
+        ...h.runtime,
+        workspaceId: 'live-conversation',
+        workspaceCwd: '/live-conversation',
+        primary: false,
+        provenance: 'live-conversation' as const,
+        workspaceService: {
+          ...h.runtime.workspaceService,
+          invalidateWorkspaceSkillsStatus: invalidateInternal,
+        },
+      };
+      h.workspaceRegistry.add(internal);
+      expect(h.workspaceRegistry.list()).not.toContain(internal);
+      expect(h.workspaceRegistry.listManaged()).toContain(internal);
+
+      await request(h.app)
+        .post(
+          `${base}/install-archive?name=demo-skill&attemptId=${randomUUID()}`,
+        )
+        .type('application/octet-stream')
+        .send(payload)
+        .expect(200);
+
+      expect(
+        h.runtime.workspaceService.invalidateWorkspaceSkillsStatus,
+      ).toHaveBeenCalledOnce();
+      expect(invalidateInternal).toHaveBeenCalledTimes(globalScope ? 1 : 0);
+    },
+  );
+
+  it.each([
+    '/workspace/config/skills',
+    '/workspaces/workspace-1/config/skills',
+  ])(
+    'keeps a valid generation through a policy-only update at %s',
+    async (base) => {
+      const h = createHarness();
+      const original = h.installWorkspaceSkill.getMockImplementation()!;
+      const guard = h.workspaceRegistry.primaryEntry.current!.guard;
+      h.installWorkspaceSkill.mockImplementationOnce(async (...args) => {
+        h.workspaceRegistry.advancePolicyRevision(
+          h.workspaceRegistry.primaryEntry,
+          'unrelated-policy-change',
+        );
+        expect(h.workspaceRegistry.primaryEntry.current!.guard).toBe(guard);
+        return original(...args);
+      });
+      const id = randomUUID();
+      await request(h.app)
+        .post(`${base}/install-archive?name=demo-skill&attemptId=${id}`)
+        .type('application/octet-stream')
+        .send(payload)
+        .expect(200);
+      const receipt = await request(h.app).get(
+        `${base}/install-attempts/${id}`,
+      );
+      expect(receipt.body.state).toBe('committed');
+    },
+  );
+
+  it.each([
+    '/workspace/config/skills',
+    '/workspaces/workspace-1/config/skills',
+  ])(
+    'invalidates cached config after recovery is required at %s',
+    async (base) => {
+      const h = createHarness();
+      h.installWorkspaceSkill.mockRejectedValueOnce(
+        new WorkspaceSkillRecoveryError(
+          ['/backup'],
+          new Error('restore failed'),
+        ),
+      );
+      await request(h.app)
+        .post(
+          `${base}/install-archive?name=demo-skill&attemptId=${randomUUID()}`,
+        )
+        .type('application/octet-stream')
+        .send(payload)
+        .expect(500);
+      expect(h.invalidateSkillsConfigStatus).toHaveBeenCalledWith('/workspace');
+    },
+  );
+
+  it.each([
+    ['/workspace/config/skills/install', 'global'],
+    ['/workspaces/workspace-1/config/skills/install', 'workspace'],
+  ])(
+    'exposes retained recovery paths for an existing source at %s',
+    async (route, scope) => {
+      const h = createHarness();
+      const retainedPaths = ['/workspace/.skills-demo.backup-1'];
+      h.installWorkspaceSkill.mockRejectedValueOnce(
+        new WorkspaceSkillRecoveryError(
+          retainedPaths,
+          new Error('restore failed'),
+        ),
+      );
+      const response = await request(h.app)
+        .post(route)
+        .send({
+          name: 'demo-skill',
+          scope,
+          source: { type: 'folder', path: '/fixture' },
+        });
+      expect(response.status).toBe(500);
+      expect(response.body).toMatchObject({
+        code: 'skill_install_recovery_required',
+        retainedPaths,
+      });
+    },
+  );
+
+  it('records recovery materials when a native publication cannot be restored', async () => {
+    const h = createHarness();
+    const retainedPaths = ['/workspace/.skills-demo.backup-1'];
+    h.installWorkspaceSkill.mockRejectedValueOnce(
+      new WorkspaceSkillRecoveryError(
+        retainedPaths,
+        new Error('restore failed'),
+      ),
+    );
+    const id = randomUUID();
+    const response = await startUpload(h, id).done;
+    expect(response?.status).toBe(500);
+    expect(response?.body.retainedPaths).toEqual(retainedPaths);
+    const receipt = await request(h.app).get(
+      `/workspace/config/skills/install-attempts/${id}`,
+    );
+    expect(receipt.body).toMatchObject({
+      state: 'recovery_required',
+      error: { retainedPaths },
+    });
+  });
+
+  function startUpload(h: ReturnType<typeof createHarness>, id: string) {
+    const upload = request(h.app)
+      .post(
+        `/workspace/config/skills/install-archive?name=demo-skill&attemptId=${id}`,
+      )
+      .type('application/octet-stream')
+      .send(payload);
+    return {
+      upload,
+      done: upload.then(
+        (response) => response,
+        () => undefined,
+      ),
+    };
+  }
+
+  it('cancels a queued request, preserves its predecessor, and limits active operations', async () => {
+    const h = createHarness();
+    const settle = vi.spyOn(h.archiveInstalls, 'settle');
+    const original = h.installWorkspaceSkill.getMockImplementation()!;
+    let release!: () => void;
+    const holding = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.installWorkspaceSkill.mockImplementationOnce(async (...args) => {
+      await holding;
+      return original(...args);
+    });
+    const a = startUpload(h, randomUUID());
+    const uploads = [a];
+    try {
+      await vi.waitFor(() =>
+        expect(h.installWorkspaceSkill).toHaveBeenCalledOnce(),
+      );
+      const bid = randomUUID();
+      const b = startUpload(h, bid);
+      uploads.push(b);
+      await vi.waitFor(async () => {
+        const response = await request(h.app).get(
+          `/workspace/config/skills/install-attempts/${bid}`,
+        );
+        expect(response.body.phase).toBe('waiting');
+      });
+      const overflow = await request(h.app)
+        .post(
+          `/workspace/config/skills/install-archive?name=demo-skill&attemptId=${randomUUID()}`,
+        )
+        .type('application/octet-stream')
+        .send(payload);
+      expect(overflow.status).toBe(429);
+      expect(overflow.headers['retry-after']).toBe('1');
+      b.upload.abort();
+      await b.done;
+      await vi.waitFor(() =>
+        expect(settle.mock.calls.some(([, id]) => id === bid)).toBe(true),
+      );
+      const cancelled = await request(h.app).get(
+        `/workspace/config/skills/install-attempts/${bid}`,
+      );
+      expect(cancelled.body.state).toBe('not_committed');
+      const cid = randomUUID();
+      const c = startUpload(h, cid);
+      uploads.push(c);
+      await vi.waitFor(async () => {
+        const response = await request(h.app).get(
+          `/workspace/config/skills/install-attempts/${cid}`,
+        );
+        expect(response.body.phase).toBe('waiting');
+      });
+      expect(h.installWorkspaceSkill).toHaveBeenCalledOnce();
+      release();
+      expect((await a.done)?.status).toBe(200);
+      expect((await c.done)?.status).toBe(200);
+      expect(h.installWorkspaceSkill).toHaveBeenCalledTimes(2);
+    } finally {
+      release();
+      await Promise.all(uploads.map(({ done }) => done));
+    }
+  });
+
+  it('finishes publication after a late HTTP cancellation and exposes its committed receipt', async () => {
+    const h = createHarness();
+    let admitted = false;
+    let release!: () => void;
+    const publishing = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.installWorkspaceSkill.mockImplementationOnce(
+      async (_ctx, input, options) => {
+        options?.beforePublish?.();
+        admitted = true;
+        await publishing;
+        const result = {
+          skillName: input.name,
+          scope: input.scope,
+          installedPath: '/workspace/.qwen/skills/demo-skill/SKILL.md',
+        };
+        options?.onCommitted?.(result);
+        return result;
+      },
+    );
+    const id = randomUUID();
+    const { upload, done } = startUpload(h, id);
+    try {
+      await vi.waitFor(() => expect(admitted).toBe(true));
+      upload.abort();
+      await done;
+      release();
+      await vi.waitFor(async () => {
+        const receipt = await request(h.app).get(
+          `/workspace/config/skills/install-attempts/${id}`,
+        );
+        expect(receipt.body.state).toBe('committed');
+      });
+    } finally {
+      release();
+      await done;
+    }
+  });
+
+  it('rejects a generation invalidated during intake before waiting on a held mutation lock', async () => {
+    const h = createHarness();
+    const original = h.installWorkspaceSkill.getMockImplementation()!;
+    let release!: () => void;
+    const holding = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    h.installWorkspaceSkill.mockImplementationOnce(async (...args) => {
+      await holding;
+      return original(...args);
+    });
+    const first = startUpload(h, randomUUID());
+    try {
+      await vi.waitFor(() =>
+        expect(h.installWorkspaceSkill).toHaveBeenCalledOnce(),
+      );
+      const temporaryDirectory = fs.mkdtemp.bind(fs);
+      vi.spyOn(fs, 'mkdtemp').mockImplementationOnce(async (...args) => {
+        const directory = await temporaryDirectory(...args);
+        h.workspaceRegistry.beginReplacement(
+          h.workspaceRegistry.primaryEntry,
+          'changed-during-intake',
+        );
+        return directory;
+      });
+      const id = randomUUID();
+      const response = await request(h.app)
+        .post(
+          `/workspace/config/skills/install-archive?name=demo-skill&attemptId=${id}`,
+        )
+        .type('application/octet-stream')
+        .send(payload)
+        .timeout(1500);
+      expect(response.status).toBe(409);
+      expect(h.installWorkspaceSkill).toHaveBeenCalledOnce();
+      const receipt = await request(h.app).get(
+        `/workspace/config/skills/install-attempts/${id}`,
+      );
+      expect(receipt.body.state).toBe('not_committed');
+    } finally {
+      release();
+      await first.done;
+    }
+  });
+
+  it.each([
+    '/workspace/config/skills',
+    '/workspaces/workspace-1/config/skills',
+  ])('returns a historical commit receipt through %s', async (base) => {
+    const h = createHarness();
+    const id = randomUUID();
+    const response = await request(h.app)
+      .post(`${base}/install-archive?name=demo-skill&attemptId=${id}`)
+      .type('application/octet-stream')
+      .send(payload);
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({
+      attemptId: id,
+      archiveSha256: sha256,
+      activation: 'deferred',
+    });
+    const receipt = await request(h.app).get(`${base}/install-attempts/${id}`);
+    expect(receipt.status).toBe(200);
+    expect(receipt.headers['cache-control']).toBe('no-store');
+    expect(receipt.body).toMatchObject({
+      state: 'committed',
+      archiveSha256: sha256,
+      workspaceId: 'workspace-1',
+    });
+    const source = h.installWorkspaceSkill.mock.calls[0][1].source;
+    expect(source.type).toBe('prepared-zip');
+    if (source.type !== 'prepared-zip')
+      throw new Error('missing owned archive');
+    await expect(fs.access(source.path)).rejects.toThrow();
+    const duplicate = await request(h.app)
+      .post(`${base}/install-archive?name=demo-skill&attemptId=${id}`)
+      .type('application/octet-stream')
+      .send(payload);
+    expect(duplicate.status).toBe(409);
+    expect(duplicate.body.code).toBe('skill_attempt_conflict');
+    expect(h.installWorkspaceSkill).toHaveBeenCalledOnce();
+    h.workspaceRegistry.beginReplacement(
+      h.workspaceRegistry.primaryEntry,
+      'next-policy',
+    );
+    const historical = await request(h.app).get(
+      `${base}/install-attempts/${id}`,
+    );
+    expect(historical.body.state).toBe('committed');
+  });
+
+  it('binds a secondary archive to its selected runtime and hides its receipt from other owners', async () => {
+    const h = createHarness();
+    const install = vi.fn(h.installWorkspaceSkill.getMockImplementation()!);
+    h.workspaceRegistry.add({
+      ...h.runtime,
+      workspaceId: 'secondary',
+      workspaceCwd: '/secondary',
+      primary: false,
+      workspaceService: {
+        ...h.runtime.workspaceService,
+        installWorkspaceSkill: install,
+      },
+    });
+    const id = randomUUID();
+    const response = await request(h.app)
+      .post(
+        `/workspaces/secondary/config/skills/install-archive?name=demo-skill&attemptId=${id}`,
+      )
+      .type('application/octet-stream')
+      .send(payload);
+    expect(response.status).toBe(200);
+    expect(h.installWorkspaceSkill).not.toHaveBeenCalled();
+    expect(install.mock.calls[0][0]).toMatchObject({
+      workspaceCwd: '/secondary',
+    });
+    const selected = await request(h.app).get(
+      `/workspaces/secondary/config/skills/install-attempts/${id}`,
+    );
+    expect(selected.body).toMatchObject({
+      workspaceId: 'secondary',
+      state: 'committed',
+    });
+    for (const owner of ['/workspace', '/workspaces/workspace-1']) {
+      const hidden = await request(h.app).get(
+        `${owner}/config/skills/install-attempts/${id}`,
+      );
+      expect(hidden.status).toBe(404);
+    }
+  });
+
+  it('copies a daemon file, verifies its digest and never removes the source', async () => {
+    const h = createHarness();
+    const directory = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'skill-route-input-'),
+    );
+    const file = path.join(directory, 'source.zip');
+    try {
+      await fs.writeFile(file, payload);
+      const response = await request(h.app)
+        .post('/workspace/config/skills/install')
+        .send({
+          name: 'demo-skill',
+          scope: 'global',
+          attemptId: randomUUID(),
+          source: { type: 'zip-file', path: file, sha256 },
+        });
+      expect(response.status).toBe(200);
+      await expect(fs.readFile(file)).resolves.toEqual(payload);
+      const id = randomUUID();
+      const mismatch = await request(h.app)
+        .post('/workspace/config/skills/install')
+        .send({
+          name: 'demo-skill',
+          scope: 'global',
+          attemptId: id,
+          source: { type: 'zip-file', path: file, sha256: '0'.repeat(64) },
+        });
+      expect(mismatch.body.code).toBe('skill_archive_digest_mismatch');
+      const receipt = await request(h.app).get(
+        `/workspace/config/skills/install-attempts/${id}`,
+      );
+      expect(receipt.body.state).toBe('not_committed');
+      expect(h.installWorkspaceSkill).toHaveBeenCalledOnce();
+    } finally {
+      await fs.rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    '/workspace/skills/install',
+    '/workspaces/workspace-1/skills/install',
+  ])('rejects zip-file on legacy runtime route %s', async (route) => {
+    const h = createHarness();
+    const response = await request(h.app)
+      .post(route)
+      .send({
+        name: 'demo-skill',
+        scope: 'workspace',
+        attemptId: randomUUID(),
+        source: { type: 'zip-file', path: '/tmp/source.zip' },
+      });
+    expect(response.status).toBe(400);
+    expect(response.body.code).toBe('skill_source_requires_config_route');
+    expect(h.installWorkspaceSkill).not.toHaveBeenCalled();
+  });
+
+  it('validates media and encoding before reserving an attempt', async () => {
+    const h = createHarness();
+    const id = randomUUID();
+    const route = `/workspace/config/skills/install-archive?name=demo-skill&attemptId=${id}`;
+    const wrongType = await request(h.app)
+      .post(route)
+      .type('text/plain')
+      .send('ZIP');
+    expect(wrongType.status).toBe(415);
+    const encoded = await request(h.app)
+      .post(route)
+      .type('application/octet-stream')
+      .set('Content-Encoding', 'gzip')
+      .send(payload);
+    expect(encoded.status).toBe(415);
+    const lookup = await request(h.app).get(
+      `/workspace/config/skills/install-attempts/${id}`,
+    );
+    expect(lookup.body.code).toBe('skill_install_attempt_unknown');
+    expect(h.installWorkspaceSkill).not.toHaveBeenCalled();
+  });
+
+  it('preserves commit when later activation fails', async () => {
+    const h = createHarness();
+    vi.mocked(
+      h.runtime.workspaceService.invalidateWorkspaceSkillsStatus,
+    ).mockImplementationOnce(() => {
+      throw new Error('activation unavailable');
+    });
+    const id = randomUUID();
+    const response = await request(h.app)
+      .post(
+        `/workspace/config/skills/install-archive?name=demo-skill&attemptId=${id}`,
+      )
+      .type('application/octet-stream')
+      .send(payload);
+    expect(response.status).toBe(200);
+    expect(response.body.activationWarning).toBe('activation unavailable');
+    const receipt = await request(h.app).get(
+      `/workspace/config/skills/install-attempts/${id}`,
+    );
+    expect(receipt.body).toMatchObject({
+      state: 'committed',
+      result: { activationWarning: 'activation unavailable' },
+    });
+  });
+
+  it('checks the monotonic budget immediately before publication', async () => {
+    const h = createHarness();
+    const now = vi.spyOn(performance, 'now').mockReturnValue(0);
+    h.installWorkspaceSkill.mockImplementationOnce(
+      async (_ctx, input, options) => {
+        now.mockReturnValue(120_001);
+        options?.beforePublish?.();
+        throw new Error(`unexpected publication of ${input.name}`);
+      },
+    );
+    const id = randomUUID();
+    const response = await request(h.app)
+      .post(
+        `/workspace/config/skills/install-archive?name=demo-skill&attemptId=${id}`,
+      )
+      .type('application/octet-stream')
+      .send(payload);
+    expect(response.status).toBe(408);
+    const receipt = await request(h.app).get(
+      `/workspace/config/skills/install-attempts/${id}`,
+    );
+    expect(receipt.body).toMatchObject({
+      state: 'not_committed',
+      error: { code: 'skill_install_timeout' },
+    });
+  });
+
+  it('rejects history immediately after configured trust is revoked, even with the old trusted runtime', async () => {
+    let folderTrustEnabled = false;
+    const h = createHarness(true, false, () => ({
+      revision: 'policy',
+      folderTrustEnabled,
+      ideTrust: undefined,
+      trustedFolders: {},
+    }));
+    const id = randomUUID();
+    await request(h.app)
+      .post(
+        `/workspace/config/skills/install-archive?name=demo-skill&attemptId=${id}`,
+      )
+      .type('application/octet-stream')
+      .send(payload)
+      .expect(200);
+    const trustedReceipt = await request(h.app)
+      .get(`/workspace/config/skills/install-attempts/${id}`)
+      .expect(200);
+    expect(trustedReceipt.body.state).toBe('committed');
+    folderTrustEnabled = true;
+    h.workspaceRegistry.beginReplacement(
+      h.workspaceRegistry.primaryEntry,
+      'revoked',
+    );
+    expect(h.runtime.trusted).toBe(true);
+    const receipt = await request(h.app).get(
+      `/workspace/config/skills/install-attempts/${id}`,
+    );
+    expect(receipt.status).toBe(403);
   });
 });
