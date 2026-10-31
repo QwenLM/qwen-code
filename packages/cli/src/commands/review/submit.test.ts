@@ -3965,10 +3965,21 @@ describe('submit receipt (producer half of the audit contract)', () => {
   it('accumulates ids across two submits in the same window (drift restart)', () => {
     ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
     runSubmit(authorizedPost());
+    // A real drift restart posts the NEW head — the same-commit tripwire
+    // refuses a re-post at the commit already reviewed (PR #15853), so the
+    // second leg carries the moved head's payload, as the restart would.
     ghMock.mockImplementationOnce(() => JSON.stringify({ id: 43 }));
-    runSubmit(authorizedPost());
+    runSubmit(
+      authorizedPost({
+        review: file('review-restart.json', {
+          ...REVIEW,
+          commit_id: 'def456',
+        }),
+      }),
+    );
     const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
     expect(receipt.reviewIds).toEqual([42, 43]);
+    expect(receipt.lastCommitId).toBe('def456');
   });
 
   it('migrates a legacy single-id receipt on the next submit', () => {
@@ -4007,6 +4018,74 @@ describe('submit receipt (producer half of the audit contract)', () => {
     const tmpDir = join(dir, '.qwen', 'tmp');
     const leftovers = readdirSync(tmpDir).filter((f) => f.endsWith('.tmp'));
     expect(leftovers).toEqual([]);
+  });
+
+  it('records the posted commit — the same-commit retry tripwire key', () => {
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.lastCommitId).toBe(REVIEW.commit_id);
+  });
+
+  it('refuses a re-submit at the commit already posted (PR #15853)', () => {
+    // The retry that replied to itself: the first submit lands the review,
+    // the second finds this round's own roots and would reply a duplicate
+    // of every finding into its own thread. The tripwire refuses before
+    // any write — exit 3, the one refusal shape, nothing posted.
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    ghMock.mockClear();
+    process.exitCode = undefined;
+    runSubmit(authorizedPost());
+    expect(process.exitCode).toBe(3);
+    expect(ghMock).not.toHaveBeenCalled();
+    const out = JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string) as {
+      posted: boolean;
+      reason: string;
+    };
+    expect(out).toEqual({
+      posted: false,
+      reason: 'already-posted-this-commit',
+    });
+    const stderr = writeStderrSpy.mock.calls
+      .map((c) => String(c[0]))
+      .join('\n');
+    expect(stderr).toContain('already posted from this workspace');
+    expect(stderr).toContain('review 42');
+  });
+
+  it('a dry-run over a landed commit previews the refusal, writes nothing', () => {
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 42 }));
+    runSubmit(authorizedPost());
+    ghMock.mockClear();
+    process.exitCode = undefined;
+    runSubmit(authorizedPost({ dryRun: true }));
+    expect(process.exitCode).toBeUndefined();
+    expect(ghMock).not.toHaveBeenCalled();
+    const out = JSON.parse(writeStdoutSpy.mock.calls.at(-1)![0] as string) as {
+      posted: boolean;
+      wouldPost: boolean;
+      reason: string;
+    };
+    expect(out.posted).toBe(false);
+    expect(out.wouldPost).toBe(false);
+    expect(out.reason).toBe('already-posted-this-commit');
+  });
+
+  it('a legacy receipt without lastCommitId does not trip the wire', () => {
+    // Receipts written before the tripwire carry no commit — the guard is
+    // inert for them (it is a retry tripwire, not a migration refusal).
+    mkdirSync(join(dir, '.qwen', 'tmp'), { recursive: true });
+    writeFileSync(
+      receiptPath(),
+      JSON.stringify({ reviewIds: [7], event: 'COMMENT', postedAt: 'x' }),
+    );
+    ghMock.mockImplementationOnce(() => JSON.stringify({ id: 8 }));
+    runSubmit(authorizedPost());
+    expect(process.exitCode).toBeUndefined();
+    const receipt = JSON.parse(readFileSync(receiptPath(), 'utf8'));
+    expect(receipt.reviewIds).toEqual([7, 8]);
+    expect(receipt.lastCommitId).toBe(REVIEW.commit_id);
   });
 });
 

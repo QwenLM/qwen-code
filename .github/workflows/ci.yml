@@ -762,6 +762,41 @@ jobs:
             echo '::warning::tmux/zip unavailable; real-tmux capture tests will be skipped and the zip-packaging suite will throw on CI.'
           fi
 
+      - name: 'Provision linters for real-binary tests'
+        # The script-lint real-binary regressions (the #15974 unloadable
+        # workflow, the PR-planted ignore-all config, the merge-base trust
+        # boundary) are skipIf-gated on actionlint/shellcheck being on PATH;
+        # without this step they silently skip on every CI run (PR #16001
+        # review). Same pinned, SHA-256-verified installer the lint lane
+        # uses, promoted onto GITHUB_PATH ahead of anything a shared runner
+        # left there. Advisory: a failed install degrades to the skips, not
+        # a red required check. Windows is excluded — the installer ships
+        # linux/darwin archives only.
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' && runner.os != 'Windows' }}"
+        timeout-minutes: 5
+        continue-on-error: true
+        run: |-
+          node --input-type=module -e '
+            import { execSync } from "node:child_process";
+            import { appendFileSync, existsSync, mkdirSync, rmSync } from "node:fs";
+            import { getLinters, getLinterTempDir } from "./scripts/lint.js";
+            const tempDir = getLinterTempDir();
+            rmSync(tempDir, { recursive: true, force: true });
+            mkdirSync(tempDir, { recursive: true });
+            const linters = getLinters();
+            for (const name of ["actionlint", "shellcheck"]) {
+              execSync(linters[name].installer, { stdio: "inherit" });
+              // Verify the install produced its binary BEFORE promoting the
+              // dir: a silent no-op install must fail this step visibly
+              // (continue-on-error tolerates it, the UI shows it), not
+              // degrade to skipped tests nobody notices (PR #16001 F2).
+              const bin = tempDir + "/" + name + "/" + name;
+              if (!existsSync(bin)) throw new Error(name + " installer produced no binary at " + bin);
+              appendFileSync(process.env.GITHUB_PATH, tempDir + "/" + name + "\n");
+            }
+            console.log("PROVISIONED actionlint + shellcheck into " + tempDir);
+          '
+
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
