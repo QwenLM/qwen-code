@@ -26,7 +26,11 @@ guarded and tested, while the first clause has three concrete evidence gaps:
 - **G2 — the extensions-enabled entry combination is unpinned.** The takeover
   continuation entry (`hosted-harness-session.ts:7124-7129`) admits sessions with
   `session.extensions?.enabled` even when `session.hooks || session.mcp`; the only
-  backstop for a non-commandStep plan is G1's untested clause.
+  backstop for a non-commandStep plan is G1's untested clause. (Resolution scope:
+  this slice pins the tool-turn backstop in both gate directions; the entry's
+  `extensions?.enabled` clause itself is a route-level surface recorded as a
+  follow-up below — a focused fixture cannot reach it without a full
+  hooks-session takeover, and a row that cannot fail is worse than no row.)
 - **G3 — an unavailable child ledger is answered as proven absence.**
   `fillParkedRoundAgentGaps` folds `gapText` for a stranded call when
   `children === undefined || admitted === undefined`
@@ -36,12 +40,16 @@ guarded and tested, while the first clause has three concrete evidence gaps:
   `hosted-child-agent-session.ts:1383-1415`); with the ledger absent, nothing is
   known — yet the fold asserts "the call never ran"
   (`HOSTED_AGENT_CALL_NOT_REACHED_TEXT`, `hosted-workspace-tool-turn.ts:1660-1661`).
-  `session.childAgents` is rebuilt deterministically from persisted session
-  configuration at load (`hosted-harness-session.ts:6265-6307`), so the absent arm
-  is unreachable for a stable configuration that never had the agent tool — but it
-  is reachable across child-lane configuration/version drift between the crashed
-  generation and the recovering one, exactly when an admitted child may still be
-  running. No test distinguishes the two arms.
+  The ledger family is `agent` AND `workflow`: the module's other readers already
+  treat the two names as one (`hosted-runtime-recovery.ts:790, 1913`,
+  `JOURNAL_ONLY_ANSWERABLE_TOOLS`), and workflow admission requires the child
+  funnel. `session.childAgents` is rebuilt deterministically from persisted
+  session configuration at load (`hosted-harness-session.ts:6265-6307`), so the
+  absent arm is unreachable for a stable configuration that never had the agent
+  tool — but it is reachable across child-lane configuration/version drift
+  between the crashed generation and the recovering one (reproducible at route
+  level via `suppressChildAgents` on a version-0 lane), exactly when an admitted
+  child may still be running. No test distinguishes the two arms.
 
 ## Verified code facts (main 35daec35ea)
 
@@ -68,22 +76,35 @@ guarded and tested, while the first clause has three concrete evidence gaps:
 
 ## Changes
 
-- **G1/G2 (tests only).** Behavioural cases in
-  `hosted-approval-continuation.test.ts`: a non-commandStep saved plan resumed by
-  a hooks-owned and by an mcp-owned tool turn must throw
-  `HostedToolRecoveryRequiredError('Unsupported saved batch owner.')`, including
-  the extensions-enabled combination. The gap is demonstrated first: deleting the
-  owner-gate clause keeps the current suites green; after the new cases, the same
-  deletion must red them.
-- **G3 (one guard + tests).** In `fillParkedRoundAgentGaps`, when the gap call is
-  the child-agent tool (`name === 'agent'`) and `input.children === undefined`,
-  throw `HostedToolRecoveryRequiredError` instead of folding: unavailable producer
-  evidence blocks (the continue route already maps the family to a retriable 409
-  `hosted_turn_recovery_required`). The ledger-present/no-record arm keeps its
-  honest never-admitted fold, and non-agent gap calls keep their existing answer.
-  Counterexample first (absent ledger + agent gap folds "never ran" today), then
-  the guard, then behavioural cases for all three arms in
-  `hosted-child-wait-recovery.test.ts`, each delete-control verified.
+- **G1/G2 (tests only).** A four-row owner-gate matrix in
+  `hosted-approval-continuation.test.ts`: a non-commandStep saved plan under a
+  hooks-owned and under an mcp-owned turn is refused with the
+  `'Unsupported saved batch owner.'` cause; a commandStep plan whose
+  `configRevision` no longer matches the turn's `extensionConfig.revision` is
+  refused by the gate's second arm; and a matching-revision commandStep plan
+  under a hooks owner proceeds PAST the gate (its rejection is the wrapped
+  transport failure, never the owner cause) — pinning the over-blocking
+  direction that keeps the A3 commandStep follow-up working. The gap is
+  demonstrated first: deleting the owner-gate clause keeps the pre-change
+  suites green.
+- **G3 (one guard + tests).** In `fillParkedRoundAgentGaps`, an owed fold
+  (`foldOwed`) for a ledger-family call (`agent` or `workflow`) with
+  `input.children === undefined` and a live (non-aborted) signal throws
+  `HostedToolRecoveryRequiredError` instead of folding. Three boundaries keep
+  the guard honest: an already-journaled gap stays a silent replay; the cancel
+  route and the interrupted-turn settle funnel PRE-ABORT this fill so they
+  terminate at once, and their abandonment folds keep the pre-A6 story (a
+  throwing fill there would wedge cancel in a deterministic 503 loop and the
+  wake in a busy retry — only the continue route, whose catch maps the family
+  to a retriable recovery block, blocks); non-family gap calls keep their
+  existing answer. Witnesses: fill-level cases for the agent arm, the workflow
+  arm, the non-agent arm, the replay silence and the pre-aborted exemption in
+  `hosted-child-wait-recovery.test.ts`, plus two route-level cases in
+  `hosted-harness-session.test.ts` that build the drift into the load
+  (`suppressChildAgents` on the orphan parked shape): continue answers a
+  retriable 409 `hosted_turn_recovery_required` with no fabricated fold, and
+  cancel still settles with its pre-A6 abandonment fold. Every clause has a
+  verified single-clause delete-control.
 
 ## Design decisions
 
@@ -91,9 +112,19 @@ guarded and tested, while the first clause has three concrete evidence gaps:
   evidence semantics: "unknown" must not be laundered into "proven absent". The
   fold is durable and answers the model; a wrong never-ran claim can strand a
   live child's effect with no owed response.
-- **Only `agent` calls change.** Their never-started proof is the child ledger
-  itself; other stranded calls keep the existing gap answer, so the guard cannot
-  regress sessions that legitimately have no child funnel.
+- **The ledger family, not just `agent`.** `workflow` launches ride the same
+  child-run ledger (the module's other readers treat the two names as one
+  family), so the same unavailable-evidence block covers both. Other stranded
+  calls keep the existing gap answer, so the guard cannot regress sessions
+  that legitimately have no child funnel.
+- **Abort exemption for the terminating routes.** Cancel and the interrupted
+  settle funnel deliberately pre-abort the fill ("settles at once … instead of
+  holding the cancel hostage"); the guard exempts an already-aborted signal so
+  those paths keep their pre-A6 abandonment folds and always terminate. The
+  residual trade-off is explicit: under drift, those two paths still fold an
+  approximate abandonment answer rather than block — blocking them would wedge
+  a cancelled Turn forever, which is worse than the approximate story their
+  own ledger-keeping children can still recover from.
 - **No packaged arm, no continuation support.** §9.1 classifies A6 as focused or
   integration evidence, and native continuation refuses Hook/MCP sessions by
   design (the commandStep follow-up is A3's other half). Packaging a Hook/MCP
@@ -107,27 +138,36 @@ guarded and tested, while the first clause has three concrete evidence gaps:
 ## Files affected
 
 - `packages/cli/src/serve/hosted-runtime-recovery.ts` (the G3 guard)
-- `packages/cli/src/serve/hosted-child-wait-recovery.test.ts` (G3 cases)
-- `packages/cli/src/serve/hosted-approval-continuation.test.ts` (G1/G2 cases)
+- `packages/cli/src/serve/hosted-child-wait-recovery.test.ts` (G3 fill-level cases)
+- `packages/cli/src/serve/hosted-harness-session.test.ts` (G3 route-level cases)
+- `packages/cli/src/serve/hosted-approval-continuation.test.ts` (G1/G2 matrix)
 - this design doc (both languages); the parent §9.1 status note is updated when
   the focused evidence lands.
 
 ## Acceptance criteria
 
 - G1/G2: the owner-gate deletion survives the pre-change suites (demonstrated
-  gap) and reds the new cases afterwards; the extensions-enabled combination is
-  covered, not just the plain hooks/mcp arms.
+  gap) and reds the refusal rows afterwards; removing `!plan.commandStep &&`
+  reds exactly the matching-revision acceptance row; removing the second
+  (revision) arm reds exactly the stale-revision row. The harness entry's
+  `extensions?.enabled` clause is NOT claimed as pinned (follow-up below).
 - G3: the absent-ledger counterexample folds "never ran" before the guard and
-  throws `HostedToolRecoveryRequiredError` with no fold written after it; the
-  ledger-present/no-record arm still folds the honest never-admitted answer; a
-  non-agent gap call with an absent ledger is unchanged; deleting the guard reds
-  exactly the new case.
+  throws with no fold written after it, for both `agent` and `workflow`; the
+  ledger-present/no-record arm still folds the honest answer; a non-family gap
+  call is unchanged; a journaled gap replays silently; a pre-aborted fill keeps
+  its abandonment fold. At route level under built-in drift: continue blocks
+  retriably (409) with no fabricated fold, and cancel still settles. Each
+  guard conjunct (family, foldOwed, abort exemption) has a delete-control that
+  reds exactly its named case.
 - Focused suites green under a sanitized environment (agent-session env vars
   stripped), typecheck/ESLint/Prettier green; the only production change is the
   single guard.
 
 ## Open questions
 
+- Pinning the harness takeover entry's `session.extensions?.enabled` clause at
+  route level (needs a hooks-session takeover fixture with a durable v3
+  continuation; the tool-turn backstop it gates is already pinned both ways).
 - Whether a later slice packages an A6 fault arm once Hook/MCP e2e fixtures
   exist (out of scope here).
 - Whether Hook/MCP-profile Turn leases should join the cleanup-debt protocol

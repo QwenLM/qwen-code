@@ -1507,9 +1507,18 @@ export async function fillParkedRoundAgentGaps(input: {
     // never-started proof a present ledger's missing record gives
     // (admitLaunch commits before dispatch). Block, never fold "never ran".
     // An already-journaled gap owes nothing: a replayed fill stays silent.
-    if (foldOwed && children === undefined && name === 'agent')
+    // The cancel route and the interrupted-turn settle funnel pre-abort this
+    // fill so they terminate at once; their abandonment folds keep the
+    // pre-A6 story. Only the live-signal continue route blocks — its catch
+    // maps the family to a retriable recovery block.
+    if (
+      foldOwed &&
+      children === undefined &&
+      (name === 'agent' || name === 'workflow') &&
+      input.signal?.aborted !== true
+    )
       throw new HostedToolRecoveryRequiredError(
-        'Child run ledger is unavailable; the agent gap cannot be proven never-started.',
+        'Child run ledger is unavailable; the gap cannot be proven never-started.',
       );
     const admitted =
       children === undefined

@@ -1112,7 +1112,7 @@ describe('hosted child wait recovery (#13708)', () => {
       }).catch((cause: unknown) => cause);
       expect(error).toBeInstanceOf(HostedToolRecoveryRequiredError);
       expect((error as HostedToolRecoveryRequiredError).cause).toBe(
-        'Child run ledger is unavailable; the agent gap cannot be proven never-started.',
+        'Child run ledger is unavailable; the gap cannot be proven never-started.',
       );
       // Only the wait's own fold landed; the agent gap owes an answer and
       // must not receive a fabricated one.
@@ -1120,6 +1120,82 @@ describe('hosted child wait recovery (#13708)', () => {
         .flatMap((entry) => entry.message?.parts ?? [])
         .map((part) => part.functionResponse?.id);
       expect(ids).toEqual(['call-1']);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  // A6 (R1-1): workflow launches ride the same child-run ledger as agent
+  // calls (the module's other readers treat the two names as one family),
+  // so the same unavailable-evidence block must cover them.
+  it('a workflow gap with an unavailable child ledger blocks, never folds never-ran', async () => {
+    await parkWedged(true, 'workflow');
+    const replacement = await open('boot-2', false);
+    try {
+      const consumption: string[] = [];
+      await settleTheChild(replacement);
+      await resumeTurn(replacement, consumption).resumeAgentWaitRuns(
+        [{ ...waitRun, functionCallId: 'call-1' }],
+        'recovered',
+        new AbortController().signal,
+      );
+      const error = await fillParkedRoundAgentGaps({
+        managed: replacement,
+        sessionId: SESSION_ID,
+        promptId: PROMPT_ID,
+        cwd: root,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+        children: undefined,
+      }).catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(HostedToolRecoveryRequiredError);
+      expect((error as HostedToolRecoveryRequiredError).cause).toBe(
+        'Child run ledger is unavailable; the gap cannot be proven never-started.',
+      );
+      const ids = toolResultEntries(await replacement.sink.project())
+        .flatMap((entry) => entry.message?.parts ?? [])
+        .map((part) => part.functionResponse?.id);
+      expect(ids).toEqual(['call-1']);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  // A6 (R1-2): the cancel route and the interrupted-turn settle funnel
+  // pre-abort this fill so they terminate at once. Their abandonment fold
+  // is the pre-A6 story and must survive the guard — only the live-signal
+  // continue route blocks.
+  it('a pre-aborted fill keeps its abandonment fold without the ledger', async () => {
+    await parkWedged(true);
+    const replacement = await open('boot-2', false);
+    try {
+      const consumption: string[] = [];
+      await settleTheChild(replacement);
+      await resumeTurn(replacement, consumption).resumeAgentWaitRuns(
+        [{ ...waitRun, functionCallId: 'call-1' }],
+        'recovered',
+        new AbortController().signal,
+      );
+      const preAborted = new AbortController();
+      preAborted.abort();
+      const filled = await fillParkedRoundAgentGaps({
+        managed: replacement,
+        sessionId: SESSION_ID,
+        promptId: PROMPT_ID,
+        cwd: root,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+        children: undefined,
+        signal: preAborted.signal,
+      });
+      expect(filled).toBe(1);
+      const callTwo = toolResultEntries(await replacement.sink.project()).find(
+        (entry) =>
+          entry.message?.parts?.some(
+            (part) => part.functionResponse?.id === 'call-2',
+          ),
+      );
+      expect(JSON.stringify(callTwo?.message?.parts)).toContain(
+        'interrupted before this child agent was admitted',
+      );
     } finally {
       await replacement.close();
     }

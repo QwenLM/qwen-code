@@ -565,18 +565,48 @@ it.each(
   TEST_TIMEOUT_MS,
 );
 
-// A6 (G1/G2): the saved-batch owner gate is the only backstop for the
-// extensions-enabled continuation entry admitting a Hook/MCP session: a
-// non-commandStep plan must be refused, never resumed under a Hook/MCP
-// owner. The gate reads ownership, not plan contents — a minimal
-// identity-matching plan isolates the clause (the reader has its own suite).
+// A6 (G1): the saved-batch owner gate refuses a non-commandStep plan under
+// a Hook/MCP owner and a commandStep plan whose configRevision no longer
+// matches, while a matching-revision commandStep plan proceeds past the
+// gate (the A3 commandStep follow-up keeps working). The gate reads
+// ownership and revisions, not plan contents — a minimal identity-matching
+// plan isolates the clause (the reader has its own suite).
+// G2 scope: this pins the tool-turn backstop, including that an
+// extensionConfig on the turn does not exempt the owner gate. The harness
+// takeover entry's `session.extensions?.enabled` clause is a separate
+// route-level surface, recorded as a follow-up in the design doc.
 it.each([
-  { owner: 'hooks', hooks: true, mcp: false, extensions: false },
-  { owner: 'mcp', hooks: false, mcp: true, extensions: false },
-  { owner: 'hooks+extensions', hooks: true, mcp: false, extensions: true },
+  {
+    owner: 'hooks',
+    hooks: true,
+    mcp: false,
+    commandStep: 'none',
+    verdict: 'refuse',
+  },
+  {
+    owner: 'mcp',
+    hooks: false,
+    mcp: true,
+    commandStep: 'none',
+    verdict: 'refuse',
+  },
+  {
+    owner: 'hooks with a stale commandStep revision',
+    hooks: true,
+    mcp: false,
+    commandStep: 'stale',
+    verdict: 'refuse',
+  },
+  {
+    owner: 'hooks with a matching commandStep revision',
+    hooks: true,
+    mcp: false,
+    commandStep: 'matching',
+    verdict: 'pass',
+  },
 ])(
-  'refuses a non-commandStep saved batch owned by a $owner session',
-  async ({ hooks, mcp, extensions }) => {
+  'the saved-batch owner gate: $owner ($verdict)',
+  async ({ hooks, mcp, commandStep, verdict }) => {
     const root = await mkdtemp(path.join(tmpdir(), 'g3-a6-owner-'));
     const sessionKey = {
       tenantId: 'tenant',
@@ -643,7 +673,7 @@ it.each([
                 } as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
               }
             : {}),
-          ...(extensions
+          ...(commandStep !== 'none'
             ? { extensionConfig: { revision: 1, packages: [] } }
             : {}),
         },
@@ -652,6 +682,14 @@ it.each([
         plan: {
           promptId,
           calls: [],
+          ...(commandStep !== 'none'
+            ? {
+                commandStep: {
+                  toolName: 'shell',
+                  configRevision: commandStep === 'stale' ? 2 : 1,
+                },
+              }
+            : {}),
           runtime: {
             bindingId: 'binding-1',
             generation: '1',
@@ -665,10 +703,22 @@ it.each([
       const error = await turn
         .resumeSavedNativeBatch(saved, 1, new AbortController().signal)
         .catch((cause: unknown) => cause);
-      expect(error).toBeInstanceOf(HostedToolRecoveryRequiredError);
-      expect((error as HostedToolRecoveryRequiredError).cause).toBe(
-        'Unsupported saved batch owner.',
-      );
+      if (verdict === 'refuse') {
+        expect(error).toBeInstanceOf(HostedToolRecoveryRequiredError);
+        expect((error as HostedToolRecoveryRequiredError).cause).toBe(
+          'Unsupported saved batch owner.',
+        );
+      } else {
+        // Past the gate: the turn warms against the fixture's unreachable
+        // broker, and the resume body wraps that transport failure into the
+        // family error with the TypeError as its cause — never the owner
+        // refusal's string cause. Dropping `!plan.commandStep &&` from the
+        // gate's first arm turns this row into the owner refusal and reds it.
+        expect(error).toBeInstanceOf(HostedToolRecoveryRequiredError);
+        const cause = (error as HostedToolRecoveryRequiredError).cause;
+        expect(cause).toBeInstanceOf(TypeError);
+        expect((cause as Error).message).toContain('fetch failed');
+      }
     } finally {
       await session.close();
       await rm(root, { recursive: true, force: true });
