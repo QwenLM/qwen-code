@@ -39,6 +39,17 @@ export function resetEncodingCache(): void {
 }
 
 /**
+ * Returns the system encoding (see {@link getSystemEncoding}), detected once
+ * per process. Shares its cache with {@link getCachedEncodingForBuffer}.
+ */
+export function getCachedSystemEncoding(): string | null {
+  if (cachedSystemEncoding === undefined) {
+    cachedSystemEncoding = getSystemEncoding();
+  }
+  return cachedSystemEncoding;
+}
+
+/**
  * Detects the encoding of a buffer.
  *
  * Strategy: try UTF-8 first, then a non-UTF-8 system encoding, then chardet.

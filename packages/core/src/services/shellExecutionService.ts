@@ -5,7 +5,7 @@
  */
 
 import stripAnsi from 'strip-ansi';
-import { isUtf8 } from 'node:buffer';
+import { isAscii, isUtf8 } from 'node:buffer';
 import type { PtyImplementation } from '../utils/getPty.js';
 import { getPty } from '../utils/getPty.js';
 import { spawn as cpSpawn, spawnSync } from 'node:child_process';
@@ -14,7 +14,10 @@ import os from 'node:os';
 import path from 'node:path';
 import type { IPty } from '@lydell/node-pty';
 import type { Terminal } from '@xterm/headless';
-import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
+import {
+  getCachedEncodingForBuffer,
+  getCachedSystemEncoding,
+} from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
 import { getShellConfiguration, type ShellType } from '../utils/shell-utils.js';
 import {
@@ -343,6 +346,52 @@ function decodePreviewTail(buffer: Buffer): string {
       ? aligned
       : buffer,
   );
+}
+
+/**
+ * Whether the system encoding is a code page other than UTF-8. An unknown
+ * encoding (code page 437, a C locale) or plain ASCII (macOS with no locale
+ * set) says nothing about bytes outside ASCII, so it does not count.
+ */
+function hasLegacyCodePage(): boolean {
+  const encoding = getCachedSystemEncoding();
+  return (
+    !!encoding &&
+    encoding !== 'ascii' &&
+    encoding !== 'us-ascii' &&
+    new TextDecoder(encoding).encoding !== 'utf-8'
+  );
+}
+
+/**
+ * Decodes one stream's complete output with the usual detection: UTF-8 when
+ * it is UTF-8, otherwise the code page. Output that was cut off can end
+ * partway through a UTF-8 character; it still counts as UTF-8 when the
+ * bytes before that character are UTF-8 and hold a multibyte character.
+ */
+function decodeCompleteOutput(bytes: Buffer, wasCut: boolean): string {
+  if (wasCut && !isUtf8(bytes)) {
+    // A cut-off character is its lead byte and at most two more bytes, and
+    // a streaming decoder holds it back without output. The bytes are
+    // checked in place rather than decoded just to test them.
+    let start = bytes.length - 1;
+    while (
+      start > 0 &&
+      start > bytes.length - 3 &&
+      (bytes[start] & 0xc0) === 0x80
+    ) {
+      start--;
+    }
+    const cutOff =
+      new TextDecoder('utf-8').decode(bytes.subarray(start), {
+        stream: true,
+      }) === '';
+    const beforeCut = bytes.subarray(0, start);
+    if (cutOff && isUtf8(beforeCut) && !isAscii(beforeCut)) {
+      return new TextDecoder('utf-8').decode(bytes);
+    }
+  }
+  return decodeBufferedOutput(bytes);
 }
 
 function appendOutputCaptureLimitNotice(
@@ -1027,6 +1076,11 @@ export class ShellExecutionService {
 
         let stdout = '';
         let stderr = '';
+        const stdoutBytes: Buffer[] = [];
+        const stderrBytes: Buffer[] = [];
+        // Whether the capture limit dropped bytes from this stream.
+        let stdoutCut = false;
+        let stderrCut = false;
         let stdoutPreview = '';
         let stderrPreview = '';
         const outputChunks: Buffer[] = [];
@@ -1056,9 +1110,17 @@ export class ShellExecutionService {
         let remainingDrainMs = POST_EXIT_STREAM_DRAIN_MS;
         let drainStartedAt = 0;
         let stdoutHeld = false;
+        // Whether the drain stopped waiting for stderr; only the decode reads it.
+        let stderrHeld = false;
         let pendingCaptureWrites = 0;
         let stdoutEnded = false;
         let stderrEnded = false;
+        // Whether a cancel killed the shell while this stream was still open,
+        // recorded before the kill: the streams a kill cuts can end before
+        // its exit is reported, and then the flags above no longer show
+        // which streams it cut.
+        let stdoutOpenAtCancel = false;
+        let stderrOpenAtCancel = false;
         let stdoutWrite: Promise<void> = Promise.resolve();
         let stderrWrite: Promise<void> = Promise.resolve();
 
@@ -1074,6 +1136,7 @@ export class ShellExecutionService {
           }
           if (remainingDrainMs <= 0) {
             stdoutHeld = !stdoutEnded;
+            stderrHeld = !stderrEnded;
             void handleExit(recordedExit.code, recordedExit.signal);
             return;
           }
@@ -1081,6 +1144,7 @@ export class ShellExecutionService {
           drainTimer = setTimeout(() => {
             drainTimer = null;
             stdoutHeld = !stdoutEnded;
+            stderrHeld = !stderrEnded;
             const recorded = recordedExit;
             if (recorded) void handleExit(recorded.code, recorded.signal);
           }, remainingDrainMs);
@@ -1188,6 +1252,10 @@ export class ShellExecutionService {
           previewTail?.add(data);
           if (stream === 'stderr') stderrTail?.add(data);
           const capturedData = captureOutputData(data);
+          if ((capturedData?.length ?? 0) < data.length) {
+            if (stream === 'stdout') stdoutCut = true;
+            else stderrCut = true;
+          }
           if (streamRawOutput) {
             onOutputEvent({
               type: 'raw_data',
@@ -1268,8 +1336,10 @@ export class ShellExecutionService {
           // Buffered text mode: accumulate for the final cleaned-blob emit.
           if (stream === 'stdout') {
             stdout += decodedChunk;
+            stdoutBytes.push(capturedData);
           } else {
             stderr += decodedChunk;
+            stderrBytes.push(capturedData);
           }
           if (streamBufferedOutput) {
             if (stream === 'stdout') {
@@ -1320,6 +1390,26 @@ export class ShellExecutionService {
             }
           }
           const { finalBuffer } = cleanup();
+          if (!streamStdout && hasLegacyCodePage()) {
+            // The first chunk picked the decoder, and an ASCII one is valid
+            // UTF-8; decode each stream again from its complete bytes, as
+            // the PTY path does at exit.
+            // A stream counts as cut off only where the service cut it: the
+            // capture limit cuts the streams it dropped bytes from, the
+            // post-exit drain the streams it stopped waiting for, and a
+            // cancel the streams still open when it killed the shell. A
+            // signal sent from outside is only seen at the exit, and the
+            // streams it cut may have ended by then, as complete output does,
+            // so its output is judged as complete output.
+            stdout = decodeCompleteOutput(
+              Buffer.concat(stdoutBytes),
+              stdoutCut || stdoutHeld || stdoutOpenAtCancel,
+            );
+            stderr = decodeCompleteOutput(
+              Buffer.concat(stderrBytes),
+              stderrCut || stderrHeld || stderrOpenAtCancel,
+            );
+          }
           // Ensure we don't add an extra newline if stdout already ends with one.
           const separator = stdout.endsWith('\n') ? '' : '\n';
           const combinedOutput =
@@ -1452,16 +1542,15 @@ export class ShellExecutionService {
 
         child.stdout?.on('data', stdoutHandler);
         child.stderr?.on('data', stderrHandler);
-        if (rawCapture || streamStdout) {
-          // streamStdout reads the stdout end too: the drain reports a
-          // stdout still held, not a held stderr.
-          child.stdout?.on('end', () => {
-            stdoutEnded = true;
-          });
-          child.stderr?.on('end', () => {
-            stderrEnded = true;
-          });
-        }
+        // The drain reports a stdout still held (raw capture and streaming),
+        // and the buffered re-decode treats a stream still open when a
+        // cancel kills the shell as cut off.
+        child.stdout?.on('end', () => {
+          stdoutEnded = true;
+        });
+        child.stderr?.on('end', () => {
+          stderrEnded = true;
+        });
         child.on('error', errorHandler);
 
         const detachServiceListeners = () => {
@@ -1788,6 +1877,8 @@ export class ShellExecutionService {
 
         const performCancelKill = async (): Promise<void> => {
           if (!child.pid || exited) return;
+          stdoutOpenAtCancel = !stdoutEnded;
+          stderrOpenAtCancel = !stderrEnded;
           if (isWindows) {
             const killer = cpSpawn(
               WINDOWS_TASKKILL,
