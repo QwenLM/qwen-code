@@ -156,6 +156,7 @@ import {
   InvalidCursorError,
   getWorkspaceSessionInfoForResponse,
   invalidateWorkspaceSessionListCache,
+  isPersistedSessionCursor,
   listLiveWorkspaceSessionsForResponse,
   listWorkspaceSessionsForResponse,
   parseSessionPageSizeQuery,
@@ -1573,17 +1574,6 @@ export function registerSessionRoutes(
       signal.throwIfAborted();
       return false;
     }
-  };
-
-  const isNumericSessionCursor = (cursor: string): boolean => {
-    const trimmed = cursor.trim();
-    if (trimmed === '') return false;
-    const parsed = Number(trimmed);
-    return (
-      Number.isFinite(parsed) &&
-      parsed >= 0 &&
-      parsed <= Number.MAX_SAFE_INTEGER
-    );
   };
 
   const requireTrustedRuntimeForWorkspaceRoute = (
@@ -9958,7 +9948,7 @@ export function registerSessionRoutes(
             parentSessionId !== undefined ||
             parsedSource.sourceType !== undefined ||
             (cursor !== undefined && cursor !== ''
-              ? isNumericSessionCursor(cursor)
+              ? isPersistedSessionCursor(cursor)
               : await hasActivePersistedSessions(runtime, controller.signal));
           // The live path only reads cursor/size; persisted-only options
           // (organized view or archived state) would be silently dropped there.

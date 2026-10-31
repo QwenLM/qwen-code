@@ -153,26 +153,39 @@ export class InvalidCursorError extends Error {
   }
 }
 
-function parseSessionCursor(cursor: string): number | string | undefined {
-  if (cursor === '') return undefined;
+/**
+ * True when `cursor` addresses a position in the persisted session store: a
+ * bare page offset, or one of the composite `"<mtime>|<name>"` cursors minted
+ * by listSessions when a page ends inside a group of files sharing an mtime.
+ * Callers use this to pick the persisted listing path over the live one; it
+ * only classifies the shape, `parseSessionCursor` still rejects bad values.
+ */
+export function isPersistedSessionCursor(cursor: string): boolean {
+  if (cursor === '') return false;
   const trimmed = cursor.trim();
-  // Composite `"<mtime>|<name>"` cursors, minted by listSessions when a page
-  // ends inside a group of files sharing an mtime, are opaque to this layer.
+  if (trimmed === '') return false;
+  // Composite cursors are opaque to this layer beyond their mtime prefix.
   const parts = trimmed.split('|');
   if (parts.length === 2 && parts[1].length > 0) {
     const mtime = Number(parts[0]);
-    if (Number.isFinite(mtime) && mtime >= 0) return trimmed;
+    if (Number.isFinite(mtime) && mtime >= 0) return true;
   }
   const parsed = Number(trimmed);
-  if (
-    trimmed === '' ||
-    !Number.isFinite(parsed) ||
-    parsed < 0 ||
-    parsed > Number.MAX_SAFE_INTEGER
-  ) {
+  return (
+    Number.isFinite(parsed) && parsed >= 0 && parsed <= Number.MAX_SAFE_INTEGER
+  );
+}
+
+function parseSessionCursor(cursor: string): number | string | undefined {
+  if (cursor === '') return undefined;
+  if (!isPersistedSessionCursor(cursor)) {
     throw new InvalidCursorError(cursor);
   }
-  return parsed;
+  const trimmed = cursor.trim();
+  // A bare offset parses as a number; a composite cursor stays opaque so it
+  // can be handed back to the persisted listing layer verbatim.
+  const parsed = Number(trimmed);
+  return Number.isFinite(parsed) ? parsed : trimmed;
 }
 
 interface OrganizedCursor {
