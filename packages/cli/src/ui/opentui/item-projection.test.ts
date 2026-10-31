@@ -881,6 +881,17 @@ describe('projectExtensionsList resolved settings (R1-8)', () => {
 });
 
 describe('projectCompression (CompressionMessage parity, R1-7/76)', () => {
+  it('keeps estimate flags paired with their token counts', () => {
+    expect(
+      projectCompression({
+        compressionStatus: CompressionStatus.COMPRESSED,
+        originalTokenCount: 100,
+        newTokenCount: 40,
+        newTokenCountIsEstimated: true,
+      }),
+    ).toBe('Chat history compressed from 100 to ~40 tokens.');
+  });
+
   it('covers pending/compressed/estimated/failed/error/noop states', () => {
     expect(projectCompression({ isPending: true })).toBe(
       'Compressing chat history',

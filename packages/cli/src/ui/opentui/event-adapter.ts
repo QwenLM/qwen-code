@@ -44,6 +44,7 @@ import type {
 import { sanitizeSensitiveText } from '../utils/textUtils.js';
 import { AGENT_TOOL_NAMES } from '../utils/agent-tool-names.js';
 import { formatDuration, formatTokenCount } from '../utils/formatters.js';
+import { formatCompressionTokenCount } from '../utils/compression-text.js';
 import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import { allocateCanonicalHistoryId } from './live-session-model.js';
 import { shouldDisplayGoalStateCause } from '../utils/goal-runtime.js';
@@ -743,22 +744,16 @@ export function createEventMapper(
           v?.triggerReason === 'image_overflow'
             ? `accumulated enough tool screenshots to trigger compaction for ${model}`
             : `approached the input token limit for ${model}`;
-        // ink's formatCount (useGeminiStream): estimated counts carry a '~'
+        // Estimated counts carry a '~'
         // prefix so locally-measured figures don't read as API-reported ones.
-        const formatCount = (count?: number, isEstimated?: boolean) =>
-          count === undefined
-            ? 'unknown'
-            : isEstimated
-              ? `~${count}`
-              : String(count);
         const warningSuffix = v?.warning ? `\n⚠️ ${v.warning}` : '';
         out.push({
           type: 'info',
           text:
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
-            `${formatCount(v?.originalTokenCount, v?.originalTokenCountIsEstimated)} to ` +
-            `${formatCount(v?.newTokenCount, v?.newTokenCountIsEstimated)} tokens).` +
+            `${formatCompressionTokenCount(v?.originalTokenCount, v?.originalTokenCountIsEstimated)} to ` +
+            `${formatCompressionTokenCount(v?.newTokenCount, v?.newTokenCountIsEstimated)} tokens).` +
             warningSuffix,
         });
         break;

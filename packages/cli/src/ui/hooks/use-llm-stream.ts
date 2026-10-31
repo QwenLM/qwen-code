@@ -127,6 +127,7 @@ import {
 import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { normalizePartList } from '../../utils/normalize-part-list.js';
+import { formatCompressionTokenCount } from '../utils/compression-text.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
 import type { UseHistoryManagerReturn } from './useHistoryManager.js';
 import {
@@ -2703,20 +2704,14 @@ export const useLlmStream = (
         : '';
       // Estimated counts (#9309) get a '~' prefix so the notice doesn't read
       // as an API-reported figure on a different scale than a later banner.
-      const formatCount = (count?: number, isEstimated?: boolean) =>
-        count === undefined
-          ? 'unknown'
-          : isEstimated
-            ? `~${count}`
-            : String(count);
       return addItem(
         {
           type: 'info',
           text:
             `IMPORTANT: This conversation ${reasonClause}. ` +
             `A compressed context will be sent for future messages (compressed from: ` +
-            `${formatCount(eventValue?.originalTokenCount, eventValue?.originalTokenCountIsEstimated)} to ` +
-            `${formatCount(eventValue?.newTokenCount, eventValue?.newTokenCountIsEstimated)} tokens).` +
+            `${formatCompressionTokenCount(eventValue?.originalTokenCount, eventValue?.originalTokenCountIsEstimated)} to ` +
+            `${formatCompressionTokenCount(eventValue?.newTokenCount, eventValue?.newTokenCountIsEstimated)} tokens).` +
             warningSuffix,
         },
         Date.now(),

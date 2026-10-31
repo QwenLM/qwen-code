@@ -321,6 +321,23 @@ describe('event-adapter (ServerGeminiStreamEvent -> neutral)', () => {
       ]);
     });
 
+    it('renders unknown counts when the compaction payload is null', () => {
+      const map = createEventMapper({ getModelName: () => 'm' });
+      const out = map({
+        type: 'chat_compressed',
+        value: null,
+      } as unknown as AnyEv);
+      expect(out).toEqual([
+        { type: 'retry-countdown-clear' },
+        {
+          type: 'info',
+          text: expect.stringContaining(
+            'compressed from: unknown to unknown tokens',
+          ),
+        },
+      ]);
+    });
+
     it('labels image-overflow compaction triggers', () => {
       const map = createEventMapper({ getModelName: () => 'm' });
       const out = map({

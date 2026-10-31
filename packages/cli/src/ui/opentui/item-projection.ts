@@ -49,6 +49,7 @@ import {
 } from '../../utils/costCalculator.js';
 import { computeSessionStats } from '../utils/computeStats.js';
 import { formatDuration } from '../utils/formatters.js';
+import { formatCompressionTokenCount } from '../utils/compression-text.js';
 import { levelLabel } from '../utils/skill-level-label.js';
 import type { SessionStatsState } from '../contexts/SessionContext.js';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -878,16 +879,14 @@ export function projectCompression(compression: {
   }
   // Estimated counts (#9309): a '~' prefix marks which banner numbers are
   // local estimates rather than API-reported counts.
-  const formatTokens = (count: number, isEstimated?: boolean) =>
-    isEstimated ? `~${count}` : String(count);
   const original = compression.originalTokenCount ?? 0;
   const next = compression.newTokenCount ?? 0;
   switch (compression.compressionStatus) {
     case CompressionStatus.COMPRESSED:
-      return `Chat history compressed from ${formatTokens(
+      return `Chat history compressed from ${formatCompressionTokenCount(
         original,
         compression.originalTokenCountIsEstimated,
-      )} to ${formatTokens(
+      )} to ${formatCompressionTokenCount(
         next,
         compression.newTokenCountIsEstimated,
       )} tokens.`;
