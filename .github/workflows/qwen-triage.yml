@@ -2585,9 +2585,9 @@ jobs:
           # Fail CLOSED on an identity lookup failure: an empty bot login
           # used to widen the filter to every user's comments, so one
           # transient API error could point the bot at an attacker's comment.
-          # The state and run markers count only in the header, the lines
-          # before the first blank line, where they are written: a report
-          # can quote them further down.
+          # Markers count only in the header, the lines before the first
+          # blank line, where they are written: a report or a notice can
+          # quote them further down.
           if ! BOT_LOGIN="$(gh api user --jq '.login')" || [ -z "$BOT_LOGIN" ]; then
             echo "::warning::Could not resolve the bot identity; posting a fresh status comment instead of reusing one."
             BOT_LOGIN=''
@@ -2600,7 +2600,7 @@ jobs:
                 jq -rs --arg m "$MARKER" --arg s "$STATUS_MARKER" --arg run "$RUN_MARKER" --arg sub "$SUBSTANTIVE_MARKER" --arg bot "$BOT_LOGIN" \
                   '[.[][] | select((.body | startswith($m)) and .user.login == $bot)] as $mine
                    | ($mine | map(select(.body | split("\n\n")[0] | split("\n") | any(.[]; . == $s) and any(.[]; . == $run))) | last) as $own
-                   | ($mine | map(select(.body | contains($sub))) | last) as $report
+                   | ($mine | map(select(.body | split("\n\n")[0] | split("\n") | any(.[]; . == $sub))) | last) as $report
                    | "\($own.id // "")\t\($report.id // "")"'
             )" || EXISTING_META=''
           fi
@@ -5776,9 +5776,9 @@ jobs:
 
           # Every body opens with a header: the verify marker, this run's
           # marker and, on a body that carries findings, the substantive
-          # marker, ended by a blank line. Choosing which comment to write
-          # into reads markers only from a header, so it is started once,
-          # here, and each branch below appends to it.
+          # marker, ended by a blank line. Every lookup reads markers only
+          # from a header, so it is started once, here, and each branch below
+          # appends to it.
           printf '%s\n%s\n' '<!-- qwen-triage:verify -->' "$RUN_MARKER" > "$BODY_FILE"
 
           # The gate verdict travels via job outputs: it survives a later

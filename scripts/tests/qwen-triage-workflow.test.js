@@ -6225,6 +6225,14 @@ describe('qwen-triage verify publish fidelity', () => {
         expect(body).toContain(shown);
         expect(body.split('\n\n')[0].split('\n')).toEqual(header);
       });
+      // A run whose artifact holds no report has no findings to keep.
+      rmSync(join(dir, 'work', 'verify-results', 'prA-verify-1', 'report.md'));
+      const reportless = render(dir, {
+        NAME: 'hdr-noreport',
+        GITHUB_RUN_ID: '41',
+      });
+      expect(reportless).toContain('No report.md was found');
+      expect(reportless.split('\n\n')[0].split('\n')).toEqual(weak);
 
       // Written once, before the branches, which only append: a new branch
       // cannot open its body without it.
@@ -6599,7 +6607,8 @@ describe('qwen-triage verify publish fidelity', () => {
   });
 
   // The follow-up snapshot must select the newest SUBSTANTIVE report, not
-  // the newest non-running comment: a cancelled notice passes that test.
+  // the newest non-running comment: a cancelled notice passes that test,
+  // and so does a notice quoting the marker below its header.
   it('snapshots the newest substantive report, not a weak notice', () => {
     const calls = statusComment([
       {
@@ -6612,11 +6621,17 @@ describe('qwen-triage verify publish fidelity', () => {
         user: BOT,
         body: '<!-- qwen-triage:verify -->\n\ncancelled notice',
       },
+      {
+        id: 103,
+        user: BOT,
+        body: '<!-- qwen-triage:verify -->\n\nnotice quoting\n<!-- qwen-triage:verify-substantive -->',
+      },
     ]);
     expect(calls).toContain(
       'SNAP api repos/QwenLM/qwen-code/issues/comments/101 ',
     );
     expect(calls).not.toContain('comments/102');
+    expect(calls).not.toContain('comments/103');
   });
 
   // Verify jobs run one at a time per PR, but the previous round's
