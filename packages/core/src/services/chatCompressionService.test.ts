@@ -41,6 +41,7 @@ import { logChatCompression } from '../telemetry/loggers.js';
 import { estimateContentTokens } from './tokenEstimation.js';
 import { getAutoMemorySnapshot } from '../memory/request-context.js';
 import { detectTurnInterruption } from '../core/turn-interruption.js';
+import { getStartupContextLength } from '../core/environmentContext.js';
 import {
   content,
   fnCall,
@@ -3478,6 +3479,16 @@ describe('ChatCompressionService.compress — plan-mode + subagent attachment wi
     expect(result.newHistory![1].parts).toEqual([
       { text: 'Got it. Thanks for the additional context!' },
     ]);
+    // The fallback must freeze the 2-entry prefix so a later real prompt that
+    // looks like a restoration block is not counted as part of it.
+    const input = userText(
+      'Recently accessed file (full current content embedded):\n\n## /tmp/a.ts\n\n```\nconst a = 1;\n```',
+    );
+    expect(
+      getStartupContextLength([...result.newHistory!, input], {
+        includeCompressed: true,
+      }),
+    ).toBe(2);
   });
 });
 

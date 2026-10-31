@@ -11961,7 +11961,9 @@ describe('LlmChat', async () => {
         expect(JSON.stringify(target.getHistory())).toBe(wire);
       }
       expect(compacted).toHaveLength(2);
+      restored.addHistory(userText('Dropped by truncation.'));
       restored.truncateHistory(2);
+      expect(JSON.stringify(restored.getHistory())).toBe(wire);
       const input = userText('Real failed input after truncation.');
       restored.addHistory(input);
       expect(restored.stripOrphanedUserEntriesFromHistory()).toEqual([input]);
