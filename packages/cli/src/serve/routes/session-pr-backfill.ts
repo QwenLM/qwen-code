@@ -190,15 +190,23 @@ interface CommandMention {
 // (`42--diff.patch`, `2026--08-25-notes.md`), digit tails (`42--45`) and a
 // lone `--` all stay rejected. parsePrCommand grants the tolerance to
 // /verify-pr only: /review also accepts extension-less file paths
-// (`42--notes`), which no tail grammar can tell from a flag. The URL
-// alternative keeps `(?!\d)`: it rejects 10+-digit numbers instead of
-// truncating them to a 9-digit prefix.
+// (`42--notes`), which no tail grammar can tell from a flag — but the
+// policy rejection still falls through to the URL arm, because a prompt
+// like `/review 42--notes https://…/pull/7` names PR 7 by URL and bound it
+// before the policy existed. The URL alternative keeps `(?!\d)`: it rejects
+// 10+-digit numbers instead of truncating them to a 9-digit prefix.
 // The bare-number alternative comes first: `/review 42 and fix #7` names 42.
 // Bare session git branches are NOT a source: they bind the workspace's
 // current branch PR onto every session — measured pure noise, removed with
 // cleanup.
-const PR_COMMAND_PATTERN =
-  /^\s*\/(review|verify-pr)(?:[ \t]+#?(\d{1,9})(?![\w./]|-(?!-[A-Za-z][\w-]*(?:=[^\s]*)?(?=[ \t\r\n]|$)))|[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d)))/;
+// The URL arm is shared with the policy fallback so the two cannot drift.
+const PR_URL_FORM_PATTERN =
+  /[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d))/;
+const PR_COMMAND_PATTERN = new RegExp(
+  String.raw`^\s*\/(review|verify-pr)(?:[ \t]+#?(\d{1,9})(?![\w./]|-(?!-[A-Za-z][\w-]*(?:=[^\s]*)?(?=[ \t\r\n]|$)))|` +
+    PR_URL_FORM_PATTERN.source +
+    ')',
+);
 
 // `/verify-pr --repo <owner>/<repo>` scopes the number to another repository;
 // a bare number beside it must never bind this workspace's same-numbered PR.
@@ -210,14 +218,20 @@ const PR_COMMAND_PATTERN =
 // same command and must not count as one. `/review` takes no `--repo`, so a
 // stray occurrence in its prompt reads as a qualifier too — the safer
 // reading, and never a binding this workspace's number. The glued spelling
-// `77--repo` must count as well — otherwise its missing or next-line value
-// would read as no qualifier and bind this workspace's PR 77 — but ONLY
-// glued to the command's own number: the arm is anchored to the command
-// position, because a prose digit (`docs/a1--repo`, a quoted `"77--repo"`,
-// even line-final) is not a qualifier and must not decline a legitimate
-// bare binding. A right-hand boundary alone cannot tell those apart.
+// must count as well — otherwise its missing or next-line value would read
+// as no qualifier and bind this workspace's PR — but ONLY within the
+// command's own glued flag CHAIN: the arm is anchored to the command
+// position and walks `--flag` links (`77--repo`, `77--publish--repo`,
+// `77--repo--publish`), because a prose digit (`docs/a1--repo`, a quoted
+// `"77--repo"`, even line-final) is not a qualifier and must not decline a
+// legitimate bare binding. The token boundary includes `-` so a `--repo`
+// link followed by another link is still an unreadable qualifier. A link
+// name is `\w` runs joined by SINGLE dashes: a dash inside a link must be
+// followed by a word character, so no link can swallow the `--` that opens
+// the next one and the chain partition stays unique — a `[\w-]*` link body
+// backtracks catastrophically on a long `--a--a--…` chain (measured).
 const REPO_FLAG_PATTERN =
-  /(?:^|[^-\w])--repo(?![\w-])|^\s*\/(?:review|verify-pr)[ \t]+#?\d{1,9}--repo(?=[ \t\r\n=]|$)|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?/g;
+  /(?:^|[^-\w])--repo(?![\w-])|^\s*\/(?:review|verify-pr)[ \t]+#?\d{1,9}(?:--[A-Za-z]\w*(?:-\w+)*)*--repo(?=[ \t\r\n=-]|$)|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?/g;
 const REPO_VALUE_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?[^\s"']+/g;
 const REPO_FORM_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?([^\s"']+)/;
 
@@ -248,8 +262,21 @@ function parsePrCommand(prompt: string): {
     // extension-less path (`42--notes`) is indistinguishable from a glued
     // flag — so the glued-tail tolerance is /verify-pr's alone, the
     // incident command, which takes no file path. The regex encodes the
-    // tail SHAPE; this is the per-command POLICY.
+    // tail SHAPE; this is the per-command POLICY. The rejection still
+    // falls through to URL evidence: before the policy existed the bare
+    // alternative failed on these prompts and the alternation bound the
+    // URL's PR, and that binding must survive.
     if (match[1] === 'review' && prompt.charAt(match[0].length) === '-') {
+      const urlMatch = PR_URL_FORM_PATTERN.exec(prompt);
+      if (urlMatch) {
+        const urlNumber = Number(urlMatch[2]);
+        if (urlNumber > 0) {
+          return {
+            mention: { number: urlNumber, bare: false },
+            urlForm: { number: urlNumber, url: urlMatch[1] },
+          };
+        }
+      }
       return {};
     }
     const repoForm = REPO_FORM_PATTERN.exec(prompt)?.[1];
