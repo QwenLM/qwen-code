@@ -1233,7 +1233,19 @@ describe('runPrepare (real git)', () => {
       rerunChecks: [`run:1:2:push:Test@${headSha}`],
       handledConflictSha: headSha,
       pushCount: 4,
+      // The head is the watch's own push: the checks keep their count.
+      pushedShas: [headSha],
       summarizedSha: headSha,
+      failingChecks: [
+        {
+          identity: 'run:1:2:push:Test',
+          check: 'Test',
+          head: headSha,
+          pushes: 2,
+          lastPush: headSha,
+          unanswered: [{ sha: 'f'.repeat(40), pushes: 1 }],
+        },
+      ],
       // `resume` starts this task again after the rebuild.
       watch: { every: 5, reply: false, instructions: 'keep the API' },
       needsHuman: [{ sha: headSha, at: '2026-10-25T00:00:00.000Z', text: 'x' }],
@@ -1253,6 +1265,46 @@ describe('runPrepare (real git)', () => {
     });
     // A start that is cancelled now must not clean the watch up.
     expect(lastReport()).toMatchObject({ resumed: false, recreated: true });
+  });
+
+  it("gives every check its fix pushes back when it recreates the worktree at someone else's push", () => {
+    runPrepare({ pr: 7, repo: 'o/r' });
+    const paths = autofixPrPaths(clone, 7);
+    const pushed = 'e'.repeat(40);
+    execFileSync('git', ['worktree', 'remove', '--force', paths.worktreePath], {
+      cwd: clone,
+    });
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      pushedShas: [pushed],
+      failingChecks: [
+        {
+          identity: 'run:1:2:push:Test',
+          check: 'Test',
+          head: pushed,
+          pushes: 3,
+          lastPush: pushed,
+          unanswered: [{ sha: 'f'.repeat(40), pushes: 2 }],
+        },
+      ],
+    });
+    // The PR head is no push of the watch's, as `sync` adopting it would see.
+    runPrepare({ pr: 7, repo: 'o/r' });
+    expect(readState(paths.statePath)).toMatchObject({
+      lastKnownHeadSha: headSha,
+      failingChecks: [
+        {
+          identity: 'run:1:2:push:Test',
+          check: 'Test',
+          head: pushed,
+          pushes: 0,
+          lastPush: pushed,
+        },
+      ],
+    });
+    expect(readState(paths.statePath)!.failingChecks![0]).not.toHaveProperty(
+      'unanswered',
+    );
   });
 
   it("reports whether the PR's author could push", () => {
