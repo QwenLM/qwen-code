@@ -6489,7 +6489,7 @@ describe('qwen-triage verify publish fidelity', () => {
         ...counts,
         gates: [
           { suite: '@everyone <!-- x -->', pass: 1290, fail: 2, skipped: 1 },
-          { suite: 'core client', pass: 619, fail: 0 },
+          { suite: 'core client', pass: 619, fail: 0, skipped: 0 },
         ],
       });
       expect(body).toContain(
@@ -6530,6 +6530,54 @@ describe('qwen-triage verify publish fidelity', () => {
       );
       expect(noSkip).not.toContain('0 skipped');
       expect(noSkip).not.toContain('Gate totals do not decide the verdict');
+
+      // A mixed list records skips for only some suites: the partial sum
+      // is not the run's total, so the clause drops out entirely.
+      const mixed = publishWith('gates-mixed', {
+        ...counts,
+        gates: [
+          { suite: 'cli', pass: 1290, fail: 0, skipped: 12 },
+          { suite: 'core', pass: 619, fail: 0 },
+        ],
+      });
+      expect(mixed).toContain(
+        'Targeted gates (existing tests, not counted above): 1909 passed · 0 failed across 2 suite(s)',
+      );
+      expect(mixed).toContain(
+        '定向门禁（已有测试，不计入上面的断言）：1909 通过 · 0 失败，共 2 个套件',
+      );
+      expect(mixed).not.toContain('12 skipped');
+
+      // A recorded zero is a measurement: the clause stays. This is the
+      // only input that distinguishes "recorded zero" from "not recorded".
+      const zeroSkip = publishWith('gates-zeroskip', {
+        ...counts,
+        gates: [{ suite: 'cli', pass: 1292, fail: 0, skipped: 0 }],
+      });
+      expect(zeroSkip).toContain(
+        'Targeted gates (existing tests, not counted above): 1292 passed · 0 failed · 0 skipped across 1 suite(s)',
+      );
+
+      // The advisory is gated on a trusted verdict: an untrusted run with
+      // gate reds prints the totals but never the sentence about judging
+      // the verdict. The fixture carries a gate red so the trust half of
+      // the guard is the only thing withholding the advisory.
+      writeFileSync(
+        file,
+        JSON.stringify({
+          ...counts,
+          gates: [{ suite: 'cli', pass: 1290, fail: 2 }],
+        }),
+      );
+      const untrusted = render(dir, {
+        NAME: 'gates-untrusted',
+        VERDICT: 'timeout',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(untrusted).toContain('Targeted gates');
+      expect(untrusted).not.toContain('Gate totals do not decide the verdict');
+      expect(untrusted).not.toContain('门禁合计不影响判定');
+      expect(untrusted).toContain('⚠️ incomplete');
 
       // No list prints no line. Neither does a malformed one, and the
       // checker refuses it, so the verdict is not trusted either. The

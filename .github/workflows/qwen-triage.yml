@@ -6022,11 +6022,12 @@ jobs:
                 )"
                 if [ -n "$GATES_META" ]; then
                   read -r G_SUITES G_PASS G_FAIL G_SKIP G_RECORDED <<< "$GATES_META"
-                  # Absent skipped is "not recorded", not a measured zero:
-                  # the clause prints only when some entry carries the field.
+                  # Absent skipped is "not recorded", not a measured zero,
+                  # and a partial sum is not the run's total: the clause
+                  # prints only when every entry carries the field.
                   G_SKIP_CLAUSE=''
                   G_SKIP_CLAUSE_ZH=''
-                  if [ "$G_RECORDED" != '0' ]; then
+                  if [ "$G_RECORDED" = "$G_SUITES" ]; then
                     G_SKIP_CLAUSE=" · ${G_SKIP} skipped"
                     G_SKIP_CLAUSE_ZH=" · ${G_SKIP} 跳过"
                   fi
