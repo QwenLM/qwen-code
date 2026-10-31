@@ -2408,6 +2408,25 @@ printf '%s\\n' '{"jobs":[]}'
       expect(out).toContain('infra_only=false');
     });
 
+    it('files when a demoted lock wait sits beside a suite failure', () => {
+      // The demoted sdk-java wait emits its own warning without the pinned
+      // `lock not acquired within` signature, so a code failure on a
+      // contended host must file an issue rather than rerun as infra.
+      const out = classify(
+        [
+          failedJob(1001, 9001, [
+            { name: 'Run Java SDK tests (self-hosted)', conclusion: 'failure' },
+          ]),
+        ],
+        {
+          9001:
+            '::warning::sdk-java host lock wait exhausted after 30 minutes; Maven cache write-back skipped; the suite result above is unaffected\n' +
+            'AssertionError: expected the suite to pass',
+        },
+      );
+      expect(out).toContain('infra_only=false');
+    });
+
     it('reruns the failed jobs once, with actions:write and no PAT or checkout', () => {
       expect(rerunJob.needs).toBe('analyze');
       expect(rerunJob.permissions).toEqual({ actions: 'write' });

@@ -281,13 +281,18 @@ jobs:
           # Seed from the host-shared repo so a warm host still starts warm.
           # The seed only reads the host cache and is best-effort, so it takes
           # no lock and cannot delay the lane.
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
-          # Maven truncates and rewrites its resolver tracking markers in
-          # place, so a seeded hardlink would let the unlocked runs mutate
-          # the host cache. Drop them; Maven recreates them job-locally.
-          find "${RUNNER_TEMP}/m2-repo" \
-            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
-            -delete 2>/dev/null || true
+          if [ -d "${HOME}/.m2/repository" ]; then
+            cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
+          fi
+          # Drop resolver tracking markers, version metadata and checksums,
+          # *.tmp transfer files, and older Resolver *.part / *.part.lock
+          # residue. Unlocked runs must not inherit mutable resolver state;
+          # Maven recreates them job-locally. Best-effort like the copy
+          # above: an entry the prune cannot delete must not abort the step
+          # before Maven, which would then re-resolve from the network.
+          if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
+            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
+          fi
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
@@ -320,14 +325,18 @@ jobs:
             mvn_stage='sdk-java install'
             mvn --batch-mode --no-transfer-progress -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install || mvn_status=$?
             if [ "${mvn_status}" -eq 0 ]; then
-              cd ../../managed-agent-server
-              # The fast tier skips mysql-integration, which owns the full H2 unit suite.
-              if [ "${TIER}" = "fast" ]; then
-                mvn_stage='runtime-broker H2 suite'
-                mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?
-              else
-                mvn_stage='runtime-broker suite'
-                mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test || mvn_status=$?
+              # A missing checkout fails the step here instead of running the
+              # Server suites inside the SDK module.
+              cd ../../managed-agent-server || mvn_status=$?
+              if [ "${mvn_status}" -eq 0 ]; then
+                # The fast tier skips mysql-integration, which owns the full H2 unit suite.
+                if [ "${TIER}" = "fast" ]; then
+                  mvn_stage='runtime-broker H2 suite'
+                  mvn --batch-mode --no-transfer-progress clean test || mvn_status=$?
+                else
+                  mvn_stage='runtime-broker suite'
+                  mvn --batch-mode --no-transfer-progress '-Dtest=com/alibaba/qwen/code/runtimebroker/**/Test*.java,com/alibaba/qwen/code/runtimebroker/**/*Test.java,com/alibaba/qwen/code/runtimebroker/**/*Tests.java,com/alibaba/qwen/code/runtimebroker/**/*TestCase.java' clean test || mvn_status=$?
+                fi
               fi
             fi
           fi
@@ -421,17 +430,21 @@ jobs:
           # (nlink >= 2), so the delta is nlink == 1. Each link is atomic and
           # -n never replaces a host file, so the backstop can leave an
           # artifact missing for the next job to re-resolve, never truncated.
+          # Maven's resolver tracking markers and version metadata record
+          # this run's resolution outcomes, so they are not published.
           # No write-back child inherits fd 9, or a cancelled job's survivor
           # would hold the host lock until it exits.
-          # The seed drops Maven's resolver tracking markers because they
-          # record a resolution outcome, and a hard-killed transfer leaves
-          # *.tmp fragments behind; a red suite can leave both in the
-          # job-local copy, and publishing either would make the failure
-          # stick for every reader of the host cache, so skip the same names.
-          mkdir -p "${HOME}/.m2/repository" 9>&-
-          cd "${RUNNER_TEMP}/m2-repo"
+          # The seed drops Maven's resolver tracking markers and version
+          # metadata because they record a resolution outcome, and a
+          # hard-killed transfer leaves *.tmp fragments behind; a red suite
+          # can leave them in the job-local copy, and publishing any would
+          # make the failure stick for every reader of the host cache, so
+          # skip the same names. Both setup failures below are best-effort
+          # too: the gate result is already decided.
+          mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable); the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
+          cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped; the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -921,13 +934,18 @@ jobs:
           # so it and the egress proxy keep paying off for the job-local copy.
           # The seed only reads the host cache and is best-effort, so it takes
           # no lock and cannot delay the lane.
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
-          # Maven truncates and rewrites its resolver tracking markers in
-          # place, so a seeded hardlink would let the unlocked runs mutate
-          # the host cache. Drop them; Maven recreates them job-locally.
-          find "${RUNNER_TEMP}/m2-repo" \
-            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
-            -delete 2>/dev/null || true
+          if [ -d "${HOME}/.m2/repository" ]; then
+            cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
+          fi
+          # Drop resolver tracking markers, version metadata and checksums,
+          # *.tmp transfer files, and older Resolver *.part / *.part.lock
+          # residue. Unlocked runs must not inherit mutable resolver state;
+          # Maven recreates them job-locally. Best-effort like the copy
+          # above: an entry the prune cannot delete must not abort the step
+          # before Maven, which would then re-resolve from the network.
+          if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
+            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
+          fi
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
@@ -947,15 +965,26 @@ jobs:
           # fast tier's wait expires behind it (run 39627609266 waited
           # 17:38-19:15, burning its then-90-minute budget, behind run
           # 39628985638's integration hold).
-          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
-          cd packages/managed-agent-server
-          # Keep mysql.url for release runs that check out an older tag.
-          mvn --batch-mode --no-transfer-progress -Pmysql-integration \
-            -Dmysql.integration.forks=2 \
-            -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
-            -Dmysql.url.1="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
-            -Dmysql.url.2="jdbc:mysql://127.0.0.1:${MYSQL_PORT_2}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
-            -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check
+          # Keep the status: a failed run still downloads most of its tree,
+          # and the write-back below should publish it. Only the exit is
+          # deferred — a failure still stops the remaining run, and the step
+          # ends with Maven's status.
+          mvn_status=0
+          mvn_stage='sdk-java install'
+          mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install || mvn_status=$?
+          if [ "${mvn_status}" -eq 0 ]; then
+            cd packages/managed-agent-server || mvn_status=$?
+            if [ "${mvn_status}" -eq 0 ]; then
+              # Keep mysql.url for release runs that check out an older tag.
+              mvn_stage='mysql integration suite'
+              mvn --batch-mode --no-transfer-progress -Pmysql-integration \
+                -Dmysql.integration.forks=2 \
+                -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
+                -Dmysql.url.1="jdbc:mysql://127.0.0.1:${MYSQL_PORT_1}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
+                -Dmysql.url.2="jdbc:mysql://127.0.0.1:${MYSQL_PORT_2}/managed_agent_test?createDatabaseIfNotExist=true&allowPublicKeyRetrieval=true&useSSL=false" \
+                -Dmysql.user=root -Dmysql.password=runtime-broker clean verify checkstyle:check || mvn_status=$?
+            fi
+          fi
           # Only the write-back mutates host-shared state, so only it takes
           # the per-host lock. One acquisition spans the write-back: run
           # 39353663670's verify step waited the full 90 minutes after the
@@ -967,9 +996,23 @@ jobs:
           # result is final before this runs, so an expired wait warns and
           # skips the copy instead of reddening a green suite.
           # A host fault takes the same warn-and-skip path as an expired wait.
+          # A tolerated skip still reports the deferred suite status.
+          # Name the deferred failure at every exit that can end a red step:
+          # the copy's output is the log tail, and every Maven failure exits 1,
+          # so the tail alone cannot tell the two runs apart.
+          lock_wait=5400
+          if [ "${mvn_status:-0}" -ne 0 ]; then
+            lock_wait=300
+          fi
+          mvn_report_failed_suite() {
+            if [ "${mvn_status:-0}" -ne 0 ]; then
+              echo "::error::Maven suite '${mvn_stage}' failed with status ${mvn_status}"
+            fi
+          }
           lock_setup_fault() {
             echo "::warning::Maven cache write-back skipped: $1; the gate result above is unaffected"
-            exit 0
+            mvn_report_failed_suite
+            exit "${mvn_status}"
           }
           cache_dir="${HOME}/.cache/qwen-code-ci"
           if [ -f "${GITHUB_WORKSPACE}/.github/scripts/sdk-java-lock.sh" ]; then
@@ -995,12 +1038,13 @@ jobs:
             exec 7> >(sed -u -e 's/^::error::/::warning::/' -e 's/lock not acquired within/lock wait exhausted/I')
             lock_filter=$!
             lock_rc=0
-            sdk_java_lock_acquire 5400 >&7 2>&1 || lock_rc=$?
+            sdk_java_lock_acquire "${lock_wait}" >&7 2>&1 || lock_rc=$?
             exec 7>&-
             wait "${lock_filter}" 2>/dev/null || true
             if [ "${lock_rc}" -ne 0 ]; then
               echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
-              exit 0
+              mvn_report_failed_suite
+              exit "${mvn_status}"
             fi
           else
             # release-sdk-java.yml resumes an existing tag by checking out
@@ -1017,12 +1061,14 @@ jobs:
               lock_setup_fault "${cache_dir} is not writable"
             exec 9>"${cache_dir}/sdk-java-tests.lock"
             lock_rc=0
-            flock --wait 5400 9 || lock_rc=$?
+            flock --wait "${lock_wait}" 9 || lock_rc=$?
             if [ "${lock_rc}" -eq 1 ]; then
               echo "::warning::Maven cache write-back skipped: the sdk-java host lock stayed busy for the full wait budget; the gate result above is unaffected"
-              exit 0
+              mvn_report_failed_suite
+              exit "${mvn_status}"
             elif [ "${lock_rc}" -ne 0 ]; then
               echo "::error::Maven cache write-back setup failed: flock exited ${lock_rc}"
+              mvn_report_failed_suite
               exit 1
             fi
           fi
@@ -1036,21 +1082,30 @@ jobs:
           # took up to 61 minutes (run 39563394993). Each link is atomic and
           # -n never replaces a host file, so the backstop can leave an
           # artifact missing for the next job to re-resolve, never truncated.
+          # Maven's resolver tracking markers and version metadata record
+          # this run's resolution outcomes, so they are not published.
           # No write-back child inherits fd 9, or a cancelled job's survivor
           # would hold the host lock until it exits.
-          # This lane's Maven runs fail inline, so only a green run reaches
-          # this copy: a marker here can only come from a green run's own
-          # resolution, and the seed drops the same names so a seeded copy
-          # never republishes a stale outcome.
-          mkdir -p "${HOME}/.m2/repository" 9>&-
-          cd "${RUNNER_TEMP}/m2-repo"
+          # The seed drops Maven's resolver tracking markers and version
+          # metadata because they record a resolution outcome, and a
+          # hard-killed transfer leaves *.tmp fragments behind; a red run can
+          # leave them in the job-local copy, and publishing any would make
+          # the failure stick for every reader of the host cache, so skip the
+          # same names. Both setup failures below are best-effort too: the
+          # gate result is already decided.
+          mkdir -p "${HOME}/.m2/repository" 9>&- || { echo "::warning::Maven cache write-back skipped (host cache unusable); the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
+          cd "${RUNNER_TEMP}/m2-repo" || { echo "::warning::Maven cache write-back skipped; the gate result above is unaffected"; mvn_report_failed_suite; exit "${mvn_status}"; }
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification \) -prune -o -type f -links 1 ! -name '*.lastUpdated' ! -name 'resolver-status.properties' ! -name '_remote.repositories' ! -name 'maven-metadata-*.xml*' ! -name '*.part' ! -name '*.part.lock' ! -name '*.tmp' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
             echo "::warning::Maven cache write-back failed; the gate result above is unaffected"
           fi
+          # Deferred so a failed suite still reaches the write-back; the
+          # step's status is the suite's, not the copy's.
+          mvn_report_failed_suite
+          exit "${mvn_status}"
 
       # Maven passes a selection narrowed by a profile, MAVEN_ARGS or
       # .mvn/maven.config, so compare what ran with the source tree.
@@ -1790,13 +1845,18 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: |-
           # Seed from the host-shared repo (cache-restored on hosted runners).
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
-          # Maven truncates and rewrites its resolver tracking markers in
-          # place, so a seeded hardlink would let the unlocked runs mutate
-          # the host cache. Drop them; Maven recreates them job-locally.
-          find "${RUNNER_TEMP}/m2-repo" \
-            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
-            -delete 2>/dev/null || true
+          if [ -d "${HOME}/.m2/repository" ]; then
+            cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
+          fi
+          # Drop resolver tracking markers, version metadata and checksums,
+          # *.tmp transfer files, and older Resolver *.part / *.part.lock
+          # residue. Unlocked runs must not inherit mutable resolver state;
+          # Maven recreates them job-locally. Best-effort like the copy
+          # above: an entry the prune cannot delete must not abort the step
+          # before Maven, which would then re-resolve from the network.
+          if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
+            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
+          fi
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
@@ -2079,13 +2139,18 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: |-
           # Seed from the host-shared repo (cache-restored on hosted runners).
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
-          # Maven truncates and rewrites its resolver tracking markers in
-          # place, so a seeded hardlink would let the unlocked runs mutate
-          # the host cache. Drop them; Maven recreates them job-locally.
-          find "${RUNNER_TEMP}/m2-repo" \
-            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
-            -delete 2>/dev/null || true
+          if [ -d "${HOME}/.m2/repository" ]; then
+            cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" || echo "::warning::Maven cache seed failed (cp exit $?); this leg will resolve Maven dependencies from the network"
+          fi
+          # Drop resolver tracking markers, version metadata and checksums,
+          # *.tmp transfer files, and older Resolver *.part / *.part.lock
+          # residue. Unlocked runs must not inherit mutable resolver state;
+          # Maven recreates them job-locally. Best-effort like the copy
+          # above: an entry the prune cannot delete must not abort the step
+          # before Maven, which would then re-resolve from the network.
+          if [ -d "${RUNNER_TEMP}/m2-repo" ]; then
+            find "${RUNNER_TEMP}/m2-repo" \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-*.xml*' -o -name '*.part' -o -name '*.part.lock' -o -name '*.tmp' \) -delete 2>/dev/null || true
+          fi
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
           # Maven runs would rewrite through into the host cache. Drop them
