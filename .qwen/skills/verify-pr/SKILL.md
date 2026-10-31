@@ -968,8 +968,8 @@ least one test that imports it.
   violates read and execute at once, so dropping either check survived 990
   unit tests.
 - Runner hygiene (time caps, PID-only kills, restoring the tree, a tree of
-  its own apart from every live cell, syntax checks that do not execute)
-  is in **Rig hygiene (local rounds)** below.
+  its own apart from every live cell, the clean-`dist` launch gate, syntax
+  checks that do not execute) is in **Rig hygiene (local rounds)** below.
 
 **A test that can skip is coverage only where it executes.** A test gated on
 a capability (`assumeTrue`, `it.skipIf`, a platform filter) passes vacuously

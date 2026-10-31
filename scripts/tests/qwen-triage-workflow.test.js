@@ -4999,6 +4999,10 @@ describe('qwen-triage verify hardening round 2', () => {
     expect(flat).toContain('propagates the mutant into `dist/`');
     expect(flat).toContain('refuse the launch when it fails');
     expect(flat).toContain('Never hand-patch `dist/`');
+    // Review on 0d06209b2d: the four pins above left the anchor-coverage and
+    // mismatch-control clauses unasserted — deleting either still passed.
+    expect(flat).toContain('covers every PR anchor');
+    expect(flat).toContain('a control proving the check can report a mismatch');
     expect(flat).toContain('`process.exit()` skips `finally`');
     expect(flat).toContain('with `node --check`, never `import()`');
     expect(flat).toContain('Do not edit a shell runner while it executes');
