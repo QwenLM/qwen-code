@@ -123,7 +123,12 @@ describe('runScriptLint — tool JSON normalisation (injected runner)', () => {
       { hunks: [{ newStart: 8, newEnd: 8 }] },
     );
     const r = runScriptLint({ plan, worktree }, runner);
-    expect(runner).toHaveBeenCalledWith('actionlint', expect.any(String));
+    // No mergeBaseSha in this plan → no base config (undefined third arg).
+    expect(runner).toHaveBeenCalledWith(
+      'actionlint',
+      expect.any(String),
+      undefined,
+    );
     expect(r.checked).toHaveLength(1);
     expect(r.checked[0].tool).toBe('actionlint');
     expect(r.checked[0].findings[0]).toMatchObject({
@@ -520,6 +525,49 @@ describe('runScriptLint — the report is bound to the diff it ran against', () 
     );
     expect(r.diffHash).toBeUndefined();
   });
+
+  it('an EMPTY refresh diff is a successful parse: no promotion from the old plan hunks', () => {
+    // PR #16001 review, round 3, the maintainer's exact shape: the base already
+    // carries SC2086 on line 3, the new head reverts the PR's only change, and
+    // `git diff base newHead` is exactly zero bytes. The empty diff parses to
+    // zero added ranges — a pre-existing finding must stay inDiff:false, not
+    // fall back to the OLD plan's context-inclusive hunks and become a blocker
+    // the gate accepts as fresh (the empty diff has a valid hash).
+    const emptyDiff = join(dir, 'empty.diff');
+    writeFileSync(emptyDiff, '');
+    const { plan, worktree } = setup('x.sh', '#!/bin/bash\nset -e\nrm $X\n', {
+      hunks: [{ newStart: 1, newEnd: 3 }], // old plan covers the buggy line
+    });
+    const r = runScriptLint(
+      { plan, worktree, diff: emptyDiff },
+      shellcheckRunner([{ line: 3, code: 2086, level: 'info' }]),
+    );
+    // sha256 of the empty string — a VALID hash, so the gate reads the report
+    // as fresh; the classification is what must be right.
+    expect(r.diffHash).toBe(
+      'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+    );
+    expect(r.checked[0].findings[0].inDiff).toBe(false);
+    expect(r.ok).toBe(true);
+  });
+
+  it('a deletions-only refresh diff also adds nothing (parsed, zero additions)', () => {
+    const delDiff = join(dir, 'del.diff');
+    writeFileSync(
+      delDiff,
+      'diff --git a/x.sh b/x.sh\n@@ -1,2 +1 @@\n #!/bin/bash\n-rm $X\n',
+    );
+    const { plan, worktree } = setup('x.sh', '#!/bin/bash\n', {
+      hunks: [{ newStart: 1, newEnd: 2 }],
+    });
+    const r = runScriptLint(
+      { plan, worktree, diff: delDiff },
+      shellcheckRunner([{ line: 1, code: 2086, level: 'info' }]),
+    );
+    expect(r.diffHash).toBeDefined();
+    expect(r.checked[0].findings[0].inDiff).toBe(false);
+    expect(r.ok).toBe(true);
+  });
 });
 
 describe('buildToolInvocation — config isolation (a PR config cannot suppress its own findings)', () => {
@@ -558,6 +606,20 @@ describe('buildToolInvocation — config isolation (a PR config cannot suppress 
     if (process.platform !== 'win32') {
       expect(statSync(dirname(cfg)).mode & 0o777).toBe(0o700);
     }
+  });
+
+  it('actionlint private config holds the merge-base content when one is given', () => {
+    // The trust boundary (round 3): the private file copies the BASE config —
+    // maintainer-merged compatibility knowledge — never the head's. Different
+    // base contents get different private files (the cache is content-keyed).
+    const base = "self-hosted-runner:\n  labels:\n    - 'ecs-qwen'\n";
+    const { argv } = buildToolInvocation('actionlint', '/w/ci.yml', base);
+    const cfg = argv[argv.indexOf('-config-file') + 1];
+    expect(readFileSync(cfg, 'utf8')).toBe(base);
+    const other = buildToolInvocation('actionlint', '/w/ci.yml', '{}\n');
+    const cfg2 = other.argv[other.argv.indexOf('-config-file') + 1];
+    expect(cfg2).not.toBe(cfg);
+    expect(readFileSync(cfg2, 'utf8')).toBe('{}\n');
   });
 
   it('actionlint carries exactly the two trusted compatibility exceptions scripts/lint.js runs', () => {

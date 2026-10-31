@@ -96,6 +96,11 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       '--diff .qwen/tmp/qwen-review-{target}-reanchor.diff',
     );
+    // Round 3: the config trust boundary is the merge base (trusted
+    // exceptions survive, head suppressions never read), and an empty
+    // refresh diff is a successful parse, not a fallback to the old hunks.
+    expect(body).toContain("MERGE-BASE tree's `.github/actionlint.yaml`");
+    expect(body).toContain('an EMPTY refresh diff');
     // Revert guards: the abandon-and-restart wording is gone for good.
     expect(body).not.toContain(
       'Abandon this submission and start the review again',

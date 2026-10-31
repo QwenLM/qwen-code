@@ -349,40 +349,48 @@ function emptyHadolintConfig(): string | undefined {
 }
 
 /**
- * A private neutral actionlint config, created once per process — or `undefined`
- * when we could not create one. Passed via `-config-file` (see below); an empty
- * config is what stops a `.github/actionlint.yaml` the PR added from suppressing
- * the findings we run actionlint to catch — measured on 1.7.12: a PR-added
- * `paths: {"**": {ignore: [".*"]}}` turns the #15974 expression finding into an
- * empty report, and `-config-file {}` brings it back (PR #16001 review).
+ * A private actionlint config file holding `baseContent` — or `undefined` when
+ * one could not be created. Passed via `-config-file` (see below), it replaces
+ * actionlint's auto-discovery of the reviewed repo's `.github/actionlint.yaml`.
+ *
+ * The TRUST BOUNDARY is the merge base, not the PR head (PR #16001 review,
+ * rounds 1–2): the head's config is PR-controlled — a planted
+ * `paths: {"**": {ignore: [".*"]}}` there suppresses every diagnostic (measured
+ * on 1.7.12) — while the BASE config is maintainer-merged compatibility
+ * knowledge (this repo's declares its ECS runner labels, the `concurrency.queue`
+ * schema lag, and the `$/` self-repository action reference; dropping it turned
+ * correct release-workflow changes into bogus `[lint]` Criticals). So
+ * `runScriptLint` reads the config blob from the merge-base tree and hands it
+ * here; a repo with no base config gets the explicit empty config `{}`.
  *
  * Same two path properties as the hadolint config, same reasons: UNPREDICTABLE
  * (mkdtemp, not a fixed tmpdir name a symlink race could plant) and ONE WE
- * CONTROL (a predictable fallback the attacker can write is a suppression
- * vector, so there is NO fallback — the caller fails actionlint closed).
- * The content is `{}` — an explicit empty config; actionlint accepts an empty
- * file too, but the explicit form says "no rules" rather than "no content".
+ * CONTROL (the content is copied into our own file, never passed as the repo's
+ * path; a predictable fallback the attacker can write is a suppression vector,
+ * so there is NO fallback — the caller fails actionlint closed). The cache is
+ * keyed by CONTENT: one process may lint several repos (tests do), and each
+ * base config deserves its own file.
  */
-let actionlintNeutralConfigPath: string | undefined;
-function neutralActionlintConfig(): string | undefined {
-  if (!actionlintNeutralConfigPath) {
-    try {
-      const d = mkdtempSync(join(tmpdir(), 'qwen-review-actionlint-'));
-      process.on('exit', () => {
-        try {
-          rmSync(d, { recursive: true, force: true });
-        } catch {
-          /* best-effort */
-        }
-      });
-      const p = join(d, 'actionlint.yaml');
-      writeFileSync(p, '{}\n');
-      actionlintNeutralConfigPath = p;
-    } catch {
-      return undefined; // no controllable config → caller must fail actionlint closed
-    }
+const actionlintConfigPaths = new Map<string, string>();
+function neutralActionlintConfig(baseContent = '{}\n'): string | undefined {
+  const cached = actionlintConfigPaths.get(baseContent);
+  if (cached !== undefined) return cached;
+  try {
+    const d = mkdtempSync(join(tmpdir(), 'qwen-review-actionlint-'));
+    process.on('exit', () => {
+      try {
+        rmSync(d, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+    });
+    const p = join(d, 'actionlint.yaml');
+    writeFileSync(p, baseContent);
+    actionlintConfigPaths.set(baseContent, p);
+    return p;
+  } catch {
+    return undefined; // no controllable config → caller must fail actionlint closed
   }
-  return actionlintNeutralConfigPath;
 }
 
 /** The outcome of pointing a linter at one file. */
@@ -395,8 +403,15 @@ export type ToolRun =
  * How `runScriptLint` invokes a linter. Injectable so a test can feed canned
  * output for all three tools — and exercise the fail-closed paths — without the
  * binaries installed; the default is the real `spawnSync`-backed runner.
+ * `actionlintBaseConfig` is the merge-base `.github/actionlint.yaml` content
+ * (actionlint only; undefined for the other tools and for a repo with no base
+ * config) — the trusted compatibility knowledge the private config preserves.
  */
-export type ToolRunner = (tool: LintTool, absPath: string) => ToolRun;
+export type ToolRunner = (
+  tool: LintTool,
+  absPath: string,
+  actionlintBaseConfig?: string,
+) => ToolRun;
 
 /**
  * The argv and environment for invoking one linter — the config-isolation layer,
@@ -418,13 +433,14 @@ export type ToolRunner = (tool: LintTool, absPath: string) => ToolRun;
  * - actionlint: auto-loads `.github/actionlint.yaml` from the reviewed repository,
  *   where a PR-added `paths: {"**": {ignore: [".*"]}}` suppresses EVERY diagnostic
  *   (measured on 1.7.12; PR #16001 review). Isolation is `-config-file <private
- *   neutral file>`, which overrides the auto-discovery; `runTool` fails actionlint
- *   closed when no private config exists. The two `-ignore` patterns are the
- *   TRUSTED compatibility exceptions the repo's own scripts/lint.js runs — custom
- *   self-hosted runner labels (this repo routes to ECS fleets whose labels
- *   actionlint cannot know) and the `environment.deployment` schema lag (this
- *   repo's own workflows use the key). They are reviewer-controlled constants,
- *   never read from the diff; every other suppression channel stays closed.
+ *   file>`, which overrides the auto-discovery; `runTool` fails actionlint closed
+ *   when no private config exists. The file's content is the MERGE-BASE config
+ *   (`actionlintBaseConfig`) — maintainer-merged compatibility knowledge (runner
+ *   labels, schema-lag ignores) the PR cannot edit — or `{}` when the base has
+ *   none; the HEAD config is never read. The two `-ignore` patterns ride ON TOP
+ *   of that config, exactly as the repo's scripts/lint.js runs them: custom
+ *   self-hosted runner labels and the `environment.deployment` schema lag,
+ *   reviewer-controlled constants covering repos whose base declares no config.
  *
  * Also carries `timeoutMs`: the wall-clock bound `runTool` puts on the spawn, kept
  * here so the bound is one asserted value rather than a literal buried in the spawn.
@@ -432,12 +448,13 @@ export type ToolRunner = (tool: LintTool, absPath: string) => ToolRun;
 export function buildToolInvocation(
   tool: LintTool,
   absPath: string,
+  actionlintBaseConfig?: string,
 ): { argv: string[]; env: NodeJS.ProcessEnv; timeoutMs: number } {
   const cfg =
     tool === 'hadolint'
       ? emptyHadolintConfig()
       : tool === 'actionlint'
-        ? neutralActionlintConfig()
+        ? neutralActionlintConfig(actionlintBaseConfig)
         : undefined;
   const argv: Record<LintTool, string[]> = {
     shellcheck: ['--norc', '--format=json1', '--severity=style', absPath],
@@ -504,7 +521,11 @@ export function buildToolInvocation(
  * (`ETIMEDOUT`) and `r.signal` (`SIGTERM`); `r.error` is checked first, so a timeout
  * is reported through the error branch below — still fail-closed either way.
  */
-function runTool(tool: LintTool, absPath: string): ToolRun {
+function runTool(
+  tool: LintTool,
+  absPath: string,
+  actionlintBaseConfig?: string,
+): ToolRun {
   // Isolation is `--config <private neutral file>`; if we could not create that file,
   // running hadolint would honour a PR-added (or planted) `.hadolint.yaml` in the cwd
   // and let it suppress findings. Fail the hadolint run CLOSED rather than lint
@@ -515,16 +536,20 @@ function runTool(tool: LintTool, absPath: string): ToolRun {
       reason: 'hadolint config isolation unavailable — failing closed',
     };
   }
-  // Same stance for actionlint: without the private neutral config it would
-  // auto-load the reviewed repo's `.github/actionlint.yaml`, and a PR-added
+  // Same stance for actionlint: without the private config it would auto-load
+  // the reviewed repo's HEAD `.github/actionlint.yaml`, and a PR-added
   // ignore-all rule there suppresses every diagnostic (PR #16001 review).
-  if (tool === 'actionlint' && !neutralActionlintConfig()) {
+  if (tool === 'actionlint' && !neutralActionlintConfig(actionlintBaseConfig)) {
     return {
       kind: 'error',
       reason: 'actionlint config isolation unavailable — failing closed',
     };
   }
-  const { argv, env, timeoutMs } = buildToolInvocation(tool, absPath);
+  const { argv, env, timeoutMs } = buildToolInvocation(
+    tool,
+    absPath,
+    actionlintBaseConfig,
+  );
   const r = spawnSync(tool, argv, {
     encoding: 'utf8',
     maxBuffer: 32 * 1024 * 1024,
@@ -692,7 +717,11 @@ export function runScriptLint(
   args: ScriptLintArgs,
   runner: ToolRunner = runTool,
 ): ScriptLintReport {
-  let plan: { files?: PlanFile[]; diffPathAbsolute?: unknown };
+  let plan: {
+    files?: PlanFile[];
+    diffPathAbsolute?: unknown;
+    mergeBaseSha?: unknown;
+  };
   try {
     plan = JSON.parse(readFileSync(args.plan, 'utf8'));
   } catch (err) {
@@ -701,6 +730,35 @@ export function runScriptLint(
     );
   }
   const files = Array.isArray(plan.files) ? plan.files : [];
+  // The actionlint config trust boundary is the MERGE BASE (PR #16001 review,
+  // round 3): the base `.github/actionlint.yaml` is maintainer-merged
+  // compatibility knowledge (runner labels, schema-lag ignores); the HEAD copy
+  // is PR-controlled and never read. Resolved lazily — a shell-only diff owes
+  // no git call — and cached for the run. The sha shape guard is the option
+  // injection fence: `git show <rev>:<path>` takes the rev as a bare argument,
+  // and only a hex object id can reach it. Any failure (no base config, no
+  // merge base, git error) degrades to the empty config `{}` — the strict
+  // direction: compatibility ignores may be lost (disclosed findings the
+  // maintainer can rule), suppressions may not be gained.
+  let actionlintBaseConfig: string | undefined;
+  let actionlintBaseResolved = false;
+  const resolveActionlintBaseConfig = (): string | undefined => {
+    if (actionlintBaseResolved) return actionlintBaseConfig;
+    actionlintBaseResolved = true;
+    const base = plan.mergeBaseSha;
+    if (typeof base !== 'string' || !/^[0-9a-f]{7,64}$/.test(base)) {
+      return undefined;
+    }
+    const r = spawnSync(
+      'git',
+      ['-C', args.worktree, 'show', `${base}:.github/actionlint.yaml`],
+      { encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024 },
+    );
+    if (r.status === 0 && typeof r.stdout === 'string' && r.stdout !== '') {
+      actionlintBaseConfig = r.stdout;
+    }
+    return actionlintBaseConfig;
+  };
   // The diff the report binds to: the plan's captured diff, unless `--diff`
   // overrides it. The override is the re-anchor protocol's refresh channel
   // (PR #16001 review): the head moved, the plan and its coverage evidence stay
@@ -718,6 +776,16 @@ export function runScriptLint(
   // snapshot B's hash, and `compose-review` would accept it as fresh.
   let addedRanges = new Map<string, Array<[number, number]>>();
   let diffHash: string | undefined;
+  // Whether the diff PARSED — distinct from whether it added any lines. An
+  // EMPTY diff (zero bytes, or deletions only) parses to zero added ranges and
+  // is a successful parse: nothing was added, so no finding is in-diff. The
+  // re-anchor refresh hits this when the new head reverts the PR's last change
+  // and `git diff base newHead` is exactly empty; treating that as a parse
+  // failure fell back to the OLD plan's context-inclusive hunks and promoted
+  // pre-existing findings into blockers the gate then accepted as fresh
+  // (PR #16001 review, round 3, reproduced with real commits). Only a genuine
+  // parse failure earns the over-inclusive fallback.
+  let diffParsed = false;
   let diffBuf: Buffer | undefined;
   if (typeof diffPath === 'string') {
     try {
@@ -730,6 +798,7 @@ export function runScriptLint(
     try {
       addedRanges = addedRangesFromDiff(diffBuf.toString('utf8'));
       diffHash = createHash('sha256').update(diffBuf).digest('hex');
+      diffParsed = true;
     } catch {
       // Diff read but UNPARSEABLE — we have no ground truth for `inDiff`. Leave
       // `diffHash` undefined so the gate rejects the report as unverifiable (fail
@@ -806,7 +875,11 @@ export function runScriptLint(
       skipped.push({ path, tool, reason: `${tool} is not installed` });
       continue;
     }
-    const res = runner(tool, abs);
+    const res = runner(
+      tool,
+      abs,
+      tool === 'actionlint' ? resolveActionlintBaseConfig() : undefined,
+    );
     if (res.kind === 'missing') {
       missing.add(tool);
       skipped.push({ path, tool, reason: `${tool} is not installed` });
@@ -833,10 +906,10 @@ export function runScriptLint(
     // does not mention yields `[]` (nothing added → nothing blocks) — NOT the plan's
     // context-inclusive hunks, which would false-positive a pre-existing finding on a
     // context line into a blocker. The context-inclusive `hunksOf` fallback is used
-    // ONLY when no diff was parsed at all (`addedRanges` empty), a report the gate
-    // then rejects as stale anyway.
-    const ranges =
-      addedRanges.get(path) ?? (addedRanges.size > 0 ? [] : hunksOf(f));
+    // ONLY when the diff could not be parsed (`diffParsed` false) — an EMPTY parsed
+    // diff is a successful parse with nothing added, not a parse failure — and that
+    // report carries no diffHash, so the gate rejects it as stale anyway.
+    const ranges = addedRanges.get(path) ?? (diffParsed ? [] : hunksOf(f));
     const findings = parsed.map((x) => ({
       ...x,
       inDiff: inAnyHunk(x.line, ranges),

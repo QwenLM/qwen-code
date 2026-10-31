@@ -22,7 +22,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { runScriptLint, toolFor } from './script-lint.js';
+import { runScriptLint, toolFor, type ToolRunner } from './script-lint.js';
 
 const hasShellcheck = (() => {
   try {
@@ -312,4 +312,128 @@ describe('runScriptLint — graceful degradation and scoping', () => {
     expect(r.ok).toBe(true);
     expect(r.note).toContain('No executable scripts');
   });
+});
+
+describe('runScriptLint — the actionlint config trust boundary is the merge base', () => {
+  // PR #16001 review, round 3: the private {} config blocked PR-added
+  // suppressions but also dropped the repo's maintainer-merged compatibility
+  // exceptions (ECS runner labels, concurrency.queue, $/ action refs),
+  // turning correct release-workflow changes into bogus [lint] Criticals.
+  // The boundary is the BASE tree's config — trusted, and unreachable by the
+  // PR — never the head's.
+  const BASE_CONFIG =
+    "self-hosted-runner:\n  labels:\n    - 'ecs-qwen-custom'\n";
+  const HEAD_CONFIG = 'paths:\n  "**":\n    ignore:\n      - ".*"\n';
+  const WORKFLOW = [
+    'name: CI',
+    'on: push',
+    'jobs:',
+    '  a:',
+    '    runs-on: [self-hosted, ecs-qwen-custom]',
+    '    env:',
+    '      X: ${{ runner.temp }}',
+    '    steps:',
+    '      - run: echo hi',
+    '',
+  ].join('\n');
+
+  /** A two-commit repo: base declares the trusted config, head plants ignore-all. */
+  function twoCommitRepo(): { worktree: string; baseSha: string } {
+    const wt = tmpDir('script-lint-basecfg-');
+    const git = (...args: string[]) =>
+      execFileSync('git', ['-C', wt, ...args], { stdio: 'ignore' });
+    git('init', '-q');
+    git('config', 'user.email', 'test@example.com');
+    git('config', 'user.name', 'test');
+    mkdirSync(join(wt, '.github', 'workflows'), { recursive: true });
+    writeFileSync(join(wt, '.github', 'actionlint.yaml'), BASE_CONFIG);
+    writeFileSync(
+      join(wt, '.github', 'workflows', 'ci.yml'),
+      'name: CI\non: push\njobs: {}\n',
+    );
+    git('add', '.');
+    git('commit', '-qm', 'base');
+    const baseSha = execFileSync('git', ['-C', wt, 'rev-parse', 'HEAD'], {
+      encoding: 'utf8',
+    }).trim();
+    writeFileSync(join(wt, '.github', 'actionlint.yaml'), HEAD_CONFIG);
+    writeFileSync(join(wt, '.github', 'workflows', 'ci.yml'), WORKFLOW);
+    git('add', '.');
+    git('commit', '-qm', 'head');
+    return { worktree: wt, baseSha };
+  }
+
+  function planFor(
+    worktree: string,
+    extra: Record<string, unknown> = {},
+  ): string {
+    const planPath = join(worktree, 'plan.json');
+    writeFileSync(
+      planPath,
+      JSON.stringify({
+        files: [
+          {
+            path: '.github/workflows/ci.yml',
+            kind: 'source',
+            hunks: [{ newStart: 1, newEnd: 10 }],
+          },
+        ],
+        ...extra,
+      }),
+    );
+    return planPath;
+  }
+
+  it('hands the runner the BASE config, never the head-planted one', () => {
+    const { worktree, baseSha } = twoCommitRepo();
+    const plan = planFor(worktree, { mergeBaseSha: baseSha });
+    const seen: Array<string | undefined> = [];
+    const runner: ToolRunner = (tool, _abs, baseConfig) => {
+      if (tool === 'actionlint') seen.push(baseConfig);
+      return { kind: 'ok', stdout: '[]' };
+    };
+    runScriptLint({ plan, worktree }, runner);
+    expect(seen).toEqual([BASE_CONFIG]);
+  });
+
+  it('no merge base in the plan degrades to the empty config', () => {
+    const { worktree } = twoCommitRepo();
+    const plan = planFor(worktree);
+    const seen: Array<string | undefined> = [];
+    const runner: ToolRunner = (tool, _abs, baseConfig) => {
+      if (tool === 'actionlint') seen.push(baseConfig);
+      return { kind: 'ok', stdout: '[]' };
+    };
+    runScriptLint({ plan, worktree }, runner);
+    expect(seen).toEqual([undefined]);
+  });
+
+  it('a non-hex merge base never reaches git (option-injection fence)', () => {
+    const { worktree } = twoCommitRepo();
+    const plan = planFor(worktree, { mergeBaseSha: '--output=/tmp/pwned' });
+    const seen: Array<string | undefined> = [];
+    const runner: ToolRunner = (tool, _abs, baseConfig) => {
+      if (tool === 'actionlint') seen.push(baseConfig);
+      return { kind: 'ok', stdout: '[]' };
+    };
+    runScriptLint({ plan, worktree }, runner);
+    expect(seen).toEqual([undefined]);
+  });
+
+  it.skipIf(!hasActionlint)(
+    'real binary: base compatibility honored, head ignore-all still blocked',
+    () => {
+      // Both directions in one run: the custom label the BASE config declares
+      // produces no runner-label finding (the exception survives), while the
+      // invalid expression the HEAD ignore-all tries to hide is still reported.
+      const { worktree, baseSha } = twoCommitRepo();
+      const plan = planFor(worktree, { mergeBaseSha: baseSha });
+      const r = runScriptLint({ plan, worktree });
+      expect(r.errored).toEqual([]);
+      const kinds = r.checked[0].findings.map((f) => f.code);
+      expect(kinds).toContain('expression');
+      expect(kinds).not.toContain('runner-label');
+      expect(r.ok).toBe(false);
+    },
+  );
 });
