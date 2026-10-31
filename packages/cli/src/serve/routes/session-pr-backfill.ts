@@ -199,11 +199,30 @@ interface CommandMention {
 // Bare session git branches are NOT a source: they bind the workspace's
 // current branch PR onto every session — measured pure noise, removed with
 // cleanup.
-// The URL arm is shared with the policy fallback so the two cannot drift.
+// The URL arm is shared with the policy fallback so the two cannot drift,
+// and the fallback is anchored at command position: its gap cannot cross a
+// newline or a quote, so a URL on a later line or inside quotes is not
+// evidence — the alternation never read those either.
 const PR_URL_FORM_PATTERN =
   /[ \t]+[^\n"\\]*?(https?:\/\/[A-Za-z0-9][^\s"'<>)]*\/pull\/(\d{1,9})(?!\d))/;
+const PR_COMMAND_URL_PATTERN = new RegExp(
+  String.raw`^\s*\/(?:review|verify-pr)` + PR_URL_FORM_PATTERN.source,
+);
+// One glued flag link — the single source of truth for the number tail and
+// the qualifier chain, so the two can never disagree on what a link is.
+// The name is word runs joined by SINGLE dashes; the optional =value may
+// contain single dashes but never `--`. Neither part can swallow the `--`
+// that opens the next link, so every quantifier partition stays unique and
+// the scan stays linear — a `[\w-]*` name or a `[^\s]*` value inside a
+// starred link backtracks catastrophically on long chains (measured).
+const PR_FLAG_LINK_BODY = String.raw`[A-Za-z]\w*(?:-\w+)*(?:=(?:[^\s-]|-(?!-))*)?`;
+const PR_FLAG_LINK = String.raw`--` + PR_FLAG_LINK_BODY;
 const PR_COMMAND_PATTERN = new RegExp(
-  String.raw`^\s*\/(review|verify-pr)(?:[ \t]+#?(\d{1,9})(?![\w./]|-(?!-[A-Za-z][\w-]*(?:=[^\s]*)?(?=[ \t\r\n]|$)))|` +
+  String.raw`^\s*\/(review|verify-pr)(?:[ \t]+#?(\d{1,9})(?![\w./]|-(?!-` +
+    PR_FLAG_LINK_BODY +
+    String.raw`(?:` +
+    PR_FLAG_LINK +
+    String.raw`)*(?=[ \t\r\n]|$)))|` +
     PR_URL_FORM_PATTERN.source +
     ')',
 );
@@ -225,13 +244,15 @@ const PR_COMMAND_PATTERN = new RegExp(
 // `77--repo--publish`), because a prose digit (`docs/a1--repo`, a quoted
 // `"77--repo"`, even line-final) is not a qualifier and must not decline a
 // legitimate bare binding. The token boundary includes `-` so a `--repo`
-// link followed by another link is still an unreadable qualifier. A link
-// name is `\w` runs joined by SINGLE dashes: a dash inside a link must be
-// followed by a word character, so no link can swallow the `--` that opens
-// the next one and the chain partition stays unique — a `[\w-]*` link body
-// backtracks catastrophically on a long `--a--a--…` chain (measured).
-const REPO_FLAG_PATTERN =
-  /(?:^|[^-\w])--repo(?![\w-])|^\s*\/(?:review|verify-pr)[ \t]+#?\d{1,9}(?:--[A-Za-z]\w*(?:-\w+)*)*--repo(?=[ \t\r\n=-]|$)|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?/g;
+// link followed by another link is still an unreadable qualifier. The walk
+// uses the same PR_FLAG_LINK as the number tail, valued links included, so
+// `77--publish=x--repo` declines exactly like `77--publish--repo`.
+const REPO_FLAG_PATTERN = new RegExp(
+  String.raw`(?:^|[^-\w])--repo(?![\w-])|^\s*\/(?:review|verify-pr)[ \t]+#?\d{1,9}(?:` +
+    PR_FLAG_LINK +
+    String.raw`)*--repo(?=[ \t\r\n=-]|$)|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?`,
+  'g',
+);
 const REPO_VALUE_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?[^\s"']+/g;
 const REPO_FORM_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?([^\s"']+)/;
 
@@ -265,9 +286,11 @@ function parsePrCommand(prompt: string): {
     // tail SHAPE; this is the per-command POLICY. The rejection still
     // falls through to URL evidence: before the policy existed the bare
     // alternative failed on these prompts and the alternation bound the
-    // URL's PR, and that binding must survive.
+    // URL's PR, and that binding must survive. The fallback is the
+    // command-anchored URL arm, not a prompt-wide scan: a URL on a later
+    // line or behind a quote was never evidence the alternation could read.
     if (match[1] === 'review' && prompt.charAt(match[0].length) === '-') {
-      const urlMatch = PR_URL_FORM_PATTERN.exec(prompt);
+      const urlMatch = PR_COMMAND_URL_PATTERN.exec(prompt);
       if (urlMatch) {
         const urlNumber = Number(urlMatch[2]);
         if (urlNumber > 0) {

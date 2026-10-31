@@ -2984,6 +2984,83 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toMatchObject([{ number: 7, url: 'https://github.com/o/r/pull/7' }]);
   });
 
+  it('does not bind a live /review URL that sits on a later line or behind a quote', async () => {
+    // The URL fallback must stay anchored at command position with the same
+    // gap the alternation uses: a URL on line 2 or inside quotes is evidence
+    // the grammar deliberately excludes, and the merge base bound nothing.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(7, 'fix/7')],
+    });
+
+    for (const [sessionId, prompt] of [
+      [
+        SESSION_A,
+        '/review 42--notes\nsee https://github.com/o/r/pull/7 for context',
+      ],
+      [SESSION_B, '/review 42--notes "see https://github.com/o/r/pull/7"'],
+    ] as Array<[string, string]>) {
+      const result = await bindSessionPrsFromPromptCommand(
+        runtime,
+        sessionId,
+        prompt,
+      );
+      // No mention at all: the live entry short-circuits before any scan.
+      expect(result).toBeUndefined();
+      expect(
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(sessionId, 'active'),
+        ),
+      ).toBeNull();
+    }
+  });
+
+  it('declines a live /verify-pr whose --repo follows a valued glued link', async () => {
+    // The chain and the number tail share one link grammar, so a `=value`
+    // link does not stop the qualifier walk: an unreadable value after a
+    // valued link still declines, and a readable one still binds.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77'), pr(78, 'fix/78')],
+    });
+
+    for (const [sessionId, prompt] of [
+      [SESSION_A, '/verify-pr 77--publish=x--repo'],
+      [SESSION_B, '/verify-pr 77--a=b--repo'],
+    ] as Array<[string, string]>) {
+      const result = await bindSessionPrsFromPromptCommand(
+        runtime,
+        sessionId,
+        prompt,
+      );
+      expect(result).toMatchObject({
+        scanned: 1,
+        bound: 0,
+        written: 0,
+        repoDeclined: 1,
+      });
+      expect(
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(sessionId, 'active'),
+        ),
+      ).toBeNull();
+    }
+
+    const readable = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_C,
+      '/verify-pr 78--publish=x--repo o/r',
+    );
+    expect(readable).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_C, 'active'),
+        )
+      )?.map((entry) => entry.number),
+    ).toEqual([78]);
+  });
+
   it('reports a /review declined by a --repo in its later prose', async () => {
     // The qualifier is read off the whole prompt, so a pasted command in the
     // body counts. Declining is right, but the decline has to be counted —
@@ -4136,6 +4213,38 @@ describe('backfillWorkspaceSessionPrs', () => {
         sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
       ),
     ).toMatchObject([{ number: 7, url: 'https://github.com/o/r/pull/7' }]);
+  });
+
+  it('keeps the anchored URL gap and the valued-link chain on the sweep', async () => {
+    // The sweep shares both grammars: a later-line or quoted URL binds
+    // nothing, and a --repo after a valued glued link still declines.
+    await seedSession(SESSION_A);
+    await appendUserText(
+      SESSION_A,
+      '/review 42--notes\nsee https://github.com/o/r/pull/7 for context',
+    );
+    await seedSession(SESSION_B);
+    await appendUserText(
+      SESSION_B,
+      '/review 42--notes "see https://github.com/o/r/pull/7"',
+    );
+    await seedSession(SESSION_C);
+    await appendUserText(SESSION_C, '/verify-pr 77--publish=x--repo');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(7, 'fix/7'), pr(77, 'fix/77')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 0, repoDeclined: 1 });
+    for (const sessionId of [SESSION_A, SESSION_B, SESSION_C]) {
+      expect(
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(sessionId, 'active'),
+        ),
+      ).toBeNull();
+    }
   });
 
   it('rejects foreign-repo and zero /review numbers', async () => {
