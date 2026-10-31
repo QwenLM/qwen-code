@@ -5163,6 +5163,48 @@ describe('loadCliConfig with allowed-mcp-server-names', () => {
     expect(config.isMcpServerDisabled('server3')).toBe(false);
   });
 
+  it('should keep only the de-duplicated flag names on Config for runtime recomputes', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--disable-mcp-server',
+      'server2, server1',
+      '--disable-mcp-server',
+      'server2',
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      ...baseSettings,
+      mcp: { excluded: ['server3'] },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    // The flag only, not the settings-derived `mcp.excluded` entry.
+    expect(config.getCliExcludedMcpServerNames()).toEqual([
+      'server2',
+      'server1',
+    ]);
+  });
+
+  it('should leave getCliExcludedMcpServerNames undefined when the flag is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(baseSettings, argv, undefined, []);
+    expect(config.getCliExcludedMcpServerNames()).toBeUndefined();
+  });
+
+  it('should not swallow a trailing positional prompt as a server name', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--disable-mcp-server',
+      'server1',
+      'do the thing',
+    ];
+    const argv = await parseArguments();
+    expect(argv.disableMcpServer).toEqual(['server1']);
+    expect(argv.query).toBe('do the thing');
+  });
+
   it('should union --disable-mcp-server with settings mcp.excluded', async () => {
     process.argv = ['node', 'script.js', '--disable-mcp-server', 'server2'];
     const argv = await parseArguments();

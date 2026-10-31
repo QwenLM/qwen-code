@@ -693,6 +693,11 @@ export async function parseArguments(): Promise<CliArgs> {
         .option('disable-mcp-server', {
           ...DEFAULT_COMMAND_OPTIONS['disable-mcp-server'],
           string: true,
+          // One name per occurrence (comma-separate or repeat the flag for
+          // several), so a trailing positional prompt is not swallowed as
+          // another server name. Deliberately limited to this flag: the other
+          // array options keep their variadic parsing.
+          nargs: 1,
           coerce: (disabledServerNames: string[]) =>
             // Handle comma-separated values
             disabledServerNames.flatMap((disabledServerName) =>
@@ -2237,14 +2242,16 @@ export async function loadCliConfig(
   // !safeMode)` branch would silently drop it twice over: under `--safe-mode`
   // that branch does not run at all, and next to `--allowed-mcp-server-names`
   // the first branch wins and leaves the set undefined. Precedence is
-  // allow-then-deny — a server named by both flags ends up disabled.
-  // Boot-time only: the settings-watcher and ACP reload paths rebuild the
-  // exclude set from settings alone, so a later settings.json edit drops these
-  // entries. Durable fix tracked in #14009.
-  if (argv.disableMcpServer) {
+  // allow-then-deny — a server named by both flags ends up disabled. The
+  // names are also kept on `Config` so the settings hot-reload and ACP
+  // workspace reloads re-apply them.
+  const cliExcludedMcpServerNames = argv.disableMcpServer
+    ? [...new Set(argv.disableMcpServer.map((n) => n.trim()).filter(Boolean))]
+    : undefined;
+  if (cliExcludedMcpServerNames?.length) {
     excludedMcpServers = new Set([
       ...(excludedMcpServers ?? []),
-      ...argv.disableMcpServer.filter(Boolean),
+      ...cliExcludedMcpServerNames,
     ]);
   }
 
@@ -2690,6 +2697,10 @@ export async function loadCliConfig(
     // bound. Undefined when `--allowed-mcp-server-names` was not passed.
     cliAllowedMcpServerNames: argv.allowedMcpServerNames
       ? argv.allowedMcpServerNames.filter(Boolean)
+      : undefined,
+    // The flag ONLY (not the settings-derived list); see ConfigParameters.
+    cliExcludedMcpServerNames: cliExcludedMcpServerNames?.length
+      ? cliExcludedMcpServerNames
       : undefined,
     excludedMcpServers: excludedMcpServers
       ? Array.from(excludedMcpServers)

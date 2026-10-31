@@ -34201,6 +34201,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       getTopTierMcpServers: vi.fn().mockReturnValue(undefined),
       getRuntimeMcpServers: vi.fn().mockReturnValue({}),
       getCliAllowedMcpServerNames: vi.fn().mockReturnValue(undefined),
+      getCliExcludedMcpServerNames: vi.fn().mockReturnValue(undefined),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getBareMode: vi.fn().mockReturnValue(false),
       isSafeMode: vi.fn().mockReturnValue(false),
@@ -34366,6 +34367,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       getTopTierMcpServers: vi.fn().mockReturnValue(undefined),
       getRuntimeMcpServers: vi.fn().mockReturnValue({}),
       getCliAllowedMcpServerNames: vi.fn().mockReturnValue(undefined),
+      getCliExcludedMcpServerNames: vi.fn().mockReturnValue(undefined),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getBareMode: vi.fn().mockReturnValue(false),
       isSafeMode: vi.fn().mockReturnValue(false),
@@ -34583,6 +34585,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       getTopTierMcpServers: vi.fn().mockReturnValue(undefined),
       getRuntimeMcpServers: vi.fn().mockReturnValue({}),
       getCliAllowedMcpServerNames: vi.fn().mockReturnValue(undefined),
+      getCliExcludedMcpServerNames: vi.fn().mockReturnValue(undefined),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getBareMode: vi.fn().mockReturnValue(false),
       isSafeMode: vi.fn().mockReturnValue(false),
@@ -34672,6 +34675,7 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
       getTopTierMcpServers: vi.fn().mockReturnValue(undefined),
       getRuntimeMcpServers: vi.fn().mockReturnValue({}),
       getCliAllowedMcpServerNames: vi.fn().mockReturnValue(undefined),
+      getCliExcludedMcpServerNames: vi.fn().mockReturnValue(undefined),
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getBareMode: vi.fn().mockReturnValue(false),
       isSafeMode: vi.fn().mockReturnValue(false),
@@ -34730,6 +34734,108 @@ describe('QwenAgent extMethod runtime MCP add/remove (T2.8)', () => {
     mockConnectionState.resolve();
     await agentPromise;
   });
+
+  it.each([
+    ['normal', false, ['other', 'bridge']],
+    ['safe', true, ['bridge']],
+  ])(
+    '%s mode: workspaceMcpReload keeps the startup --disable-mcp-server exclusions',
+    async (_mode, safeMode, expectedExcluded) => {
+      mockConfig.isSafeMode = vi.fn().mockReturnValue(safeMode);
+      mockConfig.getCliExcludedMcpServerNames = vi
+        .fn()
+        .mockReturnValue(['bridge']);
+      mockConfig.getCliAllowedMcpServerNames = vi
+        .fn()
+        .mockReturnValue(['probe']);
+
+      const discoveryManager = {
+        discoverAllMcpToolsIncremental: vi.fn().mockResolvedValue(undefined),
+        getDiscoveryState: vi.fn().mockReturnValue(MCPDiscoveryState.COMPLETED),
+        getMcpClientAccounting: vi.fn().mockReturnValue({
+          total: 0,
+          refusedServerNames: [],
+        }),
+        getMcpClientBudget: vi.fn().mockReturnValue(undefined),
+        getMcpBudgetMode: vi.fn().mockReturnValue(undefined),
+      };
+      const discoveryConfig = {
+        initialize: vi.fn().mockResolvedValue(undefined),
+        reinitializeMcpServers: vi.fn().mockResolvedValue(undefined),
+        setMcpTransportPool: vi.fn(),
+        getTargetDir: vi.fn().mockReturnValue('/tmp'),
+        getMcpServers: vi.fn().mockReturnValue({}),
+        getTopTierMcpServers: vi.fn().mockReturnValue(undefined),
+        getRuntimeMcpServers: vi.fn().mockReturnValue({}),
+        getCliAllowedMcpServerNames: vi.fn().mockReturnValue(['probe']),
+        getCliExcludedMcpServerNames: vi.fn().mockReturnValue(['bridge']),
+        getApprovalMode: vi.fn().mockReturnValue('default'),
+        getBareMode: vi.fn().mockReturnValue(false),
+        isSafeMode: vi.fn().mockReturnValue(safeMode),
+        setExcludedMcpServers: vi.fn(),
+        setAllowedMcpServers: vi.fn(),
+        setPendingMcpServers: vi.fn(),
+        getToolRegistry: vi.fn().mockReturnValue({
+          getMcpClientManager: vi.fn().mockReturnValue(discoveryManager),
+        }),
+      } as unknown as Config;
+      vi.mocked(loadSettings).mockReturnValue({
+        merged: { mcpServers: {} },
+        forScope: vi.fn().mockReturnValue({ settings: {} }),
+        getSystemHooks: vi.fn().mockReturnValue(undefined),
+        getUserHooks: vi.fn().mockReturnValue({}),
+        getProjectHooks: vi.fn().mockReturnValue({}),
+      } as unknown as LoadedSettings);
+      vi.mocked(loadCliConfig).mockResolvedValue(discoveryConfig);
+
+      const { agent, agentPromise } = await getAgent();
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpInitialize, {}),
+      ).resolves.toEqual({ accepted: true });
+      await vi.waitFor(() =>
+        expect(
+          discoveryManager.discoverAllMcpToolsIncremental,
+        ).toHaveBeenCalledWith(discoveryConfig),
+      );
+
+      // A settings.json edit that excludes some other server and no longer
+      // mentions `bridge` must not re-enable the launch-disabled server.
+      vi.mocked(loadSettings).mockReturnValue({
+        merged: { mcpServers: {}, mcp: { excluded: ['other'] } },
+        forScope: vi.fn().mockReturnValue({ settings: {} }),
+        getSystemHooks: vi.fn().mockReturnValue(undefined),
+        getUserHooks: vi.fn().mockReturnValue({}),
+        getProjectHooks: vi.fn().mockReturnValue({}),
+      } as unknown as LoadedSettings);
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMcpReload, {}),
+      ).resolves.toEqual({ accepted: true });
+
+      await vi.waitFor(() =>
+        expect(mockConfig.setExcludedMcpServers).toHaveBeenCalledWith(
+          expectedExcluded,
+        ),
+      );
+      // Every live Config reads its own startup exclusions, not just `this.config`.
+      await vi.waitFor(() =>
+        expect(discoveryConfig.setExcludedMcpServers).toHaveBeenCalledWith(
+          expectedExcluded,
+        ),
+      );
+      // The launch allow bound survives the reload too.
+      await vi.waitFor(() =>
+        expect(mockConfig.setAllowedMcpServers).toHaveBeenCalledWith(['probe']),
+      );
+      await vi.waitFor(() =>
+        expect(discoveryConfig.setAllowedMcpServers).toHaveBeenCalledWith([
+          'probe',
+        ]),
+      );
+
+      mockConnectionState.resolve();
+      await agentPromise;
+    },
+  );
 
   it('allows workspace MCP initialization to retry after a failure', async () => {
     const stop = vi.fn().mockResolvedValue(undefined);

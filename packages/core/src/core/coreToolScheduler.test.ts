@@ -7149,7 +7149,7 @@ describe('CoreToolScheduler', () => {
         'explains an excluded server with the mcp.excluded recovery action',
         configuredPangu('excluded'),
         'mcp__pangu-server__search',
-        ['excluded', 'mcp.excluded'],
+        ['excluded', 'mcp.excluded', '--disable-mcp-server'],
       ],
       [
         'explains a pending-approval server with the approval recovery action',

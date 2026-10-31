@@ -2948,7 +2948,7 @@ export class CoreToolScheduler {
       case 'not_allowed':
         return `Tool "${unknownToolName}" is unavailable: the MCP server "${serverHit}" is not in the allow-list (mcp.allowed / --allowed-mcp-server-names), so its tools are not loaded. Add it to mcp.allowed to use this tool.`;
       case 'excluded':
-        return `Tool "${unknownToolName}" is unavailable: the MCP server "${serverHit}" is excluded (mcp.excluded), so its tools are not loaded. Remove it from mcp.excluded to use this tool.`;
+        return `Tool "${unknownToolName}" is unavailable: the MCP server "${serverHit}" is excluded (mcp.excluded / --disable-mcp-server), so its tools are not loaded. Remove it from mcp.excluded, or drop the --disable-mcp-server flag and restart, to use this tool.`;
       case 'pending_approval':
         return `Tool "${unknownToolName}" is unavailable: the MCP server "${serverHit}" is awaiting approval, so its tools are not loaded. Approve it (run /mcp) to use this tool.`;
       default:
