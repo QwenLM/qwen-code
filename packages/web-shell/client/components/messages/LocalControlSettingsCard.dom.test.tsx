@@ -759,6 +759,94 @@ describe('LocalControlSettingsCard', () => {
     );
   });
 
+  it('names the standing grant when a refused pick meets a second candidate (#14140)', async () => {
+    // A CLI grant the host does not hold is refused on the first enable. The
+    // card recovers onto the lone automatic candidate, but the grant still
+    // stands in the daemon. When a second candidate makes an address-less
+    // enable ambiguous, naming the auto-fill would revoke that grant — the
+    // card must name the grant instead and let the daemon refuse it again.
+    const enableBodies: Array<Record<string, unknown>> = [];
+    const fallback = { interfaceName: 'en0', address: '192.168.1.10' };
+    const twoCandidates = [
+      fallback,
+      { interfaceName: 'en1', address: '192.168.1.20' },
+    ];
+    let enables = 0;
+    vi.mocked(fetch).mockImplementation(async (_input, init) => {
+      if ((init?.method ?? 'GET') === 'GET') {
+        return localControlResponse({
+          active: false,
+          interfaces: [fallback],
+          grantedAddress: '10.8.0.2',
+        });
+      }
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      enableBodies.push(body);
+      enables += 1;
+      if (enables === 1) {
+        return localControlResponse(
+          {
+            error:
+              '10.8.0.2 is not an IPv4 address this host can expose right now.',
+            code: 'unknown_lan_interface',
+            interfaces: [fallback],
+          },
+          false,
+          409,
+        );
+      }
+      if (enables === 2) {
+        return localControlResponse(
+          {
+            error:
+              'Multiple local networks are available; choose which one to expose: en0 (192.168.1.10), en1 (192.168.1.20)',
+            code: 'ambiguous_lan_interface',
+            interfaces: twoCandidates,
+          },
+          false,
+          409,
+        );
+      }
+      return localControlResponse({
+        active: true,
+        address: '10.8.0.2',
+        interfaceName: 'utun4',
+        interfaces: twoCandidates,
+        grantedAddress: '10.8.0.2',
+      });
+    });
+
+    const container = mount();
+    await flush();
+
+    // The grant is pre-selected by name; the daemon refuses it because the
+    // host does not hold that address.
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+    expect(enableBodies).toHaveLength(1);
+    expect(enableBodies[0]).toMatchObject({ address: '10.8.0.2' });
+
+    // The recovery leaves the lone candidate unnamed, so the next enable
+    // reaches the daemon's (now stale) candidate list address-less.
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+    expect(enableBodies).toHaveLength(2);
+    expect(enableBodies[1]).not.toHaveProperty('address');
+
+    // A second candidate makes address-less ambiguous. Naming the auto-fill
+    // would revoke the grant, so the card names the grant instead.
+    act(() => {
+      buttonWithText(container, 'Turn on Local Control').click();
+    });
+    await flush();
+    expect(enableBodies).toHaveLength(3);
+    expect(enableBodies[2]).toMatchObject({ address: '10.8.0.2' });
+  });
+
   it('promotes the displayed auto-fill when a 409 makes the choice ambiguous (#14140)', async () => {
     // A lone candidate auto-fills without a picker. If a second interface
     // appears before the click, an address-less enable is ambiguous — and

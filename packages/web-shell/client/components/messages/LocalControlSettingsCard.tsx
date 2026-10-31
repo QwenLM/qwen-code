@@ -287,14 +287,22 @@ export function LocalControlSettingsCard() {
       if (recovered) {
         setStatus((prev) => (prev ? { ...prev, interfaces: recovered } : prev));
         setSelection((prev) => {
-          // The daemon just refused the retained pick itself — it is gone
-          // (stale DHCP, departed VPN) — so stop offering it, even when it
-          // came from the CLI grant.
-          const retained =
+          const refusedPick =
             prev.retained && postedAddress === prev.retained.candidate.address
-              ? undefined
-              : prev.retained;
-          return reconcileSelection(recovered, prev, retained);
+              ? prev.retained
+              : undefined;
+          if (!refusedPick) {
+            return reconcileSelection(recovered, prev, prev.retained);
+          }
+          // The daemon just refused the retained pick itself — it is gone
+          // (stale DHCP, departed VPN) — so stop selecting it. A refused CLI
+          // grant is still the address the daemon keeps, though: keeping it
+          // as provenance stops a later ambiguous enable from naming the
+          // card's own auto-fill and revoking the grant (#14140).
+          const next = reconcileSelection(recovered, prev, undefined);
+          return refusedPick.granted
+            ? { ...next, retained: refusedPick }
+            : next;
         });
       }
     } finally {
