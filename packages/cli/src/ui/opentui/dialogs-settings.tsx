@@ -457,6 +457,11 @@ export function OpenTuiSettingsDialog(props: OpenTuiSettingsDialogProps) {
         settings,
         selectedScope,
       );
+      if (key === 'ui.disableWorkflowKeywordTrigger') {
+        config?.setWorkflowKeywordTriggerEnabled(
+          settings.merged.ui?.disableWorkflowKeywordTrigger !== true,
+        );
+      }
       onSettingApplied?.(key, value);
       setModifiedSettings((prev) => {
         const updated = new Set(prev);

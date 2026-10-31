@@ -260,7 +260,7 @@ export function readCsiFileHistoryEnvelope(
     'operation',
   ]);
   ensure(
-    boot.version === 5 &&
+    (boot.version === 5 || boot.version === 6) &&
       body['protocolVersion'] === 2 &&
       body['managedCsi'] === MANAGED_CSI_FILE_PROTOCOL,
   );
@@ -393,4 +393,26 @@ function closed(value: unknown, keys: string[]): Record<string, unknown> {
 }
 function ensure(condition: boolean): asserts condition {
   if (!condition) throw new Error('Invalid private CSI file history.');
+}
+
+export function csiHistoryContentDigest(
+  content: Record<string, unknown>,
+): string {
+  const canonical = (value: unknown): string => {
+    if (Array.isArray(value)) return `[${value.map(canonical).join(',')}]`;
+    if (value !== null && typeof value === 'object')
+      return `{${Object.keys(value)
+        .sort()
+        .map(
+          (key) =>
+            `${JSON.stringify(key)}:${canonical((value as Record<string, unknown>)[key])}`,
+        )
+        .join(',')}}`;
+    const result = JSON.stringify(value);
+    ensure(result !== undefined);
+    return result;
+  };
+  const semantic = { ...content };
+  delete semantic['record'];
+  return createHash('sha256').update(canonical(semantic)).digest('hex');
 }

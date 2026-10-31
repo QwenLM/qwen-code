@@ -316,6 +316,11 @@
   word-break: break-word;
 }
 
+[data-web-shell-user-slash-command] {
+  color: var(--agent-blue-500, #4a9eff);
+  font-weight: bold;
+}
+
 .messageTag {
   position: relative;
   display: inline-flex;

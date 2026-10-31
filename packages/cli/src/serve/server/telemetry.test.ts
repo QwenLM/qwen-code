@@ -432,6 +432,38 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     });
   });
 
+  it.each([
+    [
+      'GET',
+      '/workspaces/ws/session/session%2F1/artifact-library',
+      'GET /workspaces/:workspace/session/:id/artifact-library',
+    ],
+    [
+      'DELETE',
+      '/workspaces/ws/session/session%2F1/artifact-library/artifact-1',
+      'DELETE /workspaces/:workspace/session/:id/artifact-library/:artifactId',
+    ],
+  ])('attributes %s artifact library requests', (method, path, route) => {
+    expect(resolveDaemonTelemetryRoute(mockReq(method, path))).toEqual({
+      route,
+      sessionId: 'session/1',
+    });
+  });
+
+  it.each([
+    ['GET', ''],
+    ['POST', '/query'],
+    ['POST', '/delete'],
+  ])('attributes %s workspace artifact library%s', (method, suffix) => {
+    expect(
+      resolveDaemonTelemetryRoute(
+        mockReq(method, `/workspaces/ws/artifact-library${suffix}`),
+      ),
+    ).toEqual({
+      route: `${method} /workspaces/:workspace/artifact-library${suffix}`,
+    });
+  });
+
   it('attributes workspace transcript reads to the target workspace and session', () => {
     const mw = daemonTelemetryMiddleware(() => '/workspace/secondary');
     const res = mockRes(200);
@@ -1042,6 +1074,25 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     },
   );
 
+  it.each([
+    '/sessions/live-state',
+    '/sessions/live-state/',
+    '/SESSIONS/LIVE-STATE',
+  ])('labels batch live-state without attributing %s to primary', (path) => {
+    const resolveWorkspaceCwd = vi.fn(() => '/workspace/primary');
+    const req = mockReq('POST', path);
+    expect(resolveDaemonTelemetryRoute(req)).toEqual({
+      route: 'POST /sessions/live-state',
+      attribution: 'handler_resolved',
+    });
+    daemonTelemetryMiddleware(resolveWorkspaceCwd)(
+      req,
+      mockRes(200),
+      vi.fn() as unknown as NextFunction,
+    );
+    expect(resolveWorkspaceCwd).not.toHaveBeenCalled();
+  });
+
   it('omits workspace hash when a dynamic target is never resolved', () => {
     const resolveWorkspaceCwd = vi.fn(() => '/workspace/primary');
     const mw = daemonTelemetryMiddleware(resolveWorkspaceCwd);
@@ -1141,19 +1192,20 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
 });
 
 describe('legacy session telemetry route catalog', () => {
-  // MCP App calls resolve the live session owner in the handler, adding one
-  // handler-resolved route while preserving the two pre-resolved routes.
-  it('contains 80 unique routes with the audited 78/2 attribution split', () => {
+  // MCP App calls, attachment uploads, the batch live-state snapshot, shell
+  // runtime, and message group routes resolve the live session owner in the
+  // handler, preserving the two pre-resolved routes.
+  it('contains 86 unique routes with the audited 84/2 attribution split', () => {
     const keys = legacySessionTelemetryRoutes.map(
       ({ method, path }) => `${method} ${path}`,
     );
-    expect(keys).toHaveLength(80);
-    expect(new Set(keys).size).toBe(80);
+    expect(keys).toHaveLength(86);
+    expect(new Set(keys).size).toBe(86);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'handler_resolved',
       ),
-    ).toHaveLength(78);
+    ).toHaveLength(84);
     expect(
       legacySessionTelemetryRoutes.filter(
         ({ attribution }) => attribution === 'pre_resolved',
@@ -1187,7 +1239,7 @@ describe('legacy session telemetry route catalog', () => {
         route: entry.route,
         attribution: entry.attribution,
         ...(entry.path.includes('/:id') ? { sessionId: 'session-1' } : {}),
-        ...(entry.path.includes('/:requestId')
+        ...(entry.path.endsWith('/permission/:requestId')
           ? { permissionRequestId: 'request-1' }
           : {}),
       });
@@ -1224,6 +1276,18 @@ describe('legacy session telemetry route catalog', () => {
       });
     },
   );
+
+  it('does not label a BTW cancellation request as a permission request', () => {
+    const route = resolveDaemonTelemetryRoute(
+      mockReq('DELETE', '/session/session-1/btw/stream/btw-123'),
+    );
+    expect(route).toEqual({
+      route: 'DELETE /session/:id/btw/stream/:requestId',
+      attribution: 'handler_resolved',
+      sessionId: 'session-1',
+    });
+    expect(route).not.toHaveProperty('permissionRequestId');
+  });
 
   it('decodes and validates permission request ids after segment matching', () => {
     expect(

@@ -4,6 +4,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { DaemonClient } from '@qwen-code/sdk/daemon';
+import { createDaemonRestRequest } from '../daemon/rest-request.js';
+
 /**
  * Talks to the desktop relay on the viewer's own computer: a loopback socket
  * that `node-repl-mcp desktop-relay install` registers with launchd. The port
@@ -22,7 +25,7 @@ export const DESKTOP_RELAY_URL = 'http://127.0.0.1:47821';
  * must publish that version before the setup command can be used.
  */
 export const DESKTOP_RELAY_INSTALL_COMMAND =
-  'npx -y @qwen-code/node-repl-mcp@0.1.7 desktop-relay install';
+  'npx -y @qwen-code/node-repl-mcp@0.27.0 desktop-relay install';
 
 export type DesktopRelayRemotePhase =
   | 'connecting'
@@ -68,14 +71,6 @@ const REMOTE_PHASES: ReadonlySet<string> = new Set([
   'stopped',
   'failed',
 ]);
-
-function daemonEndpoint(daemonUrl: string, path: string): string {
-  const base = new URL(daemonUrl);
-  return new URL(
-    path,
-    `${base.origin}${base.pathname.replace(/\/?$/, '/')}`,
-  ).toString();
-}
 
 async function withTimeout<T>(
   ms: number,
@@ -154,16 +149,24 @@ export async function connectDesktopRelay(
   fetchImpl: FetchLike = defaultFetch,
   cancellation?: AbortSignal,
 ): Promise<DesktopRelayConnectResult> {
+  const daemon = new DaemonClient({
+    baseUrl: request.daemonUrl,
+    token: request.token,
+    fetch: (input, init) => fetchImpl(String(input), init),
+  });
+  const daemonRequest = createDaemonRestRequest(
+    request.daemonUrl,
+    request.token,
+    daemon,
+    true,
+  );
   try {
     // Runtime ensure allows 60 seconds; leave time for its response to arrive.
     const prewarmResponse = await withTimeout(65_000, (signal) =>
-      fetchImpl(
-        daemonEndpoint(
-          request.daemonUrl,
-          request.workspace === undefined
-            ? 'workspace/acp/preheat'
-            : `workspaces/${encodeURIComponent(request.workspace.value)}/runtime/ensure`,
-        ),
+      daemonRequest(
+        request.workspace === undefined
+          ? '/workspace/acp/preheat'
+          : `/workspaces/${encodeURIComponent(request.workspace.value)}/runtime/ensure`,
         {
           method: 'POST',
           headers: {
@@ -197,24 +200,21 @@ export async function connectDesktopRelay(
     let relayCredential = request.token;
     if (request.token) {
       const credentialResponse = await withTimeout(10_000, (signal) =>
-        fetchImpl(
-          daemonEndpoint(request.daemonUrl, 'desktop-relay/credential'),
-          {
-            method: 'POST',
-            headers: {
-              authorization: `Bearer ${request.token}`,
-              'content-type': 'application/json',
-            },
-            body: JSON.stringify({
-              sessionId: request.sessionId,
-              ...(request.workspace ? { workspace: request.workspace } : {}),
-            }),
-            cache: 'no-store',
-            signal: cancellation
-              ? AbortSignal.any([signal, cancellation])
-              : signal,
+        daemonRequest('/desktop-relay/credential', {
+          method: 'POST',
+          headers: {
+            authorization: `Bearer ${request.token}`,
+            'content-type': 'application/json',
           },
-        ),
+          body: JSON.stringify({
+            sessionId: request.sessionId,
+            ...(request.workspace ? { workspace: request.workspace } : {}),
+          }),
+          cache: 'no-store',
+          signal: cancellation
+            ? AbortSignal.any([signal, cancellation])
+            : signal,
+        }),
       );
       const credentialBody = (await credentialResponse
         .json()
@@ -265,6 +265,8 @@ export async function connectDesktopRelay(
       code: 'unreachable',
       message: error instanceof Error ? error.message : String(error),
     };
+  } finally {
+    daemon.dispose();
   }
 }
 

@@ -5,12 +5,16 @@
  */
 
 import * as path from 'node:path';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash } from 'node:crypto';
+import type { Socket } from 'node:net';
 import { pathToFileURL } from 'node:url';
 import { promises as fsp } from 'node:fs';
+import { createServer } from 'node:http';
 import * as os from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
+import express from 'express';
 import {
   SESSION_TRANSCRIPT_MAX_INDEX_BYTES,
   SessionService,
@@ -22,6 +26,7 @@ import {
   setDebugLogSession,
   writeSessionPrs,
 } from '@qwen-code/qwen-code-core';
+import { hashDaemonWorkspace } from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import {
   InvalidRewindTargetError,
   SessionBusyError,
@@ -54,6 +59,30 @@ import {
 } from './routes/session.js';
 import { SessionArchiveCoordinator } from './server/session-archive.js';
 import { arePermissionBitsEnforced } from '../test-utils/permission-bits.js';
+
+const telemetryMocks = vi.hoisted(() => ({
+  span: vi.fn(),
+  attribute: vi.fn(),
+}));
+vi.mock(
+  '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js',
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import('@qwen-code/qwen-code-core/telemetry/daemon-tracing.js')
+    >()),
+    withDaemonSpan: telemetryMocks.span,
+    addDaemonRequestAttribute: telemetryMocks.attribute,
+  }),
+);
+
+beforeEach(() => {
+  telemetryMocks.span.mockReset();
+  telemetryMocks.span.mockImplementation(
+    (_name: string, _attributes: Record<string, string>, read: () => unknown) =>
+      read(),
+  );
+  telemetryMocks.attribute.mockReset();
+});
 
 const PRIMARY_CWD = path.resolve(path.sep, 'work', 'primary');
 const SECONDARY_CWD = path.resolve(path.sep, 'work', 'secondary');
@@ -880,6 +909,15 @@ function makeBridge(
         ...(context ? { context } : {}),
       });
       return { v: 1 as const, sessionId, changes: [] };
+    },
+    async getMessageGroups() {
+      return {
+        snapshot: 'v1',
+        groups: [{ id: 'group', recordIds: ['group'] }],
+      };
+    },
+    async deleteMessageGroups() {
+      return { deletedGroupIds: ['group'], deletedPromptIds: ['prompt'] };
     },
     async getRewindSnapshots(sessionId: string) {
       rewindSnapshotCalls.push(sessionId);
@@ -3368,11 +3406,6 @@ describe('multi-workspace session dispatch', () => {
       route: 'POST /session/:id/fork',
       body: { directive: 'review this' },
     },
-    {
-      suffix: 'cd',
-      route: 'POST /session/:id/cd',
-      body: { path: path.resolve(path.sep, 'work', 'next') },
-    },
   ])(
     'rejects $route for a non-primary live-session owner',
     async ({ suffix, route, body }) => {
@@ -3407,8 +3440,160 @@ describe('multi-workspace session dispatch', () => {
     },
   );
 
+  describe('secondary session cd', () => {
+    it('dispatches to the owner with server-controlled containment and client identity', async () => {
+      const changeCwd = vi.fn<AcpSessionBridge['changeSessionCwd']>(
+        async (sessionId, req) => ({
+          sessionId,
+          previousCwd: SECONDARY_CWD,
+          newCwd: req.path,
+          warnings: [],
+        }),
+      );
+      const { app, registry, primaryBridge, secondaryBridge } = makeHarness({
+        secondaryChangeSessionCwdImpl: changeCwd,
+      });
+      const sessionId = '22222222-2222-4222-a222-222222222222';
+      const targetPath = path.join(SECONDARY_CWD, 'sessions', 'session-a');
+      const response = await request(app)
+        .post(`/session/${sessionId}/cd`)
+        .set('Host', host())
+        .set('X-Qwen-Client-Id', 'client-secondary')
+        .send({ path: targetPath, allowedRoots: [PRIMARY_CWD] });
+
+      expect(response.status).toBe(200);
+      expect(response.body.newCwd).toBe(targetPath);
+      expect(changeCwd).toHaveBeenCalledExactlyOnceWith(
+        sessionId,
+        { path: targetPath, allowedRoots: [SECONDARY_CWD] },
+        { clientId: 'client-secondary' },
+      );
+      expect(registry.listEntries()).toHaveLength(2);
+      expect(secondaryBridge.getSessionSummary(sessionId).workspaceCwd).toBe(
+        SECONDARY_CWD,
+      );
+      expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+    });
+
+    it('allows load then cd for one secondary session without loading its neighbor', async () => {
+      const sessionId = '22222222-2222-4222-a222-222222222222';
+      const neighborId = '33333333-3333-4333-a333-333333333333';
+      const { app, primaryBridge, secondaryBridge } = makeHarness({
+        secondarySummaries: [
+          makeSummary(sessionId, SECONDARY_CWD),
+          makeSummary(neighborId, SECONDARY_CWD),
+        ],
+        secondaryChangeSessionCwdImpl: async (targetSessionId, req) => ({
+          sessionId: targetSessionId,
+          previousCwd: SECONDARY_CWD,
+          newCwd: req.path,
+          warnings: [],
+        }),
+      });
+      const loaded = await request(app)
+        .post(`/session/${sessionId}/load`)
+        .set('Host', host())
+        .send({ cwd: SECONDARY_CWD });
+      expect(loaded.status).toBe(200);
+
+      for (const targetSessionId of [sessionId, neighborId]) {
+        const targetPath = path.join(SECONDARY_CWD, targetSessionId);
+        const response = await request(app)
+          .post(`/session/${targetSessionId}/cd`)
+          .set('Host', host())
+          .send({ path: targetPath });
+        expect(response.status).toBe(200);
+        expect(response.body.newCwd).toBe(targetPath);
+      }
+
+      expect(secondaryBridge.restoreCalls).toHaveLength(1);
+      expect(secondaryBridge.restoreCalls[0]?.req.sessionId).toBe(sessionId);
+      expect(
+        secondaryBridge.cwdChangeCalls.map((call) => call.sessionId),
+      ).toEqual([sessionId, neighborId]);
+      expect(primaryBridge.restoreCalls).toEqual([]);
+      expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+    });
+
+    it('fails closed when the owning generation closes during cd', async () => {
+      const { app, registry, primaryBridge } = makeHarness({
+        secondaryChangeSessionCwdImpl: async (sessionId, req) => {
+          registry
+            .getEntryByWorkspaceId('secondary-id')!
+            .current!.guard.close();
+          return {
+            sessionId,
+            previousCwd: SECONDARY_CWD,
+            newCwd: req.path,
+            warnings: [],
+          };
+        },
+      });
+      const response = await request(app)
+        .post('/session/22222222-2222-4222-a222-222222222222/cd')
+        .set('Host', host())
+        .send({ path: path.join(SECONDARY_CWD, 'session-a') });
+
+      expect(response.status).toBe(503);
+      expect(response.body.code).toBe('workspace_runtime_unavailable');
+      expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+    });
+
+    it.each([undefined, '', 'relative/path', 42])(
+      'rejects malformed target %s before calling a bridge',
+      async (targetPath) => {
+        const { app, primaryBridge, secondaryBridge } = makeHarness();
+        const response = await request(app)
+          .post('/session/22222222-2222-4222-a222-222222222222/cd')
+          .set('Host', host())
+          .send({ path: targetPath });
+
+        expect(response.status).toBe(400);
+        expect(response.body.code).toBe('invalid_path');
+        expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+        expect(secondaryBridge.primaryOnlyMutationCalls).toEqual([]);
+      },
+    );
+
+    it.each(['unknown', 'untrusted', 'ambiguous', 'replacing'] as const)(
+      'fails closed for %s owners without primary fallback',
+      async (state) => {
+        const sessionId =
+          state === 'unknown'
+            ? 'missing'
+            : '22222222-2222-4222-a222-222222222222';
+        const { app, registry, primaryBridge, secondaryBridge } = makeHarness({
+          secondaryTrusted: state !== 'untrusted',
+          ...(state === 'ambiguous'
+            ? { primarySummaries: [makeSummary(sessionId, PRIMARY_CWD)] }
+            : {}),
+        });
+        if (state === 'replacing') {
+          registry.beginReplacement(
+            registry.getEntryByWorkspaceId('secondary-id')!,
+            'policy-2',
+          );
+        }
+        const response = await request(app)
+          .post(`/session/${sessionId}/cd`)
+          .set('Host', host())
+          .send({ path: path.join(SECONDARY_CWD, 'session-a') });
+
+        expect(response.status).toBe(
+          { unknown: 404, untrusted: 403, ambiguous: 500, replacing: 404 }[
+            state
+          ],
+        );
+        expect(primaryBridge.primaryOnlyMutationCalls).toEqual([]);
+        expect(secondaryBridge.primaryOnlyMutationCalls).toEqual([]);
+      },
+    );
+  });
+
   it('does not expose the Conversations runtime identity in an unsupported session route response', async () => {
+    const daemonLog = makeDaemonLog();
     const { app } = makeHarness({
+      daemonLog,
       secondaryProvenance: 'live-conversation',
     });
 
@@ -3424,6 +3609,13 @@ describe('multi-workspace session dispatch', () => {
       code: 'non_primary_session_route_not_supported',
       sessionId: '22222222-2222-4222-a222-222222222222',
       route: 'POST /session/:id/cd',
+    });
+    expect(daemonLog.warn).toHaveBeenCalledWith('session routing failed', {
+      route: 'POST /session/:id/cd',
+      resolutionKind: 'non_primary_session_route_not_supported',
+      sessionId: '22222222-2222-4222-a222-222222222222',
+      workspaceId: 'secondary-id',
+      workspaceCwd: SECONDARY_CWD,
     });
   });
 
@@ -3553,6 +3745,71 @@ describe('multi-workspace session dispatch', () => {
     expect(approvalRes.status).toBe(403);
     expect(approvalRes.body.code).toBe('untrusted_workspace');
     expect(secondaryBridge.setApprovalModeCalls).toEqual([]);
+  });
+
+  it('routes message group listing and deletion only to the live session owner', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const primaryGet = vi.spyOn(primaryBridge, 'getMessageGroups');
+    const primaryDelete = vi.spyOn(primaryBridge, 'deleteMessageGroups');
+    const secondaryGet = vi.spyOn(secondaryBridge, 'getMessageGroups');
+    const secondaryDelete = vi.spyOn(secondaryBridge, 'deleteMessageGroups');
+    const sessionId = '22222222-2222-4222-a222-222222222222';
+    const list = await request(app)
+      .get(`/session/${sessionId}/message-groups`)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION);
+    expect(list.status).toBe(200);
+    expect(secondaryGet).toHaveBeenCalledWith(sessionId);
+    const deleted = await request(app)
+      .post(`/session/${sessionId}/messages/delete`)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({ snapshot: 'v1', groupIds: ['group'] });
+    expect(deleted.status).toBe(200);
+    expect(secondaryDelete).toHaveBeenCalledWith(
+      sessionId,
+      { snapshot: 'v1', groupIds: ['group'] },
+      { clientId: 'secondary-client' },
+    );
+    expect(primaryGet).not.toHaveBeenCalled();
+    expect(primaryDelete).not.toHaveBeenCalled();
+    const invalid = await request(app)
+      .post(`/session/${sessionId}/messages/delete`)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({ snapshot: 'v1', groupIds: ['group', 'group'] });
+    expect(invalid.status).toBe(400);
+    expect(secondaryDelete).toHaveBeenCalledTimes(1);
+    const missing = await request(app)
+      .post('/session/33333333-3333-4333-a333-333333333333/messages/delete')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({ snapshot: 'v1', groupIds: ['group'] });
+    expect(missing.status).toBe(404);
+    expect(primaryDelete).not.toHaveBeenCalled();
+  });
+
+  it('maps stale message groups to conflict without falling back to primary', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const primaryDelete = vi.spyOn(primaryBridge, 'deleteMessageGroups');
+    vi.spyOn(secondaryBridge, 'deleteMessageGroups').mockRejectedValue(
+      Object.assign(new Error('History changed'), {
+        data: { errorKind: 'message_groups_conflict' },
+      }),
+    );
+    const response = await request(app)
+      .post('/session/22222222-2222-4222-a222-222222222222/messages/delete')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({ snapshot: 'old', groupIds: ['group'] });
+    expect(response.status).toBe(409);
+    expect(response.body.code).toBe('message_groups_conflict');
+    expect(primaryDelete).not.toHaveBeenCalled();
   });
 
   it('routes owner-local actions to the owning non-primary workspace bridge', async () => {
@@ -4314,6 +4571,179 @@ describe('multi-workspace session dispatch', () => {
     expect(secondaryBridge.removeMidTurnMessageCalls).toEqual([]);
     expect(primaryBridge.sendMidTurnNowCalls).toEqual([]);
     expect(secondaryBridge.sendMidTurnNowCalls).toEqual([]);
+  });
+
+  it('advertises streaming BTW only when every runtime bridge supports it', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const generate = async function* () {
+      yield {
+        type: 'done' as const,
+        requestId: 'request',
+        model: 'main',
+        modelSource: 'main' as const,
+      };
+    };
+    primaryBridge.generateSessionBtwStream = generate;
+    const capabilities = () =>
+      request(app)
+        .get('/capabilities')
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION);
+    expect((await capabilities()).body.features).not.toContain(
+      'session_btw_stream',
+    );
+    secondaryBridge.generateSessionBtwStream = generate;
+    expect((await capabilities()).body.features).toContain(
+      'session_btw_stream',
+    );
+    delete primaryBridge.generateSessionBtwStream;
+    expect((await capabilities()).body.features).not.toContain(
+      'session_btw_stream',
+    );
+  });
+
+  it('keeps streaming BTW starts, resumes and cancellation in the session owner', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    const primary = vi.fn(async function* () {
+      yield {
+        type: 'done' as const,
+        requestId: 'upstream',
+        model: 'primary',
+        modelSource: 'main' as const,
+      };
+    });
+    const secondary = vi.fn(async function* () {
+      yield {
+        type: 'delta' as const,
+        requestId: 'upstream',
+        seq: 0,
+        text: 'secondary answer',
+      };
+      yield {
+        type: 'done' as const,
+        requestId: 'upstream',
+        model: 'secondary',
+        modelSource: 'main' as const,
+      };
+    });
+    primaryBridge.generateSessionBtwStream = primary;
+    secondaryBridge.generateSessionBtwStream = secondary;
+    const sessionId = '22222222-2222-4222-a222-222222222222';
+    for (const resume of [false, true]) {
+      const response = await request(app)
+        .post(`/session/${sessionId}/btw/stream`)
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .set('X-Qwen-Client-Id', 'secondary-client')
+        .send({ question: 'Why?', requestId: 'same-request', resume });
+      expect(response.status).toBe(200);
+      expect(response.text).toContain('secondary answer');
+    }
+    expect(secondary).toHaveBeenCalledTimes(1);
+    expect(secondary).toHaveBeenCalledWith(
+      sessionId,
+      'Why?',
+      expect.any(AbortSignal),
+      { clientId: 'secondary-client' },
+    );
+    const cancel = await request(app)
+      .delete(`/session/${sessionId}/btw/stream/same-request`)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client');
+    expect(cancel.status).toBe(204);
+    const foreign = await request(app)
+      .post(`/session/${sessionId}/btw/stream`)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'different-client')
+      .send({ question: 'Why?', requestId: 'same-request', resume: true });
+    expect(foreign.status).toBe(410);
+    const missing = await request(app)
+      .post('/session/33333333-3333-4333-a333-333333333333/btw/stream')
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .send({ question: 'Why?', requestId: 'same-request', resume: true });
+    expect(missing.status).toBe(404);
+    expect(primary).not.toHaveBeenCalled();
+  });
+
+  it('cancels an active streaming BTW only in the secondary owner', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      token: TEST_TOKEN,
+    });
+    let ready!: () => void;
+    const admitted = new Promise<void>((resolve) => {
+      ready = resolve;
+    });
+    let signal: AbortSignal | undefined;
+    const primary = vi.fn();
+    primaryBridge.generateSessionBtwStream = primary;
+    secondaryBridge.generateSessionBtwStream = vi.fn(
+      async function* (_session, _question, generationSignal) {
+        signal = generationSignal;
+        ready();
+        await new Promise<void>((resolve) =>
+          generationSignal.addEventListener('abort', () => resolve(), {
+            once: true,
+          }),
+        );
+        yield {
+          type: 'done' as const,
+          requestId: 'upstream',
+          model: 'secondary',
+          modelSource: 'main' as const,
+        };
+      },
+    );
+    const base = '/session/22222222-2222-4222-a222-222222222222/btw/stream';
+    const generation = request(app)
+      .post(base)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client')
+      .send({ question: 'Why?', requestId: 'active' })
+      .then((response) => response);
+    await admitted;
+    const cancelled = await request(app)
+      .delete(`${base}/active`)
+      .set('Host', host())
+      .set('Authorization', TEST_AUTHORIZATION)
+      .set('X-Qwen-Client-Id', 'secondary-client');
+    expect(cancelled.status).toBe(204);
+    expect(signal?.aborted).toBe(true);
+    expect((await generation).text).toContain('btw_cancelled');
+    expect(primary).not.toHaveBeenCalled();
+  });
+
+  it('rejects streaming BTW for an untrusted owner without primary fallback', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+      token: TEST_TOKEN,
+    });
+    const primary = vi.fn();
+    const secondary = vi.fn();
+    primaryBridge.generateSessionBtwStream = primary;
+    secondaryBridge.generateSessionBtwStream = secondary;
+    const base = '/session/22222222-2222-4222-a222-222222222222/btw/stream';
+    const responses = await Promise.all([
+      request(app)
+        .post(base)
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION)
+        .send({ question: 'Why?', requestId: 'request' }),
+      request(app)
+        .delete(`${base}/request`)
+        .set('Host', host())
+        .set('Authorization', TEST_AUTHORIZATION),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([403, 403]);
+    expect(primary).not.toHaveBeenCalled();
+    expect(secondary).not.toHaveBeenCalled();
   });
 
   it('rejects invalid secondary owner-local inputs before bridge actions', async () => {
@@ -7445,6 +7875,552 @@ describe('multi-workspace session dispatch', () => {
   });
 });
 
+describe('batch workspace session live-state route', () => {
+  const batch = (
+    app: ReturnType<typeof makeHarness>['app'],
+    workspaces: string[],
+  ) =>
+    request(app)
+      .post('/sessions/live-state')
+      .set('Host', host())
+      .send({ workspaces });
+
+  it('returns ordered, complete primary and secondary memory snapshots', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      primarySummaries: [
+        makeSummary('primary-session', PRIMARY_CWD, {
+          hasActivePrompt: true,
+          isWaitingForPermission: true,
+        }),
+      ],
+      secondarySummaries: [
+        makeSummary('secondary-session', SECONDARY_CWD, {
+          hasActivePrompt: false,
+          isWaitingForUserQuestion: true,
+        }),
+      ],
+    });
+    const res = await batch(app, ['secondary-id', PRIMARY_CWD]).expect(200);
+    expect(res.headers['cache-control']).toBe('no-store');
+    expect(res.body.workspaces).toEqual([
+      {
+        workspace: 'secondary-id',
+        workspaceId: 'secondary-id',
+        cwd: SECONDARY_CWD,
+        v: 1,
+        catalogVersion: expect.objectContaining({ revision: 0 }),
+        sessions: [
+          expect.objectContaining({
+            sessionId: 'secondary-session',
+            hasActivePrompt: false,
+            isWaitingForUserQuestion: true,
+          }),
+        ],
+      },
+      {
+        workspace: PRIMARY_CWD,
+        workspaceId: 'primary-id',
+        cwd: PRIMARY_CWD,
+        v: 1,
+        catalogVersion: expect.objectContaining({ revision: 0 }),
+        sessions: [
+          expect.objectContaining({
+            sessionId: 'primary-session',
+            hasActivePrompt: true,
+            isWaitingForPermission: true,
+          }),
+        ],
+      },
+    ]);
+    expect(primaryBridge.listCalls).toEqual([PRIMARY_CWD]);
+    expect(primaryBridge.spawnCalls).toEqual([]);
+    expect(secondaryBridge.listCalls).toEqual([SECONDARY_CWD]);
+    expect(secondaryBridge.spawnCalls).toEqual([]);
+  });
+
+  it('does not merge persisted catalog rows into a member snapshot', async () => {
+    await withRuntimeDir(async () => {
+      const { app, secondaryBridge } = makeHarness();
+      await writeStoredSession({
+        sessionId: '550e8400-e29b-41d4-a716-4466554402ff',
+        cwd: SECONDARY_CWD,
+        timestamp: '2026-07-08T00:03:00.000Z',
+        prompt: 'persisted secondary session absent from the live set',
+        mtime: new Date('2026-07-08T00:03:00.000Z'),
+      });
+      const res = await batch(app, ['secondary-id']).expect(200);
+      expect(
+        res.body.workspaces[0].sessions.map(
+          (session: { sessionId: string }) => session.sessionId,
+        ),
+      ).toEqual(['22222222-2222-4222-a222-222222222222']);
+      expect(secondaryBridge.spawnCalls).toEqual([]);
+    });
+  });
+
+  it('reflects running and waiting changes without advancing catalogVersion', async () => {
+    const { app, primaryBridge } = makeHarness();
+    let state = { hasActivePrompt: true, isWaitingForPermission: false };
+    vi.spyOn(primaryBridge, 'listWorkspaceSessions').mockImplementation(() => [
+      makeSummary('changing-session', PRIMARY_CWD, state),
+    ]);
+    const versions: unknown[] = [];
+    for (const next of [
+      { hasActivePrompt: true, isWaitingForPermission: false },
+      { hasActivePrompt: false, isWaitingForPermission: true },
+      { hasActivePrompt: true, isWaitingForPermission: false },
+      { hasActivePrompt: false, isWaitingForPermission: false },
+    ]) {
+      state = next;
+      const res = await batch(app, ['primary-id']).expect(200);
+      versions.push(res.body.workspaces[0].catalogVersion);
+      expect(res.body.workspaces[0].sessions[0]).toMatchObject(next);
+    }
+    expect(versions[0]).toMatchObject({
+      generation: expect.any(String),
+      revision: 0,
+    });
+    expect(versions).toEqual(Array(4).fill(versions[0]));
+  });
+
+  it('isolates unknown and untrusted members without reading their bridges', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      secondaryTrusted: false,
+    });
+    const res = await batch(app, [
+      'primary-id',
+      'missing-id',
+      'secondary-id',
+    ]).expect(200);
+    expect(res.body.workspaces[0].sessions).toHaveLength(1);
+    expect(res.body.workspaces[1]).toEqual({
+      workspace: 'missing-id',
+      error: {
+        status: 404,
+        code: 'workspace_not_found',
+        message: expect.any(String),
+      },
+    });
+    expect(res.body.workspaces[2]).toMatchObject({
+      workspaceId: 'secondary-id',
+      cwd: SECONDARY_CWD,
+      error: { status: 403, code: 'untrusted_workspace' },
+    });
+    expect(res.body.workspaces[2]).not.toHaveProperty('sessions');
+    expect(primaryBridge.listCalls).toEqual([PRIMARY_CWD]);
+    expect(secondaryBridge.listCalls).toEqual([]);
+  });
+
+  it('rejects an untrusted primary while reading a trusted secondary', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness({
+      primaryTrusted: false,
+    });
+    const res = await batch(app, ['primary-id', 'secondary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 403, code: 'untrusted_workspace' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+    expect(primaryBridge.listCalls).toEqual([]);
+    expect(secondaryBridge.listCalls).toEqual([SECONDARY_CWD]);
+  });
+
+  it('hides internal workspaces without reading their bridges', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    registry.add(
+      makeRuntime({
+        workspaceId: 'internal-id',
+        workspaceCwd: path.resolve(path.sep, 'work', 'internal'),
+        primary: false,
+        trusted: true,
+        bridge: secondaryBridge,
+        provenance: 'live-conversation',
+      }),
+    );
+    const res = await batch(app, ['internal-id']).expect(200);
+    expect(res.body.workspaces).toEqual([
+      {
+        workspace: 'internal-id',
+        error: {
+          status: 404,
+          code: 'workspace_not_found',
+          message: expect.any(String),
+        },
+      },
+    ]);
+    expect(secondaryBridge.listCalls).toEqual([]);
+  });
+
+  it('rejects invalid envelopes before reading any bridge', async () => {
+    const { app, primaryBridge } = makeHarness();
+    for (const body of [
+      { workspaces: [] },
+      { workspaces: Array.from({ length: 21 }, () => 'primary-id') },
+      { workspaces: ['primary-id'], extra: true },
+      { workspaces: [42] },
+      { workspaces: ['x'.repeat(4097)] },
+    ]) {
+      const res = await request(app)
+        .post('/sessions/live-state')
+        .set('Host', host())
+        .send(body)
+        .expect(400);
+      expect(res.body.code).toBe('invalid_session_live_state_batch_request');
+    }
+    expect(primaryBridge.listCalls).toEqual([]);
+  });
+
+  it('accepts the documented maxima', async () => {
+    const { app } = makeHarness();
+    const res = await batch(
+      app,
+      Array.from({ length: 20 }, () => 'primary-id'),
+    ).expect(200);
+    expect(res.body.workspaces).toHaveLength(20);
+    // The route answers a valid batch with 200 and per-member error objects,
+    // so the count alone cannot tell twenty snapshots from twenty failures.
+    for (const member of res.body.workspaces) {
+      expect(member).toMatchObject({
+        workspaceId: 'primary-id',
+        v: 1,
+        sessions: expect.any(Array),
+      });
+    }
+
+    const longest = await batch(app, ['/' + 'a'.repeat(4095)]).expect(200);
+    expect(longest.body.workspaces).toEqual([
+      {
+        workspace: '/' + 'a'.repeat(4095),
+        error: {
+          status: 404,
+          code: 'workspace_not_found',
+          message: expect.any(String),
+        },
+      },
+    ]);
+  });
+
+  it('bounds an oversized successful member without discarding another member', async () => {
+    const { app } = makeHarness({
+      secondarySummaries: [makeSummary('s'.repeat(600 * 1024), SECONDARY_CWD)],
+    });
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 413, code: 'live_state_response_too_large' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+
+  it('returns 503 for a transitioning member while preserving a healthy member', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    const entry = registry.getEntryByWorkspaceId('secondary-id')!;
+    registry.beginReplacement(entry, 'new-policy');
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 503, code: 'workspace_runtime_unavailable' },
+    });
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+    expect(secondaryBridge.listCalls).toEqual([]);
+  });
+
+  it('returns 503 for a member whose entry lost its current generation while preserving a healthy member', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    const entry = registry.getEntryByWorkspaceId('secondary-id')!;
+    // The trust reconciler reaches this state when a contained replacement
+    // fails to activate: the entry stays resolvable but has no generation.
+    entry.current = undefined;
+    registry.blockReplacement(entry, 'apply failed');
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 503, code: 'workspace_runtime_unavailable' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(secondaryBridge.listCalls).toEqual([]);
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+
+  it('fails closed if the selected runtime is replaced during its read', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    const entry = registry.getEntryByWorkspaceId('secondary-id')!;
+    const list = secondaryBridge.listWorkspaceSessions.bind(secondaryBridge);
+    vi.spyOn(secondaryBridge, 'listWorkspaceSessions').mockImplementation(
+      (cwd) => {
+        const sessions = list(cwd);
+        registry.beginReplacement(entry, 'new-policy');
+        return sessions;
+      },
+    );
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 503, code: 'workspace_runtime_unavailable' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+  it('returns a generic 500 member for an unexpected bridge failure without leaking details', async () => {
+    const { app, secondaryBridge } = makeHarness();
+    vi.spyOn(secondaryBridge, 'listWorkspaceSessions').mockImplementation(
+      () => {
+        throw new Error('private bridge detail ENOMEM');
+      },
+    );
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toEqual({
+      workspace: 'secondary-id',
+      workspaceId: 'secondary-id',
+      cwd: SECONDARY_CWD,
+      error: {
+        status: 500,
+        code: 'session_live_state_failed',
+        message: expect.any(String),
+      },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(JSON.stringify(res.body)).not.toContain('private bridge detail');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+
+  it('fails closed if the selected runtime starts draining during its read', async () => {
+    const { app, registry, secondaryBridge } = makeHarness();
+    const entry = registry.getEntryByWorkspaceId('secondary-id')!;
+    const list = secondaryBridge.listWorkspaceSessions.bind(secondaryBridge);
+    vi.spyOn(secondaryBridge, 'listWorkspaceSessions').mockImplementation(
+      (cwd) => {
+        const sessions = list(cwd);
+        registry.beginDrain(entry.current!.runtime);
+        return sessions;
+      },
+    );
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces[0]).toMatchObject({
+      error: { status: 503, code: 'workspace_runtime_unavailable' },
+    });
+    expect(res.body.workspaces[0]).not.toHaveProperty('sessions');
+    expect(res.body.workspaces[1].sessions).toHaveLength(1);
+  });
+
+  it('logs the discarded bridge error for a failed member', async () => {
+    const daemonLog = makeDaemonLog();
+    const { app, secondaryBridge } = makeHarness({ daemonLog });
+    vi.spyOn(secondaryBridge, 'listWorkspaceSessions').mockImplementation(
+      () => {
+        throw new Error('private bridge detail ENOMEM');
+      },
+    );
+    await batch(app, ['secondary-id']).expect(200);
+    expect(daemonLog.error).toHaveBeenCalledTimes(1);
+    expect(daemonLog.error).toHaveBeenCalledWith(
+      'private bridge detail ENOMEM',
+      expect.any(Error),
+      expect.objectContaining({
+        route: 'POST /sessions/live-state',
+        workspaceId: 'secondary-id',
+      }),
+    );
+  });
+
+  it('logs a routing failure warning for an untrusted member', async () => {
+    const daemonLog = makeDaemonLog();
+    const { app } = makeHarness({ daemonLog, secondaryTrusted: false });
+    await batch(app, ['secondary-id']).expect(200);
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'session routing failed',
+      expect.objectContaining({
+        route: 'POST /sessions/live-state',
+        resolutionKind: 'untrusted_workspace',
+        workspaceId: 'secondary-id',
+        workspaceCwd: SECONDARY_CWD,
+      }),
+    );
+  });
+
+  it('stops reading members once the client disconnects mid-batch', async () => {
+    const { app, registry, primaryBridge } = makeHarness();
+    const thirdCwd = path.resolve(path.sep, 'work', 'third');
+    const thirdBridge = makeBridge(thirdCwd, [
+      makeSummary('33333333-3333-4333-a333-333333333333', thirdCwd),
+    ]);
+    registry.add(
+      makeRuntime({
+        workspaceId: 'third-id',
+        workspaceCwd: thirdCwd,
+        primary: false,
+        trusted: true,
+        bridge: thirdBridge,
+      }),
+    );
+    const server = app.listen(0);
+    const sockets = new Set<Socket>();
+    server.on('connection', (socket) => sockets.add(socket));
+    const list = primaryBridge.listWorkspaceSessions.bind(primaryBridge);
+    vi.spyOn(primaryBridge, 'listWorkspaceSessions').mockImplementation(
+      (cwd) => {
+        const sessions = list(cwd);
+        for (const socket of sockets) socket.destroy();
+        return sessions;
+      },
+    );
+    const pending = request(server)
+      .post('/sessions/live-state')
+      .set('Host', host())
+      .send({ workspaces: ['primary-id', 'secondary-id', 'third-id'] });
+    pending.end(() => {});
+    try {
+      await vi.waitFor(() =>
+        expect(primaryBridge.listCalls).toEqual([PRIMARY_CWD]),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // Socket close delivery lags the destroy by a turn or two, so the
+      // member after the disconnect may still be read; the batch must stop
+      // before the member after that.
+      expect(thirdBridge.listCalls).toEqual([]);
+    } finally {
+      pending.abort();
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it('skips the response when the client disconnects during the last member read', async () => {
+    const { app, primaryBridge } = makeHarness();
+    const server = app.listen(0);
+    const sockets = new Set<Socket>();
+    server.on('connection', (socket) => sockets.add(socket));
+    let responseClosed = false;
+    const jsonSpies: Array<ReturnType<typeof vi.fn>> = [];
+    server.on('request', (_req, res) => {
+      res.once('close', () => {
+        responseClosed = true;
+      });
+      const jsonSpy = vi.fn();
+      jsonSpies.push(jsonSpy);
+      (res as unknown as { json: unknown }).json = jsonSpy;
+    });
+    let releaseRead!: () => void;
+    const readGate = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    telemetryMocks.span.mockImplementation(
+      async (
+        _name: string,
+        _attributes: Record<string, string>,
+        read: () => unknown,
+      ) => {
+        for (const socket of sockets) socket.destroy();
+        // Hold the last member read until the disconnect has been delivered,
+        // so the post-loop abort check — not the in-loop one — decides.
+        await readGate;
+        return read();
+      },
+    );
+    const pending = request(server)
+      .post('/sessions/live-state')
+      .set('Host', host())
+      .send({ workspaces: ['primary-id'] });
+    pending.end(() => {});
+    try {
+      await vi.waitFor(() => expect(responseClosed).toBe(true));
+      releaseRead();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      // The member read itself always completes; the guard is what keeps the
+      // response from being written to the destroyed socket.
+      expect(primaryBridge.listCalls).toEqual([PRIMARY_CWD]);
+      expect(jsonSpies).toHaveLength(1);
+      expect(jsonSpies[0]).not.toHaveBeenCalled();
+    } finally {
+      releaseRead();
+      pending.abort();
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it('skips every member read when the client disconnects before the handler runs', async () => {
+    const { app, primaryBridge, secondaryBridge } = makeHarness();
+    let dispatched = false;
+    // Parse the body while the socket is alive, then dispatch to the serve
+    // app only after the disconnect has been delivered, so the handler
+    // observes an already-destroyed response instead of attaching its close
+    // listener in time. The app's own json parser skips the re-parse because
+    // the body is already read.
+    const outer = express();
+    outer.use(express.json());
+    outer.use((req, res, _next) => {
+      res.once('close', () => {
+        dispatched = true;
+        app(req, res);
+      });
+      req.socket.destroy();
+    });
+    const server = createServer(outer);
+    await new Promise<void>((resolve) => server.listen(0, resolve));
+    const pending = request(server)
+      .post('/sessions/live-state')
+      .set('Host', host())
+      .send({ workspaces: ['primary-id', 'secondary-id'] });
+    pending.end(() => {});
+    try {
+      await vi.waitFor(() => expect(dispatched).toBe(true));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(primaryBridge.listCalls).toEqual([]);
+      expect(secondaryBridge.listCalls).toEqual([]);
+    } finally {
+      pending.abort();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      );
+    }
+  });
+
+  it('attributes the batch request and each member span to its workspace', async () => {
+    const memberScope = new AsyncLocalStorage<string>();
+    const writes: Array<{ scope?: string; key: string; value: unknown }> = [];
+    telemetryMocks.span.mockImplementation(
+      (
+        _name: string,
+        attributes: Record<string, string>,
+        read: () => unknown,
+      ) => memberScope.run(attributes['qwen-code.workspace.hash']!, read),
+    );
+    telemetryMocks.attribute.mockImplementation(
+      (key: string, value: unknown) => {
+        writes.push({ scope: memberScope.getStore(), key, value });
+      },
+    );
+    const { app } = makeHarness();
+    const res = await batch(app, ['secondary-id', 'primary-id']).expect(200);
+    expect(res.body.workspaces).toHaveLength(2);
+    const memberSpans = telemetryMocks.span.mock.calls.filter(
+      ([name]) => name === 'qwen-code.daemon.session_live_state_batch.member',
+    );
+    expect(
+      memberSpans.map(
+        ([, attributes]) => attributes['qwen-code.workspace.hash'],
+      ),
+    ).toEqual([
+      hashDaemonWorkspace(SECONDARY_CWD),
+      hashDaemonWorkspace(PRIMARY_CWD),
+    ]);
+    expect(
+      writes.filter(
+        (write) =>
+          write.key === 'qwen-code.daemon.session_live_state_batch.members',
+      ),
+    ).toEqual([
+      {
+        scope: undefined,
+        key: 'qwen-code.daemon.session_live_state_batch.members',
+        value: 2,
+      },
+    ]);
+  });
+});
+
 describe('workspace session live-state route', () => {
   const liveStatePath = (selector: string) =>
     `/workspaces/${selector}/sessions/live-state`;
@@ -7766,10 +8742,11 @@ describe('workspace session live-state route', () => {
 
       // The live-state exposure invalidates both scopes before answering.
       const live = await request(app)
-        .get(liveStatePath('secondary-id'))
+        .post('/sessions/live-state')
         .set('Host', host())
+        .send({ workspaces: ['secondary-id'] })
         .expect(200);
-      expect(live.body.catalogVersion.revision).toBe(1);
+      expect(live.body.workspaces[0].catalogVersion.revision).toBe(1);
       expect(ids((await organized('')).body).sort()).toEqual([
         activeOne,
         activeTwo,

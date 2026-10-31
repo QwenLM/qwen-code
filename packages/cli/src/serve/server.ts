@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { mountMemoryImportRoutes } from './memory-import.js';
+
 import express from 'express';
 import { registerWorkspaceRuntimeStopRoutes } from './routes/workspace-runtime-stop.js';
 import type { Application } from 'express';
@@ -108,6 +110,10 @@ import {
 } from './web-shell-static.js';
 import { mountMcpAppSandbox } from './mcp-app-sandbox.js';
 import {
+  mountManagedLocalWeb,
+  type ManagedLocalWebOptions,
+} from './managed-local-web.js';
+import {
   mountWorkspaceMemoryRoutes,
   mountWorkspaceQualifiedMemoryRoutes,
 } from './workspace-memory.js';
@@ -202,6 +208,7 @@ import {
 } from './hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from './hosted-harness-profile.js';
 import { registerHostedHarnessSessionRoutes } from './hosted-harness-session.js';
+import { registerHostedCsiSessionRoutes } from './hosted-csi-session.js';
 import {
   registerWorkspacePermissionsRoutes,
   registerWorkspaceQualifiedPermissionsRoutes,
@@ -212,6 +219,7 @@ import {
   registerWorkspaceSettingsRoutes,
   withSessionWorkflowWriteLock,
 } from './routes/workspace-settings.js';
+import { registerWorkspaceDirectoriesRoutes } from './routes/workspace-directories.js';
 import { registerUserLanguageRoutes } from './routes/user-language.js';
 import {
   getActiveSseCount,
@@ -306,6 +314,8 @@ import {
   type WorkspaceRuntimeRemovalController,
 } from './routes/workspace-management.js';
 import { isNativeDirectoryPickerAvailable } from './native-directory-picker.js';
+import { isGitAvailable } from './git-availability.js';
+import { createWorkspaceGitCloner } from './workspace-git-clone.js';
 import {
   isLocalPathOpenAvailable,
   isLocalTerminalAvailable,
@@ -329,6 +339,10 @@ import {
 } from './routes/workspace-git-branches.js';
 import { registerWorkspaceQualifiedGitRemotesRoutes } from './routes/workspace-git-remotes.js';
 import { registerWorkspaceQualifiedGitHubPrsRoutes } from './routes/workspace-github-prs.js';
+import {
+  registerAutofixPrWatchesRoutes,
+  registerWorkspaceQualifiedAutofixPrWatchesRoutes,
+} from './routes/autofix-pr-watches.js';
 import { registerWorkspaceQualifiedGitWorktreeRoutes } from './routes/workspace-git-worktrees.js';
 import { registerWorkspaceLocalOpenRoutes } from './routes/workspace-local-open.js';
 import { WorkspaceGitState } from './workspace-git-state.js';
@@ -530,6 +544,7 @@ function getRuntimeEffectiveEnv(
 }
 
 export interface ServeAppDeps {
+  managedLocalWeb?: ManagedLocalWebOptions;
   restartForUpdate?: (launcher: string) => Promise<void>;
   /** Bridge instance; tests inject a fake. Defaults to a fresh real one. */
   bridge?: AcpSessionBridge;
@@ -1169,6 +1184,15 @@ export function createServeApp(
           )
         );
       },
+      sessionBtwStreamAvailable: () => {
+        const runtimes = workspaceRegistry.listAll();
+        return (
+          runtimes.length > 0 &&
+          runtimes.every(
+            (runtime) => runtime.bridge.generateSessionBtwStream !== undefined,
+          )
+        );
+      },
       currentSessionSchedulingAvailable:
         deps.manageScheduledTaskSessions === true &&
         deps.currentSessionSchedulingAvailable === true,
@@ -1229,6 +1253,8 @@ export function createServeApp(
               deps.managedScratchRoot!.canonicalRoot,
             ),
           ),
+      gitWorkspaceCloneAvailable:
+        deps.createWorkspaceRuntime !== undefined && isGitAvailable(),
       // `realtime_voice` keeps meaning "a native Host can attach": shipped
       // clients answer it with a macOS install prompt.
       realtimeVoiceEnabled: () =>
@@ -1242,6 +1268,9 @@ export function createServeApp(
       acpHttpEnabled: acpHttpEnabledAtBoot,
       workspaceRuntimeRemovalAvailable:
         deps.workspaceRuntimeRemoval !== undefined,
+      workspaceDirectoriesAvailable:
+        deps.persistSetting !== undefined &&
+        opts.experimentalPairedEngines !== true,
       nativeDirectoryPickerAvailable:
         deps.nativeDirectoryPickerAvailable ??
         isNativeDirectoryPickerAvailable(),
@@ -1340,6 +1369,20 @@ export function createServeApp(
     injectedWorkspaceRegistry?.primary.bridge ??
     deps.bridge ??
     createAcpSessionBridge({
+      isWorkflowModeWriteAllowed: (sessionId): boolean => {
+        const registry = primaryTrustRegistry;
+        if (!registry) return false;
+        const owner = registry.resolveLiveSessionOwner(sessionId);
+        const entry = registry.primaryEntry;
+        return (
+          owner.kind === 'found' &&
+          owner.runtime.trusted &&
+          owner.runtime.bridge === defaultBridgeForAdmission &&
+          entry.state === 'active' &&
+          entry.current?.runtime === owner.runtime &&
+          !entry.current.guard.closed
+        );
+      },
       artifactSnapshotRuntimeBaseDir: Storage.getRuntimeBaseDir(),
       sessionAttachmentsRoot: attachmentsRoots.root,
       sessionAttachmentsFallbackRoot: attachmentsRoots.fallback,
@@ -1501,8 +1544,10 @@ export function createServeApp(
       invokeWorkspaceCommand: (method, params, invokeOpts) =>
         bridge.invokeWorkspaceCommand(method, params, invokeOpts),
       preheatAcpChild: () => bridge.preheat(),
-      refreshExtensionsForAllSessions: () =>
-        bridge.refreshExtensionsForAllSessions(),
+      refreshExtensionsForAllSessions: (sessionIds) =>
+        sessionIds === undefined
+          ? bridge.refreshExtensionsForAllSessions()
+          : bridge.refreshExtensionsForAllSessions(undefined, { sessionIds }),
       ...(deps.persistSetting ? { persistSetting: deps.persistSetting } : {}),
       ...(deps.persistSettings
         ? { persistSettings: deps.persistSettings }
@@ -2235,6 +2280,19 @@ export function createServeApp(
         `token or list specific origins instead of '*'.`,
     );
   }
+  if (
+    parsedAllowOrigins.loopbackPortWildcards &&
+    parsedAllowOrigins.loopbackPortWildcards.length > 0 &&
+    !opts.token
+  ) {
+    throw new Error(
+      `Refusing to start with a loopback port wildcard in --allow-origin ` +
+        `but no bearer token configured. A port wildcard admits any page ` +
+        `served from that loopback host, on any port; without a token, any ` +
+        `local page can drive the daemon. Set a token or list specific ` +
+        `origins instead.`,
+    );
+  }
   const nonLoopbackHttpOrigin = findNonLoopbackHttpOrigin(parsedAllowOrigins);
   if (nonLoopbackHttpOrigin && !opts.token) {
     throw new Error(
@@ -2289,11 +2347,14 @@ export function createServeApp(
   );
   app.use(allowOriginCors(originAllowlist));
   if (opts.profile === 'hosted-harness') {
+    const poolEnabled =
+      process.env['QWEN_HOSTED_HARNESS_INSTANCE_ID'] !== undefined;
     app.use((req, res, next) => {
       if (
         req.path === '/health' ||
         req.path === '/capabilities' ||
         req.path === '/session' ||
+        (poolEnabled && req.path.startsWith('/internal/hosted-harness/v1/')) ||
         req.path.startsWith('/session/')
       )
         next();
@@ -2353,6 +2414,7 @@ export function createServeApp(
       webShellDir,
       webShellFrameAncestors,
       opts.clientMcpOverWs === true,
+      deps.managedLocalWeb !== undefined,
     );
     (app.locals as { stopMcpAppSandbox?: () => void }).stopMcpAppSandbox =
       mountMcpAppSandbox(app, (origin, req) => {
@@ -2493,6 +2555,27 @@ export function createServeApp(
     healthRoutes.register(app);
   }
 
+  if (deps.managedLocalWeb) {
+    if (
+      opts.hostname !== '127.0.0.1' ||
+      !opts.requireAuth ||
+      !opts.token ||
+      opts.profile === 'hosted-harness'
+    ) {
+      throw new Error(
+        'Managed local WebShell requires an authenticated loopback daemon.',
+      );
+    }
+    app.use(['/managed/boot', '/api/agent', '/v1/agents'], (req, res, next) => {
+      if (listenerIdentityOf(req).kind !== 'primary') {
+        res.status(403).json({ error: 'primary_listener_required' });
+        return;
+      }
+      next();
+    });
+    mountManagedLocalWeb(app, deps.managedLocalWeb);
+  }
+
   installJsonBodyParser(app);
 
   const hostedHarness =
@@ -2500,17 +2583,31 @@ export function createServeApp(
       ? createHostedHarnessContract(opts.hostedHarnessCapabilityDigest!)
       : undefined;
   installHostedHarnessContractMiddleware(app, hostedHarness);
+  let stopHostedCsiSessions: (() => Promise<void>) | undefined;
   if (hostedHarness) {
-    registerHostedHarnessSessionRoutes(
-      app,
-      hostedHarness,
-      primaryBoundWorkspace,
+    const broker =
       opts.managedRuntimeBrokerUrl && opts.managedRuntimeBrokerToken
         ? {
             baseUrl: opts.managedRuntimeBrokerUrl,
             token: opts.managedRuntimeBrokerToken,
           }
-        : undefined,
+        : undefined;
+    if (opts.hostedCsiSessionStoreUrl && broker) {
+      const privateSessions = registerHostedCsiSessionRoutes(
+        app,
+        hostedHarness,
+        opts.hostedCsiSessionStoreUrl,
+        broker,
+        (id) => ordinary.owns(id),
+      );
+      stopHostedCsiSessions = privateSessions.stopLocal;
+      app.locals['stopHostedCsiSessions'] = stopHostedCsiSessions;
+    }
+    const ordinary = registerHostedHarnessSessionRoutes(
+      app,
+      hostedHarness,
+      primaryBoundWorkspace,
+      broker,
     );
     app.use((req, res, next) => {
       if (req.path === '/capabilities' || req.path === '/health') next();
@@ -2944,6 +3041,9 @@ export function createServeApp(
     sendBridgeError,
     mutate,
   });
+  // The /autofix-pr watches of a registered workspace's clone (the Web
+  // Shell's "PR watches" page and scheduled-task cards). Read-only.
+  registerWorkspaceQualifiedAutofixPrWatchesRoutes(app, { workspaceRegistry });
   registerWorkspaceQualifiedGitWorktreeRoutes(app, {
     workspaceRegistry,
     sendBridgeError,
@@ -2957,6 +3057,7 @@ export function createServeApp(
   });
 
   // Workspace memory + agents CRUD routes.
+  mountMemoryImportRoutes(app, { workspaceRegistry, mutate });
   mountWorkspaceMemoryRoutes(app, {
     bridge: primaryBridge,
     boundWorkspace: primaryBoundWorkspace,
@@ -3178,6 +3279,10 @@ export function createServeApp(
   });
 
   // Dynamic workspace registration.
+  const workspaceGitCloner =
+    deps.createWorkspaceRuntime !== undefined && isGitAvailable()
+      ? createWorkspaceGitCloner()
+      : undefined;
   const workspaceManagementHandle = registerWorkspaceManagementRoutes(app, {
     maxRegisteredWorkspaces,
     workspaceRegistry,
@@ -3185,6 +3290,7 @@ export function createServeApp(
     safeBody,
     createWorkspaceRuntime: deps.createWorkspaceRuntime,
     managedScratchRoot: deps.managedScratchRoot,
+    workspaceGitCloner,
     validateWorkspaceRuntimeForPublication:
       deps.validateWorkspaceRuntimeForPublication,
     runWorkspaceTrustOperation: deps.runWorkspaceTrustOperation,
@@ -3309,6 +3415,16 @@ export function createServeApp(
       },
       invalidateServeFeaturesCache,
     });
+    // Experimental paired engines put managed sessions on a second ACP child
+    // this workspace-scoped mutation cannot reach; omit the route (and the
+    // capability below) rather than apply it to one engine only.
+    if (!opts.experimentalPairedEngines) {
+      registerWorkspaceDirectoriesRoutes(app, {
+        workspaceRegistry,
+        mutate,
+        sendBridgeError,
+      });
+    }
     // Process-global user-level language sync (issue #10234). Registered
     // under the same `persistSetting` availability gate as the workspace
     // settings routes and advertised as the conditional
@@ -3444,6 +3560,8 @@ export function createServeApp(
 
   registerSessionCatalogRoutes(app, workspaceRegistry);
   const { resolveSubagentSessionRuntime } = registerSessionRoutes(app, {
+    sessionArtifactsPersistenceAvailable:
+      deps.sessionArtifactsPersistenceAvailable !== false,
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
     workspaceRegistry,
@@ -3638,6 +3756,8 @@ export function createServeApp(
       parseAndValidateWorkspaceClientId(req, res, primaryBridge),
   });
   registerWorkspaceQualifiedSkillsRoutes(app, {
+    getSkillsSnapshot: (workspaceCwd) =>
+      trustedSkillsConfigStatus.snapshot(workspaceCwd),
     workspaceRegistry,
     mutate,
     safeBody,
@@ -3677,6 +3797,14 @@ export function createServeApp(
   registerGoalsRoutes(app, {
     boundWorkspace: primaryBoundWorkspace,
     bridge: primaryBridge,
+    isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
+    captureGenerationAssertion: capturePrimaryGenerationAssertion,
+  });
+
+  // The primary workspace's /autofix-pr watches, read from the clone's files
+  // (as `qwen autofix-pr status` lists them). Read-only.
+  registerAutofixPrWatchesRoutes(app, {
+    boundWorkspace: primaryBoundWorkspace,
     isWorkspaceTrusted: isPrimaryWorkspaceTrusted,
     captureGenerationAssertion: capturePrimaryGenerationAssertion,
   });
@@ -4136,6 +4264,7 @@ export function createServeApp(
     app,
     credentials,
     originAllowlist,
+    daemonLog,
     // Resolved through the ref on each call rather than captured so Local
     // Control cannot attach to a stale ACP mount.
     attachWebSocket: (server) => acpHandleRef.current?.attachServer(server),
@@ -4150,6 +4279,7 @@ export function createServeApp(
 
   registerWorkspaceLocalControlRoutes(app, {
     service: localControlService,
+    daemonLog,
     mutate,
     safeBody,
     isDaemonDraining: deps.isChannelControlDraining,
@@ -4169,6 +4299,7 @@ export function createServeApp(
       webShellDir,
       webShellFrameAncestors,
       opts.clientMcpOverWs === true,
+      deps.managedLocalWeb !== undefined,
     );
   }
 
@@ -4183,6 +4314,7 @@ export function createServeApp(
     serveAppLifecycle.setAppDrain(async () => {
       if (appDrainComplete) return;
       const pendingDrains = [
+        stopHostedCsiSessions?.() ?? Promise.resolve(),
         (app.locals['cleanupDaemonUpdate'] as () => Promise<void>)(),
         workspaceManagementHandle.sealAndWait(),
         (

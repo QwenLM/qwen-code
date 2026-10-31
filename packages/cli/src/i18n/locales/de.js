@@ -8,6 +8,10 @@
 // Deutsche Übersetzungen für Qwen Code CLI
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Aktiviert die integrierte Generated UI in unterstützten lokalen Sitzungen. Starten Sie die zugehörige Sitzung neu, um Änderungen anzuwenden.',
+
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -1868,6 +1872,8 @@ export default {
   'System prompt': 'System-Prompt',
   'Built-in tools': 'Integrierte Tools',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Anweisungsdateien',
+  'Auto memory': 'Auto-Speicher',
   'Memory files': 'Speicherdateien',
   Skills: 'Fähigkeiten',
   Messages: 'Nachrichten',
@@ -2215,6 +2221,8 @@ export default {
   out: 'aus',
   'In/Out': 'Ein/Aus',
   // Update command
+  'Exact-version updates require a standalone installation. Install version {{version}} manually using your installation method.':
+    'Updates auf eine bestimmte Version erfordern eine Standalone-Installation. Installieren Sie Version {{version}} manuell mit Ihrer Installationsmethode.',
   'Check for Qwen Code updates and install if available':
     'Auf Qwen Code-Updates prüfen und installieren, falls verfügbar',
   'Qwen Code update available! {{current}} → {{latest}}':

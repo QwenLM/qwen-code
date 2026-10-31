@@ -24,6 +24,8 @@ export const Intent = {
 export interface QQMessageAttachment {
   url: string;
   content_type?: string;
+  /** Present on `content_type: voice`: the SILK-converted WAV file URL. */
+  voice_wav_url?: string;
   filename?: string;
   size?: number;
   width?: number;
@@ -91,14 +93,46 @@ export interface QQChannelConfig {
   chatTypes?: Record<string, 'c2c' | 'group'>;
   /** Enable experimental cron-msg features. Use at your own risk. */
   'cron-msg-experimental'?: boolean;
+  /**
+   * Expose the QQ group-management tools to the agent in this channel's
+   * sessions. Default false: the tools are destructive and run with the bot's
+   * own token, so an existing deployment keeps them off until an operator sets
+   * `true`. The platform's own rules still apply once enabled: recalling a
+   * member's message needs the bot to be a group admin.
+   */
+  moderationTools?: boolean;
+  /**
+   * How long, in milliseconds, the channel keeps an inbound message in the
+   * per-chat history the recall tool resolves a member's last message from.
+   * - `-1` (default): no time limit; entries are bounded only by the per-chat
+   *   count cap.
+   * - `0`: disable member-targeted recall. The history is not recorded and
+   *   `member_openid` is rejected; an explicit `message_id` still works.
+   * - `N > 0`: keep an entry for N milliseconds.
+   * A non-integer or a value below -1 warns on stderr and falls back to `-1`.
+   */
+  moderationRecallWindowMs?: number;
   /** Max buffer chars before forcing an immediate flush (stream+cron). Default 4096. */
   bufferFlushLength?: number;
   /** Max reconnect attempts before giving up. Default 20. 0 = unlimited. */
   maxReconnectAttempts?: number;
-  /** Max flush retries for streaming message delivery. Default 3. 0 = unlimited. */
+  /**
+   * Max flush retries for streaming message delivery. Default 3. 0 =
+   * unlimited on the background/fire-and-forget flush paths; the final
+   * segment of a completed turn is awaited inside that turn, so it is capped
+   * at 3 attempts, then reports the loss rather than holding the turn lock.
+   */
   maxFlushRetries?: number;
   /** Max gateway retries per reconnect cycle. Default 5. 0 = unlimited. */
   maxGwRetries?: number;
+  /**
+   * Delete this channel's legacy single-scope `<channel>:__single__` key and
+   * legacy user-scope `<channel>:<senderId>:<chatId>` routes when the current
+   * `sessionScope` can never route to them. Default false: the default scope
+   * changing is not the operator asking to delete persisted conversations.
+   * Enabling it also releases the routes' daemon-side sessions.
+   */
+  purgeLegacySessions?: boolean;
 }
 
 /** Robot added to a group. */

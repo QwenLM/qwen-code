@@ -25,13 +25,18 @@ import { getEffectiveReasoning } from '../../reasoning-overrides.js';
 import { clampReasoningEffort } from '../../reasoning-effort.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import { buildSessionAwareFetch } from '../../outbound-session-id.js';
+import {
+  QWENCLOUD_MAAS_HOSTS,
+  withDashScopeSourceConfig,
+  withoutDashScopeSourceConfig,
+} from '../../dashscope-source-config.js';
 
 const debugLogger = createDebugLogger('DashScopeOpenAICompatibleProvider');
 
 /**
  * Legacy input ladder for routes without an explicit reasoning capability.
- * DashScope accepts high/max as xhigh aliases; configured presets expose only
- * native low/medium/xhigh choices. Keep this fallback's clamp and warning for
+ * Configured presets declare the tiers the model accepts (qwen3.8 goes up to
+ * max) and bypass this ladder. Keep this fallback's clamp and warning for
  * existing unconfigured routes.
  */
 const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
@@ -40,6 +45,17 @@ const DASHSCOPE_TIERED_EFFORTS: readonly ReasoningEffort[] = [
   'high',
   'xhigh',
 ] as const;
+
+/**
+ * Output caps DashScope enforces on hosted third-party models that sit below
+ * the vendor's own limit (and so below the shared tokenLimits table, which
+ * describes the vendor API). Keys are lowercase wire model ids. A request
+ * above the cap is rejected with `400 Range of max_tokens should be [1, N]`
+ * on every DashScope endpoint (Standard, Token Plan); probe 2026-10-22.
+ */
+const DASHSCOPE_OUTPUT_TOKEN_CAPS: ReadonlyMap<string, number> = new Map([
+  ['minimax-m2.5', 32_768],
+]);
 
 export type DashScopeThinkingKnobSelection = {
   source: 'extra_body' | 'samplingParams' | 'reasoning';
@@ -174,15 +190,7 @@ export const DASHSCOPE_REGIONAL_HOSTS: readonly string[] = [
   'dashscope-us.aliyuncs.com',
 ];
 
-/**
- * 千问AI平台 (China) / QwenCloud (International) MaaS hosts. Both the
- * pay-as-you-go endpoints and the `token-plan.`-prefixed subscription
- * endpoints are subdomains of these, so one suffix match covers all four.
- */
-export const QWENCLOUD_MAAS_HOSTS: readonly string[] = [
-  'maas.qianwenaiapi.com',
-  'maas.qwencloudapi.com',
-];
+export { QWENCLOUD_MAAS_HOSTS };
 
 export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatibleProvider {
   constructor(
@@ -326,9 +334,11 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       defaultHeaders['X-DashScope-OssResourceResolve'] = 'enable';
     }
 
-    return customHeaders
-      ? { ...defaultHeaders, ...customHeaders }
-      : defaultHeaders;
+    return withDashScopeSourceConfig(
+      customHeaders ? { ...defaultHeaders, ...customHeaders } : defaultHeaders,
+      this.contentGeneratorConfig.baseUrl,
+      this.cliConfig.getChannel?.(),
+    );
   }
 
   override buildClient(): OpenAI {
@@ -356,7 +366,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       fetch: buildSessionAwareFetch(
         runtimeOptions?.fetch,
         this.cliConfig,
-        this.contentGeneratorConfig.customHeaders,
+        withoutDashScopeSourceConfig(this.contentGeneratorConfig.customHeaders),
       ),
     });
   }
@@ -367,7 +377,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
    * This method applies DashScope-specific configurations including:
    * - Cache control for the system message, last tool message (when tools are configured),
    *   and the latest history message — or, when a reattach region trails the
-   *   conversation, the last stable block before it
+   *   conversation, the last message lying entirely before it
    * - Output token limits based on model capabilities
    * - Vision model specific parameters (vl_high_resolution_images)
    * - Request metadata for session tracking
@@ -533,6 +543,7 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       ...result,
       ...(extraBody ? extraBody : {}),
     };
+    this.capHostedOutputTokens(merged, model);
     const reasoningEffort = merged['reasoning_effort'];
     const dropped = new Set<string>();
     if (selectedThinkingKnob?.field === 'thinking_budget') {
@@ -561,7 +572,9 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     }
     this.warnConflictingKnobDrop(model, reasoningEffort, [...dropped]);
     this.flattenGptReasoningEffort(merged);
-    return merged as unknown as OpenAI.Chat.ChatCompletionCreateParams;
+    return this.flattenDeepSeekReasoningEffort(
+      merged,
+    ) as unknown as OpenAI.Chat.ChatCompletionCreateParams;
   }
 
   private getConfiguredReasoning(model: string | undefined) {
@@ -583,7 +596,8 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
 
   /**
    * Translate the unified reasoning effort into the wire shape the model
-   * accepts. The qwen3.8-max family takes the tiered `reasoning_effort`
+   * accepts. The tiered-effort Qwen families (qwen3.8-max,
+   * qwen-latest-series-invite-*, qwen4*) take the tiered `reasoning_effort`
    * directly; older qwen hybrid models expose only the on/off
    * `enable_thinking` switch, so the effort ladder collapses to on/off
    * there. Gated to qwen-family wire models (mirroring the pipeline's
@@ -616,6 +630,23 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
       return { enable_thinking: true };
     }
     return {};
+  }
+
+  /**
+   * Clamp max_tokens to the DashScope cap for hosted models whose endpoint
+   * limit is lower than the vendor's. Runs on the final body, so the default,
+   * samplingParams and extra_body values are all bounded: the server rejects
+   * anything above the cap, whichever layer set it.
+   */
+  private capHostedOutputTokens(
+    merged: Record<string, unknown>,
+    model: string | undefined,
+  ): void {
+    const cap = DASHSCOPE_OUTPUT_TOKEN_CAPS.get(this.resolveWireModel(model));
+    const maxTokens = merged['max_tokens'];
+    if (cap !== undefined && typeof maxTokens === 'number' && maxTokens > cap) {
+      merged['max_tokens'] = cap;
+    }
   }
 
   /**
@@ -818,9 +849,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
     const lastIndex = messages.length - 1;
 
     // With a volatile reattach region trailing the conversation, the breakpoint
-    // must sit on the last STABLE block — before the reattached images — or the
-    // cached prefix shifts every turn (issue #11627). Otherwise keep the
-    // historical "last block of the last message" anchor.
+    // must sit on the last message lying entirely before that region — the
+    // gateway's cache boundary is message-level, and an anchor inside the
+    // message carrying the region restores no reuse (issue #11627). Otherwise
+    // keep the historical "last block of the last message" anchor.
     const stableBlock =
       reattachBlockCount > 0 && lastIndex >= 0
         ? this.lastStableBlock(messages, reattachBlockCount)
@@ -861,10 +893,10 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   /**
-   * Locate the last block that is not part of the trailing reattach region,
-   * walking back through messages as needed. Returns the owning message index
-   * plus how many trailing blocks of that message to skip when stamping the
-   * conversation `cache_control` breakpoint.
+   * Locate the last message lying entirely before the trailing reattach
+   * region, walking back through messages as needed. Returns the owning
+   * message index plus how many trailing blocks of that message to skip when
+   * stamping the conversation `cache_control` breakpoint.
    */
   private lastStableBlock(
     messages: OpenAI.Chat.ChatCompletionMessageParam[],
@@ -887,6 +919,14 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
             : 0;
       if (blockCount === 0) continue;
       if (blockCount > remaining) {
+        // The gateway's cache boundary is message-level: when this message
+        // itself carries the volatile region, a block-level anchor inside it
+        // restores no reuse. Keep walking to a message lying entirely before
+        // the region (issue #11627).
+        if (remaining > 0) {
+          remaining = 0;
+          continue;
+        }
         return { messageIndex: index, excludeTail: remaining };
       }
       remaining -= blockCount;

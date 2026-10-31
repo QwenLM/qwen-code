@@ -59,6 +59,7 @@ const POSIX_PS = '/bin/ps';
 const WINDOWS_TASKKILL = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\taskkill.exe`;
 
 export interface ManagedRuntimeLedgerWorkerRecord {
+  readonly groupOwned?: boolean;
   readonly pid: number;
   /** The worker's own process group; its pid on Windows, which has none. */
   readonly pgid: number;
@@ -164,9 +165,12 @@ export interface ProcessTableRow {
    * procps's negative wraparound): the row still COUNTS as a member — a
    * group whose only row is undatable is not gone — but no age judgement
    * may ever be made from it, so the group can only judge 'unknown' (held
-   * unproven), never 'gone' and never 'recycled'.
+   * unproven), never 'gone' and never 'recycled'. A zombie row is the one
+   * exception: it runs nothing, so the identity judges drop it first.
    */
   readonly runningMs: number | undefined;
+  /** ps's STAT column; a leading `Z` is a zombie awaiting reap, not live. */
+  readonly state?: string;
   readonly args: string;
 }
 
@@ -193,11 +197,14 @@ function parseProcessTable(
 ): ReadonlyMap<number, ProcessTableRow> {
   const rows = new Map<number, ProcessTableRow>();
   for (const line of stdout.split('\n')) {
-    const match = /^(\d+)\s+(\d+)\s+(\S+)(?:\s+(.*))?$/u.exec(line.trim());
+    const match = /^(\d+)\s+(\d+)\s+(\S+)\s+(\S+)(?:\s+(.*))?$/u.exec(
+      line.trim(),
+    );
     if (!match) continue;
     const pid = Number.parseInt(match[1]!, 10);
     const pgid = Number.parseInt(match[2]!, 10);
     const runningMs = parsePsElapsed(match[3]!);
+    const state = match[4]!;
     if (
       !Number.isSafeInteger(pid) ||
       pid <= 0 ||
@@ -209,7 +216,7 @@ function parseProcessTable(
     // A row whose elapsed column cannot be dated stays in the table:
     // dropping it would read the group's only member as absent — 'gone',
     // resolved silently, ledger deleted with the live group running.
-    rows.set(pid, { pid, pgid, runningMs, args: match[4] ?? '' });
+    rows.set(pid, { pid, pgid, runningMs, state, args: match[5] ?? '' });
   }
   return rows;
 }
@@ -227,7 +234,7 @@ export function queryProcessTable(): ReadonlyMap<number, ProcessTableRow> {
     // -ww: procps truncates every row to the terminal width even into a
     // pipe, and the identity markers are matched at the END of the args
     // column — a narrow inherited COLUMNS would cut them off a live row.
-    ['-A', '-ww', '-o', 'pid=,pgid=,etime=,args='],
+    ['-A', '-ww', '-o', 'pid=,pgid=,etime=,stat=,args='],
     {
       encoding: 'utf8',
       maxBuffer: PROCESS_QUERY_MAX_BUFFER,
@@ -303,6 +310,7 @@ function judgeWorkerIdentity(
   now: number,
   platform: NodeJS.Platform = process.platform,
 ): WorkerIdentity {
+  if (isZombieRow(row)) return 'recycled';
   if (!row.args.includes('managed-runtime-worker')) return 'recycled';
   // The pid answers but its age cannot be read: nothing here dates the
   // process AS the record's, and nothing proves it a recycler either.
@@ -345,12 +353,21 @@ function groupMatchesRecord(
   );
 }
 
+/** A zombie has exited and only awaits its parent's reap; it runs nothing.
+ * A multithreaded leader in EXIT_ZOMBIE can still have live sibling threads;
+ * procps marks that row with `l` (e.g. `Zl`, `Zsl`), so only a zombie without
+ * that marker has nothing left to run. */
+function isZombieRow(row: ProcessTableRow): boolean {
+  return row.state?.startsWith('Z') === true && !row.state.includes('l');
+}
+
 /** What the live table can prove about the group a record holds. */
 type GroupIdentity = 'gone' | 'ours' | 'recycled' | 'unknown';
 
 /**
- * Judges the group `record` holds against a live table. `gone`: no member
- * left. `ours`: some member old enough to have been there at the record's
+ * Judges the group `record` holds against a live table. `gone`: no live
+ * member left (zombies are not live members). `ours`: some member old enough
+ * to have been there at the record's
  * write still runs — judged first, so a SIGTERM-ignoring survivor keeps
  * the group accountable even where its dead leader's pid has been recycled
  * to a younger leader. `recycled`: with no old-enough member, a live young
@@ -370,10 +387,18 @@ function judgeGroupIdentity(
   platform: NodeJS.Platform = process.platform,
 ): GroupIdentity | undefined {
   if (table === undefined) return undefined;
-  const members = [...table.values()].filter((row) => row.pgid === record.pgid);
+  const rows = [...table.values()].filter((row) => row.pgid === record.pgid);
+  const members = rows.filter((row) => !isZombieRow(row));
   if (members.length === 0) return 'gone';
-  if (groupMatchesRecord(members, record, now, platform)) return 'ours';
-  const leader = members.find((member) => member.pid === record.pgid);
+  // The age/ownership check reads every row, including a zombie leader: its
+  // start time is still evidence that this is the recorded group, and a live
+  // child created later than the record must not erase that evidence.
+  if (groupMatchesRecord(rows, record, now, platform)) return 'ours';
+  // The leader lookup must also see a zombie leader: a young zombie on a
+  // reused pgid proves the recorded group is gone ('recycled'), while
+  // filtering it out leaves an unrelated live child to be signalled in
+  // witnessed mode or the stale ledger held in unwitnessed mode.
+  const leader = rows.find((member) => member.pid === record.pgid);
   if (
     leader !== undefined &&
     leader.runningMs !== undefined &&
@@ -673,6 +698,33 @@ export class ManagedRuntimeLedger {
     return state;
   }
 
+  async stopWitnessedGroup(
+    pgid: number,
+    budgetMs: number,
+  ): Promise<ProcessLiveness> {
+    const record = this.groups.get(pgid);
+    if (record === undefined) return 'gone';
+    const identity = judgeGroupIdentity(
+      record,
+      queryTableQuietly(),
+      Date.now(),
+    );
+    if (identity === 'gone' || identity === 'recycled')
+      return this.waitForGroupExit(pgid, 0);
+    if (identity !== 'ours') return 'denied';
+    signalProcessGroup(pgid, 'SIGTERM');
+    if ((await this.waitForGroupExit(pgid, 1000)) === 'gone') return 'gone';
+    const remainingIdentity = judgeGroupIdentity(
+      record,
+      queryTableQuietly(),
+      Date.now(),
+    );
+    if (remainingIdentity === 'gone' || remainingIdentity === 'recycled')
+      return this.waitForGroupExit(pgid, 0);
+    if (remainingIdentity !== 'ours') return 'denied';
+    return this.stopGroup(pgid, budgetMs);
+  }
+
   async stopGroup(pgid: number, budgetMs: number): Promise<ProcessLiveness> {
     const record = this.groups.get(pgid);
     if (record === undefined) return 'gone';
@@ -886,6 +938,13 @@ export async function sweepWorkerLedger(
     );
   }
   const document = parseLedgerDocument(raw);
+  if (document?.worker.groupOwned === false) {
+    throw new LedgerSweepUnprovenError(
+      workFile,
+      [document.worker.pgid],
+      'Worker process group belongs to its host; only explicit extension-owner reconciliation may stop its registered groups.',
+    );
+  }
   if (!document) {
     // A ledger nobody can read is an operator's evidence, not a retryable
     // stop: a reaper would re-read the same immutable bytes forever and
@@ -934,7 +993,10 @@ export async function sweepWorkerLedger(
   const prove = async (pgid: number): Promise<boolean> => {
     // Only ESRCH (or the caller's idea of 'gone') proves an exit; a transient
     // EPERM during teardown must not end the wait, and a permanent one ends
-    // it unproven at the deadline.
+    // it unproven at the deadline. This stays on the bare liveness probe: a
+    // group killed by this very sweep can turn zombie-only after the judge,
+    // so one proof may time out; the ledger reaper retries on backoff and the
+    // next pass judges the zombie-only group 'gone'.
     const deadline = performance.now() + proofTimeoutMs;
     for (;;) {
       if (liveness(pgid) === 'gone') return true;
@@ -1185,7 +1247,7 @@ function holdsForLiveHost(
   if (!alive(worker.hostPid)) return false;
   if (table === undefined) return worker.hostPid !== 1;
   const host = table.get(worker.hostPid);
-  if (host === undefined) return false;
+  if (host === undefined || isZombieRow(host)) return false;
   if (
     !host.args.includes('--acp') &&
     !host.args.includes('--experimental-acp')

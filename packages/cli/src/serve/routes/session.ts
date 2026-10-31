@@ -12,6 +12,11 @@ import * as crypto from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { inspect } from 'node:util';
+import { z } from 'zod';
+import {
+  hashDaemonWorkspace,
+  withDaemonSpan,
+} from '@qwen-code/qwen-code-core/telemetry/daemon-tracing.js';
 import {
   APPROVAL_MODES,
   AGENT_WORKTREE_SLUG_PATTERN,
@@ -125,6 +130,11 @@ import {
   type BridgeSessionCatalogVersion,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
+import {
+  BtwStreamError,
+  BtwStreamRequests,
+  streamBtwSnapshots,
+} from '../btw-stream.js';
 import type { SendBridgeError } from '../server/error-response.js';
 import {
   WorktreeMarkerMissingError,
@@ -156,6 +166,7 @@ import {
   assertSessionArchived,
   assertSessionLoadable,
   assertSessionRestorable,
+  DaemonDrainingError,
   deleteDaemonSessionIfOrphan,
   deleteDaemonSessions,
   logSessionArchiveWarning,
@@ -163,6 +174,17 @@ import {
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
+import {
+  ArtifactLibraryRequestError,
+  artifactLibraryMemberError,
+  removeWorkspaceLibraryArtifact,
+  removeWorkspaceLibraryArtifacts,
+  type ArtifactLibraryRemovalResult,
+  type WorkspaceSessionArtifactsEnvelope,
+} from '../server/session-artifact-library.js';
+import { WorkspaceArtifactCache } from '../server/workspace-artifact-cache.js';
+import { ArtifactLibraryStream } from '../server/artifact-library-stream.js';
+import { bindSessionPrsFromPromptCommand } from './session-pr-backfill.js';
 import { acquireWorktreeOwnershipOp } from '../server/worktree-ownership-op.js';
 import {
   exportSessionTranscript,
@@ -218,16 +240,26 @@ import {
   type VirtualSubagentSessions,
 } from '../virtual-subagent-sessions.js';
 import {
+  captureWorkspaceEntryCurrency,
+  failedBatchMember,
+  isGenerationClosedError,
+  MAX_BATCH_WORKSPACES,
+  MAX_MEMBER_BYTES,
+  MAX_SELECTOR_CHARS,
+  resolveWorkspaceEntryBySelector,
   resolveWorkspaceEntryFromParam,
   resolveWorkspaceRuntimeFromParam,
   sendUntrustedWorkspaceResponse,
   sendWorkspaceRuntimeUnavailable,
 } from '../workspace-route-runtime.js';
 import {
+  redactWorkflowModeFromConfigOptions,
+  redactWorkflowModeFromSessionState,
   redactWorkflowsFromAvailableCommandsEvent,
   redactWorkflowsFromReplayArrays,
   redactWorkflowsFromSupportedCommands,
 } from '../workflow-session-gate.js';
+import { WorkspaceGenerationClosedError } from '../workspace-registry.js';
 import type {
   WorkspaceEntry,
   WorkspaceRegistry,
@@ -309,6 +341,7 @@ interface RegisterSessionRoutesDeps {
   channelDeliveryAuthorizations?: ChannelDeliveryAuthorizationStore;
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
+  sessionArtifactsPersistenceAvailable?: boolean;
   languageCodes: string[];
   virtualSubagentSessions?: VirtualSubagentSessions;
   materializeLiveConversationDirectory?: (sessionId: string) => Promise<string>;
@@ -336,6 +369,7 @@ const TRANSCRIPT_CURSOR_TOO_LARGE_REPLAY_ERROR =
   'Transcript pagination state exceeds the safe limit';
 // Must exceed CHANNEL_DELIVERY_IPC_TIMEOUT_MS (30 s, channel-delivery-ipc.ts) plus scheduling slack.
 const CHANNEL_DELIVERY_AUTHORIZATION_GRACE_MS = 60_000;
+const ARTIFACT_LIBRARY_CONCURRENCY = 4;
 // Media blocks are resolved into inline bytes at dispatch, so an unbounded
 // content array lets one small request fan out into gigabytes of heap (a
 // repeated reference resolves to the same 8 MiB image once per occurrence).
@@ -420,26 +454,15 @@ function mediaBlockParseError(
   }
   return `each ${entryLabel} must be an inline content block or carry \`attachmentId\`, \`size\`, and \`mimeType\``;
 }
-const PRIMARY_ONLY_LIVE_SESSION_ROUTES = ['POST /session/:id/cd'] as const;
 const PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES = [
   'POST /session/:id/branch',
   'POST /session/:id/fork',
 ] as const;
-type PrimaryOnlyLiveSessionRoute =
-  (typeof PRIMARY_ONLY_LIVE_SESSION_ROUTES)[number];
 type PrimaryOrInternalLiveSessionRoute =
   (typeof PRIMARY_OR_INTERNAL_LIVE_SESSION_ROUTES)[number];
 type RestrictedLiveSessionRoute =
-  | PrimaryOnlyLiveSessionRoute
+  | 'POST /session/:id/cd'
   | PrimaryOrInternalLiveSessionRoute;
-
-function isPrimaryOnlyLiveSessionRoute(
-  route: string,
-): route is PrimaryOnlyLiveSessionRoute {
-  return (PRIMARY_ONLY_LIVE_SESSION_ROUTES as readonly string[]).includes(
-    route,
-  );
-}
 
 function isPrimaryOrInternalLiveSessionRoute(
   route: string,
@@ -851,6 +874,7 @@ export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
 ): { resolveSubagentSessionRuntime: ResolveSubagentSessionRuntime } {
+  const btwStreams = new BtwStreamRequests();
   const {
     boundWorkspace,
     workspaceRegistry,
@@ -926,6 +950,18 @@ export function registerSessionRoutes(
     return guard ? () => guard.assertOpen() : undefined;
   };
   const LANGUAGE_CODES = deps.languageCodes;
+  const workspaceArtifactCaches = new WeakMap<
+    WorkspaceRuntime,
+    WorkspaceArtifactCache
+  >();
+  const artifactCache = (runtime: WorkspaceRuntime): WorkspaceArtifactCache => {
+    let cache = workspaceArtifactCaches.get(runtime);
+    if (!cache) {
+      cache = new WorkspaceArtifactCache(runtime);
+      workspaceArtifactCaches.set(runtime, cache);
+    }
+    return cache;
+  };
   const transcriptCursorMasterKey = crypto.randomBytes(32);
   const transcriptCursorCodecs = new Map<
     string,
@@ -2918,8 +2954,7 @@ export function registerSessionRoutes(
     ) => Promise<void> | void,
     options: { cwdBound?: boolean; rejectStandalone?: boolean } = {},
   ): RequestHandler => {
-    const primaryOnly = isPrimaryOnlyLiveSessionRoute(route);
-    if (!primaryOnly && !isPrimaryOrInternalLiveSessionRoute(route)) {
+    if (!isPrimaryOrInternalLiveSessionRoute(route)) {
       throw new Error(`Unregistered restricted session route: ${route}`);
     }
     return async (req, res) => {
@@ -2933,10 +2968,7 @@ export function registerSessionRoutes(
           sendStandaloneActionUnsupported(res, route, sessionId);
           return;
         }
-        if (
-          !runtime.primary &&
-          (primaryOnly || !isInternalWorkspaceRuntime(runtime))
-        ) {
+        if (!runtime.primary && !isInternalWorkspaceRuntime(runtime)) {
           logSessionRoutingFailure(
             route,
             'non_primary_session_route_not_supported',
@@ -6172,9 +6204,27 @@ export function registerSessionRoutes(
   app.post(
     '/session/:id/cd',
     mutate(),
-    withRestrictedMutableSession(
+    withOwnerMutableSession(
       'POST /session/:id/cd',
       async (req, res, sessionId, runtime) => {
+        if (isInternalWorkspaceRuntime(runtime)) {
+          logSessionRoutingFailure(
+            'POST /session/:id/cd',
+            'non_primary_session_route_not_supported',
+            {
+              sessionId,
+              workspaceId: runtime.workspaceId,
+              workspaceCwd: runtime.workspaceCwd,
+            },
+          );
+          sendNonPrimarySessionRouteUnsupported(
+            res,
+            'POST /session/:id/cd',
+            sessionId,
+            runtime,
+          );
+          return;
+        }
         const body = safeBody(req);
         const targetPath = body['path'];
         if (
@@ -6193,13 +6243,18 @@ export function registerSessionRoutes(
         runtime.generationGuard?.assertOpen();
         const result = await runtime.bridge.changeSessionCwd(
           sessionId,
-          { path: targetPath },
+          {
+            path: targetPath,
+            ...(!runtime.primary
+              ? { allowedRoots: [runtime.workspaceCwd] }
+              : {}),
+          },
           clientId !== undefined ? { clientId } : undefined,
         );
         runtime.generationGuard?.assertOpen();
         res.status(200).json(result);
       },
-      { rejectStandalone: true },
+      { cwdBound: 'always', rejectStandalone: true },
     ),
   );
 
@@ -6950,9 +7005,14 @@ export function registerSessionRoutes(
     withOwnerReadSession(
       'GET /session/:id/context',
       async (_req, res, sessionId, runtime) => {
+        const status = await runtime.bridge.getSessionContextStatus(sessionId);
         res
           .status(200)
-          .json(await runtime.bridge.getSessionContextStatus(sessionId));
+          .json(
+            runtime.trusted
+              ? status
+              : redactWorkflowModeFromSessionState(status),
+          );
       },
     ),
   );
@@ -7047,6 +7107,25 @@ export function registerSessionRoutes(
               runtime.trusted && req.query['includeWorkflows'] === 'true',
           }),
         );
+      },
+    ),
+  );
+
+  app.get(
+    '/session/:id/tasks/:taskId/runtime',
+    withOwnerReadSession(
+      'GET /session/:id/tasks/:taskId/runtime',
+      async (req, res, sessionId, runtime) => {
+        const taskId = req.params['taskId'];
+        if (!taskId) {
+          res.status(400).json({
+            error: '`taskId` route parameter is required',
+          });
+          return;
+        }
+        res
+          .status(200)
+          .json(await runtime.bridge.getSessionTaskRuntime(sessionId, taskId));
       },
     ),
   );
@@ -7278,6 +7357,403 @@ export function registerSessionRoutes(
       },
     ),
   );
+
+  const artifactSessionId = z
+    .string()
+    .min(1)
+    .max(256)
+    .refine((id) => id.trim().length > 0)
+    .transform(normalizeSessionIdForLookup);
+  const artifactQuery = z
+    .object({
+      sessionIds: z.array(artifactSessionId).min(1).max(100),
+    })
+    .strict();
+  const artifactDeletion = z
+    .object({
+      artifacts: z
+        .array(
+          z
+            .object({
+              sessionId: artifactSessionId,
+              artifactId: z
+                .string()
+                .min(1)
+                .max(200)
+                .refine((id) => id.trim().length > 0),
+            })
+            .strict(),
+        )
+        .min(1)
+        .max(100),
+    })
+    .strict();
+
+  for (const operation of ['all', 'query', 'delete'] as const) {
+    const route =
+      '/workspaces/:workspace/artifact-library' +
+      (operation === 'all' ? '' : `/${operation}`);
+    const handler: RequestHandler = async (req, res) => {
+      const selected = new Map<string, Set<string>>();
+      if (operation === 'query') {
+        const parsed = artifactQuery.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            code: 'invalid_artifact_library_request',
+            error: 'Expected 1–100 sessionIds.',
+          });
+          return;
+        }
+        for (const id of parsed.data.sessionIds) selected.set(id, new Set());
+      } else if (operation === 'delete') {
+        const parsed = artifactDeletion.safeParse(req.body);
+        if (!parsed.success) {
+          res.status(400).json({
+            code: 'invalid_artifact_library_request',
+            error: 'Expected 1–100 artifacts with sessionId and artifactId.',
+          });
+          return;
+        }
+        for (const { sessionId, artifactId } of parsed.data.artifacts) {
+          const ids = selected.get(sessionId) ?? new Set<string>();
+          ids.add(artifactId);
+          selected.set(sessionId, ids);
+        }
+      }
+      if (deps.sessionArtifactsPersistenceAvailable === false) {
+        res.status(409).json({
+          code: 'artifact_library_unavailable',
+          error: 'Artifact persistence is unavailable',
+        });
+        return;
+      }
+      let stream: ArtifactLibraryStream | undefined;
+      try {
+        const runtime = await resolveQualifiedSessionRuntime(
+          req,
+          res,
+          route,
+          [],
+          'any',
+        );
+        if (!runtime) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
+        const cache = artifactCache(runtime);
+        const response = await runOwnerRuntimeActivity(runtime, () =>
+          runWithWorkspaceRuntimeStorage(runtime, async () => {
+            assertOpen?.();
+            if (operation === 'all') {
+              for (const id of await cache.sessionIds())
+                selected.set(id, new Set());
+            }
+            const readResults: WorkspaceSessionArtifactsEnvelope[] = [];
+            const errors: Array<
+              ReturnType<typeof artifactLibraryMemberError> & {
+                sessionId: string;
+              }
+            > = [];
+            const removed: ArtifactLibraryRemovalResult[] = [];
+            const groups = [...selected];
+            const processGroup = async ([sessionId, artifactIds]: [
+              string,
+              Set<string>,
+            ]) => {
+              const run = async () => {
+                assertOpen?.();
+                const owner =
+                  workspaceRegistry.resolveLiveSessionOwner(sessionId);
+                if (owner.kind === 'unavailable')
+                  throw new ArtifactLibraryRequestError(
+                    503,
+                    'workspace_runtime_unavailable',
+                    'Session owner is unavailable.',
+                  );
+                if (owner.kind === 'ambiguous')
+                  throw new ArtifactLibraryRequestError(
+                    500,
+                    'ambiguous_session_owner',
+                    'Session has multiple live owners.',
+                  );
+                if (owner.kind === 'found' && owner.runtime !== runtime)
+                  throw new ArtifactLibraryRequestError(
+                    409,
+                    'session_workspace_conflict',
+                    'Session belongs to another workspace.',
+                  );
+                if (isInternalWorkspaceRuntime(runtime)) {
+                  const service = createWorkspaceRuntimeSessionService(runtime);
+                  const location = await service.getSessionLocation(sessionId);
+                  if (location === 'conflict')
+                    throw new SessionConflictError(sessionId);
+                  if (
+                    !location ||
+                    !(await readLoadableLiveConversationMetadata(
+                      sessionId,
+                      service,
+                    ))
+                  )
+                    throw new SessionNotFoundError(sessionId);
+                }
+                assertOpen?.();
+                if (operation !== 'delete')
+                  return { session: await cache.read(sessionId) };
+                cache.invalidate(sessionId);
+                try {
+                  return {
+                    removed: await removeWorkspaceLibraryArtifacts(
+                      runtime,
+                      sessionId,
+                      [...artifactIds],
+                      () => assertOpen?.(),
+                    ),
+                  };
+                } finally {
+                  cache.invalidate(sessionId);
+                }
+              };
+              try {
+                const result =
+                  operation === 'delete'
+                    ? await archiveCoordinator.runExclusiveMany(
+                        [sessionId],
+                        run,
+                      )
+                    : await archiveCoordinator.runSharedMany([sessionId], run);
+                return { sessionId, artifactIds, result };
+              } catch (error) {
+                return {
+                  sessionId,
+                  artifactIds,
+                  error: artifactLibraryMemberError(error),
+                };
+              }
+            };
+            let succeeded = 0;
+            let failed = 0;
+            let skipped = 0;
+            const consume = async (
+              item: Awaited<ReturnType<typeof processGroup>>,
+            ) => {
+              if (item.error) {
+                if (operation === 'delete') {
+                  for (const artifactId of item.artifactIds)
+                    removed.push({
+                      sessionId: item.sessionId,
+                      artifactId,
+                      error: item.error,
+                    });
+                } else if (
+                  operation !== 'all' ||
+                  item.error.code !== 'session_not_found'
+                ) {
+                  failed++;
+                  const error = { sessionId: item.sessionId, ...item.error };
+                  if (stream) await stream.send('session_error', error);
+                  else errors.push(error);
+                } else skipped++;
+              } else if (item.result?.session) {
+                succeeded++;
+                if (stream)
+                  await stream.send('session', { ...item.result.session });
+                else readResults.push(item.result.session);
+              } else if (item.result?.removed) {
+                removed.push(...item.result.removed);
+              }
+            };
+            if (operation === 'delete') {
+              for (
+                let offset = 0;
+                offset < groups.length;
+                offset += ARTIFACT_LIBRARY_CONCURRENCY
+              ) {
+                const batch = await Promise.all(
+                  groups
+                    .slice(offset, offset + ARTIFACT_LIBRARY_CONCURRENCY)
+                    .map(processGroup),
+                );
+                assertOpen?.();
+                for (const item of batch) await consume(item);
+              }
+            } else {
+              if (res.destroyed) return;
+              res.vary('Accept');
+              if (
+                req.accepts(['application/json', 'text/event-stream']) ===
+                'text/event-stream'
+              ) {
+                stream = new ArtifactLibraryStream(res);
+                await stream.send('start', { total: groups.length });
+              }
+              const results: Array<Awaited<ReturnType<typeof processGroup>>> =
+                [];
+              let next = 0;
+              let stopped = false;
+              const worker = async () => {
+                try {
+                  while (
+                    !stopped &&
+                    !res.destroyed &&
+                    !stream?.closed &&
+                    next < groups.length
+                  ) {
+                    assertOpen?.();
+                    const index = next++;
+                    const item = await processGroup(groups[index]!);
+                    assertOpen?.();
+                    if (res.destroyed || stream?.closed) return;
+                    if (stream) await consume(item);
+                    else results[index] = item;
+                  }
+                } catch (error) {
+                  stopped = true;
+                  throw error;
+                }
+              };
+              const workers = await Promise.allSettled(
+                Array.from(
+                  {
+                    length: Math.min(
+                      ARTIFACT_LIBRARY_CONCURRENCY,
+                      groups.length,
+                    ),
+                  },
+                  worker,
+                ),
+              );
+              const rejected = workers.find(
+                (result) => result.status === 'rejected',
+              );
+              if (rejected?.status === 'rejected') throw rejected.reason;
+              if (res.destroyed || stream?.closed) return;
+              assertOpen?.();
+              if (stream) {
+                await stream.send('complete', {
+                  total: groups.length,
+                  succeeded,
+                  failed,
+                  skipped,
+                });
+                return;
+              }
+              for (const item of results) await consume(item);
+            }
+            assertOpen?.();
+            return operation === 'delete'
+              ? { v: 1, results: removed }
+              : { v: 1, sessions: readResults, errors };
+          }),
+        );
+        if (!stream && !res.destroyed)
+          res.status(200).set('Cache-Control', 'no-store').json(response);
+      } catch (error) {
+        if (stream) {
+          if (!stream.closed)
+            await stream
+              .send(
+                'error',
+                error instanceof WorkspaceGenerationClosedError
+                  ? {
+                      status: 503,
+                      code: 'workspace_runtime_unavailable',
+                      message: 'Workspace runtime is not active.',
+                    }
+                  : { ...artifactLibraryMemberError(error) },
+              )
+              .catch(() => undefined);
+        } else if (!res.destroyed) sendBridgeError(res, error, { route });
+      } finally {
+        stream?.end();
+      }
+    };
+    if (operation === 'all') app.get(route, handler);
+    else if (operation === 'delete')
+      app.post(route, mutate({ strict: true }), handler);
+    else app.post(route, handler);
+  }
+
+  // Persisted workspace management neither borrows a session client identity
+  // nor loads cold sessions.
+  for (const operation of ['read', 'remove'] as const) {
+    const route =
+      '/workspaces/:workspace/session/:id/artifact-library' +
+      (operation === 'remove' ? '/:artifactId' : '');
+    const handler: RequestHandler = async (req, res) => {
+      const sessionId = requireSessionId(req, res);
+      if (sessionId === null) return;
+      if (deps.sessionArtifactsPersistenceAvailable === false) {
+        res.status(409).json({
+          code: 'artifact_library_unavailable',
+          error: 'Artifact persistence is unavailable',
+        });
+        return;
+      }
+      try {
+        const runtime = await resolveQualifiedSessionRuntime(
+          req,
+          res,
+          route,
+          [sessionId],
+          'any',
+        );
+        if (!runtime) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
+        const run = async () => {
+          assertOpen?.();
+          const liveOwner =
+            workspaceRegistry.resolveLiveSessionOwner(sessionId);
+          if (liveOwner.kind === 'unavailable') {
+            sendWorkspaceRuntimeUnavailable(res);
+            return undefined;
+          }
+          if (liveOwner.kind === 'ambiguous') {
+            sendAmbiguousSessionOwner(
+              res,
+              route,
+              sessionId,
+              liveOwner.runtimes,
+            );
+            return undefined;
+          }
+          if (liveOwner.kind === 'found' && liveOwner.runtime !== runtime) {
+            sendSessionWorkspaceConflict(
+              res,
+              route,
+              sessionId,
+              runtime,
+              liveOwner.runtime,
+            );
+            return undefined;
+          }
+          if (operation === 'remove')
+            workspaceArtifactCaches.get(runtime)?.invalidate(sessionId);
+          const result = await runWithWorkspaceRuntimeStorage(runtime, () =>
+            operation === 'read'
+              ? artifactCache(runtime).read(sessionId)
+              : removeWorkspaceLibraryArtifact(
+                  runtime,
+                  sessionId,
+                  req.params['artifactId']!,
+                  () => assertOpen?.(),
+                ),
+          );
+          assertOpen?.();
+          return result;
+        };
+        const result = await runOwnerRuntimeActivity(runtime, () =>
+          operation === 'read'
+            ? archiveCoordinator.runSharedMany([sessionId], run)
+            : archiveCoordinator.runExclusiveMany([sessionId], run),
+        );
+        if (result)
+          res.status(200).set('Cache-Control', 'no-store').json(result);
+      } catch (error) {
+        if (sendArtifactValidationError(res, error)) return;
+        sendBridgeError(res, error, { route, sessionId });
+      }
+    };
+    if (operation === 'read') app.get(route, handler);
+    else app.delete(route, mutate({ strict: true }), handler);
+  }
 
   app.get(
     '/session/:id/artifacts',
@@ -8155,6 +8631,68 @@ export function registerSessionRoutes(
           return;
         }
         res.off('close', onResClose);
+
+        // A `/review` or `/verify-pr` prompt binds the PR to this session as
+        // soon as the turn is admitted, instead of waiting for an on-demand
+        // backfill sweep. Off the prompt path: a failed bind never affects
+        // the turn.
+        if (runtime.trusted && channelPrompt === undefined) {
+          // Only the prompt the user typed is a source: take the first text
+          // block. Later blocks can carry @-imported file content whose
+          // line-leading examples would forge a binding; a channel-relayed
+          // turn is an external sender's message, not the local user's.
+          const firstTextBlock: Record<string, unknown> | undefined =
+            prompt.find(
+              (item: unknown) =>
+                (item as Record<string, unknown>)['type'] === 'text',
+            );
+          const promptText =
+            typeof firstTextBlock?.['text'] === 'string'
+              ? (firstTextBlock['text'] as string)
+              : undefined;
+          if (promptText !== undefined) {
+            void bindSessionPrsFromPromptCommand(
+              runtime,
+              sessionId,
+              promptText,
+              {
+                archiveCoordinator: deps.archiveCoordinator,
+              },
+            )
+              .then((result) => {
+                if (!result) return;
+                // A `--repo` decline is a policy outcome, not a failure, but
+                // it still has to reach the log: a badge missing because the
+                // number named another repository is otherwise
+                // indistinguishable from one that never resolved.
+                if (
+                  result.writeErrors ||
+                  result.unresolved ||
+                  result.repoDeclined
+                ) {
+                  daemonLog?.warn('session PR bind incomplete', {
+                    sessionId,
+                    unresolved: result.unresolved,
+                    repoDeclined: result.repoDeclined,
+                    writeErrors: result.writeErrors,
+                    overLimit: result.overLimit,
+                  });
+                }
+              })
+              .catch((error) => {
+                if (
+                  error instanceof WorkspaceGenerationClosedError ||
+                  error instanceof DaemonDrainingError
+                ) {
+                  return;
+                }
+                daemonLog?.warn('session PR bind failed', {
+                  sessionId,
+                  error: describePromptTurnFailure(error),
+                });
+              });
+          }
+        }
 
         promptPromise
           .then(
@@ -9671,56 +10209,208 @@ export function registerSessionRoutes(
     BridgeSessionCatalogVersion
   >();
 
+  const readWorkspaceLiveState = (runtime: WorkspaceRuntime) => {
+    const assertRuntimeOpen = captureRuntimeGenerationAssertion(runtime);
+    const bridge = runtime.bridge;
+    assertRuntimeOpen?.();
+    const catalogVersion = bridge.getSessionCatalogVersion();
+    const lastExposed = lastExposedCatalogVersions.get(bridge);
+    if (
+      lastExposed === undefined ||
+      lastExposed.generation !== catalogVersion.generation ||
+      lastExposed.revision !== catalogVersion.revision
+    ) {
+      invalidateSessionLists(runtime, ['active', 'archived']);
+    }
+    const sessions = bridge
+      .listWorkspaceSessions(runtime.workspaceCwd)
+      .filter(
+        (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
+      )
+      .map((session) => ({
+        sessionId: session.sessionId,
+        clientCount: session.clientCount,
+        hasActivePrompt: session.hasActivePrompt,
+        ...(session.activeWorkState !== undefined
+          ? { activeWorkState: session.activeWorkState }
+          : {}),
+        hasRunningBackgroundTasks: session.hasRunningBackgroundTasks,
+        ...(session.backgroundTurn
+          ? { backgroundTurn: session.backgroundTurn }
+          : {}),
+        isWaitingForPermission: session.isWaitingForPermission ?? false,
+        isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
+        // Bridge-local activity watermark, absent until a running prompt in
+        // this bridge publishes its first terminal. Reading it costs nothing
+        // extra: the summary is already in memory.
+        ...(session.updatedAt !== undefined
+          ? { updatedAt: session.updatedAt }
+          : {}),
+      }));
+    assertRuntimeOpen?.();
+    lastExposedCatalogVersions.set(bridge, catalogVersion);
+    return { v: 1 as const, catalogVersion, sessions };
+  };
+
   app.get('/workspaces/:workspace/sessions/live-state', async (req, res) => {
     const route = 'GET /workspaces/:workspace/sessions/live-state';
     // Strict trust gate: live state is never read from an untrusted
     // runtime, and an unknown selector never falls back to primary.
     const runtime = requireTrustedRuntimeForWorkspaceRoute(req, res, route);
     if (runtime === null) return;
-    const assertRuntimeOpen = captureRuntimeGenerationAssertion(runtime);
-    const bridge = runtime.bridge;
     try {
-      assertRuntimeOpen?.();
-      const catalogVersion = bridge.getSessionCatalogVersion();
-      const lastExposed = lastExposedCatalogVersions.get(bridge);
-      if (
-        lastExposed === undefined ||
-        lastExposed.generation !== catalogVersion.generation ||
-        lastExposed.revision !== catalogVersion.revision
-      ) {
-        invalidateSessionLists(runtime, ['active', 'archived']);
-      }
-      const sessions = bridge
-        .listWorkspaceSessions(runtime.workspaceCwd)
-        .filter(
-          (session) => session.sourceType !== AGENT_HOST_SESSION_SOURCE_TYPE,
-        )
-        .map((session) => ({
-          sessionId: session.sessionId,
-          clientCount: session.clientCount,
-          hasActivePrompt: session.hasActivePrompt,
-          ...(session.activeWorkState !== undefined
-            ? { activeWorkState: session.activeWorkState }
-            : {}),
-          hasRunningBackgroundTasks: session.hasRunningBackgroundTasks,
-          ...(session.backgroundTurn
-            ? { backgroundTurn: session.backgroundTurn }
-            : {}),
-          isWaitingForPermission: session.isWaitingForPermission ?? false,
-          isWaitingForUserQuestion: session.isWaitingForUserQuestion ?? false,
-          // Bridge-local activity watermark, absent until a running prompt in
-          // this bridge publishes its first terminal. Reading it costs nothing
-          // extra: the summary is already in memory.
-          ...(session.updatedAt !== undefined
-            ? { updatedAt: session.updatedAt }
-            : {}),
-        }));
-      assertRuntimeOpen?.();
-      lastExposedCatalogVersions.set(bridge, catalogVersion);
       res.setHeader('Cache-Control', 'no-store');
-      res.status(200).json({ v: 1, catalogVersion, sessions });
+      res.status(200).json(readWorkspaceLiveState(runtime));
     } catch (err) {
       sendBridgeError(res, err, { route });
+    }
+  });
+
+  const liveStateBatchRequest = z
+    .object({
+      workspaces: z
+        .array(z.string().min(1).max(MAX_SELECTOR_CHARS))
+        .min(1)
+        .max(MAX_BATCH_WORKSPACES),
+    })
+    .strict();
+
+  app.post('/sessions/live-state', async (req, res) => {
+    const parsed = liveStateBatchRequest.safeParse(req.body);
+    if (!parsed.success) {
+      res.status(400).json({
+        code: 'invalid_session_live_state_batch_request',
+        error: 'Invalid session live-state batch request.',
+      });
+      return;
+    }
+
+    const readMember = async (workspace: string) => {
+      const entry = resolveWorkspaceEntryBySelector(
+        workspaceRegistry,
+        workspace,
+      );
+      if (!entry) {
+        return failedBatchMember(
+          workspace,
+          undefined,
+          404,
+          'workspace_not_found',
+          'Workspace is not registered with this daemon.',
+        );
+      }
+      const unavailable = () =>
+        failedBatchMember(
+          workspace,
+          entry,
+          503,
+          'workspace_runtime_unavailable',
+          'Workspace runtime is not active.',
+        );
+      const { generation, isCurrent } = captureWorkspaceEntryCurrency(
+        workspaceRegistry,
+        entry,
+      );
+      if (!generation || !isCurrent()) return unavailable();
+      const runtime = generation.runtime;
+      if (!runtime.trusted) {
+        logSessionRoutingFailure(
+          'POST /sessions/live-state',
+          'untrusted_workspace',
+          {
+            workspaceId: runtime.workspaceId,
+            workspaceCwd: runtime.workspaceCwd,
+          },
+        );
+        return failedBatchMember(
+          workspace,
+          entry,
+          403,
+          'untrusted_workspace',
+          'Workspace is not trusted.',
+        );
+      }
+      try {
+        const snapshot = await withDaemonSpan(
+          'qwen-code.daemon.session_live_state_batch.member',
+          {
+            'qwen-code.workspace.hash': hashDaemonWorkspace(
+              runtime.workspaceCwd,
+            ),
+          },
+          async () => readWorkspaceLiveState(runtime),
+        );
+        if (!isCurrent()) return unavailable();
+        const member = {
+          workspace,
+          workspaceId: runtime.workspaceId,
+          cwd: runtime.workspaceCwd,
+          ...snapshot,
+        };
+        if (Buffer.byteLength(JSON.stringify(member)) > MAX_MEMBER_BYTES) {
+          return failedBatchMember(
+            workspace,
+            entry,
+            413,
+            'live_state_response_too_large',
+            `Live-state snapshot exceeds ${MAX_MEMBER_BYTES / 1024} KiB.`,
+          );
+        }
+        return member;
+      } catch (error) {
+        if (isGenerationClosedError(error) || !isCurrent()) {
+          return unavailable();
+        }
+        // The member body stays generic by contract; the raw error exists
+        // only here, so losing it would leave a polling client with no
+        // server-side trace of which workspace is failing.
+        daemonLog?.error(
+          error instanceof Error ? error.message : String(error),
+          error instanceof Error ? error : undefined,
+          {
+            route: 'POST /sessions/live-state',
+            workspaceId: entry.workspaceId,
+          },
+        );
+        return failedBatchMember(
+          workspace,
+          entry,
+          500,
+          'session_live_state_failed',
+          'Failed to read workspace session live state.',
+        );
+      }
+    };
+
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    const onClose = () => {
+      if (!res.writableEnded) abort();
+    };
+    req.once('aborted', abort);
+    res.once('close', onClose);
+    if (req.aborted || res.destroyed) abort();
+
+    const workspaces = [];
+    try {
+      for (const workspace of parsed.data.workspaces) {
+        if (controller.signal.aborted) return;
+        workspaces.push(await readMember(workspace));
+        // Member reads are synchronous bridge-memory reads chained through
+        // microtasks, so without this yield the loop cannot observe a
+        // disconnect until every member has been read.
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      if (controller.signal.aborted) return;
+      addDaemonRequestAttribute(
+        'qwen-code.daemon.session_live_state_batch.members',
+        workspaces.length,
+      );
+      res.setHeader('Cache-Control', 'no-store');
+      res.status(200).json({ workspaces });
+    } finally {
+      req.off('aborted', abort);
+      res.off('close', onClose);
     }
   });
 
@@ -9801,9 +10491,9 @@ export function registerSessionRoutes(
         const configId = body['configId'];
         const value = body['value'];
         const persist = body['persist'];
-        if (configId !== 'reasoning_effort') {
+        if (configId !== 'reasoning_effort' && configId !== 'workflow_mode') {
           res.status(400).json({
-            error: '`configId` must be reasoning_effort',
+            error: '`configId` must be reasoning_effort or workflow_mode',
           });
           return;
         }
@@ -9813,12 +10503,40 @@ export function registerSessionRoutes(
           });
           return;
         }
+        if (configId === 'workflow_mode') {
+          if ((value !== 'on' && value !== 'off') || persist !== undefined) {
+            res.status(400).json({
+              error:
+                'Workflow mode requires on/off and does not accept persist',
+            });
+            return;
+          }
+          if (!runtime.trusted) {
+            sendUntrustedSessionOwner(
+              res,
+              'POST /session/:id/config-option',
+              sessionId,
+              runtime,
+            );
+            return;
+          }
+          if (runtime.routeFileSystemFactory.sshWorkspace) {
+            res.status(501).json({
+              code: 'ssh_workspace_operation_unsupported',
+              error: 'Workflow mode is unsupported for SSH workspaces',
+            });
+            return;
+          }
+        }
         if (persist !== undefined && typeof persist !== 'boolean') {
           res.status(400).json({
             error: '`persist` must be a boolean when provided',
           });
           return;
         }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const assertOpen = captureRuntimeGenerationAssertion(runtime);
         const response = await runtime.bridge.setSessionConfigOption(
           sessionId,
           {
@@ -9833,10 +10551,16 @@ export function registerSessionRoutes(
                 }
               : {}),
           },
+          clientId !== undefined ? { clientId } : undefined,
+          assertOpen,
         );
+        assertOpen?.();
         res.status(200).json({
-          configOptions: response.configOptions,
+          configOptions: runtime.trusted
+            ? response.configOptions
+            : redactWorkflowModeFromConfigOptions(response).configOptions,
           persisted:
+            configId === 'workflow_mode' ||
             response._meta?.[REASONING_SELECTION_PERSISTED_META_KEY] === true,
         });
       },
@@ -9871,6 +10595,85 @@ export function registerSessionRoutes(
         res.status(200).json(response);
       },
     ),
+  );
+
+  const btwRequestId = z.string().regex(/^[A-Za-z0-9_-]{1,64}$/);
+  const btwStreamInput = z.object({
+    question: z.string().max(BTW_MAX_INPUT_LENGTH).trim().min(1),
+    requestId: btwRequestId,
+    resume: z.boolean().optional(),
+  });
+  const btwStreamHandler = (method: 'post' | 'delete') =>
+    withOwnerMutableSession(
+      method === 'post'
+        ? 'POST /session/:id/btw/stream'
+        : 'DELETE /session/:id/btw/stream/:requestId',
+      (req, res, sessionId, runtime) => {
+        const parsed =
+          method === 'post'
+            ? btwStreamInput.safeParse(safeBody(req))
+            : btwRequestId.safeParse(req.params['requestId']);
+        if (!parsed.success) {
+          res.status(400).json({
+            code: 'invalid_btw_request',
+            error:
+              method === 'post'
+                ? 'A valid requestId and non-empty question are required'
+                : 'A valid requestId is required',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        const bridge = runtime.bridge;
+        // Session detach can win the race with cancelling its own cached request.
+        if (
+          typeof parsed.data !== 'string' ||
+          !btwStreams.has(bridge, sessionId, clientId, parsed.data)
+        ) {
+          // Authorize this live-session client without starting model work.
+          bridge.getPendingPrompts(
+            sessionId,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+        }
+        try {
+          if (typeof parsed.data === 'string') {
+            btwStreams.cancel(bridge, sessionId, clientId, parsed.data);
+            res.status(204).end();
+            return;
+          }
+          if (!bridge.generateSessionBtwStream) {
+            res.status(501).json({
+              code: 'btw_stream_not_supported',
+              error: 'Streaming side questions are not supported',
+            });
+            return;
+          }
+          const { requestId, question, resume } = parsed.data;
+          const request = btwStreams.open(
+            bridge,
+            sessionId,
+            clientId,
+            requestId,
+            question,
+            resume === true,
+          );
+          // The bridge's side request holds generation alive independently of HTTP.
+          void streamBtwSnapshots(res, request);
+        } catch (error) {
+          if (!(error instanceof BtwStreamError)) throw error;
+          res
+            .status(error.status)
+            .json({ code: error.code, error: error.message });
+        }
+      },
+    );
+  app.post('/session/:id/btw/stream', mutate(), btwStreamHandler('post'));
+  app.delete(
+    '/session/:id/btw/stream/:requestId',
+    mutate(),
+    btwStreamHandler('delete'),
   );
 
   app.post(
@@ -10279,6 +11082,54 @@ export function registerSessionRoutes(
         }
       },
       { cwdBound: 'always' },
+    ),
+  );
+
+  app.get(
+    '/session/:id/message-groups',
+    withOwnerReadSession(
+      'GET /session/:id/message-groups',
+      async (_req, res, sessionId, runtime) => {
+        res.status(200).json(await runtime.bridge.getMessageGroups(sessionId));
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/messages/delete',
+    mutate({ strict: true }),
+    withOwnerMutableSession(
+      'POST /session/:id/messages/delete',
+      async (req, res, sessionId, runtime) => {
+        const body = safeBody(req);
+        const snapshot = body['snapshot'];
+        const groupIds = body['groupIds'];
+        if (
+          typeof snapshot !== 'string' ||
+          snapshot.length === 0 ||
+          !Array.isArray(groupIds) ||
+          groupIds.length === 0 ||
+          !groupIds.every((id) => typeof id === 'string' && id.length > 0) ||
+          new Set(groupIds).size !== groupIds.length
+        ) {
+          res.status(400).json({
+            error: 'A snapshot and distinct non-empty groupIds are required',
+            code: 'invalid_message_groups',
+          });
+          return;
+        }
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        res
+          .status(200)
+          .json(
+            await runtime.bridge.deleteMessageGroups(
+              sessionId,
+              { snapshot, groupIds },
+              clientId !== undefined ? { clientId } : undefined,
+            ),
+          );
+      },
     ),
   );
 

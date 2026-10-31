@@ -76,8 +76,11 @@ original operation, and that a different payload under the same key conflicts.
   `WebShellOperationRequest`. Besides `task_id`, which only a task cancel
   carries, three parts stay `planned`: the cwd member of the two operation
   unions (W2), `action_resolution` (D6) and `failure_code`, which no lifecycle
-  operation sets. The generated WebShell types therefore read
-  `WebShellOperation` as `WebShellCommandOperation`.
+  operation set at v1.18. The generated WebShell types therefore read
+  `WebShellOperation` as `WebShellCommandOperation`. v1.25 implements
+  `failure_code` with the permission Action responses (D6b), and a lifecycle
+  operation now sets it once its retry budget is spent or while it is
+  `recovery_blocked` (4.5, 4.6).
 - `SessionCapabilities.session_lifecycle` is implemented. It is `true` for a
   Session without a Workspace binding and `false` for a bound one (4.9). The
   WebShell capability object stays `planned` in this change; the Stage H0c work
@@ -456,9 +459,9 @@ a stale failure is cleared (#13742).
 ## 7. Validation
 
 - The Managed Agent server's `mvn test` (151 tests) and Checkstyle pass.
-- `ManagedAgentMySqlIT` passes against `mariadb:10.11.18`, the image CI uses,
-  and against `mysql:8.4`, including the V17 upgrade. `HostedHarnessMySqlIT`
-  passes against `mysql:8.4` with the bundled CLI.
+- `ManagedAgentMySqlIT` has passed against both `mariadb:10.11.18` and
+  `mysql:8.4`, including the V17 upgrade. `HostedHarnessMySqlIT` passes against
+  `mysql:8.4` with the bundled CLI.
 - On this branch, focused H2 migration and publication tests pass 24/24. On a
   fresh MySQL 8.4 schema, `ManagedAgentMySqlIT` passes 11/11 with V16–V19
   applied in order. MariaDB verification of the combined sequence awaits CI.

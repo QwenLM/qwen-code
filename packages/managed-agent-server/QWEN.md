@@ -17,7 +17,7 @@ alive. The Broker reconciles and adopts bindings through recovery-capable
 provisioners. The embedding service owns those provisioners, reprovisioning
 policy, and Session rebind policy.
 
-Broker and Server sources, resources and tests share this Maven module. Keep their Java packages separate. The server depends on the Java SDK at `../sdk-java/qwencode`; install that SDK before building.
+The parent builds six production Maven modules: `contracts`, `control-plane`, `runtime-broker`, `persistence`, `adapters`, and `server`. Tests live in `verification`. Keep each production Java package in one module. Only `adapters` depends on the Java SDK at `../sdk-java/qwencode`; install that SDK before building. Follow [AGENTS.md](AGENTS.md) for focused verification and the shared local budget.
 
 Use JDK 21 or later to build and run this module.
 
@@ -25,7 +25,7 @@ Build and test with:
 
 ```bash
 mvn test
-mvn checkstyle:check checkstyle:check@runtime-broker-checkstyle
+mvn checkstyle:check
 mvn verify
 ```
 

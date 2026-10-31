@@ -65,7 +65,6 @@ describe('ManagedAgentWebShell', () => {
       root.render(
         <ManagedAgentWebShell
           baseUrl="https://product.example"
-          environmentId="python"
           language="zh-CN"
           sessionId="session-1"
         />,
@@ -81,8 +80,6 @@ describe('ManagedAgentWebShell', () => {
     expect(
       container.querySelector('[data-web-shell-root]')?.getAttribute('lang'),
     ).toBe('zh-CN');
-    expect(props.managedAgentProvider.kind).toBe('java');
-    expect(props.managedAgentProvider.acceptsWorkspaceCwd).toBe(false);
     expect(props.workspaceCwd).toBeUndefined();
     expect(props.sessionId).toBe('session-1');
   });

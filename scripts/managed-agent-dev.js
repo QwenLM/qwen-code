@@ -366,7 +366,7 @@ export function buildSpringRecipeLines({
       "  $env:SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'",
       "  $env:SPRING_DATASOURCE_USERNAME='qwen'",
       "  $env:SPRING_DATASOURCE_PASSWORD='replace-me'",
-      '  Set-Location packages\\managed-agent-server; mvn spring-boot:run',
+      '  mvn -f packages/managed-agent-server/pom.xml -pl server -am -DskipTests install; mvn -f packages/managed-agent-server/server/pom.xml spring-boot:run',
     );
   } else {
     lines.push(
@@ -374,7 +374,7 @@ export function buildSpringRecipeLines({
       "  export SPRING_DATASOURCE_URL='jdbc:mysql://127.0.0.1:3306/qwen_managed_agent'",
       "  export SPRING_DATASOURCE_USERNAME='qwen'",
       "  export SPRING_DATASOURCE_PASSWORD='replace-me'",
-      '  cd packages/managed-agent-server && mvn spring-boot:run',
+      '  mvn -f packages/managed-agent-server/pom.xml -pl server -am -DskipTests install && mvn -f packages/managed-agent-server/server/pom.xml spring-boot:run',
     );
   }
   return lines;
@@ -447,9 +447,10 @@ export function findWebPort(excludedPorts) {
   return findAvailablePort(DEFAULT_WEB_PORT, excludedPorts, WEB_HOST);
 }
 
-// `qwen serve` retries EADDRINUSE by bumping regardless of whether the port
-// was explicitly pinned, so a busy pinned port would leave the launcher
-// polling an address the child never bound. Fail fast instead.
+// Outside --profile hosted-harness, `qwen serve` retries EADDRINUSE by
+// bumping even when the port was pinned, which would leave the launcher
+// polling an address the child never bound; the hosted-harness profile exits
+// instead. Either way, fail fast with a message naming the flag.
 export async function ensurePortFree(port, label) {
   const probe = net.createServer();
   try {
@@ -460,7 +461,7 @@ export async function ensurePortFree(port, label) {
   } catch (err) {
     if (err && typeof err === 'object' && err.code === 'EADDRINUSE') {
       throw new Error(
-        `${label} ${port} is already in use (qwen serve would silently bump past it; free the port or omit the flag to auto-increment).`,
+        `${label} ${port} is already in use (free the port, or omit the flag to auto-increment).`,
       );
     }
     throw err;

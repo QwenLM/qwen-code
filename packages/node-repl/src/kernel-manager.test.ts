@@ -5,10 +5,11 @@
  */
 
 import fs from 'node:fs';
+import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   NodeReplKernelManager,
   type KernelManagerOptions,
@@ -37,7 +38,7 @@ function texts(outcome: NodeReplExecOutcome): string[] {
 
 function makeManager(
   overrides: Partial<
-    Pick<KernelManagerOptions, 'policy' | 'readableRoots'>
+    Pick<KernelManagerOptions, 'policy' | 'readableRoots' | 'preloadCua'>
   > = {},
 ): NodeReplKernelManager {
   return new NodeReplKernelManager({
@@ -75,17 +76,116 @@ async function run(code: string, timeoutMs = EXEC_TIMEOUT) {
   return manager.exec({ code, timeoutMs });
 }
 
+// Starts a process from session code. It holds a connection to this test,
+// so its exit is seen even if nothing reaps it.
+async function startSessionProcess(script = '') {
+  const server = net.createServer();
+  const connection = new Promise<net.Socket>((resolve) =>
+    server.once('connection', resolve),
+  );
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address() as net.AddressInfo;
+  let pid = 0;
+  let exited = false;
+  const stop = () => {
+    if (pid > 0 && !exited) {
+      try {
+        process.kill(pid, 'SIGKILL');
+      } catch {
+        // Already gone.
+      }
+    }
+    server.close();
+  };
+  try {
+    const started = await run(
+      `const { spawn } = await import('node:child_process');
+      const child = spawn(${JSON.stringify(process.execPath)}, ['-e', ${JSON.stringify(
+        `require('node:net').connect(${port}, '127.0.0.1'); ${script} setInterval(() => {}, 1000);`,
+      )}], { stdio: 'ignore' });
+      nodeRepl.write(String(child.pid));`,
+    );
+    expect(started.status).toBe('ok');
+    pid = Number(texts(started)[0]);
+    const socket = await connection;
+    socket.on('error', () => undefined);
+    const closed = new Promise<boolean>((resolve) =>
+      socket.once('close', () => {
+        exited = true;
+        resolve(true);
+      }),
+    );
+    const exitedWithin = (timeoutMs: number) =>
+      Promise.race([
+        closed,
+        new Promise<boolean>((resolve) =>
+          setTimeout(resolve, timeoutMs, false),
+        ),
+      ]);
+    return { exitedWithin, stop };
+  } catch (error) {
+    stop();
+    throw error;
+  }
+}
+
 beforeEach(() => {
   workDir = fs.mkdtempSync(path.join(os.tmpdir(), 'node-repl-km-'));
   manager = makeManager();
 });
 
-afterEach(() => {
-  manager.dispose();
+afterEach(async () => {
+  await manager.dispose();
   fs.rmSync(workDir, { recursive: true, force: true });
 });
 
+it('forwards native UI disabling flags to the kernel without unrelated arguments', async () => {
+  await manager.dispose();
+  manager = makeManager({ preloadCua: false });
+  const original = process.argv.slice();
+  process.argv.push('--no-overlay', '--unrelated', '--no-pip');
+  try {
+    const root = path.join(workDir, 'node_modules');
+    createEsmPackage(
+      root,
+      'kernel-args',
+      'export const args = process.argv.slice(2);',
+    );
+    await manager.addModuleRoot(root);
+    const result = await run(
+      'nodeRepl.write(JSON.stringify((await import("kernel-args")).args))',
+    );
+    expect(result.status).toBe('ok');
+    expect(texts(result).join('')).toBe('["--no-overlay","--no-pip"]');
+  } finally {
+    process.argv.splice(0, process.argv.length, ...original);
+  }
+});
+
 describe('NodeReplKernelManager', () => {
+  it('awaits Computer Use session cleanup on reset and disposal', async () => {
+    const marker = path.join(workDir, 'cua-cleanup.txt');
+    createEsmPackage(
+      path.join(workDir, 'node_modules'),
+      'cua-cleanup-fixture',
+      `
+      import fs from 'node:fs';
+      import { setTimeout } from 'node:timers/promises';
+      export const cua = { async [Symbol.asyncDispose]() {
+        await setTimeout(30);
+        fs.appendFileSync(${JSON.stringify(marker)}, ${JSON.stringify('released\n')});
+      } };
+    `,
+    );
+    const install = `globalThis.cua = (await import('cua-cleanup-fixture')).cua;`;
+    expect((await run(install)).status).toBe('ok');
+    await manager.reset();
+    expect(fs.readFileSync(marker, 'utf8')).toBe('released\n');
+    expect((await run(install)).status).toBe('ok');
+    await manager.dispose();
+    expect(fs.readFileSync(marker, 'utf8')).toBe('released\nreleased\n');
+  });
+
   it('preserves bounded error diagnostics without invoking getters or custom inspectors', async () => {
     const result = await run(`
       var invoked = 0;
@@ -1221,7 +1321,7 @@ describe('NodeReplKernelManager', () => {
       fs.mkdirSync(readableRoot);
       const original = path.join(readableRoot, 'original.png');
       fs.writeFileSync(original, Buffer.from(PNG_BASE64, 'base64'));
-      manager.dispose();
+      await manager.dispose();
       manager = makeManager({ readableRoots: [readableRoot] });
       expect(
         (
@@ -1558,7 +1658,7 @@ describe('NodeReplKernelManager', () => {
     async () => {
       const volatileCwd = path.join(workDir, 'volatile-cwd');
       fs.mkdirSync(volatileCwd);
-      manager.dispose();
+      await manager.dispose();
       manager = new NodeReplKernelManager({
         cwd: volatileCwd,
         homeDir: os.homedir(),
@@ -1595,6 +1695,149 @@ describe('NodeReplKernelManager', () => {
     TEST_TIMEOUT,
   );
 
+  it.skipIf(process.platform === 'win32')(
+    'lets an idle kernel exit on reset and disposal before any signal',
+    async () => {
+      await run('nodeRepl.write("up");');
+      const realKill = process.kill.bind(process);
+      const signalledRunningKernels: number[] = [];
+      const kill = vi
+        .spyOn(process, 'kill')
+        .mockImplementation((pid, signal) => {
+          try {
+            realKill(Math.abs(pid), 0);
+            signalledRunningKernels.push(pid);
+          } catch {
+            // The kernel had already exited.
+          }
+          return realKill(pid, signal);
+        });
+      try {
+        await manager.reset();
+        await run('nodeRepl.write("up");');
+        await manager.dispose();
+        expect(signalledRunningKernels).toEqual([]);
+      } finally {
+        kill.mockRestore();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === 'win32').each([
+    { name: 'reset', terminate: () => manager.reset() },
+    { name: 'disposal', terminate: () => manager.dispose() },
+    {
+      name: 'a timed-out cancellation barrier',
+      terminate: async () => {
+        const outcome = await run(
+          'await nodeRepl.signal.waitUntil(new Promise(() => {}));',
+          2_000,
+        );
+        expect(outcome.status).toBe('timeout');
+        expect(outcome.stats.kernelReplaced).toBe(true);
+      },
+    },
+  ])(
+    'stops processes the session started on $name',
+    async ({ terminate }) => {
+      const child = await startSessionProcess();
+      try {
+        await terminate();
+        await expect(child.exitedWithin(10_000)).resolves.toBe(true);
+      } finally {
+        child.stop();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'kills a session process that ignores SIGTERM on reset',
+    async () => {
+      const child = await startSessionProcess(
+        "process.on('SIGTERM', () => {});",
+      );
+      try {
+        await manager.reset();
+        await expect(child.exitedWithin(10_000)).resolves.toBe(true);
+      } finally {
+        child.stop();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'lets a session process handle SIGTERM before it is killed on reset',
+    async () => {
+      const marker = path.join(workDir, 'sigterm-marker');
+      const child = await startSessionProcess(
+        `process.on('SIGTERM', () => { require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'flushed'); process.exit(0); });`,
+      );
+      try {
+        await manager.reset();
+        await expect(child.exitedWithin(10_000)).resolves.toBe(true);
+        expect(fs.readFileSync(marker, 'utf8')).toBe('flushed');
+      } finally {
+        child.stop();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'kills a session process that ignores SIGTERM when the kernel exits on its own after the grace period',
+    async () => {
+      // Cleanup outlasts the 2500 ms grace period, so the group gets SIGTERM
+      // while the kernel is still running. The kernel ignores it once shutdown
+      // has started and exits when cleanup ends, during the 500 ms that follow.
+      createEsmPackage(
+        path.join(workDir, 'node_modules'),
+        'cua-slow-cleanup-fixture',
+        `export const cua = { async [Symbol.asyncDispose]() {
+          const until = Date.now() + 2750;
+          while (Date.now() < until);
+        } };`,
+      );
+      const child = await startSessionProcess(
+        "process.on('SIGTERM', () => {});",
+      );
+      try {
+        const install = await run(
+          `globalThis.cua = (await import('cua-slow-cleanup-fixture')).cua;`,
+        );
+        expect(install.status).toBe('ok');
+        const kernelPid = manager.getKernelPid()!;
+        const realKill = process.kill.bind(process);
+        const signalledRunningKernel: Array<[number, unknown]> = [];
+        const kill = vi
+          .spyOn(process, 'kill')
+          .mockImplementation((pid, signal) => {
+            try {
+              realKill(kernelPid, 0);
+              signalledRunningKernel.push([pid, signal]);
+            } catch {
+              // The kernel had already exited.
+            }
+            return realKill(pid, signal);
+          });
+        try {
+          await manager.reset();
+        } finally {
+          kill.mockRestore();
+        }
+        // Without this the kernel could exit before any signal and the case
+        // would pass without reaching the path it is named for.
+        expect(signalledRunningKernel).toContainEqual([-kernelPid, 'SIGTERM']);
+        await expect(child.exitedWithin(10_000)).resolves.toBe(true);
+      } finally {
+        child.stop();
+      }
+    },
+    TEST_TIMEOUT,
+  );
+
   it(
     'disposes the process and temp directory and settles in-flight work',
     async () => {
@@ -1607,11 +1850,11 @@ describe('NodeReplKernelManager', () => {
       await new Promise((resolve) => setTimeout(resolve, 100));
 
       const queuedReset = manager.reset();
-      manager.dispose();
+      const disposal = manager.dispose();
 
       expect((await pending).status).toBe('cancelled');
       await expect(queuedReset).rejects.toThrow(/disposed/);
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await disposal;
       expect(() => process.kill(pid, 0)).toThrow();
       expect(fs.existsSync(tmpDir)).toBe(false);
       await expect(run('1;')).rejects.toThrow(/disposed/);

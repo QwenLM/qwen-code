@@ -249,7 +249,7 @@ qwen -p "Write a Python script" --output-format stream-json --include-partial-me
 
 Pending managed memory work does not delay the terminal `result` message in JSON or stream-JSON output. After writing its terminal output (a result message in JSON formats, or the final response or error in text output), the CLI normally waits for tracked extraction, dreaming, and scheduled skill-review tasks before finishing the invocation. A one-shot process may therefore remain running after its output is written. In a reusable stream-JSON session, the next serialized turn can also wait for those tasks while stdin remains open.
 
-Normal EOF in `--input-format stream-json` releases the session's memory-wait grace signal: a wait already underway in the current turn stops waiting (its task stays tracked), and the remaining turns complete without a memory bound. When that work settles, the final retained-memory drain gets one fresh 5000 ms grace period; on expiry the CLI stops waiting for memory without cancelling foreground work or changing an already emitted result. The grace period is not measured from EOF and is not consumed by foreground work — a foreground turn still completes even if it runs past any fixed interval. This is not a 5-second limit on the whole shutdown: foreground work, output flushing, recording, and other cleanup can take longer. One-shot invocations have no session EOF moment, so each of their memory drains gets its own 5000 ms window; sessions whose stdin remains open wait within their turns under the session's grace signal.
+Normal EOF in `--input-format stream-json` releases the session's memory-wait grace signal: a wait already underway in the current turn stops waiting (its task stays tracked), and the remaining turns complete without a memory bound. When that work settles, the final retained-memory drain gets one fresh 5000 ms grace period; on expiry the CLI stops waiting for memory without cancelling foreground work or changing an already emitted result. The grace period is not measured from EOF and is not consumed by foreground work — a foreground turn still completes even if it runs past any fixed interval. This is not a 5-second limit on the whole shutdown: foreground work, output flushing, recording, and other cleanup can take longer. One-shot invocations have no session EOF moment. Their failure and cancellation terminals each get a 5000 ms window; a successful one-shot instead waits for the memory writes its turn started and is bounded only by the run's own abort, matching the base behavior. Sessions whose stdin remains open wait within their turns under the session's grace signal.
 
 Cancellation and run-budget aborts stop this wait, including when they arrive after terminal output has been written; session-turn-cap exits also do not wait. Stopping the wait does not cancel the underlying memory tasks. In a reusable session, unfinished tasks remain tracked for a later wait while the process is alive. This is best-effort completion: process exit may abandon unfinished memory updates, and they are not automatically resumed in a later process. Neither receiving a result nor reaching the EOF deadline guarantees that all memory writes have completed. No replacement result is emitted if one was already written, so consumers should also check the invocation outcome or process exit status. Independently scheduled memory metadata migration is outside this tracked task list and is cancelled when the invocation's `Config` shuts down.
 
@@ -312,6 +312,26 @@ Key command-line options for headless usage:
 | `--max-tool-calls`           | Cumulative tool-call budget for the run                                                                                                                                                                                                                                                                                                                                                                                                                 | `qwen -p "..." --max-tool-calls 50`                                      |
 
 For complete details on all available configuration options, settings files, and environment variables, see the [Configuration Guide](../configuration/settings).
+
+### Tool schemas in small context windows
+
+`--max-tool-calls 0` limits tool execution; it does not remove tool schemas from
+the model request. `--safe-mode` also keeps built-in tools and ignores the
+settings-sourced `tools.eager` allowlist, so it is not a text-only mode.
+
+Outside safe or bare mode, use [`tools.eager`](../configuration/settings#tools)
+to defer unlisted, non-exempt tool schemas. An empty list defers all non-exempt
+eager tools, but exempt tools and other schema-reveal paths can still contribute
+to the request. With safe mode enabled, use `--exclude-tools <name,...>` to remove
+unneeded built-in tools instead. Exclusions disable those tools, rather than
+keeping them available through deferred discovery. Recheck the tool names and
+resulting request after upgrading; the built-in set can change between releases.
+
+Budget the complete serialized input, including system instructions, history and
+tool schemas, together with the requested output. Deferral and output limits do
+not guarantee that the input fits: an oversized initial request can still be
+rejected before generation. Do not rely on a schema-size preflight warning to
+establish compatibility with a provider's context limit.
 
 ## Safety in unattended runs
 
