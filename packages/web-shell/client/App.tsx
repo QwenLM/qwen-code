@@ -15689,10 +15689,11 @@ export function App({
   );
 
   /**
-   * Post-delete landing for the session the client is currently attached to:
-   * leave the deleted conversation and open a fresh draft in the same
-   * workspace context. Shared by the Session Overview panel, the sidebar row
-   * delete, and the delete-session picker (issue #12619).
+   * Post-removal landing (delete or archive) for the session the client is
+   * currently attached to: leave the removed conversation and open a fresh
+   * draft in the same workspace context. Shared by the Session Overview
+   * panel, the sidebar row delete/archive, and the delete-session picker
+   * (issues #12619, #15480).
    */
   const handleCurrentSessionRemoved = useCallback(
     async (removed: { sessionId: string; workspaceCwd: string }) => {
@@ -22644,12 +22645,12 @@ export function App({
                   onSessionRenameConfirmed={reconcileCatalogRename}
                   onSessionsDeleted={(sessionIds, meta) => {
                     closeUsageTabs(sessionIds);
-                    // Deleting the attached session must leave the deleted
-                    // conversation: open a fresh draft in the same context,
-                    // mirroring the Session Overview (#12619). The daemon's
+                    // Deleting or archiving the attached session must leave
+                    // it: open a fresh draft in the same context, mirroring
+                    // the Session Overview (#12619, #15480). The daemon's
                     // terminal `session_closed` frame clears the attachment
-                    // before the delete response resolves, so fall back to the
-                    // id the sidebar captured at confirm time.
+                    // before the response resolves, so fall back to the id
+                    // the sidebar captured up front.
                     const current = connectionRef.current;
                     const attachedId =
                       current.sessionId ?? meta?.attachedSessionId;

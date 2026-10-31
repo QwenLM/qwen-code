@@ -366,6 +366,7 @@ const capabilities = {
     'multi_workspace_sessions',
     'workspace_runtime_removal',
     'session_archive',
+    'session_archive_idle_guard',
     'workspace_qualified_rest_core',
     'workspace_session_metadata',
     'session_source_metadata',
@@ -1177,7 +1178,9 @@ describe('WebShellSidebar workspace removal', () => {
     await act(async () => {
       await secondaryArchive.mock.results.at(-1)?.value;
     });
-    expect(secondaryArchive).toHaveBeenCalledWith(['other-secondary']);
+    expect(secondaryArchive).toHaveBeenCalledWith(['other-secondary'], {
+      requireIdle: true,
+    });
     expect(primaryArchive).not.toHaveBeenCalled();
   }, 15000);
 
@@ -1224,7 +1227,7 @@ describe('WebShellSidebar workspace removal', () => {
     await expandWorkspace('other');
 
     // Current-session delete is allowed while the session is idle (#12619);
-    // archive keeps its current-session restriction.
+    // archive allows the idle current session now too (#15480).
     expect(inlineSessionAction('Locked current', 'Delete')?.disabled).toBe(
       false,
     );
@@ -1232,7 +1235,7 @@ describe('WebShellSidebar workspace removal', () => {
       (await openSessionMenuItem('Locked current', 'Archive')).getAttribute(
         'aria-disabled',
       ),
-    ).toBe('true');
+    ).toBeNull();
     expect(inlineSessionAction('Locked other', 'Rename')?.disabled).toBe(false);
     expect(inlineSessionAction('Locked current', 'Rename')?.disabled).toBe(
       false,
@@ -1511,7 +1514,9 @@ describe('WebShellSidebar workspace removal', () => {
     await act(async () => {
       await secondaryArchive.mock.results.at(-1)?.value;
     });
-    expect(secondaryArchive).toHaveBeenCalledWith(['locked-archive']);
+    expect(secondaryArchive).toHaveBeenCalledWith(['locked-archive'], {
+      requireIdle: true,
+    });
     expect(refreshWorkspaceSessionCatalog).toHaveBeenLastCalledWith(
       '/tmp/other',
     );
@@ -1574,6 +1579,7 @@ describe('WebShellSidebar workspace removal', () => {
       features: [
         'multi_workspace_sessions',
         'session_archive',
+        'session_archive_idle_guard',
         'session_organization',
         'workspace_session_export',
       ],
@@ -2614,16 +2620,12 @@ describe('WebShellSidebar workspace removal', () => {
     expect(rename?.disabled).toBe(false);
     // Current-session delete is allowed while the session is idle (#12619).
     expect(remove?.disabled).toBe(false);
+    // The idle current row is archivable now too (#15480).
     const archive = await openSessionMenuItem(
       'Current no-cwd primary',
       'Archive',
     );
-    expect(archive.getAttribute('aria-disabled')).toBe('true');
-
-    await act(async () => {
-      click(archive);
-      await Promise.resolve();
-    });
+    expect(archive.getAttribute('aria-disabled')).toBeNull();
     expect(
       (await openSessionMenuItem('Equal-id secondary', 'Archive')).hasAttribute(
         'data-disabled',
@@ -4337,7 +4339,9 @@ describe('WebShellSidebar non-primary archive', () => {
     });
 
     expect(workspace.client.workspaceByCwd).toHaveBeenCalledWith('/tmp/other');
-    expect(archiveSessionsData).toHaveBeenCalledWith(['secondary-active']);
+    expect(archiveSessionsData).toHaveBeenCalledWith(['secondary-active'], {
+      requireIdle: true,
+    });
     expect(active.reload).not.toHaveBeenCalled();
     expect(archived.reload).not.toHaveBeenCalled();
     expect(
@@ -4738,14 +4742,16 @@ describe('WebShellSidebar non-primary archive', () => {
       (
         await openSessionMenuItem('Legacy primary shared', 'Archive')
       ).getAttribute('aria-disabled'),
-    ).toBe('true');
+    ).toBeNull();
     await selectSessionMenuItem('Secondary shared', 'Archive');
     await act(async () => {
       await archiveSessionsData.mock.results.at(-1)?.value;
       await Promise.resolve();
     });
 
-    expect(archiveSessionsData).toHaveBeenCalledWith(['shared-session']);
+    expect(archiveSessionsData).toHaveBeenCalledWith(['shared-session'], {
+      requireIdle: true,
+    });
     expect(onError).not.toHaveBeenCalled();
     expect(active.reload).not.toHaveBeenCalled();
     expect(archived.reload).not.toHaveBeenCalled();

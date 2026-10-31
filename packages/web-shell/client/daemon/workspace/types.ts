@@ -545,8 +545,13 @@ export interface DaemonWorkspaceActions {
    * Move a session to the archived directory. Idempotent: an
    * already-archived session resolves `true`. Rejects if the daemon
    * reports a per-session error (e.g. an archive/unarchive conflict).
+   * `requireIdle` makes the daemon itself refuse a session with active or
+   * unconfirmed work instead of closing it under that work.
    */
-  archiveSession(sessionId: string): Promise<boolean>;
+  archiveSession(
+    sessionId: string,
+    options?: { requireIdle?: boolean },
+  ): Promise<boolean>;
   /** Restore an archived session to the active directory. Idempotent. */
   unarchiveSession(sessionId: string): Promise<boolean>;
 

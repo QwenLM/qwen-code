@@ -166,10 +166,13 @@ export function createDaemonWorkspaceActions({
       );
     },
 
-    async archiveSession(sessionId: string) {
+    async archiveSession(
+      sessionId: string,
+      options?: { requireIdle?: boolean },
+    ) {
       const client = requireClient(getClient, 'Archive session failed');
       const result = await withActionTimeout(
-        client.archiveSessionsData([sessionId]),
+        client.archiveSessionsData([sessionId], options),
         'Archive session timed out',
       );
       if (result.errors.length > 0) {

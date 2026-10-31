@@ -616,9 +616,9 @@ export function useWebShellSessions(options: WebShellSessionsOptions = {}) {
     [generatedUiOwner, invalidate, workspace.actions, workspaceCwd],
   );
   const archiveSession = useCallback(
-    async (sessionId: string) => {
+    async (sessionId: string, options?: { requireIdle?: boolean }) => {
       try {
-        return await workspace.actions.archiveSession(sessionId);
+        return await workspace.actions.archiveSession(sessionId, options);
       } finally {
         invalidate();
       }
