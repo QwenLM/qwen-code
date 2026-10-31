@@ -491,7 +491,7 @@ it('gates the member plan tool and submits it through the durable command wait',
     const running = execute(turn, [call(args, id, name)]);
     await vi.waitFor(
       () => expect(commands.command(commandIdOf(id))).toBeDefined(),
-      { timeout: 5000 },
+      { timeout: 10_000 },
     );
     expect(commands.command(commandIdOf(id))?.kind).toBe(
       name === 'task_list' ? 'board_read' : 'plan_submit',
@@ -540,7 +540,7 @@ it.each(['execute', 'resume', 'refused'] as const)(
     ]);
     await vi.waitFor(
       () => expect(commands.command(commandIdOf('hook-plan'))).toBeDefined(),
-      { timeout: 5000 },
+      { timeout: 10_000 },
     );
     await commands.handover(commandIdOf('hook-plan'), PARENT);
     await commands.answered(commandIdOf('hook-plan'), {

@@ -416,6 +416,10 @@ interface ChatEditorRenderProps
     | 'contextUsageAlwaysVisible'
     | 'contextUsageControls'
     | 'onOpenContextUsage'
+    | 'workflowMode'
+    | 'workflowModeStatus'
+    | 'workflowModePending'
+    | 'onWorkflowModeChange'
   > {
   composerTags?: WebShellComposerTag[];
   pastedImages?: Array<{ data: string; media_type: string }>;
@@ -6860,5 +6864,57 @@ describe('ChatEditor file upload gating', () => {
       // come back instead of vanishing silently.
       expect(restore).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+describe('ChatEditor Workflow mode', () => {
+  const ready = {
+    workflowModeStatus: 'ready' as const,
+    workflowMode: { requested: true, available: true, effective: true },
+  };
+
+  it('keeps Workflow independent of reasoning and a running response', () => {
+    const onWorkflowModeChange = vi.fn();
+    const container = renderChatEditor({
+      ...ready,
+      isRunning: true,
+      disabled: true,
+      visibleToolbarActions: ['plan', 'workflowMode', 'model'],
+      onTogglePlan: vi.fn(),
+      onWorkflowModeChange,
+    });
+    const control = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Workflow mode"]',
+    )!;
+    expect(control.disabled).toBe(false);
+    act(() => control.click());
+    expect(onWorkflowModeChange).toHaveBeenCalledExactlyOnceWith(false);
+    expect(composerCoreState.submitText).not.toHaveBeenCalled();
+    const plan = container.querySelector('[data-web-shell-plan-control]')!;
+    const workflow = container.querySelector(
+      '[data-web-shell-workflow-mode-control]',
+    )!;
+    const model = container.querySelector('[data-web-shell-model-button]')!;
+    expect(
+      plan.compareDocumentPosition(workflow) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      workflow.compareDocumentPosition(model) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('honors explicit toolbar allowlists without fabricating support', () => {
+    const container = renderChatEditor({
+      ...ready,
+      visibleToolbarActions: ['model'],
+    });
+    expect(
+      container.querySelector('[data-web-shell-workflow-mode-control]'),
+    ).toBeNull();
+    rerenderChatEditor(container, { visibleToolbarActions: ['workflowMode'] });
+    expect(
+      container.querySelector('[data-web-shell-workflow-mode-control]'),
+    ).toBeNull();
   });
 });
