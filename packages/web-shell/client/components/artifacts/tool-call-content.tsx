@@ -14,7 +14,7 @@ import {
   sanitizeControlChars,
   truncateText,
 } from '../messages/toolFormatting';
-import { extractDiff, fencedCodeBlock } from '../messages/ToolGroup';
+import { resolveDiffAnnotation, fencedCodeBlock } from '../messages/ToolGroup';
 import { Markdown } from '../messages/Markdown';
 import { parseShellLiveOutput } from '../messages/tools/shellLiveOutput';
 import styles from './tool-call-content.module.css';
@@ -124,12 +124,14 @@ export function toolCallContent(
   tool: ACPToolCall,
   block: Pick<DaemonToolTranscriptBlock, 'rawInput' | 'rawOutput' | 'content'>,
 ) {
-  const diff = EDIT_TOOL.test(tool.toolName.toLowerCase())
-    ? extractDiff(tool)
-    : '';
+  const resolved = EDIT_TOOL.test(tool.toolName.toLowerCase())
+    ? resolveDiffAnnotation(tool)
+    : null;
+  const diff = resolved?.diff ?? '';
   const shell = isShellToolName(tool.toolName) ? shellDetails(tool) : undefined;
   return {
     diff,
+    noteKey: resolved?.noteKey ?? null,
     shell,
     argumentsText: shell ? shell.command : stringifyValue(block.rawInput),
     resultText: diff
