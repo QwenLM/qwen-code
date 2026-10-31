@@ -9,9 +9,7 @@
 仓库的 Actions 队列动辄积压数小时，而仓库内没有任何东西汇报它。2026-10-28 北京时间
 13:47 至 14:24 实测：排队 229–233 条，在跑仅 19–33 条，活队列等待中位数约 146 分钟。
 
-Fleet Shepherd 本就每 15 分钟在托管 runner 上跑一跳，也本就维护唯一一条 Dashboard
-issue，但它对队列的感知只有 `ZOMBIE_QUEUED_MINUTES`，那是盯本循环自己的 autofix
-派发的。全仓积压在有人打开 Actions 页面之前是不可见的。
+Fleet Shepherd 本就每 15 分钟在托管 runner 上跑一跳（本 PR 改为 30 分钟），也本就维护唯一一条 Dashboard issue，但它对队列的感知只有 `ZOMBIE_QUEUED_MINUTES`，那是盯本循环自己的 autofix 派发的。全仓积压在有人打开 Actions 页面之前是不可见的。
 
 autofix 自己发现不了：它的输入是 issue 标签、PR 评审、评论，以及对开放 PR 的定时扫描，
 没有任何一路读队列指标。

@@ -115,11 +115,11 @@ re-checked immediately before the mutation, mirroring every existing lever.
 - **Bootstrap without a backfill job:** the label write runs even when the
   notice comment is dedup'd, so currently-paused PRs are labeled by the
   regular scan rotation after deploy — note the scan's idle backoff defers
-  PRs idle >24h (exactly the paused population) to ~1 scan in 4. At the
-  30-minute tick that is a two-hour scan interval, so expect the backfill
-  within roughly half a day (median ~4h, p90 ~12h), not minutes. The
-  earlier ~2h/~6h figures were derived at the 15-minute tick and doubled
-  with it.
+  PRs idle >24h (exactly the paused population) to ~1 scan in 4, so expect
+  the backfill within a few hours (median ~2h, p90 ~6h), not minutes. That
+  rotation is the **autofix review scan** (`qwen-autofix.yml`, cron `*/10`),
+  not the Fleet Shepherd tick: changing the shepherd's cadence does not
+  change this estimate.
 - **Auto-release keyed on the notice timestamp**, not label age: labels carry
   no timestamps, and the notice is written by the same identity-verified path
   that applies the label. Resume evidence newer than the notice vetoes the

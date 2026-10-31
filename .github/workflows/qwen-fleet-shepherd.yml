@@ -165,16 +165,16 @@ env:
   # which is tuned for this loop's own dispatches and would swallow a live
   # queue whose median wait is already hours.
   QUEUE_AGED_HOURS: '24'
+  # Every per-tick cap below is a per-TICK blast-radius bound; the hourly
+  # ceiling it implies halves when the tick period doubles (12 to 6 syncs,
+  # 8 to 4 conflict dispatches, 12 to 6 closes, 20 to 10 cleanups). That is
+  # accepted: the caps exist to bound one tick's damage, and a burst that
+  # needs more than a tick's worth now takes two ticks.
   MAX_SYNCS_PER_TICK: '3'
   MAX_CONFLICT_DISPATCHES_PER_TICK: '2'
   # No-op closes per tick. Notices are uncapped: they are marker-deduped per
   # head SHA within NOOP_NOTICE_MAX_AGE_SEC and bounded by the 50-PR fleet
   # window.
-  # Every per-tick cap above and below is a per-TICK blast-radius bound; the
-  # hourly ceiling it implies halves when the tick period doubles (12 to 6
-  # syncs, 8 to 4 conflict dispatches, 12 to 6 closes, 20 to 10 cleanups). That
-  # is accepted: the caps exist to bound one tick's damage, and a burst that
-  # needs more than a tick's worth now takes two ticks.
   MAX_NOOP_CLOSES_PER_TICK: '3'
   # The close waits until its notice is at least GRACE old, and treats a
   # notice older than MAX_AGE as absent (a fresh one is posted first). GRACE
@@ -745,14 +745,14 @@ jobs:
             # contributor included; fork-triggered runs are documented here as
             # executing the BASE file, so that case is not claimed). This
             # section is emitted BEFORE the liveness marker that the next tick
-            # recovers with `head -1`. A name carrying a
-            # newline could therefore end the row early and land a forged
-            # watermark above the real one, and that watermark gates the
-            # liveness dispatch. Control characters collapse to spaces here;
-            # the rows then join on a REAL newline and print with '%s' (not
-            # '%b'), so no escape sequence is interpreted anywhere downstream —
-            # the R4-10 escaping on the takeover rows exists because those stay
-            # on '%b'. Pipes are escaped for the table.
+            # recovers with `head -1`. A name carrying a newline could
+            # therefore end the row early and land a forged watermark above
+            # the real one, and that watermark gates the liveness dispatch.
+            # Control characters collapse to spaces here; the rows then join
+            # on a REAL newline and print with '%s', not '%b', so no escape
+            # sequence is interpreted anywhere downstream — the R4-10 escaping
+            # on the takeover rows exists because those stay on '%b'. Pipes are
+            # escaped for the table.
             QUEUE_ROWS="$(jq -r --arg now "${NOW_EPOCH}" --arg hrs "${QUEUE_AGED_HOURS}" "${QUEUE_JQ}"'
               [ .[] | select(aged($now; $hrs) | not) ]
               | group_by(.name) | map({name: (.[0].name // ""), n: length}) | sort_by(-.n) | .[0:5]

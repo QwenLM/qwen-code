@@ -12,8 +12,9 @@ repository reports it. Measured on 2026-10-28 between 13:47 and 14:24 (Beijing):
 229–233 runs queued against 19–33 in progress, with a live median wait of about
 146 minutes.
 
-The Fleet Shepherd already runs every 15 minutes on a hosted runner and already
-maintains a single dashboard issue, but its queue awareness is limited to
+The Fleet Shepherd already ran every 15 minutes on a hosted runner (this PR
+moves it to 30) and already maintains a single dashboard issue, but its queue
+awareness was limited to
 `ZOMBIE_QUEUED_MINUTES`, which watches this loop's own autofix dispatches. A
 repo-wide backlog is invisible until someone opens the Actions tab.
 
