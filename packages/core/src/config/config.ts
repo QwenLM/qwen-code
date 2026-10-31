@@ -336,7 +336,7 @@ import {
   type ChatRecordingFailureListener,
   type ManagedSessionRecordWriter,
 } from '../services/chatRecordingService.js';
-import { CHARS_PER_TOKEN } from '../services/tokenEstimation.js';
+import { estimateContextTextTokens } from '../services/tokenEstimation.js';
 import {
   clearRuntimeStatus,
   writeRuntimeStatus,
@@ -3066,6 +3066,7 @@ export class Config {
   /** Stable managed-memory policy, separate from the changing catalog. */
   private autoMemoryPrompt = '';
   private autoMemoryContext = '';
+  private autoMemoryCatalogHasContent = false;
   private memoryRecallMode: MemoryRecallMode = 'legacy';
   private memoryCorpusRevision = '';
   private memoryRecallModeInitialized = false;
@@ -5529,6 +5530,7 @@ export class Config {
       this.setUserMemory('');
       this.autoMemoryPrompt = '';
       this.autoMemoryContext = '';
+      this.autoMemoryCatalogHasContent = false;
       this.setMemoryFileCount(0);
       this.setContextFilePaths([]);
       this.conditionalRulesRegistry = new ConditionalRulesRegistry(
@@ -5719,6 +5721,7 @@ export class Config {
           userSection.memoryDir,
           teamSection?.memoryDir,
         );
+        this.autoMemoryCatalogHasContent = false;
       } else {
         const policy = this.memoryManager.buildAutoMemoryPrompt(
           memoryDir,
@@ -5735,11 +5738,19 @@ export class Config {
         );
         this.autoMemoryPrompt = policy;
         this.autoMemoryContext = catalog;
+        // Empty indexes still render headers and placeholders, so token cost
+        // alone cannot establish that there are memories to prune.
+        this.autoMemoryCatalogHasContent = [
+          managedAutoMemoryIndex,
+          userAutoMemoryIndex,
+          teamSection?.indexContent,
+        ].some((content) => Boolean(content?.trim()));
       }
     } else {
       this.setUserMemory(memoryContent);
       this.autoMemoryPrompt = '';
       this.autoMemoryContext = '';
+      this.autoMemoryCatalogHasContent = false;
     }
     this.setMemoryFileCount(fileCount);
     this.setContextFilePaths(contextFilePaths);
@@ -5763,16 +5774,33 @@ export class Config {
     });
   }
 
-  private buildMemoryContextWarning(memoryContent: string): string | undefined {
+  private buildMemoryContextWarning(alwaysOnContext: {
+    contextFiles: string;
+    memoryPolicy: string;
+    memoryCatalog: string;
+  }): string | undefined {
     const contextWindowSize =
       this.getContentGeneratorConfig()?.contextWindowSize ??
       this.modelsConfig.getGenerationConfig().contextWindowSize ??
       tokenLimit(this.getModel(), 'input');
-    if (!contextWindowSize || contextWindowSize <= 0 || !memoryContent) {
+    if (!contextWindowSize || contextWindowSize <= 0) {
       return undefined;
     }
 
-    const estimatedTokens = Math.ceil(memoryContent.length / CHARS_PER_TOKEN);
+    const contextFileTokens = estimateContextTextTokens(
+      alwaysOnContext.contextFiles,
+    );
+    const policyTokens = estimateContextTextTokens(
+      alwaysOnContext.memoryPolicy,
+    );
+    const catalogTokens = estimateContextTextTokens(
+      alwaysOnContext.memoryCatalog,
+    );
+    const estimatedTokens = contextFileTokens + policyTokens + catalogTokens;
+    if (estimatedTokens === 0) {
+      return undefined;
+    }
+
     const ratioTokens = Math.floor(
       contextWindowSize * MEMORY_CONTEXT_WARNING_RATIO,
     );
@@ -5792,11 +5820,45 @@ export class Config {
       thresholdTokens === ratioTokens
         ? windowClause
         : `${MEMORY_CONTEXT_WARNING_MAX_TOKENS.toLocaleString()} tokens — the smaller of that and ${windowClause}`;
+    // Name every non-empty contributor: the catalog is what the index adds to
+    // a large-window session, and it is not trimmed by editing QWEN.md.
+    const contributors = [
+      { label: 'context files', tokens: contextFileTokens },
+      { label: 'auto-memory policy', tokens: policyTokens },
+      { label: 'auto-memory catalog', tokens: catalogTokens },
+    ].filter(({ tokens }) => tokens > 0);
+    const parts = contributors.map(
+      ({ label, tokens }) => `${tokens.toLocaleString()} tokens of ${label}`,
+    );
+    const breakdown =
+      parts.length > 2
+        ? `${parts.slice(0, -1).join(', ')}, and ${parts[parts.length - 1]}`
+        : parts.join(' and ');
+    const actions = [
+      ...(contextFileTokens > 0 ? ['trimming context files'] : []),
+      ...(catalogTokens > 0 && this.autoMemoryCatalogHasContent
+        ? ['pruning stale memories']
+        : []),
+    ];
+    const advice: string[] = [];
+    if (actions.length > 0) {
+      const onDemand =
+        contextFileTokens > 0 ? ' or moving details into on-demand files' : '';
+      advice.push(
+        `Consider ${actions.join(' or ')}${actions.length > 1 ? ',' : ''}${onDemand}.`,
+      );
+    }
+    const fixedTokens =
+      policyTokens + (this.autoMemoryCatalogHasContent ? 0 : catalogTokens);
+    if (actions.length === 0 || fixedTokens > thresholdTokens) {
+      advice.push(
+        'Managed auto-memory adds fixed overhead. Consider disabling managed auto-memory or using a model with a larger context window.',
+      );
+    }
     return (
       `Warning: Loaded always-on context (QWEN.md context files + auto-memory) uses about ` +
       `${estimatedTokens.toLocaleString()} tokens, more than ${bound}. ` +
-      `Consider trimming long always-loaded context or moving details into ` +
-      `on-demand files.`
+      `Of those, there are ${breakdown}. ${advice.join(' ')}`
     );
   }
 
@@ -6421,15 +6483,11 @@ export class Config {
    */
   getWarnings(): string[] {
     // Include the current catalog as well as the system memory policy.
-    const memoryContextWarning = this.buildMemoryContextWarning(
-      [
-        this.getUserMemory(),
-        this.getAutoMemoryPrompt(),
-        this.getAutoMemoryContext(),
-      ]
-        .filter(Boolean)
-        .join('\n\n'),
-    );
+    const memoryContextWarning = this.buildMemoryContextWarning({
+      contextFiles: this.getUserMemory(),
+      memoryPolicy: this.getAutoMemoryPrompt(),
+      memoryCatalog: this.getAutoMemoryContext(),
+    });
     const ruleWarnings = this.ignoredExtensionRules.map(
       (displayPath) =>
         `Extension rule ${displayPath} has no \`paths:\` and was skipped. ` +
@@ -8065,6 +8123,7 @@ export class Config {
     // the reset mode leaves that tool undeclared.
     this.autoMemoryPrompt = '';
     this.autoMemoryContext = '';
+    this.autoMemoryCatalogHasContent = false;
 
     let memoryRefreshError: unknown;
     try {

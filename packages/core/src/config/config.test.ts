@@ -8749,6 +8749,268 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  // #14976: the warning was the last context-reporting path still on char/4.
+  it('estimates CJK-heavy context with the same estimator as /context', () => {
+    const config = makeConfig({
+      userMemory: '规则'.repeat(2_000), // 4,000 CJK characters
+      generationConfig: { contextWindowSize: 1_000 },
+    });
+
+    // char/4 would report 1,000 tokens; the CJK-aware estimator charges
+    // non-ASCII characters 1.5 tokens each, the number /context reports.
+    expectWarning(config, 'uses about 6,000 tokens');
+    const warning = config
+      .getWarnings()
+      .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+    expect(warning).toContain('6,000 tokens of context files');
+    expect(warning).not.toContain('auto-memory policy');
+    expect(warning).not.toContain('auto-memory catalog');
+  });
+
+  it('does not suggest pruning memories for constructor context before refresh', () => {
+    const config = makeConfig({
+      userMemory: 'a'.repeat(4_000),
+      ...smallWindow(),
+    });
+
+    const warning = config
+      .getWarnings()
+      .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+
+    expect(config.getAutoMemoryContext()).toBe('');
+    expect(warning).toContain(
+      'Consider trimming context files or moving details into on-demand files.',
+    );
+    expect(warning).not.toContain('pruning stale memories');
+    expect(warning).not.toContain('disabling managed auto-memory');
+  });
+
+  it.each(['safe', 'bare'] as const)(
+    'clears an already-loaded catalog when refreshed in %s mode',
+    async (mode) => {
+      const config = makeConfig(smallWindow());
+      // Keep the public catalog getter observable: clearing the policy alone
+      // would otherwise hide a stale catalog and let its clear regress.
+      vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('policy');
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce(
+        memoryLoad({ memoryContent: 'a'.repeat(4_000), fileCount: 1 }),
+      );
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+        mockAutoMemoryIndexRead('saved catalog entry '.repeat(100)),
+      );
+      vi.mocked(readUserAutoMemoryIndexWithStats).mockResolvedValueOnce(null);
+
+      await config.refreshHierarchicalMemory();
+      expect(config.getMemoryRecallMode()).toBe('legacy');
+      expect(config.getAutoMemoryContext()).toContain('saved catalog entry');
+      expectWarning(config, 'pruning stale memories');
+
+      if (mode === 'safe') {
+        vi.spyOn(config, 'isSafeMode').mockReturnValue(true);
+      } else {
+        vi.spyOn(config, 'getBareMode').mockReturnValue(true);
+        vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce(
+          memoryLoad({ memoryContent: 'a'.repeat(4_000), fileCount: 1 }),
+        );
+      }
+      await config.refreshHierarchicalMemory();
+
+      expect(config.getAutoMemoryContext()).toBe('');
+      const warning = config
+        .getWarnings()
+        .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+      if (mode === 'safe') {
+        expect(config.getUserMemory()).toBe('');
+        expect(warning).toBeUndefined();
+      } else {
+        expect(warning).toContain('1,000 tokens of context files');
+        expect(warning).not.toContain('pruning stale memories');
+      }
+    },
+  );
+
+  it.each([
+    {
+      source: 'catalog',
+      policy: '',
+      catalog: '规则'.repeat(2_000),
+      total: '7,000',
+      contribution: '6,000 tokens of auto-memory catalog',
+    },
+    {
+      source: 'policy',
+      policy: '规则'.repeat(100),
+      catalog: '',
+      total: '1,300',
+      contribution: '300 tokens of auto-memory policy',
+    },
+  ])(
+    'uses the CJK estimator for the $source contribution',
+    ({ policy, catalog, total, contribution }) => {
+      const config = makeConfig({
+        userMemory: 'a'.repeat(4_000),
+        ...smallWindow(),
+      });
+      vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue(policy);
+      vi.spyOn(config, 'getAutoMemoryContext').mockReturnValue(catalog);
+
+      expectWarning(config, `uses about ${total} tokens`);
+      expectWarning(config, '1,000 tokens of context files');
+      expectWarning(config, contribution);
+    },
+  );
+
+  it('offers fixed-overhead remedies without suggesting edits to absent context files', () => {
+    const config = makeConfig({ userMemory: '', ...smallWindow() });
+    vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('b'.repeat(4_000));
+    vi.spyOn(config, 'getAutoMemoryContext').mockReturnValue('');
+
+    const warning = config
+      .getWarnings()
+      .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+    expect(warning).toContain('1,000 tokens of auto-memory policy');
+    expect(warning).not.toContain('trimming context files');
+    expect(warning).not.toContain('moving details into on-demand files');
+    expect(warning).not.toContain('pruning stale memories');
+    expect(warning).toContain('disabling managed auto-memory');
+    expect(warning).toContain('a model with a larger context window');
+  });
+
+  it.each([null, '', ' \n\t '])(
+    'does not suggest pruning empty legacy indexes (%j)',
+    async (content) => {
+      const config = makeConfig(smallWindow());
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce(
+        memoryLoad({ memoryContent: 'a'.repeat(4_000), fileCount: 1 }),
+      );
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+        content === null ? null : mockAutoMemoryIndexRead(content),
+      );
+      vi.mocked(readUserAutoMemoryIndexWithStats).mockResolvedValueOnce(
+        content === null ? null : mockAutoMemoryIndexRead(content),
+      );
+
+      await config.refreshHierarchicalMemory();
+
+      expect(config.getMemoryRecallMode()).toBe('legacy');
+      expect(config.getAutoMemoryContext()).toContain(
+        'MEMORY.md is currently empty',
+      );
+      const warning = config
+        .getWarnings()
+        .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+      expect(warning).toContain('tokens of auto-memory catalog');
+      expect(warning).toContain('trimming context files');
+      expect(warning).not.toContain('pruning stale memories');
+      expect(warning).toContain('disabling managed auto-memory');
+    },
+  );
+
+  it.each(['project', 'user', 'team'] as const)(
+    'offers pruning for a non-empty %s catalog and stops after it becomes empty',
+    async (scope) => {
+      const config = makeConfig({
+        ...smallWindow(),
+        enableTeamMemory: scope === 'team',
+      });
+      vi.spyOn(config, 'isTrustedFolder').mockReturnValue(true);
+      const entry = '- [Saved memory](saved.md) — remembered project detail';
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce(
+        memoryLoad(),
+      );
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+        scope === 'project' ? mockAutoMemoryIndexRead(entry) : null,
+      );
+      vi.mocked(readUserAutoMemoryIndexWithStats).mockResolvedValueOnce(
+        scope === 'user' ? mockAutoMemoryIndexRead(entry) : null,
+      );
+      if (scope === 'team') {
+        vi.mocked(rebuildTeamAutoMemoryIndex).mockResolvedValueOnce(entry);
+      }
+
+      await config.refreshHierarchicalMemory();
+
+      const warning = config
+        .getWarnings()
+        .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+      expect(warning).toContain('pruning stale memories');
+      expect(warning).not.toContain('trimming context files');
+      expect(warning).not.toContain('moving details into on-demand files');
+
+      vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce(
+        memoryLoad(),
+      );
+      vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(null);
+      vi.mocked(readUserAutoMemoryIndexWithStats).mockResolvedValueOnce(null);
+      if (scope === 'team') {
+        vi.mocked(rebuildTeamAutoMemoryIndex).mockResolvedValueOnce(null);
+      }
+      await config.refreshHierarchicalMemory();
+
+      const emptyWarning = config
+        .getWarnings()
+        .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+      expect(emptyWarning).not.toContain('pruning stale memories');
+      expect(emptyWarning).not.toContain('trimming context files');
+      expect(emptyWarning).toContain('disabling managed auto-memory');
+    },
+  );
+
+  it('does not suggest pruning memories when structured recall omits the catalog', () => {
+    const config = makeConfig({
+      userMemory: 'a'.repeat(4_000),
+      ...smallWindow(),
+    });
+    Object.assign(config, {
+      memoryRecallMode: 'structured',
+      autoMemoryPrompt: 'b'.repeat(400),
+      autoMemoryContext: 'c'.repeat(20_000),
+    });
+
+    const warning = config
+      .getWarnings()
+      .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+
+    expect(config.getAutoMemoryContext()).toBe('');
+    expect(warning).toContain('uses about 1,100 tokens');
+    expect(warning).toContain('100 tokens of auto-memory policy');
+    expect(warning).not.toContain('auto-memory catalog');
+    expect(warning).not.toContain('pruning stale memories');
+  });
+
+  // #14976: the memory catalog drove the breach while the advice pointed at
+  // QWEN.md, so the warning now names each contributor.
+  it('names the context-file, auto-memory policy, and catalog split in the warning', async () => {
+    const config = makeConfig({
+      userMemory: 'a'.repeat(4_000), // 1,000 tokens
+      generationConfig: { contextWindowSize: 1_000 },
+    });
+    vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce(
+      memoryLoad({ memoryContent: 'a'.repeat(4_000), fileCount: 1 }),
+    );
+    vi.mocked(readAutoMemoryIndexWithStats).mockResolvedValueOnce(
+      mockAutoMemoryIndexRead('c'.repeat(20_000)),
+    );
+    vi.mocked(readUserAutoMemoryIndexWithStats).mockResolvedValueOnce(null);
+    await config.refreshHierarchicalMemory();
+    vi.spyOn(config, 'getAutoMemoryPrompt').mockReturnValue('b'.repeat(400));
+    vi.spyOn(config, 'getAutoMemoryContext').mockReturnValue(
+      'c'.repeat(20_000),
+    );
+
+    const warning = config
+      .getWarnings()
+      .find((candidate) => candidate.includes(ALWAYS_ON_CONTEXT));
+
+    expect(warning).toContain('uses about 6,100 tokens');
+    expect(warning).toContain(
+      'Of those, there are 1,000 tokens of context files, ' +
+        '100 tokens of auto-memory policy, and 5,000 tokens of auto-memory catalog.',
+    );
+    expect(warning).toContain('pruning stale memories');
+    expect(warning).not.toContain('disabling managed auto-memory');
+  });
+
   it('refreshHierarchicalMemory should not warn for small always-loaded context', async () => {
     const config = makeConfig({ bareMode: true, ...smallWindow() });
     vi.mocked(loadServerHierarchicalMemory).mockResolvedValueOnce(
