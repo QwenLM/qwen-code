@@ -4536,6 +4536,13 @@ export function App({
   const [sessionStatusDisplayName, setSessionStatusDisplayName] = useState<
     string | undefined
   >(undefined);
+  /**
+   * Bumped when a standalone session rename settles outside the sidebar
+   * (pane or header title); WebShellSidebar maps it into its standalone
+   * recents refresh key, which the sidebar's own mutations bump directly.
+   */
+  const [standaloneRenameRefreshToken, setStandaloneRenameRefreshToken] =
+    useState(0);
   const [currentSessionSummary, setCurrentSessionSummary] = useState<
     DaemonSessionSummary | undefined
   >(undefined);
@@ -13528,6 +13535,18 @@ export function App({
         target.closest('[data-web-shell-context-popover]')
       )
         return;
+      // Exempt the inline rename's own controls (the pane title's
+      // keyboard-activation path and its input) so the dismisser can't
+      // swallow their Enter/Space or preempt the title's handler; any other
+      // editable target (e.g. the composer) must keep being able to dismiss
+      // or cancel the panel from the keyboard.
+      if (
+        target instanceof Element &&
+        target.closest(
+          '[data-web-shell-pane-title], [data-web-shell-pane-title-input]',
+        )
+      )
+        return;
       const message = btwMessage;
       if (!message || message.role !== 'btw') return;
 
@@ -15012,9 +15031,57 @@ export function App({
         connectionRef.current.sessionContext?.kind === 'standalone'
       ) {
         setSessionStatusDisplayName(displayName);
+        // The sidebar's standalone recents reload only on their own
+        // mutations; refresh them for renames settled outside the sidebar.
+        setStandaloneRenameRefreshToken((value) => value + 1);
       }
     },
     [sessionCatalogController],
+  );
+  // The chat header title's inline rename: the same write and
+  // reconciliation as /rename, so the catalog, the status line and the host's
+  // session info all see the daemon's stored (possibly clamped) name.
+  const renameSessionFromHeader = useCallback(
+    (displayName: string): Promise<void> => {
+      const renamedSessionId = connectionRef.current.sessionId;
+      if (!renamedSessionId) return Promise.resolve();
+      const renamedWorkspaceCwd = workspaceContextActive
+        ? connectionRef.current.workspaceCwd
+        : undefined;
+      const owner = sessionOwnerGuard.capture();
+      const write =
+        effectiveSessionContext?.kind === 'standalone'
+          ? workspace.client.renameStandaloneSession(
+              renamedSessionId,
+              displayName,
+            )
+          : sessionActions.renameSession(displayName);
+      return write
+        .then((result) => {
+          reconcileCatalogRename(
+            renamedWorkspaceCwd,
+            renamedSessionId,
+            result?.displayName || displayName,
+          );
+        })
+        .catch((error: unknown) => {
+          if (renamedWorkspaceCwd) {
+            sessionCatalogController.invalidateWorkspace(renamedWorkspaceCwd);
+          }
+          if (!owner.isCurrent()) return;
+          reportError(error, 'Failed to rename session');
+        });
+    },
+    [
+      effectiveSessionContext?.kind,
+      reconcileCatalogRename,
+      reportError,
+      sessionActions,
+      sessionCatalogController,
+      sessionOwnerGuard,
+      workspace.client,
+      workspaceContextActive,
+    ],
   );
   useEffect(() => {
     const sessionId = connection.sessionId;
@@ -22642,6 +22709,7 @@ export function App({
                     returnToChat();
                   }}
                   onSessionRenameConfirmed={reconcileCatalogRename}
+                  standaloneRenameRefreshToken={standaloneRenameRefreshToken}
                   onSessionsDeleted={(sessionIds, meta) => {
                     closeUsageTabs(sessionIds);
                     // Deleting the attached session must leave the deleted
@@ -22932,6 +23000,14 @@ export function App({
                       onOpenLocalControlSettings={
                         showMobileAccess && workspaceContextActive
                           ? handleOpenLocalControlSettings
+                          : undefined
+                      }
+                      titleRename={
+                        connection.sessionId
+                          ? {
+                              sessionId: connection.sessionId,
+                              rename: renameSessionFromHeader,
+                            }
                           : undefined
                       }
                     />
@@ -23808,6 +23884,7 @@ export function App({
                         // is launched from), not the single-session chat.
                         onExit={handleSplitExit}
                         onError={reportError}
+                        onSessionRenameConfirmed={reconcileCatalogRename}
                         onImageIngestionNotice={pushToast}
                         onSlashCommand={onSlashCommand}
                         onOpenGoals={openGoals}

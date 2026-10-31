@@ -105,6 +105,22 @@
   color: var(--foreground);
 }
 
+/* Single-click inline rename: the input stands in for the title text, so it
+   keeps the title's flex share and font to avoid a header row jump. */
+.titleRenameInput {
+  flex: 1 1 auto;
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .headerActions {
   position: relative;
   flex: 0 0 auto;

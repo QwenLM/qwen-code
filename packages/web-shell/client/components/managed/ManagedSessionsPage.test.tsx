@@ -3760,6 +3760,38 @@ describe('ManagedSessionsPage', () => {
     }
   });
 
+  it('does not turn the home header title into the daemon session rename', async () => {
+    // The chat header's inline title rename targets the daemon session; the
+    // managed home renders the same header for a managed Session, so its
+    // title must stay outside that rename.
+    mocks.client.getSession.mockResolvedValue(
+      summary('s1', { title: 'Managed task' }),
+    );
+    const target = document.createElement('div');
+    document.body.appendChild(target);
+    try {
+      await render('s1', 'en', provider, target);
+      expect(
+        container.querySelector('[data-testid="chat-context-header"]'),
+      ).not.toBeNull();
+      expect(container.querySelector('[data-web-shell-pane-title]')).toBeNull();
+      const title = [...container.querySelectorAll('span')].find(
+        (span) => span.textContent === 'Managed task',
+      );
+      expect(title).toBeDefined();
+      await act(async () => {
+        title!.dispatchEvent(
+          new MouseEvent('click', { bubbles: true, detail: 1 }),
+        );
+      });
+      expect(
+        container.querySelector('[data-web-shell-pane-title-input]'),
+      ).toBeNull();
+    } finally {
+      target.remove();
+    }
+  });
+
   it('keeps the labeled Workspace lines in the standalone layout', async () => {
     mocks.client.getSession.mockResolvedValue(
       summary('bound', {

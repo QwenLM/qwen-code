@@ -7,12 +7,13 @@
 
 import * as messageDeletion from '../utils/message-deletion';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, forwardRef, useImperativeHandle } from 'react';
+import { act, forwardRef, useImperativeHandle, useState } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import {
   DaemonHttpError,
   GOAL_PAUSE_REASON_COMMAND,
 } from '@qwen-code/sdk/daemon';
+import { Popover as RadixPopover } from 'radix-ui';
 import type { ContextUsageControls } from '../hooks/useContextUsageControls';
 import { I18nProvider } from '../i18n';
 import { formatDateTime } from '../utils/formatDateTime';
@@ -23,6 +24,13 @@ import {
 } from '../customization';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
+
+// jsdom has no PointerEvent constructor; Radix's outside-press dismissal only
+// needs a pointerdown-typed event with a button property (the same
+// substitution sidebarHarness makes).
+if (!globalThis.PointerEvent) {
+  globalThis.PointerEvent = MouseEvent as typeof PointerEvent;
+}
 
 const catalogController = vi.hoisted(() => ({
   invalidateWorkspace: vi.fn(),
@@ -87,8 +95,10 @@ const controlGoal = vi.fn();
 const readAttachment = vi.fn();
 const getContextUsage = vi.fn();
 const loadSession = vi.fn(async () => {});
+const renameSession = vi.fn(async () => ({}));
 const daemonActions = {
   loadSession,
+  renameSession,
   sendPrompt,
   submitPermission,
   respondToPermission,
@@ -104,6 +114,9 @@ const daemonActions = {
   controlGoal,
   readAttachment,
   getContextUsage,
+};
+const workspaceClientMock = {
+  renameStandaloneSession: vi.fn(),
 };
 const enqueuePrompt = vi.fn(() => true);
 const removeQueuedPrompt = vi.fn();
@@ -121,7 +134,9 @@ const latestComposerCoreOptions = vi.hoisted(() => ({
 
 const paneSettings = vi.fn(async () => ({ v: 1, settings: [] }));
 const workspaceByCwd = vi.fn(() => ({ workspaceSettings: paneSettings }));
-const paneWorkspaceClient = { workspaceByCwd };
+// Stable module-level identity: the pane approval-mode hooks key their
+// effects on the client object, a fresh object per render would re-fire them.
+const paneWorkspaceClient = { workspaceByCwd, ...workspaceClientMock };
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
@@ -507,6 +522,11 @@ beforeEach(() => {
   catalogController.promptAdmitted.mockClear();
   catalogController.promptAdmissionUncertain.mockClear();
   catalogController.turnCompleted.mockClear();
+  catalogController.renamed.mockClear();
+  renameSession.mockReset();
+  renameSession.mockResolvedValue({});
+  workspaceClientMock.renameStandaloneSession.mockReset();
+  workspaceClientMock.renameStandaloneSession.mockResolvedValue({});
 });
 
 afterEach(() => {
@@ -514,6 +534,9 @@ afterEach(() => {
   container?.remove();
   root = null;
   container = null;
+  // The jsdom document outlives the test: drop any text selection so a
+  // selection-guard case cannot leak into the next one.
+  window.getSelection()?.removeAllRanges();
 });
 
 function render(
@@ -4199,5 +4222,471 @@ describe('pane approval mode allowlist', () => {
     expect(workspaceByCwd).toHaveBeenCalledOnce();
     // A failed scoped read fails closed rather than offering every mode.
     expect(latestChatEditorProps.availableModes).toEqual([]);
+  });
+});
+
+describe('ChatPane pane title single-click rename', () => {
+  // The same Popover the app renders (imported from the radix-ui package).
+  // It starts open and, by Radix design, a button-0 pointerdown + click
+  // outside the layer dismisses it through a deferred native click on
+  // document — a click stopped before document (React stopPropagation)
+  // would leave it open.
+  function ProbePopover({
+    onOpenChange,
+  }: {
+    onOpenChange: (open: boolean) => void;
+  }) {
+    const [open, setOpen] = useState(true);
+    return (
+      <RadixPopover.Root
+        open={open}
+        onOpenChange={(next) => {
+          setOpen(next);
+          onOpenChange(next);
+        }}
+      >
+        <RadixPopover.Trigger asChild>
+          <button type="button">probe trigger</button>
+        </RadixPopover.Trigger>
+        <RadixPopover.Portal>
+          <RadixPopover.Content data-probe-popover>
+            probe popover content
+          </RadixPopover.Content>
+        </RadixPopover.Portal>
+      </RadixPopover.Root>
+    );
+  }
+
+  function findTitle(): HTMLElement {
+    const title = container!.querySelector<HTMLElement>(
+      '[data-web-shell-pane-title]',
+    );
+    expect(title).not.toBeNull();
+    return title as HTMLElement;
+  }
+
+  function findRenameInput(): HTMLInputElement | null {
+    return container!.querySelector<HTMLInputElement>(
+      '[data-web-shell-pane-title-input]',
+    );
+  }
+
+  async function openRename(): Promise<void> {
+    await act(async () => {
+      findTitle().dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      );
+    });
+  }
+
+  function setRenameValue(value: string): void {
+    const input = findRenameInput() as HTMLInputElement;
+    const setter = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setter?.call(input, value);
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+  }
+
+  function pressRenameKey(key: string): void {
+    (findRenameInput() as HTMLInputElement).dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+  }
+
+  it('opens the inline rename input on a single title click, prefilled and focused', async () => {
+    render();
+    await openRename();
+    const input = findRenameInput();
+    expect(input).not.toBeNull();
+    expect(input?.value).toBe('Refactor core');
+    expect(input?.maxLength).toBe(256);
+    expect(input?.getAttribute('aria-label')).toBe('Rename: Refactor core');
+    expect(document.activeElement).toBe(input);
+    expect(renameSession).not.toHaveBeenCalled();
+  });
+
+  it('saves the trimmed name on Enter and reconciles the session catalog', async () => {
+    render();
+    await openRename();
+    setRenameValue('  Pane renamed  ');
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(renameSession).toHaveBeenCalledTimes(1);
+    expect(renameSession).toHaveBeenCalledWith('Pane renamed');
+    expect(catalogController.renamed).toHaveBeenCalledTimes(1);
+    expect(catalogController.renamed).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+      'Pane renamed',
+    );
+    expect(findRenameInput()).toBeNull();
+  });
+
+  it('reconciles through the host callback with the daemon-stored name', async () => {
+    renameSession.mockResolvedValueOnce({ displayName: 'Stored name' });
+    const onSessionRenameConfirmed = vi.fn();
+    render({ onSessionRenameConfirmed });
+    await openRename();
+    setRenameValue('Typed name');
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(renameSession).toHaveBeenCalledWith('Typed name');
+    expect(onSessionRenameConfirmed).toHaveBeenCalledTimes(1);
+    expect(onSessionRenameConfirmed).toHaveBeenCalledWith(
+      '/w',
+      'sess-1',
+      'Stored name',
+    );
+    expect(catalogController.renamed).not.toHaveBeenCalled();
+  });
+
+  it('bails on Enter without editing: no daemon write, form closes', async () => {
+    render();
+    await openRename();
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(renameSession).not.toHaveBeenCalled();
+    expect(workspaceClientMock.renameStandaloneSession).not.toHaveBeenCalled();
+    expect(catalogController.renamed).not.toHaveBeenCalled();
+    expect(findRenameInput()).toBeNull();
+  });
+
+  it('renames the split pane title supplied via the title prop', async () => {
+    render({
+      title: 'Split pane name',
+      sessionSummary: {
+        sessionId: 'sess-1',
+        displayName: 'Split pane name',
+      },
+      workspaceCwd: '/ws2',
+    });
+    await openRename();
+    expect(findRenameInput()?.value).toBe('Split pane name');
+    setRenameValue('Split renamed');
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(renameSession).toHaveBeenCalledWith('Split renamed');
+    expect(catalogController.renamed).toHaveBeenCalledWith(
+      '/ws2',
+      'sess-1',
+      'Split renamed',
+    );
+  });
+
+  it('saves standalone sessions through the workspace client', async () => {
+    connectionState = {
+      ...connectionState,
+      sessionContext: { kind: 'standalone' },
+    };
+    render();
+    await openRename();
+    setRenameValue('Standalone name');
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(workspaceClientMock.renameStandaloneSession).toHaveBeenCalledWith(
+      'sess-1',
+      'Standalone name',
+    );
+    expect(renameSession).not.toHaveBeenCalled();
+    // A standalone session has no workspace-catalog row: the host is told
+    // with no workspace, and the pane does not patch the catalog itself.
+    expect(catalogController.renamed).not.toHaveBeenCalled();
+  });
+
+  it('reconciles a standalone rename through the host callback without a workspace', async () => {
+    connectionState = {
+      ...connectionState,
+      sessionContext: { kind: 'standalone' },
+    };
+    const onSessionRenameConfirmed = vi.fn();
+    render({ onSessionRenameConfirmed });
+    await openRename();
+    setRenameValue('Standalone name');
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(onSessionRenameConfirmed).toHaveBeenCalledWith(
+      undefined,
+      'sess-1',
+      'Standalone name',
+    );
+    expect(catalogController.renamed).not.toHaveBeenCalled();
+  });
+
+  it('cancels on Escape without saving', async () => {
+    render();
+    await openRename();
+    setRenameValue('Whatever');
+    await act(async () => {
+      pressRenameKey('Escape');
+    });
+    expect(findRenameInput()).toBeNull();
+    expect(renameSession).not.toHaveBeenCalled();
+    expect(workspaceClientMock.renameStandaloneSession).not.toHaveBeenCalled();
+  });
+
+  it('cancels on blur without saving', async () => {
+    render();
+    await openRename();
+    setRenameValue('Whatever');
+    await act(async () => {
+      (findRenameInput() as HTMLInputElement).blur();
+    });
+    expect(findRenameInput()).toBeNull();
+    expect(renameSession).not.toHaveBeenCalled();
+  });
+
+  it('closes without saving when the name is empty', async () => {
+    render();
+    await openRename();
+    setRenameValue('   ');
+    await act(async () => {
+      pressRenameKey('Enter');
+    });
+    expect(findRenameInput()).toBeNull();
+    expect(renameSession).not.toHaveBeenCalled();
+  });
+
+  it('does not open the rename on a click that follows a text selection', async () => {
+    render();
+    const title = findTitle();
+    const range = document.createRange();
+    range.selectNodeContents(title);
+    window.getSelection()?.removeAllRanges();
+    window.getSelection()?.addRange(range);
+    await act(async () => {
+      title.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      );
+    });
+    expect(findRenameInput()).toBeNull();
+    expect(renameSession).not.toHaveBeenCalled();
+  });
+
+  it('leaves the title inert without a session id', async () => {
+    connectionState = { ...connectionState, sessionId: null };
+    render();
+    expect(container!.querySelector('[data-web-shell-pane-title]')).toBeNull();
+    const title = Array.from(container!.querySelectorAll('span')).find(
+      (span) => span.textContent === 'Refactor core',
+    );
+    expect(title).toBeDefined();
+    await act(async () => {
+      (title as HTMLElement).dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    expect(findRenameInput()).toBeNull();
+    expect(renameSession).not.toHaveBeenCalled();
+  });
+
+  it('reports a failed save and closes the editor', async () => {
+    const boom = new Error('boom');
+    renameSession.mockRejectedValueOnce(boom);
+    const onError = vi.fn();
+    render({ onError });
+    await openRename();
+    setRenameValue('New name');
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(onError).toHaveBeenCalledWith(boom, 'Failed to rename session');
+    expect(catalogController.invalidateWorkspace).toHaveBeenCalledWith('/w');
+    expect(findRenameInput()).toBeNull();
+  });
+
+  it('suppresses the failure report after a mid-flight owner switch', async () => {
+    const failing = deferred<never>();
+    renameSession.mockReturnValueOnce(failing.promise);
+    const onError = vi.fn();
+    render({ onError });
+    await openRename();
+    setRenameValue('New name');
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // The pane switches sessions before the write settles.
+    act(() => {
+      ownerVersion += 1;
+      rerender({ onError });
+    });
+    await act(async () => {
+      failing.reject(new Error('late boom'));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    // The catalog is still invalidated, but the error is not reported to a
+    // session the user has already switched away from.
+    expect(catalogController.invalidateWorkspace).toHaveBeenCalledWith('/w');
+    expect(onError).not.toHaveBeenCalled();
+    expect(findRenameInput()).toBeNull();
+  });
+
+  it('opens from the keyboard with Enter or Space on the focused title', async () => {
+    render();
+    const enter = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      findTitle().dispatchEvent(enter);
+    });
+    expect(enter.defaultPrevented).toBe(true);
+    expect(findRenameInput()?.value).toBe('Refactor core');
+    await act(async () => {
+      pressRenameKey('Escape');
+    });
+    expect(document.activeElement).toBe(findTitle());
+    const space = new KeyboardEvent('keydown', {
+      key: ' ',
+      bubbles: true,
+      cancelable: true,
+    });
+    await act(async () => {
+      findTitle().dispatchEvent(space);
+    });
+    expect(space.defaultPrevented).toBe(true);
+    expect(findRenameInput()).not.toBeNull();
+  });
+
+  it('hands focus back to the title wrapped in the session details anchor', async () => {
+    // The title's ref reaches the DOM through the details anchor's asChild
+    // Slot; focus restoration depends on that composed ref.
+    render({
+      sessionSummary: { sessionId: 'sess-1', displayName: 'Refactor core' },
+    });
+    const title = findTitle();
+    title.focus();
+    await act(async () => {
+      title.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(findRenameInput()).not.toBeNull();
+    await act(async () => {
+      pressRenameKey('Escape');
+    });
+    expect(findRenameInput()).toBeNull();
+    expect(document.activeElement).toBe(findTitle());
+  });
+
+  it('ignores the Enter that commits an IME composition', async () => {
+    render();
+    await openRename();
+    setRenameValue('huiyijilu');
+    await act(async () => {
+      (findRenameInput() as HTMLInputElement).dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          keyCode: 229,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(renameSession).not.toHaveBeenCalled();
+    expect(findRenameInput()?.value).toBe('huiyijilu');
+  });
+
+  it('does not write the id-prefix prefill when the real name arrives under an open editor', async () => {
+    connectionState = {
+      ...connectionState,
+      sessionId: 'a1b2c3d4-e5f6-7890-abcd',
+      displayName: undefined,
+    };
+    render();
+    await openRename();
+    expect(findRenameInput()?.value).toBe('a1b2c3d4');
+    connectionState = { ...connectionState, displayName: 'Real title' };
+    rerender();
+    await act(async () => {
+      pressRenameKey('Enter');
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(renameSession).not.toHaveBeenCalled();
+    expect(catalogController.renamed).not.toHaveBeenCalled();
+  });
+
+  it('does not write a stale draft to the session swapped in under the editor', async () => {
+    render();
+    await openRename();
+    setRenameValue('Stale draft');
+    connectionState = {
+      ...connectionState,
+      sessionId: 'sess-2',
+      displayName: 'Other session',
+    };
+    rerender();
+    expect(findRenameInput()).toBeNull();
+    expect(renameSession).not.toHaveBeenCalled();
+    expect(catalogController.renamed).not.toHaveBeenCalled();
+  });
+
+  it('dismisses an already-open Radix popover when a title click starts the rename', async () => {
+    render();
+    const onOpenChange = vi.fn();
+    const probeHost = document.createElement('div');
+    document.body.appendChild(probeHost);
+    const probeRoot = createRoot(probeHost);
+    act(() => {
+      probeRoot.render(<ProbePopover onOpenChange={onOpenChange} />);
+    });
+    // DismissableLayer registers its document pointerdown listener in a
+    // setTimeout(0); give it a macrotask before probing dismissal.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(
+      document
+        .querySelector('[data-probe-popover]')
+        ?.getAttribute('data-state'),
+    ).toBe('open');
+    const title = findTitle();
+    await act(async () => {
+      title.dispatchEvent(
+        new PointerEvent('pointerdown', { bubbles: true, button: 0 }),
+      );
+      title.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, cancelable: true }),
+      );
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(onOpenChange).toHaveBeenCalledWith(false);
+    expect(
+      document
+        .querySelector('[data-probe-popover]')
+        ?.getAttribute('data-state'),
+    ).not.toBe('open');
+    expect(findRenameInput()).not.toBeNull();
+    act(() => probeRoot.unmount());
+    probeHost.remove();
   });
 });

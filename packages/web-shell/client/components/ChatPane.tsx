@@ -55,6 +55,7 @@ import {
 import { useAnimationFrameTranscriptSnapshot } from '../hooks/useAnimationFrameTranscriptBlocks';
 import { useMessagesFromBlocks } from '../hooks/useMessages';
 import { useSessionArtifacts } from '../hooks/useSessionArtifacts';
+import { useInlineSessionRename } from '../hooks/useInlineSessionRename';
 import { useBackgroundTasks } from '../hooks/useBackgroundTasks';
 import { extractPendingPermission } from '../adapters/transcriptAdapter';
 import type { PromptFile, PromptImage } from '../adapters/promptTypes';
@@ -238,6 +239,17 @@ export interface ChatPaneProps {
   /** Whether this pane is currently the maximized (solo) one. */
   isMaximized?: boolean;
   onError?: (error: unknown, fallback: string) => void;
+  /**
+   * Reconciles a rename made from the pane title, the same callback the
+   * sidebar receives as `onSessionRenameConfirmed`: `workspaceCwd` is
+   * undefined for a session outside the workspace catalog. Omitted, the pane
+   * patches the workspace catalog itself.
+   */
+  onSessionRenameConfirmed?: (
+    workspaceCwd: string | undefined,
+    sessionId: string,
+    displayName: string,
+  ) => void;
   onImageIngestionNotice?: (tone: 'warning' | 'error', message: string) => void;
   /** Host slash-command callback shared with the main chat composer. */
   onSlashCommand?: WebShellSlashCommandHandler;
@@ -295,6 +307,7 @@ export function ChatPane({
   onToggleMaximize,
   isMaximized = false,
   onError,
+  onSessionRenameConfirmed,
   onImageIngestionNotice,
   onSlashCommand,
   modelManagement,
@@ -1583,6 +1596,54 @@ export function ChatPane({
     title || connection.displayName || connection.sessionId?.slice(0, 8) || '';
   const sessionStamp = sessionSummary?.updatedAt || sessionSummary?.createdAt;
 
+  // Single-click inline rename of the pane title. The write mirrors /rename:
+  // standalone sessions go through the workspace client, and the rename is
+  // reconciled through the host's callback (catalog patch, status line)
+  // with the daemon's stored, possibly clamped, name.
+  const renamePaneSession = useCallback(
+    (displayName: string): Promise<void> => {
+      const sessionId = connection.sessionId;
+      if (!sessionId) return Promise.resolve();
+      const standalone = connection.sessionContext?.kind === 'standalone';
+      const catalogCwd = standalone ? undefined : paneWorkspaceCwd;
+      const owner = sessionOwnerGuard.capture();
+      const write = standalone
+        ? workspace.client.renameStandaloneSession(sessionId, displayName)
+        : actions.renameSession(displayName);
+      return write
+        .then((result) => {
+          const storedName = result?.displayName || displayName;
+          if (onSessionRenameConfirmed) {
+            onSessionRenameConfirmed(catalogCwd, sessionId, storedName);
+          } else if (catalogCwd) {
+            sessionCatalogController.renamed(catalogCwd, sessionId, storedName);
+          }
+        })
+        .catch((error: unknown) => {
+          if (catalogCwd)
+            sessionCatalogController.invalidateWorkspace(catalogCwd);
+          if (!owner.isCurrent()) return;
+          reportError(error, 'Failed to rename session');
+        });
+    },
+    [
+      actions,
+      connection.sessionContext?.kind,
+      connection.sessionId,
+      onSessionRenameConfirmed,
+      paneWorkspaceCwd,
+      reportError,
+      sessionCatalogController,
+      sessionOwnerGuard,
+      workspace.client,
+    ],
+  );
+  const sessionRename = useInlineSessionRename({
+    label: headerLabel,
+    sessionKey: connection.sessionId ?? undefined,
+    onSave: renamePaneSession,
+  });
+
   // Multi-workspace-ness comes from the shared workspace provider (the
   // pane's own session connection may not carry it).
   const showWorkspaceChip =
@@ -1687,7 +1748,16 @@ export function ChatPane({
               <span className={styles.workspaceTagText}>{workspaceLabel}</span>
             </span>
           )}
-          {sessionSummary && !hidden ? (
+          {sessionRename.editing ? (
+            <input
+              className={styles.titleRenameInput}
+              aria-label={`${t('sessionTitle.rename')}: ${headerLabel}`}
+              data-web-shell-pane-title-input
+              autoFocus
+              maxLength={256}
+              {...sessionRename.inputProps}
+            />
+          ) : sessionSummary && !hidden ? (
             <SessionDetailsTooltip
               session={{
                 ...sessionSummary,
@@ -1699,10 +1769,16 @@ export function ChatPane({
               workspaceLabel={workspaceLabel}
               side="bottom"
             >
-              <span className={styles.title}>{headerLabel}</span>
+              <span className={styles.title} {...sessionRename.titleProps}>
+                {headerLabel}
+              </span>
             </SessionDetailsTooltip>
           ) : (
-            <span className={styles.title} title={headerLabel}>
+            <span
+              className={styles.title}
+              title={headerLabel}
+              {...sessionRename.titleProps}
+            >
               {headerLabel}
             </span>
           )}

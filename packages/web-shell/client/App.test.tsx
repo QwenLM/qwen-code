@@ -1930,6 +1930,7 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
         sessionIds: string[],
         meta?: { attachedSessionId?: string },
       ) => void;
+      standaloneRenameRefreshToken?: number;
       onOpenAddWorkspace?: () => void;
       onOpenGitDiff?: (workspaceCwd: string) => void;
       onOpenCommit?: (workspaceCwd: string) => void;
@@ -1962,6 +1963,9 @@ vi.mock('./components/sidebar/WebShellSidebar', async (importOriginal) => {
           'data-has-git-diff': String(Boolean(props.onOpenGitDiff)),
           'data-has-commit': String(Boolean(props.onOpenCommit)),
           'data-current-session-active': String(props.currentSessionActive),
+          'data-standalone-rename-refresh': String(
+            props.standaloneRenameRefreshToken ?? 0,
+          ),
           'data-can-open-sessions-overview': String(
             Boolean(props.canOpenSessionsOverview),
           ),
@@ -32987,6 +32991,144 @@ describe('App session callbacks', () => {
     },
   );
 
+  it('lets the inline rename input keep a space with a settled btw answer', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/btw keep this answer';
+    await clickSubmit(container);
+    await flush();
+    testState.prompt = '';
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    const btw = () => container.querySelector('[class*="btwPanel"]');
+    expect(btw()).not.toBeNull();
+
+    const title = container.querySelector<HTMLElement>(
+      '[data-testid="chat-context-header"] [data-web-shell-pane-title]',
+    );
+    expect(title).not.toBeNull();
+    await act(async () => {
+      title!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      );
+    });
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-pane-title-input]',
+    );
+    expect(input).not.toBeNull();
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, 'Project ');
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    const space = new KeyboardEvent('keydown', {
+      key: ' ',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => input!.dispatchEvent(space));
+    expect(space.defaultPrevented).toBe(false);
+    expect(input.value).toBe('Project ');
+    expect(btw()).not.toBeNull();
+  });
+
+  it('lets Enter on the pane title open the rename with a settled btw answer', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/btw keep this answer';
+    await clickSubmit(container);
+    await flush();
+    testState.prompt = '';
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    const btw = () => container.querySelector('[class*="btwPanel"]');
+    expect(btw()).not.toBeNull();
+
+    const title = container.querySelector<HTMLElement>(
+      '[data-testid="chat-context-header"] [data-web-shell-pane-title]',
+    );
+    expect(title).not.toBeNull();
+    act(() => {
+      title!.focus();
+    });
+    act(() =>
+      title!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      ),
+    );
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-pane-title-input]',
+    );
+    expect(input).not.toBeNull();
+    expect(btw()).not.toBeNull();
+  });
+
+  it('dismisses a settled btw answer with Escape from another editable target', async () => {
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/btw keep this answer';
+    await clickSubmit(container);
+    await flush();
+    testState.prompt = '';
+    expect(testState.latestBtwMessageProps?.isPending).toBe(false);
+    const btw = () => container.querySelector('[class*="btwPanel"]');
+    expect(btw()).not.toBeNull();
+
+    const field = document.createElement('input');
+    container.append(field);
+    const event = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => field.dispatchEvent(event));
+    expect(event.defaultPrevented).toBe(true);
+    expect(btw()).toBeNull();
+  });
+
+  it('cancels a pending btw with Ctrl+C from another editable target', async () => {
+    const hold = deferred<void>();
+    let signal: AbortSignal | undefined;
+    mockSessionActions.btwSessionStream.mockImplementationOnce(async function* (
+      _question?: unknown,
+      opts?: { signal?: AbortSignal },
+    ) {
+      signal = opts?.signal;
+      yield {
+        v: 1,
+        type: 'answer',
+        requestId: 'btw-request',
+        answer: 'Working on it',
+      } as const;
+      await hold.promise;
+    });
+    const { container } = renderApp();
+    await flush();
+    testState.prompt = '/btw slow answer';
+    await clickSubmit(container);
+    await flush();
+    expect(testState.latestBtwMessageProps?.isPending).toBe(true);
+    const btw = () => container.querySelector('[class*="btwPanel"]');
+    expect(btw()).not.toBeNull();
+
+    const field = document.createElement('input');
+    container.append(field);
+    const event = new KeyboardEvent('keydown', {
+      key: 'c',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    act(() => field.dispatchEvent(event));
+    expect(event.defaultPrevented).toBe(true);
+    expect(btw()).toBeNull();
+    expect(signal?.aborted).toBe(true);
+  });
+
   it('settles visible recap after a same-id attachment replacement', async () => {
     const recap = deferred<{ sessionId: string; recap: string | null }>();
     mockSessionActions.recapSession.mockReturnValueOnce(recap.promise);
@@ -43925,6 +44067,180 @@ describe('App session callbacks', () => {
     expect(testState.latestChatEditorProps?.sessionName).toBe(
       'Standalone title',
     );
+  });
+
+  async function renameFromHeaderTitle(
+    container: HTMLElement,
+    name: string,
+  ): Promise<void> {
+    const title = container.querySelector<HTMLElement>(
+      '[data-testid="chat-context-header"] [data-web-shell-pane-title]',
+    );
+    expect(title).not.toBeNull();
+    await act(async () => {
+      title!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true, detail: 1 }),
+      );
+    });
+    const input = container.querySelector<HTMLInputElement>(
+      '[data-web-shell-pane-title-input]',
+    );
+    expect(input).not.toBeNull();
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )!.set!.call(input, name);
+      input!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+    await act(async () => {
+      input!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    await flush();
+  }
+
+  it('reconciles a header title rename once, like a confirmed /rename', async () => {
+    const onSessionChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionChange });
+    await flush();
+
+    await renameFromHeaderTitle(container, 'Header title');
+
+    expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+      'Header title',
+    );
+    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
+      '/tmp/project',
+      'session-1',
+      'Header title',
+    );
+    act(() => {
+      mockConnection.displayName = 'Header title';
+      rerender({ onSessionChange });
+    });
+    expect(sessionCatalogController.renamed).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows a standalone header title rename in the session name', async () => {
+    mockConnection.sessionContext = { kind: 'standalone' };
+    mockConnection.workspaceCwd = '';
+    mockConnection.displayName = 'Old standalone title';
+    mockWorkspace.capabilities = {
+      features: ['standalone_sessions_v1'],
+      workspaces: [{ id: 'primary', cwd: '/workspace', primary: true }],
+    } as typeof mockWorkspace.capabilities;
+    const { container } = renderApp();
+    await flush();
+
+    await renameFromHeaderTitle(container, 'Standalone title');
+
+    expect(mockWorkspace.client.renameStandaloneSession).toHaveBeenCalledWith(
+      'session-1',
+      'Standalone title',
+    );
+    expect(mockSessionActions.renameSession).not.toHaveBeenCalled();
+    expect(sessionCatalogController.renamed).not.toHaveBeenCalled();
+    expect(testState.latestChatEditorProps?.sessionName).toBe(
+      'Standalone title',
+    );
+    expect(
+      container
+        .querySelector<HTMLElement>('[data-testid="sidebar"]')
+        ?.getAttribute('data-standalone-rename-refresh'),
+    ).toBe('1');
+  });
+
+  it('reconciles a header title rename with the daemon-stored name', async () => {
+    mockSessionActions.renameSession.mockResolvedValueOnce({
+      displayName: 'Clamped',
+    });
+    const { container } = renderApp();
+    await flush();
+
+    await renameFromHeaderTitle(container, 'Typed long name');
+
+    expect(mockSessionActions.renameSession).toHaveBeenCalledWith(
+      'Typed long name',
+    );
+    // The catalog must see the daemon-stored (possibly clamped) name, not the
+    // typed one — the pane twin pins this same arm.
+    expect(sessionCatalogController.renamed).toHaveBeenCalledWith(
+      '/tmp/project',
+      'session-1',
+      'Clamped',
+    );
+  });
+
+  it('invalidates the catalog and toasts when a header rename fails', async () => {
+    mockSessionActions.renameSession.mockRejectedValueOnce('boom');
+    const onToast = vi.fn();
+    const { container } = renderApp({ onToast });
+    await flush();
+
+    await renameFromHeaderTitle(container, 'Failing name');
+
+    expect(sessionCatalogController.invalidateWorkspace).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
+    expect(onToast).toHaveBeenCalledWith('error', 'Failed to rename session');
+  });
+
+  it('suppresses the header rename failure toast after an owner switch', async () => {
+    const failing = deferred<never>();
+    mockSessionActions.renameSession.mockReturnValueOnce(failing.promise);
+    const onToast = vi.fn();
+    const { container, rerender } = renderApp({ onToast });
+    await flush();
+
+    // Submit a rename that stays in flight; the owner is captured now.
+    await renameFromHeaderTitle(container, 'Mid-flight name');
+    act(() => {
+      testState.ownerVersion += 1;
+      rerender();
+    });
+    await act(async () => {
+      failing.reject(new Error('late boom'));
+      await flush();
+    });
+
+    // The catalog is still invalidated, but the toast is suppressed for a
+    // session the user has already switched away from.
+    expect(sessionCatalogController.invalidateWorkspace).toHaveBeenCalledWith(
+      '/tmp/project',
+    );
+    expect(onToast).not.toHaveBeenCalled();
+  });
+
+  it('notifies the host exactly once after a header rename echo', async () => {
+    const onSessionChange = vi.fn();
+    const { container, rerender } = renderApp({ onSessionChange });
+    await flush();
+
+    await renameFromHeaderTitle(container, 'Header title');
+
+    // No rename dispatch until the connection name actually changes.
+    expect(onSessionChange).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'rename' }),
+    );
+
+    act(() => {
+      mockConnection.displayName = 'Header title';
+      rerender({ onSessionChange });
+    });
+
+    expect(onSessionChange).toHaveBeenCalledWith({
+      type: 'rename',
+      sessionId: 'session-1',
+      newName: 'Header title',
+    });
+    // The echo must not re-reconcile the catalog row the write already set.
+    expect(sessionCatalogController.renamed).toHaveBeenCalledTimes(1);
   });
 
   it('rejects programmatic attachments in a standalone chat', async () => {

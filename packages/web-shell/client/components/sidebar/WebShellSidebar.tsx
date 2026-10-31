@@ -508,6 +508,11 @@ interface WebShellSidebarProps {
     displayName: string,
   ) => void;
   /**
+   * Bumped by the host after a standalone rename settled outside the
+   * sidebar (pane or header title), so the standalone recents re-fetch.
+   */
+  standaloneRenameRefreshToken?: number;
+  /**
    * `attachedSessionId` is the session this client was attached to when the
    * delete was confirmed. The daemon publishes the terminal `session_closed`
    * frame before the delete request resolves, so the attachment is no longer
@@ -1137,6 +1142,7 @@ export function WebShellSidebar({
   onOpenHostSession,
   onSelectCurrentSession,
   onSessionRenameConfirmed,
+  standaloneRenameRefreshToken,
   onSessionsDeleted,
   onError,
   theme,
@@ -1606,6 +1612,13 @@ export function WebShellSidebar({
     });
   const archivedExpanded = Boolean(archivedSessionsTarget);
   const [standaloneRefreshKey, setStandaloneRefreshKey] = useState(0);
+  // A standalone rename confirmed outside the sidebar (pane or header
+  // title) bypasses the sidebar's own mutation handler, so the host pushes
+  // the refresh through this token.
+  useEffect(() => {
+    if (standaloneRenameRefreshToken)
+      setStandaloneRefreshKey((value) => value + 1);
+  }, [standaloneRenameRefreshToken]);
   const [standaloneArchivedStatus, setStandaloneArchivedStatus] = useState({
     count: 0,
     loading: false,
