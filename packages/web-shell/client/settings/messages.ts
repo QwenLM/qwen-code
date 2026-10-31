@@ -74,6 +74,7 @@ export const SETTINGS_MESSAGES_EN: Record<string, SettingsMessage> = {
   'settings.localControl.qr': 'Local Control QR code',
   'settings.localControl.enable': 'Turn on Local Control',
   'settings.localControl.disable': 'Disconnect phone access',
+  'settings.localControl.explicitPick': 'Named at daemon start',
   'settings.localControl.encrypted': 'Encrypted',
   'settings.localControl.unencrypted':
     'Unencrypted — trusted networks only; re-enable after network changes',
@@ -169,6 +170,7 @@ export const SETTINGS_MESSAGES_ZH: Record<string, SettingsMessage> = {
   'settings.localControl.qr': '本地控制二维码',
   'settings.localControl.enable': '开启本地控制',
   'settings.localControl.disable': '断开手机访问',
+  'settings.localControl.explicitPick': '守护进程启动时指定',
   'settings.localControl.encrypted': '已加密',
   'settings.localControl.unencrypted':
     '未加密，仅限受信任网络；网络变化后请重新启用',
