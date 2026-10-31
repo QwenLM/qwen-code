@@ -2229,6 +2229,7 @@ describe('package scripts', () => {
     expect(checkoutStep).toContain('persist-credentials: false');
     // The checkout only reads the release commit; a missing or rejected bot
     // PAT must not abort the release before the push step that needs it.
+    expect(checkoutStep).not.toContain('CI_BOT_PAT');
     expect(checkoutStep).toContain("token: '${{ github.token }}'");
     expect(checkoutStep).not.toContain('secrets.');
     // Nothing before the push step may reintroduce the bot PAT either: the
