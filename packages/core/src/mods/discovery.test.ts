@@ -64,6 +64,16 @@ describe('Mod discovery', () => {
     expect(await loadModSource(root)).toBeUndefined();
   });
 
+  it('reads manifests saved with a UTF-8 BOM', async () => {
+    await write('qwen-extension.json', '\uFEFF{"name":"bom"}');
+    expect(await loadModSource(root)).toBeUndefined();
+    await write('hooks/hooks.json', '\uFEFF{"modules":["./register.js"]}');
+    await write('hooks/register.js', 'export function register() {}');
+    expect((await loadModSource(root))?.source).toContain(
+      'export function register',
+    );
+  });
+
   it.each(['absolute', 'relative-outside'])(
     'leaves %s Qwen hook manifests to the classic hook loader',
     async (kind) => {
