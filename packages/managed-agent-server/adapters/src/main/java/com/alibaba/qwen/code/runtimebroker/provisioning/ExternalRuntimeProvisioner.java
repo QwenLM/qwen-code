@@ -386,7 +386,8 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
 
     private void validate(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {
         if (request == null || seed == null || !kind().equals(request.getProvisionerKind())
-                || !"session".equals(request.getScope().getIsolationClass())) {
+                || !("session".equals(request.getScope().getIsolationClass())
+                        || ExternalWorkspaceProvisioner.isWorkspaceRequest(request))) {
             throw conflict();
         }
         String cwd = request.getScope().getCanonicalCwd();
@@ -400,6 +401,38 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
         if (JsonCodec.encode(bootDocument(request, seed)).length > BOOT_LIMIT) {
             throw conflict();
         }
+    }
+
+    /** Validates an unleased first-start original without adopting a replacement endpoint. */
+    public final void validateTerminalOriginal(RuntimeBindingRecord binding) {
+        if (binding == null || executor.isShutdown()) {
+            throw conflict();
+        }
+        validate(binding.getRequest(), binding.getProvisionSeed());
+        if (binding.getLease() != null
+                && !binding.getProvisionSeed().matches(binding.getLease())) {
+            throw conflict();
+        }
+        validateHandle(binding.getRequest(), binding.getProvisionSeed(),
+                binding.getResourceHandle());
+    }
+
+    /** Exports the original boot only to the trusted local recovery host. */
+    public final Map<String, Object> recoveryProviderRequest(
+            RuntimeBindingRecord binding) {
+        Map<String, Object> boot = validatedSavedBoot(binding);
+        Map<String, Object> body = new LinkedHashMap<>();
+        body.put("protocolVersion", 1);
+        body.put("provisionRequestId",
+                binding.getProvisionSeed().getProvisionRequestId());
+        body.put("identity",
+                binding.getResourceHandle().getValue().get("identity"));
+        body.put("scope", java.util.Collections.unmodifiableMap(
+                scope(binding.getRequest())));
+        body.put("boot", boot);
+        body.put("handle",
+                binding.getResourceHandle().getValue().get("provider"));
+        return java.util.Collections.unmodifiableMap(body);
     }
 
     /** Validates durable originals without observing, allocating or adopting a placement. */
@@ -454,15 +487,24 @@ public class ExternalRuntimeProvisioner implements RuntimeProvisioner {
     private String identity(RuntimeProvisionRequest request, Map<String, Object> originalBoot) {
         Map<String, Object> boot = new LinkedHashMap<>(originalBoot);
         boot.remove("token");
-        return digest(Map.of("version", 1, "providerId", providerId,
-                "isolationKey", request.getIsolationKey(), "boot", boot));
+        Map<String, Object> identity = new LinkedHashMap<>();
+        identity.put("version", 1);
+        identity.put("providerId", providerId);
+        identity.put("isolationKey", request.getIsolationKey());
+        identity.put("boot", boot);
+        return digest(identity);
     }
 
     private static Map<String, Object> scope(RuntimeProvisionRequest request) {
         RuntimeScope scope = request.getScope();
-        return Map.of("tenantId", scope.getTenantId(), "workspaceId", scope.getWorkspaceId(),
-                "workspaceGeneration", scope.getWorkspaceGeneration(), "workspaceCwd", scope.getCanonicalCwd(),
-                "isolationClass", scope.getIsolationClass(), "isolationKey", request.getIsolationKey());
+        Map<String, Object> fields = new LinkedHashMap<>();
+        fields.put("tenantId", scope.getTenantId());
+        fields.put("workspaceId", scope.getWorkspaceId());
+        fields.put("workspaceGeneration", scope.getWorkspaceGeneration());
+        fields.put("workspaceCwd", scope.getCanonicalCwd());
+        fields.put("isolationClass", scope.getIsolationClass());
+        fields.put("isolationKey", request.getIsolationKey());
+        return fields;
     }
 
     static Map<String, Object> boot(RuntimeProvisionRequest request, RuntimeProvisionSeed seed) {

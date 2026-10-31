@@ -55,7 +55,9 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
 
-public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
+public class EmbeddedRuntimeBroker implements RuntimeWarmer,
+        com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceRecoveryGateway,
+        AutoCloseable {
     private static final Logger LOG = LoggerFactory.getLogger(
             EmbeddedRuntimeBroker.class);
     public static final Duration LEASE = Duration.ofSeconds(30);
@@ -460,6 +462,37 @@ public class EmbeddedRuntimeBroker implements RuntimeWarmer, AutoCloseable {
         if (recovery != null) {
             recovery.scan();
         }
+    }
+
+    @Override
+    public void validateExternalTerminalOriginal(
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord binding) {
+        if (!(localProvisioner instanceof ExternalWorkspaceProvisioner external)) {
+            throw new RuntimeBrokerException(409,
+                    "external_workspace_retirement_unavailable",
+                    "External Workspace retirement is unavailable", false);
+        }
+        external.validateTerminalOriginal(binding);
+    }
+
+    @Override
+    public java.util.Map<String, Object> externalRecoveryProviderRequest(
+            com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord binding) {
+        if (!(localProvisioner instanceof ExternalWorkspaceProvisioner external)) {
+            throw new RuntimeBrokerException(409,
+                    "external_workspace_recovery_unavailable",
+                    "External Workspace recovery is unavailable", false);
+        }
+        return external.recoveryProviderRequest(binding);
+    }
+
+    @Override
+    public CompletionStage<com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord>
+            recoverExternalWorkspaceBinding(
+                    String bindingId, long expectedGeneration,
+                    long expectedVersion) {
+        return service.recoverExternalWorkspaceBinding(
+                bindingId, expectedGeneration, expectedVersion);
     }
 
     /**

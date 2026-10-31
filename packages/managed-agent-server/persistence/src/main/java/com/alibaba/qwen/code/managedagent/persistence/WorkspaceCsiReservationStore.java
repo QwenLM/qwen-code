@@ -65,7 +65,7 @@ public final class WorkspaceCsiReservationStore implements com.alibaba.qwen.code
         }
         transaction.executeWithoutResult(status -> {
             WorkspaceStorageKindGuard.lockDomain(jdbc, registration.tenantId());
-            if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind IN ('LOCAL', 'EXTERNAL')",
+            if (jdbc.queryForObject("SELECT COUNT(*) FROM ma_storage WHERE alias_key = ? AND storage_kind IN ('LOCAL', 'EXTERNAL', 'EPHEMERAL')",
                     Long.class, registration.aliasKey()) != 0) {
                 throw unavailable();
             }

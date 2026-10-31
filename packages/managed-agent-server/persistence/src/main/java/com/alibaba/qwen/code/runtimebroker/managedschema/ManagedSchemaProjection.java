@@ -170,7 +170,8 @@ public enum ManagedSchemaProjection {
                     + "execution_state, execution_status, result_json, last_sequence, cancel_requested, "
                     + "dispatch_owner, dispatch_lease_until, dispatch_generation, record_version, "
                     + "settled_at, abandoned_at, loss_evidence_id, authorized_dispatch_generation, "
-                    + "authorized_binding_version, native_authorization_json"),
+                    + "authorized_binding_version, native_authorization_json,"
+                    + " shared_dispatch_class"),
     TURN(
             "tenant_id, session_id, turn_id, prompt_id, input_json, payload_digest, status, "
                     + "submission_attempted, harness_event_epoch, harness_last_event_id, dispatch_owner, "

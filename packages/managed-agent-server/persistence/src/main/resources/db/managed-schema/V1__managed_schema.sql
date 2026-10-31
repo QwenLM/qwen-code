@@ -977,7 +977,8 @@ CREATE TABLE ma_tool_execution (
         (binding_id, runtime_generation, execution_state),
     INDEX idx_tool_execution_harness
         (harness_session_id, execution_call_id_hash),
-    native_authorization_json LONGTEXT
+    native_authorization_json LONGTEXT,
+    shared_dispatch_class VARCHAR(16)
 ) ENGINE=InnoDB DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_bin;
 
 CREATE TABLE ma_storage_owner (

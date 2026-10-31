@@ -290,7 +290,8 @@ final class WorkspaceCsiApplicationInventory {
                     + "result_json:LONGTEXT,last_sequence:BIGINT,cancel_requested:BOOLEAN,dispatch_owner:VARBINARY,"
                     + "dispatch_lease_until:BIGINT,dispatch_generation:BIGINT,record_version:BIGINT,settled_at:BIGINT,"
                     + "abandoned_at:BIGINT,loss_evidence_id:VARBINARY,authorized_dispatch_generation:BIGINT,"
-                    + "authorized_binding_version:BIGINT,native_authorization_json:LONGTEXT"),
+                    + "authorized_binding_version:BIGINT,native_authorization_json:LONGTEXT,"
+                    + "shared_dispatch_class:VARCHAR"),
             declaration("ma_turn", "tenant_id,session_id,turn_id",
                     "tenant_id:VARBINARY,session_id:VARBINARY,turn_id:VARBINARY,prompt_id:VARBINARY,input_json:LONGTEXT,"
                     + "payload_digest:VARCHAR,status:VARCHAR,submission_attempted:BOOLEAN,harness_event_epoch:VARBINARY,"

@@ -380,11 +380,13 @@ public class ManagedAgentProperties
             throw new IllegalStateException("Bound-Session isolation must be session or workspace");
         }
         if ("workspace".equals(boundSessionIsolation)
+                && !ExternalRuntimeKinds.isWorkspace(runtimeBroker.getProvisioner())
                 && (!com.alibaba.qwen.code.runtimebroker.protocol.RuntimeProviderKinds.LOCAL_PROCESS.equals(runtimeBroker.getProvisioner())
                         || !runtimeBroker.isDurableLocalProcess()
                         || runtimeBroker.isChildWorkspacesEnabled())) {
-            throw new IllegalStateException("Workspace-isolated bound Sessions require a durable"
-                    + " local-process Broker and cannot combine with child Workspaces");
+            throw new IllegalStateException("Workspace-isolated bound Sessions require a"
+                    + " durable local-process or external-workspace Broker and cannot"
+                    + " combine with child Workspaces");
         }
         // Under Session isolation, which SSH-bound Sessions always use, a
         // create warm would start one worker per unused Session and
@@ -513,7 +515,9 @@ public class ManagedAgentProperties
                             + " managed Workspace features must be disabled");
         }
         if (!"session".equals(runtimeBroker.getIsolationClass())
-                || !"session".equals(runtimeBroker.getBoundSessionIsolationClass())
+                || !("session".equals(runtimeBroker.getBoundSessionIsolationClass())
+                        || ExternalRuntimeKinds.isWorkspace(provisioner)
+                                && "workspace".equals(runtimeBroker.getBoundSessionIsolationClass()))
                 || runtimeBroker.isSessionCreateWarm()) {
             throw new IllegalStateException("External Runtime requires session isolation without Session-create warm");
         }

@@ -89,6 +89,13 @@ public final class WorkspaceRuntimeProvisioner implements RuntimeProvisioner {
         if (!request.isManagedContext() || !executionStore.verifiedRecoveryEnabled()) {
             return;
         }
+        if (WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
+                && com.alibaba.qwen.code.runtimebroker.HarnessOwnership
+                        .sharesRuntimeSessions(request)) {
+            resolver.requireExternalWorkspaceCurrent(
+                    request.getScope(), request.getStorageId());
+            return;
+        }
         if (request.getIsolationKey() != null) {
             var resolved = resolver.resolve(request.getIsolationKey(), request.getScope().getLifecycleAuthority());
             if (!resolved.scope().equals(request.getScope())

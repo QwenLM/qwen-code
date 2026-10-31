@@ -1102,6 +1102,17 @@ public class ManagedAgentPropertiesTest {
         nonLocal.getRuntimeBroker().setProvisioner("static");
         assertThatThrownBy(nonLocal::validateWorkspaceFiles).isInstanceOf(IllegalStateException.class)
                 .hasMessageContaining("local-process");
+
+        ManagedAgentProperties externalWorkspace = new ManagedAgentProperties();
+        externalWorkspace.getRuntimeBroker().setProvisioner("external-workspace");
+        externalWorkspace.getRuntimeBroker().setBoundSessionIsolationClass("workspace");
+        externalWorkspace.getRuntimeBroker().setDurableLocalProcess(false);
+        externalWorkspace.getRuntimeBroker().setTrustedLocalRebootRecovery(false);
+        externalWorkspace.getRuntimeBroker().setExternalProviderUrl("https://provider.example");
+        externalWorkspace.getRuntimeBroker().setExternalProviderToken("test-provider-token");
+        externalWorkspace.getRuntimeBroker().setWorkspaceId("workspace");
+        externalWorkspace.getRuntimeBroker().setWorkspaceCwd("/workspace");
+        assertThatCode(externalWorkspace::validateWorkspaceFiles).doesNotThrowAnyException();
     }
 
     @Test

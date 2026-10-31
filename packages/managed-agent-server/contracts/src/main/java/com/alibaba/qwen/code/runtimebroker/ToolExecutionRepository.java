@@ -31,6 +31,17 @@ public interface ToolExecutionRepository {
     public ToolExecutionRecord claimDispatch(String executionCallId, String owner,
             Duration leaseDuration);
 
+    /**
+     * Claims dispatch with evidence derived from the exact payload digest.
+     * Repositories that support shared Workspace dispatch admit concurrent
+     * reads while fencing writes and indeterminate operations. Existing
+     * implementations retain exclusive behavior through this default.
+     */
+    public default ToolExecutionRecord claimValidatedDispatch(String executionCallId, String owner,
+            Duration leaseDuration, VerifiedDispatchPayload payload) {
+        return claimDispatch(executionCallId, owner, leaseDuration);
+    }
+
     public ToolExecutionRecord renewDispatch(String executionCallId, String owner,
             long dispatchGeneration, Duration leaseDuration);
 

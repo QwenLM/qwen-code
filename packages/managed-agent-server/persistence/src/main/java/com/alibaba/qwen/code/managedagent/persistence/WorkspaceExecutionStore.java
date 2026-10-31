@@ -431,7 +431,9 @@ public class WorkspaceExecutionStore
             claim(context, session);
             return;
         }
-        external(context, binding, repository, session.getSession().getScope(), true, (connection, owner, current) -> {
+        external(context, binding, repository, session.getSession().getScope(),
+                session.getSession().getHarnessSessionId(), true,
+                (connection, owner, current) -> {
             JdbcExternalWorkspaceOwnership.claim(connection, owner, current, session);
             return null;
         });
@@ -442,7 +444,10 @@ public class WorkspaceExecutionStore
         if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(binding.getRequest())) {
             return isHeld(context, session);
         }
-        return external(context, binding, repository, session.getSession().getScope(), false, (connection, owner, current) ->
+        return external(context, binding, repository,
+                session.getSession().getScope(),
+                session.getSession().getHarnessSessionId(), false,
+                (connection, owner, current) ->
                 JdbcExternalWorkspaceOwnership.held(connection, owner, current, session, false));
     }
 
@@ -452,7 +457,9 @@ public class WorkspaceExecutionStore
             assertHeld(context, session);
             return;
         }
-        external(context, binding, repository, session.getSession().getScope(), true, (connection, owner, current) -> {
+        external(context, binding, repository, session.getSession().getScope(),
+                session.getSession().getHarnessSessionId(), true,
+                (connection, owner, current) -> {
             if (!JdbcExternalWorkspaceOwnership.held(connection, owner, current, session, true)) {
                 throw busy();
             }
@@ -466,7 +473,9 @@ public class WorkspaceExecutionStore
             release(context, session);
             return;
         }
-        external(context, binding, repository, session.getSession().getScope(), false, (connection, owner, current) -> {
+        external(context, binding, repository, session.getSession().getScope(),
+                session.getSession().getHarnessSessionId(), false,
+                (connection, owner, current) -> {
             JdbcExternalWorkspaceOwnership.releaseMember(connection, owner, current, session);
             return null;
         });
@@ -474,7 +483,9 @@ public class WorkspaceExecutionStore
 
     public void assertOriginalExternal(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
             RuntimeBindingRepository repository) {
-        external(context, binding, repository, session.getSession().getScope(), false, (connection, owner, current) -> {
+        external(context, binding, repository, session.getSession().getScope(),
+                session.getSession().getHarnessSessionId(), false,
+                (connection, owner, current) -> {
             JdbcExternalWorkspaceOwnership.held(connection, owner, current, session, false);
             if (!JdbcExternalWorkspaceOwnership.hasHolder(connection, owner, current)) {
                 throw unavailable();
@@ -485,25 +496,31 @@ public class WorkspaceExecutionStore
 
     public void releaseStopped(ContextBinding context, RuntimeSessionRecord session, RuntimeBindingRecord binding,
             RuntimeBindingRepository repository) {
-        external(context, binding, repository, session.getSession().getScope(), false, (connection, owner, current) -> {
+        external(context, binding, repository, session.getSession().getScope(),
+                session.getSession().getHarnessSessionId(), false,
+                (connection, owner, current) -> {
             JdbcExternalWorkspaceOwnership.releaseStopped(connection, owner, current, binding, session);
             return null;
         });
     }
 
     private <T> T external(ContextBinding context, RuntimeBindingRecord binding, RuntimeBindingRepository repository,
-            com.alibaba.qwen.code.runtimebroker.RuntimeScope scope, boolean acquiring, ExternalWork<T> work) {
+            com.alibaba.qwen.code.runtimebroker.RuntimeScope scope,
+            String harnessSessionId, boolean acquiring, ExternalWork<T> work) {
         if (!(repository instanceof JdbcRuntimeBindingRepository original) || !original.usesDataSource(jdbc.getDataSource())) {
             throw unavailable();
         }
         WorkspaceStorageKindGuard.requireFreshTransaction();
         return transaction.execute(status -> jdbc.execute((org.springframework.jdbc.core.ConnectionCallback<T>) connection -> {
             var owner = JdbcExternalWorkspaceOwnership.lockOwner(connection, binding);
-            var saved = JdbcExternalWorkspaceOwnership.savedContext(connection, binding, acquiring);
+            var saved = JdbcExternalWorkspaceOwnership.savedContext(
+                    connection, binding, harnessSessionId, acquiring);
             if (context != null && !context.equals(saved)) {
                 throw unavailable();
             }
-            JdbcRuntimeBindingRepository.requireExternalHarnessAdmission(connection, binding.getRequest(), scope, !acquiring);
+            JdbcRuntimeBindingRepository.requireExternalHarnessAdmission(
+                    connection, binding.getRequest(), scope,
+                    harnessSessionId, !acquiring);
             var current = JdbcExternalWorkspaceOwnership.requireCurrent(connection, original, binding, acquiring);
             return work.apply(connection, owner, current);
         }));
@@ -802,12 +819,16 @@ public class WorkspaceExecutionStore
 
     public boolean canStopExternalDrained(RuntimeBindingRecord saved, RuntimeBindingRepository repository) {
         if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(saved.getRequest())
+                || HarnessOwnership.sharesRuntimeSessions(saved.getRequest())
                 || saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST
                 || !saved.isDrainRequested()
                 || saved.getOperationOwner() == null) {
             return false;
         }
-        return external(null, saved, repository, saved.getRequest().getScope(), false, (connection, owner, current) -> {
+        return external(null, saved, repository,
+                saved.getRequest().getScope(),
+                saved.getRequest().getIsolationKey(), false,
+                (connection, owner, current) -> {
             JdbcExternalWorkspaceOwnership.requireDrainMembers(connection, owner, current);
             return noActiveExecutions(current);
         });
