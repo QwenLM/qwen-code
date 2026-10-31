@@ -10,7 +10,7 @@ import {
   flushSidebar,
   installSidebarDomShims,
   makeSidebarSession as makeSession,
-  resolvedWebShellSessions,
+  useResolvedWebShellSessions,
   sidebarSessionPage,
   useSidebarSessionCatalogQuery,
 } from '../../test/sidebarHarness';
@@ -48,7 +48,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
     enabled?: boolean;
     archiveState?: string;
     group?: string;
-  }) => resolvedWebShellSessions(mocks, options),
+  }) => useResolvedWebShellSessions(mocks, options),
   useSessionCatalogController: () => ({
     refreshQueries: refreshSessionCatalogQueries,
     invalidateWorkspace: vi.fn(),

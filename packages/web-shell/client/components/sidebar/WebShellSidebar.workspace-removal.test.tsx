@@ -112,11 +112,7 @@ const sessionCatalogController = {
     refreshWorkspaceSessionCatalog(workspaceCwd);
     for (const listener of catalogListeners) listener(workspaceCwd);
   },
-  renamed: (
-    workspaceCwd: string,
-    sessionId: string,
-    displayName: string,
-  ) => {
+  renamed: (workspaceCwd: string, sessionId: string, displayName: string) => {
     renameSessionCatalog(workspaceCwd, sessionId, displayName);
     for (const listener of catalogListeners) listener(workspaceCwd);
   },
@@ -164,6 +160,7 @@ const workspaceActions = {
   updateWorkspace: vi.fn(),
   removeWorkspace: vi.fn(),
   listSessionGroups: vi.fn(),
+  createSessionGroup: vi.fn(),
 };
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({

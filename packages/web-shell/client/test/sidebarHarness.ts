@@ -346,18 +346,26 @@ export function sidebarSessionPage(
 
 /**
  * useWebShellSessions in the settled-catalog shape: the page state passes
- * through with a legacy catalog query attached.
+ * through with a legacy catalog query attached. The query is memoized the
+ * way the real hook keys it (enabled excluded) so its identity survives
+ * re-renders and catalog-refresh effects do not re-fire on it.
  */
-export function resolvedWebShellSessions(
+export function useResolvedWebShellSessions(
   mocks: SidebarMocks,
   options?: { enabled?: boolean; archiveState?: string; group?: string },
 ) {
   const state = sidebarSessionPage(mocks, options);
-  const catalogQuery = {
-    routeKind: 'legacy' as const,
-    workspaceCwd: mocks.connection.workspaceCwd,
-    options,
-  };
+  const workspaceCwd = mocks.connection.workspaceCwd;
+  const { enabled: _enabled, ...catalogOptions } = options ?? {};
+  const optionsKey = JSON.stringify(catalogOptions);
+  const catalogQuery = React.useMemo(
+    () => ({
+      routeKind: 'legacy' as const,
+      workspaceCwd,
+      options: JSON.parse(optionsKey),
+    }),
+    [optionsKey, workspaceCwd],
+  );
   return resolveWebShellSessions(
     state,
     options?.enabled !== false,
