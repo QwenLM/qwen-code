@@ -119,6 +119,12 @@ for (const retryFrom of ['owner', 'foreign', 'restored-foreign']) {
     if (retryFrom === 'owner') {
       await choose('A');
       await expect(editor).toContainText('Accepted A input');
+    } else {
+      // A foreign session owns no retry affordance: it redirects to the
+      // conversation holding the pending prompt instead.
+      await page
+        .getByRole('button', { name: 'Open the original conversation' })
+        .click();
     }
 
     await page.getByRole('button', { name: 'Retry the same request' }).click();
