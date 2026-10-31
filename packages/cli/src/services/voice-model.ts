@@ -13,13 +13,31 @@ export type VoiceTransport =
   | 'dashscope-task-realtime'
   | 'unsupported';
 
-/** Map a model id to the ASR transport it uses, or 'unsupported'. */
+/**
+ * Map a model id to the ASR transport it uses, or 'unsupported'.
+ *
+ * The `qwen-audio-<version>` family (Model Studio Token Plan, #10932) follows
+ * the same split as `qwen3-asr-flash`: `*-realtime` and `*-asr-flash-streaming`
+ * ids speak the OpenAI realtime WebSocket dialect, while bare and date-suffixed
+ * `*-asr-flash` ids use the batch chat/completions shape. Other ids in the
+ * family (filetrans, tts) are not dictation transports and stay unsupported.
+ */
 export function resolveVoiceTransport(model: string): VoiceTransport {
   const id = model.toLowerCase();
   if (/^qwen3-asr-flash-realtime(?:-|$)/.test(id)) {
     return 'qwen-asr-realtime';
   }
   if (/^qwen3-asr-flash(?:-\d{4}-\d{2}-\d{2})?$/.test(id)) {
+    return 'qwen-asr-chat';
+  }
+  if (
+    /^qwen-audio-[\d.]+-(?:asr-flash-(?:realtime|streaming)|realtime)(?:-|$)/.test(
+      id,
+    )
+  ) {
+    return 'qwen-asr-realtime';
+  }
+  if (/^qwen-audio-[\d.]+-asr-flash(?:-\d{4}-\d{2}-\d{2})?$/.test(id)) {
     return 'qwen-asr-chat';
   }
   if (/^(fun-asr|paraformer).*realtime(?:-|$)/.test(id)) {
