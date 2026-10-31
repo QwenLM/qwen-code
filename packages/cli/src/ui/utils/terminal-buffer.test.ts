@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { getSettingsSchema } from '../../config/settingsSchema.js';
 import {
   isInteractiveTerminal,
@@ -40,6 +40,16 @@ describe('shouldUseVirtualViewport', () => {
         CMDER_SHELL: '',
       }),
     ).toBe(true);
+  });
+
+  it('detects ConEmu from process.env when the env argument is omitted', () => {
+    vi.stubEnv('ConEmuPID', '12345');
+    vi.stubEnv('CMDER_SHELL', '');
+    try {
+      expect(shouldUseVirtualViewport(undefined, false, true)).toBe(false);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('keeps the virtual viewport on ConEmu/Cmder when explicitly enabled', () => {
