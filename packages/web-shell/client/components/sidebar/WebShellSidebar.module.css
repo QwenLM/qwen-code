@@ -167,6 +167,23 @@
   outline-offset: 2px;
 }
 
+.activityToggle {
+  cursor: pointer;
+}
+
+.activityToggle[aria-pressed='true'] {
+  background: color-mix(in srgb, var(--agent-blue-500) 14%, transparent);
+  color: var(--agent-blue-500);
+}
+
+.activityToggle[aria-pressed='true']:hover {
+  background: color-mix(in srgb, var(--agent-blue-500) 20%, transparent);
+}
+
+.activityToggle[aria-pressed='true'] [data-activity-attention] {
+  background: currentColor;
+}
+
 .navIcon {
   position: relative;
   width: 24px;

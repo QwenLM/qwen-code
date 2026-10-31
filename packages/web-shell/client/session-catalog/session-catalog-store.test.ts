@@ -180,6 +180,29 @@ describe('SessionCatalogStore', () => {
     }
   });
 
+  it('updates and clears turn errors from live state', async () => {
+    const target = query('/work');
+    legacy.mockResolvedValue({
+      sessions: [{ sessionId: 'one', workspaceCwd: '/work' }],
+    });
+    await store.loadOnce(target);
+    const live = {
+      sessionId: 'one',
+      clientCount: 1,
+      hasActivePrompt: false,
+      isWaitingForPermission: false,
+      isWaitingForUserQuestion: false,
+    };
+    store.applyLiveState('/work', [{ ...live, hasTurnError: true }]);
+    expect(store.getSnapshot(target).page?.sessions[0]).toMatchObject({
+      hasTurnError: true,
+    });
+    store.applyLiveState('/work', [{ ...live, hasTurnError: false }]);
+    expect(store.getSnapshot(target).page?.sessions[0]).toMatchObject({
+      hasTurnError: false,
+    });
+  });
+
   it('keeps a pending prompt title on every catalog read until a custom title lands', async () => {
     store.setPendingSessionTitle('/work', 'session-1', 'Fix login');
     legacy.mockResolvedValueOnce(page('session-1'));

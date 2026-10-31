@@ -713,6 +713,7 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
       hasRunningBackgroundTasks?: boolean;
       isWaitingForPermission: boolean;
       isWaitingForUserQuestion: boolean;
+      hasTurnError?: boolean;
       updatedAt?: string;
     }>();
     expectTypeOf<DaemonWorkspaceSessionLiveState>().toEqualTypeOf<{
