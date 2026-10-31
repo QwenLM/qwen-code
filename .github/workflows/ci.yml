@@ -1000,8 +1000,11 @@ jobs:
           rm -rf -- "$home"
           mkdir -p "$home" "${RUNNER_TOOL_CACHE}/qwen-ci-cache"
           printf 'HOME=%s\nUSERPROFILE=%s\n' "$home" "$home" >> "${GITHUB_ENV}"
-          # Content-verified caches (SHA-256) stay shared and warm.
-          printf 'XDG_CACHE_HOME=%s\nCOREPACK_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" "${RUNNER_TOOL_CACHE}/qwen-ci-cache/node/corepack" >> "${GITHUB_ENV}"
+          # Linter archives are SHA-256-verified on every cache hit, so sharing
+          # them is safe; corepack does NOT re-verify extracted entries on hit,
+          # so its home stays per-run (a shared one is a poisoning channel).
+          printf 'XDG_CACHE_HOME=%s\n' "${RUNNER_TOOL_CACHE}/qwen-ci-cache" >> "${GITHUB_ENV}"
+          printf 'COREPACK_HOME=%s\n' "${home}/.cache/node/corepack" >> "${GITHUB_ENV}"
 
       # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
       # verify) may leave root-owned, read-only files anywhere in the workspace.

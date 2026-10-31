@@ -57,12 +57,15 @@ residual surface below. Limits that stay accepted:
 
 - **Package caches are cold.** npm and pnpm stores live under the per-run
   HOME, so each run installs from the registry; yamllint is re-pipped into
-  `$HOME/.local`. The measured cold install (~900 s) is what the 90/45 ceiling
-  already prices. The content-verified caches stay shared and warm:
-  `XDG_CACHE_HOME` (lint.js SHA-256-checks linter archives) and `COREPACK_HOME`
-  (corepack verifies the `packageManager` sha512) point at
-  `${RUNNER_TOOL_CACHE}/qwen-ci-cache`, so sharing them back does not reopen
-  the poisoning channel.
+  `$HOME/.local` and the corepack shim is re-downloaded per run. The measured
+  cold install (~900 s) is what the 90/45 ceiling already prices. Only the
+  linter-archive cache stays shared and warm: `XDG_CACHE_HOME` points at
+  `${RUNNER_TOOL_CACHE}/qwen-ci-cache`, and lint.js SHA-256-verifies every
+  archive on each cache hit before extraction, rejecting and re-fetching
+  tampered entries. `COREPACK_HOME` stays inside the run-unique HOME:
+  corepack does not re-verify extracted entries on cache hit (reproduced on
+  0.34.6 and 0.36.0 — a tampered pnpm entry executes with the recorded hash
+  unchanged), so a shared corepack home is a cross-job poisoning channel.
 - **`$GITHUB_WORKSPACE` is still shared.** The pre-checkout "Restore workspace
   ownership" step and the checkout itself reduce, but cannot eliminate,
   residue a co-resident job leaves behind. The lane's only credential is the
