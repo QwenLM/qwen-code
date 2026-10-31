@@ -24,15 +24,11 @@ on:
       - 'release/**'
       - 'omni-experiment'
   merge_group:
-  # The macOS and Windows lanes' ONLY remaining trigger, and therefore this
-  # repository's only signal about a host that is not Linux with a GNU
-  # userland. Those two are otherwise gated on `merge_group`, and the merge
-  # queue is not enabled here — no queue run since 2026-07-02 — while their
-  # pull-request trigger is off until the standing Windows failures are fixed
-  # (see test_macos). A regression therefore surfaces here, one day later, on
-  # `main`, and nowhere else: treat a red nightly as a blocker, not as noise.
-  # Every other job here excludes `schedule` explicitly, so a nightly run is
-  # exactly two jobs.
+  # Scheduled macOS and Windows tests provide a non-Linux signal even when
+  # the merge queue is not enabled and their pull-request triggers are off
+  # (see test_macos_shards and test_windows). These lanes also admit
+  # `merge_group` and `workflow_dispatch`; treat a red nightly as a blocker,
+  # not as noise.
   schedule:
     - cron: '17 19 * * *'
   workflow_dispatch:
@@ -829,8 +825,8 @@ jobs:
           # Symlink aliases break tests that intentionally compare real paths.
           # The sample-file setup sits BEFORE the TMPDIR routing block (#10035)
           # because no-ak-integration-ci pins that block byte-identical across
-          # the test/test_macos/test_windows legs; each DFSAMPLE line already
-          # carries the routed tmpdir, so the header only needs job/runner ids.
+          # the test/test_macos_shards/test_windows legs; each DFSAMPLE line
+          # already carries the routed tmpdir, so the header only needs job/runner ids.
           DISK_SAMPLES="${RUNNER_TEMP}/disk-pressure-samples.log"
           if [ ! -s "$DISK_SAMPLES" ]; then
             echo "DISKCONTEXT $(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null) runner[${RUNNER_NAME:-unknown}] run[${GITHUB_RUN_ID:-local}/${GITHUB_RUN_ATTEMPT:-1}] job[${GITHUB_JOB:-test}] cpus[$(nproc 2>/dev/null || echo unknown)]" > "$DISK_SAMPLES" 2>/dev/null || true
@@ -2047,8 +2043,8 @@ jobs:
           if [ "$RC" -ne 0 ]; then df -hT 2>/dev/null || df -h 2>/dev/null || true; df -i 2>/dev/null || true; grep -E 'MemTotal|MemAvailable|SwapTotal|SwapFree' /proc/meminfo 2>/dev/null || true; fi
           exit "$RC"
 
-  # Windows counterpart of test_macos (see that job's note). ECS is the default
-  # with a windows-2022 kill-switch fallback; the check name stays unchanged so
+  # Windows counterpart of test_macos_shards (see that job's note). ECS is
+  # the default with a windows-2022 kill-switch fallback; the check name stays unchanged so
   # it matches the required-status-check context. The `!= 'pull_request'` arm
   # of `runs-on` is inert while the pull-request trigger is off, and stays for
   # when it returns: a pull_request run executes the workflow YAML from the
