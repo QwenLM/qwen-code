@@ -31,6 +31,15 @@ import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.j
 import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
+import {
+  canonicalWorktreePath,
+  grantUnattendedFixes,
+  openBackgroundFix,
+  recordConfirmedWatch,
+  recordWatchTask,
+  resetUnattendedFixGrantsForTests,
+} from './autofix-pr-grants.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 const readText = (filePath: string) => fs.readFileSync(filePath, 'utf8');
 
@@ -110,6 +119,7 @@ describe('EditTool', () => {
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: vi.fn().mockReturnValue(false),
       getFileHistoryService: () => mockFileHistoryService,
+      isRecordArtifactEnabled: vi.fn().mockReturnValue(false),
     } as unknown as Config;
 
     // Default to not skipping confirmation
@@ -539,6 +549,50 @@ describe('EditTool', () => {
       ).toBeNull();
     });
 
+    it("asks the user for a write into a background fix's worktree, but for its own agent", async () => {
+      const worktree = fs.mkdtempSync(path.join(os.tmpdir(), 'autofix-pr-wt-'));
+      try {
+        await openFixAt(worktree, 'fix-agent');
+        const file = path.join(worktree, 'src', 'a.ts');
+        expect(
+          tool
+            .build({ file_path: file, old_string: '', new_string: 'x' })
+            .requiresUserInteraction?.(),
+        ).toBe(true);
+        expect(
+          await runWithAgentContext('fix-agent', async () =>
+            tool
+              .build({ file_path: file, old_string: '', new_string: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(false);
+        // An agent the fix agent started is its own; another agent is not.
+        expect(
+          await runWithAgentContext('fix-agent-child', async () =>
+            tool
+              .build({ file_path: file, old_string: '', new_string: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(false);
+        expect(
+          await runWithAgentContext('session-agent', async () =>
+            tool
+              .build({ file_path: file, old_string: '', new_string: 'x' })
+              .requiresUserInteraction?.(),
+          ),
+        ).toBe(true);
+        const outside = path.join(path.dirname(worktree), 'elsewhere.ts');
+        expect(
+          tool
+            .build({ file_path: outside, old_string: '', new_string: 'x' })
+            .requiresUserInteraction?.(),
+        ).toBe(false);
+      } finally {
+        resetUnattendedFixGrantsForTests();
+        fs.rmSync(worktree, { recursive: true, force: true });
+      }
+    });
+
     it('proposes (asks) team writes — never auto-allowed like private memory', async () => {
       const permission = await tool
         .build({ file_path: teamFile(), old_string: '', new_string: 'x' })
@@ -769,6 +823,117 @@ describe('EditTool', () => {
       expect(writeSpy).toHaveBeenCalledWith(
         expect.objectContaining({ toolWriteOrigin: 'edit' }),
       );
+    });
+
+    describe('session artifacts', () => {
+      beforeEach(() => {
+        (mockConfig.isRecordArtifactEnabled as Mock).mockReturnValue(true);
+      });
+
+      it('records an edited artifact-like file', async () => {
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,old\n1,a\n');
+
+        const result = await run(edit(csvPath, 'old', 'newer-col'));
+
+        expect(result.llmContent).toContain(
+          'automatically recorded as a workspace artifact with workspacePath "orders.csv"',
+        );
+        expect(result.llmContent).toMatch(
+          /recorded as a workspace artifact[^]*Showing lines/,
+        );
+        expect(result.artifacts).toEqual([
+          {
+            title: 'orders.csv',
+            kind: 'file',
+            storage: 'workspace',
+            workspacePath: 'orders.csv',
+            mimeType: 'text/csv',
+            sizeBytes: fs.statSync(csvPath).size,
+          },
+        ]);
+      });
+
+      it('records an artifact-like file created by edit', async () => {
+        const notePath = path.join(rootDir, 'notes', 'summary.md');
+        autoEditOnce();
+
+        const result = await run(edit(notePath, '', '# Summary\n'));
+
+        expect(result.llmContent).toMatch(/Created new file/);
+        expect(result.artifacts).toEqual([
+          expect.objectContaining({
+            title: 'summary.md',
+            kind: 'file',
+            workspacePath: 'notes/summary.md',
+          }),
+        ]);
+        expect(result.artifacts?.[0]).not.toHaveProperty('updateOnly');
+      });
+
+      it('only refreshes an existing artifact when record_as_artifact is false', async () => {
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,old\n1,a\n');
+
+        const result = await run(
+          edit(csvPath, 'old', 'new', { record_as_artifact: false }),
+        );
+
+        expect(result.llmContent).not.toContain('automatically recorded');
+        expect(result.artifacts).toEqual([
+          expect.objectContaining({
+            workspacePath: 'orders.csv',
+            updateOnly: true,
+          }),
+        ]);
+      });
+
+      it('only refreshes an existing artifact for other files', async () => {
+        const sourcePath = path.join(rootDir, 'src', 'index.ts');
+        fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+        seedFile(sourcePath, 'export const old = 1;\n');
+
+        const result = await run(edit(sourcePath));
+
+        expect(result.llmContent).not.toContain('automatically recorded');
+        expect(result.artifacts).toEqual([
+          expect.objectContaining({
+            workspacePath: 'src/index.ts',
+            updateOnly: true,
+          }),
+        ]);
+      });
+
+      it('does not record files outside the workspace', async () => {
+        const outsidePath = path.join(tempDir, 'outside.csv');
+        seedFile(outsidePath, 'old\n');
+
+        const result = await run(edit(outsidePath));
+
+        expect(readText(outsidePath)).toBe('new\n');
+        expect(result.artifacts).toBeUndefined();
+      });
+
+      it('does not record anything when the edit fails', async () => {
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,value\n');
+
+        const result = await run(edit(csvPath, 'missing', 'replacement'));
+
+        expect(result.error).toBeDefined();
+        expect(result.artifacts).toBeUndefined();
+      });
+
+      it('does not record anything when artifact recording is disabled', async () => {
+        (mockConfig.isRecordArtifactEnabled as Mock).mockReturnValue(false);
+        const csvPath = path.join(rootDir, 'orders.csv');
+        seedFile(csvPath, 'id,old\n');
+
+        const result = await run(edit(csvPath));
+
+        expect(result.llmContent).not.toContain('automatically recorded');
+        expect(result.artifacts).toBeUndefined();
+      });
     });
 
     // trackEdit is best-effort: a FileHistoryService failure (disk full,
@@ -1517,3 +1682,35 @@ describe('EditTool', () => {
     });
   });
 });
+
+async function openFixAt(worktree: string, agentId: string) {
+  grantUnattendedFixes('s-write', {
+    pr: 3,
+    worktree: canonicalWorktreePath(worktree),
+    check: async () => true,
+    open: async () => ({ task: 't' }),
+    close: async () => {},
+  });
+  recordConfirmedWatch('s-write', {
+    pr: 3,
+    repo: 'o/r',
+    host: null,
+    targetDir: path.dirname(worktree),
+    preparedAt: null,
+    worktree: canonicalWorktreePath(worktree),
+    authorCanPush: true,
+  });
+  recordWatchTask('s-write', 3, { task: 't', reply: true, instructions: '' });
+  const fix = await openBackgroundFix(
+    's-write',
+    worktree,
+    new AbortController().signal,
+  );
+  // The fix agent started `${agentId}-child`.
+  fix.attach(
+    agentId,
+    () => {},
+    (id) => id === `${agentId}-child`,
+  );
+  return fix;
+}

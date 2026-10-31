@@ -2235,7 +2235,7 @@ jobs:
     #   pin, upload, cleanup         ~5m
     #   java toolchain + Maven repo
     #   + sibling modules            ≤ ~20m, and only when the diff touches
-    #                                packages/sdk-java/. curl --max-time caps
+    #                                a Java module. curl --max-time caps
     #                                each download; `timeout 300` caps each
     #                                mvn install
     #   ------------------------------------
@@ -2263,7 +2263,13 @@ jobs:
       # empty -> the job broke before deciding (publish reports infra).
       verdict: '${{ steps.run.outputs.verdict || steps.prepare.outputs.verdict || steps.pr.outputs.verdict }}'
       failure_phase: '${{ steps.prepare.outputs.failure_phase }}'
-      agent_verdict: '${{ steps.run.outputs.agent_verdict }}'
+      # Report-footer attribution: the configured model, the runner's CLI
+      # version, and the content hash of the base-pinned skill that ran.
+      # Empty when the run step never reached its output writes; the
+      # publisher then keeps its generic signature.
+      model: '${{ steps.run.outputs.model }}'
+      cli_version: '${{ steps.run.outputs.cli_version }}'
+      skill_hash: '${{ steps.run.outputs.skill_hash }}'
       # Deterministic flakiness gate (#9125): `flaky` demotes the published
       # headline; every other value is informational. The summary is
       # gate-authored fixed text plus counters — never PR-controlled strings.
@@ -2365,10 +2371,10 @@ jobs:
             exit 0
           fi
           # Same full list, same `grep <<<` (a pipe would SIGPIPE under
-          # pipefail). Only packages/sdk-java/ pays for a JDK; the broader
+          # pipefail). Only the Maven package trees pay for a JDK; the broader
           # sdk-java.yml path list is mostly core/CLI, and those diffs still
           # cannot run the database-backed Java ITs this lane does not host.
-          if grep -qE '^packages/sdk-java/' <<< "$files"; then
+          if grep -qE '^packages/(sdk-java|managed-agent-server)/' <<< "$files"; then
             echo "java=true" >> "$GITHUB_OUTPUT"
           fi
           # Snapshot PR metadata for the token-free agent: the agent env
@@ -2698,7 +2704,7 @@ jobs:
             echo "Java toolchain ready at ${prefix} (Temurin ${TEMURIN_VERSION}, Maven ${MAVEN_VERSION})."
           else
             rm -rf -- "$prefix"
-            echo "::warning::Java toolchain install failed; sdk-java changes will be reported as not covered."
+            echo "::warning::Java toolchain install failed; Java changes will be reported as not covered."
           fi
           rm -rf -- "$work"
 
@@ -3219,7 +3225,7 @@ jobs:
         uses: 'actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830' # v4.3.0
         with:
           path: '${{ runner.temp }}/verify-maven-repo'
-          key: "verify-maven-repo-${{ hashFiles('packages/sdk-java/*/pom.xml') }}"
+          key: "verify-maven-repo-${{ hashFiles('packages/sdk-java/*/pom.xml', 'packages/managed-agent-server/**/pom.xml') }}"
           restore-keys: 'verify-maven-repo-'
 
       - name: 'Install and build PR app'
@@ -4096,10 +4102,8 @@ jobs:
           {
             run_mvn packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true -Dmaven.javadoc.skip=true install
             qwencode_status=$?
-            run_mvn packages/sdk-java/runtime-broker/pom.xml -DskipTests -Dspotbugs.skip=true install
-            broker_status=$?
           } >> "$log" 2>&1
-          printf 'qwencode=%s runtime-broker=%s\n' "$qwencode_status" "$broker_status" >> "$log"
+          printf 'qwencode=%s\n' "$qwencode_status" >> "$log"
 
       - name: 'Install evidence browser'
         if: "steps.pr.outputs.decision == 'run' && steps.prepare.outputs.verdict == ''"
@@ -4226,6 +4230,22 @@ jobs:
           rm -rf "$STAGE_DIR"
           chown -R root:root .qwen
           chmod -R a-w,a+rX .qwen
+
+          # Attribution for the published report's footer, collected HERE —
+          # after the re-pin above and BEFORE the agent starts. The workspace
+          # parent directory stays node-owned, so during the agent era PR
+          # code can replace the whole .qwen directory (mv + mkdir) without
+          # touching the root-owned files inside it; a hash taken after the
+          # agent could then name instructions the round never loaded. The
+          # model is the lane's own config and the CLI is the root-owned
+          # global install. --no-filters matters even here: prepare left
+          # .git node-owned, and a planted clean filter would otherwise
+          # choose what gets hashed — or run as root. Best-effort: an empty
+          # value makes the publisher keep its generic signature instead of
+          # posting a half-attributed footer. The timeout keeps a planted
+          # shim from hanging the step.
+          CLI_VERSION="$(timeout 30s qwen --version 2>/dev/null | head -1 | tr -d '[:space:]' | cut -c1-64 || true)"
+          SKILL_HASH="$(timeout 30s git hash-object --no-filters .qwen/skills/verify-pr/SKILL.md 2>/dev/null | cut -c1-12 || true)"
 
           # 3. Fake artifact dirs planted during the build: a zeroed
           #    timestamp sorts AHEAD of the agent's real dir at collection
@@ -4674,24 +4694,20 @@ jobs:
             echo "::error::Failed to write the agent output stream (tee exit ${TEE_STATUS}); reporting an infrastructure failure rather than a pass."
           fi
           echo "verdict=$VERDICT" >> "$GITHUB_OUTPUT"
+          # verdict.txt is read only by the publisher, from the uploaded
+          # report's own directory: a second reader here picked its own
+          # round directory and could name a different word.
 
-          # The skill writes its verdict as one word in verdict.txt. It is
-          # output of a run that executed untrusted PR code, so allowlist it
-          # instead of echoing it into workflow outputs.
-          AGENT_VERDICT=''
-          VERDICT_FILE="$(find tmp -maxdepth 2 -type f -path '*-verify-*/verdict.txt' 2>/dev/null | sort | head -1 || true)"
-          if [ -n "$VERDICT_FILE" ]; then
-            # Bound the read before the pipeline: with `head` closing early on
-            # an oversized file, the producer takes SIGPIPE and `pipefail`
-            # would abort the step instead of ignoring an unusable verdict.
-            CANDIDATE="$(head -c 4096 "$VERDICT_FILE" | tr -d '[:space:]' | cut -c1-32)"
-            case "$CANDIDATE" in
-              merge-ready|findings|blocked|inconclusive) AGENT_VERDICT="$CANDIDATE" ;;
-              *) echo "::warning::Unrecognized agent verdict in ${VERDICT_FILE}; ignoring." ;;
-            esac
-          fi
-          echo "agent_verdict=$AGENT_VERDICT" >> "$GITHUB_OUTPUT"
-          echo "verify verdict: $VERDICT agent: ${AGENT_VERDICT:-none} (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
+          # Emit the attribution collected before the agent started (see the
+          # re-pin above) — the saved values, never re-derived here: the
+          # agent era can replace the .qwen directory itself, so a post-agent
+          # hash could name instructions the round never loaded.
+          {
+            echo "model=$(printf '%s' "${OPENAI_MODEL:-}" | tr -d '\r\n' | cut -c1-200)"
+            echo "cli_version=$CLI_VERSION"
+            echo "skill_hash=$SKILL_HASH"
+          } >> "$GITHUB_OUTPUT"
+          echo "verify verdict: $VERDICT (exit $EXIT_CODE)" >> "$GITHUB_STEP_SUMMARY"
 
       # The gate log's authoritative copy lives root-owned inside the 0700
       # root-only home (/flake-gate/log), which no PR-controlled
@@ -5187,10 +5203,10 @@ jobs:
       contents: 'read'
       pull-requests: 'write'
     steps:
-      # Sparse — the uploader, its helper dependency, and the root
-      # package.json that marks the uploader's `.js` as ESM (without it the
-      # uploader only parses on the Node versions that infer module syntax,
-      # and this job pins no Node).
+      # Sparse — the uploader, the artifact checker, their helpers, and the
+      # root package.json that marks the uploader's `.js` as ESM (without it
+      # the uploader only parses on the Node versions that infer module
+      # syntax, and this job pins no Node).
       - name: 'Checkout the OSS publisher scripts'
         uses: 'actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10' # v6.0.3
         with:
@@ -5204,6 +5220,8 @@ jobs:
             /package.json
             scripts/upload-aliyun-oss-assets.js
             scripts/release-script-utils.js
+            scripts/verify-pr-check.mjs
+            scripts/lib/
           sparse-checkout-cone-mode: false
           persist-credentials: false
 
@@ -5278,7 +5296,9 @@ jobs:
           # cancellations. Verified by executing this step with both values.
           PR_NUMBER: '${{ needs.verify.outputs.pr_number || github.event.issue.number }}'
           VERDICT: '${{ needs.verify.outputs.verdict }}'
-          AGENT_VERDICT: '${{ needs.verify.outputs.agent_verdict }}'
+          VERIFY_MODEL: '${{ needs.verify.outputs.model }}'
+          VERIFY_CLI_VERSION: '${{ needs.verify.outputs.cli_version }}'
+          VERIFY_SKILL_HASH: '${{ needs.verify.outputs.skill_hash }}'
           FLAKE_VERDICT: '${{ needs.verify.outputs.flake_verdict }}'
           FLAKE_SUMMARY: '${{ needs.verify.outputs.flake_summary }}'
           SKIP_REASON: '${{ needs.verify.outputs.skip_reason }}'
@@ -5313,6 +5333,8 @@ jobs:
             exit 0
           fi
           BODY_FILE="${RUNNER_TEMP:-/tmp}/verify-comment.md"
+          # Set only from the published report's own verdict.txt below.
+          AGENT_VERDICT=''
 
           # Same embedding discipline as publish-tmux: the report is untrusted
           # PR-run output, so it goes inside <details><pre><code> with &, <, >
@@ -5901,9 +5923,27 @@ jobs:
           else
             collect_and_host_evidence
             # Pin the artifact-dir shape and sort: a bare -name search takes
-            # whatever directory find visits first, which is unordered.
-            REPORT="$(find verify-results -mindepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
-            ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
+            # whatever directory find visits first, which is unordered. Depth
+            # 2 exactly: a report.md nested in a round (evidence/) sorts
+            # ahead of the round's own and would stand in for it.
+            REPORT="$(find verify-results -mindepth 2 -maxdepth 2 -type f -path '*-verify-*/report.md' 2>/dev/null | sort | head -1 || true)"
+            # The report's own directory is the round: its counts and its
+            # verdict word headline it, never another directory's. This is
+            # the only reader of verdict.txt, which untrusted PR code wrote.
+            if [ -n "$REPORT" ]; then
+              ASSERTIONS_FILE="$(dirname "$REPORT")/assertions.json"
+              [ -f "$ASSERTIONS_FILE" ] || ASSERTIONS_FILE=''
+              AGENT_VERDICT="$(head -c 4096 "$(dirname "$REPORT")/verdict.txt" 2>/dev/null | tr -d '[:space:]' | cut -c1-32 || true)"
+              case "$AGENT_VERDICT" in
+                merge-ready|findings|blocked|inconclusive) ;;
+                *)
+                  echo "::warning::No usable verdict.txt beside the published report.md; the round has no agent verdict."
+                  AGENT_VERDICT=''
+                  ;;
+              esac
+            else
+              ASSERTIONS_FILE="$(find verify-results -mindepth 2 -type f -path '*-verify-*/assertions.json' 2>/dev/null | sort | head -1 || true)"
+            fi
             # Exact root-level path, never a find: the staging step writes
             # this name last as root, and a same-named file nested inside a
             # collected agent artifact dir must not shadow it.
@@ -5940,13 +5980,37 @@ jobs:
                 echo "::warning::assertions.json missing or inconsistent; not treating it as evidence."
               fi
             fi
+            # The checker local rounds run before posting, from this trusted
+            # checkout, so both paths share one set of rules. It must pass on
+            # the report's directory and read the verdict taken from it above.
+            # Only its last stdout line is the summary: warnings above it can
+            # carry agent-chosen evidence filenames, so they are never echoed.
+            # node also exits 1 when the script cannot load; stderr says why.
+            ARTIFACT_CHECK=''
+            if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ] && [ -n "${AGENT_VERDICT:-}" ]; then
+              check_log="${RUNNER_TEMP:-/tmp}/verify-pr-check.log"
+              check_status=0
+              node "${VERIFY_PR_CHECK:-scripts/verify-pr-check.mjs}" "$(dirname "$REPORT")" > "$check_log" 2> "$check_log.err" || check_status=$?
+              case "${check_status}:$(tail -n 1 "$check_log")" in
+                "0:  ok: verdict=${AGENT_VERDICT} ("*) ARTIFACT_CHECK=ok ;;
+                '1:  failed: verdict='*)
+                  ARTIFACT_CHECK=refused
+                  grep '^  error ' "$check_log" | head -20 | cut -c1-300 || true
+                  ;;
+                *)
+                  ARTIFACT_CHECK=error
+                  echo "::warning::The artifact check could not run (exit ${check_status}); not trusting the agent verdict."
+                  head -n 8 "$check_log.err" | cut -c1-300 || true
+                  ;;
+              esac
+            fi
             # The agent's own verdict is only honoured for a run that
             # actually completed AND left consistent evidence: an early
             # `merge-ready` file must not headline a run that then timed out,
             # crashed, or produced no report/assertions. Otherwise the
             # headline comes from the process outcome.
             TRUST_AGENT_VERDICT=false
-            if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ]; then
+            if [ "${VERDICT:-}" = 'pass' ] && [ -n "$REPORT" ] && [ -n "$ASSERT_LINE" ] && [ "$ARTIFACT_CHECK" = ok ]; then
               case "${AGENT_VERDICT:-}" in
                 merge-ready) [ "$A_FAIL" = '0' ] && TRUST_AGENT_VERDICT=true ;;
                 findings|blocked|inconclusive) TRUST_AGENT_VERDICT=true ;;
@@ -5961,9 +6025,18 @@ jobs:
             # or produced no usable verdict says nothing about the PR and
             # gets incomplete/inconclusive, never a pass or a fail.
             if [ "$TRUST_AGENT_VERDICT" = true ]; then
+              # Verdicts come from harness exits: `findings` with no failed
+              # assertion is advisory, and the checker has already refused
+              # failures none of which the ledger attributes to the PR.
               case "$AGENT_VERDICT" in
                 merge-ready) QUAL='✅ passed'; QUAL_ZH='✅ 通过'; HEADLINE='merge-ready (agent verdict)'; HEADLINE_ZH='可合入（agent 判定）' ;;
-                findings) QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='findings reported (agent verdict)'; HEADLINE_ZH='报告了发现（agent 判定）' ;;
+                findings)
+                  if [ "$A_FAIL" = '0' ]; then
+                    QUAL='✅ passed with findings'; QUAL_ZH='✅ 通过（有发现）'; HEADLINE='non-blocking findings, every scripted assertion passed (agent verdict)'; HEADLINE_ZH='非阻塞发现，脚本断言全部通过（agent 判定）'
+                  else
+                    QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='findings reported (agent verdict)'; HEADLINE_ZH='报告了发现（agent 判定）'
+                  fi
+                  ;;
                 blocked) QUAL='❌ not passed'; QUAL_ZH='❌ 不通过'; HEADLINE='blocked (agent verdict)'; HEADLINE_ZH='阻塞（agent 判定）' ;;
                 inconclusive) QUAL='⚠️ inconclusive'; QUAL_ZH='⚠️ 无法判定'; HEADLINE='the agent could not reach a conclusion'; HEADLINE_ZH='agent 未能得出结论' ;;
               esac
@@ -5977,12 +6050,14 @@ jobs:
               esac
               if [ -n "${AGENT_VERDICT:-}" ]; then
                 if [ "${VERDICT:-}" = 'pass' ]; then
-                  if [ -z "$REPORT" ]; then
-                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (report.md missing); reporting the process outcome instead."
-                  elif [ -z "$ASSERT_LINE" ]; then
+                  # A word is only ever read beside a report, so the report
+                  # is present here.
+                  if [ -z "$ASSERT_LINE" ]; then
                     echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions.json missing or inconsistent); reporting the process outcome instead."
-                  else
+                  elif [ "$AGENT_VERDICT" = 'merge-ready' ] && [ "${A_FAIL:-0}" != '0' ]; then
                     echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (assertions recorded ${A_FAIL:-?} failures); reporting the process outcome instead."
+                  else
+                    echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but it was not trusted (artifact check: ${ARTIFACT_CHECK}); reporting the process outcome instead."
                   fi
                 else
                   echo "::warning::Agent wrote verdict '${AGENT_VERDICT}' but the run did not complete cleanly (process verdict '${VERDICT:-}'); reporting the process outcome instead."
@@ -6033,6 +6108,22 @@ jobs:
                 FLAKE_LINE_ZH='抖动门：⚠️ error — 发布时门判定缺失或无法识别，按 error 处理'
                 ;;
             esac
+            # The merge-ready-with-failures case has its own paragraph below.
+            CHECK_NOTE=''
+            CHECK_NOTE_ZH=''
+            if [ "$TRUST_AGENT_VERDICT" != true ] &&
+               ! { [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "${A_FAIL:-0}" != '0' ]; }; then
+              case "$ARTIFACT_CHECK" in
+                refused)
+                  CHECK_NOTE='its artifacts fail the consistency check (`verify-pr-check.mjs`), so that verdict was not trusted — the workflow run log lists the errors'
+                  CHECK_NOTE_ZH='其产物未通过一致性检查（`verify-pr-check.mjs`），因此该判定未被采信——检查的错误见工作流运行日志'
+                  ;;
+                error)
+                  CHECK_NOTE='the consistency check (`verify-pr-check.mjs`) could not run on its artifacts, so that verdict was not trusted — the workflow run log shows why'
+                  CHECK_NOTE_ZH='一致性检查（`verify-pr-check.mjs`）无法在其产物上运行，因此该判定未被采信——原因见工作流运行日志'
+                  ;;
+              esac
+            fi
             if [ -z "$REPORT" ]; then
               MISSING_REPORT_NOTE='No report.md was found in the run artifacts, so the report section is omitted — see the workflow run output.'
               echo "::warning::${MISSING_REPORT_NOTE}"
@@ -6073,6 +6164,9 @@ jobs:
               if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
                 printf 'The agent reported `merge-ready`, but `assertions.json` recorded %s failures, so that claim was not trusted — see the report for whether these are expected A/B control cells.\n\n' "$A_FAIL"
               fi
+              if [ -n "$CHECK_NOTE" ]; then
+                printf 'The agent reported `%s`, but %s.\n\n' "$AGENT_VERDICT" "$CHECK_NOTE"
+              fi
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf 'The deterministic flakiness gate re-ran the test files this PR changes and got different outcomes from identical runs%s. A test that can fail with no code changing lands as intermittent red on unrelated PRs, so this run is reported as not passed regardless of the agent verdict — the per-round matrix is in the flakiness gate log below.\n\n' "${AGENT_VERDICT:+ (agent verdict: \`${AGENT_VERDICT}\`)}"
                 if [ ! -f "$FLAKE_LOG" ]; then
@@ -6098,6 +6192,9 @@ jobs:
               if [ "${AGENT_VERDICT:-}" = 'merge-ready' ] && [ "$TRUST_AGENT_VERDICT" != true ] && [ "${A_FAIL:-0}" != '0' ]; then
                 printf 'agent 报告了 `merge-ready`，但 `assertions.json` 记录了 %s 个失败，因此该判定未被采信——请参阅报告确认这些是否为预期的 A/B 对照单元。\n\n' "$A_FAIL"
               fi
+              if [ -n "$CHECK_NOTE_ZH" ]; then
+                printf 'agent 报告了 `%s`，但%s。\n\n' "$AGENT_VERDICT" "$CHECK_NOTE_ZH"
+              fi
               if [ "${FLAKE_VERDICT:-}" = 'flaky' ]; then
                 printf '确定性抖动门将本 PR 改动的测试文件原样重跑了多轮，得到了不一致的结果%s。一个在代码不变时也会失败的测试会以间歇性红灯落在无关的 PR 上，因此无论 agent 判定如何，本次运行按不通过报告——各轮结果矩阵见下方抖动门日志。\n\n' "${AGENT_VERDICT:+（agent 判定：\`${AGENT_VERDICT}\`）}"
                 if [ ! -f "$FLAKE_LOG" ]; then
@@ -6117,7 +6214,17 @@ jobs:
                 printf '%s' "$EVIDENCE_SECTION"
               fi
               printf 'Harness scripts and raw logs are in the workflow run artifacts (7-day retention).\n\n'
-              printf '%s\n' '— _Qwen Code · sandboxed verification_'
+              # Attribution footer, the same shape /review posts: model, CLI
+              # version, and the content hash of the skill that ran. Only on
+              # a body that actually carries a report and only when all three
+              # workflow-owned values arrived — a missing report makes this
+              # a weak notice (WEAK_BODY above), and a half-known identity
+              # keeps the generic signature too.
+              if [ -n "$REPORT" ] && [ -n "${VERIFY_MODEL:-}" ] && [ -n "${VERIFY_CLI_VERSION:-}" ] && [ -n "${VERIFY_SKILL_HASH:-}" ]; then
+                printf '_— %s via Qwen Code /verify-pr (v%s; skill %s)_\n' "$VERIFY_MODEL" "$VERIFY_CLI_VERSION" "$VERIFY_SKILL_HASH"
+              else
+                printf '%s\n' '— _Qwen Code · sandboxed verification_'
+              fi
             } > "$BODY_FILE"
           fi
 

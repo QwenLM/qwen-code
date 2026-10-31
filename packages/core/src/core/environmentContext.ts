@@ -7,6 +7,7 @@
 import type { Content, Part } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { ToolNames } from '../tools/tool-names.js';
+import { getApiHistoryPromptId } from '../utils/api-history-metadata.js';
 import type {
   DeferredToolSummary,
   ToolRegistry,
@@ -22,9 +23,39 @@ import {
 
 const debugLogger = createDebugLogger('ENVIRONMENT_CONTEXT');
 
+export const AUTO_MEMORY_SNAPSHOT_METADATA =
+  'qwen-code:memory-catalog-snapshot';
+
 export const SYSTEM_REMINDER_OPEN = '<system-reminder>';
 export const SYSTEM_REMINDER_CLOSE = '</system-reminder>';
 const MAX_DEFERRED_TOOL_DESC_LEN = 160;
+const COMPRESSED_PREFIX_LENGTH = Symbol('compressedPrefixLength');
+
+type CompressedSummary = Content & {
+  [COMPRESSED_PREFIX_LENGTH]?: number;
+};
+
+export function markCompressedHistory(
+  history: Content[],
+  prefixLength?: number,
+): void {
+  const offset = history[0] && isSystemReminderContent(history[0]) ? 1 : 0;
+  const detected = detectCompressedPrefixLength(history, offset);
+  const length =
+    prefixLength !== undefined &&
+    Number.isInteger(prefixLength) &&
+    prefixLength >= offset + 2 &&
+    prefixLength <= Math.min(history.length, offset + 4)
+      ? prefixLength - offset
+      : detected;
+  if (detected > 0 && Number.isInteger(length) && length >= 2 && length <= 4) {
+    // Freeze before later real input can resemble a restoration block.
+    (history[offset] as CompressedSummary)[COMPRESSED_PREFIX_LENGTH] = Math.min(
+      length,
+      3,
+    );
+  }
+}
 // Character threshold for simplifying the session-start <available_skills>
 // snapshot. The snapshot lives in the stable messages prefix; simplifying a
 // large skill set limits cached-prefix growth. Typical small skill sets render
@@ -683,7 +714,8 @@ function detectCompressedPrefixLength(
   const firstEntry = history[offset];
   if (firstEntry?.role !== 'user') return 0;
   const firstText = firstEntry.parts?.[0]?.text;
-  // Post-compression prefix for rewind indexing only. The startup-context
+  const ackText = history[offset + 1]?.parts?.[0]?.text;
+  // Post-compression prefix for turn indexing and recovery. The startup-context
   // refresh/restore paths need compressed history to look like "no startup
   // prelude" so they don't strip or skip the compressed summary.
   //
@@ -696,10 +728,17 @@ function detectCompressedPrefixLength(
     typeof firstText !== 'string' ||
     !firstText.includes('Resume the prior task') ||
     history[offset + 1]?.role !== 'model' ||
-    history[offset + 1]?.parts?.[0]?.text !==
-      'Got it. Thanks for the additional context!'
+    ackText !== 'Got it. Thanks for the additional context!'
   ) {
     return 0;
+  }
+  const remembered = (firstEntry as CompressedSummary)[
+    COMPRESSED_PREFIX_LENGTH
+  ];
+  if (remembered !== undefined) {
+    return remembered === 3 && isModelFunctionCallEntry(history[offset + 3])
+      ? 4
+      : Math.min(remembered, history.length - offset);
   }
   if (isPostCompactAttachmentEntry(history[offset + 2])) {
     if (isModelFunctionCallEntry(history[offset + 3])) return 4;
@@ -710,20 +749,23 @@ function detectCompressedPrefixLength(
 
 function isPostCompactAttachmentEntry(content: Content | undefined): boolean {
   if (content?.role !== 'user') return false;
+  if (getApiHistoryPromptId(content) !== undefined) return false;
   const parts = content.parts ?? [];
   return parts.some(
     (part) =>
       typeof part.text === 'string' &&
-      (part.text.startsWith('<plan-mode-active>') ||
-        part.text.startsWith('<background-tasks>') ||
-        part.text.startsWith(
-          'The following files were recently accessed before context was compacted.',
+      ((part.text.startsWith('<plan-mode-active>\n') &&
+        part.text.endsWith('\n</plan-mode-active>')) ||
+        (part.text.startsWith('<background-tasks>\n') &&
+          part.text.endsWith('\n</background-tasks>')) ||
+        /^The following files were recently accessed before context was compacted\.[^\n]+\n\n- [^\n]+/.test(
+          part.text,
         ) ||
-        part.text.startsWith(
-          'Recently accessed file (full current content embedded):',
+        /^Recently accessed file \(full current content embedded\):\n\n## [^\n]+\n\n(`{3,})[^\n]*\n[\s\S]*\n\1$/.test(
+          part.text,
         ) ||
-        part.text.startsWith(
-          'Recent visual snapshots preserved from before context was compacted',
+        /^Recent visual snapshots preserved from before context was compacted[^\n]+\n\n- turn /.test(
+          part.text,
         )),
   );
 }
@@ -735,9 +777,17 @@ function isModelFunctionCallEntry(content: Content | undefined): boolean {
   );
 }
 
+export function isWrappedSystemReminderPart(part: Part): boolean {
+  return (
+    typeof part.text === 'string' &&
+    part.text.startsWith(SYSTEM_REMINDER_OPEN) &&
+    part.text.trimEnd().endsWith(SYSTEM_REMINDER_CLOSE)
+  );
+}
+
 /**
- * True when `content` is a *pure* system-reminder entry: it has parts and
- * EVERY part is a text part wrapped in `<system-reminder>…</system-reminder>`.
+ * True when `content` is a structural system-reminder entry: it has parts and
+ * EVERY part is wrapped reminder text or a marked memory catalog snapshot.
  *
  * These are structural history entries — the startup-context prelude
  * (history[0]) and the mid-history MCP added-tool reminders injected by
@@ -752,7 +802,8 @@ function isModelFunctionCallEntry(content: Content | undefined): boolean {
  * prompt as structural (e.g. dropping it from rewind truncation, or
  * preserving an orphaned failed turn whose prompt then leaks via coalescing).
  *
- * Each part must END with the close tag, not merely contain it. IDE mode is
+ * Retained catalog snapshots are structural by their trusted part metadata.
+ * Text-wrapped reminders must END with the close tag, not merely contain it. IDE mode is
  * the case "every part" alone misses: the editor reminder is concatenated into
  * the prompt's text part (not a separate part), so that part trails the real
  * prompt after the close tag. `wrapSystemReminder`/`wrapIdeContext` emit the
@@ -765,8 +816,8 @@ export function isSystemReminderContent(content: Content): boolean {
   return parts.every(
     (part) =>
       typeof part.text === 'string' &&
-      part.text.startsWith(SYSTEM_REMINDER_OPEN) &&
-      part.text.trimEnd().endsWith(SYSTEM_REMINDER_CLOSE),
+      (part.partMetadata?.[AUTO_MEMORY_SNAPSHOT_METADATA] === true ||
+        isWrappedSystemReminderPart(part)),
   );
 }
 

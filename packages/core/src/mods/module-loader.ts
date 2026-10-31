@@ -9,7 +9,15 @@ import ts from 'typescript';
 import { readModFile } from './discovery.js';
 import { MOD_MAX_BYTES, type ModSource } from './types.js';
 
-const suffixes = ['.ts', '.js', '.mjs', '.cjs', '.mts', '.cts'];
+// Claude Code's order, which is also the order an extensionless import tries.
+const suffixes = ['.ts', '.tsx', '.jsx', '.js', '.mjs', '.cjs', '.mts', '.cts'];
+// JSX compiles against the `h` and `Fragment` globals, with the classic
+// runtime, as Claude Code compiles it.
+const jsx = {
+  jsx: ts.JsxEmit.React,
+  jsxFactory: 'h',
+  jsxFragmentFactory: 'Fragment',
+};
 const maxGraphBytes = 1024 * 1024;
 
 async function resolveImport(
@@ -31,16 +39,15 @@ async function resolveImport(
   if (extension && !suffixes.includes(extension)) {
     throw new Error('Unsupported Mod import extension.');
   }
-  const replacements: Record<string, string> = {
-    '.js': '.ts',
-    '.mjs': '.mts',
-    '.cjs': '.cts',
+  const replacements: Record<string, string[]> = {
+    '.js': ['.ts', '.tsx'],
+    '.jsx': ['.tsx'],
+    '.mjs': ['.mts'],
+    '.cjs': ['.cts'],
   };
   const candidates = [target];
-  if (replacements[extension])
-    candidates.push(
-      target.slice(0, -extension.length) + replacements[extension],
-    );
+  for (const replacement of replacements[extension] ?? [])
+    candidates.push(target.slice(0, -extension.length) + replacement);
   for (const suffix of suffixes)
     candidates.push(target + suffix, path.join(target, 'index' + suffix));
   for (const candidate of candidates) {
@@ -77,13 +84,19 @@ export async function compileModModules(input: ModSource) {
     ) {
       throw new Error('Mod source graph exceeds its file or byte limit.');
     }
-    const isTypescript = /\.[cm]?ts$/.test(entry);
+    const kind = /\.[cm]?ts$/.test(entry)
+      ? { file: 'mod.ts', script: ts.ScriptKind.TS, label: 'TypeScript' }
+      : entry.endsWith('.tsx')
+        ? { file: 'mod.tsx', script: ts.ScriptKind.TSX, label: 'TypeScript' }
+        : entry.endsWith('.jsx')
+          ? { file: 'mod.jsx', script: ts.ScriptKind.JSX, label: 'JSX' }
+          : undefined;
     const syntax = ts.createSourceFile(
-      isTypescript ? 'mod.ts' : 'mod.js',
+      kind?.file ?? 'mod.js',
       source,
       ts.ScriptTarget.ES2022,
       true,
-      isTypescript ? ts.ScriptKind.TS : ts.ScriptKind.JS,
+      kind?.script ?? ts.ScriptKind.JS,
     );
     function check(node: ts.Node, inFunction = false): void {
       if (
@@ -116,22 +129,28 @@ export async function compileModModules(input: ModSource) {
     }
     check(syntax);
     let output = source;
-    if (isTypescript) {
+    if (kind) {
       const compiled = ts.transpileModule(source, {
-        fileName: 'mod.ts',
+        fileName: kind.file,
         compilerOptions: {
           target: ts.ScriptTarget.ES2022,
           module: ts.ModuleKind.ESNext,
           isolatedModules: true,
+          ...(kind.script === ts.ScriptKind.TS ? {} : jsx),
         },
         reportDiagnostics: true,
       });
-      if (
-        compiled.diagnostics?.some(
-          (item) => item.category === ts.DiagnosticCategory.Error,
-        )
-      ) {
-        throw new Error(`Invalid Mod TypeScript: ${path.basename(entry)}.`);
+      const error = compiled.diagnostics?.find(
+        (item) => item.category === ts.DiagnosticCategory.Error,
+      );
+      if (error) {
+        const at =
+          error.file && error.start !== undefined
+            ? error.file.getLineAndCharacterOfPosition(error.start)
+            : undefined;
+        throw new Error(
+          `Invalid Mod ${kind.label}: ${path.basename(entry)}: ${ts.flattenDiagnosticMessageText(error.messageText, ' ')}${at ? ` (line ${at.line + 1}, column ${at.character + 1})` : ''}.`,
+        );
       }
       output = compiled.outputText;
     }

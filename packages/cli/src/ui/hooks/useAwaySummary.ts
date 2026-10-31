@@ -7,6 +7,7 @@
 import { useEffect, useRef } from 'react';
 import { generateSessionRecap, type Config } from '@qwen-code/qwen-code-core';
 import type { HistoryItemAwayRecap, HistoryItemWithoutId } from '../types.js';
+import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 
 const DEFAULT_AWAY_THRESHOLD_MINUTES = 5;
 
@@ -150,7 +151,17 @@ export function useAwaySummary(options: UseAwaySummaryOptions): void {
     const controller = new AbortController();
     inFlightRef.current = controller;
 
-    void generateSessionRecap(config, controller.signal)
+    const mods = getInteractiveModSession(config);
+    const recap = mods
+      ? mods.ready
+          .then(() =>
+            controller.signal.aborted || !isIdleRef.current
+              ? null
+              : generateSessionRecap(config, controller.signal),
+          )
+          .catch(() => null)
+      : generateSessionRecap(config, controller.signal);
+    void recap
       .then((recap) => {
         if (controller.signal.aborted || !recap) return;
         if (!isIdleRef.current) return;

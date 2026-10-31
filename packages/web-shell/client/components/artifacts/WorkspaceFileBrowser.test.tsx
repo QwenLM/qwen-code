@@ -34,8 +34,20 @@ vi.mock('../ui/resizable', () => ({
   ),
   ResizableHandle: () => null,
 }));
+const treeOptions = vi.hoisted(() => ({
+  current: undefined as
+    | ConstructorParameters<typeof import('@pierre/trees').FileTree>[0]
+    | undefined,
+}));
 vi.mock('@pierre/trees', () => ({
   FileTree: class {
+    constructor(
+      options: ConstructorParameters<
+        typeof import('@pierre/trees').FileTree
+      >[0],
+    ) {
+      treeOptions.current = options;
+    }
     render() {}
     getFileTreeContainer() {
       return undefined;
@@ -43,6 +55,7 @@ vi.mock('@pierre/trees', () => ({
     subscribe() {
       return () => {};
     }
+    batch() {}
     setSearch() {}
     cleanUp() {}
   },
@@ -50,19 +63,28 @@ vi.mock('@pierre/trees', () => ({
 let root: Root | undefined;
 let container: HTMLDivElement;
 const upload = vi.fn();
-async function mount() {
+async function mount(
+  workspaceCwd = '/workspace',
+  rootListing: {
+    entries: Array<{ name: string; kind: 'file' }>;
+    truncated: boolean;
+  } = {
+    entries: [],
+    truncated: false,
+  },
+) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   const actions = {
-    listDirectory: vi.fn().mockResolvedValue({ entries: [], truncated: false }),
+    listDirectory: vi.fn().mockResolvedValue(rootListing),
     uploadWorkspaceFile: upload,
   } as unknown as ArtifactWorkspaceActions;
   await act(async () =>
     root!.render(
       <I18nProvider language="en">
         <WorkspaceFileBrowser
-          workspaceCwd="/workspace"
+          workspaceCwd={workspaceCwd}
           actions={actions}
           renderPreview={() => null}
           onOpenPreview={() => {}}
@@ -139,4 +161,18 @@ it('reports overflow once with the skipped filename and count', async () => {
   expect(container.textContent).not.toContain('file-101.bin');
   expect(container.querySelectorAll('[role="status"]')).toHaveLength(1);
   expect(container.querySelector('[role="alert"]')).toBeNull();
+});
+it('keeps repeated spaces in the workspace name shown in the header', async () => {
+  await mount('/workspace/notes  draft');
+  expect(container.textContent).toContain('notes  draft');
+});
+it('keeps repeated spaces in the selected file shown in the header', async () => {
+  await mount('/workspace', {
+    entries: [{ name: 'notes  draft.md', kind: 'file' }],
+    truncated: false,
+  });
+  act(() => treeOptions.current?.onSelectionChange?.(['notes  draft.md']));
+  const header = container.querySelector('header span')!;
+  expect(header.textContent).toContain('notes  draft.md');
+  expect(header.getAttribute('title')).toContain('notes  draft.md');
 });

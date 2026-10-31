@@ -17,6 +17,7 @@ import {
 } from '../core/turn.js';
 import { DEFAULT_TOKEN_LIMIT } from '../core/tokenLimits.js';
 import { getCompressionPrompt } from '../core/prompts.js';
+import { withoutAutoMemorySnapshots } from '../memory/request-context.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { buildModelIdContext, resolveModelId } from '../utils/modelId.js';
 import { supportsOpenAIPrefixCaching } from '../core/openaiContentGenerator/prefix-caching.js';
@@ -245,6 +246,37 @@ export function computeThresholds(
   return { warn, auto, hard, effectiveWindow };
 }
 
+/**
+ * Whether a prompt of `promptTokens` sits below the compaction warning tier
+ * for this config's window. Memory extraction cadence (#13004) only *arms* a
+ * skip below this tier: a skip armed on an earlier turn can still be pending
+ * when compaction fires, and compaction does not flush it.
+ *
+ * Callers pass the next prompt's known base — the chat's last API-reported
+ * prompt count plus its retained output tokens — because both compaction gates
+ * measure at least that much, and comparing the bare prompt count would report
+ * "below warn" for a turn whose own output budget already reaches the auto
+ * tier. What remains between this tier and `auto` is {@link WARN_BUFFER}, the
+ * reserve for the next user message and the estimate's error.
+ */
+export function isBelowCompactionWarn(
+  config: Config,
+  promptTokens: number,
+): boolean {
+  // A count of 0 means this chat has no API report yet — an un-keyed read
+  // adopts the active route, so a zero is this chat's own last report rather
+  // than a value borrowed from another route — not an empty prompt: fail
+  // closed so no turn is skipped.
+  if (promptTokens <= 0) return false;
+  const window =
+    config.getContentGeneratorConfig()?.contextWindowSize ??
+    DEFAULT_TOKEN_LIMIT;
+  return (
+    promptTokens <
+    computeThresholds(window, config.getAutoCompactThreshold()).warn
+  );
+}
+
 export type CompactTrigger = 'manual' | 'auto';
 
 /**
@@ -256,10 +288,40 @@ export type CompactTrigger = 'manual' | 'auto';
  */
 export const PAYLOAD_OVERFLOW_SIDE_QUERY_TEXT_CAP = 4000;
 
+export interface ChatCompressionCandidate {
+  readonly newHistory: Content[];
+  readonly info: ChatCompressionInfo;
+  readonly summary: string;
+}
+
+export async function firePostCompact(
+  config: Config,
+  candidate: ChatCompressionCandidate,
+  signal?: AbortSignal,
+  trigger: CompactTrigger = 'manual',
+): Promise<void> {
+  try {
+    await config
+      .getHookSystem()
+      ?.firePostCompactEvent(
+        trigger === 'manual'
+          ? PostCompactTrigger.Manual
+          : PostCompactTrigger.Auto,
+        candidate.summary,
+        signal,
+      );
+  } catch (error) {
+    if (config.getHookSystem()?.isManaged()) throw error;
+    config.getDebugLogger().warn(`PostCompact hook failed: ${error}`);
+  }
+}
+
 export interface CompressOptions {
   promptId: string;
   force: boolean;
   config: Config;
+  onPreparedCompaction?: (candidate: ChatCompressionCandidate) => Promise<void>;
+  restoreRecentFiles?: boolean;
   /**
    * Number of consecutive auto-compaction failures for this chat. When it reaches
    * MAX_CONSECUTIVE_FAILURES, the cheap-gate stops trying until a successful
@@ -643,15 +705,16 @@ export class ChatCompressionService {
       lastCurated.parts?.some((part) => !!part.functionCall)
         ? curatedHistory.slice(0, -1)
         : curatedHistory;
-    const sideQueryHistory = pendingToolResult
-      ? [...sideQueryBase, opts.pendingUserMessage!]
-      : sideQueryBase;
-    const pendingToolResultTokenCount = pendingToolResult
-      ? estimateContentTokens(
-          [opts.pendingUserMessage!],
-          slimmingConfig.imageTokenEstimate,
-        )
-      : 0;
+    const pendingHistory = pendingToolResult ? [opts.pendingUserMessage!] : [];
+    // Keep raw pending input intact for replay and compression checkpoints.
+    const visiblePendingHistory = config.getAutoMemoryContext?.()
+      ? pendingHistory
+      : withoutAutoMemorySnapshots(pendingHistory);
+    const sideQueryHistory = [...sideQueryBase, ...visiblePendingHistory];
+    const pendingToolResultTokenCount = estimateContentTokens(
+      visiblePendingHistory,
+      slimmingConfig.imageTokenEstimate,
+    );
 
     // Lazy: the cold fallback input is slimmed on demand. The original
     // history keeps its media: the shared request needs it for cache-prefix
@@ -1226,7 +1289,10 @@ export class ChatCompressionService {
             // retry request straight back over the same limit and defeating
             // the recovery. Suppress restoration attachments on this path;
             // the summary that just fit dominates the retried request.
-            maxFiles: opts.requestPayloadTooLarge ? 0 : tuning.maxRecentFiles,
+            maxFiles:
+              opts.requestPayloadTooLarge || opts.restoreRecentFiles === false
+                ? 0
+                : tuning.maxRecentFiles,
             maxImages: opts.requestPayloadTooLarge ? 0 : tuning.maxRecentImages,
             // Restore plan-mode reminder + running-subagent snapshot so the
             // post-compact agent does not lose either piece of mid-session
@@ -1434,31 +1500,11 @@ export class ChatCompressionService {
         },
       };
     } else {
-      // Fire PostCompact event after successful compression
-      try {
-        const postCompactTrigger =
-          compactTrigger === 'manual'
-            ? PostCompactTrigger.Manual
-            : PostCompactTrigger.Auto;
-        // Pass the stripped summary (Finding 8a) so hook consumers see
-        // the same text that lands in history — not the raw side-query
-        // output with the <analysis> scratchpad still attached. The
-        // resume trailer is NOT included; it is wrapper decoration for
-        // the next agent turn, not state for downstream consumers.
-        await config
-          .getHookSystem()
-          ?.firePostCompactEvent(
-            postCompactTrigger,
-            stripAnalysisBlock(summary),
-            signal,
-          );
-      } catch (err) {
-        if (config.getHookSystem()?.isManaged()) throw err;
-        config.getDebugLogger().warn(`PostCompact hook failed: ${err}`);
-      }
-
-      return {
+      const candidate: ChatCompressionCandidate = {
         newHistory: extraHistory,
+        // Hook consumers see the same summary that lands in history, without
+        // the side-query's analysis scratchpad or the resume trailer.
+        summary: stripAnalysisBlock(summary),
         info: {
           originalTokenCount,
           newTokenCount,
@@ -1468,6 +1514,27 @@ export class ChatCompressionService {
           ...(compactionWarning && { warning: compactionWarning }),
         },
       };
+      // A hosted caller saves this before any PostCompact side effect, so a
+      // takeover resumes that exact summary instead of generating another one.
+      await opts.onPreparedCompaction?.(candidate);
+      await firePostCompact(config, candidate, signal, compactTrigger);
+
+      // #13004: this shrink lands below whatever a parked cadence snapshot
+      // holds, and a turn that ends without reaching scheduleExtract (e.g.
+      // cancelled) lets no shrink guard observe it — the flush would replay
+      // the stale snapshot into a cursor no live history matches. Drop it
+      // here, at the point the shrink is decided.
+      // Only the session's own chat may: `compress()` runs per chat, while a
+      // forked chat shares this Config instance and a subagent's derived
+      // Config shares the session id and manager — neither history is the one
+      // the parked snapshot was cut from.
+      if (!chat.isForkedChat) {
+        config
+          .getMemoryManager?.()
+          ?.invalidatePendingExtract(config.getSessionId(), config);
+      }
+
+      return { newHistory: candidate.newHistory, info: candidate.info };
     }
   }
 }

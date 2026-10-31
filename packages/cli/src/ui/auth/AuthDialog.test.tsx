@@ -6,16 +6,18 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { setTimeout as settleInput } from 'node:timers/promises';
+import { Box } from 'ink';
 import { AuthDialog } from './AuthDialog.js';
 import { LoadedSettings } from '../../config/settings.js';
 import type { Settings } from '../../config/settingsSchema.js';
 import type { Config } from '@qwen-code/qwen-code-core';
 import { AuthType } from '@qwen-code/qwen-code-core';
-import { renderWithProviders } from '../../test-utils/render.js';
+import { renderWithProviders, withProviders } from '../../test-utils/render.js';
 import { UIStateContext } from '../contexts/UIStateContext.js';
 import { UIActionsContext } from '../contexts/UIActionsContext.js';
 import type { UIState } from '../contexts/UIStateContext.js';
 import type { UIActions } from '../contexts/UIActionsContext.js';
+import { setLanguageAsync } from '../../i18n/index.js';
 
 const discoverProviderModelsMock = vi.hoisted(() =>
   vi.fn().mockResolvedValue(null),
@@ -194,11 +196,23 @@ const moveDownAndWaitForSelection = async (
   await waitForSelectedOption(lastFrame, label);
 };
 
+const QWENCLOUD_MAIN_LABEL = 'QwenCloud';
+
+// \u5343\u95eeAI\u5e73\u53f0 / QwenCloud is the first top-level entry; Alibaba
+// ModelStudio now sits one step below it.
+const selectAlibabaModelStudio = async (
+  stdin: { write: (s: string) => void },
+  lastFrame: () => string | undefined,
+) => {
+  await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+  await moveDownAndWaitForSelection(stdin, lastFrame, 'Alibaba ModelStudio');
+};
+
 const navigateToCustomProtocolSelect = async (
   stdin: { write: (s: string) => void },
   lastFrame: () => string | undefined,
 ) => {
-  await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+  await selectAlibabaModelStudio(stdin, lastFrame);
   await moveDownAndWaitForSelection(stdin, lastFrame, 'Third-party Providers');
   await moveDownAndWaitForSelection(stdin, lastFrame, 'Custom Provider');
   await pressEnterAndWaitFor(
@@ -285,6 +299,183 @@ describe('AuthDialog', { timeout: 15000 }, () => {
   afterEach(() => {
     process.env = originalEnv;
   });
+
+  itWhenTuiInputReliable.each([36, 100])(
+    'keeps provider navigation readable in a 14-row dialog at width %i',
+    async (width) => {
+      const empty = { path: '', settings: {}, originalSettings: {} };
+      const settings = new LoadedSettings(
+        empty,
+        empty,
+        empty,
+        empty,
+        true,
+        new Set(),
+      );
+      const config = {
+        getAuthType: () => undefined,
+        getContentGeneratorConfig: () => undefined,
+      } as unknown as Config;
+      const actions = createMockUIActions();
+      const state = createMockUIState({ mainAreaWidth: width });
+      // Unclipped on purpose: a fixed height plus overflow="hidden" would make
+      // the rows<=height assertion below hold for any output the dialog paints.
+      const dialog = (height: number) => (
+        <UIStateContext.Provider value={state}>
+          <UIActionsContext.Provider value={actions}>
+            <Box width={width} flexDirection="column">
+              <AuthDialog availableTerminalHeight={height} />
+            </Box>
+          </UIActionsContext.Provider>
+        </UIStateContext.Provider>
+      );
+      const { stdin, lastFrame, rerender, unmount } = renderWithProviders(
+        dialog(14),
+        { settings, config },
+      );
+      const expectReadableSelection = (label: string, height = 14) => {
+        const frame = lastFrame() ?? '';
+        expect(frame.split('\n').length).toBeLessThanOrEqual(height);
+        const selectedLine = frame
+          .split('\n')
+          .find((line) => line.includes('›'));
+        expect(selectedLine?.replaceAll('│', '').trim()).toBe(`› ${label}`);
+      };
+
+      await waitForSelectedOption(lastFrame, 'QwenCloud');
+      expectReadableSelection('QwenCloud');
+      for (const label of [
+        'Alibaba ModelStudio',
+        'Third-party Providers',
+        'Custom Provider',
+      ]) {
+        await moveDownAndWaitForSelection(stdin, lastFrame, label);
+        expectReadableSelection(label);
+      }
+      expect(lastFrame()?.replace(/[│\s]/g, '')).toContain(
+        'https://qwenlm.github.io/qwen-code-docs/en/users/support/tos-privacy/',
+      );
+
+      rerender(withProviders(dialog(1), { settings, config }));
+      await waitForSelectedOption(lastFrame, 'Custom Provider');
+      expectReadableSelection('Custom Provider', 1);
+      stdin.write('\u001b[A');
+      await waitForSelectedOption(lastFrame, 'Third-party Providers');
+      expectReadableSelection('Third-party Providers', 1);
+      rerender(withProviders(dialog(14), { settings, config }));
+      await pressEnterAndWaitFor(stdin, lastFrame, 'DeepSeek API Key');
+      stdin.write('\u001b[A');
+      await waitForSelectedOption(lastFrame, 'Requesty');
+      expectReadableSelection('Requesty');
+
+      rerender(withProviders(dialog(40), { settings, config }));
+      await waitForSelectedOption(lastFrame, 'Requesty');
+      rerender(withProviders(dialog(14), { settings, config }));
+      await waitForSelectedOption(lastFrame, 'Requesty');
+      expectReadableSelection('Requesty');
+      // The multi-step form has its own layout; expand before entering it.
+      rerender(withProviders(dialog(40), { settings, config }));
+      await pressEnterAndWaitFor(
+        stdin,
+        lastFrame,
+        'Requesty · Step 1/2 · API Key',
+      );
+      stdin.write('\u001b');
+      await waitForSelectedOption(lastFrame, 'Requesty');
+      stdin.write('\u001b');
+      await waitForSelectedOption(lastFrame, 'Third-party Providers');
+      unmount();
+    },
+  );
+
+  // Deliberately render-only and NOT behind itWhenTuiInputReliable: it needs no
+  // stdin, so it still runs under CI=true, where the input-driven case above is
+  // skipped and would otherwise leave the row budget unexercised.
+  // The shape contentGenerator validation actually produces: several failures
+  // joined with newlines, then wrapped by useAuth.
+  const multiLineAuthError = [
+    'Failed to authenticate. Message: Missing API key for anthropic auth.',
+    "Missing baseUrl for modelProviders model '(unknown)'.",
+    "Set the environment variable 'ANTHROPIC_MODEL'.",
+  ].join('\n');
+
+  it.each([
+    // Enough room for every error line plus a menu row.
+    {
+      width: 80,
+      height: 14,
+      error: multiLineAuthError,
+      expectedError: multiLineAuthError,
+    },
+    // No room: the error is dropped rather than pushing the dialog past its
+    // budget, and the menu must survive instead of vanishing on a NaN viewport.
+    { width: 80, height: 2, error: multiLineAuthError, expectedError: '' },
+    {
+      width: 36,
+      height: 14,
+      error:
+        'You must connect a provider to proceed. Press Ctrl+C again to exit.',
+      expectedError:
+        'You must connect a provider to proceed. Press Ctrl+C again to exit.',
+    },
+    {
+      width: 36,
+      height: 5,
+      error:
+        'You must connect a provider to proceed. Press Ctrl+C again to exit.',
+      expectedError: 'You must connect',
+    },
+  ])(
+    'keeps an auth error inside a $width-column, $height-row dialog budget',
+    async ({ width, height, error, expectedError }) => {
+      const empty = { path: '', settings: {}, originalSettings: {} };
+      const settings = new LoadedSettings(
+        empty,
+        empty,
+        empty,
+        empty,
+        true,
+        new Set(),
+      );
+      const config = {
+        getAuthType: () => undefined,
+        getContentGeneratorConfig: () => undefined,
+      } as unknown as Config;
+      const actions = createMockUIActions();
+      const state = createMockUIState({
+        mainAreaWidth: width,
+        authError: error,
+      });
+      const { lastFrame, unmount } = renderWithProviders(
+        <UIStateContext.Provider value={state}>
+          <UIActionsContext.Provider value={actions}>
+            <Box width={width} flexDirection="column">
+              <AuthDialog availableTerminalHeight={height} />
+            </Box>
+          </UIActionsContext.Provider>
+        </UIStateContext.Provider>,
+        { settings, config },
+      );
+
+      await waitForSelectedOption(lastFrame, 'QwenCloud');
+
+      const frame = lastFrame() ?? '';
+      const painted = frame.split('\n').length;
+      // An empty frame also satisfies a bare rows<=budget assertion, so pin that
+      // the dialog really painted its menu, and that the error is shown exactly
+      // when it fits.
+      expect(painted).toBeGreaterThan(0);
+      expect(frame).toContain('QwenCloud');
+      const normalizedFrame = frame.replace(/[│\s]/g, '');
+      if (expectedError) {
+        expect(normalizedFrame).toContain(expectedError.replace(/\s/g, ''));
+      } else {
+        expect(normalizedFrame).not.toContain('Failedtoauthenticate');
+      }
+      expect(painted).toBeLessThanOrEqual(height);
+      unmount();
+    },
+  );
 
   it('should show an error if the initial auth type is invalid', () => {
     process.env['GEMINI_API_KEY'] = '';
@@ -513,7 +704,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // QWEN OAuth no longer has a UI entry; the dialog falls back to the
-      // default Alibaba ModelStudio option.
+      // default first option, QwenCloud.
+      expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
 
@@ -553,7 +745,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { lastFrame } = renderAuthDialog(settings);
 
-      // Default is Alibaba ModelStudio (first option).
+      // Default is QwenCloud (first option).
+      expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
 
@@ -596,7 +789,8 @@ describe('AuthDialog', { timeout: 15000 }, () => {
       const { lastFrame } = renderAuthDialog(settings);
 
       // Since the auth dialog doesn't show QWEN_DEFAULT_AUTH_TYPE errors anymore,
-      // it will just show the default Alibaba ModelStudio option.
+      // it will just show the default first option, QwenCloud.
+      expectSelectedOption(lastFrame(), QWENCLOUD_MAIN_LABEL);
       expect(lastFrame()).toContain('Alibaba ModelStudio');
     });
   });
@@ -652,7 +846,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         { closeAuthDialog },
         undefined, // config.getAuthType() returns undefined
       );
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
 
       // Simulate pressing escape key
       stdin.write('\u001b'); // ESC key
@@ -835,6 +1029,10 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const cases = [
         {
+          label: QWENCLOUD_MAIN_LABEL,
+          childTitle: `${QWENCLOUD_MAIN_LABEL} · Access Method`,
+        },
+        {
           label: 'Alibaba ModelStudio',
           childTitle: 'Alibaba ModelStudio · Access Method',
         },
@@ -852,7 +1050,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         const { stdin, lastFrame, unmount } =
           renderAuthDialog(createSettings());
 
-        await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+        await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
         while (
           !lastFrame()?.match(
             new RegExp(`›\\s*(?:\\d+\\.\\s*)?${escapeRegExp(testCase.label)}`),
@@ -908,7 +1106,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
@@ -974,7 +1172,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await moveDownAndWaitForSelection(
         stdin,
         lastFrame,
@@ -1044,7 +1242,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await moveDownAndWaitForSelection(
         stdin,
         lastFrame,
@@ -1111,7 +1309,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await moveDownAndWaitForSelection(
         stdin,
         lastFrame,
@@ -1194,7 +1392,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       await pressEnterAndWaitFor(
         stdin,
         lastFrame,
@@ -1206,9 +1404,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
           const frame = lastFrame();
           expect(frame).toContain('Coding Plan');
           expect(frame).toContain('Token Plan');
-          expect(frame).toContain(
-            'Usage-based billing with dedicated endpoint',
-          );
+          expect(frame).toContain('Subscription with a monthly Credit quota');
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );
@@ -1260,7 +1456,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         { handleProviderSubmit },
       );
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       stdin.write('\r');
       await waitForSelectedOption(lastFrame, 'Coding Plan');
       await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
@@ -1341,7 +1537,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       stdin.write('\r');
       await waitForSelectedOption(lastFrame, 'Coding Plan');
       await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
@@ -1411,7 +1607,7 @@ describe('AuthDialog', { timeout: 15000 }, () => {
 
       const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
 
-      await waitForSelectedOption(lastFrame, 'Alibaba ModelStudio');
+      await selectAlibabaModelStudio(stdin, lastFrame);
       stdin.write('\r');
       await waitForSelectedOption(lastFrame, 'Coding Plan');
       await moveDownAndWaitForSelection(stdin, lastFrame, 'Token Plan');
@@ -1441,6 +1637,163 @@ describe('AuthDialog', { timeout: 15000 }, () => {
         () => {
           expect(lastFrame()).toContain('Alibaba ModelStudio');
           expectSelectedOption(lastFrame(), 'Token Plan');
+        },
+        { timeout: WAIT_FOR_TIMEOUT },
+      );
+
+      unmount();
+    },
+  );
+
+  it('resolves the view title while rendering, not at import time (T1)', async () => {
+    // Ungated on purpose: every keystroke-driven QwenCloud case in this file is
+    // skipped when CI=true, so this is the only Ink-side guard that runs there.
+    // The module is imported under the default locale, so an eager VIEW_TITLES
+    // would still render 'Connect a Provider' after the switch to zh.
+    await setLanguageAsync('zh');
+    const settings: LoadedSettings = new LoadedSettings(
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: {},
+        originalSettings: {},
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      {
+        settings: { ui: { customThemes: {} }, mcpServers: {} },
+        originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+        path: '',
+      },
+      true,
+      new Set(),
+    );
+
+    const { lastFrame, unmount } = renderAuthDialog(settings);
+    try {
+      expect(lastFrame()).toContain('连接服务商');
+    } finally {
+      unmount();
+      await setLanguageAsync('en');
+    }
+  });
+
+  itWhenTuiInputReliable(
+    'renders QwenCloud flow title in Chinese when locale is zh (T1)',
+    async () => {
+      await setLanguageAsync('zh');
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+      try {
+        await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+        stdin.write('\r');
+        await waitForSelectedOption(lastFrame, 'Token Plan');
+        // The sub-menu heading comes from VIEW_TITLES, unlike the flowTitle path
+        // asserted below, so it is the assertion that pins render-time lookup.
+        expect(lastFrame()).toContain('千问AI平台 · 接入方式');
+        stdin.write('\r');
+
+        await vi.waitFor(
+          () => {
+            const frame = lastFrame();
+            expect(frame).toContain('千问AI平台');
+            expect(frame).not.toContain('QwenCloud · Step');
+          },
+          { timeout: WAIT_FOR_TIMEOUT },
+        );
+      } finally {
+        unmount();
+        await setLanguageAsync('en');
+      }
+    },
+  );
+
+  itWhenTuiInputReliable(
+    'shows Token Plan and Standard API Key in QwenCloud sub-menu but not Coding Plan (T3+T4)',
+    async () => {
+      const settings: LoadedSettings = new LoadedSettings(
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        {
+          settings: {},
+          originalSettings: {},
+          path: '',
+        },
+        {
+          settings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          originalSettings: {
+            security: { auth: { selectedType: undefined } },
+            ui: { customThemes: {} },
+            mcpServers: {},
+          },
+          path: '',
+        },
+        {
+          settings: { ui: { customThemes: {} }, mcpServers: {} },
+          originalSettings: { ui: { customThemes: {} }, mcpServers: {} },
+          path: '',
+        },
+        true,
+        new Set(),
+      );
+
+      const { stdin, lastFrame, unmount } = renderAuthDialog(settings);
+
+      await waitForSelectedOption(lastFrame, QWENCLOUD_MAIN_LABEL);
+      stdin.write('\r');
+
+      await vi.waitFor(
+        () => {
+          const frame = lastFrame();
+          expect(frame).toContain('Token Plan');
+          expect(frame).toContain('Standard API Key');
+          expect(frame).not.toContain('Coding Plan');
         },
         { timeout: WAIT_FOR_TIMEOUT },
       );

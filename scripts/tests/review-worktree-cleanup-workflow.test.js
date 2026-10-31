@@ -28,6 +28,7 @@ import {
   reviewBranch,
   worktreePath,
 } from '../../packages/cli/src/commands/review/lib/paths.js';
+import { arePermissionBitsEnforced } from '../../packages/cli/src/test-utils/permission-bits.js';
 
 // The cleanup steps in ci.yml and qwen-code-pr-review.yml hard-code the
 // review-artifact layout owned by paths.ts: worktreePath()/reviewBranch()
@@ -191,13 +192,13 @@ function expectQuarantineFallback(run) {
   // guard's `! -L` arm is what keeps `chmod -R u+w` from dereferencing a
   // symlinked leftover into a tree outside the workspace. The behavioral
   // fixtures below execute both copies where permission fixtures are
-  // available (skipped on the Windows/root lanes): the dangling-symlink
-  // fixture witnesses the existence guard's `-L` arm behaviorally on each
-  // copy, but the chmod guard's `! -L` arm has no behavioral witness (the
-  // live-symlink fixture asserts content, not mode), so pin both arms
-  // textually here on every copy — dropping `-L` fails the dangling-symlink
-  // fixture, while dropping `! -L` keeps this suite green and re-poisons
-  // the checkout (mutation-probed).
+  // available (skipped on Windows, and for root with its DAC capabilities):
+  // the dangling-symlink fixture witnesses the existence guard's `-L` arm
+  // behaviorally on each copy, but the chmod guard's `! -L` arm has no
+  // behavioral witness (the live-symlink fixture asserts content, not
+  // mode), so pin both arms textually here on every copy — dropping `-L`
+  // fails the dangling-symlink fixture, while dropping `! -L` keeps this
+  // suite green and re-poisons the checkout (mutation-probed).
   expect(code).toContain('[ ! -e "$stale_qwen" ] && [ ! -L "$stale_qwen" ]');
   expect(code).toContain('[ -d "$stale_qwen" ] && [ ! -L "$stale_qwen" ]');
   // The move must be the fallback of the removal chain, not an
@@ -263,9 +264,9 @@ const sweepToolsAvailable =
   ).status === 0;
 // The fixtures defeat rm with a chmod-555 parent, which needs POSIX
 // permission semantics: Git Bash on Windows resolves `bash` but not chmod,
-// and root ignores the bits entirely.
+// and root with its DAC capabilities ignores the bits entirely.
 const permissionFixturesAvailable =
-  bashAvailable && process.platform !== 'win32' && process.geteuid?.() !== 0;
+  bashAvailable && arePermissionBitsEnforced();
 // The ladder's failure path resolves the leftover with `realpath --`; on a
 // host without it (the merge_group macOS lane ships none) the function
 // refuses as `path could not be resolved` instead, so the test asserting

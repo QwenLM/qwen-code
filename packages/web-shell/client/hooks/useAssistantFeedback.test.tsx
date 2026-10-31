@@ -75,7 +75,7 @@ function unmount(): void {
 }
 
 const button = (title: string) =>
-  container.querySelector<HTMLButtonElement>(`button[title="${title}"]`);
+  container.querySelector<HTMLButtonElement>(`button[aria-label="${title}"]`);
 const isLit = (title: string) =>
   button(title)?.getAttribute('aria-pressed') === 'true';
 

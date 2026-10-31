@@ -42,6 +42,8 @@ interface ChatContextHeaderProps {
   rightPanelAvailable: boolean;
   onToggleEnvironment: () => void;
   onToggleRightPanel: () => void;
+  /** Opens the current workspace file tree; informational when omitted. */
+  onOpenFiles?: () => void;
   /** Opens the session token-usage panel; hidden when omitted. */
   onOpenTokenUsage?: () => void;
   /** Opens the session context panel; hidden when omitted. */
@@ -63,35 +65,38 @@ export function ChatContextHeader({
   rightPanelAvailable,
   onToggleEnvironment,
   onToggleRightPanel,
+  onOpenFiles,
   onOpenTokenUsage,
   onOpenContextUsage,
   onOpenLocalControlSettings,
 }: ChatContextHeaderProps) {
   const { t } = useI18n();
   const workspaceLabel = workspaceName ?? t('sidebar.noWorkspace');
+  const WorkspaceIcon = onOpenFiles ? 'button' : 'span';
+  const workspaceAriaLabel = workspaceName
+    ? t('workspace.paneLabel', { name: workspaceName })
+    : workspaceLabel;
 
   return (
     <header className={styles.header} data-testid="chat-context-header">
       {!hideWorkspaceIcon && (
-        // role="img" so the icon is announced as its aria-label; a bare span
-        // (generic role) does not surface one reliably. The same folder glyph
-        // serves both states — the icon cannot name the workspace, or say that
-        // there is none, so hovering it does.
         <TooltipProvider delayDuration={300}>
           <Tooltip>
             <TooltipTrigger asChild>
-              <span
-                role="img"
+              <WorkspaceIcon
+                type={onOpenFiles ? 'button' : undefined}
+                role={onOpenFiles ? undefined : 'img'}
+                onClick={onOpenFiles}
                 className={styles.workspaceIcon}
                 data-testid="chat-header-workspace"
                 aria-label={
-                  workspaceName
-                    ? t('workspace.paneLabel', { name: workspaceName })
-                    : workspaceLabel
+                  onOpenFiles
+                    ? `${t('files.description')}: ${workspaceAriaLabel}`
+                    : workspaceAriaLabel
                 }
               >
                 <FolderClosedIcon />
-              </span>
+              </WorkspaceIcon>
             </TooltipTrigger>
             <TooltipContent side="bottom">
               <span className={styles.workspaceTooltip}>

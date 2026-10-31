@@ -26,7 +26,10 @@ import { listenerIdentityOfSocket } from '../local-control/listener-identity.js'
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import { resolveAcpHttpEnabled } from '../acp-http-enabled.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
-import type { ParsedAllowOriginPatterns } from '../auth.js';
+import {
+  originIsExplicitlyAllowed,
+  type ParsedAllowOriginPatterns,
+} from '../auth.js';
 import {
   canonicalHost,
   formatHostForAuthority,
@@ -1716,13 +1719,14 @@ export function mountAcpHttp(
             localPort,
             opts.hostname,
           );
-          // `--allow-origin` allowlist (same match semantics as the REST
-          // `allowOriginCors`): lets an explicitly permitted non-loopback
-          // origin — e.g. a browser extension's `chrome-extension://<id>`
-          // opening the reverse tool channel — past the CSWSH wall.
+          // `--allow-origin` allowlist, shared with the REST matcher: static
+          // origins and loopback port wildcards let an explicitly permitted
+          // origin — a browser extension's `chrome-extension://<id>`, or the
+          // desktop shell's `http://127.0.0.1:<ephemeral>` — past the CSWSH
+          // wall. The `*` literal stays REST-only by design.
           const isAllowlistedOrigin =
             opts.allowedOrigins !== undefined &&
-            opts.allowedOrigins.origins.has(origin.toLowerCase());
+            originIsExplicitlyAllowed(opts.allowedOrigins, origin);
           const isListenerOrigin =
             upgradeListenerIdentity.kind === 'local-control' &&
             upgradeListenerIdentity.origin === origin.toLowerCase();

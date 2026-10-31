@@ -2,7 +2,7 @@
 
 [English](2026-10-02-runtime-broker-hardening.md) | [简体中文](2026-10-02-runtime-broker-hardening.zh-CN.md)
 
-状态：已在 `packages/sdk-java/runtime-broker` 实现（PR #13214,issue #13183)。
+状态：已在 `packages/managed-agent-server` 实现（PR #13214,issue #13183)。
 
 ## 问题
 
@@ -28,4 +28,4 @@
 
 ## 验证
 
-`Issue13183RegressionTest` 与 `Issue13183AdversarialTest` 以修复后的期望编码了 issue 的场景：竞态交错、卡住的续约、观测冷却、回环拒绝、楔住 worker 的升级强杀、整代际排空，另有 600 轮跨进程对撞（其中 300 轮为紧竞态、300 轮由准入先提交）与 forked-JVM 退出钩子实证。`RuntimeRecoveryContract.verifyBeginSessionRelease` 在两种仓库后端上覆盖新原语：READY 与 ACQUIRING 两种转换、快照过期时返回 null、已 RELEASING 或 RELEASED 时原样返回、`runtime_session_busy`，以及 `runtime_session_not_ready`。`packages/sdk-java/runtime-broker` 的 `mvn clean test` 与 managed-agent-server 修复邻近套件通过；`mvn checkstyle:check` 干净。
+`Issue13183RegressionTest` 与 `Issue13183AdversarialTest` 以修复后的期望编码了 issue 的场景：竞态交错、卡住的续约、观测冷却、回环拒绝、楔住 worker 的升级强杀、整代际排空，另有 600 轮跨进程对撞（其中 300 轮为紧竞态、300 轮由准入先提交）与 forked-JVM 退出钩子实证。`RuntimeRecoveryContract.verifyBeginSessionRelease` 在两种仓库后端上覆盖新原语：READY 与 ACQUIRING 两种转换、快照过期时返回 null、已 RELEASING 或 RELEASED 时原样返回、`runtime_session_busy`，以及 `runtime_session_not_ready`。`packages/managed-agent-server` 的 `mvn clean test` 与 managed-agent-server 修复邻近套件通过；`mvn checkstyle:check` 干净。

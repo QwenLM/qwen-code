@@ -102,6 +102,20 @@ pub(crate) struct FocusLease {
 }
 
 impl FocusLease {
+    pub(crate) fn wait_until_monitored(&self, timeout: std::time::Duration) -> bool {
+        let deadline = std::time::Instant::now() + timeout;
+        while self.is_current() {
+            if self.process.lock().is_ok_and(|entry| entry.monitored) {
+                return true;
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        false
+    }
+
     pub(crate) fn is_current(&self) -> bool {
         process_stamp(self.pid) == Some(self.stamp)
             && registry().lock().is_ok_and(|entries| {
@@ -345,6 +359,14 @@ unsafe extern "C" fn observe_event(
         }
         return event;
     }
+    let pid = match process.lock() {
+        Ok(entry) => entry.pid,
+        Err(_) => return event,
+    };
+    let guarded = crate::key_focus_guard::observe_event(pid, event_type, event);
+    if guarded.is_null() {
+        return guarded;
+    }
     if matches!(event_type, 13 | 21) && !event.is_null() {
         objc2::rc::autoreleasepool(|_| {
             use objc2::{class, msg_send};
@@ -396,7 +418,7 @@ fn start_monitor(pid: i32, process: Arc<Mutex<ProcessFocus>>) {
             let context = Arc::as_ptr(&process) as *mut c_void;
             // Observe only activation/process notifications. No keyboard or
             // pointer contents are collected by the per-process focus monitor.
-            let tap = create(pid, 0, 1, (1 << 13) | (1 << 21), observe_event, context);
+            let tap = create(pid, 0, 0, (1 << 13) | (1 << 21), observe_event, context);
             if tap.is_null() {
                 return;
             }
@@ -568,7 +590,7 @@ mod tests {
             (Preparation::Activate, 13),
             (Preparation::ReturnKeyFocus, 21),
         ] {
-            let events = super::super::app_pointer::focus_events(preparation, 1234, None).unwrap();
+            let events = super::super::app_pointer::focus_events(preparation, 1234).unwrap();
             let event = events[0].as_ptr() as *mut c_void;
             assert_eq!(
                 unsafe { observe_event(std::ptr::null_mut(), kind, event, context) },

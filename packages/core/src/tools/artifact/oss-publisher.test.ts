@@ -72,8 +72,13 @@ describe('ossCredentialsFromEnv', () => {
       ossCredentialsFromEnv({
         ALIBABA_CLOUD_ACCESS_KEY_ID: 'a',
         ALIBABA_CLOUD_ACCESS_KEY_SECRET: 'b',
+        ALIBABA_CLOUD_SECURITY_TOKEN: 'STS',
       } as NodeJS.ProcessEnv),
-    ).toMatchObject({ accessKeyId: 'a', accessKeySecret: 'b' });
+    ).toEqual({
+      accessKeyId: 'a',
+      accessKeySecret: 'b',
+      securityToken: 'STS',
+    });
   });
   it('returns undefined when missing', () => {
     expect(ossCredentialsFromEnv({} as NodeJS.ProcessEnv)).toBeUndefined();
