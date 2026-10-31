@@ -86,6 +86,27 @@ describe('web-shell i18n catalog', () => {
     }
   });
 
+  // The settings dialog's Memory group is localized only by these catalog
+  // entries: keys are built by string concatenation and a miss silently
+  // falls back to English, so the catalog itself is pinned.
+  it('localizes the Memory settings group in zh-CN and leaves EN to the schema copy', () => {
+    const keys = [
+      'settings.category.Memory',
+      'settings.label.memory.enableManagedAutoMemory',
+      'settings.description.memory.enableManagedAutoMemory',
+      'settings.label.memory.enableManagedAutoDream',
+      'settings.description.memory.enableManagedAutoDream',
+    ];
+    const zh = getTranslator('zh-CN');
+    const en = getTranslator('en');
+    for (const key of keys) {
+      expect(zh(key)).not.toBe(key);
+      expect(zh(key)).toMatch(/[\u4e00-\u9fff]/);
+      // EN deliberately has no entry: its fallback IS the schema copy.
+      expect(en(key)).toBe(key);
+    }
+  });
+
   // The daemon validates a saved voice only while Live Voice is on; the copy
   // must not promise an unconditional check, in either locale.
   it('states the provider-validation condition on the voice hint', () => {

@@ -7,6 +7,8 @@ const SETTING_KEYS = {
   'setting:session-recap-away-threshold':
     'general.sessionRecapAwayThresholdMinutes',
   'setting:cleanup-period': 'general.cleanupPeriodDays',
+  'setting:memory-auto-memory': 'memory.enableManagedAutoMemory',
+  'setting:memory-auto-dream': 'memory.enableManagedAutoDream',
   'setting:git-commit-co-author': 'general.gitCoAuthor.commit',
   'setting:git-pr-co-author': 'general.gitCoAuthor.pr',
   'setting:language': 'general.language',

@@ -43,6 +43,7 @@ export {
   useDaemonFiles,
   useDaemonGlob,
   useDaemonMcp,
+  useDaemonAutoMemory,
   useDaemonMemory,
   useDaemonResource,
   useDaemonSessions,

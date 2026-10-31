@@ -77,6 +77,8 @@ import type {
   DaemonWorkspaceMcpToolsStatus,
   DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryStatus,
+  DaemonWorkspaceAutoMemoryStatus,
+  DaemonAutoMemoryFileContent,
   DaemonWorkspaceCapability,
   DaemonWorkspaceRemovalResult,
   DaemonWorkspaceUpdate,
@@ -663,6 +665,21 @@ export interface DaemonWorkspaceActions {
     opts?: { maxBytes?: number },
   ): Promise<DaemonWorkspaceFile>;
   writeMemory(req: DaemonWriteMemoryRequest): Promise<DaemonWriteMemoryResult>;
+
+  // Auto memory (managed entries kept outside the bound workspace)
+  loadAutoMemoryStatus(): Promise<DaemonWorkspaceAutoMemoryStatus>;
+  readAutoMemoryFile(filePath: string): Promise<DaemonAutoMemoryFileContent>;
+  /**
+   * Ask the daemon host to open the auto-memory directory for `scope`.
+   * The daemon resolves the path itself; `workspaceCwd` selects the
+   * registered workspace, and `dir` one of its listing's `projectDirs`
+   * for `scope: 'project'`.
+   */
+  openAutoMemoryFolder(
+    scope: 'project' | 'user',
+    workspaceCwd: string,
+    dir?: string,
+  ): Promise<void>;
 
   generateContent(
     prompt: string,

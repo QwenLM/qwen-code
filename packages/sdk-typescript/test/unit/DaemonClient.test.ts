@@ -1954,6 +1954,77 @@ describe('DaemonClient', () => {
       expect(calls.map((call) => call.body)).toEqual(['{"target":"terminal"}']);
     });
 
+    it('opens an auto-memory folder only on a daemon advertising workspace_auto_memory', async () => {
+      const opened = {
+        kind: 'workspace-local-open',
+        opened: true,
+        target: 'auto-memory',
+        scope: 'project',
+      };
+      const capable = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, { features: ['workspace_auto_memory'] })
+          : jsonResponse(200, opened),
+      );
+      await expect(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch: capable.fetch })
+          .workspaceByCwd('/work/secondary')
+          .openAutoMemoryFolderLocally(
+            'project',
+            '/work/secondary/.qwen/memory',
+          ),
+      ).resolves.toBeUndefined();
+      expect(
+        capable.calls.map((call) => [call.method, call.url, call.body]),
+      ).toEqual([
+        ['GET', 'http://daemon/capabilities', null],
+        [
+          'POST',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/open',
+          JSON.stringify({
+            target: 'auto-memory',
+            autoMemoryScope: 'project',
+            autoMemoryDir: '/work/secondary/.qwen/memory',
+          }),
+        ],
+      ]);
+
+      // An older daemon would coerce the unknown target to 'folder' and
+      // open the WORKSPACE directory with 200: refuse before posting.
+      const older = recordingFetch((req) =>
+        req.url.endsWith('/capabilities')
+          ? jsonResponse(200, { features: ['workspace_local_open'] })
+          : jsonResponse(200, { ...opened, target: 'folder' }),
+      );
+      await expect(
+        new DaemonClient({ baseUrl: 'http://daemon', fetch: older.fetch })
+          .workspaceByCwd('/work/secondary')
+          .openAutoMemoryFolderLocally('user'),
+      ).rejects.toMatchObject({ name: 'DaemonCapabilityMissingError' });
+      expect(older.calls.map((call) => call.method)).toEqual(['GET']);
+    });
+
+    it('reads a workspace-qualified auto-memory listing and file over REST', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { v: 1, entries: [] }),
+      );
+      const workspace = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+      }).workspaceByCwd('/work/secondary');
+
+      await workspace.workspaceAutoMemory();
+      await workspace.workspaceAutoMemoryFile('/m/a b.md');
+
+      expect(calls.map((call) => [call.method, call.url])).toEqual([
+        ['GET', 'http://daemon/workspaces/%2Fwork%2Fsecondary/auto-memory'],
+        [
+          'GET',
+          'http://daemon/workspaces/%2Fwork%2Fsecondary/auto-memory/file?path=%2Fm%2Fa%20b.md',
+        ],
+      ]);
+    });
+
     it('reads primary and workspace-qualified Git status over REST', async () => {
       const primary = {
         v: 1 as const,

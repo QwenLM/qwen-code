@@ -32,7 +32,10 @@
     "prompt_deadline_exceeded",
     "writer_idle_timeout",
     "model_stream_interrupted",
-    "loop_detected"
+    "loop_detected",
+    "readdir_failed",
+    "stat_failed",
+    "symlinked_root"
   ],
   "expectedToolResult": "Visible summary\nVisible notice",
   "timestamps": 0

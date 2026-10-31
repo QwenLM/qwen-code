@@ -100,6 +100,9 @@ export { useDaemonMcp as useMcp } from './daemon/index.js';
 /** Memory files (CLAUDE.md etc.) stored in the workspace. */
 export { useDaemonMemory as useMemory } from './daemon/index.js';
 
+/** Managed auto-memory entries: browse, read, open folder. */
+export { useDaemonAutoMemory as useAutoMemory } from './daemon/index.js';
+
 /** Generic SWR-style resource fetcher for daemon REST endpoints. */
 export { useDaemonResource as useResource } from './daemon/index.js';
 
@@ -401,6 +404,12 @@ export type {
   DaemonWorkspaceMcpResourcesStatus,
   /** Memory file entry: path, scope, byte size. */
   DaemonWorkspaceMemoryFile,
+  /** Managed auto-memory entry (one .md file in a memory directory). */
+  DaemonAutoMemoryFile,
+  /** Managed auto-memory listing: project + user roots, entries, totals. */
+  DaemonWorkspaceAutoMemoryStatus,
+  /** One auto-memory entry's read content (possibly truncated). */
+  DaemonAutoMemoryFileContent,
   /** Skill status: name, description, level, model-invocable flag. */
   DaemonWorkspaceSkillStatus,
   /** Registered tool: name, displayName, description, enabled flag. */

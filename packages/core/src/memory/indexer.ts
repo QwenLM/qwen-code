@@ -86,7 +86,7 @@ function truncateIndexField(value: string, limit: number): string {
  * whitespace (incl. newlines) so the entry can't break out of its one-line list
  * item, defang code/link markdown, and cap length.
  */
-function sanitizeIndexField(value: string): string {
+export function sanitizeIndexField(value: string): string {
   const cleaned = value
     // C0/C1 control chars (CR, LF, TAB, ESC, ...) -> space.
     // eslint-disable-next-line no-control-regex

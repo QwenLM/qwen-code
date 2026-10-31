@@ -155,6 +155,15 @@ import {
   type StandaloneSessionService,
 } from '../conversations/standalone-session-service.js';
 import { collectWorkspaceMemoryStatus } from '../workspace-memory.js';
+import {
+  AutoMemoryEnvOverrideError,
+  AutoMemoryPathError,
+  autoMemoryPathErrorStatus,
+  collectWorkspaceAutoMemoryStatus,
+  readWorkspaceAutoMemoryFile,
+  runWithAutoMemoryRuntime,
+  type AutoMemoryRuntime,
+} from '../workspace-auto-memory.js';
 import { runWithWorkspaceRuntimeStorage } from '../workspace-runtime-storage.js';
 import {
   createDaemonSubagentManager,
@@ -423,6 +432,8 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}workspace/memory/forget/get`,
   `${QWEN_METHOD_NS}workspace/memory/dream`,
   `${QWEN_METHOD_NS}workspace/memory/dream/get`,
+  `${QWEN_METHOD_NS}workspace/auto-memory`,
+  `${QWEN_METHOD_NS}workspace/auto-memory/file`,
   // Wave 1: files
   `${QWEN_METHOD_NS}file/read`,
   `${QWEN_METHOD_NS}file/read_bytes`,
@@ -475,6 +486,8 @@ const TRUSTED_WORKSPACE_METHODS = new Set<string>([
   `${QWEN_METHOD_NS}workspace/memory/forget/get`,
   `${QWEN_METHOD_NS}workspace/memory/dream`,
   `${QWEN_METHOD_NS}workspace/memory/dream/get`,
+  `${QWEN_METHOD_NS}workspace/auto-memory`,
+  `${QWEN_METHOD_NS}workspace/auto-memory/file`,
   `${QWEN_METHOD_NS}file/write`,
   `${QWEN_METHOD_NS}file/edit`,
   `${QWEN_METHOD_NS}workspace/tools`,
@@ -1335,6 +1348,50 @@ export class AcpDispatcher {
     private readonly standaloneSessionService?: LegacyStandaloneSessionRestorer,
   ) {
     this.agentManager = createDaemonSubagentManager(boundWorkspace);
+  }
+
+  /** The memory axes this dispatcher's workspace runtime resolves under. */
+  private autoMemoryRuntime(): AutoMemoryRuntime {
+    return {
+      sessionRuntimeBaseDir:
+        this.getSessionRuntimeContext().sessionRuntimeBaseDir,
+      env: { mode: 'runtime-overlay', effectiveEnv: this.getEnv() },
+    };
+  }
+
+  /**
+   * Auto-memory refusals, which toRpcError's switch does not know: path
+   * refusals keep the REST route's status split (404 / 400 client fault /
+   * 500 `read_failed` daemon fault), an unsupported memory env override
+   * answers 409. Returns false for anything else.
+   */
+  private sendAutoMemoryRefusal(
+    conn: AcpConnection,
+    id: JsonRpcId,
+    err: unknown,
+  ): boolean {
+    if (err instanceof AutoMemoryPathError) {
+      const httpStatus = autoMemoryPathErrorStatus(err);
+      conn.sendConn(
+        error(
+          id,
+          httpStatus >= 500 ? RPC.INTERNAL_ERROR : RPC.INVALID_PARAMS,
+          err.message,
+          { errorKind: err.code, httpStatus },
+        ),
+      );
+      return true;
+    }
+    if (err instanceof AutoMemoryEnvOverrideError) {
+      conn.sendConn(
+        error(id, RPC.INVALID_REQUEST, err.message, {
+          errorKind: err.code,
+          httpStatus: 409,
+        }),
+      );
+      return true;
+    }
+    return false;
   }
 
   private invalidateSessionLists(
@@ -4460,6 +4517,61 @@ export class AcpDispatcher {
           );
           assertGenerationOpen?.();
           this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/auto-memory`: {
+          // TRUSTED_WORKSPACE_METHODS refuses an untrusted workspace
+          // before dispatch, so the listing always runs trusted here.
+          let result;
+          try {
+            result = await runWithAutoMemoryRuntime(
+              this.autoMemoryRuntime(),
+              () =>
+                collectWorkspaceAutoMemoryStatus(this.boundWorkspace, {
+                  trusted: true,
+                }),
+            );
+          } catch (err) {
+            if (id !== undefined && this.sendAutoMemoryRefusal(conn, id, err))
+              return;
+            throw err;
+          }
+          assertGenerationOpen?.();
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/auto-memory/file`: {
+          const filePath = params['path'];
+          if (typeof filePath !== 'string' || filePath.length === 0) {
+            if (id !== undefined)
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`path` required, must be string',
+                ),
+              );
+            return;
+          }
+          try {
+            const result = await runWithAutoMemoryRuntime(
+              this.autoMemoryRuntime(),
+              () =>
+                readWorkspaceAutoMemoryFile(this.boundWorkspace, filePath, {
+                  trusted: true,
+                }),
+            );
+            assertGenerationOpen?.();
+            this.replyConn(conn, id, result as unknown);
+          } catch (err) {
+            if (id === undefined) return;
+            if (this.sendAutoMemoryRefusal(conn, id, err)) return;
+            // Everything else is rethrown so the outer mapper keeps the
+            // coded, client-safe envelope (and the stderr log) it owns.
+            throw err;
+          }
           return;
         }
 

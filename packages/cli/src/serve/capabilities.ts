@@ -121,6 +121,12 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // to either the bound workspace or the global ~/.qwen directory.
   workspace_memory: { since: 'v1' },
   memory_import_v1: { since: 'v1' },
+  // Auto-memory browse (`GET /workspace/auto-memory` + `/file`): the
+  // managed auto-memory roots of a trusted workspace are listed and
+  // served by the same route family, so a web shell newer than its
+  // daemon must not render the Auto tab against a daemon that lacks
+  // the routes.
+  workspace_auto_memory: { since: 'v1' },
   workspace_memory_remember: {
     since: 'v1',
     modes: ['workspace', 'clean'],

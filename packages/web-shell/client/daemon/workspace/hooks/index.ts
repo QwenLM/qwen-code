@@ -11,6 +11,7 @@ export { useDaemonDiagnostics } from './useDaemonDiagnostics.js';
 export { useDaemonFiles } from './useDaemonFiles.js';
 export { useDaemonGlob } from './useDaemonGlob.js';
 export { useDaemonMcp } from './useDaemonMcp.js';
+export { useDaemonAutoMemory } from './useDaemonAutoMemory.js';
 export { useDaemonMemory } from './useDaemonMemory.js';
 export { useDaemonResource } from './useDaemonResource.js';
 export { useDaemonSessions } from './useDaemonSessions.js';

@@ -1188,6 +1188,27 @@ describe('acpRouteTable – query param coercion', () => {
     expect(extract('/workspace/memory', 'GET').params).toEqual({});
   });
 
+  it('GET /workspace/auto-memory maps to the listing method with no params', () => {
+    expect(extract('/workspace/auto-memory', 'GET')).toEqual({
+      method: '_qwen/workspace/auto-memory',
+      params: {},
+    });
+    // Trailing slash is accepted by the same listing entry.
+    expect(extract('/workspace/auto-memory/', 'GET')).toEqual({
+      method: '_qwen/workspace/auto-memory',
+      params: {},
+    });
+  });
+
+  it('GET /workspace/auto-memory/file forwards path as a flat string param', () => {
+    const { method, params } = extract(
+      '/workspace/auto-memory/file?path=%2Fp%2Fnote.md',
+      'GET',
+    );
+    expect(method).toBe('_qwen/workspace/auto-memory/file');
+    expect(params).toEqual({ path: '/p/note.md' });
+  });
+
   it('GET context-usage without detail omits it (sessionId only)', () => {
     expect(extract('/session/s1/context-usage', 'GET').params).toEqual({
       sessionId: 's1',

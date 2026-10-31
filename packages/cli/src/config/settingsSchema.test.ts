@@ -341,6 +341,28 @@ describe('SettingsSchema', () => {
       });
     });
 
+    // Config snapshots both flags into private readonly fields at
+    // construction and no live setter exists, so the served descriptor
+    // must tell clients the change applies to newly created sessions.
+    it('should keep the managed auto-memory toggles restart-scoped', () => {
+      expect(
+        getSettingsSchema().memory.properties.enableManagedAutoMemory,
+      ).toMatchObject({
+        type: 'boolean',
+        default: true,
+        requiresRestart: true,
+        showInDialog: false,
+      });
+      expect(
+        getSettingsSchema().memory.properties.enableManagedAutoDream,
+      ).toMatchObject({
+        type: 'boolean',
+        default: true,
+        requiresRestart: true,
+        showInDialog: false,
+      });
+    });
+
     it('should have top-level proxy setting in schema', () => {
       expect(getSettingsSchema().proxy).toBeDefined();
       expect(getSettingsSchema().proxy.type).toBe('string');

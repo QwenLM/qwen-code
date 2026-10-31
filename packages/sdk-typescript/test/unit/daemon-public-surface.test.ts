@@ -744,6 +744,17 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expect(Public.DAEMON_ERROR_KINDS).toContain('writer_idle_timeout');
     expect(Public.DAEMON_ERROR_KINDS).toContain('restore_timeout');
   });
+
+  it('keeps the auto-memory scan error kinds in DaemonErrorKind', () => {
+    // GET /workspace/auto-memory reports per-root scan faults in its
+    // `errors` cells; these kinds must stay part of the closed
+    // DaemonErrorKind union, or SDK consumers lose the typed switch.
+    const kind: (typeof Public.DAEMON_ERROR_KINDS)[number] = 'readdir_failed';
+    expect(kind).toBe('readdir_failed');
+    expect(Public.DAEMON_ERROR_KINDS).toContain('readdir_failed');
+    expect(Public.DAEMON_ERROR_KINDS).toContain('stat_failed');
+    expect(Public.DAEMON_ERROR_KINDS).toContain('symlinked_root');
+  });
 });
 
 describe('mcp_server_added event drift insurance', () => {

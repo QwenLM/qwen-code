@@ -48,6 +48,7 @@ import {
   readSessionPrs,
   upsertSessionPr,
 } from '@qwen-code/qwen-code-core';
+import { clearAutoMemoryRootCache } from '@qwen-code/qwen-code-core/memory/paths.js';
 import {
   resetHomeEnvBootstrapForTesting,
   SettingScope,
@@ -10608,6 +10609,168 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           },
         },
       });
+    });
+
+    it('maps a closed runtime generation on an auto-memory read to a retryable RPC error', async () => {
+      // The entry generation assertion runs before the method, so the guard
+      // must close DURING the read: local memory mode pins the project root
+      // to <workspace>/.qwen/memory, the read's first lstat is gated until
+      // the guard closes, and the in-try assertion is what surfaces the
+      // WorkspaceGenerationClosedError to the shared error mapper.
+      const workspace = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-automem-'),
+      );
+      const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      clearAutoMemoryRootCache();
+      const file = path.join(workspace, '.qwen', 'memory', 'note.md');
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'note\n');
+
+      let markStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        markStarted = resolve;
+      });
+      let releaseRead!: () => void;
+      const readReleased = new Promise<void>((resolve) => {
+        releaseRead = resolve;
+      });
+      const originalLstat = fs.lstat.bind(fs);
+      let readGated = false;
+      const lstatSpy = vi.spyOn(fs, 'lstat').mockImplementation((target) => {
+        if (!readGated) {
+          readGated = true;
+          markStarted();
+          return readReleased.then(() => originalLstat(target));
+        }
+        return originalLstat(target);
+      });
+
+      try {
+        const generationGuard = createWorkspaceGenerationGuard();
+        await restartServer({ generationGuard, boundWorkspace: workspace });
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+
+        const posting = post(connId, {
+          jsonrpc: '2.0',
+          id: 596,
+          method: '_qwen/workspace/auto-memory/file',
+          params: { path: file },
+        });
+        await started;
+        generationGuard.close();
+        releaseRead();
+        await posting;
+
+        expect(await reader.next()).toMatchObject({
+          id: 596,
+          error: {
+            code: -32603,
+            data: {
+              errorKind: 'workspace_runtime_unavailable',
+              httpStatus: 503,
+              retryable: true,
+            },
+          },
+        });
+        reader.close();
+      } finally {
+        lstatSpy.mockRestore();
+        if (previousLocal === undefined) {
+          delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+        } else {
+          process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+        }
+        clearAutoMemoryRootCache();
+        await fs.rm(workspace, { recursive: true, force: true });
+      }
+    });
+
+    it.each([
+      '_qwen/workspace/auto-memory',
+      '_qwen/workspace/auto-memory/file',
+    ])(
+      'refuses %s for an untrusted workspace before dispatch',
+      async (method) => {
+        await restartServer({ primaryTrusted: false });
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 597,
+          method,
+          params: { path: '/any/note.md' },
+        });
+
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 597,
+          error: {
+            data: { errorKind: 'untrusted_workspace', httpStatus: 403 },
+          },
+        });
+      },
+    );
+
+    it('classifies an admitted-but-unreadable auto-memory file as a 500 server fault', async () => {
+      // Same classification as the REST route: read_failed is a daemon
+      // fault (500 / INTERNAL_ERROR), never the 400 client-fault bucket.
+      const workspace = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-automem-'),
+      );
+      const previousLocal = process.env['QWEN_CODE_MEMORY_LOCAL'];
+      process.env['QWEN_CODE_MEMORY_LOCAL'] = '1';
+      clearAutoMemoryRootCache();
+      const file = path.join(workspace, '.qwen', 'memory', 'note.md');
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      await fs.writeFile(file, 'note\n');
+      const canonicalFile = await fs.realpath(file);
+      const originalRealpath = fs.realpath.bind(fs);
+      const realpathSpy = vi
+        .spyOn(fs, 'realpath')
+        .mockImplementation((target) =>
+          String(target) === file || String(target) === canonicalFile
+            ? Promise.reject(
+                Object.assign(new Error('EACCES: permission denied'), {
+                  code: 'EACCES',
+                }),
+              )
+            : originalRealpath(target),
+        );
+
+      try {
+        await restartServer({ boundWorkspace: workspace });
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 598,
+          method: '_qwen/workspace/auto-memory/file',
+          params: { path: file },
+        });
+
+        expect(await reader.next()).toMatchObject({
+          id: 598,
+          error: {
+            code: -32603,
+            data: { errorKind: 'read_failed', httpStatus: 500 },
+          },
+        });
+        reader.close();
+      } finally {
+        realpathSpy.mockRestore();
+        if (previousLocal === undefined) {
+          delete process.env['QWEN_CODE_MEMORY_LOCAL'];
+        } else {
+          process.env['QWEN_CODE_MEMORY_LOCAL'] = previousLocal;
+        }
+        clearAutoMemoryRootCache();
+        await fs.rm(workspace, { recursive: true, force: true });
+      }
     });
 
     it('rejects trusted-only methods after primary trust is revoked', async () => {

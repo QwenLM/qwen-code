@@ -1,14 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  useConnection,
   useMemory,
   type DaemonContextFileScope,
   type DaemonWorkspaceMemoryFile,
 } from '@qwen-code/web-shell/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { AutoMemoryPanel } from './AutoMemoryPanel';
 import styles from './MemoryMessage.module.css';
 
 type MemoryMode = 'view' | 'edit';
 type MemoryScope = 'global' | 'workspace';
+type MemoryTab = MemoryScope | 'auto';
 
 interface MemoryMessageProps {
   refreshSignal?: number;
@@ -32,6 +35,10 @@ function fileForScope(
   return files.find((file) => file.scope === scope);
 }
 
+function entryKey(entry: MemoryEntry): string {
+  return `${entry.scope}\0${entry.file?.path ?? ''}`;
+}
+
 function scopeLabel(
   scope: MemoryScope,
   t: ReturnType<typeof useI18n>['t'],
@@ -46,13 +53,19 @@ export function MemoryMessage({
   onMessage,
 }: MemoryMessageProps) {
   const { t } = useI18n();
+  const connection = useConnection();
+  // Daemons that predate the auto-memory routes must not get the tab:
+  // the routes 404, so the tag gates the affordance.
+  const autoMemoryAvailable =
+    connection.capabilities?.features?.includes('workspace_auto_memory') ??
+    false;
   const { files, status, loading, error, readMemoryFile, reload, writeMemory } =
     useMemory({
       autoLoad: true,
     });
   const editorRef = useRef<HTMLTextAreaElement>(null);
   const loadSeqRef = useRef(0);
-  const [selectedScope, setSelectedScope] = useState<MemoryScope>('workspace');
+  const [selectedTab, setSelectedTab] = useState<MemoryTab>('workspace');
   const [mode, setMode] = useState<MemoryMode>('view');
   const [content, setContent] = useState('');
   const [draft, setDraft] = useState('');
@@ -64,6 +77,12 @@ export function MemoryMessage({
   const [editable, setEditable] = useState(true);
   const [message, setMessage] = useState<string | null>(null);
   const handledAddSignalRef = useRef(0);
+  // The file whose text `content`/`draft` hold (`scope\0path`).
+  const loadedKeyRef = useRef<string | null>(null);
+  // The gate holds at both ends: when the tag goes away (e.g. while
+  // capabilities refetch) the Auto tab is not rendered, nor is its panel.
+  const activeTab: MemoryTab =
+    selectedTab === 'auto' && !autoMemoryAvailable ? 'workspace' : selectedTab;
 
   const entries = useMemo<MemoryEntry[]>(() => {
     const globalFile = fileForScope(files, 'global');
@@ -87,7 +106,9 @@ export function MemoryMessage({
   }, [files, t]);
 
   const selectedEntry =
-    entries.find((entry) => entry.scope === selectedScope) ?? entries[0];
+    activeTab === 'auto'
+      ? undefined
+      : (entries.find((entry) => entry.scope === activeTab) ?? entries[0]);
 
   // Replace needs both the file's full text and the list that says whether
   // the file exists. While the status load is outstanding (`status` is
@@ -100,6 +121,7 @@ export function MemoryMessage({
   const loadContent = useCallback(
     (entry: MemoryEntry | undefined, nextMode: MemoryMode) => {
       const loadSeq = ++loadSeqRef.current;
+      loadedKeyRef.current = entry ? entryKey(entry) : null;
       setMode(nextMode);
       setMessage(null);
       setContent('');
@@ -145,8 +167,16 @@ export function MemoryMessage({
     [onMessage, readMemoryFile, t],
   );
 
+  // An unsaved edit survives an excursion to the read-only Auto tab:
+  // returning to the file that owns the dirty draft must not re-read it.
+  const keepsDraft = (entry: MemoryEntry) =>
+    mode === 'edit' &&
+    draft !== content &&
+    loadedKeyRef.current === entryKey(entry);
+
   useEffect(() => {
-    if (!selectedEntry) return;
+    if (activeTab === 'auto' || !selectedEntry) return;
+    if (keepsDraft(selectedEntry)) return;
     loadContent(selectedEntry, mode);
     // Only reload when the selected file changes. Mode changes are explicit
     // button actions that call loadContent directly.
@@ -176,13 +206,14 @@ export function MemoryMessage({
     if (handledAddSignalRef.current === addSignal) return;
     handledAddSignalRef.current = addSignal;
     const nextScope = addScope === 'global' ? 'global' : 'workspace';
-    setSelectedScope(nextScope);
+    setSelectedTab(nextScope);
     const entry = entries.find((item) => item.scope === nextScope);
     loadContent(entry, 'edit');
   }, [addScope, addSignal, entries, loadContent]);
 
   const handleSelect = (entry: MemoryEntry) => {
-    setSelectedScope(entry.scope);
+    setSelectedTab(entry.scope);
+    if (keepsDraft(entry)) return;
     loadContent(entry, 'view');
   };
 
@@ -240,7 +271,7 @@ export function MemoryMessage({
     <div className={styles.page}>
       <nav className={styles.tabs} aria-label={t('memory.menu')}>
         {entries.map((entry) => {
-          const active = entry.scope === selectedScope;
+          const active = entry.scope === activeTab;
           return (
             <button
               key={entry.scope}
@@ -254,67 +285,92 @@ export function MemoryMessage({
             </button>
           );
         })}
+        {autoMemoryAvailable && (
+          <button
+            key="auto"
+            type="button"
+            className={`${styles.memoryCard} ${
+              activeTab === 'auto' ? styles.memoryCardActive : ''
+            }`}
+            onClick={() => setSelectedTab('auto')}
+          >
+            <span className={styles.memoryTitle}>
+              {t('memory.autoMemoryTab')}
+            </span>
+          </button>
+        )}
       </nav>
 
       <section className={styles.detail}>
-        <header className={styles.detailHeader}>
-          <div className={styles.detailTitleWrap}>
-            <div className={styles.detailPath}>{path}</div>
-          </div>
-          <div className={styles.actions}>
-            <button
-              type="button"
-              className={styles.actionButton}
-              disabled={!canReplace}
-              onClick={handleEdit}
-            >
-              {t('settings.action.edit')}
-            </button>
-          </div>
-        </header>
-
-        {statusText && <div className={styles.status}>{statusText}</div>}
-
-        {mode === 'edit' ? (
-          <>
-            <textarea
-              ref={editorRef}
-              className={styles.editor}
-              value={draft}
-              disabled={saving || contentLoading}
-              onChange={(event) => setDraft(event.target.value)}
-              placeholder={t('memory.placeholder', {
-                scope: selectedEntry ? scopeLabel(selectedEntry.scope, t) : '',
-              })}
-            />
-            <div className={styles.editorFooter}>
-              <button
-                type="button"
-                className={styles.secondaryButton}
-                disabled={saving}
-                onClick={() => {
-                  setDraft(content);
-                  setMode('view');
-                }}
-              >
-                {t('common.cancel')}
-              </button>
-              <button
-                type="button"
-                className={styles.primaryButton}
-                disabled={saving || contentLoading || !canReplace}
-                onClick={handleSave}
-              >
-                {saving ? t('memory.saving') : t('memory.save')}
-              </button>
-            </div>
-          </>
+        {activeTab === 'auto' ? (
+          <AutoMemoryPanel
+            onMessage={onMessage}
+            refreshSignal={refreshSignal}
+          />
         ) : (
-          <pre className={styles.content}>
-            {contentLoading
-              ? t('memory.loadingFile')
-              : content || t('memory.noFiles')}
-          </pre>
+          <>
+            <header className={styles.detailHeader}>
+              <div className={styles.detailTitleWrap}>
+                <div className={styles.detailPath}>{path}</div>
+              </div>
+              <div className={styles.actions}>
+                <button
+                  type="button"
+                  className={styles.actionButton}
+                  disabled={!canReplace}
+                  onClick={handleEdit}
+                >
+                  {t('settings.action.edit')}
+                </button>
+              </div>
+            </header>
+
+            {statusText && <div className={styles.status}>{statusText}</div>}
+
+            {mode === 'edit' ? (
+              <>
+                <textarea
+                  ref={editorRef}
+                  className={styles.editor}
+                  value={draft}
+                  disabled={saving || contentLoading}
+                  onChange={(event) => setDraft(event.target.value)}
+                  placeholder={t('memory.placeholder', {
+                    scope: selectedEntry
+                      ? scopeLabel(selectedEntry.scope, t)
+                      : '',
+                  })}
+                />
+                <div className={styles.editorFooter}>
+                  <button
+                    type="button"
+                    className={styles.secondaryButton}
+                    disabled={saving}
+                    onClick={() => {
+                      setDraft(content);
+                      setMode('view');
+                    }}
+                  >
+                    {t('common.cancel')}
+                  </button>
+                  <button
+                    type="button"
+                    className={styles.primaryButton}
+                    disabled={saving || contentLoading || !canReplace}
+                    onClick={handleSave}
+                  >
+                    {saving ? t('memory.saving') : t('memory.save')}
+                  </button>
+                </div>
+              </>
+            ) : (
+              <pre className={styles.content}>
+                {contentLoading
+                  ? t('memory.loadingFile')
+                  : content || t('memory.noFiles')}
+              </pre>
+            )}
+          </>
         )}
       </section>
     </div>
