@@ -821,9 +821,14 @@ export function PermissionsDialog({
   }
 
   if (view === 'add-rule-scope') {
-    // The frame spends a border and a padding column on each side; the list
-    // then charges its cursor box and number gutter.
-    const scopeItems = permissionScopeItems(scopeRowWidth(columns - 4, 2));
+    // The dialog is mounted in the app's `min(columns - 4, 100)` content box
+    // and spends a border and a padding column on each side; the list then
+    // charges its cursor box and number gutter. Budget the row from that inner
+    // width, not from the terminal width, or a wide terminal over-budgets and
+    // the renderer clips the settings file name.
+    const scopeItems = permissionScopeItems(
+      scopeRowWidth(Math.min(columns - 4, 100) - 4, 2),
+    );
     return (
       <Box flexDirection="column">
         <Box

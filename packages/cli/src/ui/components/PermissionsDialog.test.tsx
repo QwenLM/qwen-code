@@ -3,16 +3,26 @@
  * Copyright 2026 Qwen
  * SPDX-License-Identifier: Apache-2.0
  */
+// @vitest-environment jsdom
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { EventEmitter } from 'node:events';
 import * as os from 'node:os';
 import * as nodePath from 'node:path';
+import { Box, render as inkRender } from 'ink';
+import { waitFor } from '@testing-library/react';
+import type { Config } from '@qwen-code/qwen-code-core';
 import {
   SCOPE_LABEL_GAP,
   permissionScopeItems,
 } from '../utils/permission-scope-row.js';
 import { setLanguageAsync } from '../../i18n/index.js';
 import { getCachedStringWidth } from '../utils/textUtils.js';
+import { PermissionsDialog } from './PermissionsDialog.js';
+import { KeypressProvider } from '../contexts/KeypressContext.js';
+import { ConfigContext } from '../contexts/ConfigContext.js';
+import { SettingsContext } from '../contexts/SettingsContext.js';
+import type { LoadedSettings } from '../../config/settings.js';
 
 describe('permissionScopeItems', () => {
   const originalQwenHome = process.env['QWEN_HOME'];
@@ -158,5 +168,153 @@ describe('permissionScopeItems row width', () => {
     const item = permissionScopeItems(43)[1]!;
 
     expect(item.description).toContain('settings.json');
+  });
+});
+
+const stripAnsi = (s: string): string =>
+  // eslint-disable-next-line no-control-regex
+  s.replace(/\u001b\[[0-9;]*m/g, '');
+
+class FakeStdin extends EventEmitter {
+  isTTY = true;
+  private data: string | null = null;
+  setEncoding(): void {}
+  setRawMode(): void {}
+  resume(): void {}
+  pause(): void {}
+  ref(): void {}
+  unref(): void {}
+  write(data: string): void {
+    this.data = data;
+    this.emit('readable');
+    this.emit('data', data);
+  }
+  read(): string | null {
+    const data = this.data;
+    this.data = null;
+    return data;
+  }
+}
+
+// ink-testing-library hard-codes a 100-column buffer, too narrow to reproduce
+// the wide-terminal over-budget this dialog had. Render through ink directly
+// with a wide stdout so layout and paint widths agree.
+function renderDialogAtWidth(columns: number) {
+  let lastFrame = '';
+  const stdout = Object.assign(new EventEmitter(), {
+    columns,
+    rows: 50,
+    write: (frame: string) => {
+      lastFrame = frame;
+    },
+  });
+  const stderr = Object.assign(new EventEmitter(), {
+    columns,
+    rows: 50,
+    write: () => {},
+  });
+  const stdin = new FakeStdin();
+  const config = {
+    getPermissionManager: () => null,
+    getWorkspaceContext: () => ({
+      getDirectories: () => [],
+      getInitialDirectories: () => [],
+    }),
+  } as unknown as Config;
+  const settings = {
+    merged: {},
+    setValue: () => {},
+    forScope: () => ({ settings: {} }),
+  } as unknown as LoadedSettings;
+
+  const instance = inkRender(
+    // Mirror the app shell: the dialog lives in a content area capped at 100
+    // columns, so a wider terminal does not widen the painted row.
+    <Box marginX={2} width={Math.min(columns - 4, 100)}>
+      <ConfigContext.Provider value={config}>
+        <SettingsContext.Provider value={settings}>
+          <KeypressProvider kittyProtocolEnabled={false}>
+            <PermissionsDialog onExit={() => {}} />
+          </KeypressProvider>
+        </SettingsContext.Provider>
+      </ConfigContext.Provider>
+    </Box>,
+    {
+      stdout: stdout as unknown as NodeJS.WriteStream,
+      stderr: stderr as unknown as NodeJS.WriteStream,
+      stdin: stdin as unknown as NodeJS.ReadStream,
+      debug: true,
+      patchConsole: false,
+      exitOnCtrlC: false,
+    },
+  );
+  return { lastFrame: () => lastFrame, stdin, unmount: instance.unmount };
+}
+
+describe('PermissionsDialog scope rows', () => {
+  const originalQwenHome = process.env['QWEN_HOME'];
+
+  afterEach(() => {
+    if (originalQwenHome === undefined) {
+      delete process.env['QWEN_HOME'];
+    } else {
+      process.env['QWEN_HOME'] = originalQwenHome;
+    }
+  });
+
+  it('keeps the settings file name when the terminal is wider than the layout cap', async () => {
+    // The app caps its content area at 100 columns, so a 200-column terminal
+    // must not budget the row from 200: the renderer clips at the cap and the
+    // file name is what falls off the right edge.
+    process.env['QWEN_HOME'] =
+      '/opt/qwen-enterprise/runtimes/tenant-42/configuration/shared/config';
+    const originalColumns = Object.getOwnPropertyDescriptor(
+      process.stdout,
+      'columns',
+    );
+    Object.defineProperty(process.stdout, 'columns', {
+      value: 200,
+      configurable: true,
+    });
+    const { lastFrame, stdin, unmount } = renderDialogAtWidth(200);
+    try {
+      await waitFor(
+        () => expect(stripAnsi(lastFrame())).toContain('Add a new rule'),
+        { timeout: 3000 },
+      );
+      stdin.write('\r');
+      await waitFor(
+        () => expect(stripAnsi(lastFrame())).toContain('Enter to submit'),
+        { timeout: 3000 },
+      );
+      stdin.write('Bash');
+      await waitFor(() => expect(stripAnsi(lastFrame())).toContain('Bash'), {
+        timeout: 3000,
+      });
+      // Let the keypress parser flush the text chunk before the submit Return,
+      // otherwise both arrive in one chunk and the Return is read as paste.
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      stdin.write('\r');
+      await waitFor(
+        () => expect(stripAnsi(lastFrame())).toContain('User settings'),
+        { timeout: 3000 },
+      );
+
+      const frame = stripAnsi(lastFrame());
+      const row = frame
+        .split('\n')
+        .find((line) => line.includes('User settings'));
+      expect(row).toBeDefined();
+      expect(row).toContain('settings.json');
+    } finally {
+      unmount();
+      if (originalColumns) {
+        Object.defineProperty(process.stdout, 'columns', originalColumns);
+      } else {
+        delete (process.stdout as unknown as Record<string, unknown>)[
+          'columns'
+        ];
+      }
+    }
   });
 });
