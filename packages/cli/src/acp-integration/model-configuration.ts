@@ -27,6 +27,7 @@ import {
   getDeepSeekReasoningState,
 } from '@qwen-code/qwen-code-core/core/deepseek-reasoning.js';
 import { getRequestModel } from '@qwen-code/qwen-code-core/core/request-model.js';
+import { isTieredEffortQwenPrefix } from '@qwen-code/qwen-code-core/core/modalityDefaults.js';
 import type { SessionConfigOption } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../config/settings.js';
 import { ACP_ROUTE_ID_PREFIX } from '../utils/acpModelUtils.js';
@@ -317,7 +318,10 @@ export function getModelConfiguration(
           },
         }
       : modelId
-        ? MODEL_CONFIGURATIONS[modelId]
+        ? (MODEL_CONFIGURATIONS[modelId] ??
+          (isTieredEffortQwenPrefix(modelId)
+            ? MODEL_CONFIGURATIONS['qwen3.8-max']
+            : undefined))
         : undefined;
 }
 

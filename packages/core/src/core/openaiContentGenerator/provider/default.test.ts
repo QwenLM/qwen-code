@@ -485,7 +485,7 @@ describe('DefaultOpenAICompatibleProvider', () => {
         },
       });
       const request = {
-        model: 'deepseek-v4-pro',
+        model: 'legacy-non-gpt',
         messages: [],
         reasoning: { effort: 'low' },
       } as unknown as OpenAI.Chat.ChatCompletionCreateParams;

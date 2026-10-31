@@ -19,11 +19,13 @@ const FLASH_MODELS = new Set([
   'deepseek-v4.1-flash',
   'deepseek-v4.1-flash-1017',
 ]);
-const LEGACY_MODELS = new Set([
-  'deepseek-v4-pro',
-  'deepseek-v4-pro-0813',
-  'deepseek-v4-flash-0731',
-]);
+
+// The one case-insensitive choke point for the DeepSeek-V4 family: every id
+// under the prefix (dated snapshots and gateway aliases included) speaks the
+// same effort contract.
+function isDeepSeekV4Model(model: string | undefined): boolean {
+  return /^deepseek-v4/i.test(model ?? '');
+}
 
 function getDeepSeekEndpoint(
   baseUrl: string | undefined,
@@ -41,13 +43,13 @@ function getDeepSeekEndpoint(
     hostname.endsWith('.maas.aliyuncs.com') ||
     /^(?:dashscope(?:-intl|-us)?|cn-hongkong\.dashscope)\.aliyuncs\.com$/.test(
       hostname,
-    ) ||
-    (/^deepseek-v4\.1-flash(?:-1017)?$/i.test(model ?? '') &&
-      (hostname.endsWith('.alibaba-inc.com') ||
-        hostname.endsWith('.aliyun-inc.com') ||
-        hostname.endsWith('.alicloudapi.com')))
+    )
   )
     return 'maas';
+  // DeepSeek-V4 models are hosted by many third-party OpenAI-compatible
+  // gateways (PAI-EAS, internal proxies, ...); the model id alone identifies
+  // the MaaS-style wire contract there, so no hostname whitelist applies.
+  if (isDeepSeekV4Model(model)) return 'maas';
   return undefined;
 }
 
@@ -59,9 +61,7 @@ export function getBuiltinDeepSeekReasoning(
   if (
     config.authType !== AuthType.USE_OPENAI ||
     !endpoint ||
-    (!FLASH_MODELS.has(model) &&
-      !LEGACY_MODELS.has(model) &&
-      !(endpoint === 'official' && model === 'deepseek-v4-flash-vision-exp'))
+    (!isDeepSeekV4Model(model) && !FLASH_MODELS.has(model))
   )
     return undefined;
   return {

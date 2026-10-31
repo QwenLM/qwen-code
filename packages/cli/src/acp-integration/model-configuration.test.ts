@@ -224,6 +224,16 @@ describe('model configuration manifest', () => {
     ],
     [
       'deepseek-v4.1-flash-1017',
+      'https://gateway.cn-shanghai.pai-eas.aliyuncs.com/api/predict/demo/v1',
+      ['low', 'high', 'max'],
+    ],
+    [
+      'DeepSeek-V4-Pro',
+      'https://gateway.cn-shanghai.pai-eas.aliyuncs.com/api/predict/demo/v1',
+      ['high', 'max'],
+    ],
+    [
+      'deepseek-v4.1-flash-1017',
       'https://dashscope.aliyuncs.com/compatible-mode/v1',
       ['low', 'high', 'max'],
     ],
@@ -726,6 +736,38 @@ describe('model configuration manifest', () => {
     });
   });
 
+  it.each([
+    'qwen-latest-series-invite-202610-m6',
+    'QWEN-LATEST-SERIES-INVITE-202610-m6',
+    'qwen4',
+    'qwen4-plus',
+    'Qwen4-Max-2026-10-01',
+  ])('registers the stable tiered controls for %s', (modelId) => {
+    expect(getModelConfiguration(modelId)).toEqual(
+      getModelConfiguration('qwen3.8-max'),
+    );
+    expect(buildModelReasoningConfigOption(modelId)).toMatchObject({
+      id: 'reasoning_effort',
+      currentValue: 'xhigh',
+      options: [
+        { value: 'none' },
+        { value: 'low' },
+        { value: 'medium' },
+        { value: 'xhigh' },
+      ],
+      _meta: {
+        'qwenCode/reasoning': { defaultEffort: 'xhigh' },
+      },
+    });
+  });
+
+  it.each(['qwen-latest-series-other', 'company-qwen4', 'qwen3.9-max'])(
+    'does not register tiered controls for %s',
+    (modelId) => {
+      expect(getModelConfiguration(modelId)).toBeUndefined();
+    },
+  );
+
   it('builds the stable qwen3.8-max default reasoning option', () => {
     expect(buildModelReasoningConfigOption('qwen3.8-max')).toMatchObject({
       id: 'reasoning_effort',
@@ -790,6 +832,10 @@ describe('model configuration manifest', () => {
     ['qwen3.8-max', 'max', false, false],
     ['qwen3.8-max', 'none', false, true],
     ['qwen3.8-max', 'none', true, false],
+    ['qwen-latest-series-invite-202610-m6', 'low', false, true],
+    ['qwen-latest-series-invite-202610-m6', 'max', false, false],
+    ['qwen4-plus', 'none', false, true],
+    ['qwen4-plus', 'none', true, false],
     ['qwen3.7-plus', 'default', false, true],
     ['qwen3.7-plus', 'none', false, true],
     ['qwen3.7-plus', 'low', false, false],

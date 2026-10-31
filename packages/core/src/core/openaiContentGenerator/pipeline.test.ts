@@ -898,30 +898,37 @@ describe('ContentGenerationPipeline', () => {
       });
     });
 
-    it('never ships the max tier to the tiered DashScope family end to end', async () => {
-      // `/effort max` persists the tier in config, so a raw pass-through 400s
-      // on this and every later request of the session: through the real
-      // provider, the wire body must carry the tier capped at xhigh.
-      const apiCall = await executeWith(
-        {
-          baseUrl: DASHSCOPE_URL,
-          model: 'qwen3.8-max',
-          authType: AuthType.QWEN_OAUTH,
-          reasoning: { effort: 'max' },
-        },
-        userRequest('qwen3.8-max', {
-          thinkingConfig: { includeThoughts: true },
-        }),
-        'prompt-id',
-        DashScopeOpenAICompatibleProvider,
-      );
+    it.each([
+      'qwen3.8-max',
+      'qwen-latest-series-invite-202610-m6',
+      'qwen4-plus',
+    ])(
+      'never ships the max tier to the tiered DashScope family end to end (%s)',
+      async (model) => {
+        // `/effort max` persists the tier in config, so a raw pass-through 400s
+        // on this and every later request of the session: through the real
+        // provider, the wire body must carry the tier capped at xhigh.
+        const apiCall = await executeWith(
+          {
+            baseUrl: DASHSCOPE_URL,
+            model,
+            authType: AuthType.QWEN_OAUTH,
+            reasoning: { effort: 'max' },
+          },
+          userRequest(model, {
+            thinkingConfig: { includeThoughts: true },
+          }),
+          'prompt-id',
+          DashScopeOpenAICompatibleProvider,
+        );
 
-      // The tier ships alone — no competing nested knob.
-      expectFields(apiCall, {
-        reasoning_effort: 'xhigh',
-        reasoning: undefined,
-      });
-    });
+        // The tier ships alone — no competing nested knob.
+        expectFields(apiCall, {
+          reasoning_effort: 'xhigh',
+          reasoning: undefined,
+        });
+      },
+    );
 
     it('never ships the max tier to a generic OpenAI-compatible endpoint end to end', async () => {
       // The same persisted-tier failure through the real default provider.
@@ -1362,7 +1369,9 @@ describe('ContentGenerationPipeline', () => {
     async function executeWithCapability(
       capability: unknown,
       configOverrides: Partial<ContentGeneratorConfig>,
-      model = 'deepseek-v4-pro',
+      // Neutral id: the DeepSeek-V4 prefix now carries a built-in contract on
+      // every host, which would mask the declared-capability path under test.
+      model = 'capability-probe',
     ): Promise<Record<string, unknown>> {
       mockCliConfig = {
         getResolvedModelConfig: vi
@@ -1457,6 +1466,10 @@ describe('ContentGenerationPipeline', () => {
       ['https://model-proxy.alibaba-inc.com/v1', 'enable_thinking'],
       ['https://model-proxy.aliyun-inc.com/v1', 'enable_thinking'],
       ['https://model-proxy.alicloudapi.com/v1', 'enable_thinking'],
+      [
+        'https://gateway.cn-shanghai.pai-eas.aliyuncs.com/api/predict/demo/v1',
+        'enable_thinking',
+      ],
     ])(
       'sends built-in DeepSeek selection and defaults through %s',
       async (baseUrl, field) => {
