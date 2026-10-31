@@ -11,8 +11,8 @@ import {
   installSidebarDomShims,
   makeSidebarSession as makeSession,
   resolvedWebShellSessions,
-  sidebarSessionCatalogQuery,
   sidebarSessionPage,
+  useSidebarSessionCatalogQuery,
 } from '../../test/sidebarHarness';
 
 const mocks = createSidebarMocks({
@@ -106,7 +106,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
     client: typeof mocks.workspace.client,
     query: { workspaceCwd: string; options?: Record<string, unknown> },
     options: { autoLoad?: boolean; enabled?: boolean },
-  ) => sidebarSessionCatalogQuery(client, query, options),
+  ) => useSidebarSessionCatalogQuery(client, query, options),
   useSessionCatalogQueries,
 }));
 

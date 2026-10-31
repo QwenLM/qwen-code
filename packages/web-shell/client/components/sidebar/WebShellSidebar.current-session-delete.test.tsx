@@ -6,9 +6,9 @@
 
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   McpAppGeneratedUiOwnerContext,
   type McpAppGeneratedUiOwner,
@@ -21,8 +21,8 @@ import {
   installSidebarDomShims,
   makeSidebarSession as makeSession,
   resolvedWebShellSessions,
-  sidebarSessionCatalogQuery,
   sidebarSessionPage,
+  useSidebarSessionCatalogQuery,
 } from '../../test/sidebarHarness';
 
 const mocks = createSidebarMocks({
@@ -33,7 +33,6 @@ const mocks = createSidebarMocks({
 const {
   connection,
   workspace,
-  workspaceActions,
   active,
   pinned,
   archived,
@@ -41,6 +40,16 @@ const {
   useSessionCatalogQueries,
   loadSession,
 } = mocks;
+// Stable identity across renders: the sidebar's useLayoutEffect depends on
+// the controller object, and a fresh literal per render re-runs the effect
+// (extra refreshQueries) on each render.
+const sessionCatalogController = {
+  refreshQueries: refreshSessionCatalogQueries,
+  invalidateWorkspace: vi.fn(),
+  refreshWorkspace: vi.fn(),
+  renamed: vi.fn(),
+  toggleSessionPinned: vi.fn(),
+};
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
   DAEMON_APPROVAL_MODES,
@@ -59,19 +68,13 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
     archiveState?: string;
     group?: string;
   }) => resolvedWebShellSessions(mocks, options),
-  useSessionCatalogController: () => ({
-    refreshQueries: refreshSessionCatalogQueries,
-    invalidateWorkspace: vi.fn(),
-    refreshWorkspace: vi.fn(),
-    renamed: vi.fn(),
-    toggleSessionPinned: vi.fn(),
-  }),
+  useSessionCatalogController: () => sessionCatalogController,
   useSessionCatalogPolling: () => undefined,
   useSessionCatalogQuery: (
     client: typeof mocks.workspace.client,
     query: { workspaceCwd: string; options?: Record<string, unknown> },
     options: { autoLoad?: boolean; enabled?: boolean },
-  ) => sidebarSessionCatalogQuery(client, query, options),
+  ) => useSidebarSessionCatalogQuery(client, query, options),
   useSessionCatalogQueries,
 }));
 

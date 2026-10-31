@@ -97,6 +97,33 @@ const refreshWorkspaceSessionCatalog = vi.fn();
 const renameSessionCatalog = vi.fn();
 const useSessionCatalogPollingSpy = vi.fn();
 const listStandaloneSessionsPage = vi.fn().mockResolvedValue({ sessions: [] });
+const listWorkspaceSessionsPage = vi.fn().mockResolvedValue({ sessions: [] });
+const catalogListeners = new Set<(workspaceCwd: string) => void>();
+// Module-level so every render sees the same controller object: the
+// sidebar's useLayoutEffect depends on it, and a fresh literal per render
+// re-runs the effect (extra refreshQueries) on each render.
+const sessionCatalogController = {
+  refreshQueries: refreshSessionCatalogQueries,
+  invalidateWorkspace: (workspaceCwd: string) => {
+    invalidateSessionCatalog(workspaceCwd);
+    for (const listener of catalogListeners) listener(workspaceCwd);
+  },
+  refreshWorkspace: (workspaceCwd: string) => {
+    refreshWorkspaceSessionCatalog(workspaceCwd);
+    for (const listener of catalogListeners) listener(workspaceCwd);
+  },
+  renamed: (
+    workspaceCwd: string,
+    sessionId: string,
+    displayName: string,
+  ) => {
+    renameSessionCatalog(workspaceCwd, sessionId, displayName);
+    for (const listener of catalogListeners) listener(workspaceCwd);
+  },
+  // These tests render pages straight from listWorkspaceSessions, so the
+  // store-owned pin toggle has no loaded catalog pages to patch.
+  toggleSessionPinned: vi.fn(),
+};
 
 const workspace = {
   baseUrl: '',
@@ -110,6 +137,7 @@ const workspace = {
     | undefined,
   client: {
     listStandaloneSessionsPage,
+    listWorkspaceSessionsPage,
     archiveStandaloneSessions: archiveSessionsData,
     unarchiveStandaloneSessions: unarchiveSessionsData,
     workspaceByCwd: vi.fn(() => ({
@@ -154,7 +182,6 @@ vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
 }));
 
 vi.mock('../../session-catalog/session-catalog-hooks', () => {
-  const catalogListeners = new Set<(workspaceCwd: string) => void>();
   return {
     useWebShellSessions: (options?: {
       enabled?: boolean;
@@ -173,28 +200,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => {
         catalogQuery,
       );
     },
-    useSessionCatalogController: () => ({
-      refreshQueries: refreshSessionCatalogQueries,
-      invalidateWorkspace: (workspaceCwd: string) => {
-        invalidateSessionCatalog(workspaceCwd);
-        for (const listener of catalogListeners) listener(workspaceCwd);
-      },
-      refreshWorkspace: (workspaceCwd: string) => {
-        refreshWorkspaceSessionCatalog(workspaceCwd);
-        for (const listener of catalogListeners) listener(workspaceCwd);
-      },
-      renamed: (
-        workspaceCwd: string,
-        sessionId: string,
-        displayName: string,
-      ) => {
-        renameSessionCatalog(workspaceCwd, sessionId, displayName);
-        for (const listener of catalogListeners) listener(workspaceCwd);
-      },
-      // These tests render pages straight from listWorkspaceSessions, so the
-      // store-owned pin toggle has no loaded catalog pages to patch.
-      toggleSessionPinned: vi.fn(),
-    }),
+    useSessionCatalogController: () => sessionCatalogController,
     useSessionCatalogPolling: (...args: unknown[]) =>
       useSessionCatalogPollingSpy(...args),
     useSessionCatalogQuery: (

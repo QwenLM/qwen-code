@@ -369,7 +369,7 @@ export function resolvedWebShellSessions(
  * Stateful useSessionCatalogQuery mock: mirrors the page read from
  * `client.workspaceByCwd(cwd).listWorkspaceSessions` and auto-loads once.
  */
-export function sidebarSessionCatalogQuery(
+export function useSidebarSessionCatalogQuery(
   client: SidebarWorkspaceClient,
   query: { workspaceCwd: string; options?: Record<string, unknown> },
   options: { autoLoad?: boolean; enabled?: boolean },
