@@ -75,7 +75,7 @@ class HostedEventStreamLivenessIT {
     // Longer than the bound, inside the Harness's 120 s first-response wait.
     private static final long QUIET_MILLIS = IDLE_BOUND_MILLIS + 10_000;
     private static final String IDLE_RETRY =
-            "failure=HostedHarnessStreamIdleException";
+            "failure=HarnessStreamIdleFailure";
 
     private final ObjectMapper json = new ObjectMapper();
     private final List<JsonNode> modelRequests = new CopyOnWriteArrayList<>();
