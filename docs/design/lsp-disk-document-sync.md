@@ -134,8 +134,9 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   unbacked, or when a server that could own the queried file was unreachable;
   the tool surfaces the rejection as `ToolErrorType.EXECUTION_FAILED`. An
   authoritative empty report is clean only when it is both relevant and, for an
-  extension the tables can place, positively owned; a file whose extension no
-  table can place (`.h`, `.mts`, an extensionless name) has no decidable owner
+  extension the tables or an explicit mapping can place, positively owned; a
+  file whose extension neither can place (an unknown extension without a
+  mapping, or an extensionless name) has no decidable owner
   and is judged on relevance alone, as it was before ownership became a
   requirement. A non-`file:` URI (`jdt://…`) reaches the same undecidable case
   by another route: `synchronizeDocument` returns before sending any `didOpen`,
@@ -153,11 +154,10 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   and the identity-mapped language IDs — and the JS/TS family widening is
   one-directional: a `typescript` declaration covers the JavaScript side, while
   a `javascript`-only declaration cannot claim `.ts` or `.tsx`. The rejection
-  names which condition failed: an answer was retrieved and a queried server
-  did answer, but no answer positively owns the queried extension; a relevant
-  answer could not be attributed to the queried file; or no configured server
-  covers it. A
-  server that could never own the queried file does not veto a document query;
+  names which condition failed: a failure, refusal, or unreachable owner is
+  named when possible; otherwise it distinguishes a server that answered but
+  could not be attributed from the case where no configured server covers the
+  file. A server that could never own the queried file does not veto a document query;
   a workspace query refuses an unbacked clean report while any configured
   server is unreachable, and while any pull failed for a reason other than a
   refusal. A server that finishes starting while a query is in flight is asked
@@ -174,6 +174,44 @@ retryable stale error. Ordinary non-file requests pass through unchanged.
   return empty arrays or null; these are **not evidence of clean diagnostics**.
 - Notification delivery is not acknowledged by the transport. This change does
   not redesign asynchronous writes/closed connections.
+
+### Explicit diagnostic ownership
+
+An `extensionToLanguage` key is direct ownership evidence even when it is not
+in the built-in extension tables. Such an extension is attributable across the
+configured servers, so a foreign empty answer cannot replace its owner's
+missing answer, and a failed foreign server cannot veto that owner's clean
+report. Explicit keys must match the document synchronization lookup (the
+lowercase extension, with or without its leading dot). This change does not
+introduce whitespace normalization; mapping values still contribute recognized
+language aliases. The diagnostics-local tables include common secondary
+extensions such as `.mts`, `.h`, and `.pyi`. A non-empty, whitespace-free
+language ID outside those tables owns its same-named extension unless it is also
+the configured server name; that distinction admits live language IDs without
+maintaining a closed allowlist while preserving the conservative treatment of
+malformed declarations and server-name keys. Without any recognized declaration
+or explicit mapping, a server-name key remains unknown and keeps its
+conservative veto. Unknown extensions without an explicit mapping retain the
+fallback above. Workspace-symbol warmup selection is unchanged.
+
+Known limitation: ownership remains fail-closed when an attributable extension
+cannot be reached from a server's declared language ID through the built-in
+tables or an explicit mapping. A healthy server using an unlisted alias can
+therefore have an authoritative clean answer refused (for example, a `pyright`
+language ID serving `.pyi`). This change does not resolve that provenance gap or
+change the fail-closed behavior; choosing between carrying configuration
+provenance and relaxing the ownership requirement requires a separate
+maintainer decision.
+
+The consumers are diagnostic ownership accounting, failure and unsupported
+attribution, initial unavailable-server reporting, newly-ready selection, and
+the final unreachable-server veto. Attribution is evaluated against live
+configuration at the final decision, and newly-ready owners' answers are counted
+even if their extension was unknown when the query began. Workspace diagnostics
+have no file extension and retain their existing relevance semantics. Regression
+tests cover custom mapping ownership, foreign vetoes, unnormalized and unknown
+declarations, owners added during a query, and the unchanged unknown-extension
+fallback.
 
 ## Costs
 
@@ -244,10 +282,10 @@ blame an irrelevant server whose pull resolved to nothing`). The attribution
 split adds two more: reverting the `serverDeclaredIrrelevant` guard to
 `KNOWN_DIAGNOSTIC_EXTENSIONS` (`does not let a failed sibling veto a clean
 answer for a placeable extension`, and the `pyright` row of `refuses an empty
-answer with no attributable owner from` loses its coverage reason); dropping
-the attributable term from the clean-answer gate (`keeps a clean answer for an
-extension the tables cannot place`, all three rows, and `keeps a clean answer
-for a non-file URI the tables cannot place`). The workspace leg and the
+answer with no attributable owner from` goes red); requiring ownership when an
+extension is not attributable (`keeps a clean answer from the declared owner`,
+the `Dockerfile` row, and `keeps a clean answer for a non-file URI the tables
+cannot place`). The workspace leg and the
 attribution tables add four more: the workspace catch routes `pullUnsupported`
 back into `failures` (`keeps a clean workspace report from the pull-capable of
 two servers`, `does not treat a lone -32601 workspace refusal as a failed
@@ -255,8 +293,8 @@ pull`, and `names a -32601 workspace refusal beside the failure that did
 veto`); `serverDeclaredIrrelevant`'s attribution predicate returns to
 `KNOWN_DIAGNOSTIC_EXTENSIONS` / `DIAGNOSTIC_LANGUAGE_IDS` (`does not let a
 downed kotlin sibling veto a clean answer it cannot own`, and the `kotlin` row
-of `refuses an empty answer with no attributable owner from` loses its coverage
-reason); `declaredDiagnosticExtensions` widens all four JS/TS family IDs again
+of `refuses an empty answer with no attributable owner from` goes red);
+`declaredDiagnosticExtensions` widens all four JS/TS family IDs again
 (`does not let a downed javascript sibling veto a clean answer it cannot own`
 and its `javascriptreact` twin); the document leg drops the queried `uri` from
 its `unreachableDiagnosticServers` call (`does not let a downed python sibling
@@ -265,6 +303,17 @@ late-ready retry adds one: dropping either leg's `pending.push` of
 `newlyReadyDiagnosticHandles` (`asks a server that became ready during the
 diagnostics query before deciding` for the document leg, its
 `workspaceDiagnostics` twin for the sweep).
+
+Explicit ownership adds six focused mutations: restoring a closed self-naming
+ID allowlist (`accepts self-naming ownership omitted from the attribution
+allowlist`);
+restoring inherited-prone mapping reads (`does not treat inherited mapping key`);
+removing the secondary TypeScript, JavaScript, C/C++, or Python rows (`keeps a
+failed owner as a veto for mapped` and the `.mts` refusal case); restoring the
+trim filter for mapping keys (`matches ownership to an untrimmed mapping key`);
+deleting the dotless mapping lookup (`accepts a dotless mapping key from the
+config loader`); and selecting terminal wording from `answeredRelevant` instead
+of `answeredAny` (`reports an answering foreign server as unattributed`).
 
 The touched service and manager and their collocated unit tests were renamed to
 kebab-case per AGENTS.md. Their barrel exports, native client type imports,
