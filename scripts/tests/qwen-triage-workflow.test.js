@@ -5322,7 +5322,7 @@ describe('qwen-triage verify hardening round 2', () => {
     const frontmatter = parse(/^---\n([\s\S]*?)\n---/.exec(verifySkill)[1]);
 
     expect(frontmatter['argument-hint']).toBe(
-      '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]',
+      '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--expect-head <sha>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]',
     );
   });
 

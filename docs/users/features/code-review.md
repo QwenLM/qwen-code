@@ -288,6 +288,108 @@ After the review, context-aware tips appear as ghost text. Press Tab to accept:
 
 Note: `fix these issues` is only available for local reviews, for the same reason `--fix` is — for PR reviews the worktree is cleaned up after the review, so post-review interactive fixing is not possible; use `--comment` or `post comments` to publish findings instead. When `--fix` was passed, the findings already carry outcomes and no fix tip is offered.
 
+## Automatic Deep Verification
+
+A clean PR review can hand itself to a deep-verification round. When a round
+ends with zero Criticals **and** certified its scope (the review's own
+fail-closed caps — an undecided blocker, unproven coverage, an unavailable PR
+context — withhold that certification), the running `qwen serve` daemon starts a
+session in the same workspace executing:
+
+```
+/verify-pr <number> --publish --repo <owner>/<repo>
+```
+
+That round produces behavioural evidence for the change and posts its report as
+a PR comment. It runs untrusted PR code under the same isolation posture as a
+manually invoked `/verify-pr`, so treat it as you would that command.
+
+- **One verification per reviewed head.** Two clean rounds at the same commit
+  start one round. A failed start is logged and not retried, so a report is
+  never published twice by accident; run `/verify-pr` by hand if you want it
+  again.
+- **Only `github.com` targets start today.** The handoff records the platform,
+  but `/verify-pr` has no Aone or GitLab backend and no `--host` flag yet, and
+  the workspace must carry the project skill (`.qwen/skills/verify-pr`).
+  Other targets are recorded and declined with a reason in the daemon log.
+- **Turn it off** with `review.autoVerify: false` in your user settings. Producers
+  still write the record, but the consumer declines and drops it — nothing is
+  queued for later, and nothing is spawned. A repository's own
+  `.qwen/settings.json` cannot change this either way.
+
+### Handing off a review performed elsewhere
+
+The reviewer does not have to be qwen-code. Another agent, a script, or a person
+can record the same handoff:
+
+```bash
+qwen review verify-event --pr 15846 --repo QwenLM/qwen-code \
+  --head <the commit the review actually read> --reviewed-by codex
+```
+
+The command is offline — it reads no platform and needs no credentials — and the
+daemon does not have to be running yet: the record is durable and is picked up
+whenever the daemon next reads that workspace. Pass `--workspace-root` when you
+are not invoking it from that checkout, and `--host` for any non-GitHub target
+(there is no default host off GitHub).
+
+The round becomes a **sub-session of the session you name**, so it stays attached
+to your work. `--session-id` defaults to `QWEN_CODE_SESSION_ID`, so an agent
+running inside a session needs no flag; one invoking this from outside must name
+the session it wants the round attached to, and a handoff with no session is
+refused rather than recorded. The caller asserts the two facts it is responsible
+for — which head was read, and that the round found no Critical — and
+`--reviewed-by` records who asserted them, which the daemon log names alongside
+the owning session when it starts the round.
+
+### Watching a PR instead of handing off once
+
+If you do not want to rely on the reviewer remembering to hand off, register the
+PR for observation:
+
+```bash
+# Watch a PR: every head that comes back cleanly approved is handed off
+qwen review verify-watch 15846 --repo QwenLM/qwen-code
+
+qwen review verify-watch --list      # what is being watched
+qwen review verify-watch --once      # run one observation pass now
+qwen review verify-watch 15846 --repo QwenLM/qwen-code --remove
+```
+
+The daemon re-reads each watched PR every five minutes and hands off a head when
+**all** of these hold:
+
+- the PR is open and not a draft;
+- GitHub's `reviewDecision` is `APPROVED` **and** an approval exists whose commit
+  is the current head. The aggregate alone is not enough: dismissing a stale
+  approval on push is an optional repository setting, so on a repository without
+  it an approval of an older commit survives a push and the aggregate still reads
+  `APPROVED`. No approval of the current head means no handoff;
+- no review thread is both unresolved and non-outdated. Any such thread counts
+  as a blocker; the observer does not try to guess which are "only questions";
+- the thread list was read in full. A truncated read hands off nothing, because
+  the page it could not read may hold the blocker.
+
+A watch belongs to the session that registers it (`--session-id`, defaulting to
+`QWEN_CODE_SESSION_ID`): the rounds it starts are that session's sub-sessions, and
+deleting the session ends the watch. An idle session keeps its watches — only
+deletion ends them. Two sessions may watch the same PR; each owns its own watch,
+and the shared per-head dedupe still means one verification per head.
+
+The round is bound to the commit that was reviewed: its prompt carries
+`--expect-head <sha>`, and the verification preflight refuses a PR that has
+advanced past it — before fetching or running anything. A moved head ends the
+round with nothing published; re-review the new head to verify it.
+
+This works no matter who reviewed — another agent, the CI bot, or a person — and
+needs nothing from them. Each head is handed off once, and a head already
+verified through any other route is not handed off again. The daemon log names
+the approving reviewers, so a published report is attributable.
+
+Observation reads GitHub today. A watch on another platform is registered and
+declined with a reason until that platform has a backend. `review.autoVerify:
+false` stops observation as well as spawning.
+
 ## Project Review Rules
 
 You can customize review criteria per project. `/review` reads rules from these files (in order):

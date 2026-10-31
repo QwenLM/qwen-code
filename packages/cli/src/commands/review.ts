@@ -48,11 +48,13 @@ import { cleanupCommand } from './review/cleanup.js';
 import { costLedgerCommand } from './review/cost-ledger.js';
 import { runCommand } from './review/run.js';
 import { saveArtifactCommand } from './review/save-artifact.js';
+import { verifyEventCommand } from './review/verify-event.js';
 import { metaCommand } from './review/meta.js';
 import { issueContextCommand } from './review/issue-context.js';
 import { fetchDiffCommand } from './review/fetch-diff.js';
 import { commentBodyCommand } from './review/comment-body.js';
 import { watchRepoCommand } from './review/watch-repo.js';
+import { verifyWatchCommand } from './review/verify-watch.js';
 
 export const reviewCommand: CommandModule = {
   command: 'review',
@@ -101,12 +103,14 @@ export const reviewCommand: CommandModule = {
       .command(publishAssetsCommand)
       .command(composeReviewCommand)
       .command(saveArtifactCommand)
+      .command(verifyEventCommand)
+      .command(verifyWatchCommand)
       .command(submitCommand)
       .command(cleanupCommand)
       .command(watchRepoCommand)
       .demandCommand(
         1,
-        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, capture-tui, plan-diff, cache-commit, repo-context, pr-context, comment-status, load-rules, agent-prompt, emit-workflow, build-test, base-tree, scratch-tree, test-delta, fix-delta, drive, ab-drive, mock-provider, extract-step, script-lint, dedup-candidates, revert-hunk, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, submit, cleanup, or watch-repo.',
+        'Specify a subcommand: run, parse-args, match-remote, meta, issue-context, fetch-diff, comment-body, fetch-pr, capture-local, capture-tui, plan-diff, cache-commit, repo-context, pr-context, comment-status, load-rules, agent-prompt, emit-workflow, build-test, base-tree, scratch-tree, test-delta, fix-delta, drive, ab-drive, mock-provider, extract-step, script-lint, dedup-candidates, revert-hunk, resolve-anchors, check-coverage, cost-ledger, presubmit, test-efficacy, test-plan, findings, recover-findings, publish-assets, compose-review, save-artifact, verify-event, verify-watch, submit, cleanup, or watch-repo.',
       )
       .version(false),
   handler: () => {

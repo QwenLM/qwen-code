@@ -1,7 +1,7 @@
 ---
 name: verify-pr
 description: This skill should be used to run a sandboxed deep verification of a qwen-code PR — "/verify-pr <n>", "/verify-pr <n> --publish" (local round that also posts the report comment), "深度验证这个 PR", "验证这个 PR 并把报告发到评论", "有更新了，重新验证", "重新验证 PR <n>", "re-verify after update", A/B load-bearing proof against the base build, mock-free harnesses with wire oracles, and targeted gates — producing tmp/pr<n>-verify-<ts>/report.md plus a machine-readable verdict. Designed for the token-free CI verify job; also usable locally.
-argument-hint: '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]'
+argument-hint: '<pr-number> [--publish] [--watch] [--repo <owner>/<repo>] [--expect-head <sha>] [--assets-repo <owner>/<repo>] [--assets-branch <branch>]'
 ---
 
 # PR Deep Verification
@@ -31,6 +31,13 @@ Two entry paths share the contract below.
   refresh them (the local install strategy below).
   This round executes untrusted PR code, so it needs an isolation boundary
   (see _Local invocation_).
+- **Automated handoff** — a prompt carrying `--expect-head <sha>` was started by
+  the clean-review automation, and that sha is the commit the review actually
+  read. Pass the flag straight through to the prepare command. **Exit 5 means
+  the PR has advanced past the reviewed commit: stop the round, publish nothing,
+  and say the head moved and needs a fresh review.** Never drop the flag and
+  verify the current head instead — that would publish a report about one
+  commit as evidence for a review of another.
 
 `/verify-pr <n>` proves the change and posts nothing. `--publish` adds the
 report comment and its image evidence; `--watch` installs a standing trigger.
@@ -146,7 +153,8 @@ maintainer's machine; if that isolation is unavailable, ask the maintainer to
 trigger the sandboxed `@qwen-code /verify` lane instead.
 
 Run `node scripts/verify-pr-prepare.mjs <n> --repo <owner>/<repo>` on the host
-before anything else: it fetches the metadata snapshot, resolves and verifies
+before anything else — adding `--expect-head <sha>` whenever the invocation
+carried one: it fetches the metadata snapshot, resolves and verifies
 both OIDs against this clone, refuses a tree that is not a clean, fully
 materialised checkout of the PR head (a wrong HEAD names the `git checkout`
 to run; uncommitted changes name the entries and a stash form that clears
@@ -155,7 +163,10 @@ skip-worktree, assume-unchanged — are refused too; the script never stashes
 for you),
 creates `tmp/pr<n>-verify-<ts>/` with a `context.json` holding `repo`, `pr`,
 `baseRefOid` and `headRefOid`, and reports the isolation signals it can see.
-It does not gate on them — resolving metadata
+With `--expect-head` it refuses (exit 5) a live head that is not that commit
+ahead of every one of those checks — before fetching, before the tree gate and
+before creating anything; treat that as the end of the round, not as a reason
+to retry without the flag. It does not gate on them — resolving metadata
 needs `gh`, which the boundary excludes, so this path always runs on the host.
 The boundary check belongs inside: run
 `node scripts/verify-pr-prepare.mjs --require-isolation` as the round's first
