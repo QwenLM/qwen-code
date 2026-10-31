@@ -583,7 +583,11 @@ differs only by the change under test; the verdict is the pair of counts.
   hardlinks are free, and the relative `@qwen-code/*` symlinks then resolve
   into the base tree, which the realpath assertion above can confirm. Do not
   symlink the directory itself — the internal links would resolve through it
-  back into the head tree and both arms would run head code.
+  back into the head tree and both arms would run head code. Hardlinks
+  share inodes, and the base build can write under `node_modules` (its
+  postinstall patch step), so a base arm that rebuilds needs real copies
+  from the store instead
+  (`pnpm install --offline --frozen-lockfile --config.package-import-method=copy`).
 - Report the cell table: environment per cell, observable oracle per cell
   (exit code, stderr line, wire request, rendered frame), and `X/Y` at head
   vs control. "5/9 flip from broken to fixed" is the shape to aim for.
@@ -1277,28 +1281,32 @@ results in both directions.
   itself) and assert each `@qwen-code/*` link resolves inside it (a nested
   tree without its own `node_modules` walks up to the round's); a row that
   writes under `node_modules` needs real copies from the store
-  (`pnpm install --offline --frozen-lockfile`), because hardlinks share the
-  round's inodes. Build the sandbox image under a per-tree tag
-  (`QWEN_SANDBOX_IMAGE_TAG=<tree>`; the build reads that variable, not
-  `QWEN_SANDBOX_IMAGE`), export `QWEN_SANDBOX_IMAGE` for that tree's cells
-  only, and pass no `--sandbox-image` in those cells — the flag outranks
-  the export (the tag in `packages/cli/package.json` is one shared name
-  any tree's build retags). Give Java rows their own `-Dmaven.repo.local`
-  copied from the warmed repository. Before the matrix starts, record a
-  sha256 manifest of each measurement arm's clean `dist/`, and gate every
-  daemon or dist-level harness launch outside the row that produced it
-  on a scripted comparison against that manifest — never against the
-  matrix tree's live source, which mid-row is the mutant and agrees with
-  its own build. Prove the gate live by requiring it to refuse a
-  known-mutant build, not merely to report a fabricated mismatch. Never
-  hand-patch `dist/` to repair a contaminated build; rebuild from source
-  you have verified clean and re-record the manifest from that build — a
-  hand-patch that restores only the visible sites leaves the rest of the
-  build mutant. Measured example: a round interleaved its mutation matrix
-  with 80 live daemon cells on one tree, then hand-patched the mutant it
-  found in `dist/`; the patched build still carried the mutant
-  expression, so every live cell and the whole matrix were withdrawn and
-  the round shipped as `inconclusive`.
+  (`pnpm install --offline --frozen-lockfile --config.package-import-method=copy`),
+  because hardlinks share the round's inodes and pnpm's default import
+  falls back to hardlinks where clones are unavailable. Build the sandbox
+  image under a per-tree tag — a sanitized tree label, never a path
+  (`QWEN_SANDBOX_IMAGE_TAG=<label>`; the build reads that variable, not
+  `QWEN_SANDBOX_IMAGE`, and interpolates it into the tag verbatim) — and
+  inject `QWEN_SANDBOX_IMAGE=ghcr.io/qwenlm/qwen-code:<label>` per launch
+  of that tree's cells, never as a shell-wide export, which every later
+  cell inherits; pass no `--sandbox-image` in those cells — the flag
+  outranks the variable (the tag in `packages/cli/package.json` is one
+  shared name any tree's build retags). Give Java rows their own
+  `-Dmaven.repo.local` copied from the warmed repository. Before the
+  matrix starts, record a sha256 manifest of each measurement arm's
+  clean `dist/`, and gate every daemon or dist-level harness launch
+  outside the row that produced it on a scripted comparison against that
+  manifest — never against the matrix tree's live source, which mid-row
+  is the mutant and agrees with its own build. Prove the gate live by
+  requiring it to refuse a known-mutant build, not merely to report a
+  fabricated mismatch. Never hand-patch `dist/` to repair a contaminated
+  build; rebuild from source you have verified clean and re-record the
+  manifest from that build — a hand-patch that restores only the visible
+  sites leaves the rest of the build mutant. Measured example: a round
+  interleaved its mutation matrix with 80 live daemon cells on one tree,
+  then hand-patched the mutant it found in `dist/`; the patched build
+  still carried the mutant expression, so every live cell and the whole
+  matrix were withdrawn and the round shipped as `inconclusive`.
 - Stop processes only by the PIDs you recorded. After every batch, list
   orphaned (ppid 1) processes under the rig path and expect zero.
 - Restore the tree and tear the rig down before exiting. `process.exit()`
