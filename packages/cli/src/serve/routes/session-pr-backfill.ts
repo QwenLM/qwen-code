@@ -202,9 +202,12 @@ const PR_COMMAND_PATTERN =
 // through to this workspace's PR. `--assets-repo` is a different flag of the
 // same command and must not count as one. `/review` takes no `--repo`, so a
 // stray occurrence in its prompt reads as a qualifier too — the safer
-// reading, and never a binding this workspace's number.
+// reading, and never a binding this workspace's number. The prefix admits a
+// digit as well: the number token accepts a glued `--flag`, so `77--repo`
+// must count as a qualifier token too — otherwise its missing or next-line
+// value would read as no qualifier and bind this workspace's PR 77.
 const REPO_FLAG_PATTERN =
-  /(?:^|[^-\w])--repo(?![\w-])|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?/g;
+  /(?:^|[^-\w]|\d)--repo(?![\w-])|(?:^|[\s])-R[ \t\r\n]*=?[ \t\r\n]*["']?(?:[a-z][a-z0-9+.-]*:\/\/[^\s"']+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)?(?![\w./-]))["']?/g;
 const REPO_VALUE_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?[^\s"']+/g;
 const REPO_FORM_PATTERN = /--repo(?:[ \t]*=[ \t]*|[ \t]+)["']?([^\s"']+)/;
 

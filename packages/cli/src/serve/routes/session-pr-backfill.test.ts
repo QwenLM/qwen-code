@@ -2706,6 +2706,111 @@ describe('backfillWorkspaceSessionPrs', () => {
     ).toBeNull();
   });
 
+  it('declines a live /verify-pr whose glued --repo has no value', async () => {
+    // The widened number boundary admits `77--repo`; the qualifier detector
+    // must count the glued flag too, or the unreadable qualifier reads as no
+    // qualifier and binds this workspace's PR 77 (measured regression).
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr 77--repo',
+    );
+
+    expect(result).toMatchObject({
+      scanned: 1,
+      bound: 0,
+      written: 0,
+      repoDeclined: 1,
+    });
+    expect(runtime.bridge.markSessionCatalogChanged).not.toHaveBeenCalled();
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('declines a live /verify-pr whose glued --repo value is on the next line', async () => {
+    // A value on the next line is unreadable to the value grammar exactly as
+    // in the spaced form; the glued flag must decline, not bind.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr 77--repo\nother/x',
+    );
+
+    expect(result).toMatchObject({
+      scanned: 1,
+      bound: 0,
+      written: 0,
+      repoDeclined: 1,
+    });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
+  it('binds a live /verify-pr whose glued --repo names this workspace', async () => {
+    // A glued flag with a readable value is a normal qualifier: the own-repo
+    // spelling binds exactly like the spaced form.
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(78, 'fix/78')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr 78--repo o/r',
+    );
+
+    expect(result).toMatchObject({ scanned: 1, bound: 1 });
+    expect(
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+        )
+      )?.map((entry) => entry.number),
+    ).toEqual([78]);
+  });
+
+  it('declines a live /verify-pr whose glued --repo names another repository', async () => {
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(79, 'fix/79')],
+    });
+
+    const result = await bindSessionPrsFromPromptCommand(
+      runtime,
+      SESSION_A,
+      '/verify-pr 79--repo other/x',
+    );
+
+    expect(result).toMatchObject({
+      scanned: 1,
+      bound: 0,
+      written: 0,
+      repoDeclined: 1,
+    });
+    expect(
+      await readSessionPrs(
+        sessionService.getPrSessionPathForArchiveState(SESSION_A, 'active'),
+      ),
+    ).toBeNull();
+  });
+
   it('reports a /review declined by a --repo in its later prose', async () => {
     // The qualifier is read off the whole prompt, so a pasted command in the
     // body counts. Declining is right, but the decline has to be counted —
@@ -4130,6 +4235,35 @@ describe('backfillWorkspaceSessionPrs', () => {
     expect(await numbersIn(SESSION_A)).toEqual([11]);
     expect(await numbersIn(SESSION_B)).toEqual([12]);
     expect(await numbersIn(SESSION_C)).toEqual([]);
+  });
+
+  it('declines glued --repo qualifiers the value grammar cannot read', async () => {
+    // The sweep reads the same qualifier grammar as the live path: a glued
+    // `77--repo` with a missing or next-line value must decline on both, and
+    // a glued flag with a readable own-repo value still binds.
+    await seedSession(SESSION_A);
+    await appendUserText(SESSION_A, '/verify-pr 77--repo');
+    await seedSession(SESSION_B);
+    await appendUserText(SESSION_B, '/verify-pr 77--repo\nother/x');
+    await seedSession(SESSION_C);
+    await appendUserText(SESSION_C, '/verify-pr 78--repo o/r');
+    fetchGitHubPullRequestsMock.mockResolvedValue({
+      kind: 'ok',
+      pullRequests: [pr(77, 'fix/77'), pr(78, 'fix/78')],
+    });
+
+    const result = await backfillWorkspaceSessionPrs(runtime);
+
+    expect(result).toMatchObject({ bound: 1, repoDeclined: 2 });
+    const numbersIn = async (sessionId: string): Promise<number[]> =>
+      (
+        await readSessionPrs(
+          sessionService.getPrSessionPathForArchiveState(sessionId, 'active'),
+        )
+      )?.map((entry) => entry.number) ?? [];
+    expect(await numbersIn(SESSION_A)).toEqual([]);
+    expect(await numbersIn(SESSION_B)).toEqual([]);
+    expect(await numbersIn(SESSION_C)).toEqual([78]);
   });
 
   it('binds a nested-group qualifier by its full path', async () => {
