@@ -369,7 +369,7 @@ const WINDOW_PLAN_CACHE_CAPACITY: usize = 32;
 /// walk's own 20-second bound. The shell fallback retains its prior behavior.
 const WINDOW_CAPTURE_NATIVE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Permit at most one native window-capture worker. If an Apple completion callback
+/// Each capture lane permits at most one native worker. If an Apple completion callback
 /// never fires, the timed-out worker keeps this permit, and every later request
 /// goes straight to the compatibility fallback instead of leaking more
 /// blocked threads.
@@ -403,6 +403,12 @@ impl Drop for NativeCapturePermit {
 }
 
 fn native_capture_gate() -> &'static NativeCaptureGate {
+    static GATE: NativeCaptureGate = NativeCaptureGate::new();
+    &GATE
+}
+
+fn preview_capture_gate() -> &'static NativeCaptureGate {
+    // Sampling cannot occupy the worker needed by an explicit observation.
     static GATE: NativeCaptureGate = NativeCaptureGate::new();
     &GATE
 }
@@ -908,6 +914,39 @@ pub fn screenshot_window_bytes(window_id: u32) -> anyhow::Result<Vec<u8>> {
     )
 }
 
+/// Continuous previews must not enter the subprocess compatibility path.
+pub(crate) fn screenshot_window_bytes_native(
+    window_id: u32,
+    lifetime: std::sync::Arc<dyn Send + Sync>,
+) -> anyhow::Result<Vec<u8>> {
+    // A timed-out worker must keep its cleanup receipt until its result is dropped.
+    let sck_lifetime = lifetime.clone();
+    let deadline = Instant::now() + WINDOW_CAPTURE_NATIVE_TIMEOUT;
+    let off_space = crate::windows::window_on_current_space_by_id(window_id) == Some(false);
+    capture_window_with_space_route(
+        window_id,
+        off_space,
+        |wid| {
+            run_native_capture_worker(
+                preview_capture_gate(),
+                deadline.saturating_duration_since(Instant::now()),
+                move || {
+                    screenshot_window_bytes_sck_inner(wid).map(|capture| (capture, sck_lifetime))
+                },
+            )
+            .map(|(capture, _lifetime)| capture)
+        },
+        |wid| {
+            run_native_capture_worker(
+                preview_capture_gate(),
+                deadline.saturating_duration_since(Instant::now()),
+                move || screenshot_window_bytes_skylight(wid).map(|capture| (capture, lifetime)),
+            )
+            .map(|(capture, _lifetime)| capture)
+        },
+    )
+}
+
 fn capture_window_with_space_route<P, S>(
     window_id: u32,
     off_space: bool,
@@ -1134,6 +1173,61 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
     use std::sync::Arc;
+
+    #[test]
+    fn timed_out_native_capture_retains_cleanup_until_the_real_worker_finishes() {
+        static GATE: NativeCaptureGate = NativeCaptureGate::new();
+        let lifetime = std::sync::Arc::new(());
+        let weak = std::sync::Arc::downgrade(&lifetime);
+        let (finish, waiting) = std::sync::mpsc::channel();
+        let result = run_native_capture_worker(&GATE, Duration::from_millis(10), move || {
+            waiting.recv().unwrap();
+            Ok((vec![1u8], lifetime))
+        });
+        assert!(result.is_err());
+        assert!(
+            weak.upgrade().is_some(),
+            "timeout is not a cleanup acknowledgement"
+        );
+        finish.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while weak.upgrade().is_some() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(weak.upgrade().is_none());
+    }
+
+    #[test]
+    fn continuous_preview_capture_has_no_shell_or_display_fallback() {
+        let source = include_str!("capture.rs");
+        let entry = source
+            .split("pub(crate) fn screenshot_window_bytes_native(")
+            .nth(1)
+            .unwrap()
+            .split("\nfn capture_window_with_space_route")
+            .next()
+            .unwrap();
+        for forbidden in [
+            "Command",
+            "_shell(",
+            "screenshot_window_bytes(",
+            "screenshot_display",
+            ".output(",
+        ] {
+            assert!(
+                !entry.contains(forbidden),
+                "preview capture must stay in-process: {forbidden}"
+            );
+        }
+        assert!(entry.contains("screenshot_window_bytes_sck_inner(wid)"));
+        assert!(entry.contains("screenshot_window_bytes_skylight(wid)"));
+        assert_eq!(entry.matches("run_native_capture_worker(").count(), 2);
+        assert_eq!(entry.matches(".map(|capture| (capture,").count(), 2);
+        assert_eq!(
+            entry.matches("deadline.saturating_duration_since").count(),
+            2
+        );
+    }
 
     #[test]
     fn space_route_prefers_the_appropriate_backend_and_never_falls_back_after_identity_change() {
@@ -1438,6 +1532,17 @@ mod tests {
             GATE.try_acquire().is_some(),
             "gate reopens only when the worker-owned permit drops"
         );
+    }
+
+    #[test]
+    fn active_preview_does_not_block_an_explicit_observation() {
+        let preview = preview_capture_gate().try_acquire().unwrap();
+        let result =
+            run_native_capture_worker(native_capture_gate(), Duration::from_secs(1), || Ok(42));
+        assert_eq!(result.unwrap(), 42);
+        assert!(preview_capture_gate().try_acquire().is_none());
+        drop(preview);
+        assert!(preview_capture_gate().try_acquire().is_some());
     }
 
     #[test]

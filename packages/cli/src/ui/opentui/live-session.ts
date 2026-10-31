@@ -20,7 +20,12 @@
  * feature parity + regression are complete.
  */
 
+import {
+  completeRestoreToolResponse,
+  type RestoreToolResponseBinding,
+} from '../utils/restore-tool-response.js';
 import { observeInteractiveModTool } from '../../services/interactive-mod-tool-observer.js';
+import { goalToolResultProvenance } from '@qwen-code/qwen-code-core/goals/goal-tool-result-provenance.js';
 import {
   InteractiveModToolScheduler,
   type InteractiveCompletedToolCall,
@@ -29,14 +34,21 @@ import {
 import type { HumanPromptInput } from '@qwen-code/qwen-code-core/core/workflow-intent.js';
 import { appendFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
+import { mapToDisplay } from '../hooks/useReactToolScheduler.js';
+import { writeToolCheckpoint } from './tool-checkpoint.js';
+import { allocateCanonicalHistoryId } from './live-session-model.js';
+import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
+import { getApiHistoryPromptId } from '@qwen-code/qwen-code-core/utils/api-history-metadata.js';
 import type { DualOutputBridge } from '../../dualOutput/DualOutputBridge.js';
 import { buildPermissionSuggestions } from '../../nonInteractive/permission-suggestions.js';
 import { getInteractiveModSession } from '../../services/interactive-mod-session.js';
 import type {
   AgentResultDisplay,
   Config,
+  ServerLlmStreamEvent,
   SteerInput,
   ToolCallConfirmationDetails,
+  ToolCallRequestInfo,
   ToolResultDisplay,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -69,25 +81,50 @@ import {
   createEventMapper,
   extractStructuredResult,
   renderResultDisplay,
+  formatToolArgs,
   toolResultEvent,
   type OpenTuiStreamEvent,
 } from './event-adapter.js';
 import { isAtCommand } from '../utils/commandUtils.js';
 import { handleAtCommand } from '../hooks/atCommandProcessor.js';
-import { ToolCallStatus, type IndividualToolCallDisplay } from '../types.js';
+import {
+  ToolCallStatus,
+  type HistoryItem,
+  type IndividualToolCallDisplay,
+} from '../types.js';
 import { collectText } from '@qwen-code/qwen-code-core/services/visionBridge/image-part-utils.js';
 import type { OpenTuiInputSubmission } from './input-submission.js';
+
+const checkpointLogger = createDebugLogger('OPENTUI_CHECKPOINT');
 
 export interface OpenTuiSteeringSubmission extends OpenTuiInputSubmission {
   content: PartListUnion;
 }
 
+export interface PreparedLiveRequest {
+  content: PartListUnion;
+  modelOverride?: string;
+  inlineModelOverride: boolean;
+}
+
 /** Options the backend passes through to the live turn. */
 export interface LivePromptOptions {
+  checkpointHistory?: {
+    snapshot: () => HistoryItem[];
+    allocateId: () => number;
+  };
   dualOutput?: DualOutputBridge | null;
   isCurrentTurn?: () => boolean;
   /** Per-turn model override (submit_prompt's modelOverride parity). */
   modelOverride?: string;
+  toolCall?: {
+    name: string;
+    args: Record<string, unknown>;
+    restoreResponseBinding?: RestoreToolResponseBinding;
+  };
+  retry?: PreparedLiveRequest;
+  onAcceptedSteering?: (messages: readonly string[]) => void;
+  onPreparedRequest?: (request: PreparedLiveRequest | undefined) => void;
   /**
    * "Enter to steer" parity: called at each tool boundary (after tools ran,
    * before their results go back to the model). Returned texts are resolved
@@ -132,12 +169,20 @@ export interface LivePromptOptions {
    */
   submittedPrompt?: string;
   humanInput?: HumanPromptInput;
+  workflowModeEligible?: boolean;
   /**
    * PromptId minted by the backend (`nextLivePromptId`) at submit time so
    * the user item and this request share the checkpoint key. Omitted → one
    * is minted here (first turn of a session, …).
    */
   promptId?: string;
+  /** Called once UserPromptSubmit admits the prompt, before its request. */
+  onPromptAdmitted?: () => void;
+  /** Sees every event of the turn's model streams, as the client sent it. */
+  onStreamEvent?: (event: ServerLlmStreamEvent) => void;
+  /** Called when every tool of a round was cancelled, which ends the turn. */
+  onToolsCancelled?: () => void;
+  onExecutingShells?: (calls: readonly ExecutingShellCall[]) => void;
 }
 
 /**
@@ -157,6 +202,12 @@ export interface WaitingCallInfo {
   callId: string;
   name: string;
   confirmationDetails: ToolCallConfirmationDetails;
+}
+
+export interface ExecutingShellCall {
+  callId: string;
+  pid?: number;
+  promoteAbortController?: AbortController;
 }
 
 // ink useGeminiStream EDIT_TOOL_NAMES parity (AUTO_EDIT auto-approves edits only).
@@ -311,6 +362,17 @@ async function expandAtMentions(
     signal,
   });
   const events = (result.toolDisplays ?? []).flatMap(atMentionCardEvents);
+  if (result.toolDisplays?.length) {
+    const source: HistoryItem = {
+      id: allocateCanonicalHistoryId(),
+      type: 'tool_group',
+      tools: result.toolDisplays,
+    };
+    for (const event of events) {
+      event.historyId = source.id;
+      event.canonicalHistoryItem = source;
+    }
+  }
   if (!result.shouldProceed || result.processedQuery === null) {
     return { parts: query, events, declined: true };
   }
@@ -591,14 +653,10 @@ async function resolveSteeredPromptParts(
 
 /**
  * Single shared `config.initialize()` flight for the OpenTUI app. Core joins
- * callers onto an in-flight initialize and only rejects once initialization
- * has settled ("Config was already initialized"), so plain awaits are safe
- * against a race but can neither own one boot flight nor preserve a failure:
- * the guard gives the entry one flight that command loading and every turn
- * await, and — because a settled failure is never retried by core and the
- * rejected promise stays cached — every later submit surfaces the real cause
- * instead of re-entering, swallowing the re-entry error and degrading into
- * "Chat not initialized".
+ * in-flight callers and reports a settled success as "Config was already
+ * initialized"; failures retain their original rejection. The guard gives
+ * startup, command loading and every turn the same flight and preserves its
+ * result, including Mod readiness, for later awaiters.
  */
 const initializationPromises = new WeakMap<Config, Promise<void>>();
 
@@ -609,13 +667,12 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
     .initialize()
     .catch((err) => {
       // A caller that initialized elsewhere already won: its settled success
-      // reports as core's re-entry error while the chat is ready to send. A
-      // settled failure does not — the real error must surface, and core has
+      // reports as core's re-entry error. A settled failure retains its
+      // original rejection — the real error must surface, and core has
       // no retry either way, so the rejected promise stays cached for awaiters.
       if (
-        config.getGeminiClient()?.isInitialized?.() ||
-        (err instanceof Error &&
-          err.message === 'Config was already initialized')
+        err instanceof Error &&
+        err.message === 'Config was already initialized'
       ) {
         return;
       }
@@ -623,7 +680,7 @@ export function ensureConfigInitialized(config: Config): Promise<void> {
       throw err;
     })
     .then(async () => {
-      await getInteractiveModSession(config)?.initialize();
+      await getInteractiveModSession(config)?.initialize(['AbovePrompt']);
     });
   // Fire-and-forget callers (the entry) must not trip unhandled-rejection
   // handling; awaiters still receive the rejection.
@@ -688,6 +745,7 @@ export async function* livePromptEvents(
       `Timed out after ${STARTUP_CHAT_WAIT_MS}ms waiting for the startup chat to become ready`,
     );
   }
+  const sessionId = config.getSessionId();
   const current = () => options?.isCurrentTurn?.() !== false;
   const dualOutput = options?.dualOutput;
   const promptId = options?.promptId ?? nextLivePromptId(config);
@@ -695,8 +753,12 @@ export async function* livePromptEvents(
   // Read per boundary rather than once: the vision bridge can pick a full-turn
   // model mid-turn, and the rest of the turn then stays on it (ink parity).
   const turnModel: TurnModelOverride = {
-    current: options?.modelOverride,
-    inline: options?.modelOverride !== undefined,
+    current: options?.retry
+      ? options.retry.modelOverride
+      : options?.modelOverride,
+    inline: options?.retry
+      ? options.retry.inlineModelOverride
+      : options?.modelOverride !== undefined,
   };
   const map = createEventMapper({
     // ink handleErrorEvent parity: auth-aware formatting. The Ctrl+Y retry
@@ -722,14 +784,19 @@ export async function* livePromptEvents(
   // the tool and submits the functionResponses to continue. Replicate that
   // loop here so tools actually run under OpenTUI (drain -> schedule ->
   // submit results -> drain again).
-  let nextPrompt: PartListUnion = prompt;
+  let nextPrompt: PartListUnion = options?.retry?.content ?? prompt;
   // Provenance marks user-typed text: the composer submit and the follow-on
   // turn built from the mid-turn queue both carry it. A slash command's
   // generated `submit_prompt` payload does not, and ink never expands that
   // one (processQuery returns it before its own isAtCommand check).
   const typedText =
     typeof prompt === 'string' ? prompt : collectText(normalizeParts(prompt));
-  if (options?.submittedPrompt !== undefined && isAtCommand(typedText)) {
+  if (
+    !options?.toolCall &&
+    !options?.retry &&
+    options?.submittedPrompt !== undefined &&
+    isAtCommand(typedText)
+  ) {
     const expanded = await expandAtMentions(config, typedText, abort);
     for (const ev of expanded.events) yield ev;
     // A failed read reports itself on the card above; ink drops the
@@ -739,23 +806,26 @@ export async function* livePromptEvents(
   }
   // ink runs the bridge on every query it hands the model
   // (`prepareQueryForLlm`), so an image attached at the composer converts here.
-  const bridged = await applyPromptVisionBridge(
-    config,
-    nextPrompt,
-    abort,
-    turnModel,
-  );
-  for (const ev of bridged.events) yield ev;
-  if (bridged.parts === null) return;
-  nextPrompt = bridged.parts;
-  abort.throwIfAborted();
-  // U-27 (ink :3834-3850): the fresh hop checks the user-query parts once,
-  // before the send loop — tool-result continuations are never checked.
-  if (hasUnsupportedImageFormat(nextPrompt)) {
-    yield imageFormatWarningEvent();
+  if (!options?.toolCall && !options?.retry) {
+    const bridged = await applyPromptVisionBridge(
+      config,
+      nextPrompt,
+      abort,
+      turnModel,
+    );
+    for (const ev of bridged.events) yield ev;
+    if (bridged.parts === null) return;
+    nextPrompt = bridged.parts;
+    abort.throwIfAborted();
+    // U-27 (ink :3834-3850): the fresh hop checks the user-query parts once,
+    // before the send loop — tool-result continuations are never checked.
+    if (hasUnsupportedImageFormat(nextPrompt)) {
+      yield imageFormatWarningEvent();
+    }
   }
   if (!current() || abort.aborted) return;
-  dualOutput?.emitUserMessage(normalizeParts(nextPrompt));
+  if (!options?.toolCall || options.retry)
+    dualOutput?.emitUserMessage(normalizeParts(nextPrompt));
   // Core settles this carrier at its request-local history push. Neither a
   // stream event nor a normal empty stream proves that this input was pushed.
   let pendingSteer: SteerInput | undefined;
@@ -769,62 +839,131 @@ export async function* livePromptEvents(
     }
     const steerInput = pendingSteer;
     pendingSteer = undefined;
+    const prepared: PreparedLiveRequest = {
+      content: nextPrompt,
+      modelOverride: turnModel.current,
+      inlineModelOverride: turnModel.inline,
+    };
+    let steerAccepted = false;
+    const carrier: SteerInput | undefined = steerInput && {
+      parts: steerInput.parts,
+      accept: () => {
+        steerAccepted = true;
+        steerInput.accept();
+      },
+      restore: () => {
+        steerInput.restore();
+        if (!steerAccepted && steerInput.parts.length > 0) {
+          prepared.content = normalizeParts(nextPrompt).slice(
+            0,
+            -steerInput.parts.length,
+          );
+        }
+      },
+    };
     const sendOptions = first
       ? {
-          type: SendMessageType.UserQuery,
-          ...(options?.humanInput ? { humanInput: options.humanInput } : {}),
+          type: options?.retry
+            ? SendMessageType.Retry
+            : SendMessageType.UserQuery,
+          ...(!options?.retry && options?.workflowModeEligible === true
+            ? { workflowModeEligible: true }
+            : {}),
+          ...(options?.onPromptAdmitted
+            ? { onPromptAdmitted: options.onPromptAdmitted }
+            : {}),
+          ...(!options?.retry && options?.humanInput
+            ? { humanInput: options.humanInput }
+            : {}),
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
-          ...(options?.submittedPrompt
+          ...(!options?.retry && options?.submittedPrompt
             ? { submittedPrompt: options.submittedPrompt }
             : {}),
         }
       : {
           type: SendMessageType.ToolResult,
           ...(turnModel.current ? { modelOverride: turnModel.current } : {}),
-          ...(steerInput ? { steerInput } : {}),
+          ...(carrier ? { steerInput: carrier } : {}),
         };
+    const initialTool =
+      first && !options?.retry ? options?.toolCall : undefined;
     first = false;
-    const pending: Array<{ callId: string; name: string; args?: unknown }> = [];
-    dualOutput?.startAssistantMessage();
-    try {
-      const stream = client.sendMessageStream(
-        nextPrompt,
-        abort,
-        promptId,
-        sendOptions,
-      );
-      for await (const ev of stream) {
-        if (!current() || abort.aborted) return;
-        dualOutput?.processEvent(ev);
-        for (const event of acceptedSteerEvents.splice(0)) yield event;
-        if (dbg) {
-          try {
-            appendFileSync(
-              '/tmp/opentui-events.log',
-              `${(ev as { type?: string }).type}\n`,
-            );
-          } catch {
-            /* ignore */
+    const pending: ToolCallRequestInfo[] = initialTool
+      ? [
+          {
+            callId: `${initialTool.name}-${randomUUID()}`,
+            name: initialTool.name,
+            args: initialTool.args,
+            isClientInitiated: true,
+            prompt_id: promptId,
+            executionOrigin: { kind: 'client' },
+          },
+        ]
+      : [];
+    const initialToolCallId = pending[0]?.callId;
+    if (initialTool?.restoreResponseBinding) {
+      initialTool.restoreResponseBinding.executionCallId = initialToolCallId;
+    }
+    if (initialTool) {
+      const request = pending[0];
+      yield {
+        type: 'tool-start',
+        id: request.callId,
+        tool: request.name,
+        title: request.name,
+      };
+      const args = formatToolArgs(request.args);
+      if (args) yield { type: 'tool-args', id: request.callId, args };
+    }
+    let streamFailed = false;
+    if (!initialTool) {
+      options?.onPreparedRequest?.(prepared);
+      dualOutput?.startAssistantMessage();
+      try {
+        const stream = client.sendMessageStream(
+          nextPrompt,
+          abort,
+          promptId,
+          sendOptions,
+        );
+        for await (const ev of stream) {
+          options?.onStreamEvent?.(ev);
+          if (!current() || abort.aborted) return;
+          dualOutput?.processEvent(ev);
+          for (const event of acceptedSteerEvents.splice(0)) yield event;
+          if (dbg) {
+            try {
+              appendFileSync(
+                '/tmp/opentui-events.log',
+                `${(ev as { type?: string }).type}\n`,
+              );
+            } catch {
+              /* ignore */
+            }
+          }
+          if (ev.type === 'retry' || ev.type === 'model_fallback') {
+            pending.length = 0;
+          }
+          if ((ev as { type?: string }).type === 'tool_call_request') {
+            pending.push((ev as { value: ToolCallRequestInfo }).value);
+          }
+          for (const neutral of map(ev)) {
+            if (neutral.type === 'error') streamFailed = true;
+            yield neutral;
           }
         }
-        if ((ev as { type?: string }).type === 'tool_call_request') {
-          pending.push(
-            (ev as { value: { callId: string; name: string; args?: unknown } })
-              .value,
-          );
-        }
-        for (const neutral of map(ev)) yield neutral;
+      } catch (error) {
+        for (const event of acceptedSteerEvents.splice(0)) yield event;
+        throw error;
+      } finally {
+        // Covers a synchronous call failure or an unsettled early exit. A
+        // carrier already accepted/restored by core makes this a no-op.
+        carrier?.restore();
+        if (current()) dualOutput?.finalizeAssistantMessage();
       }
-    } catch (error) {
       for (const event of acceptedSteerEvents.splice(0)) yield event;
-      throw error;
-    } finally {
-      // Covers a synchronous call failure or an unsettled early exit. A
-      // carrier already accepted/restored by core makes this a no-op.
-      steerInput?.restore();
-      if (current()) dualOutput?.finalizeAssistantMessage();
+      if (!streamFailed) options?.onPreparedRequest?.(undefined);
     }
-    for (const event of acceptedSteerEvents.splice(0)) yield event;
     if (pending.length === 0 || abort.aborted) return;
 
     // Live output bridge (ink outputUpdateHandler parity): scheduler output
@@ -938,6 +1077,31 @@ export async function* livePromptEvents(
         }
       }
     };
+    // Approval may finish during the write; a new entrance replaces its snapshot owner.
+    const checkpointRequests = new Map<
+      string,
+      { request: ToolCallRequestInfo }
+    >();
+    const groupId = options?.checkpointHistory?.allocateId();
+    const batchId = `tool-batch-${randomUUID()}`;
+    const publishToolHistory = (calls: InteractiveToolCall[]) => {
+      if (groupId === undefined || calls.length === 0) return;
+      live.push({
+        type: 'tool-history',
+        item: {
+          ...mapToDisplay(calls, config.getProjectRoot()),
+          id: groupId,
+          batchId,
+        },
+        pending: calls.some(
+          (call) =>
+            call.status !== 'success' &&
+            call.status !== 'error' &&
+            call.status !== 'cancelled',
+        ),
+      });
+    };
+    let shellOwnerOpen = true;
     const scheduler = new InteractiveModToolScheduler({
       config,
       onNativeAttempt: (call) =>
@@ -952,6 +1116,23 @@ export async function* livePromptEvents(
         for (const ev of mapOutputChunk(callId, chunk)) live.push(ev);
       },
       onToolCallsUpdate: (calls) => {
+        if (shellOwnerOpen)
+          options?.onExecutingShells?.(
+            current() && !abort.aborted
+              ? calls.flatMap((call) =>
+                  call.status === 'executing' &&
+                  call.request.name === ToolNames.SHELL
+                    ? [
+                        {
+                          callId: call.request.callId,
+                          pid: call.pid,
+                          promoteAbortController: call.promoteAbortController,
+                        },
+                      ]
+                    : [],
+                )
+              : [],
+          );
         emitPermissionTransitions(calls);
         // Real invocation descriptions (ink mapToDisplay): the card title is
         // the tool's own getDescription() off the tracked call's invocation,
@@ -982,6 +1163,7 @@ export async function* livePromptEvents(
             description: invocation.getDescription(),
           });
         }
+        publishToolHistory(calls);
         // Mirror the calls still awaiting approval: one that left the state
         // (resolved, or bounced back by a PreToolUse 'ask' hook under the
         // same callId) must be able to surface its dialog again. Each
@@ -1017,6 +1199,11 @@ export async function* livePromptEvents(
           const callId = c.request.callId;
           if (waitingSeen.has(callId)) continue;
           waitingSeen.add(callId);
+          if (
+            EDIT_TOOL_NAMES.has(c.request.name) &&
+            !c.request.isClientInitiated
+          )
+            checkpointRequests.set(callId, { request: c.request });
           live.push({
             type: 'confirm',
             id: callId,
@@ -1042,6 +1229,11 @@ export async function* livePromptEvents(
         }
       },
       onAllToolCallsComplete: async (calls) => {
+        if (shellOwnerOpen) {
+          shellOwnerOpen = false;
+          options?.onExecutingShells?.([]);
+        }
+        publishToolHistory(calls);
         emitPermissionTransitions(calls);
         completed = calls.filter(
           (call): call is InteractiveCompletedToolCall =>
@@ -1052,8 +1244,15 @@ export async function* livePromptEvents(
         live.close();
       },
     });
+    publishToolHistory(
+      pending.map((request) => ({ status: 'scheduled', request })),
+    );
     const scheduled = scheduler.schedule(pending as never, abort);
     void scheduled.catch((error: unknown) => {
+      if (shellOwnerOpen) {
+        shellOwnerOpen = false;
+        options?.onExecutingShells?.([]);
+      }
       const cancelled =
         abort.aborted ||
         (error instanceof Error && error.name === 'AbortError');
@@ -1079,6 +1278,46 @@ export async function* livePromptEvents(
       const ev = await live.next();
       if (ev === undefined) break;
       yield ev;
+      // The consumer has now folded the preceding assistant and tool events.
+      // Capturing inside onToolCallsUpdate would read an undrained live queue.
+      if (ev.type === 'confirm') {
+        const checkpoint = checkpointRequests.get(ev.id);
+        const port = options?.checkpointHistory;
+        const directory =
+          checkpoint && port && config.getFileCheckpointingEnabled()
+            ? config.storage.getProjectTempCheckpointsDir()
+            : undefined;
+        if (checkpoint && port && directory) {
+          try {
+            await writeToolCheckpoint({
+              directory,
+              request: checkpoint.request,
+              isCurrent: () =>
+                current() &&
+                config.getSessionId() === sessionId &&
+                !abort.aborted &&
+                checkpointRequests.get(ev.id) === checkpoint,
+              snapshot: () => {
+                const history = port.snapshot();
+                const clientHistory = client.getHistoryShallow();
+                const promptIds = clientHistory.map(
+                  (content) => getApiHistoryPromptId(content) ?? null,
+                );
+                return {
+                  history,
+                  clientHistory,
+                  ...(promptIds.some(Boolean) ? { promptIds } : {}),
+                };
+              },
+            });
+          } catch (error) {
+            checkpointLogger.debug(
+              'Could not save complete tool checkpoint',
+              error,
+            );
+          }
+        }
+      }
     }
     await scheduled;
 
@@ -1119,10 +1358,10 @@ export async function* livePromptEvents(
       if (resp) {
         const final = finalResponses[index];
         responseParts.push(...final.responseParts);
-        if (usesMods)
-          config
-            .getChatRecordingService()
-            ?.recordToolResult(final.responseParts, {
+        if (!initialTool && current() && config.getSessionId() === sessionId)
+          config.getChatRecordingService()?.recordToolResult(
+            final.responseParts,
+            {
               callId: call.request.callId,
               status: call.status,
               resultDisplay: resp.resultDisplay,
@@ -1131,8 +1370,53 @@ export async function* livePromptEvents(
               executionStatus: resp.executionStatus,
               persistedOutputFiles: final.persistedOutputFiles,
               artifacts: final.artifacts,
-            });
+            },
+            goalToolResultProvenance(call.request, final.responseParts),
+          );
       }
+    }
+    // Client-initiated slash tools finish locally in Ink. Leave queued user
+    // input for its own turn rather than attaching it to tool responses.
+    if (initialTool) {
+      if (initialTool.restoreResponseBinding) {
+        const index = completed.findIndex(
+          (call) => call.request.callId === initialToolCallId,
+        );
+        if (index !== -1) {
+          await completeRestoreToolResponse(
+            initialTool.restoreResponseBinding,
+            completed[index].request,
+            finalResponses[index].responseParts,
+            () => !abort.aborted && current(),
+            {
+              toolCallResult: {
+                callId: completed[index].request.callId,
+                status: completed[index].status,
+                resultDisplay: completed[index].response.resultDisplay,
+                error: completed[index].response.error,
+                errorType: completed[index].response.errorType,
+                executionStatus: completed[index].response.executionStatus,
+                persistedOutputFiles:
+                  finalResponses[index].persistedOutputFiles,
+                artifacts: finalResponses[index].artifacts,
+              },
+              options: goalToolResultProvenance(
+                completed[index].request,
+                finalResponses[index].responseParts,
+              ),
+            },
+          );
+        }
+      }
+      if (!abort.aborted && current()) {
+        for (const [index, call] of completed.entries()) {
+          dualOutput?.emitToolResult(call.request, {
+            ...call.response,
+            ...finalResponses[index],
+          });
+        }
+      }
+      return;
     }
     // ink use-llm-stream parity (:5328): when every tool in the batch was
     // cancelled, the cancelled responses go to history only — no follow-up
@@ -1143,8 +1427,16 @@ export async function* livePromptEvents(
       if (responseParts.length > 0) {
         await client.addHistory({ role: 'user', parts: responseParts });
       }
+      options?.onToolsCancelled?.();
       return;
     }
+    if (!turnModel.inline && !turnModel.current?.endsWith('\0')) {
+      for (const call of completed) {
+        if ('modelOverride' in call.response)
+          turnModel.current = call.response.modelOverride;
+      }
+    }
+
     if (!abort.aborted && current()) {
       for (const [index, call] of completed.entries()) {
         dualOutput?.emitToolResult(call.request, {
@@ -1193,6 +1485,9 @@ export async function* livePromptEvents(
             settled = true;
             if (options?.isCurrentTurn?.() === false) return;
             acceptedSteerEvents.push(...steered.events);
+            options?.onAcceptedSteering?.(
+              steered.recordings.map((recording) => recording.message),
+            );
             const recorder = config.getChatRecordingService?.();
             for (const recording of steered.recordings) {
               dualOutput?.emitUserMessage(recording.parts);

@@ -34,6 +34,7 @@ import type { ManagedSessionResourceStore } from './managed-session-storage.js';
  * than falling back to a direct append.
  */
 const CARRIED_SYSTEM_SUBTYPES = new Set([
+  'memory_catalog_snapshot',
   'slash_command',
   'at_command',
   'ui_telemetry',

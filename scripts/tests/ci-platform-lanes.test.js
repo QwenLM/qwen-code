@@ -26,7 +26,10 @@
 // carried this change; the classifier script and its tests were left in
 // place so that stays a revert.
 
-import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { parse } from 'yaml';
 
@@ -36,20 +39,77 @@ const failureIssue = parse(
 );
 // `on:` parses as the boolean true in YAML 1.1.
 const triggers = ci[true] ?? ci['on'];
-const LANES = ['test_macos', 'test_windows'];
+const LANES = ['test_macos_shards', 'test_windows'];
 const PUSH_JOBS = ['classify_pr', 'test', 'lint_and_static'];
 const condOf = (job) => String(ci.jobs[job].if ?? '');
 
-// The extended ceilings below, except the test lane's, are scoped to the ECS
-// pool: `runs-on` falls back to ubuntu-latest for fork PRs from untrusted
-// authors and when MAINTAINER_ECS_RUNNER_DISABLED=true, so those hosted paths
-// keep the pre-contention ceiling. Evaluate the real timeout expression for both
-// routings instead of pinning a bare number -- the same
+describe('complete macOS test groups', () => {
+  it('partitions both heavy suites and retains every remaining test group', () => {
+    const job = ci.jobs.test_macos_shards;
+    expect(job.strategy['fail-fast']).toBe(false);
+    expect(job.strategy.matrix.include).toEqual([
+      { group: 'cli', shard: '1/3' },
+      { group: 'cli', shard: '2/3' },
+      { group: 'cli', shard: '3/3' },
+      { group: 'core', shard: '1/2' },
+      { group: 'core', shard: '2/2' },
+      { group: 'rest', shard: '' },
+      { group: 'scripts', shard: '' },
+    ]);
+    const step = job.steps.find(
+      (candidate) => candidate.name === 'Run tests and generate reports',
+    );
+    expect(step.env.MACOS_TEST_GROUP).toBe('${{ matrix.group }}');
+    expect(step.env.MACOS_TEST_SHARD).toBe('${{ matrix.shard }}');
+    expect(step.run).toContain(
+      'node scripts/run-macos-ci-group.js "$MACOS_TEST_GROUP" "$MACOS_TEST_SHARD"',
+    );
+  });
+
+  it('keeps the original check name and rejects incomplete matrix results', () => {
+    const aggregate = ci.jobs.test_macos;
+    expect(aggregate.name).toBe('Test (macos-latest, Node 22.x)');
+    expect(aggregate.needs).toBe('test_macos_shards');
+    expect(aggregate.if).toContain('always()');
+    const [step] = aggregate.steps;
+    expect(step.env.MACOS_RESULT).toBe('${{ needs.test_macos_shards.result }}');
+    expect(step.run).toBe('test "$MACOS_RESULT" = success');
+    for (const result of ['failure', 'cancelled', 'skipped', '']) {
+      expect(() =>
+        execFileSync('bash', ['-c', step.run], {
+          env: { ...process.env, MACOS_RESULT: result },
+          stdio: 'pipe',
+        }),
+      ).toThrow();
+    }
+  });
+
+  it('keeps the aggregate gate on exactly the events the shards run on', () => {
+    // The aggregate only reads `needs.test_macos_shards.result`, so a gate
+    // that drifts from the shards' makes the preserved check name report
+    // `skipped` while the seven legs run and fail.
+    for (const event of ['merge_group', 'schedule', 'workflow_dispatch']) {
+      expect(gateRunsOn(condOf('test_macos'), event)).toBe(
+        gateRunsOn(condOf('test_macos_shards'), event),
+      );
+    }
+    expect(gateRunsOn(condOf('test_macos'), 'pull_request')).toBe(false);
+  });
+});
+
+// The extended ceilings below, except the test lane's, are scoped to the
+// self-hosted pool: `runs-on` falls back to ubuntu-latest for fork PRs from
+// untrusted authors and when MAINTAINER_ECS_RUNNER_DISABLED=true, so those
+// hosted paths keep the pre-contention ceiling. The ARM64 fleet renders
+// `["self-hosted", "linux", "arm64"]` — no `ecs-qwen` label — so the scope
+// cannot key on the x64 fleet's name. Evaluate the real timeout expression for
+// each routing instead of pinning a bare number -- the same
 // substitute-then-evaluate technique
 // `.github/scripts/ci-runner-routing.test.mjs` uses on `runs-on` -- so a
 // regression to an unconditional ceiling fails here instead of reading as a
 // passing constant.
 const ECS_RUNNER = '["self-hosted", "linux", "x64", "ecs-qwen"]';
+const ARM_RUNNER = '["self-hosted", "linux", "arm64"]';
 const HOSTED_RUNNER = '["ubuntu-latest"]';
 const timeoutMinutesOn = (job, ubuntuRunner) => {
   // The same `|| '["ubuntu-latest"]'` default the runs-on expression carries:
@@ -59,8 +119,8 @@ const timeoutMinutesOn = (job, ubuntuRunner) => {
     .replace(/^\$\{\{\s*/, '')
     .replace(/\s*\}\}$/, '')
     .replace(
-      /contains\(needs\.classify_pr\.outputs\.ubuntu_runner \|\| '\["ubuntu-latest"\]', 'ecs-qwen'\)/g,
-      String(effective.includes('ecs-qwen')),
+      /contains\(needs\.classify_pr\.outputs\.ubuntu_runner \|\| '\["ubuntu-latest"\]', 'self-hosted'\)/g,
+      String(effective.includes('self-hosted')),
     )
     .replace(/fromJSON\(/g, '(');
   if (/needs\.|contains\(|fromJSON\(/.test(expr)) {
@@ -69,6 +129,132 @@ const timeoutMinutesOn = (job, ubuntuRunner) => {
     );
   }
   return Number(new Function(`return (${expr});`)());
+};
+
+describe('raw JUnit report retention', () => {
+  const steps = ci.jobs.test.steps;
+  const upload = steps.find(
+    (step) => step.name === 'Upload Test Results Artifact',
+  );
+  // The rule `gateRunsOn` states for itself applies here too: a context term
+  // these stubs do not model must throw rather than read as `undefined`,
+  // where an inequality such as `x != true` would silently evaluate true.
+  const loud = (value, path) =>
+    typeof value !== 'object' || value === null
+      ? value
+      : new Proxy(value, {
+          get: (target, key) => {
+            if (typeof key === 'symbol' || key in target) {
+              return loud(target[key], `${path}${String(key)}.`);
+            }
+            throw new Error(
+              `gate carries a term this guard does not model: ${path}${String(key)}`,
+            );
+          },
+        });
+
+  const evaluate = (expression, event, headRepo, skipCi, profile) =>
+    new Function(
+      'github',
+      'needs',
+      'steps',
+      'always',
+      `return (${expression.replace(/^\$\{\{\s*/, '').replace(/\s*\}\}$/, '')});`,
+    )(
+      loud(
+        {
+          event_name: event,
+          repository: 'QwenLM/qwen-code',
+          event: { pull_request: { head: { repo: { full_name: headRepo } } } },
+        },
+        'github.',
+      ),
+      loud({ classify_pr: { outputs: { skip_ci: skipCi } } }, 'needs.'),
+      loud({ ci_profile: { outputs: { ci_profile: profile } } }, 'steps.'),
+      () => true,
+    );
+
+  it.each([
+    [
+      'pull_request',
+      'contributor/qwen-code',
+      'test-results-fork-22.x-ubuntu-latest',
+    ],
+    ['pull_request', 'QwenLM/qwen-code', 'test-results-22.x-ubuntu-latest'],
+    ['push', '', 'test-results-22.x-ubuntu-latest'],
+  ])(
+    'retains reports for %s from %s, including failed runs',
+    (event, repo, name) => {
+      expect(upload.if).toContain('always()');
+      expect(evaluate(upload.if, event, repo, 'false', 'full')).toBe(true);
+      expect(evaluate(upload.with.name, event, repo, 'false', 'full')).toBe(
+        name,
+      );
+      expect(evaluate(upload.if, event, repo, 'true', 'full')).toBe(false);
+      expect(evaluate(upload.if, event, repo, 'false', 'web-shell-only')).toBe(
+        false,
+      );
+      expect(evaluate(upload.if, event, repo, 'false', '')).toBe(false);
+    },
+  );
+
+  it('uploads raw XML for seven days without requiring a report to exist', () => {
+    // Pinned to the 40-hex SHA, not the bare action name: this step now runs
+    // on every full-profile lane inside a job holding `checks: write`, so a
+    // relaxation to a mutable tag must not pass unnoticed.
+    expect(upload.uses).toMatch(/^actions\/upload-artifact@[0-9a-f]{40}$/);
+    expect(upload.with.path).toBe('packages/*/junit.xml');
+    expect(upload.with['retention-days']).toBe(7);
+    expect(upload.with['if-no-files-found']).toBe('ignore');
+  });
+
+  it('throws on a context term the stubs do not model', () => {
+    // An inequality over an unmodelled term would otherwise read `undefined`
+    // and pass: `undefined != true` is true, so all three rows above would
+    // stay green while asserting nothing about the new term.
+    expect(() =>
+      evaluate(
+        '${{ github.event.pull_request.draft != true }}',
+        'push',
+        '',
+        'false',
+        'full',
+      ),
+    ).toThrow(/does not model/);
+  });
+
+  it('keeps report publication advisory and unit-test failures blocking', () => {
+    const publisher = steps.find(
+      (step) => step.name === 'Publish Test Report (for non-forks)',
+    );
+    const unitTests = steps.find((step) => step.id === 'unit_tests');
+    expect(publisher['continue-on-error']).toBe(true);
+    expect(publisher.with['fail-on-error']).toBe('false');
+    expect(upload['continue-on-error']).toBe(true);
+    expect(unitTests['continue-on-error']).not.toBe(true);
+    expect(unitTests.run).toContain('exit "$RC"');
+    expect(steps.indexOf(upload)).toBeGreaterThan(steps.indexOf(publisher));
+  });
+});
+
+// The smoke lane keeps the classifier's trust decision and hosted overrides
+// but picks its own architecture, so its `runs-on` cannot be compared with
+// another lane's. Evaluate the real expression the way
+// `.github/scripts/ci-runner-routing.test.mjs` does.
+const runnerOn = (job, ubuntuRunner) => {
+  const expression = String(ci.jobs[job]['runs-on'])
+    .replace(/^\$\{\{\s*/, '')
+    .replace(/\s*\}\}$/, '');
+  return new Function(
+    'needs',
+    'fromJSON',
+    'contains',
+    `return (${expression});`,
+  )(
+    { classify_pr: { outputs: { ubuntu_runner: ubuntuRunner } } },
+    JSON.parse,
+    (labels, label) => labels.includes(label),
+  );
 };
 
 it('gives the shared Linux test lane one ceiling on both pools', () => {
@@ -101,12 +287,37 @@ it('keeps lint_and_static sized for cold-cache pool runs', () => {
   expect(timeoutMinutesOn('lint_and_static', '')).toBe(45);
 });
 
-it('routes browser gates like the shared Linux test lane, at the hosted worker count', () => {
-  expect(ci.jobs.web_shell_e2e_smoke['runs-on']).toBe(ci.jobs.test['runs-on']);
+it('gives the ARM64 fleet the same contended-pool ceilings as the x64 pool', () => {
+  // `LINUX_RUNNER_FLEET=arm64` renders ["self-hosted", "linux", "arm64"] — the
+  // same reserved, shared hosts without the x64 fleet's `ecs-qwen` label. A
+  // fleet-name scope would price them as hosted and behead lint at 45 / no_ak
+  // at 30, which reads as an ARM compatibility failure.
+  expect(timeoutMinutesOn('lint_and_static', ARM_RUNNER)).toBe(90);
+  expect(timeoutMinutesOn('integration_no_ak', ARM_RUNNER)).toBe(60);
+});
+
+it('routes the browser smoke to ARM64 independently of the shared Linux test lane', () => {
+  // The lane keeps the classifier's trust decision and hosted overrides, but
+  // it no longer inherits the ordinary Linux fleet's architecture.
+  expect(runnerOn('web_shell_e2e_smoke', ECS_RUNNER)).toEqual([
+    'self-hosted',
+    'linux',
+    'arm64',
+  ]);
+  expect(runnerOn('web_shell_e2e_smoke', HOSTED_RUNNER)).toEqual([
+    'ubuntu-latest',
+  ]);
+  // A missing classifier output (classify_pr skipped) is the hosted routing.
+  expect(runnerOn('web_shell_e2e_smoke', '')).toEqual(['ubuntu-latest']);
   const smoke = ci.jobs.web_shell_e2e_smoke.steps.find(
     (step) => step.name === 'Run web-shell browser smoke',
   );
   expect(smoke.run).toMatch(/ -- --workers=2$/);
+  expect(smoke.env.TMPDIR).toBe('${{ runner.temp }}');
+  const transcript = ci.jobs.web_shell_e2e_smoke.steps.find(
+    (step) => step.name === 'Run transcript document browser gate',
+  );
+  expect(transcript.env.TMPDIR).toBe('${{ runner.temp }}');
   // Slow hosted browser installs took over 23 min, so reserve time in the
   // 60-minute job for transcript/smoke tests and artifact upload, while the
   // install step itself stays bounded.
@@ -150,7 +361,7 @@ const gateRunsOn = (cond, event) => {
     // evaluates here at the pin and may mis-report its reachability —
     // re-derive this helper's verdict before adding such a gate.
     [/needs\.classify_pr\.outputs\.skip_ci/g, '"false"'],
-    [/needs\.test\.outputs\.ci_profile/g, '"full"'],
+    [/needs\.classify_pr\.outputs\.ci_profile/g, '"full"'],
     [
       /github\.event\.pull_request\.head\.repo\.full_name/g,
       event === 'pull_request' ? '"QwenLM/qwen-code"' : '""',
@@ -300,7 +511,7 @@ describe('platform lanes — triggers', () => {
     // therefore either exclude `schedule` outright or gate on an event
     // allowlist that cannot contain it — otherwise the nightly quietly
     // becomes a full CI run every day.
-    assertEventReachesOnly('schedule', LANES);
+    assertEventReachesOnly('schedule', [...LANES, 'test_macos']);
   });
 });
 
@@ -419,6 +630,17 @@ describe('post-merge push lane', () => {
       new Map(
         (ci.jobs[job].steps ?? []).map((s) => {
           const { name: _artifactName, ...restWith } = s.with ?? {};
+          if (job === 'lint_and_static' && s.name === 'Install dependencies') {
+            expect(s.env).toEqual({
+              QWEN_SKIP_PREPARE: '1',
+              QWEN_SKIP_NOTICE_GENERATION: '1',
+            });
+            const { env: _installEnv, ...install } = s;
+            return [
+              s.name,
+              JSON.stringify(canon({ ...install, with: restWith })),
+            ];
+          }
           return [s.name, JSON.stringify(canon({ ...s, with: restWith }))];
         }),
       );
@@ -457,9 +679,209 @@ describe('post-merge push lane', () => {
       'shared prelude reordered between the two jobs',
     ).toEqual(namesIn('test').filter((n) => sharedSet.has(n)));
     const lintNames = namesIn('lint_and_static');
+    expect(ci.jobs.lint_and_static.env?.QWEN_SKIP_PREPARE).toBeUndefined();
+    expect(
+      ci.jobs.lint_and_static.env?.QWEN_SKIP_NOTICE_GENERATION,
+    ).toBeUndefined();
+    expect(
+      lintNames.indexOf('Check serve fast-path bundle closure'),
+    ).toBeLessThan(lintNames.indexOf('Run i18n check'));
     expect(lintNames.indexOf('Use trusted CI profile')).toBeLessThan(
       lintNames.indexOf('Install dependencies'),
     );
+    // The incremental opt-in is two pieces — the job-level LINT_BASE_SHA
+    // binding and the history fetch — and neither was pinned: dropping the
+    // env, deleting the step or reordering it left every suite green while
+    // each PR quietly paid for the whole-repository scan this feature exists
+    // to remove (full scanning IS the designed fallback).
+    expect(String(ci.jobs.lint_and_static.env?.LINT_BASE_SHA)).toContain(
+      'github.event.pull_request.base.sha',
+    );
+    const lintStep = (name) => {
+      const index = lintNames.indexOf(name);
+      expect(index, `step "${name}" is missing`).toBeGreaterThan(-1);
+      return index;
+    };
+    // Both steps above refetch shallow history, and a depth-1 fetch of the
+    // base ref grafts the very commit LINT_BASE_SHA names: `merge-base` then
+    // has no ancestry to walk and lint-scope falls back to a full scan.
+    for (const refetch of [
+      'Check the API contract version advances',
+      'Report test growth',
+    ]) {
+      expect(
+        lintStep('Fetch incremental lint history'),
+        `"Fetch incremental lint history" must stay below "${refetch}"`,
+      ).toBeGreaterThan(lintStep(refetch));
+    }
+    expect(lintStep('Fetch incremental lint history')).toBeLessThan(
+      lintStep('Install linters'),
+    );
+    // Blobless is load-bearing, not an optimization: the job may already hold
+    // a blobless merge base from `Report test growth`, and a plain fetch then
+    // dies with `fatal: missing blob object` — silently, because this step is
+    // continue-on-error — leaving every lane on the full scan.
+    const fetchStep = (ci.jobs.lint_and_static.steps ?? []).find(
+      (s) => s.name === 'Fetch incremental lint history',
+    );
+    // Comments stripped: the rationale above the command names the flag too,
+    // and a pin satisfied by prose would go green with the flag deleted.
+    const fetchCode = String(fetchStep?.run)
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    expect(fetchCode).toContain(
+      'fetch --no-tags --depth=100 --filter=blob:none',
+    );
+    expect(fetchCode).toContain(
+      'git config --unset remote.origin.partialclonefilter',
+    );
+    // A fixed window is not enough: main moves 50-100 commits a day, so a
+    // 100-commit depth expires in about a day and every longer-lived PR paid
+    // for a full scan. The deepen retry is what keeps them incremental.
+    expect(fetchCode).toContain('--deepen=');
+    // Pin the mechanism, not the flag: each of these can be deleted while a
+    // bare `--deepen=` substring survives.
+    expect(fetchCode).toContain(
+      'fetch --no-tags --deepen=300 --filter=blob:none',
+    );
+    expect(fetchCode).toContain('git merge-base --all "${LINT_BASE_SHA}" HEAD');
+    expect(fetchCode).toContain('history_usable || state=$?');
+    expect(fetchCode).toContain("reason='deepen fetch aborted'; break;");
+    expect(fetchCode).toContain(
+      'git rev-list "${merge_base}..HEAD" "${merge_base}..${LINT_BASE_SHA}"',
+    );
+    expect(fetchCode).toContain('grep -qxF -f "${shallow}" <<< "${above}"');
+    expect(fetchCode).toMatch(/for _attempt in 1 2 3/);
+    expect(fetchCode).toContain('Incremental lint history:');
+  });
+
+  it.each([
+    ['first fetch aborts', 1, 99, 99, 1, 0, 'deepen fetch aborted'],
+    ['third fetch aborts', 3, 99, 99, 3, 2, 'deepen fetch aborted'],
+    ['cap exhausted', 0, 99, 99, 3, 3, 'deepen cap reached'],
+    ['initially ambiguous', 0, 99, 0, 0, 0, 'ambiguous merge base'],
+    ['ambiguous after final deepen', 0, 99, 3, 3, 3, 'ambiguous merge base'],
+    ['already usable', 0, 0, 99, 0, 0, null],
+    ['shallow boundary recovered', 0, 1, 99, 1, 1, null],
+  ])(
+    'reports incremental history: %s',
+    (
+      _label,
+      abortAt,
+      readyAfter,
+      ambiguousAfter,
+      attempts,
+      deepens,
+      reason,
+    ) => {
+      const dir = mkdtempSync(join(tmpdir(), 'qwen-lint-history-'));
+      try {
+        const summary = join(dir, 'summary');
+        const shallow = join(dir, 'shallow');
+        writeFileSync(summary, '');
+        writeFileSync(shallow, `${'e'.repeat(40)}\n`);
+        const run = ci.jobs.lint_and_static.steps.find(
+          (step) => step.name === 'Fetch incremental lint history',
+        ).run;
+        const gitShim = String.raw`
+          attempts=0
+          successes=0
+          git() {
+            case "$*" in
+              *'fetch --no-tags --depth=100'*) return 0 ;;
+              *'fetch --no-tags --deepen=300'*)
+                attempts=$((attempts + 1))
+                [ "$attempts" -ne "$ABORT_AT" ] || return 1
+                successes=$((successes + 1)) ;;
+              'merge-base --all '*)
+                printf '%s\n' "$MERGE_BASE"
+                if [ "$successes" -ge "$AMBIGUOUS_AFTER" ]; then
+                  printf '%s\n' "$LINT_BASE_SHA"
+                fi ;;
+              'rev-parse --is-shallow-repository')
+                if [ "$successes" -ge "$READY_AFTER" ]; then
+                  echo false
+                else
+                  echo true
+                fi ;;
+              'rev-parse --git-path shallow') echo "$SHALLOW_PATH" ;;
+              'rev-list --count '*) echo "$((100 + 300 * successes))" ;;
+              'rev-list '*) printf '%s\n' "$BOUNDARY" ;;
+              'config --unset remote.origin.partialclonefilter') return 0 ;;
+              *) echo "unexpected git command: $*" >&2; return 97 ;;
+            esac
+          }
+        `;
+        const output = execFileSync(
+          'bash',
+          [
+            '--noprofile',
+            '--norc',
+            '-e',
+            '-o',
+            'pipefail',
+            '-c',
+            `${gitShim}\n${run}\nprintf 'attempts=%s\\n' "$attempts"`,
+          ],
+          {
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              LINT_BASE_SHA: 'a'.repeat(40),
+              LINT_HEAD_SHA: 'b'.repeat(40),
+              MERGE_BASE: 'c'.repeat(40),
+              BOUNDARY: 'e'.repeat(40),
+              SHALLOW_PATH: shallow,
+              GITHUB_STEP_SUMMARY: summary,
+              ABORT_AT: String(abortAt),
+              READY_AFTER: String(readyAfter),
+              AMBIGUOUS_AFTER: String(ambiguousAfter),
+            },
+          },
+        );
+        expect(output).toContain(`attempts=${attempts}\n`);
+        if (reason) {
+          const message = `Incremental lint history: ${deepens} deepen(s), base depth ${100 + 300 * deepens} — ${reason}`;
+          expect(output).toContain(`::warning::${message}\n`);
+          expect(readFileSync(summary, 'utf8')).toBe(`- ${message}\n`);
+        } else {
+          expect(output).not.toContain('::warning::');
+          expect(readFileSync(summary, 'utf8')).toBe('');
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("pins the disk-pressure collector's upload-artifact revision", () => {
+    // The equality loop above compares the two jobs to EACH OTHER, so it is
+    // structurally blind to both collectors moving together — exempting only
+    // `with.name` put `uses:` back in scope for the one-sided case, but a
+    // coordinated re-pin leaves both serializations equal and reports green.
+    // The SHA-format regex on `Upload Test Results Artifact` is not a witness
+    // either: it accepts any 40-hex revision, on a different step. Pin the
+    // literal revision, resolved per job rather than through a single
+    // name-keyed map, because the step carries the SAME name in both jobs.
+    const PIN =
+      'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a';
+    for (const job of ['test', 'lint_and_static']) {
+      const collector = (ci.jobs[job].steps ?? []).find(
+        (s) => s.name === 'Upload disk-pressure samples',
+      );
+      expect(
+        collector?.uses,
+        `${job}: 'Upload disk-pressure samples' must stay on ${PIN}`,
+      ).toBe(PIN);
+      // Same coordinated-edit blindness, second field: no suite pins the
+      // sample window. Literal 14, not a shared constant — the JUnit
+      // `Upload Test Results Artifact` step deliberately retains 7.
+      expect(
+        collector?.with?.['retention-days'],
+        `${job}: disk-pressure samples must stay retained for 14 days`,
+      ).toBe(14);
+    }
   });
 
   it('keeps the moved lint/static payload present, gated, and out of test', () => {
@@ -486,13 +908,13 @@ describe('post-merge push lane', () => {
       'Run yamllint',
       'Run Prettier',
       'Run sensitive keyword linter',
+      'Check serve fast-path bundle closure',
+      'Check core subpath exports resolve',
       'Run i18n check',
       'Generate settings schema',
       'Check settings schema is up-to-date',
       'Generate Web Shell and VS Code companion notices',
       'Check Web Shell and VS Code companion notices are up-to-date',
-      'Check serve fast-path bundle closure',
-      'Check core subpath exports resolve',
       'Run .github/scripts helper tests',
     ];
     const steps = ci.jobs.lint_and_static.steps ?? [];
@@ -534,9 +956,76 @@ describe('post-merge push lane', () => {
       'if [[ -n $(git status --porcelain packages/vscode-ide-companion/NOTICES.txt packages/web-shell/NOTICES.txt) ]]; then',
     );
     expect(checkNotices.run).toContain('exit 1');
+    // Name, order and gate were pinned, but only the two notices steps had a
+    // command body pinned: emptying `Run ESLint`'s `run:` or repointing it at
+    // `true` left every suite green while the required check stopped running
+    // the tool it is named for. Pin the load-bearing substring of each body —
+    // NOT whitespace-exact text, so reformatting one of the multi-line blocks
+    // stays benign. Totality is asserted below, not left to a missing key:
+    // `toContain` coerces `undefined` to the literal string "undefined", so a
+    // body containing that word would pass with its command unpinned.
+    const LOAD_BEARING_RUN = {
+      'Audit critical runtime dependencies': 'npm run audit:runtime:critical',
+      'Check lockfile': 'npm run check:lockfile',
+      'Check desktop workspace isolation': 'npm run check:desktop-isolation',
+      'Check TUI dependency direction': 'npm run check:tui-dep-direction',
+      'Install linters': 'node scripts/lint.js --setup',
+      'Run ESLint': 'node scripts/lint.js --eslint',
+      'Run actionlint': 'node scripts/lint.js --actionlint',
+      'Run shellcheck': 'node scripts/lint.js --shellcheck',
+      'Run yamllint': 'node scripts/lint.js --yamllint',
+      'Run Prettier': 'node scripts/lint.js --prettier',
+      'Run sensitive keyword linter':
+        'node scripts/lint.js --sensitive-keywords',
+      'Check serve fast-path bundle closure':
+        'npm run check:serve-fast-path-bundle',
+      'Check core subpath exports resolve':
+        'npm run check:core-subpath-exports',
+      'Run i18n check': 'npm run check-i18n',
+      'Generate settings schema': 'npm run generate:settings-schema',
+      'Check settings schema is up-to-date':
+        'git status --porcelain packages/vscode-ide-companion/schemas/settings.schema.json',
+      'Generate Web Shell and VS Code companion notices':
+        'npm run generate:notices --workspace=@qwen-code/web-shell',
+      'Check Web Shell and VS Code companion notices are up-to-date':
+        'git status --porcelain packages/vscode-ide-companion/NOTICES.txt',
+      'Run .github/scripts helper tests':
+        'node --test --test-concurrency=1 ${{ env.HELPER_TESTS }}',
+    };
+    expect(
+      Object.keys(LOAD_BEARING_RUN).sort(),
+      'LOAD_BEARING_RUN drifted from FULL_PAYLOAD',
+    ).toEqual([...FULL_PAYLOAD].sort());
+    // Whole literal, not the `ci_profile == 'full'` substring filtered above:
+    // an appended `&&` clause still matches that substring while dropping the
+    // step from the unattended post-merge lane. All 19 gates are identical.
+    const FULL_GATE =
+      "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}";
     for (const n of FULL_PAYLOAD) {
+      const step = stepByName.get(n);
       expect(testNames.has(n), `${n} leaked back into test`).toBe(false);
+      expect(String(step.if), `${n} gate drifted`).toBe(FULL_GATE);
+      expect(
+        String(step.run ?? ''),
+        `${n} no longer runs its load-bearing command`,
+      ).toContain(LOAD_BEARING_RUN[n]);
+      // Containment says the command is present, not that its failure reaches
+      // the job. The body guard is `|| true`/`|| :`, not a bare `||`: the
+      // helper-tests retry legitimately uses `|| {`. Both stay inside this
+      // loop — two non-payload steps set continue-on-error on purpose.
+      expect(
+        step['continue-on-error'],
+        `${n} must not swallow its own failure`,
+      ).toBeUndefined();
+      expect(
+        String(step.run ?? ''),
+        `${n} swallows its exit status`,
+      ).not.toMatch(/\|\|\s*(true|:)/);
     }
+    expect(
+      String(stepByName.get('Check settings schema is up-to-date').run),
+      'settings-schema gate lost its exit 1',
+    ).toContain('exit 1');
     // The two deliberately-different gates, pinned as they are.
     expect(String(stepByName.get('Check workflow file size').if)).toBe(
       "${{ needs.classify_pr.outputs.skip_ci != 'true' }}",
@@ -602,8 +1091,31 @@ describe('post-merge push lane', () => {
       );
       expect(checkout, job).toBeDefined();
       expect(String(checkout.with?.ref ?? ''), job).toBe(
-        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}",
+        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || (github.event_name == 'push' && github.sha) || github.ref }}",
       );
+    }
+  });
+
+  it('pins the two PR-only lanes to their whole checkout ref', () => {
+    // Same order contract as above, for the two lanes that carry no push arm
+    // and so cannot join that loop. Whole literal, not a substring: moving
+    // `|| github.ref` ahead of the pull-request arm keeps every token in
+    // place — `toContain(head.sha)` and `not.toContain('refs/pull/')` both
+    // stay green — while the lane silently checks out the asynchronously
+    // rebuilt merge ref this PR exists to avoid, and the ancestor guard still
+    // passes because a newer merge tree contains the expected head.
+    const expectedRefs = {
+      web_shell_e2e_smoke:
+        "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || github.ref }}",
+      integration_no_ak:
+        "${{ (github.event_name == 'pull_request' && github.event.pull_request.head.sha) || (github.event_name == 'merge_group' && github.event.merge_group.head_sha) || github.ref }}",
+    };
+    for (const [job, ref] of Object.entries(expectedRefs)) {
+      const checkout = (ci.jobs[job].steps ?? []).find((s) =>
+        String(s.uses ?? '').startsWith('actions/checkout'),
+      );
+      expect(checkout, job).toBeDefined();
+      expect(String(checkout.with?.ref ?? ''), job).toBe(ref);
     }
   });
 
@@ -629,37 +1141,73 @@ describe('post-merge push lane', () => {
   });
 
   it('scopes the concurrency group and keeps main uncancellable', () => {
-    // All three components, the way e2e-workflow.test.js pins its own.
-    //
-    // Event: unscoped, the group collapses onto `Qwen Code CI-refs/heads/main`
-    // and the post-merge run shares it with the nightly (60-minute lanes, no
-    // cancellation on main) and with any PR from a fork branch named literally
-    // `refs/heads/main` — a legal ref name.
-    //
-    // Repo + ref: `head_ref` alone is not unique. Two PRs with the same head
-    // branch name — including from different forks, which evaluate groups in
-    // the base repo's namespace — share a group, and PR runs DO cancel in
-    // progress, so they cancel each other. A fork's default branch is `main`,
-    // the most common head_ref there is. Dropping the ref half entirely would
-    // collapse every PR into one group and leave this suite green.
-    //
-    // cancel-in-progress: `main` stays out of cancellation on purpose, not by
-    // accident. A shared group holds at most one running plus one pending run,
-    // and a newer pending run REPLACES the older one even while this reads
-    // `false`, so back-to-back merges still coalesce onto the newest tree —
-    // but the in-flight run always finishes and reports, which matters
-    // because with no merge queue this lane is the only fast witness of a
-    // merged tree and its coverage upload is `always()`-gated. The history of
-    // flipping it the other way is recorded once already: 67 of 100 push runs
-    // cancelled and only 25 ever reported (#5859). Pinning the literal keeps
-    // a later "make main cancellable" change from landing unnoticed.
-    expect(String(ci.concurrency.group)).toBe(
-      '${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.head_ref || github.ref }}',
+    expect(String(ci.concurrency.group).trim()).toBe(
+      "${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.head.repo.full_name || github.repository }}-${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && github.sha || github.head_ref || github.ref }}",
     );
     expect(String(ci.concurrency['cancel-in-progress']).trim()).toBe(
       "${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/release/') }}",
     );
   });
+
+  it.each([
+    ['push', 'refs/heads/main', '', true],
+    ['push', 'refs/heads/feat/e2e/example', '', false],
+    ['push', 'refs/heads/release/example', '', false],
+    ['schedule', 'refs/heads/main', '', false],
+    ['workflow_dispatch', 'refs/heads/main', '', false],
+    ['workflow_dispatch', 'refs/heads/release/example', '', false],
+    ['pull_request', 'refs/pull/1/merge', 'feature', false],
+    ['merge_group', 'refs/heads/gh-readonly-queue/main/pr-1', '', false],
+  ])(
+    'groups %s on %s without changing other events',
+    (event, ref, headRef, perSha) => {
+      const workflows = [ci];
+      if (['push', 'schedule', 'workflow_dispatch'].includes(event)) {
+        workflows.push(
+          parse(readFileSync('.github/workflows/e2e.yml', 'utf8')),
+        );
+      }
+      for (const workflow of workflows) {
+        for (const sourceRepo of event === 'pull_request'
+          ? ['one/fork', 'two/fork']
+          : ['']) {
+          for (const sha of ['a'.repeat(40), 'b'.repeat(40)]) {
+            for (const attempt of [1, 2]) {
+              const github = {
+                workflow: workflow.name,
+                repository: 'QwenLM/qwen-code',
+                event_name: event,
+                event: {
+                  pull_request: { head: { repo: { full_name: sourceRepo } } },
+                },
+                ref,
+                ref_name: ref.replace('refs/heads/', ''),
+                head_ref: headRef,
+                sha,
+                run_id: attempt,
+                run_attempt: attempt,
+              };
+              // Evaluate the actual YAML's string/boolean expressions. Exact
+              // expression pins above and in e2e-workflow constrain this subset.
+              const group = workflow.concurrency.group
+                .trim()
+                .replace(/\$\{\{(.*?)\}\}/g, (_, expression) =>
+                  new Function('github', `return (${expression});`)(github),
+                );
+              const isCi = workflow === ci;
+              const repoPart = isCi
+                ? `${sourceRepo || github.repository}-`
+                : '';
+              const refPart = headRef || (isCi ? ref : github.ref_name);
+              expect(group).toBe(
+                `${workflow.name}-${event}-${repoPart}${perSha ? sha : refPart}`,
+              );
+            }
+          }
+        }
+      }
+    },
+  );
 });
 
 describe('platform lanes — the retired sensitivity classifier', () => {
@@ -708,6 +1256,32 @@ describe('GitHub helper tests', () => {
         expect(invocation, step.name).toContain('--test-concurrency=1');
       }
     }
+  });
+
+  it('routes the battery tmpdir off the host /tmp tmpfs', () => {
+    // #15965: e2e-build.test.mjs mkdtemps thousands of chunk files via
+    // os.tmpdir(); on the ECS pool that defaulted to the shared /tmp tmpfs,
+    // whose ~1M inode quota filled up and failed the lane with ENOSPC while
+    // 202G of capacity stayed free. RUNNER_TEMP sits on the roomy data disk,
+    // same routing the unit lanes already use (#10035).
+    const step = (ci.jobs.lint_and_static.steps ?? []).find(
+      (candidate) => candidate.name === 'Run .github/scripts helper tests',
+    );
+    expect(step, 'helper-tests step missing').toBeDefined();
+    // Comments stripped: the rationale above the export names it too, so a pin
+    // satisfied by prose would stay green with the routing commented out.
+    const run = String(step.run)
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
+    expect(run).toContain('export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"');
+    expect(run.indexOf('export TMPDIR')).toBeLessThan(
+      run.indexOf('node --test'),
+    );
+    // The routed dir is private to the run and reaped on exit: RUNNER_TEMP
+    // itself is shared with every other job on the host.
+    expect(run).toContain('mktemp -d "${TMPDIR}/helper-tests-XXXXXX"');
+    expect(run).toContain('trap \'rm -rf "$HELPER_TMPDIR"\' EXIT');
   });
 
   it('retries the full-profile battery once against pool contention', () => {

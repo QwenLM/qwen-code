@@ -472,6 +472,7 @@ export interface GenerateJsonOptions {
    * The maximum number of attempts for the request.
    */
   maxAttempts?: number;
+  boundedRetries?: boolean;
 }
 
 /**
@@ -579,7 +580,7 @@ export class BaseLlmClient {
         maxAttempts: maxAttempts ?? DEFAULT_MAX_ATTEMPTS,
         authType: retryAuthType,
         extraRetryErrorCodes: retryErrorCodes,
-        persistentMode: isUnattendedMode(),
+        persistentMode: options.boundedRetries ? false : isUnattendedMode(),
         signal: abortSignal,
         heartbeatFn: (info) => {
           process.stderr.write(
