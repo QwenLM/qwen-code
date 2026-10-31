@@ -1097,7 +1097,7 @@ jobs:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
-    # The step ceilings today (162 + 20 + 50 + 20 = 252 — the FG8 letters
+    # The step ceilings today (201 + 20 + 50 + 20 = 291 — the FG8 letters
     # grew the shared failsafe fork to 3600 s, FG9 slice 3 to 3990 s, the
     # FG10b–f workflow relay letters to 4484 s, the FG12a MCP reply-loss
     # letter to 4499 s, the FG12c restart matrix to 4548 s, the FG13c Hook
@@ -1171,14 +1171,15 @@ jobs:
     # pending CI measurement: fork 11444 s, Verify 201 minutes, and 12044 s
     # of fork plus wrap with the same 16 s left;
     # the Broker fault gates use 20,
-    # and admission plus O4 keep per-fork ceilings) plus ~33 minutes for the
-    # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 291 + 33. The allowance sits above the ~13-minute floor
-    # because admission now runs on red-verify nights too: the worst case
-    # sums all four capped steps, and a slow setup (the CLI install retries
-    # three times) must not cancel the job before the O4 gates, whose
-    # !cancelled() condition would then record them skipped. The failover
-    # arms run in hosted-failover-e2e.
+    # and admission plus O4 keep per-fork ceilings) plus a 33-minute
+    # allowance for the uncapped setup steps (Checkout.. cgroup delegation,
+    # the report checks), which took under 10 minutes on every nightly from
+    # 10-14 to 10-30: 291 + 33. A Verify that timed out used to skip
+    # admission, leaving that path 50 minutes spare; admission now runs
+    # after it, so that path too can fill all four capped ceilings. The
+    # allowance sits above the ~13-minute floor so that a slow setup (the
+    # CLI install makes up to three attempts) still leaves the O4 gates
+    # time to run. The failover arms run in hosted-failover-e2e.
     timeout-minutes: 324
     services:
       mysql:

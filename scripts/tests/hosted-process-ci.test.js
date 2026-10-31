@@ -664,8 +664,9 @@ describe('Hosted real-process gates', () => {
     // Step ceilings today (201 + 20 + 50 + 20): Verify, the Broker fault
     // gates, admission and O4. The failover arms moved to their own job.
     // The MySQL job's ceiling carries 33 minutes of setup allowance, above
-    // the 13-minute floor: admission runs on red-verify nights too, so a
-    // slow setup must not cancel the job before the O4 gates.
+    // the 13-minute floor: a Verify that timed out used to skip admission,
+    // and now that path too can fill all four ceilings, so a slow setup
+    // must still leave the O4 gates time to run.
     ['hosted-harness-mysql', 291, 324],
     // Twenty-seven failover arms at 10 each.
     ['hosted-failover-e2e', 270, 285],
@@ -677,10 +678,10 @@ describe('Hosted real-process gates', () => {
         (total, step) => total + (step['timeout-minutes'] ?? 0),
         0,
       );
-      // The uncapped setup steps need their own allowance — the job
-      // comment estimates it at ~13, so the enforced floor moves with that
-      // estimate, not the older 10. A ceiling may grant more (the MySQL
-      // job does, for the red-verify worst case).
+      // The uncapped setup steps need their own allowance of at least ~13
+      // minutes, so the enforced floor moves with that estimate, not the
+      // older 10. A ceiling may grant more (the MySQL job does, for the
+      // red-verify worst case).
       expect(summed).toBe(steps);
       expect(job['timeout-minutes']).toBeGreaterThanOrEqual(summed + 13);
       expect(job['timeout-minutes']).toBe(ceiling);
@@ -935,9 +936,11 @@ describe('Hosted real-process gates', () => {
     // Without a condition a red Hosted verify skipped them on 10 of the 14
     // nights to 10-27, though they need neither its build nor MySQL.
     'Run Runtime Broker fault gates',
-    // The same held for these, which rebuild the module and boot on a
-    // database of their own, and for the O4 gates.
+    // The same held for these, which rebuild the module and need the MySQL
+    // service but not the verify's database.
     'Verify Hosted admission gates',
+    // O4 has carried the condition since it was added, with nothing
+    // pinning it.
     'Verify O4 filesystem process and capacity gates',
   ])('runs the %s step even when the Hosted verify fails', (name) => {
     const steps = java.jobs['hosted-harness-mysql'].steps;
@@ -947,10 +950,6 @@ describe('Hosted real-process gates', () => {
       "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}",
     );
     expect(gates['continue-on-error'], name).toBeUndefined();
-    // Nor may the command swallow its own failure: the hosted-gates class
-    // check counts a class that failed as one that ran.
-    expect(gates.run, name).not.toContain('|| true');
-    expect(gates.run, name).not.toContain('failure.ignore');
     // An unknown step id reads as '' and would skip the gates on every run.
     const install = steps.find((step) => step.id === 'managed_dependencies');
     expect(install, 'the managed_dependencies step').toBeDefined();
@@ -978,6 +977,13 @@ describe('Hosted real-process gates', () => {
     expect(bundle).toBeGreaterThan(-1);
     expect(bundle).toBeLessThan(steps.indexOf(install));
     expect(steps.indexOf(install)).toBeLessThan(steps.indexOf(gates));
+    // After the verify, a red verify would skip the install, and with it
+    // the gates, on exactly the nights this condition is for.
+    const verify = steps.findIndex(
+      (step) => step.name === 'Verify Hosted Java, Spring and MySQL processes',
+    );
+    expect(verify).toBeGreaterThan(-1);
+    expect(steps.indexOf(install)).toBeLessThan(verify);
   });
 
   it('checks the admission gate classes whenever the admission step passes', () => {
@@ -999,7 +1005,7 @@ describe('Hosted real-process gates', () => {
       "${{ !cancelled() && steps.hosted_admission.outcome == 'success' }}",
     );
     // The check must still be able to fail the job: continue-on-error, an
-    // `|| true` on the command or a custom shell would turn a dropped gate
+    // `|| true` on the command or a custom shell could turn a dropped gate
     // class into a pass, the silent drift it exists to catch.
     expect(check.run).toBe(
       'node scripts/check-failsafe-reports.js hosted-gates packages/managed-agent-server',
@@ -1018,16 +1024,30 @@ describe('Hosted real-process gates', () => {
     // Managed schema validation refuses any table outside the managed set,
     // so an fg*_fire table a killed Hosted IT left in hosted_harness_test
     // would fail both gates at boot, on the red nights they now run on.
-    expect(admission.run).toMatch(
-      /^mysql --no-defaults .* -e 'CREATE DATABASE qwen_admission_ci'\n/,
+    // The command, its env and its shell are pinned whole. An `||`
+    // fallback, a pipe, or -fn in the command or MAVEN_ARGS could hide a
+    // failure the class check misses, since it counts a failed class as
+    // one that ran; a second -Dmysql.url would point it back at the shared
+    // database. The default shell's -e stops it when CREATE DATABASE fails.
+    expect(admission.run).toBe(
+      [
+        `mysql --no-defaults --protocol=TCP --host=127.0.0.1 --port="\${MYSQL_PORT}" --user=root -e 'CREATE DATABASE qwen_admission_ci'`,
+        'mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml \\',
+        '  -Phosted-harness-gates \\',
+        '  -Dnode.executable="$(command -v node)" \\',
+        '  -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js" \\',
+        '  -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/qwen_admission_ci?allowPublicKeyRetrieval=true&useSSL=false" \\',
+        '  -Dmysql.user=root -Dmysql.password=hosted-fixture clean verify checkstyle:check',
+      ].join('\n'),
     );
-    expect(admission.run).toContain(
-      '-Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/qwen_admission_ci?',
-    );
-    expect(admission.run).not.toContain('hosted_harness_test');
-    expect(admission.env.MYSQL_PWD).toBe(
-      job.services.mysql.env.MYSQL_ROOT_PASSWORD,
-    );
+    expect(admission.shell, admission.name).toBeUndefined();
+    expect(admission.env).toEqual({
+      MAVEN_ARGS:
+        '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml',
+      MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}",
+      MYSQL_PWD: 'hosted-fixture',
+    });
+    expect(job.services.mysql.env.MYSQL_ROOT_PASSWORD).toBe('hosted-fixture');
   });
 
   // The Hosted*IT classes share one failsafe fork, so a case stalled to its
