@@ -229,7 +229,11 @@ cross-cutting "how the system works today" tour.
 - `RuntimeBrokerService`: extract module-internal collaborators for recovery
   scanning, cancellation, tool holds, and observation cooldown; the service
   becomes a facade. The module already exists, so no cross-module contract
-  moves. This is the lowest-risk, highest-readability split.
+  moves. This is the lowest-risk, highest-readability split. The observation
+  cooldown is the first seam extracted (2026-10-31,
+  `ExecutionObservationCooldown`): it owns the only state it touches and has
+  no lifecycle of its own; recovery scanning, cancellation and tool holds
+  follow as separate slices.
 - Apply the same treatment to `ManagedSessionStore` and
   `QwenHostedHarnessConnector` afterwards, each as its own slice.
 

@@ -199,7 +199,10 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
   显式表达，而不是可变装配。镜像的测试文件在同一批切片中拆开。
 - `RuntimeBrokerService`：为恢复扫描、取消、tool hold、observation 冷却
   提取模块内协作者；服务本体退为门面。模块已经存在，不需要动任何跨模块
-  契约。这是风险最低、可读性收益最高的拆分。
+  契约。这是风险最低、可读性收益最高的拆分。observation 冷却是第一条
+  提取的缝（2026-10-31，`ExecutionObservationCooldown`）：它只拥有自己
+  触及的状态、无独立生命周期；恢复扫描、取消与 tool hold 作为独立切片
+  跟进。
 - 之后对 `ManagedSessionStore` 与 `QwenHostedHarnessConnector` 做同样处理，
   各自独立成切片。
 
