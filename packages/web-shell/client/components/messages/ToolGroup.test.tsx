@@ -1006,6 +1006,32 @@ describe('tool row rendering', () => {
     expect(container.textContent).toContain('Architecture Agent');
   });
 
+  it.each([
+    ['custom_tool', 'First line.\n' + 'Bounded exported answer. '.repeat(8)],
+    [
+      'tool_call',
+      JSON.stringify({
+        schemaVersion: 1,
+        documentId: `g1_${'a'.repeat(64)}`,
+        title: 'Capacity estimate',
+        summary:
+          'Four workers at 25 requests/s give 100 requests/s. Adjust inputs locally.',
+      }),
+    ],
+  ])(
+    'keeps the full safe %s text preview visible in document mode',
+    (toolName, text) => {
+      const container = renderToolGroup(
+        [makeTool({ toolName, status: 'completed', rawOutput: text })],
+        {},
+        undefined,
+        'document',
+      );
+      expect(container.textContent).toContain(text);
+      expect(container.querySelector('iframe')).toBeNull();
+    },
+  );
+
   it('keeps grouped tools and thoughts fully expanded in document mode', () => {
     const container = renderToolGroup(
       [

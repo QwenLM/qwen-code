@@ -79,6 +79,22 @@ describe('toolFormatting', () => {
     ).toBe('pwd');
   });
 
+  it('names Generated UI calls by their card title', () => {
+    const call = tool({
+      toolName: 'mcp__generated-ui__generated_ui_show',
+      title:
+        'mcp__generated-ui__generated_ui_show ToolCall: mcp__generated-ui__generated_ui_show',
+      args: { title: 'Bill splitter', summary: 'Each pays 154.' },
+    });
+    expect(getToolDescription(call)).toBe('Bill splitter');
+    expect(localizeToolDisplayName(call.toolName, getTranslator('en'))).toBe(
+      'Interactive view',
+    );
+    expect(localizeToolDisplayName(call.toolName, getTranslator('zh-CN'))).toBe(
+      '交互视图',
+    );
+  });
+
   it('uses the daemon title description when present', () => {
     expect(
       getToolDescription(

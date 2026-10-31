@@ -21,6 +21,7 @@ import {
   reportRejectedLoaderKeys,
   resetLoaderKeyRejectionReportingForTesting,
 } from './shared-env-keys.js';
+import { VERIFY_PR_COORDINATE_ENV } from './verify-pr-coordinates.js';
 import { publishPendingCompileCache } from './compile-cache.js';
 import { writeStderrLineSafe } from '../utils/stdioHelpers.js';
 import {
@@ -38,11 +39,9 @@ export const SETTINGS_DIRECTORY_NAME = QWEN_DIR;
 
 const RELOAD_EXCLUDED_KEYS = new Set([
   ...PROJECT_ENV_HARDCODED_EXCLUSIONS,
-  // The daemon auth token: the full loader never takes it from
-  // settings.env, and a mid-session .env edit must not rotate it. (The
-  // serve fast path consults only the hardcoded tier, so its documented
-  // workspace-settings.env token feature is unaffected.)
-  'QWEN_SERVER_TOKEN',
+  // QWEN_SERVER_TOKEN is covered by the spread above: the serve daemon bearer
+  // must never come from repository content on any load path — initial or
+  // reload — so it lives in the hardcoded project-.env tier.
   // Loader-class keys are rejected by the isLoaderEnvKey guard before this
   // Set is consulted, so they are not spread here. These three keep their
   // pre-denylist reload-only exclusion: too compatibility-heavy for the
@@ -641,6 +640,25 @@ function reportRejectedSettingsEnv(
   ) {
     writeStderrLineSafe(
       `qwen: ${source} cannot set QWEN_AGENT_EXECUTION_BACKEND; ignored. Export it in the launch environment instead.`,
+    );
+  }
+  // The publishing coordinates are excluded at every settings scope: the
+  // merged map carries a workspace entry indistinguishably from an operator
+  // one, and only the operator may choose where evidence is published. Say so
+  // instead of dropping the entry silently, and name the channel that works.
+  for (const [setting, key] of Object.entries(VERIFY_PR_COORDINATE_ENV)) {
+    // The gate that drops the entry folds case (Windows env lookup does), so
+    // an exact-spelling lookup here would stay silent for the spellings it
+    // rejects. Report whichever spelling was actually written.
+    const entry = Object.entries(env).find(
+      ([candidate, value]) =>
+        candidate.toUpperCase() === key &&
+        typeof value === 'string' &&
+        value.trim() !== '',
+    );
+    if (!entry) continue;
+    writeStderrLineSafe(
+      `qwen: ${source} cannot set ${entry[0]}; ignored. Set verifyPr.${setting} at user scope in settings.json, or export it in the launch environment.`,
     );
   }
 }

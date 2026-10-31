@@ -4,6 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import {
+  useDaemonAvailability,
+  useDaemonAvailabilityController,
+} from '../../daemon/availability-context.js';
+
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DaemonClient } from '@qwen-code/sdk/daemon';
 import {
@@ -116,6 +121,8 @@ export function useWorkspaceOverview(
     pollIntervalMs = WORKSPACE_OVERVIEW_POLL_MS,
   }: UseWorkspaceOverviewOptions,
 ): WorkspaceOverviewResult {
+  const available = useDaemonAvailability() === 'available';
+  const controller = useDaemonAvailabilityController();
   const [overview, setOverview] = useState<WorkspaceOverviewSnapshot>();
   const requestIdRef = useRef(0);
   // Miss budgets live per bookkeeping session: the epoch advances at every
@@ -144,11 +151,18 @@ export function useWorkspaceOverview(
   // section refreshes through the sidebar's reload token, and exposing a
   // trigger would invite callers to bypass the visibility gating.
   const reload = useCallback(async () => {
-    if (!active || !workspaceCwd) return;
+    if (
+      !active ||
+      !available ||
+      !workspaceCwd ||
+      (controller && controller.getSnapshot() !== 'available')
+    )
+      return;
     const requestId = ++requestIdRef.current;
     const cwd = workspaceCwd;
     const epoch = epochRef.current;
     const next = await fetchWorkspaceOverview(client, cwd, requested);
+    if (controller && controller.getSnapshot() !== 'available') return;
     if (cwd !== cwdRef.current) return;
     // Started before the last bookkeeping reset: its budget no longer
     // exists, and the snapshot it could expire was already cleared.
@@ -177,7 +191,7 @@ export function useWorkspaceOverview(
     setOverview((previous) =>
       mergeOverviewSnapshots(previous, next, requested, expired),
     );
-  }, [active, client, requested, workspaceCwd]);
+  }, [active, available, client, controller, requested, workspaceCwd]);
 
   // A snapshot belongs to one workspace: switching cwd on a live hook must
   // not let the previous workspace's facets carry over into the next merge.
@@ -196,6 +210,17 @@ export function useWorkspaceOverview(
       setOverview(undefined);
       return;
     }
+    if (!available) {
+      // A paused poll cannot book a miss, so a facet the daemon can no longer
+      // answer would otherwise keep rendering its pre-outage count. The
+      // fallback snapshot matters when the `!active` branch above already
+      // cleared `overview`: consumers fall back to `retainedOverview`, so an
+      // undefined result here would leave the pre-outage counts showing.
+      setOverview((previous) =>
+        dropExpiredFacets(previous ?? { fetchedAt: 0 }, requested),
+      );
+      return;
+    }
     void reload();
     const onFocus = () => void reload();
     window.addEventListener('focus', onFocus);
@@ -206,7 +231,7 @@ export function useWorkspaceOverview(
       window.removeEventListener('focus', onFocus);
       window.clearInterval(timer);
     };
-  }, [active, pollIntervalMs, reload, reloadToken]);
+  }, [active, available, pollIntervalMs, reload, reloadToken, requested]);
 
   return { overview };
 }

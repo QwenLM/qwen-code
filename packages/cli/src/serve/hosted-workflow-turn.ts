@@ -204,6 +204,7 @@ export async function runHostedWorkflowTurn(input: {
     acp: true,
     safeMode: true,
     chatRecording: false,
+    sessionIdGenerated: true,
     sessionId: input.sessionId,
   } as CliArgs;
   // The config is the per-turn hosted shape (safeMode, untrusted

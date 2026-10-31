@@ -55,6 +55,25 @@ export const TRAJECTORY_WINDOW_MESSAGES_EN: Record<string, WindowMessage> = {
     'History could not continue: the page cursor did not advance. Return to latest.',
   'trajectory.window.budget':
     'The history cursor exceeds the navigation budget. Return to latest.',
+  'trajectory.detail.back': 'Back to records',
+  'trajectory.detail.previous': 'Previous record',
+  'trajectory.detail.next': 'Next record',
+  'trajectory.detail.notRecorded': 'Not recorded',
+  'trajectory.detail.generating': (v) => `${v?.duration ?? ''} generating`,
+  'trajectory.detail.tokens': 'Tokens',
+  'trajectory.detail.steps': 'Steps',
+  'trajectory.detail.tools': 'Tools',
+  'trajectory.detail.modelTime': 'Model time',
+  'trajectory.detail.resize': 'Resize details',
+  'trajectory.detail.tokenCounts': (v) =>
+    `${v?.input ?? 0} in · ${v?.cached ?? 0} cached · ${v?.output ?? 0} out`,
+  'trajectory.detail.input': 'Input',
+  'trajectory.detail.output': 'Output',
+  'trajectory.detail.text': 'Text',
+  'trajectory.detail.other': 'Other arguments and metadata',
+  'trajectory.detail.identifiers': 'Identifiers',
+  'trajectory.detail.lifecycle': 'Lifecycle',
+  'trajectory.detail.copySection': (v) => `Copy ${v?.section ?? ''}`,
 };
 
 export const TRAJECTORY_WINDOW_MESSAGES_ZH: Record<string, WindowMessage> = {
@@ -96,4 +115,23 @@ export const TRAJECTORY_WINDOW_MESSAGES_ZH: Record<string, WindowMessage> = {
   'trajectory.window.protocol':
     '历史读取无法继续：分页游标没有推进。请回到最新。',
   'trajectory.window.budget': '历史游标超过导航预算，请回到最新。',
+  'trajectory.detail.back': '返回记录列表',
+  'trajectory.detail.previous': '上一条记录',
+  'trajectory.detail.next': '下一条记录',
+  'trajectory.detail.notRecorded': '未记录',
+  'trajectory.detail.generating': (v) => `生成 ${v?.duration ?? ''}`,
+  'trajectory.detail.tokens': 'token',
+  'trajectory.detail.steps': '步骤',
+  'trajectory.detail.tools': '工具',
+  'trajectory.detail.modelTime': '模型耗时',
+  'trajectory.detail.resize': '调整详情宽度',
+  'trajectory.detail.tokenCounts': (v) =>
+    `输入 ${v?.input ?? 0} · 缓存 ${v?.cached ?? 0} · 输出 ${v?.output ?? 0}`,
+  'trajectory.detail.input': '输入',
+  'trajectory.detail.output': '输出',
+  'trajectory.detail.text': '正文',
+  'trajectory.detail.other': '其他参数与元数据',
+  'trajectory.detail.identifiers': '标识符',
+  'trajectory.detail.lifecycle': '生命周期',
+  'trajectory.detail.copySection': (v) => `复制${v?.section ?? ''}`,
 };
