@@ -294,6 +294,12 @@ export function getToolResultSummary(tool: ACPToolCall): string {
     );
     if (rawSummary) return rawSummary;
   }
+  if (name === 'glob') {
+    const rawSummary = parseGlobSummary(
+      (extractRawOutputText(tool.rawOutput) ?? '').trim(),
+    );
+    if (rawSummary) return rawSummary;
+  }
 
   if (isAdvisorToolName(name)) {
     const raw = getAdvisorReview(tool.rawOutput);
@@ -465,9 +471,30 @@ function getDescriptionFromTitle(
 }
 
 function parseGrepSummary(text: string): string | null {
-  if (text === 'No matches found') return text;
-  if (/^Found \d+ match(?:es)?(?: \(truncated\))?$/.test(text)) return text;
+  const summary = text.replace(
+    / \[\d+ files? omitted by permission rules\]$/,
+    '',
+  );
+  if (
+    summary === 'No matches found' ||
+    summary === 'No permitted matches found'
+  )
+    return text;
+  if (
+    /^Found \d+ match(?:es)?(?: \((?:truncated(?:, incomplete)?|incomplete)\))?$/.test(
+      summary,
+    )
+  )
+    return text;
   return null;
+}
+
+function parseGlobSummary(text: string): string | null {
+  return /^(?:Found (?:\d+|at least \d+) matching file\(s\)(?: \(truncated\))?|No (?:permitted )?files found)(?: \[\d+ files? omitted by permission rules\])?$/.test(
+    text,
+  )
+    ? text
+    : null;
 }
 
 function getDescriptionFromArgs(

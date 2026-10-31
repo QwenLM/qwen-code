@@ -6,6 +6,8 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { spawn } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 import type { GrepToolParams } from './grep.js';
 import { GrepTool } from './grep.js';
 import path from 'node:path';
@@ -18,6 +20,7 @@ import { ToolErrorType } from './tool-error.js';
 import type { ToolResult } from './tools.js';
 import * as glob from 'glob';
 import { FileReadCache } from '../services/fileReadCache.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 
 vi.mock('glob', { spy: true });
 
@@ -736,6 +739,145 @@ describe('GrepTool', () => {
           grepTool.validateToolParams({ pattern: 'test', limit }),
         ).toBeNull();
       }
+    });
+  });
+
+  describe('Read deny rules over search results', () => {
+    /** An initialized PermissionManager denying `rules` within the temp root. */
+    const denyPm = (rules: string[]) => {
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => rules,
+        getProjectRoot: () => tempRootDir,
+        getCwd: () => tempRootDir,
+      });
+      pm.initialize();
+      return pm;
+    };
+    const toolWithPm = (pm: PermissionManager) =>
+      new GrepTool({
+        ...mockConfig,
+        getPermissionManager: () => pm,
+      } as unknown as Config);
+
+    it('omits matches from a file denied by a path-scoped Read rule', async () => {
+      const tool = toolWithPm(denyPm(['Read(./fileA.txt)']));
+
+      const result = await run({ pattern: 'hello' }, tool);
+
+      expect(result.llmContent).toContain('Found 1 match');
+      expect(result.llmContent).toContain('File: fileB.js');
+      expect(result.llmContent).not.toContain('fileA');
+      expect(result.llmContent).not.toContain('hello world');
+      expect(result.llmContent).toContain('1 file omitted by permission rules');
+      expect(result.returnDisplay).toContain(
+        '1 file omitted by permission rules',
+      );
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'fileB.js'),
+      ]);
+    });
+
+    it('omits matches for every file under a denied directory rule', async () => {
+      const tool = toolWithPm(denyPm(['Read(./sub/**)']));
+
+      const result = await run({ pattern: 'world' }, tool);
+
+      expect(result.llmContent).toContain('File: fileA.txt');
+      expect(result.llmContent).not.toContain('fileC');
+      expect(result.llmContent).toContain('1 file omitted by permission rules');
+    });
+
+    it('reports only the omission when every match is denied', async () => {
+      const tool = toolWithPm(denyPm(['Read(./fileA.txt)']));
+
+      const result = await run({ pattern: 'second line' }, tool);
+
+      expect(result.llmContent).toContain('No permitted matches found');
+      expect(result.llmContent).toContain('1 file omitted by permission rules');
+      expect(result.returnDisplay).toContain(
+        '1 file omitted by permission rules',
+      );
+    });
+
+    it('filters NUL-framed git grep results from a subdirectory', async () => {
+      await fs.mkdir(path.join(tempRootDir, '.git'));
+      const tool = toolWithPm(denyPm(['Read(./sub/fileC.txt)']));
+      const child = Object.assign(new EventEmitter(), {
+        stdout: new PassThrough(),
+        stderr: new PassThrough(),
+      });
+      vi.mocked(spawn).mockImplementationOnce(() => {
+        setTimeout(() => {
+          child.stdout.emit(
+            'data',
+            Buffer.from(
+              'fileC.txt\x001\x00another world in sub dir\nfileD.md\x002\x00This is a test.\n',
+            ),
+          );
+          child.emit('close', 0);
+        }, 0);
+        return child as unknown as ReturnType<typeof spawn>;
+      });
+
+      const result = await run({ pattern: 'world|test', path: 'sub' }, tool);
+
+      expect(spawn).toHaveBeenLastCalledWith('git', expect.any(Array), {
+        cwd: path.join(tempRootDir, 'sub'),
+        windowsHide: true,
+      });
+      expect(result.llmContent).toContain('File: fileD.md');
+      expect(result.llmContent).not.toContain('fileC');
+      expect(result.llmContent).not.toContain('another world');
+      expect(result.llmContent).toContain('1 file omitted by permission rules');
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'sub/fileD.md'),
+      ]);
+    });
+
+    it('filters denied files before truncation and read tracking', async () => {
+      const tool = toolWithPm(denyPm(['Read(./fileB.js)']));
+
+      const result = await run({ pattern: 'hello', limit: 1 }, tool);
+
+      expect(result.llmContent).toContain('File: fileA.txt');
+      expect(result.llmContent).not.toContain('fileB.js');
+      expect(result.llmContent).not.toContain('truncated');
+      expect(
+        fileReadCache.check(await fs.stat(path.join(tempRootDir, 'fileB.js')))
+          .state,
+      ).toBe('unknown');
+      expect(
+        fileReadCache.check(await fs.stat(path.join(tempRootDir, 'fileA.txt')))
+          .state,
+      ).toBe('fresh');
+    });
+
+    it('keeps files matched only by ask rules visible', async () => {
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => ['Read(./fileA.txt)'],
+        getPermissionsDeny: () => [],
+        getProjectRoot: () => tempRootDir,
+        getCwd: () => tempRootDir,
+      });
+      pm.initialize();
+
+      const result = await run({ pattern: 'hello' }, toolWithPm(pm));
+
+      expect(result.llmContent).toContain('File: fileA.txt');
+      expect(result.llmContent).toContain('hello world');
+      expect(result.llmContent).not.toContain('omitted by permission rules');
+    });
+
+    it('keeps results unchanged without a permission manager', async () => {
+      const result = await run({ pattern: 'hello' });
+
+      expect(result.llmContent).toContain('Found 2 matches');
+      expect(result.llmContent).toContain('File: fileA.txt');
+      expect(result.llmContent).toContain('File: fileB.js');
+      expect(result.llmContent).not.toContain('omitted by permission rules');
     });
   });
 });

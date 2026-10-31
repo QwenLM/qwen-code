@@ -28,6 +28,7 @@ import { DEFAULT_FILE_FILTERING_OPTIONS } from '../utils/file-filtering-options.
 import { FileReadCache } from '../services/fileReadCache.js';
 import { logRipgrepRuntimeRecovery } from '../telemetry/loggers.js';
 import type { ToolResult } from './tools.js';
+import { PermissionManager } from '../permissions/permission-manager.js';
 
 // Mock ripgrepUtils
 vi.mock('../utils/ripgrepUtils.js', () => ({
@@ -174,6 +175,151 @@ describe('RipGrepTool', () => {
 
   afterEach(async () => {
     await fs.rm(tempRootDir, { recursive: true, force: true });
+  });
+
+  describe('Read deny rules over search results', () => {
+    const toolWithRules = (deny: string[], ask: string[] = []) => {
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => ask,
+        getPermissionsDeny: () => deny,
+        getProjectRoot: () => tempRootDir,
+        getCwd: () => tempRootDir,
+      });
+      pm.initialize();
+      return new RipGrepTool({
+        ...mockConfig,
+        getPermissionManager: () => pm,
+      } as unknown as Config);
+    };
+
+    it.each(['relative', 'absolute', 'json'])(
+      'omits denied files before truncating %s results and recording reads',
+      async (format) => {
+        const filePath = (file: string) =>
+          format === 'absolute' ? path.join(tempRootDir, file) : file;
+        const match = (file: string, text: string) =>
+          format === 'json'
+            ? jsonLine({
+                type: 'match',
+                data: {
+                  path: { text: file },
+                  line_number: 1,
+                  lines: { text: `${text}\n` },
+                },
+              })
+            : hit(filePath(file), 1, text);
+        const result = await searchWith(
+          match('fileA.txt', 'hello world') + match('fileB.js', 'hello'),
+          { pattern: 'hello', limit: 1 },
+          toolWithRules(['Read(./fileA.txt)']),
+        );
+
+        expectLlm(
+          result,
+          ['Found 1 match', 'fileB.js', '1 file omitted by permission rules'],
+          ['fileA', 'hello world', 'truncated'],
+        );
+        expect(result.returnDisplay).toContain(
+          '1 file omitted by permission rules',
+        );
+        expect(result.llmContent).toMatch(
+          /\n---\n\[1 file omitted by permission rules\]$/,
+        );
+        expect(result.resultFilePaths).toEqual([
+          path.join(tempRootDir, 'fileB.js'),
+        ]);
+        expect(
+          fileReadCache.check(
+            await fs.stat(path.join(tempRootDir, 'fileA.txt')),
+          ).state,
+        ).toBe('unknown');
+        expect(
+          fileReadCache.check(await fs.stat(path.join(tempRootDir, 'fileB.js')))
+            .state,
+        ).toBe('fresh');
+      },
+    );
+
+    it('filters subdirectory results using the project-relative deny rule', async () => {
+      const result = await searchWith(
+        hit('fileC.txt', 1, 'another world') + hit('fileD.md', 1, 'test'),
+        { pattern: 'world|test', path: 'sub' },
+        toolWithRules(['Read(./sub/fileC.txt)']),
+      );
+
+      expectLlm(
+        result,
+        ['fileD.md', '1 file omitted by permission rules'],
+        ['fileC', 'another world'],
+      );
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'sub/fileD.md'),
+      ]);
+    });
+
+    it('reports the omission when every match is denied', async () => {
+      const result = await searchWith(
+        hit('sub/fileC.txt', 1, 'another world'),
+        { pattern: 'world' },
+        toolWithRules(['Read(./sub/**)']),
+      );
+
+      expectLlm(
+        result,
+        ['No permitted matches found', '1 file omitted by permission rules'],
+        ['fileC', 'another world'],
+      );
+      expect(result.returnDisplay).toContain(
+        '1 file omitted by permission rules',
+      );
+      expect(result.resultFilePaths ?? []).toEqual([]);
+      expect(
+        fileReadCache.check(
+          await fs.stat(path.join(tempRootDir, 'sub/fileC.txt')),
+        ).state,
+      ).toBe('unknown');
+    });
+
+    it('reports omissions when an incomplete search has no permitted matches', async () => {
+      rgRecovered(
+        hit('sub/fileC.txt', 1, 'another world'),
+        {
+          selectionMode: 'builtin',
+          retryTriggered: false,
+          failureKind: 'max_buffer',
+        },
+        new Error('stdout maxBuffer length exceeded'),
+      );
+
+      const result = await search(
+        { pattern: 'world' },
+        toolWithRules(['Read(./sub/**)']),
+      );
+
+      expectLlm(result, [
+        'Search did not complete for pattern',
+        'No valid matches were returned',
+        '1 file omitted by permission rules',
+      ]);
+      expect(result.returnDisplay).toBe(
+        'Error: Search incomplete [1 file omitted by permission rules]',
+      );
+    });
+
+    it('keeps files matched only by ask rules visible', async () => {
+      const result = await searchWith(
+        hit('fileA.txt', 1, 'hello world'),
+        { pattern: 'hello' },
+        toolWithRules([], ['Read(./fileA.txt)']),
+      );
+
+      expectLlm(
+        result,
+        ['fileA.txt', 'hello world'],
+        ['omitted by permission rules'],
+      );
+    });
   });
 
   describe('validateToolParams', () => {

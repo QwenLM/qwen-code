@@ -7,6 +7,7 @@
 import path from 'node:path';
 import fs from 'node:fs';
 import os from 'node:os';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import picomatch from 'picomatch';
 import { parse } from 'shell-quote';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -17,6 +18,13 @@ import {
 import { isNodeError } from '../utils/errors.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
+const pathPatternCache = new AsyncLocalStorage<
+  Map<string, picomatch.Matcher[]>
+>();
+
+export function withPathPatternCache<T>(callback: () => T): T {
+  return pathPatternCache.run(new Map(), callback);
+}
 
 /**
  * Normalize a filesystem path to use POSIX-style forward slashes.
@@ -1511,17 +1519,23 @@ export function matchesPathPattern(
   cwd: string,
   matchMode: 'lexical' | 'canonical' = 'lexical',
 ): boolean {
-  const resolvedPattern = resolvePathPattern(specifier, projectRoot, cwd);
-  const patterns =
-    matchMode === 'canonical'
-      ? getCanonicalPatternCandidates(resolvedPattern)
-      : [resolvedPattern];
-  const matchers = patterns.map((pattern) =>
-    picomatch(neutralizeLineTerminators(pattern), {
-      dot: true,
-      nocase: false,
-    }),
-  );
+  const cache = pathPatternCache.getStore();
+  const cacheKey = `${specifier}\0${projectRoot}\0${cwd}\0${matchMode}`;
+  let matchers = cache?.get(cacheKey);
+  if (!matchers) {
+    const resolvedPattern = resolvePathPattern(specifier, projectRoot, cwd);
+    const patterns =
+      matchMode === 'canonical'
+        ? getCanonicalPatternCandidates(resolvedPattern)
+        : [resolvedPattern];
+    matchers = patterns.map((pattern) =>
+      picomatch(neutralizeLineTerminators(pattern), {
+        dot: true,
+        nocase: false,
+      }),
+    );
+    cache?.set(cacheKey, matchers);
+  }
   const paths =
     matchMode === 'canonical'
       ? getCanonicalPathMatchCandidates(filePath, cwd)

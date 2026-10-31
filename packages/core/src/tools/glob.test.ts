@@ -19,6 +19,7 @@ import { tildeifyPath } from '../utils/paths.js';
 import { ToolErrorType } from './tool-error.js';
 import * as glob from 'glob';
 import type { Path as GlobResultPath } from 'glob';
+import { PermissionManager } from '../permissions/permission-manager.js';
 
 vi.mock('glob', { spy: true });
 
@@ -106,6 +107,7 @@ describe('GlobTool', () => {
     prefix: string,
     count: number,
     extension = 'streamlimit',
+    baseDir = tempRootDir,
   ) => {
     const baseMtimeMs = Date.now();
     let yielded = 0;
@@ -116,7 +118,7 @@ describe('GlobTool', () => {
         const fileNumber = index + 1;
         yield {
           fullpath: () =>
-            path.join(tempRootDir, `${prefix}${fileNumber}.${extension}`),
+            path.join(baseDir, `${prefix}${fileNumber}.${extension}`),
           mtimeMs: baseMtimeMs + fileNumber,
         } as unknown as GlobResultPath;
       }
@@ -959,6 +961,157 @@ describe('GlobTool', () => {
         .build({ pattern: '*', path: '~/outside-workspace' })
         .getDefaultPermission();
       expect(permission).toBe('ask');
+    });
+  });
+
+  describe('Read deny rules over search results', () => {
+    /** An initialized PermissionManager denying `rules` within the temp root. */
+    const denyPm = (rules: string[]) => {
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => [],
+        getPermissionsDeny: () => rules,
+        getProjectRoot: () => tempRootDir,
+        getCwd: () => tempRootDir,
+      });
+      pm.initialize();
+      return pm;
+    };
+
+    it('omits a file denied by a path-scoped Read rule', async () => {
+      const result = await run(
+        { pattern: '*.sortme' },
+        toolWith({
+          getPermissionManager: () => denyPm([`Read(./older.sortme)`]),
+        }),
+      );
+
+      expect(result.llmContent).toContain('Found 1 file(s)');
+      expect(result.llmContent).toContain('newer.sortme');
+      expect(result.llmContent).not.toContain('older.sortme');
+      expect(result.llmContent).toContain('1 file omitted by permission rules');
+      expect(result.returnDisplay).toContain(
+        '1 file omitted by permission rules',
+      );
+      expect(result.resultFilePaths).toEqual([
+        path.join(tempRootDir, 'newer.sortme'),
+      ]);
+      expect(result.collectedFilePaths).toEqual([
+        path.join(tempRootDir, 'newer.sortme'),
+      ]);
+    });
+
+    it('omits every file under a denied directory rule', async () => {
+      const result = await run(
+        { pattern: 'sub/**' },
+        toolWith({
+          getPermissionManager: () => denyPm(['Read(./sub/**)']),
+        }),
+      );
+
+      expect(result.llmContent).toContain(
+        'No permitted files found matching pattern',
+      );
+      expect(result.llmContent).not.toContain('fileC');
+      expect(result.llmContent).not.toContain('fileD');
+      expect(result.llmContent).toContain(
+        '3 files omitted by permission rules',
+      );
+      expect(result.returnDisplay).toContain(
+        '3 files omitted by permission rules',
+      );
+    });
+
+    it('preserves the narrowing hint when the collected matches are all denied', async () => {
+      const stream = mockGlobStreamResults('denied-', 1002);
+      const result = await run(
+        { pattern: '*.streamlimit' },
+        toolWith({
+          getPermissionManager: () => denyPm(['Read(./*.streamlimit)']),
+        }),
+      );
+
+      expect(stream.getYielded()).toBe(1001);
+      expect(stream.destroy).toHaveBeenCalled();
+      expect(result.llmContent).toContain('No permitted files found');
+      expect(result.llmContent).toContain('1000 matching files');
+      expect(result.llmContent).toContain('Narrow the pattern or path');
+      expect(result.returnDisplay).toContain('truncated');
+      expect(result.llmContent).toContain(
+        '1000 files omitted by permission rules',
+      );
+      expect(result.resultFilePaths ?? []).toEqual([]);
+      expect(result.collectedFilePaths ?? []).toEqual([]);
+    });
+
+    it('reports the scanned count separately from permitted results', async () => {
+      mockGlobStreamResults('denied-', 1002);
+      const denied = path.join(tempRootDir, 'denied-1.streamlimit');
+      const result = await run(
+        { pattern: '*.streamlimit' },
+        toolWith({
+          getPermissionManager: () => denyPm(['Read(./denied-1.streamlimit)']),
+        }),
+      );
+
+      expect(result.llmContent).toContain('Found at least 999 file(s)');
+      expect(result.llmContent).toContain(
+        'Results truncated after scanning 1000 matching files',
+      );
+      expect(result.llmContent).toContain('1 file omitted by permission rules');
+      expect(result.collectedFilePaths).toHaveLength(999);
+      expect(result.collectedFilePaths).not.toContain(denied);
+    });
+
+    it('does not spend the cross-workspace budget on denied files', async () => {
+      const wsA = path.join(tempRootDir, 'wsA');
+      const wsB = path.join(tempRootDir, 'wsB');
+      await fs.mkdir(wsA);
+      await fs.mkdir(wsB);
+      mockGlobStreamResults('denied-', 1200, 'streamlimit', wsA);
+      mockGlobStreamResults('allowed-', 1, 'streamlimit', wsB);
+
+      const result = await run(
+        { pattern: '*.streamlimit' },
+        toolWith({
+          getWorkspaceContext: () => createMockWorkspaceContext(wsA, [wsB]),
+          getPermissionManager: () => denyPm([`Read(/${wsA}/**)`]),
+        }),
+      );
+
+      const allowedPath = path.join(wsB, 'allowed-1.streamlimit');
+      expect(result.resultFilePaths ?? []).toContain(allowedPath);
+      expect(result.collectedFilePaths ?? []).toContain(allowedPath);
+      expect(result.llmContent).toContain(
+        '1000 files omitted by permission rules',
+      );
+    });
+
+    it('keeps files matched only by ask rules visible', async () => {
+      const pm = new PermissionManager({
+        getPermissionsAllow: () => [],
+        getPermissionsAsk: () => ['Read(./older.sortme)'],
+        getPermissionsDeny: () => [],
+        getProjectRoot: () => tempRootDir,
+        getCwd: () => tempRootDir,
+      });
+      pm.initialize();
+      const result = await run(
+        { pattern: '*.sortme' },
+        toolWith({ getPermissionManager: () => pm }),
+      );
+
+      expectFound(result, 2, 'older.sortme', 'newer.sortme');
+      expect(result.llmContent).not.toContain('omitted by permission rules');
+    });
+
+    it('keeps results unchanged without a permission manager', async () => {
+      const result = await run({ pattern: '*.sortme' });
+
+      expect(result.llmContent).toContain('Found 2 file(s)');
+      expect(result.llmContent).toContain('older.sortme');
+      expect(result.llmContent).toContain('newer.sortme');
+      expect(result.llmContent).not.toContain('omitted by permission rules');
     });
   });
 });

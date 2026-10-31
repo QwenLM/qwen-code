@@ -28,7 +28,11 @@ import type { PermissionDecision } from '../permissions/types.js';
 import type { FileExclusions } from '../utils/ignorePatterns.js';
 import { ToolErrorType } from './tool-error.js';
 import { isCommandAvailable } from '../utils/shell-utils.js';
-import { recordGrepResultFileReads } from './grepReadTracking.js';
+import {
+  formatPermissionOmissionNote,
+  recordGrepResultFileReads,
+} from './grepReadTracking.js';
+import { selectPathsDeniedByPermissionRules } from '../core/permission-helpers.js';
 
 const debugLogger = createDebugLogger('GREP');
 
@@ -166,14 +170,39 @@ class GrepToolInvocation extends BaseToolInvocation<
         });
       }
 
+      // Drop matches from files a path-scoped deny rule claims. The
+      // input-side check only sees the search root, which can never match a
+      // rule that targets an individual result file (#15129).
+      const deniedPaths = await selectPathsDeniedByPermissionRules(
+        this.config.getPermissionManager?.(),
+        ToolNames.GREP,
+        this.config.getTargetDir(),
+        Array.from(new Set(rawMatches.map((match) => match.absoluteFilePath))),
+      );
+      const omittedFileCount = deniedPaths.size;
+      if (omittedFileCount > 0) {
+        debugLogger.debug('Files omitted by permission rules:', [
+          ...deniedPaths,
+        ]);
+        rawMatches = rawMatches.filter(
+          (match) => !deniedPaths.has(match.absoluteFilePath),
+        );
+      }
+
       const filterDescription = this.params.glob
         ? ` (filter: "${this.params.glob}")`
         : '';
 
+      const omittedFilesNote = formatPermissionOmissionNote(omittedFileCount);
+
       // Check if we have any matches
       if (rawMatches.length === 0) {
-        const noMatchMsg = `No matches found for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
-        return { llmContent: noMatchMsg, returnDisplay: `No matches found` };
+        const noMatchMsg = `${omittedFileCount > 0 ? 'No permitted matches found' : 'No matches found'} for pattern "${this.params.pattern}" ${searchLocationDescription}${filterDescription}.`;
+        return {
+          llmContent:
+            noMatchMsg + (omittedFilesNote ? `\n---\n${omittedFilesNote}` : ''),
+          returnDisplay: `${omittedFileCount > 0 ? 'No permitted matches found' : 'No matches found'}${omittedFilesNote ? ` ${omittedFilesNote}` : ''}`,
+        };
       }
 
       const charLimit = this.config.getTruncateToolOutputThreshold();
@@ -263,11 +292,17 @@ class GrepToolInvocation extends BaseToolInvocation<
         const omittedMatches = totalMatches - includedLines;
         llmContent += ` [${omittedMatches} ${omittedMatches === 1 ? 'line' : 'lines'} truncated] ...`;
       }
+      if (omittedFilesNote) {
+        llmContent += `\n---\n${omittedFilesNote}`;
+      }
 
       // Build display message
       let displayMessage = `Found ${totalMatches} ${matchTerm}`;
       if (truncatedByLineLimit || truncatedByCharLimit) {
         displayMessage += ` (truncated)`;
+      }
+      if (omittedFilesNote) {
+        displayMessage += ` ${omittedFilesNote}`;
       }
 
       const resultFilePaths = Array.from(
