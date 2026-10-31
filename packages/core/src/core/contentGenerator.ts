@@ -209,6 +209,18 @@ export type ContentGeneratorConfig = {
   // text-only tool results as strings while leaving the default spec-compliant
   // content-part shape unchanged.
   toolResultContentFormat?: 'parts' | 'string';
+  // When true, a tool that declares no arguments is still sent with a
+  // `parameters` object. Servers that type `tools[].function.parameters` as a
+  // required field reject the request when a parameterless tool omits it —
+  // `missing field parameters` on serde/litellm routers (#11956), `Field
+  // required` on Pydantic-typed ones. Omitted by default because #10080 exists
+  // to keep empty `properties` off older llama.cpp grammars. That shape returns
+  // HTTP 200 on the three llama.cpp builds #10080 verified (b10068/b10745/b10425)
+  // and LM Studio's validator accepts it, but that rejection was never reproduced
+  // live and no wider engine survey exists. #11410's 400 named an absent
+  // `parameters.properties` on the bare `{"type":"object"}` shape, not this one.
+  // So this stays an explicit per-route opt-in.
+  toolParametersMandatory?: boolean;
 };
 
 // Keep the public ContentGeneratorConfigSources API, but reuse the generic

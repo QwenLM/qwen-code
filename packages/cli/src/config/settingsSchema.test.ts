@@ -561,6 +561,27 @@ describe('SettingsSchema', () => {
       });
     });
 
+    it('should keep toolParametersMandatory off by default', () => {
+      // The value itself is load-bearing: true makes every OpenAI-compatible
+      // route synthesize `parameters` for parameterless tools, the empty-object
+      // shape #10080 keeps off older llama.cpp grammars. That shape returns
+      // HTTP 200 on the three llama.cpp builds #10080 verified and LM Studio's
+      // validator accepts it, but the rejection behind that relaxation has no
+      // live reproducer and no wider engine survey exists (#10080, #11431). The
+      // 400 in #11410 was the bare `{ "type": "object" }` shape lacking
+      // `properties`, not this one.
+      const toolParametersMandatory =
+        getSettingsSchema().model.properties.generationConfig.properties
+          ?.toolParametersMandatory;
+
+      expect(toolParametersMandatory).toMatchObject({
+        type: 'boolean',
+        default: false,
+        requiresRestart: false,
+        showInDialog: false,
+      });
+    });
+
     it('should define stopHookBlockingCap schema override as a positive integer', () => {
       expect(
         getSettingsSchema().stopHookBlockingCap.jsonSchemaOverride,

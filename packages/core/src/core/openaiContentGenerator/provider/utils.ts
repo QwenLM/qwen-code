@@ -61,3 +61,47 @@ export function stripReasoningContent(
   }
   return [next as unknown as OpenAI.Chat.ChatCompletionMessageParam];
 }
+
+// Servers that type `tools[].function.parameters` as a required field reject a
+// request whose parameterless tool omits it: serde-based routers report `missing
+// field parameters` (#11956), Pydantic-typed ones report `Field required`. The
+// converter omits the field on purpose (#11431): #10080 keeps an empty
+// `properties` off older llama.cpp grammars. That shape returns HTTP 200 on the
+// three llama.cpp builds #10080 verified (b10068/b10745/b10425) and LM Studio's
+// validator accepts it, but the rejection behind that relaxation was never
+// reproduced live and no wider engine survey exists. The 400 in #11410 was the
+// bare `{"type":"object"}` shape lacking `properties`, not this one. So callers
+// here decide per route. Running at the outbound boundary is also what lets an
+// empty `properties` reach the wire at all: `relaxSchemaForFunctionCalling`
+// strips it during conversion.
+//
+// The checks below are runtime guards rather than narrowings: openai's types
+// admit only function tools, but `generationConfig.extra_body` is a user knob
+// merged into the request ahead of this repair, so a grammar or custom tool can
+// reach the map and has no `function` to dereference — and a hand-written entry
+// in the flat Responses shape claims `type: 'function'` while still carrying a
+// missing or null `function`. A nullish entry is left exactly as written: this
+// repair rewrites tool schemas, it does not vet a user's own list.
+export function withEmptyToolParameters(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+): OpenAI.Chat.ChatCompletionCreateParams {
+  if (!request.tools) return request;
+
+  return {
+    ...request,
+    tools: request.tools.map((tool) =>
+      tool != null &&
+      tool.type === 'function' &&
+      tool.function != null &&
+      tool.function.parameters === undefined
+        ? {
+            ...tool,
+            function: {
+              ...tool.function,
+              parameters: { type: 'object', properties: {} },
+            },
+          }
+        : tool,
+    ),
+  };
+}
