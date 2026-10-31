@@ -2789,6 +2789,7 @@ describe('qwen-triage verify hardening', () => {
           GH_STUB_DIFF: diffFile,
           GH_STUB_OID: prOid ?? 'oid-1',
           GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          GITHUB_RUN_ID: '1',
           GITHUB_STEP_SUMMARY: '/dev/null',
           GITHUB_OUTPUT: out,
           RUNNER_TEMP: temp,
@@ -3942,18 +3943,21 @@ describe('qwen-triage verify hardening round 2', () => {
     );
   });
 
-  // Status/report lifecycle is keyed on a machine marker, and identity
+  // Status/report lifecycle is keyed on machine markers, and identity
   // failures must not widen the ownership filter to every user.
-  it('keys the status comment on a marker and fails closed on identity', () => {
+  it('keys the status comment on markers and fails closed on identity', () => {
     for (const name of [
       'Resolve PR and snapshot metadata',
       'Post verification report comment',
     ]) {
       const s = step(name);
-      expect(s).toContain('qwen-triage:verify-state=running');
+      expect(s).toContain('qwen-triage:verify-run=${GITHUB_RUN_ID}');
       expect(s).not.toContain('$bot == ""');
       expect(s).toContain('.user.login == $bot');
     }
+    expect(step('Resolve PR and snapshot metadata')).toContain(
+      'qwen-triage:verify-state=running',
+    );
   });
 
   // The evidence-hosting path carries the untrusted-image checks; exercise
@@ -4018,9 +4022,7 @@ describe('qwen-triage verify hardening round 2', () => {
       const work = join(dir, 'work');
       const art = join(work, 'verify-results', 'prA-verify-1');
       mkdirSync(join(art, 'evidence'), { recursive: true });
-      mkdirSync(join(work, 'verify-results', 'prB-verify-2', 'evidence'), {
-        recursive: true,
-      });
+      mkdirSync(join(art, 'scratch', 'evidence'), { recursive: true });
       const png = (p, bytes) =>
         writeFileSync(
           p,
@@ -4030,11 +4032,8 @@ describe('qwen-triage verify hardening round 2', () => {
           ]),
         );
       png(join(art, 'evidence', '01-ab.png'), 500);
-      // Same sanitized name in a second artifact dir -> must not duplicate.
-      png(
-        join(work, 'verify-results', 'prB-verify-2', 'evidence', '01-ab.png'),
-        500,
-      );
+      // Same sanitized name in a nested evidence dir -> must not duplicate.
+      png(join(art, 'scratch', 'evidence', '01-ab.png'), 500);
       writeFileSync(join(art, 'evidence', '02-fake.png'), 'not a png');
       png(join(art, 'evidence', '03-big.png'), 2 * 1024 * 1024);
       png(join(art, 'evidence', '04-edge.png'), 2 * 1024 * 1024 - 9);
@@ -4084,7 +4083,11 @@ describe('qwen-triage verify hardening round 2', () => {
         '![01-ab](https://assets.example.test/pr-assets/verify/pr7999-77-1/01-ab.png)',
       );
       expect(comment).not.toContain('02-fake');
-      expect(comment).toContain('did not pass the hosting checks');
+      // The text file, the oversize file and the duplicate: a duplicate
+      // copied over the first counts as hosted and drops this to 2.
+      expect(comment).toContain(
+        '_3 additional image(s) did not pass the hosting checks',
+      );
 
       // Upload failure -> text-only, never an aborted report.
       const out2 = join(dir, 'comment2.md');
@@ -4451,8 +4454,10 @@ describe('qwen-triage verify hardening round 2', () => {
 
   // Every publish fixture returned [] for the comments listing, so the
   // PATCH arm — the one that must reuse a live status comment instead of
-  // stranding it — was never executed by any test.
-  it('patches a live status comment instead of posting a duplicate', () => {
+  // stranding it — was never executed by any test. The publisher used to
+  // take the newest marker comment, which under queued publishers was
+  // often another round's, and one round's report overwrote the other's.
+  it("patches this run's own status comment and no other", () => {
     const publishStep = stepIn(
       'publish-verify',
       'Post verification report comment',
@@ -4463,12 +4468,14 @@ describe('qwen-triage verify hardening round 2', () => {
     const dir = mkdtempSync(join(tmpdir(), 'verify-upsert-'));
     try {
       // The stub records which HTTP verb the publisher used and against
-      // which comment id, and serves a comments listing from a fixture.
+      // which comment id, keeps the body it sent, and serves a comments
+      // listing from a fixture.
       writeFileSync(
         join(dir, 'gh'),
         [
           '#!/usr/bin/env bash',
           'all="$*"',
+          'for a in "$@"; do case "$a" in body=@*) cp "${a#body=@}" "$BODY_OUT";; esac; done',
           'case "$all" in',
           '  *"api user"*|*" user "*) echo qwen-code-ci-bot ;;',
           '  *"-X PATCH"*) echo "PATCH $all" >> "$CALLS" ;;',
@@ -4488,6 +4495,7 @@ describe('qwen-triage verify hardening round 2', () => {
       );
       const listing = join(dir, 'listing.json');
       const calls = join(dir, 'calls');
+      const bodyOut = join(dir, 'body.md');
       const M = '<!-- qwen-triage:verify -->';
       const RUNNING = '<!-- qwen-triage:verify-state=running -->';
       const run = (comments, env = {}) => {
@@ -4501,13 +4509,15 @@ describe('qwen-triage verify hardening round 2', () => {
             PATH: `${dir}:${process.env.PATH}`,
             LISTING: listing,
             CALLS: calls,
-            GH_STUB_OUT: join(dir, 'body.md'),
+            BODY_OUT: bodyOut,
             GH_TOKEN: 'x',
             GITHUB_REPOSITORY: 'QwenLM/qwen-code',
             RUNNER_TEMP: dir,
             GITHUB_STEP_SUMMARY: '/dev/null',
+            // A second attempt: the comment belongs to the run, not to one
+            // attempt of it.
             GITHUB_RUN_ID: '1',
-            GITHUB_RUN_ATTEMPT: '1',
+            GITHUB_RUN_ATTEMPT: '2',
             PR_NUMBER: '7999',
             RUN_URL: 'u',
             VERIFY_RESULT: 'success',
@@ -4523,34 +4533,133 @@ describe('qwen-triage verify hardening round 2', () => {
         return readFileSync(calls, 'utf8');
       };
 
-      // A live status comment owned by the bot must be PATCHed, not
-      // duplicated — otherwise the "running" line is stranded forever.
-      // One page of comments, matching `gh --paginate` output shape.
-      const patched = run([
-        {
-          id: 555,
-          user: { login: 'qwen-code-ci-bot' },
-          body: `${M}\n${RUNNING}\n\nrunning`,
-        },
-      ]);
+      // A live status as the status step writes it, for the given run
+      // (the fixture publishes as run 1).
+      const status = (id, runId, login = 'qwen-code-ci-bot') => ({
+        id,
+        user: { login },
+        body: `${M}\n${RUNNING}\n<!-- qwen-triage:verify-run=${runId} -->\n\nrunning`,
+      });
+
+      // This run's own live status must be PATCHed, not duplicated —
+      // otherwise the "running" line is stranded forever. One page of
+      // comments, matching `gh --paginate` output shape.
+      const patched = run([status(555, 1)]);
       expect(patched).toContain('PATCH');
       expect(patched).toContain('/issues/comments/555');
       expect(patched).not.toContain('POST');
+      // Both lookups select on the leading marker, and the run marker is
+      // what a re-run of this job finds.
+      expect(readFileSync(bodyOut, 'utf8').split('\n').slice(0, 2)).toEqual([
+        M,
+        '<!-- qwen-triage:verify-run=1 -->',
+      ]);
+
+      // Re-run after it published: the report it already wrote is replaced,
+      // not posted a second time.
+      const rerun = run([
+        {
+          id: 555,
+          user: { login: 'qwen-code-ci-bot' },
+          body: `${M}\n<!-- qwen-triage:verify-run=1 -->\n<!-- qwen-triage:verify-substantive -->\n\nreport`,
+        },
+      ]);
+      expect(rerun).toContain('/issues/comments/555');
+      expect(rerun).not.toContain('POST');
 
       // No prior comment: post fresh.
       expect(run([])).toContain('POST');
 
       // A comment carrying the marker but owned by someone else must not be
       // touched; the report is posted fresh instead.
-      const foreign = run([
-        {
-          id: 777,
-          user: { login: 'someone-else' },
-          body: `${M}\n${RUNNING}\n\nrunning`,
-        },
-      ]);
+      const foreign = run([status(777, 1, 'someone-else')]);
       expect(foreign).toContain('POST');
       expect(foreign).not.toContain('/issues/comments/777');
+
+      // Publishers queue, so the newest marker comment can be another
+      // round's: its live status is that round's to replace, and an earlier
+      // round's report is kept. This real report is posted fresh beside
+      // either.
+      const report = (id) => ({
+        id,
+        user: { login: 'qwen-code-ci-bot' },
+        body: `${M}\n<!-- qwen-triage:verify-run=2 -->\n<!-- qwen-triage:verify-substantive -->\n\nearlier report`,
+      });
+      for (const comments of [
+        [report(600), status(601, 2)],
+        [status(601, 2), report(602)],
+      ]) {
+        const calls = run(comments);
+        expect(calls).toContain('POST');
+        expect(calls).not.toContain('PATCH');
+      }
+
+      // The run marker is matched whole: run 1 does not own run 12's.
+      expect(run([status(612, 12)])).not.toContain('PATCH');
+
+      // The own status is found even when a later round's sits after it,
+      // and a weak notice replaces it just the same.
+      const own = run([status(555, 1), status(556, 2)]);
+      expect(own).toContain('/issues/comments/555');
+      expect(own).not.toContain('/issues/comments/556');
+      const cancelled = run([status(555, 1), status(556, 2)], {
+        VERIFY_RESULT: 'cancelled',
+      });
+      expect(cancelled).toContain('PATCH');
+      expect(cancelled).toContain('/issues/comments/555');
+      expect(cancelled).not.toContain('POST');
+
+      // A notice never replaces this run's published report. Re-run on its
+      // own, the job cannot download results (the artifact name carries the
+      // attempt), so a body that would say "results unavailable" is posted
+      // beside the report. A build failure carries findings and replaces it.
+      const ownReport = {
+        id: 555,
+        user: { login: 'qwen-code-ci-bot' },
+        body: `${M}\n<!-- qwen-triage:verify-run=1 -->\n<!-- qwen-triage:verify-substantive -->\n\nreport`,
+      };
+      for (const env of [
+        { DOWNLOAD_OUTCOME: 'failure' },
+        { VERIFY_RESULT: 'cancelled' },
+        { VERDICT: 'infra-error', PREPARE_FAILURE_PHASE: 'install' },
+      ]) {
+        const calls = run([ownReport], env);
+        expect(calls).toContain('POST');
+        expect(calls).not.toContain('/issues/comments/555');
+      }
+      const buildFail = run([ownReport], {
+        VERDICT: 'fail',
+        PREPARE_FAILURE_PHASE: 'build',
+      });
+      expect(buildFail).toContain('/issues/comments/555');
+      expect(buildFail).not.toContain('POST');
+      // A notice may replace this run's earlier notice.
+      const notice = run(
+        [
+          {
+            id: 555,
+            user: { login: 'qwen-code-ci-bot' },
+            body: `${M}\n<!-- qwen-triage:verify-run=1 -->\n\nresults unavailable`,
+          },
+        ],
+        { DOWNLOAD_OUTCOME: 'failure' },
+      );
+      expect(notice).toContain('/issues/comments/555');
+      expect(notice).not.toContain('POST');
+
+      // Markers count only in the header: another round's report quoting
+      // this run's marker further down is not this run's comment.
+      const quoting = {
+        id: 556,
+        user: { login: 'qwen-code-ci-bot' },
+        body: `${M}\n<!-- qwen-triage:verify-run=2 -->\n<!-- qwen-triage:verify-substantive -->\n\n\`\`\`\n${M}\n<!-- qwen-triage:verify-run=1 -->\n\`\`\``,
+      };
+      const quoted = run([status(555, 1), quoting]);
+      expect(quoted).toContain('/issues/comments/555');
+      expect(quoted).not.toContain('/issues/comments/556');
+      const quotedOnly = run([quoting]);
+      expect(quotedOnly).toContain('POST');
+      expect(quotedOnly).not.toContain('PATCH');
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -4877,8 +4986,20 @@ describe('qwen-triage verify hardening round 2', () => {
     );
     expect(flat).toContain('only `updated_at` moves');
     expect(flat).toContain('Keep the guard and the post in separate commands');
+    // #15984 rounds 1-3: the title and the whole verdict paragraph shared
+    // one `#` line, which GitHub renders as a single giant H1, and all three
+    // comments shipped without the attribution footer. The verdict line is
+    // pinned to a plain paragraph, and the posted body is assembled as
+    // comment.md so the read-back and the footer check compare against one
+    // local file — report.md carries no footer by contract.
     expect(flat).toContain(
-      'read the body back and compare it with the local file byte for byte',
+      'The verdict line is a **plain paragraph, never a heading**',
+    );
+    expect(flat).toContain(
+      'Assemble the exact comment body — report content plus the resolved footer — into `comment.md`',
+    );
+    expect(flat).toContain(
+      'read the body back and compare it with `comment.md` byte for byte',
     );
 
     // #13163 R7: a merge carried two review fixes in 507 hand-written lines
@@ -4992,6 +5113,70 @@ describe('qwen-triage verify hardening round 2', () => {
       'fresh database, storage and workspace per scenario and per arm',
     );
     expect(flat).toContain('orphaned (ppid 1) processes');
+    // PR #13748 local round (2026-10-31): the mutation matrix and 80 live
+    // daemon cells shared one tree; a hand-patched dist still carried the
+    // mutant expression, and the whole round was withdrawn as inconclusive.
+    // Review on 21014c30d6: fragment pins left the operative clauses and the
+    // measured example unasserted, so the bullet is pinned whole inside its
+    // section: deleting any clause, flipping the exclusion, or moving the
+    // bullet out of Rig hygiene turns this red. Review on ff867ec035: the
+    // slice bounds are asserted, because a renamed closing heading would
+    // otherwise fail open (slice(start, -1) spans the rest of the document).
+    // Review on b99f52a5e3: the end bound is the NEXT heading, not a named
+    // one, so a section inserted before the old bound cannot shelter a moved
+    // bullet; and the sandbox variable the prose names is pinned at its read
+    // site, so renaming it cannot leave the recipe pointing at nothing.
+    const rigHygieneStart = flat.indexOf('### Rig hygiene (local rounds)');
+    const rigHygieneEnd = flat.indexOf('### ', rigHygieneStart + 4);
+    expect(rigHygieneStart).toBeGreaterThanOrEqual(0);
+    expect(rigHygieneEnd).toBeGreaterThan(rigHygieneStart);
+    const rigHygiene = flat.slice(rigHygieneStart, rigHygieneEnd);
+    expect(rigHygiene).toContain(
+      'Give the mutation matrix a tree of its own — never the tree a live ' +
+        'cell is measured on. Restoring the source after each row is not ' +
+        'enough: a build inside a row propagates the mutant into `dist/`, and a ' +
+        'daemon started mid-row loads it. Isolate every artifact a launch ' +
+        "resolves, not just the checkout: `cp -al` the round's `node_modules` — " +
+        'root plus any per-package ones — into the matrix tree (never symlink ' +
+        'the directory itself) and assert each `@qwen-code/*` link resolves ' +
+        'inside it (a nested tree without its own `node_modules` walks up to ' +
+        "the round's); a row that writes under `node_modules` needs real copies " +
+        'from the store (`pnpm install --offline --frozen-lockfile ' +
+        '--config.package-import-method=copy`), because hardlinks share the ' +
+        "round's inodes and pnpm's default import falls back to hardlinks where " +
+        'clones are unavailable. Build the sandbox image under a per-tree tag — ' +
+        'a sanitized tree label, never a path ' +
+        '(`QWEN_SANDBOX_IMAGE_TAG=<label>`; the build reads that variable, not ' +
+        '`QWEN_SANDBOX_IMAGE`, and interpolates it into the tag verbatim) — and ' +
+        'inject `QWEN_SANDBOX_IMAGE=ghcr.io/qwenlm/qwen-code:<label>` per ' +
+        "launch of that tree's cells, never as a shell-wide export, which every " +
+        'later cell inherits; pass no `--sandbox-image` in those cells — the ' +
+        'flag outranks the variable (the tag in `packages/cli/package.json` is ' +
+        "one shared name any tree's build retags). Give Java rows their own " +
+        '`-Dmaven.repo.local` copied from the warmed repository. Before the ' +
+        "matrix starts, record a sha256 manifest of each measurement arm's " +
+        'clean `dist/`, and gate every daemon or dist-level harness launch ' +
+        'outside the row that produced it on a scripted comparison against that ' +
+        "manifest — never against the matrix tree's live source, which mid-row " +
+        'is the mutant and agrees with its own build. Prove the gate live by ' +
+        'requiring it to refuse a known-mutant build, not merely to report a ' +
+        'fabricated mismatch. Never hand-patch `dist/` to repair a contaminated ' +
+        'build; rebuild from source you have verified clean and re-record the ' +
+        'manifest from that build — a hand-patch that restores only the visible ' +
+        'sites leaves the rest of the build mutant. Measured example: a round ' +
+        'interleaved its mutation matrix with 80 live daemon cells on one tree, ' +
+        'then hand-patched the mutant it found in `dist/`; the patched build ' +
+        'still carried the mutant expression, so every live cell and the whole ' +
+        'matrix were withdrawn and the round shipped as `inconclusive`.',
+    );
+    expect(flat).toContain(
+      'Runner hygiene (time caps, PID-only kills, restoring the tree, a tree ' +
+        'of its own apart from every live cell, the clean-`dist` launch gate, ' +
+        'syntax checks that do not execute) is in **Rig hygiene (local ' +
+        'rounds)** below.',
+    );
+    const sandboxBuild = readFileSync('scripts/build_sandbox.js', 'utf8');
+    expect(sandboxBuild).toContain('process.env.QWEN_SANDBOX_IMAGE_TAG');
     expect(flat).toContain('`process.exit()` skips `finally`');
     expect(flat).toContain('with `node --check`, never `import()`');
     expect(flat).toContain('Do not edit a shell runner while it executes');
@@ -5502,27 +5687,29 @@ describe('qwen-triage verify hardening round 2', () => {
   });
 
   // This step runs the checker itself (design decision 3), but still spells
-  // out the verdict vocabulary twice: the allowlist that reads verdict.txt and
-  // the headline labels. Both must stay the checker's four words, so a fifth
-  // word on either side fails here.
+  // out the verdict vocabulary three times: the allowlist that reads
+  // verdict.txt, the trust switch, and the headline labels. All three must
+  // stay the checker's four words, so a fifth or a missing word on any of
+  // them fails here.
   it('keeps the local checker aligned with the publisher verdicts', () => {
     const publishStep = step('Post verification report comment');
+    const labelsAt = (at) =>
+      new Set(
+        [
+          ...publishStep
+            .slice(at)
+            .split('esac')[0]
+            .matchAll(/^\s+([a-z][a-z|-]*)\)/gm),
+        ].flatMap((match) => match[1].split('|')),
+      );
     const marker = 'case "$AGENT_VERDICT" in';
-    const allowlist = publishStep
-      .slice(publishStep.indexOf(marker) + marker.length)
-      .trim()
-      .split(')')[0]
-      .split('|');
-    expect(new Set(allowlist)).toEqual(new Set(VERDICTS));
-    const headlineCase = publishStep
-      .slice(publishStep.lastIndexOf(marker))
-      .split('esac')[0];
-    const labels = new Set(
-      [...headlineCase.matchAll(/^\s+([a-z][a-z-]*)\)/gm)].map(
-        (match) => match[1],
-      ),
+    const trust = 'case "${AGENT_VERDICT:-}" in';
+    expect(publishStep.split(trust)).toHaveLength(2);
+    expect(labelsAt(publishStep.indexOf(marker))).toEqual(new Set(VERDICTS));
+    expect(labelsAt(publishStep.indexOf(trust))).toEqual(new Set(VERDICTS));
+    expect(labelsAt(publishStep.lastIndexOf(marker))).toEqual(
+      new Set(VERDICTS),
     );
-    expect(labels).toEqual(new Set(VERDICTS));
   });
 });
 
@@ -5535,8 +5722,7 @@ describe('qwen-triage verify publish fidelity', () => {
   // Render the publisher for a given outcome with a stubbed gh and the real
   // artifact checker, and return the comment body it would post plus the
   // step log. The publisher reads the agent's word only from verdict.txt
-  // beside the report, so AGENT_VERDICT names what the fixture writes there
-  // unless VERDICT_TXT says otherwise.
+  // beside the report, so AGENT_VERDICT names what the fixture writes there.
   const publish = (dir, env) => {
     const out = join(dir, `body-${env.NAME}.md`);
     const work = join(dir, 'work');
@@ -5547,8 +5733,9 @@ describe('qwen-triage verify publish fidelity', () => {
       'verdict.txt',
     );
     rmSync(verdictFile, { force: true });
-    const word = env.VERDICT_TXT ?? env.AGENT_VERDICT;
-    if (word) writeFileSync(verdictFile, `${word}\n`);
+    if (env.AGENT_VERDICT) {
+      writeFileSync(verdictFile, `${env.AGENT_VERDICT}\n`);
+    }
     const res = spawnSync('bash', ['-c', publishScript()], {
       cwd: work,
       encoding: 'utf8',
@@ -5969,22 +6156,22 @@ describe('qwen-triage verify publish fidelity', () => {
   // REPORT, the counts and the verdict were picked by independent searches
   // (the verdict in another job), so a run that left an earlier round
   // directory behind could headline the later report with that directory's
-  // zero or verdict word.
-  it("binds the headline to the report's own directory", () => {
+  // zero or verdict word. With more than one complete round, the oldest one
+  // was the one published.
+  it("binds the headline to the newest round's own directory", () => {
     const dir = fixture();
     const results = join(dir, 'work', 'verify-results');
     const round = join(results, 'prA-verify-1');
+    const earlier = join(results, 'prA-verify-0');
     try {
-      // The leftover sorts first and holds a complete green round's files.
-      mkdirSync(join(results, 'prA-verify-0'));
+      // An earlier round, complete and green, sorts ahead of the newest.
+      mkdirSync(earlier);
+      writeFileSync(join(earlier, 'report.md'), '## earlier round\n');
       writeFileSync(
-        join(results, 'prA-verify-0', 'assertions.json'),
+        join(earlier, 'assertions.json'),
         '{"pass":10,"fail":0,"total":10}',
       );
-      writeFileSync(
-        join(results, 'prA-verify-0', 'verdict.txt'),
-        'merge-ready\n',
-      );
+      writeFileSync(join(earlier, 'verdict.txt'), 'merge-ready\n');
       writeFileSync(
         join(round, 'assertions.json'),
         '{"pass":9,"fail":1,"total":10,"failures":[{"id":"x","attribution":"pr"}]}',
@@ -5996,11 +6183,13 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(mixed).toContain(
         'Scripted assertions: 9 passed · 1 failed · 10 total',
       );
+      expect(mixed).toContain('real report');
+      expect(mixed).not.toContain('earlier round');
       expect(mixed).not.toContain('merge-ready (agent verdict)');
       expect(mixed).not.toContain('verify-pr-check.mjs');
 
       // A round holding only its report has no counts and no word, and the
-      // leftover must lend it neither.
+      // earlier round must lend it neither.
       rmSync(join(round, 'assertions.json'));
       const bare = publish(dir, { NAME: 'bare', AGENT_VERDICT: '' });
       expect(bare.body).toContain(
@@ -6011,18 +6200,184 @@ describe('qwen-triage verify publish fidelity', () => {
         '::warning::No usable verdict.txt beside the published report.md',
       );
 
-      // A report.md nested inside the round sorts ahead of the round's own.
+      // A word outside the four is no verdict either, and never reaches the
+      // body, not even as an untrusted one.
       writeFileSync(
         join(round, 'assertions.json'),
         '{"pass":10,"fail":0,"total":10}',
       );
-      mkdirSync(join(round, 'evidence'));
-      writeFileSync(join(round, 'evidence', 'report.md'), '## nested\n');
+      const unknown = publish(dir, { NAME: 'unk', AGENT_VERDICT: 'shipit' });
+      expect(unknown.body).toContain(
+        '⚠️ inconclusive — completed without a usable structured verdict',
+      );
+      expect(unknown.body).not.toContain('shipit');
+      expect(unknown.log).toContain(
+        '::warning::No usable verdict.txt beside the published report.md',
+      );
+
+      // A report.md nested inside the round sorts past the round's own.
+      mkdirSync(join(round, 'scratch'));
+      writeFileSync(join(round, 'scratch', 'report.md'), '## scratch report\n');
       const nested = render(dir, {
         NAME: 'nested',
         AGENT_VERDICT: 'merge-ready',
       });
       expect(nested).toContain('✅ passed — merge-ready (agent verdict)');
+      expect(nested).not.toContain('scratch report');
+
+      // Without a report the newest round's own counts still show, at the
+      // same depth, under the process outcome.
+      rmSync(join(earlier, 'report.md'));
+      rmSync(join(round, 'report.md'));
+      writeFileSync(
+        join(round, 'assertions.json'),
+        '{"pass":9,"fail":1,"total":10,"failures":[{"id":"x","attribution":"pr"}]}',
+      );
+      writeFileSync(
+        join(round, 'scratch', 'assertions.json'),
+        '{"pass":7,"fail":3,"total":10}',
+      );
+      const reportless = render(dir, {
+        NAME: 'nore',
+        VERDICT: 'timeout',
+        AGENT_VERDICT: '',
+      });
+      expect(reportless).toContain(
+        '⚠️ incomplete — the run timed out with partial evidence',
+      );
+      expect(reportless).toContain(
+        'Scripted assertions: 9 passed · 1 failed · 10 total',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // A re-run of the publisher finds what it already published by the run
+  // marker, and a notice must not replace findings, so every terminal body
+  // opens with a header: the verify marker both lookups select on, this
+  // run's marker, and the substantive marker when it carries findings. The
+  // lookups read markers only from the lines before the first blank line.
+  it('opens every terminal body with its header', () => {
+    const dir = fixture();
+    try {
+      const weak = [
+        '<!-- qwen-triage:verify -->',
+        '<!-- qwen-triage:verify-run=41 -->',
+      ];
+      const strong = [...weak, '<!-- qwen-triage:verify-substantive -->'];
+      const variants = [
+        ['real report', strong, { AGENT_VERDICT: 'merge-ready' }],
+        ['incomplete — cancelled', weak, { VERIFY_RESULT: 'cancelled' }],
+        [
+          'incomplete — infrastructure failure',
+          weak,
+          { VERIFY_RESULT: 'failure', VERDICT: '' },
+        ],
+        [
+          'not run — skipped',
+          weak,
+          { VERDICT: 'skipped', SKIP_REASON: 'closed' },
+        ],
+        ['not run — n/a', weak, { VERDICT: 'n/a' }],
+        ['results unavailable', weak, { DOWNLOAD_OUTCOME: 'failure' }],
+        [
+          'the PR could not be built',
+          strong,
+          { VERDICT: 'fail', PREPARE_FAILURE_PHASE: 'build' },
+        ],
+        [
+          'was unreachable from the runner',
+          weak,
+          { VERDICT: 'infra-error', PREPARE_FAILURE_PHASE: 'install' },
+        ],
+      ];
+      variants.forEach(([shown, header, env], i) => {
+        const body = render(dir, {
+          NAME: `hdr-${i}`,
+          GITHUB_RUN_ID: '41',
+          ...env,
+        });
+        expect(body).toContain(shown);
+        expect(body.split('\n\n')[0].split('\n')).toEqual(header);
+      });
+      // A run whose artifact holds no report has no findings to keep.
+      rmSync(join(dir, 'work', 'verify-results', 'prA-verify-1', 'report.md'));
+      const reportless = render(dir, {
+        NAME: 'hdr-noreport',
+        GITHUB_RUN_ID: '41',
+      });
+      expect(reportless).toContain('No report.md was found');
+      expect(reportless.split('\n\n')[0].split('\n')).toEqual(weak);
+
+      // Written once, before the branches, which only append: a new branch
+      // cannot open its body without it.
+      const code = publishScript()
+        .split('\n')
+        .filter((line) => !/^\s*#/.test(line))
+        .join('\n');
+      expect(code.match(/'<!-- qwen-triage:verify -->'/g)).toHaveLength(1);
+      expect(code.match(/[^>]> "\$BODY_FILE"/g)).toHaveLength(1);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // Images were collected across every round, oldest first, while the
+  // report came from the newest: an earlier round holding eight images
+  // filled the cap, and the published report showed none of its own.
+  it("illustrates the published round with that round's own images", () => {
+    const dir = fixture();
+    const results = join(dir, 'work', 'verify-results');
+    const png = (round, name) => {
+      mkdirSync(join(results, round, 'evidence'), { recursive: true });
+      writeFileSync(
+        join(results, round, 'evidence', `${name}.png`),
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0]),
+      );
+    };
+    const images = (env) => {
+      const body = render(dir, {
+        AGENT_VERDICT: 'merge-ready',
+        VERIFY_ASSETS_UPLOADER: 'true',
+        ALIYUN_OSS_BUCKET: 'b',
+        ALIYUN_OSS_PUBLIC_BASE_URL: 'https://oss.example.test',
+        ...env,
+      });
+      // Each published round holds one image and hosts it; another round's
+      // images must not be counted as failing the checks either.
+      expect(body).not.toContain('did not pass the hosting checks');
+      return [
+        ...body.matchAll(/!\[([^\]]+)\]\(https:\/\/oss\.example\.test\//g),
+      ].map((m) => m[1]);
+    };
+    try {
+      // An earlier complete round with a full set, the newest complete
+      // round with one image, and a newer directory holding images only.
+      mkdirSync(join(results, 'prA-verify-0'));
+      writeFileSync(join(results, 'prA-verify-0', 'report.md'), '## old\n');
+      writeFileSync(
+        join(results, 'prA-verify-0', 'assertions.json'),
+        '{"pass":10,"fail":0,"total":10}',
+      );
+      for (let i = 1; i <= 8; i++) png('prA-verify-0', `0${i}-old`);
+      png('prA-verify-1', '09-new');
+      png('prA-verify-2', '10-stray');
+      expect(images({ NAME: 'ev-report' })).toEqual(['09-new']);
+
+      // Reportless: the round whose counts are shown.
+      rmSync(join(results, 'prA-verify-0', 'report.md'));
+      rmSync(join(results, 'prA-verify-1', 'report.md'));
+      expect(images({ NAME: 'ev-counts', VERDICT: 'timeout' })).toEqual([
+        '09-new',
+      ]);
+
+      // Neither report nor counts anywhere: the newest round directory.
+      rmSync(join(results, 'prA-verify-0', 'assertions.json'));
+      rmSync(join(results, 'prA-verify-1', 'assertions.json'));
+      expect(images({ NAME: 'ev-none', VERDICT: 'timeout' })).toEqual([
+        '10-stray',
+      ]);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -6265,69 +6620,136 @@ describe('qwen-triage verify publish fidelity', () => {
     }
   });
 
-  // The follow-up snapshot must select the newest SUBSTANTIVE report, not
-  // the newest non-running comment: a cancelled notice passes that test.
-  it('snapshots the newest substantive report, not a weak notice', () => {
+  // The status step's comment block, run verbatim as run 1 with a stubbed
+  // gh that serves one page of `gh api --paginate` output and records every
+  // write and the snapshot read.
+  const statusComment = (comments) => {
     const resolve = step('Resolve PR and snapshot metadata');
-    // Run the workflow's own selector verbatim against a fixture shaped
-    // exactly like one page of `gh api --paginate` output, so no rewriting
-    // of the expression is needed.
-    const jqProgram = resolve.match(/jq -rs --arg m[^']*'([\s\S]*?end)'/)?.[1];
-    expect(jqProgram).toBeTruthy();
-    expect(jqProgram).toContain('contains($sub)');
-
-    const dir = mkdtempSync(join(tmpdir(), 'verify-snap-'));
+    const start = resolve.indexOf("MARKER='<!-- qwen-triage:verify -->'");
+    const end = resolve.indexOf('echo "decision=run"', start);
+    expect(start).toBeGreaterThan(-1);
+    expect(end).toBeGreaterThan(start);
+    const dir = mkdtempSync(join(tmpdir(), 'verify-status-'));
     try {
-      const comments = join(dir, 'c.json');
       writeFileSync(
-        comments,
-        JSON.stringify([
-          {
-            id: 101,
-            user: { login: 'qwen-code-ci-bot' },
-            body: '<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-substantive -->\n\nREAL REPORT',
-          },
-          {
-            id: 102,
-            user: { login: 'qwen-code-ci-bot' },
-            body: '<!-- qwen-triage:verify -->\n\ncancelled notice',
-          },
-        ]),
+        join(dir, 'gh'),
+        [
+          '#!/usr/bin/env bash',
+          'case "$*" in',
+          '  "api user --jq .login") echo qwen-code-ci-bot ;;',
+          '  *"--method GET"*) cat "$LISTING" ;;',
+          '  *"--method PATCH"*) echo "PATCH $*" >> "$CALLS" ;;',
+          '  *"--jq .body") echo "SNAP $*" >> "$CALLS"; echo previous ;;',
+          '  *"/issues/7999/comments -f body="*) echo "POST $*" >> "$CALLS" ;;',
+          '  *) echo "UNEXPECTED $*" >> "$CALLS"; exit 1 ;;',
+          'esac',
+        ].join('\n'),
+        { mode: 0o755 },
       );
-      const runJq = (program) =>
-        spawnSync(
-          'jq',
-          [
-            '-rs',
-            '--arg',
-            'm',
-            '<!-- qwen-triage:verify -->',
-            '--arg',
-            's',
-            '<!-- qwen-triage:verify-state=running -->',
-            '--arg',
-            'sub',
-            '<!-- qwen-triage:verify-substantive -->',
-            '--arg',
-            'bot',
-            'qwen-code-ci-bot',
-            program,
-            comments,
-          ],
-          { encoding: 'utf8' },
-        ).stdout.trim();
-
-      // The newest comment is the weak notice, but the snapshot must be the
-      // substantive report behind it.
-      expect(runJq(jqProgram)).toBe('102\tfalse\t101');
-      // Control: selecting "newest non-running comment" picks the notice.
-      expect(
-        runJq(
-          '[.[][] | select((.body | startswith($m)) and .user.login == $bot)] | map(select(.body | contains($s) | not)) | last | "\\(.id)"',
-        ),
-      ).toBe('102');
+      writeFileSync(join(dir, 'listing.json'), JSON.stringify(comments));
+      writeFileSync(join(dir, 'calls'), '');
+      mkdirSync(join(dir, 'verify-context'));
+      const script = resolve.slice(start, end).replace(/^ {10}/gm, '');
+      const res = spawnSync('bash', ['-c', `set -euo pipefail\n${script}`], {
+        cwd: dir,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: `${dir}:${process.env.PATH}`,
+          LISTING: join(dir, 'listing.json'),
+          CALLS: join(dir, 'calls'),
+          GH_TOKEN: 'x',
+          GITHUB_REPOSITORY: 'QwenLM/qwen-code',
+          GITHUB_RUN_ID: '1',
+          GITHUB_RUN_ATTEMPT: '2',
+          PR_NUMBER: '7999',
+          RUN_URL: 'u',
+          RUNNER_TEMP: dir,
+        },
+      });
+      expect(res.status).toBe(0);
+      const calls = readFileSync(join(dir, 'calls'), 'utf8');
+      expect(calls).not.toContain('UNEXPECTED');
+      return calls;
     } finally {
       rmSync(dir, { recursive: true, force: true });
+    }
+  };
+  const BOT = { login: 'qwen-code-ci-bot' };
+  const liveStatus = (id, runId, user = BOT) => ({
+    id,
+    user,
+    body: `<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-state=running -->\n<!-- qwen-triage:verify-run=${runId} -->\n\nrunning`,
+  });
+
+  // The follow-up snapshot must select the newest SUBSTANTIVE report, not
+  // the newest non-running comment: a cancelled notice passes that test,
+  // and so does a notice quoting the marker below its header.
+  it('snapshots the newest substantive report, not a weak notice', () => {
+    const calls = statusComment([
+      {
+        id: 101,
+        user: BOT,
+        body: '<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-substantive -->\n\nREAL REPORT',
+      },
+      {
+        id: 102,
+        user: BOT,
+        body: '<!-- qwen-triage:verify -->\n\ncancelled notice',
+      },
+      {
+        id: 103,
+        user: BOT,
+        body: '<!-- qwen-triage:verify -->\n\nnotice quoting\n<!-- qwen-triage:verify-substantive -->',
+      },
+    ]);
+    expect(calls).toContain(
+      'SNAP api repos/QwenLM/qwen-code/issues/comments/101 ',
+    );
+    expect(calls).not.toContain('comments/102');
+    expect(calls).not.toContain('comments/103');
+  });
+
+  // Verify jobs run one at a time per PR, but the previous round's
+  // publisher is often still queued, so its live status is still there.
+  // Taking it over put both rounds into one comment, and the later report
+  // overwrote the earlier one.
+  it("reuses only its own run's status comment", () => {
+    // The body exactly as both lookups read it: the verify marker first,
+    // then the state and this run's marker.
+    const written =
+      '-f body=<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-state=running -->\n<!-- qwen-triage:verify-run=1 -->\n\n';
+    const own = statusComment([liveStatus(201, 1), liveStatus(202, 2)]);
+    expect(own).toContain(
+      'PATCH api --method PATCH repos/QwenLM/qwen-code/issues/comments/201 ',
+    );
+    expect(own).not.toContain('comments/202');
+    expect(own).toContain(written);
+
+    // Another round's live status, a run id that only starts with ours,
+    // and our run marker in a comment the bot does not own: none is ours.
+    // ...nor is this run's published report, which a re-run must not turn
+    // back into "running", nor a report quoting both markers below its
+    // header.
+    for (const comment of [
+      liveStatus(202, 2),
+      liveStatus(212, 12),
+      liveStatus(203, 1, { login: 'someone-else' }),
+      {
+        id: 204,
+        user: BOT,
+        body: '<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-run=1 -->\n<!-- qwen-triage:verify-substantive -->\n\nreport',
+      },
+      {
+        id: 205,
+        user: BOT,
+        body: '<!-- qwen-triage:verify -->\n<!-- qwen-triage:verify-run=2 -->\n\n```\n<!-- qwen-triage:verify-state=running -->\n<!-- qwen-triage:verify-run=1 -->\n```',
+      },
+    ]) {
+      const calls = statusComment([comment]);
+      expect(calls).not.toContain('PATCH');
+      expect(calls).toContain('POST');
+      expect(calls).toContain(written);
     }
   });
 
@@ -7391,13 +7813,13 @@ describe('qwen-triage verify round-3 hardening', () => {
   });
 
   // A crashed run with no report has nothing to preserve, so it must not
-  // claim the substantive marker and overwrite the previous round's report.
+  // claim the substantive marker and displace the previous round's report
+  // as the next round's snapshot.
   it('marks a body substantive only when a report exists', () => {
     const publish = stepIn(
       'publish-verify',
       'Post verification report comment',
     );
-    expect(publish).toMatch(/if \[ -z "\$REPORT" \]; then\s+WEAK_BODY=true/);
     expect(publish).toMatch(
       /if \[ -n "\$REPORT" \]; then\s+printf '%s\\n' '<!-- qwen-triage:verify-substantive -->'/,
     );

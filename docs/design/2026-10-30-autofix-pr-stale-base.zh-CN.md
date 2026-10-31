@@ -40,7 +40,7 @@ CI 侧的 fleet workflow（`.github/workflows/qwen-autofix.yml`，rationale `af-
 ### 1. `snapshot.ts` —— 仅在 prepared 模式做惰性 compare
 
 - 新导出函数 `baseIsBehind(state, headSha)`：读取 `gh api repos/<owner>/<repo>/compare/<baseRefName>...<headSha> --jq .status`，仅当结果为 `behind` 或 `diverged` 时回答 `true`。任何错误（网络、跨 fork head 在 base 仓库无法解析时的 404、畸形输出）都回答 `false`：round 不带提示继续。
-- `runSnapshot`（prepared、非 gate 路径）在 `buildSnapshot` 之后：当 snapshot 的 action 为 `fix` 且事件中至少有一个非 `startupFailure` 的 `ci_failed` 时，调用 `baseIsBehind`；回答 `true` 时，给写入 snapshot 文件与单行 stdout 摘要的 snapshot 加上 `baseBehind: true`。
+- `runSnapshot`（prepared、非 gate 路径）在 `buildSnapshot` 之后：当 snapshot 的 action 为 `fix` 且事件中至少有一个非 `startupFailure`、且未 `exhausted`（修复推送用完、这一轮不修复的检查）的 `ci_failed` 时，调用 `baseIsBehind`；回答 `true` 时，给写入 snapshot 文件与单行 stdout 摘要的 snapshot 加上 `baseBehind: true`。
 - `Snapshot` 增加 `baseBehind?: true`，注释说明仅 prepared 模式：分支落后于 base，失败 check 可能是 base 的错。
 - gate 路径（`runGate`、`buildGateSnapshot`）不动：它本就会在每个新的失败 attempt 上唤醒 round，由 round 重新计算提示。安静的 PR 零开销。
 
@@ -54,7 +54,7 @@ CI 侧的 fleet workflow（`.github/workflows/qwen-autofix.yml`，rationale `af-
 
 ### 3. 测试
 
-- `snapshot.test.ts`（或按 `snapshot.gate.test.ts` 既有 mock 模式组织的同置测试套件）：mock `gh` 后测 `baseIsBehind`（`behind`、`diverged`、`ahead`、`identical`、抛错）；`runSnapshot` 的标志条件（有失败 check → 发起 compare；无失败 / 仅 `startupFailure` / `lagging` → 不发起 compare）。
+- `snapshot.test.ts`（或按 `snapshot.gate.test.ts` 既有 mock 模式组织的同置测试套件）：mock `gh` 后测 `baseIsBehind`（`behind`、`diverged`、`ahead`、`identical`、抛错）；`runSnapshot` 的标志条件（有失败 check → 发起 compare；无失败 / 仅 `startupFailure` / 仅 `exhausted` / `lagging` → 不发起 compare）。
 - `SKILL.test.ts`：按既有压平文本断言风格为新句子加 pin。
 
 ## 设计决策与理由
