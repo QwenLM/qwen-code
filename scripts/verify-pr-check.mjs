@@ -35,6 +35,14 @@ export const VERDICTS = ['merge-ready', 'findings', 'blocked', 'inconclusive'];
  */
 export const ATTRIBUTIONS = ['pr', 'harness', 'environment'];
 
+/**
+ * Above this many assertions, a round has almost certainly folded an existing
+ * test suite into its own counts. The four such rounds among 18 recent CI
+ * artifacts (3918 to 7737) each counted whole workspace suites; one counted
+ * them again for every mutant run, so 7737 held a few dozen checks of its own.
+ */
+const SUITE_SIZED_TOTAL = 1000;
+
 const KEBAB_PNG = /^[a-z0-9]+(?:-[a-z0-9]+)*\.png$/;
 const OID = /^[0-9a-f]{7,40}$/;
 
@@ -46,6 +54,8 @@ Checks a local round against the rules the CI publisher enforces:
   - verdict.txt is exactly one of merge-ready | findings | blocked | inconclusive
   - assertions.json holds non-negative integers, a positive total, and
     total == pass + fail
+  - assertions.json gates, when present, lists { suite, pass, fail } entries
+    (skipped optional) with non-negative integer counts
   - a merge-ready verdict carries no failed assertion
   - a findings/blocked verdict whose failures ledger attributes no failure to
     the PR is a contradiction: expected reds are passes
@@ -53,8 +63,9 @@ Checks a local round against the rules the CI publisher enforces:
     and lists at least one commit (an empty set makes the claim vacuous)
 
 and warns (without failing) when the report does not lead with its verdict and
-head OID, when evidence/ carries no kebab-case PNG capture, or when a round with
-failures carries no failures ledger at all.
+head OID, when evidence/ carries no kebab-case PNG capture, when a round with
+failures carries no failures ledger at all, or when over ${SUITE_SIZED_TOTAL} assertions
+come with no gates (an existing test suite counted as the round's own).
 
 Exit codes: 0 no errors, 1 errors found, 2 usage.
 `;
@@ -233,6 +244,33 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
           } else {
             attributions = ledger.map((entry) => entry.attribution);
           }
+        }
+        // Gate counts are the repo's existing tests, kept apart so that
+        // pass/fail/total measure what this round wrote. The messages carry
+        // no suite name: the publisher forwards error lines to its log.
+        const gates = parsed.gates;
+        const isCount = (value) => Number.isInteger(value) && value >= 0;
+        if (gates !== undefined) {
+          if (
+            !Array.isArray(gates) ||
+            gates.some(
+              (gate) =>
+                !gate ||
+                typeof gate.suite !== 'string' ||
+                gate.suite.trim() === '' ||
+                !isCount(gate.pass) ||
+                !isCount(gate.fail) ||
+                (gate.skipped !== undefined && !isCount(gate.skipped)),
+            )
+          ) {
+            errors.push(
+              'assertions.json gates must be an array of { suite, pass, fail } entries with non-negative integer counts (skipped optional)',
+            );
+          }
+        } else if (counts.total > SUITE_SIZED_TOTAL) {
+          warnings.push(
+            `assertions.json counts ${counts.total} assertions and records no gates: an existing test suite's results belong in gates, not in pass, fail and total`,
+          );
         }
       }
     }

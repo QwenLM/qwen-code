@@ -1287,6 +1287,16 @@ vitest) and cite exact counts. Never claim a repo-wide gate you did not run;
 never re-run what the PR's own CI already covers unless your A/B needs the
 number from a known-clean state.
 
+**Gate counts are not assertions.** Record each suite under `gates` in
+`assertions.json`, as `{"suite": "cli acp-session", "pass": 1292, "fail": 0}`,
+never in `pass`, `fail` or `total`. Those count the checks this round wrote.
+Folding a suite in turns them into a count of the repo's tests: a round
+published "7737 scripted assertions" while holding a few dozen checks of its
+own. A mutant run is likewise one assertion (killed, or survived as
+predicted), not its suite's test count. A gate red the PR causes still reaches
+the verdict as an assertion, green at base and red at head, with its
+attribution.
+
 **Prove the gate is live before citing it as evidence.** A linter that exits
 0 because it matched no files looks exactly like a linter that passed: plant
 a violation it must catch (an unused variable, a formatting break), confirm
@@ -1525,7 +1535,9 @@ workflow globs). It must contain:
   nonzero add `failures`, one `{id, attribution}` entry per failed assertion,
   with `attribution` one of `pr`, `harness` or `environment` — the verdict is
   read from that ledger, so a red the PR did not cause cannot decide it (see
-  **Hard rules**).
+  **Hard rules**). Existing test suites run as targeted gates go in `gates`,
+  one `{suite, pass, fail}` entry per suite (`skipped` optional), never in the
+  three counts (see _Targeted gates_).
 - `mutations.json` — the mutation matrix as data, whenever the round ran one:
   `rows[]`, and, when the report claims per-commit coverage,
   `coverageClaim: "per-commit"` plus `productionCommits` from

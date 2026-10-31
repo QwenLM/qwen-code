@@ -6451,6 +6451,139 @@ describe('qwen-triage verify publish fidelity', () => {
     }
   });
 
+  // Rounds folded whole workspace suites into their assertion counts.
+  // Suite results now have a line of their own, as totals only: a suite
+  // name is agent-chosen text.
+  it('prints gate totals on a line of their own', () => {
+    const dir = fixture();
+    const file = join(
+      dir,
+      'work',
+      'verify-results',
+      'prA-verify-1',
+      'assertions.json',
+    );
+    const counts = { pass: 10, fail: 0, total: 10 };
+    const publishWith = (name, assertions) => {
+      writeFileSync(file, JSON.stringify(assertions));
+      return render(dir, { NAME: name, AGENT_VERDICT: 'merge-ready' });
+    };
+    try {
+      const body = publishWith('gates', {
+        ...counts,
+        gates: [
+          { suite: '@everyone <!-- x -->', pass: 1290, fail: 2, skipped: 1 },
+          { suite: 'core client', pass: 619, fail: 0 },
+        ],
+      });
+      expect(body).toContain(
+        'Scripted assertions: 10 passed · 0 failed · 10 total',
+      );
+      expect(body).toContain(
+        'Targeted gates (existing tests, not counted above): 1909 passed · 2 failed · 1 skipped across 2 suite(s)',
+      );
+      expect(
+        body.indexOf(
+          '定向门禁（已有测试，不计入上面的断言）：1909 通过 · 2 失败 · 1 跳过，共 2 个套件',
+        ),
+      ).toBeGreaterThan(body.indexOf('<details>'));
+      expect(body).not.toContain('@everyone');
+      // A gate red is the repo's test result: the verdict still comes from
+      // the round's own assertions and their ledger.
+      expect(body).toContain('✅ passed');
+
+      // No list prints no line. Neither does a malformed one, and the
+      // checker refuses it, so the verdict is not trusted either.
+      expect(publishWith('gates-none', counts)).not.toContain('Targeted gates');
+      expect(
+        publishWith('gates-empty', { ...counts, gates: [] }),
+      ).not.toContain('Targeted gates');
+      for (const gates of [
+        [{ suite: 'x', pass: '1290', fail: 0 }],
+        [{ pass: 1290, fail: 0 }],
+        [{ suite: 'x', pass: -1, fail: 0 }],
+        [{ suite: 'x', pass: 1, fail: -1 }],
+        [{ suite: 'x', pass: 1, fail: 0, skipped: 0.5 }],
+      ]) {
+        const bad = publishWith('gates-bad', { ...counts, gates });
+        expect(bad).not.toContain('Targeted gates');
+        expect(bad).not.toContain('定向门禁（');
+        expect(bad).toContain('⚠️ inconclusive');
+      }
+      // Gates ride the validated triple: an inconsistent one drops both.
+      expect(
+        publishWith('gates-triple', {
+          pass: 10,
+          fail: 0,
+          total: 9,
+          gates: [{ suite: 'x', pass: 1, fail: 0 }],
+        }),
+      ).not.toContain('Targeted gates');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // The publisher reads `gates` only if rounds write it: both places the
+  // skill defines the counts have to say where suite results go.
+  it('teaches the gates field the publisher reads', () => {
+    const flat = verifySkill.replace(/\s+/g, ' ');
+    expect(flat).toContain('Gate counts are not assertions');
+    expect(flat).toContain('never in `pass`, `fail` or `total`');
+    expect(flat).toContain('A mutant run is likewise one assertion');
+    expect(flat).toContain('one `{suite, pass, fail}` entry per suite');
+  });
+
+  // The checker runs only for a completed run with a report, valid counts
+  // and a verdict word. Without one of them the verdict is untrusted anyway,
+  // and a checker run would add a refusal sentence about the wrong cause.
+  // (A verdict is only read beside a report, so no report means no verdict.)
+  it('consults the checker only when there is a verdict to check', () => {
+    const dir = fixture();
+    const calls = join(dir, 'checker-calls');
+    const stub = join(dir, 'checker-stub.mjs');
+    writeFileSync(
+      stub,
+      `import { appendFileSync } from 'node:fs';\nappendFileSync(${JSON.stringify(calls)}, 'called\\n');\n`,
+    );
+    const consulted = (env) => {
+      rmSync(calls, { force: true });
+      const body = render(dir, { VERIFY_PR_CHECK: stub, ...env });
+      return { body, called: existsSync(calls) };
+    };
+    try {
+      // Control: with every input present the stub is reached.
+      expect(
+        consulted({ NAME: 'leg-all', AGENT_VERDICT: 'merge-ready' }).called,
+      ).toBe(true);
+      const legs = [
+        {
+          NAME: 'leg-timeout',
+          AGENT_VERDICT: 'merge-ready',
+          VERDICT: 'timeout',
+        },
+        { NAME: 'leg-noverdict' },
+      ];
+      for (const env of legs) {
+        const { body, called } = consulted(env);
+        expect(called).toBe(false);
+        expect(body).not.toContain('consistency check');
+      }
+      writeFileSync(
+        join(dir, 'work', 'verify-results', 'prA-verify-1', 'assertions.json'),
+        '{"pass":1,"fail":0,"total":0}',
+      );
+      const { body, called } = consulted({
+        NAME: 'leg-counts',
+        AGENT_VERDICT: 'merge-ready',
+      });
+      expect(called).toBe(false);
+      expect(body).not.toContain('consistency check');
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   // #7836: when the agent claims merge-ready but assertions.json records
   // failures, the publisher must explain the mismatch in the comment body
   // so a reader does not see a hedged headline above "7 failed" with
@@ -6470,6 +6603,12 @@ describe('qwen-triage verify publish fidelity', () => {
       expect(body).toContain(
         'The agent reported `merge-ready`, but `assertions.json` recorded 7 failures',
       );
+      // The checker's rule, not an invitation to excuse the failures.
+      expect(body).toContain(
+        'an expected A/B control red counts as a pass, so a recorded failure contradicts `merge-ready`',
+      );
+      expect(body).not.toContain('see the report for whether');
+      expect(body).toContain('与 `merge-ready` 相矛盾');
       expect(body).toContain('\u26a0\ufe0f inconclusive');
       expect(body).not.toContain('\u2705 passed');
       // The Chinese counterpart must sit INSIDE the fold, so a Chinese-only

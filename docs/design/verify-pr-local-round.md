@@ -78,8 +78,8 @@ them rather than at the end of the document.
   when every call succeeded. `--compare --start <a> --now <b>` reports every
   reason the round is dirty and exits 1.
 
-The checker gains two rules over the artifacts the contract asks the round to
-write. The artifact contract names both, because a file no artifact list asks
+The checker gains three rules over the artifacts the contract asks the round
+to write. The artifact contract names both, because a file no artifact list asks
 for is a file no round produces, and a check over an absent file is silent:
 
 - `assertions.json` carries `failures: [{ id, attribution }]` whenever `fail` is
@@ -93,6 +93,13 @@ for is a file no round produces, and a check over an absent file is silent:
 <target>` and
   `rows[].commit`. A listed commit with no row is an error naming the commits,
   and so is an empty list: a claim over no commits is vacuously true.
+- `assertions.json` may carry `gates: [{ suite, pass, fail, skipped? }]`, one
+  entry per existing test suite the round ran as a targeted gate. Those counts
+  stay out of `pass`/`fail`/`total`, which count only the checks the round
+  wrote, and the publisher prints their totals on a line of their own. A
+  malformed list is an error. Over 1000 assertions with no `gates` is a
+  warning: the four such rounds among 18 recent CI artifacts had each counted
+  whole workspace suites.
 
 Each prepared artifact directory keeps `context.json` with the round's full
 coordinates — `repo`, `pr`, `baseRefOid` and `headRefOid` — so a local round
