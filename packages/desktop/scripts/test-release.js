@@ -114,10 +114,33 @@ async function testBootstrapWorkspaceVisibility() {
     path.join(packageDir, 'src-tauri', 'src', 'runtime.rs'),
     'utf8',
   );
+  const startBody =
+    runtimeSource.match(/pub fn start\([\s\S]*?\n {4}\}\n/)?.[0] ?? '';
+  assert.ok(
+    !startBody.includes('/*'),
+    'DesktopRuntime::start must not hide the spawn_runtime_group call inside a block comment.',
+  );
   assert.match(
-    runtimeSource,
-    /let mut child = spawn_runtime_group\(&mut command\)/,
+    startBody,
+    /\n\s*let mut child = spawn_runtime_group\(&mut command\)/,
     'DesktopRuntime::start must spawn the runtime through the hidden-console helper.',
+  );
+  // kill_on_drop maps to KILL_ON_JOB_CLOSE; without it a force-killed desktop
+  // leaves the daemon holding node.exe and blocks the next update. Job objects
+  // only exist on Windows, so the Windows-only unit test pins the behaviour on
+  // the desktop lane; this pin runs everywhere. A regex cannot tell a call from
+  // a comment, and the line anchor only defeats `//` and same-line `/*`, so
+  // reject block comments in the slice outright.
+  const spawnGroup =
+    runtimeSource.match(/fn spawn_runtime_group[\s\S]*?\n\}\n/)?.[0] ?? '';
+  assert.ok(
+    !spawnGroup.includes('/*'),
+    'spawn_runtime_group must not hide kill_on_drop inside a block comment.',
+  );
+  assert.match(
+    spawnGroup,
+    /\n\s*\.kill_on_drop\(true\)\s*\n\s*\.creation_flags\(CREATE_NO_WINDOW\)/,
+    'spawn_runtime_group must keep kill_on_drop(true) so the daemon cannot outlive the desktop.',
   );
   const primary = await createBootstrapHarness();
   const { body, commands, element, listeners, resolveBootstrapState } = primary;
@@ -1489,6 +1512,22 @@ function testUpdaterMirrorConfiguration() {
   assert.match(
     main,
     /app\.updater_builder\(\)\s*\.timeout\(UPDATE_CHECK_TIMEOUT\)/,
+  );
+  // The runtime must be stopped before the Windows installer is spawned, and
+  // the plugin's default cleanup hook must survive: on_before_exit replaces
+  // rather than appends, so dropping either half re-opens #15276 or skips
+  // Tauri's cleanup. Slice the function body so relocation cannot pass, and
+  // reject block comments: a regex cannot tell a call from a comment.
+  const checkForUpdate =
+    main.match(/async fn check_for_update[\s\S]*?\n\}\n/)?.[0] ?? '';
+  assert.ok(
+    !checkForUpdate.includes('/*'),
+    'check_for_update must not hide the on_before_exit hook inside a block comment.',
+  );
+  assert.match(
+    checkForUpdate,
+    /\.on_before_exit\(move \|\| \{\s*stop_runtime\(&exit_handle\);\s*exit_handle\.cleanup_before_exit\(\);\s*\}\)/,
+    'check_for_update must stop the bundled runtime and keep the default cleanup hook before the installer exits the app.',
   );
   assert.match(main, /"QWEN_DESKTOP_DISABLE_UPDATES"/);
   // The adapter must actually read the env var: without this pin, rewiring

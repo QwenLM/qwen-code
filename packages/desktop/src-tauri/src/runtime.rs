@@ -149,7 +149,13 @@ impl Drop for DesktopRuntime {
 #[cfg(windows)]
 fn spawn_runtime_group(command: &mut Command) -> std::io::Result<GroupChild> {
     const CREATE_NO_WINDOW: u32 = 0x08000000;
-    command.group().creation_flags(CREATE_NO_WINDOW).spawn()
+    command
+        .group()
+        // KILL_ON_JOB_CLOSE: a daemon orphaned by a crashed or force-killed
+        // desktop keeps node.exe locked and blocks the next update.
+        .kill_on_drop(true)
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
 }
 
 #[cfg(not(windows))]
@@ -614,11 +620,13 @@ mod tests {
     #[cfg(unix)]
     use super::{stop_runtime_handle, wait_for_listening};
     #[cfg(windows)]
-    use super::{layout_from_root, spawn_runtime_group};
+    use super::{layout_from_root, spawn_runtime_group, stop_runtime_handle};
     use std::path::Path;
     #[cfg(windows)]
     use std::path::PathBuf;
     #[cfg(unix)]
+    use std::sync::Arc;
+    #[cfg(windows)]
     use std::sync::Arc;
     use std::sync::Mutex;
     use url::Url;
@@ -701,6 +709,70 @@ mod tests {
             "0",
             "the runtime child must not receive a console window"
         );
+    }
+
+    // kill_on_drop maps to KILL_ON_JOB_CLOSE, so dropping the group handle must
+    // take the daemon with it; otherwise a crashed desktop leaves it holding
+    // node.exe and blocks the next update (#15276).
+    #[cfg(windows)]
+    #[test]
+    fn dropping_the_runtime_group_kills_the_daemon() {
+        use std::time::{Duration, Instant};
+
+        let mut command = std::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep 60"]);
+        let mut child = spawn_runtime_group(&mut command).expect("spawn long-lived runtime child");
+        assert!(
+            child.try_wait().expect("inspect runtime child").is_none(),
+            "probe exited before the group was dropped"
+        );
+        let pid = child.id();
+        drop(child);
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let probe =
+                format!("if (Get-Process -Id {pid} -ErrorAction SilentlyContinue) {{ exit 1 }}");
+            let alive = std::process::Command::new("powershell.exe")
+                .args(["-NoProfile", "-NonInteractive", "-Command", probe.as_str()])
+                .status()
+                .map(|status| !status.success())
+                .unwrap_or(true);
+            if !alive {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "daemon {pid} outlived the dropped runtime group"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    // The updater hook runs inline and its wait has no timeout, so a blocking
+    // stop would hang the update after the daemon is already dead (#15276).
+    #[cfg(windows)]
+    #[test]
+    fn pending_stop_reaps_a_child_taken_from_the_shared_handle_on_windows() {
+        let mut command = std::process::Command::new("powershell.exe");
+        command.args(["-NoProfile", "-NonInteractive", "-Command", "Start-Sleep 60"]);
+        let mut group_child =
+            spawn_runtime_group(&mut command).expect("spawn long-lived runtime child");
+        assert!(
+            group_child
+                .try_wait()
+                .expect("inspect runtime child")
+                .is_none(),
+            "probe exited before the stop"
+        );
+        let handle = Arc::new(Mutex::new(Some(group_child)));
+        let started = std::time::Instant::now();
+        stop_runtime_handle(&handle);
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(10),
+            "stop blocked, so the child was not killed"
+        );
+        assert!(handle.lock().expect("handle").is_none());
     }
 
     #[cfg(windows)]
