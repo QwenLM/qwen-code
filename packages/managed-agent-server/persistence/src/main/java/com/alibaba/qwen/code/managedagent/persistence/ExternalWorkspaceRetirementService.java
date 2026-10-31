@@ -5,8 +5,8 @@ import com.alibaba.qwen.code.runtimebroker.BrokerValues;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.persistence.JdbcRuntimeBindingRepository;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceRecoveryGateway;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -180,7 +180,9 @@ public final class ExternalWorkspaceRetirementService {
     }
 
     private void requireOriginal(Request request, RuntimeBindingRecord binding) {
-        require(binding != null && ExternalWorkspaceProvisioner.isWorkspaceRequest(binding.getRequest()));
+        require(binding != null
+                && WorkspaceExecutionProfile.isExternalWorkspaceRequest(
+                        binding.getRequest()));
         var scope = binding.getRequest().getScope();
         require("workspace".equals(scope.getIsolationClass()) && request.tenantId().equals(scope.getTenantId())
                 && request.workspaceId().equals(scope.getWorkspaceId())

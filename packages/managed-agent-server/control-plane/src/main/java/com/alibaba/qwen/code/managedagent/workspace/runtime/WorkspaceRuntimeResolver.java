@@ -107,7 +107,8 @@ public final class WorkspaceRuntimeResolver {
                 .orElseThrow(WorkspaceExecutionStore::unavailable);
         if (authority.isExternal(session.workspace())) {
             if (hook || managedExtensions.isEnabled() || externalRegistrations == null
-                    || !"session".equals(boundSessionIsolationClass)) {
+                    || !java.util.Set.of("session", "workspace")
+                            .contains(boundSessionIsolationClass)) {
                 throw WorkspaceExecutionStore.unavailable();
             }
             authority.authorizeExternal(session, lifecycle);
@@ -119,7 +120,9 @@ public final class WorkspaceRuntimeResolver {
             }
             return new Resolved(saved, new RuntimeScope(session.tenantId(), saved.getWorkspaceId(),
                     Long.toString(saved.getWorkspaceGeneration()), registered.mountRoot(),
-                    WorkspaceExecutionProfile.CAPABILITY_DIGEST, "session").withLifecycleAuthority(lifecycle));
+                    WorkspaceExecutionProfile.CAPABILITY_DIGEST,
+                    boundSessionIsolationClass)
+                    .withLifecycleAuthority(lifecycle));
         }
         if (lifecycle == null && hook && "CLOSING".equals(session.status())) {
             authority.authorizeLegacyClose(session);
@@ -241,6 +244,24 @@ public final class WorkspaceRuntimeResolver {
             throw com.alibaba.qwen.code.managedagent.repository.WorkspaceExecutionStore.unavailable();
         }
         verifyMountIntact(mount);
+    }
+
+    /** 共享 external Workspace 没有 owning Session，只校验原注册和 scope 连续性。 */
+    public void requireExternalWorkspaceCurrent(
+            RuntimeScope scope, String storageId) {
+        if (externalRegistrations == null
+                || !scope.getWorkspaceId().equals(storageId)
+                || !WorkspaceExecutionProfile.isBoundWorkspaceScope(scope)
+                || !"workspace".equals(scope.getIsolationClass())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
+        var registered = externalRegistrations.find(
+                        scope.getTenantId(), storageId)
+                .orElseThrow(WorkspaceExecutionStore::unavailable);
+        if (!storageId.equals(registered.tenantWorkspaceId())
+                || !scope.getCanonicalCwd().equals(registered.mountRoot())) {
+            throw WorkspaceExecutionStore.unavailable();
+        }
     }
 
     private Mount mount(ContextBinding binding) {

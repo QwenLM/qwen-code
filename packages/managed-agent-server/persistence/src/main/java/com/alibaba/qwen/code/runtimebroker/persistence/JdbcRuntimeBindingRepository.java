@@ -143,6 +143,15 @@ public final class JdbcRuntimeBindingRepository
     @Override
     public RuntimeSessionRecord completeStoppedSessionRelease(RuntimeSessionRepository sessions,
             ToolExecutionRepository executions, RuntimeSessionRecord expected, RuntimeBindingRecord claim) {
+        if (com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile
+                        .isExternalWorkspaceRequest(claim.getRequest())
+                && HarnessOwnership.sharesRuntimeSessions(
+                        claim.getRequest())) {
+            throw new RuntimeBrokerException(409,
+                    "external_workspace_recovery_required",
+                    "A resident Workspace cannot be destroyed by closing one Session",
+                    false);
+        }
         if (!(sessions instanceof JdbcRuntimeSessionRepository jdbcSessions)
                 || !jdbcSessions.usesDataSource(dataSource)
                 || !(executions instanceof JdbcToolExecutionRepository jdbcExecutions)
@@ -155,8 +164,14 @@ public final class JdbcRuntimeBindingRepository
                     .isExternalWorkspaceRequest(claim.getRequest());
             var externalOwner = external ? JdbcExternalWorkspaceOwnership.lockOwner(connection, claim) : null;
             if (external) {
-                JdbcExternalWorkspaceOwnership.savedContext(connection, claim, false);
-                requireExternalHarnessAdmission(connection, claim.getRequest(), claim.getRequest().getScope(), true);
+                String harnessSessionId =
+                        expected.getSession().getHarnessSessionId();
+                JdbcExternalWorkspaceOwnership.savedContext(
+                        connection, claim, harnessSessionId, false);
+                requireExternalHarnessAdmission(
+                        connection, claim.getRequest(),
+                        claim.getRequest().getScope(),
+                        harnessSessionId, true);
             }
             String physical = external ? null : localStorageOwnerKey(connection, claim.getRequest().getScope().getTenantId(),
                     claim.getRequest().getStorageId(), true);

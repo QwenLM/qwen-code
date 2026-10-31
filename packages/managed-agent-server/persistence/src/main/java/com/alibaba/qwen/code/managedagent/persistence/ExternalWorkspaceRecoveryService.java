@@ -4,8 +4,8 @@ import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRecord;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBindingRepository;
 import com.alibaba.qwen.code.runtimebroker.RuntimeBrokerException;
 import com.alibaba.qwen.code.runtimebroker.ToolExecutionRepository;
+import com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile;
 import com.alibaba.qwen.code.runtimebroker.managedworkspace.WorkspaceAccess;
-import com.alibaba.qwen.code.runtimebroker.provisioning.ExternalWorkspaceProvisioner;
 import com.alibaba.qwen.code.runtimebroker.spi.ExternalWorkspaceRecoveryGateway;
 import com.fasterxml.jackson.annotation.JsonIgnore;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -122,7 +122,7 @@ public final class ExternalWorkspaceRecoveryService {
         var request = binding.getRequest();
         var scope = request.getScope();
         if (!tenantId.equals(scope.getTenantId()) || !workspaceId.equals(scope.getWorkspaceId())
-                || !ExternalWorkspaceProvisioner.isWorkspaceRequest(request)
+                || !WorkspaceExecutionProfile.isExternalWorkspaceRequest(request)
                 || !"workspace".equals(scope.getIsolationClass())
                 || (binding.getState() != RuntimeBindingRecord.State.READY
                         && binding.getState() != RuntimeBindingRecord.State.RECOVERY_BLOCKED)

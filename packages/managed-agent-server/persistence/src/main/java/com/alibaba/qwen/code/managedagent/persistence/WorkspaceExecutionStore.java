@@ -819,12 +819,16 @@ public class WorkspaceExecutionStore
 
     public boolean canStopExternalDrained(RuntimeBindingRecord saved, RuntimeBindingRepository repository) {
         if (!com.alibaba.qwen.code.runtimebroker.WorkspaceExecutionProfile.isExternalWorkspaceRequest(saved.getRequest())
+                || HarnessOwnership.sharesRuntimeSessions(saved.getRequest())
                 || saved.getState() != RuntimeBindingRecord.State.DRAINING && saved.getState() != RuntimeBindingRecord.State.LOST
                 || !saved.isDrainRequested()
                 || saved.getOperationOwner() == null) {
             return false;
         }
-        return external(null, saved, repository, saved.getRequest().getScope(), false, (connection, owner, current) -> {
+        return external(null, saved, repository,
+                saved.getRequest().getScope(),
+                saved.getRequest().getIsolationKey(), false,
+                (connection, owner, current) -> {
             JdbcExternalWorkspaceOwnership.requireDrainMembers(connection, owner, current);
             return noActiveExecutions(current);
         });
