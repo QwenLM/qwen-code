@@ -2250,6 +2250,95 @@ describe('OpenAIContentConverter', () => {
 
     it.each([
       [
+        'non-streaming',
+        (extra: Record<string, unknown>) =>
+          toLlm([], { usage: usage(3, 1, 4, extra) }),
+      ],
+      [
+        'streaming usage-only',
+        (extra: Record<string, unknown>) =>
+          usageChunk(withStreamParser(), usage(3, 1, 4, extra)),
+      ],
+    ])('preserves cache-write provenance for %s usage', (_title, convert) => {
+      const response = convert({
+        prompt_tokens_details: { cache_write_tokens: 256 },
+      });
+
+      expect(response.usageMetadata?.promptTokenCount).toBe(3);
+      expect(response.usageMetadata?.candidatesTokenCount).toBe(1);
+      expect(response.usageMetadata?.cachedContentTokenCount).toBe(0);
+      expect(
+        getGenAiUsageProvenance(response.usageMetadata)
+          ?.cachedInputTokensReported,
+      ).toBe(false);
+      expect(
+        getGenAiUsageProvenance(response.usageMetadata)
+          ?.cacheCreationInputTokens,
+      ).toBe(256);
+    });
+
+    it.each([
+      [
+        'non-streaming',
+        (extra: Record<string, unknown>) =>
+          toLlm([], { usage: usage(3, 1, 4, extra) }),
+      ],
+      [
+        'streaming usage-only',
+        (extra: Record<string, unknown>) =>
+          usageChunk(withStreamParser(), usage(3, 1, 4, extra)),
+      ],
+    ])(
+      'keeps cache reads and writes distinct for %s usage',
+      (_title, convert) => {
+        const response = convert({
+          prompt_tokens_details: {
+            cached_tokens: 100,
+            cache_write_tokens: 256,
+          },
+        });
+
+        expect(response.usageMetadata?.promptTokenCount).toBe(3);
+        expect(response.usageMetadata?.candidatesTokenCount).toBe(1);
+        expect(response.usageMetadata?.cachedContentTokenCount).toBe(100);
+        expect(getGenAiUsageProvenance(response.usageMetadata)).toMatchObject({
+          cachedInputTokensReported: true,
+          cacheCreationInputTokens: 256,
+        });
+      },
+    );
+
+    it.each([
+      [
+        'non-streaming',
+        (extra: Record<string, unknown>) =>
+          toLlm([], { usage: usage(3, 1, 4, extra) }),
+      ],
+      [
+        'streaming usage-only',
+        (extra: Record<string, unknown>) =>
+          usageChunk(withStreamParser(), usage(3, 1, 4, extra)),
+      ],
+    ])(
+      'distinguishes absent and explicit-zero cache-write fields for %s usage',
+      (_title, convert) => {
+        const absent = convert({});
+        const zero = convert({
+          prompt_tokens_details: { cache_write_tokens: 0 },
+        });
+
+        expect(
+          getGenAiUsageProvenance(absent.usageMetadata)
+            ?.cacheCreationInputTokens,
+        ).toBeUndefined();
+        expect(
+          getGenAiUsageProvenance(zero.usageMetadata)?.cacheCreationInputTokens,
+        ).toBe(0);
+      },
+    );
+
+    it.each([
+      [
         'estimates missing reasoning tokens from non-streaming content',
         { reasoning_content: '先仔细想' },
         usage(1, 10, 11),
