@@ -1801,6 +1801,54 @@ describe('bundled review skill', () => {
     expect(posting).not.toContain('occurs _anywhere_ in its body');
   });
 
+  it('warns that --new-findings is not the canonical artifact (#9218)', () => {
+    // Revert guard: the artifact's `line` is the agent's claim and its `id`
+    // sits on every finding, so handing this flag the artifact makes the
+    // overlap dedup key on a line no comment was placed at — a duplicate then
+    // reads as disjoint. The step that writes the file has to say so, name the
+    // resolver's input as the other forbidden sibling, and keep the three
+    // qualifications that make the recipe safe: the body-only placeholder the
+    // resolver cannot carry, the carried-only `id`, and the `startLine` rename
+    // a mechanical projection trips over (#9218 review).
+    const posting = referenceBody('posting.md');
+    // Unique to this sentence. The bare phrase "is the agent's claim" also sits
+    // in the resolver section, where it would keep the assertion green after
+    // the rationale here was reworded (#9218 review, R1-6).
+    expect(posting).toContain(
+      "the artifact's `locations[].line` is the agent's claim",
+    );
+    expect(posting).toContain("nor the resolver's INPUT `…-anchors.json`");
+    expect(posting).toContain('raw `…-anchors-resolved.json` output');
+    expect(posting).toContain(
+      'only `path`, `line`, `start_line`, and optional carried `id`',
+    );
+    expect(posting).toContain('drop `anchor` and all other resolver metadata');
+    expect(posting).toContain(
+      'spells the range field `startLine`, so rename it',
+    );
+    expect(posting).toContain(
+      '`line` must be a nonnegative integer (missing/null means 0)',
+    );
+    expect(posting).toContain(
+      '`start_line`, when present, must be a positive integer with a positive `line`',
+    );
+    expect(posting).toContain(
+      'still add one id-less placeholder `{path, line}` for every body-only Critical',
+    );
+    expect(posting).toContain(
+      "an aggregate's locations carry `<id>-k`, which this shape refuses",
+    );
+    expect(posting).toContain(
+      'Match the full finding ID or its `<findingId>-k` expansion',
+    );
+    expect(posting).toContain(
+      'never blindly strip a trailing `-<n>`, because a standalone ledger ID such as `R3-2` is already complete',
+    );
+    expect(posting).toContain(
+      'must never be written over the canonical artifact',
+    );
+  });
+
   it("joins the repost exemption on the id alone — a carry-reply entry sits at the reply's location, not the finding's (#9940 review, round 29)", () => {
     // presubmit's reply carrier matches a wanted id at ANY location (its
     // anchor may be unmapped or the finding moved); a location-qualified
