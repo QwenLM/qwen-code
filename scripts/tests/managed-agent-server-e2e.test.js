@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { inspect } from 'node:util';
+import { inspect, isDeepStrictEqual } from 'node:util';
 import {
   createSourceFile,
   isArrayLiteralExpression,
@@ -55,7 +55,7 @@ describe('managed-agent-server e2e runner', () => {
   it('queries tables from the shared fresh-database baseline', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     const baseline = read(
-      'packages/managed-agent-server/src/main/resources/db/managed-schema/V1__managed_schema.sql',
+      'packages/managed-agent-server/persistence/src/main/resources/db/managed-schema/V1__managed_schema.sql',
     );
     const tables = new Set(
       [...baseline.matchAll(/CREATE TABLE (\w+)/g)].map((match) => match[1]),
@@ -288,6 +288,28 @@ describe('managed-agent-server e2e runner', () => {
     expect(approvalDecisionCommitted('decided\t1\t1')).toBe(true);
   });
 
+  it('recognizes only a turn.settled store commit as the terminal write', () => {
+    const { commitCarriesTurnSettled } = load(
+      ['commitCarriesTurnSettled'],
+      'commitCarriesTurnSettled',
+    )();
+    const commit = (kind) =>
+      Buffer.from(
+        JSON.stringify({
+          recordBytesBase64: Buffer.from(
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: { kind },
+            }),
+          ).toString('base64'),
+        }),
+      );
+    expect(commitCarriesTurnSettled(commit('turn.settled'))).toBe(true);
+    expect(commitCarriesTurnSettled(commit('message.committed'))).toBe(false);
+    expect(commitCarriesTurnSettled(Buffer.from('{}'))).toBe(false);
+    expect(commitCarriesTurnSettled(Buffer.from('not json'))).toBe(false);
+  });
+
   it('pins the #14481 approval fault arms to durable barriers', () => {
     const source = read('scripts/run-managed-agent-server-e2e.ts');
     const workflow = read('.github/workflows/sdk-java.yml');
@@ -296,8 +318,13 @@ describe('managed-agent-server e2e runner', () => {
       'test:e2e:managed-harness-restart-approval-after-decision',
       'test:e2e:managed-harness-restart-approval-after-prepare',
       'test:e2e:managed-harness-restart-approval-after-result',
+      'test:e2e:managed-harness-restart-approval-finished-before-commit',
       'test:e2e:managed-harness-restart-approval-decision-reply-lost',
       'test:e2e:managed-harness-restart-approval-admission-reply-lost',
+      'test:e2e:managed-harness-restart-approval-load-reply-lost',
+      'test:e2e:managed-harness-restart-approval-terminal-reply-lost',
+      'test:e2e:managed-harness-restart-approval-terminal-write-failed',
+      'test:e2e:managed-harness-restart-approval-cleanup-failed',
     ];
     for (const script of scripts) {
       expect(manifest, `${script} must be an npm script`).toContain(
@@ -324,8 +351,8 @@ describe('managed-agent-server e2e runner', () => {
       scrap,
       'the crashed home must be scrapped before recovery',
     ).toBeLessThan(recovery);
-    expect(source).toContain(
-      "await waitUntil(\n          'Post-fault recovery Harness adopted the Session'",
+    expect(source).toMatch(
+      /await waitUntil\(\s*'Post-fault recovery Harness adopted the Session'/,
     );
     // The partial-prepare crash needs the held :start and a PREPARED row
     // with no dispatch, or it degrades into the after-decision barrier.
@@ -376,6 +403,690 @@ describe('managed-agent-server e2e runner', () => {
     // R1-5: the pre-dispatch proxy must never hold after-result's :start.
     expect(source.slice(proxy - 500, proxy)).not.toContain(
       "approvalFault === 'after-result'",
+    );
+    // C1 arms its crash barrier only after the store confirms a 200, and
+    // records that pre-crash count; a non-200 first commit must not pass.
+    expect(source).toContain('forwarded 200 dropped reply');
+    expect(source).toContain('terminalAcceptsAtBarrier');
+    expect(source).toContain('postCrashTerminalAccepts');
+    expect(source).toContain('did not commit the terminal before recovery');
+    // C1/C2: the store proxy must be armed before the decision and must
+    // distinguish a lost reply (committed) from a refused write (missing).
+    expect(source).toContain('storeFaultProxy = await startStoreFaultProxy');
+    expect(source).toContain('Terminal commit store fault observed');
+    expect(source).toContain('storeFaultProxy?.armTerminal(');
+    expect(source).toContain('storeFaultProxy?.allowTerminal()');
+    expect(source).toContain('commitCarriesTurnSettled');
+    expect(source).toContain('Terminal write fault was not compensated');
+    // C1 must drop every bounded retry, not only the first answer, or the
+    // doomed generation can receive a replay before the crash.
+    expect(source).toContain('&& !terminalAllowed');
+    // A terminal alone is not the answer: the surviving transcript must
+    // still carry the model response.
+    expect(source).toContain('Approval recovery answer differs');
+    // C3 refuses the release until the crash, then reopens it so the
+    // replacement's own release is witnessed on the same proxy, and the
+    // crash only lands once the control plane projected the terminal.
+    expect(source).toContain('releaseFailureCount: () => releaseFailureCount');
+    expect(source).toContain('replacementBrokerProxy.allowRelease()');
+    expect(source).toContain("'Runtime cleanup release refused'");
+    expect(source).toContain(
+      "'Original Turn projected before the cleanup crash'",
+    );
+    expect(source).toContain(
+      "'Post-fault cleanup retry reached the replacement'",
+    );
+    expect(source).toContain(
+      'Cleanup fault was not retried after the replacement',
+    );
+    expect(source).toContain("owner_kind='HOSTED_CLEANUP'");
+    // A4 loses the first takeover load reply once via a test-gated hook on the
+    // replacement, and asserts the fault landed before trusting the recovery
+    // (a redrive that never lost a reply would prove nothing).
+    expect(source).toContain('QWEN_E2E_DROP_LOAD_REPLY: session.id');
+    expect(source).toContain("'Takeover load reply lost'");
+    expect(source).toContain('E2E dropping first load reply');
+    const harnessSource = read(
+      'packages/cli/src/serve/hosted-harness-session.ts',
+    );
+    expect(harnessSource).toContain("process.env['QWEN_E2E_DROP_LOAD_REPLY']");
+    expect(harnessSource).toContain('E2E dropping first load reply');
+    // B3a crashes the replacement inside the window after its post-tool stream
+    // Finished marker is durable but before the assistant commit, via a
+    // test-gated hook set only on that generation. The barrier proves the
+    // fault landed; the recovery parity proves the next generation reissued
+    // the saved request rather than compensating an already-committed terminal.
+    expect(source).toContain(
+      'QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT: session.id',
+    );
+    expect(source).toContain(
+      "'Finished turn held before the assistant commit'",
+    );
+    expect(source).toContain(
+      'E2E holding finished turn before assistant commit',
+    );
+    // The flag rides only the crashing generation, never the recovery one.
+    // Pin both call sites and the parameter default, not merely the
+    // identifiers (which appear at several runner sites): giving the recovery
+    // generation the flag, or flipping the default to true, must red here.
+    expect(source).toMatch(
+      /startReplacementHarness\(\s*'Replacement Hosted Harness',\s*approvalFault === 'finished-before-commit',\s*approvalFault === 'sibling-approval',?\s*\)/,
+    );
+    expect(source).toMatch(
+      /startReplacementHarness\(\s*'Post-fault recovery Harness',?\s*\)/,
+    );
+    expect(source).toContain('crashBeforeAssistantCommit = false');
+    expect(source).toContain('holdPendingSiblingApproval = false');
+    // B3a asserts the durable crash precondition (the approved result settled)
+    // from MySQL like the sibling crash arms, not only the hook's log line.
+    expect(source).toContain(
+      'Finished-before-commit crash did not land after the approved result settled',
+    );
+    // R1-1 (deeper): the settled execution is not the window. The barrier must
+    // also read the post-tool main attempt's durable Finished marker from the
+    // same journal the recovery reads, and assert no assistant commit follows
+    // it, before the SIGKILL. Pin this window-shaped — the journal assertion
+    // must sit between the B3a barrier and the crash, and its discriminator
+    // must mirror findHostedCommittedModelOutput — so deleting the assertion or
+    // moving the hold above the output_committed commit cannot stay green. A
+    // bare identifier check would survive both, since the recovery reader also
+    // accepts a saved request whose attempt is still started.
+    const b3aBarrier = source.indexOf(
+      "'Finished turn held before the assistant commit'",
+    );
+    const b3aCrash = source.indexOf('await crashChild(', b3aBarrier);
+    expect(b3aBarrier).toBeGreaterThan(-1);
+    expect(b3aCrash).toBeGreaterThan(b3aBarrier);
+    const b3aWindow = source.slice(b3aBarrier, b3aCrash);
+    expect(b3aWindow).toContain('finishedBeforeCommitWindow(');
+    expect(b3aWindow).toContain(
+      'SELECT prompt_id FROM qwen_managed_agent.ma_turn',
+    );
+    // R4-2: the window helper only runs through its arming ternary. Pin the
+    // condition itself, so narrowing the guard (e.g. to 'after-result') reds
+    // here instead of silently deleting the arm's only durable-window check
+    // while the helper name still appears in the barrier->crash slice.
+    expect(source).toMatch(
+      /approvalFault === 'finished-before-commit'\s*\?\s*finishedBeforeCommitWindow\(/,
+    );
+    expect(source).toContain(
+      'Finished-before-commit crash landed before the model Finished marker committed',
+    );
+    expect(source).toContain(
+      'Finished-before-commit crash landed after the assistant commit',
+    );
+    const windowFn = source.indexOf('function finishedBeforeCommitWindow(');
+    expect(windowFn).toBeGreaterThan(-1);
+    const windowFnBody = source.slice(
+      windowFn,
+      source.indexOf('\n}', windowFn),
+    );
+    expect(windowFnBody).toContain('qwen_managed_agent.ma_session_journal_tx');
+    expect(windowFnBody).toContain(':main:');
+    expect(windowFnBody).toContain(
+      "latestAttempt.payload['state'] !== 'output_committed'",
+    );
+    expect(windowFnBody).toContain("event.payload['role'] === 'assistant'");
+    expect(windowFnBody).toContain('event.sequence > latestAttempt.sequence');
+    // B3a must take the same deep-equal parity gate as after-result; pin the
+    // combined condition so reverting it to after-result-only reds here rather
+    // than silently deleting the arm's only deep-equal assertion.
+    expect(source).toMatch(
+      /if \(\s*approvalFault === 'after-result' \|\|\s*approvalFault === 'finished-before-commit'\s*\)/,
+    );
+    expect(harnessSource).toContain(
+      "process.env['QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT']",
+    );
+    expect(harnessSource).toContain(
+      'E2E holding finished turn before assistant commit',
+    );
+    // A3 crashes the replacement inside a two-call approval batch — sibling[0]
+    // decided, sibling[1] still requested — via a test-gated hook on the first
+    // approval the replacement asks. The barrier proves the crash landed in
+    // the approval gap; the recovery assertions prove the decided sibling was
+    // not re-asked, the pending sibling kept its original Action/deadline and
+    // earned its own Allow, and both siblings recovered in order, once each.
+    const toolTurnSource = read(
+      'packages/cli/src/serve/hosted-workspace-tool-turn.ts',
+    );
+    expect(source).toContain("'sibling-approval'");
+    expect(source).toContain('call_managed_continuation_sibling');
+    expect(source).toContain(
+      'QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL: session.id',
+    );
+    // The flag rides only the crashing generation, gated on the parameter.
+    expect(source).toMatch(
+      /holdPendingSiblingApproval\s*\?\s*\{\s*QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL: session\.id\s*\}/,
+    );
+    expect(toolTurnSource).toContain(
+      "process.env['QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL']",
+    );
+    expect(toolTurnSource).toContain('E2E holding pending sibling approval');
+    // The barrier asserts the durable approval-gap shape, not the log alone,
+    // and the shape checks sit between the barrier and the SIGKILL.
+    expect(source).toContain("'Pending sibling approval held'");
+    expect(source).toContain(
+      'Sibling-approval crash did not land in the approval gap',
+    );
+    expect(source).toContain(
+      'Sibling-approval crash plan is not the pending second sibling',
+    );
+    const a3Barrier = source.indexOf("'Pending sibling approval held'");
+    const a3Crash = source.indexOf('await crashChild(', a3Barrier);
+    expect(a3Barrier).toBeGreaterThan(-1);
+    expect(a3Crash).toBeGreaterThan(a3Barrier);
+    const a3Window = source.slice(a3Barrier, a3Crash);
+    expect(a3Window).toContain('siblingPlan.approvalOrdinal !== 1');
+    expect(a3Window).toContain("decidedSibling?.[1] !== 'decided'");
+    expect(a3Window).toContain("pendingSibling?.[1] !== 'requested'");
+    // The recovery generation re-decides the ORIGINAL pending sibling and
+    // asserts its identity/deadline survived before answering.
+    expect(source).toContain('const siblingBefore = await fetchJson');
+    expect(source).toContain(
+      'Recovery did not preserve the pending sibling Action/deadline',
+    );
+    expect(source).toContain('actions/${siblingApprovalId}/responses');
+    // Two siblings settle once each under their original identities: the
+    // count, both Action rows, the pending sibling's own decision, the second
+    // file effect and the order-sensitive final plan are all pinned.
+    // R1-7 / F1: anchor each count ternary to its own site. The bare `? 2 : 1`
+    // matches both expectedExecutions and expectedOriginalPlanCalls, so each is
+    // pinned separately and narrowing either one (2 -> 1) reds here at unit
+    // speed, not only at the real-stack barrier.
+    expect(source).toMatch(
+      /const expectedExecutions =[\s\S]*?approvalFault === 'sibling-approval' \|\|\s*approvalFault === 'after-earlier-tools'\s*\?\s*2\s*:\s*1/,
+    );
+    // `\s*`, not `[\s\S]*?`: the gap here is whitespace-only, so a tight anchor
+    // cannot span past this site to the expectedExecutions ternary and mask a
+    // narrowed count (the spanning form stays green under `? 2` -> `? 1`).
+    expect(source).toMatch(
+      /const expectedOriginalPlanCalls =\s*approvalFault === 'sibling-approval'\s*\?\s*2\s*:\s*1/,
+    );
+    // R1-7: pin the per-call identity loop itself (match by prepare key, not
+    // the pre-PR single-execution shape), so reverting it reds here at unit
+    // speed rather than only on a full real-stack run.
+    expect(source).toContain(
+      'for (const [ordinal, call] of plan.calls.entries())',
+    );
+    expect(source).toContain('(row) => row[1] === call.prepareKey');
+    expect(source).toContain(
+      'Replacement changed the original prepared execution identity for call',
+    );
+    // R1-4: the decided sibling is read and asserted still decided with its
+    // original deadline BEFORE the pending sibling is answered.
+    expect(source).toContain('const decidedBefore = await fetchJson');
+    expect(source).toContain("decidedBefore.state !== 'decided'");
+    expect(source).toContain(
+      'Recovery re-touched the decided sibling Action/deadline',
+    );
+    // R1-5: execution order is gated on settled_at along the plan, not only
+    // the plan resource order, so a reverse dispatch reds.
+    expect(source).toContain(
+      'request_digest, settled_at FROM qwen_managed_agent.ma_tool_execution',
+    );
+    expect(source).toContain('settledAtByOrdinal.push(Number(execution[8]))');
+    expect(source).toContain(
+      'Replacement settled the siblings out of plan order',
+    );
+    expect(source).toContain('Sibling approval identities/states differ');
+    expect(source).toContain('Stored sibling decision differs');
+    expect(source).toContain('Sibling physical file assertion failed');
+    expect(source).toContain('Sibling recovery reordered or rewrote call');
+    expect(source).toContain(
+      'Sibling recovery changed the original Action IDs',
+    );
+    // The order assertion reads the recovered final plan the way recovery
+    // does (latest hosted.batch.planned link for the batch, stage final).
+    expect(source).toContain('siblingFinalPlan(');
+    const a3PlanFn = source.indexOf('function siblingFinalPlan(');
+    expect(a3PlanFn).toBeGreaterThan(-1);
+    const a3PlanFnBody = source.slice(
+      a3PlanFn,
+      source.indexOf('\n}', a3PlanFn),
+    );
+    expect(a3PlanFnBody).toContain('qwen_managed_agent.ma_session_journal_tx');
+    expect(a3PlanFnBody).toContain("event.kind !== 'hosted.batch.planned'");
+    expect(a3PlanFnBody).toContain("payload['batchId'] !== batchId");
+    expect(a3PlanFnBody).toContain("plan.stage !== 'final'");
+    // B3 after-earlier-tools: the multi-round fixture, the second-Allow
+    // choreography, the round/budget continuity readers + assertions, and the
+    // later-round deep-equal parity are all pinned so a regression reds here.
+    expect(source).toContain("'after-earlier-tools'");
+    expect(source).toContain('call_managed_b3_second');
+    expect(source).toContain('b3BudgetDirective');
+    expect(source).toContain('Second earlier-tool approval requested');
+    expect(source).toContain('Earlier tools settled and the later round held');
+    expect(source).toContain('b3RoundAndBudget(');
+    expect(source).toContain('B3 recovery reset the logical round');
+    expect(source).toContain('B3 recovery reset the turn budget snapshot');
+    expect(source).toContain('B3 recovery wiped the per-model token ledger');
+    expect(source).toContain('B3 second physical file assertion failed');
+    expect(source).toContain(
+      'B3 recovery changed the saved later-round model request',
+    );
+    expect(source).toContain('B3 earlier execution');
+    expect(source).toContain('B3 approval identities/states differ');
+    // The hold armed for B3 must also be RELEASED after the crash: a release
+    // gated to after-result alone leaves the recovery generation's reissued
+    // request held forever (the .75 head run crash-looped on exactly that).
+    const releaseAt = source.indexOf('releaseApprovalResultHold();');
+    expect(releaseAt).toBeGreaterThan(-1);
+    expect(source.slice(releaseAt - 200, releaseAt)).toContain(
+      "approvalFault === 'after-earlier-tools'",
+    );
+    // B3 shares after-result's published-prefix capture and retraction proof.
+    expect(source).toMatch(
+      /approvalFault === 'after-result' \|\|\s*approvalFault === 'after-earlier-tools'\s*\) \{\s*\/\/ The reissue must retract the held prefix/,
+    );
+    // The fixture must charge non-zero usage (the fake default is all zeros,
+    // which makes the ledger continuity assertion vacuous) and the ledger
+    // check must compare per-model totals — an empty {} ledger is truthy.
+    expect(source).toContain('completion_tokens: 300');
+    expect(source).toContain(
+      'B3 crash-boundary per-model token ledger is empty',
+    );
+    expect(source).toContain('B3 crash-boundary turn budget was not exercised');
+    expect(source).toContain('afterTokens < beforeTokens');
+    expect(source).toContain('assertB3CostContinuity(');
+    // R1-3: the budget guard must test the NUMERIC field — a non-null snapshot
+    // with budget: null is a legal production state, so an object-truthy guard
+    // would let a lost +Nk directive pass as null == null.
+    const b3CostFn = source.indexOf('function assertB3CostContinuity(');
+    expect(b3CostFn).toBeGreaterThan(-1);
+    const b3CostFnBody = source.slice(
+      b3CostFn,
+      source.indexOf('\n}', b3CostFn),
+    );
+    expect(b3CostFnBody).toContain(
+      'b3Budget === null || b3Budget === undefined',
+    );
+    // R1-4: site-anchor the B3 post-tool request count like the neighbouring
+    // R1-7 / F1 pins — the identifier alone survives a conflict resolution
+    // back to the pre-PR ternary, which would only red in the real-stack lane.
+    // Deleting the after-earlier-tools ? 3 clause must red here.
+    expect(source).toMatch(
+      /const expectedModelsAfterResults =[\s\S]*?approvalFault === 'after-earlier-tools'\s*\?\s*3\s*:/,
+    );
+    const b3Fn = source.indexOf('function b3RoundAndBudget(');
+    expect(b3Fn).toBeGreaterThan(-1);
+    const b3FnBody = source.slice(b3Fn, source.indexOf('\n}', b3Fn));
+    expect(b3FnBody).toContain('qwen_managed_agent.ma_session_journal_tx');
+    expect(b3FnBody).toContain("event.kind !== 'model.attempt'");
+    expect(b3FnBody).toContain('SELECT HEX(inline_bytes)');
+    expect(b3FnBody).toContain("attempts[i].payload['recoveryRef']");
+    expect(b3FnBody).toContain("['usageRef', 'routeRef']");
+  });
+
+  // R4-2 (behavioural): the source pins above assert the window helper's
+  // spelling; this exercises finishedBeforeCommitWindow itself on injected
+  // journal rows, so the latest-attempt selection and both throw branches are
+  // proven on data, not on text. runMysql is injected through load() (the
+  // parameter must be spelled exactly runMysql to shadow the free identifier);
+  // the helper stays a top-level declaration so extracted() can walk it.
+  it('behaves finishedBeforeCommitWindow on injected journal rows', () => {
+    const promptId = 'turn_b3a';
+    const attempt = (sequence, state, prompt = promptId) => ({
+      kind: 'model.attempt',
+      sequence,
+      payload: { attemptId: `${prompt}:main:${sequence}`, state },
+    });
+    const assistantCommit = (sequence) => ({
+      kind: 'message.committed',
+      sequence,
+      payload: { role: 'assistant' },
+    });
+    // The helper reads HEX(record_bytes) rows; each row decodes to UTF-8 JSON
+    // Lines of managed_session_event_v1 records. Encode the events the way the
+    // journal writer does, as one HEX blob the helper splits back into lines.
+    const rows = (events) =>
+      Buffer.from(
+        events
+          .map((event) =>
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: event,
+            }),
+          )
+          .join('\n'),
+        'utf8',
+      ).toString('hex');
+    const run = (events) =>
+      load(
+        ['finishedBeforeCommitWindow'],
+        'finishedBeforeCommitWindow',
+        'runMysql',
+      )(() => rows(events)).finishedBeforeCommitWindow(0, 'filter', promptId);
+
+    // output_committed with no following assistant commit: the window holds.
+    expect(run([attempt(25, 'output_committed')])).toEqual({
+      attemptId: `${promptId}:main:25`,
+      attemptSequence: 25,
+    });
+    // An assistant commit before the attempt does not close the window.
+    expect(run([assistantCommit(20), attempt(25, 'output_committed')])).toEqual(
+      {
+        attemptId: `${promptId}:main:25`,
+        attemptSequence: 25,
+      },
+    );
+    // A non-assistant commit after the attempt does not close the window.
+    expect(
+      run([
+        attempt(25, 'output_committed'),
+        { kind: 'message.committed', sequence: 27, payload: { role: 'user' } },
+      ]),
+    ).toEqual({ attemptId: `${promptId}:main:25`, attemptSequence: 25 });
+    // The latest main attempt wins, even when rows arrive unsorted.
+    expect(
+      run([attempt(30, 'output_committed'), attempt(25, 'output_committed')]),
+    ).toEqual({ attemptId: `${promptId}:main:30`, attemptSequence: 30 });
+    // Another prompt's attempts are not this window's.
+    expect(() => run([attempt(25, 'output_committed', 'other_turn')])).toThrow(
+      /no main model attempt/,
+    );
+    // A still-started latest attempt: the crash landed before the Finished
+    // marker committed (a mutation the source pins alone cannot catch).
+    expect(() => run([attempt(25, 'started')])).toThrow(
+      /before the model Finished marker committed: attemptState=started/,
+    );
+    // A newer started attempt after an older completed one is still before the
+    // window: the recovery reader accepts a started attempt, so only the latest
+    // attempt's state discriminates.
+    expect(() =>
+      run([attempt(25, 'output_committed'), attempt(30, 'started')]),
+    ).toThrow(
+      /before the model Finished marker committed: attemptState=started/,
+    );
+    // An assistant commit after the attempt: the crash landed after the commit.
+    expect(() =>
+      run([attempt(25, 'output_committed'), assistantCommit(27)]),
+    ).toThrow(
+      /after the assistant commit: commitSequence=27 attemptSequence=25/,
+    );
+  });
+
+  // A3 (behavioural): exercise siblingFinalPlan on injected journal rows and
+  // plan resources, so the latest-link selection, the batch filter and both
+  // throw branches are proven on data, not on text. runMysql is injected
+  // through load() and dispatches on the query (journal HEX rows vs the plan
+  // resource, keyed by resource_id); the helper stays a top-level declaration
+  // so extracted() can walk it.
+  it('behaves siblingFinalPlan on injected journal rows', () => {
+    const batchId = 'batch_a3';
+    const call = (ordinal, actionId) => ({
+      runtimeCallId: `rc_${ordinal}`,
+      partIndex: ordinal,
+      prepareKey: `rs:rc_${ordinal}`,
+      requestDigest: `sha256:digest_${ordinal}`,
+      actionId,
+    });
+    const finalPlan = {
+      stage: 'final',
+      calls: [call(0, 'action_0'), call(1, 'action_1')],
+    };
+    const planned = (sequence, batch = batchId, resourceId = 'res_final') => ({
+      kind: 'hosted.batch.planned',
+      sequence,
+      payload: { batchId: batch, planRevision: 1, planRef: { resourceId } },
+    });
+    const journalRows = (events) =>
+      Buffer.from(
+        events
+          .map((event) =>
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: event,
+            }),
+          )
+          .join('\n'),
+        'utf8',
+      ).toString('hex');
+    const run = (events, plans = { res_final: finalPlan }) =>
+      load(
+        ['siblingFinalPlan', 'sqlString'],
+        'siblingFinalPlan',
+        'runMysql',
+      )((_port, query) => {
+        if (query.includes('ma_session_journal_tx')) return journalRows(events);
+        if (query.includes('ma_resource')) {
+          const resourceId = query.match(/resource_id='([^']+)'/)?.[1];
+          const plan = plans[resourceId];
+          if (!plan) throw new Error(`no plan for ${String(resourceId)}`);
+          return JSON.stringify(plan);
+        }
+        throw new Error(`unexpected query: ${query}`);
+      }).siblingFinalPlan(0, 'filter', batchId);
+
+    // The hosted.batch.planned link for the batch resolves the final plan.
+    expect(run([planned(10)])).toEqual(finalPlan);
+    // The highest-sequence link wins, even when rows arrive unsorted: each
+    // link points at a different resource, so selecting the older one reds.
+    const newerPlan = {
+      stage: 'final',
+      calls: [call(0, 'action_0'), call(1, 'action_new')],
+    };
+    // Descending input kills a last-row-wins implementation.
+    expect(
+      run([planned(30, batchId, 'res_new'), planned(20, batchId, 'res_old')], {
+        res_new: newerPlan,
+        res_old: finalPlan,
+      }),
+    ).toEqual(newerPlan);
+    // Ascending input (the real query's ORDER BY first_sequence direction, so
+    // the newest link is the LAST row) kills a first-match implementation: a
+    // first-match guard would pick the stale res_old here. Both directions
+    // together force a genuine highest-sequence selection.
+    expect(
+      run([planned(20, batchId, 'res_old'), planned(30, batchId, 'res_new')], {
+        res_new: newerPlan,
+        res_old: finalPlan,
+      }),
+    ).toEqual(newerPlan);
+    // Another batch's link is not this batch's plan.
+    expect(() => run([planned(10, 'other_batch')])).toThrow(
+      /no final batch plan link/,
+    );
+    // No link at all.
+    expect(() => run([])).toThrow(/no final batch plan link/);
+    // A non-final plan resource is refused: recovery must resume the final plan.
+    expect(() =>
+      run([planned(10)], { res_final: { stage: 'approval', calls: [] } }),
+    ).toThrow(/not a final batch plan/);
+    // Non-planned events are skipped, not parsed as the batch plan link.
+    expect(
+      run([
+        {
+          kind: 'message.committed',
+          sequence: 5,
+          payload: { role: 'assistant' },
+        },
+        planned(10),
+      ]),
+    ).toEqual(finalPlan);
+  });
+
+  // B3 (behavioural): exercise b3RoundAndBudget on injected journal rows and
+  // request/route/usage resources, so the latest-attempt round selection, the
+  // reverse-scan for budget/models, and both throw branches are proven on data.
+  // runMysql is injected through load() and dispatches on the query (journal
+  // HEX rows vs HEX resource bytes keyed by resource_id); sqlString is
+  // extracted too.
+  it('behaves b3RoundAndBudget on injected journal rows', () => {
+    const attempt = (sequence, refs) => ({
+      kind: 'model.attempt',
+      sequence,
+      payload: refs,
+    });
+    const journalRows = (events) =>
+      Buffer.from(
+        events
+          .map((event) =>
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: event,
+            }),
+          )
+          .join('\n'),
+        'utf8',
+      ).toString('hex');
+    const budgetSnapshot = { budget: 500000, outputTokensAtTurnStart: 100 };
+    const resources = {
+      // The saved request carries the full system prompt, so its JSON has \"
+      // and \\ sequences — the shape mysql --batch escaping corrupted when the
+      // helper read CONVERT(inline_bytes) instead of HEX.
+      req_round2: { round: 2, prompt: 'reply "exactly" then \\ stop' },
+      req_round0: { round: 0 },
+      usage1: { budget: budgetSnapshot, models: { m: { output: 150 } } },
+      route2: { budget: budgetSnapshot },
+      // R1-2: a discriminating pair — the older attempt carries a DIFFERENT
+      // budget and a smaller ledger, the newest its own. An oldest-first scan
+      // returns 900000/300 where the newest-first contract returns 500000/600,
+      // so the direction is proven on data, not only on the round selection.
+      usageOld: {
+        budget: { budget: 900000, outputTokensAtTurnStart: 0 },
+        models: { m: { tokens: { candidates: 300 } } },
+      },
+      usageNew: {
+        budget: budgetSnapshot,
+        models: { m: { tokens: { candidates: 600 } } },
+      },
+    };
+    const run = (events) =>
+      load(
+        ['b3RoundAndBudget', 'sqlString'],
+        'b3RoundAndBudget',
+        'runMysql',
+      )((_port, query) => {
+        if (query.includes('ma_session_journal_tx')) return journalRows(events);
+        if (query.includes('ma_resource')) {
+          const resourceId = query.match(/resource_id='([^']+)'/)?.[1];
+          const res = resources[resourceId];
+          if (!res) throw new Error(`no resource ${String(resourceId)}`);
+          return Buffer.from(JSON.stringify(res), 'utf8').toString('hex');
+        }
+        throw new Error(`unexpected query: ${query}`);
+      }).b3RoundAndBudget(0, 'filter');
+
+    // The latest attempt's request gives the round; budget/models reverse-scan
+    // across the route/usage refs (budget from the newest, models from usage1).
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usage1' },
+        }),
+        attempt(20, {
+          recoveryRef: { resourceId: 'req_round2' },
+          routeRef: { resourceId: 'route2' },
+        }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { m: { output: 150 } },
+    });
+    // Models still resolve from an earlier attempt when the newest has no usage.
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usage1' },
+        }),
+        attempt(20, { recoveryRef: { resourceId: 'req_round2' } }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { m: { output: 150 } },
+    });
+    // R1-2: the newest attempt's own usage wins over an older, different one —
+    // an oldest-first budget/models scan reds here (900000/300 vs 500000/600).
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usageOld' },
+        }),
+        attempt(20, {
+          recoveryRef: { resourceId: 'req_round2' },
+          usageRef: { resourceId: 'usageNew' },
+        }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { m: { tokens: { candidates: 600 } } },
+    });
+    // No attempt at all.
+    expect(() => run([])).toThrow(/no model attempt/);
+    // An attempt with no saved request round.
+    expect(() => run([attempt(10, {})])).toThrow(
+      /no saved model-request round/,
+    );
+  });
+
+  // R1-2 / R1-3 (behavioural): the cost-continuity assertion on injected
+  // before/after states. isDeepStrictEqual is injected through load() because
+  // the extracted body's free identifiers resolve against the harness scope.
+  it('behaves assertB3CostContinuity on injected before/after states', () => {
+    const assertCost = load(
+      ['assertB3CostContinuity'],
+      'assertB3CostContinuity',
+      'isDeepStrictEqual',
+    )(isDeepStrictEqual).assertB3CostContinuity;
+    const snapshot = {
+      sessionId: 's',
+      promptId: 'p',
+      budget: 500000,
+      directiveText: '+500k',
+      outputTokensAtTurnStart: 0,
+    };
+    const ledger = (candidates) => ({
+      'fake-model': { tokens: { candidates } },
+    });
+    const before = { round: 2, budget: snapshot, models: ledger(600) };
+    // The healthy recovery: snapshot deep-equal, ledger grown by the final round.
+    expect(() =>
+      assertCost(before, { round: 2, budget: snapshot, models: ledger(700) }),
+    ).not.toThrow();
+    // R1-3: a non-null snapshot whose numeric budget is null (the +Nk directive
+    // stopped being parsed) must red — an object-truthy guard passes it and the
+    // deep-equal then compares null with null.
+    expect(() =>
+      assertCost(
+        { ...before, budget: { ...snapshot, budget: null } },
+        {
+          round: 2,
+          budget: { ...snapshot, budget: null },
+          models: ledger(700),
+        },
+      ),
+    ).toThrow(/turn budget was not exercised/);
+    // A missing snapshot reds the same guard.
+    expect(() =>
+      assertCost({ ...before, budget: null }, { ...before, budget: null }),
+    ).toThrow(/turn budget was not exercised/);
+    // A re-baselined snapshot (different turn-start baseline) reds deep-equal.
+    expect(() =>
+      assertCost(before, {
+        round: 2,
+        budget: { ...snapshot, outputTokensAtTurnStart: 600 },
+        models: ledger(700),
+      }),
+    ).toThrow(/reset the turn budget snapshot/);
+    // An empty crash-boundary ledger is vacuous and must red.
+    expect(() =>
+      assertCost({ ...before, models: {} }, { ...before, models: {} }),
+    ).toThrow(/token ledger is empty/);
+    // A zeroed ({}) after-ledger must red — {} is truthy, so a null check passes it.
+    expect(() =>
+      assertCost(before, { round: 2, budget: snapshot, models: {} }),
+    ).toThrow(/wiped the per-model token ledger/);
+    // A shrunk per-model total must red (the dropped-restore shape).
+    expect(() =>
+      assertCost(before, { round: 2, budget: snapshot, models: ledger(100) }),
+    ).toThrow(
+      /wiped the per-model token ledger: model=fake-model before=600 after=100/,
     );
   });
 
@@ -561,7 +1272,7 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain(`'${refusal}'`);
     expect(
       read(
-        'packages/managed-agent-server/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java',
+        'packages/managed-agent-server/persistence/src/main/java/com/alibaba/qwen/code/managedagent/persistence/ManagedSessionStore.java',
       ),
     ).toContain(`"${refusal}."`);
     const writerBefore = source.indexOf(
@@ -800,7 +1511,9 @@ describe('managed-agent-server e2e runner', () => {
     // Harness and find its workspace ID there: application.yml derives the
     // switch from the Harness, and Prerequisites exports the ID.
     expect(
-      read('packages/managed-agent-server/src/main/resources/application.yml'),
+      read(
+        'packages/managed-agent-server/server/src/main/resources/application.yml',
+      ),
       'the Session Store switch must follow the Harness by default',
     ).toContain(
       "enabled: '${QWEN_MANAGED_AGENT_SESSION_STORE_ENABLED:${qwen.managed-agent.harness.enabled:false}}'",
@@ -843,7 +1556,7 @@ describe('managed-agent-server e2e runner', () => {
     // document the current authority, so the false claim reaches
     // integrators in either language.
     const toolTurnIt =
-      'packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java';
+      'packages/managed-agent-server/verification/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java';
     expect(
       existsSync(new URL(`../../${toolTurnIt}`, import.meta.url)) &&
         read('.github/workflows/sdk-java.yml').includes(
@@ -1370,31 +2083,17 @@ describe('managed-agent-server e2e runner', () => {
     );
   });
 
-  it('names the jar explicitly on both surfaces — pom-derived name in the runner, classifier exclusion at image build', () => {
+  it('selects the executable classifier for the runner and image', () => {
     const script = read('scripts/run-managed-agent-server-e2e.ts');
-    expect(script).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
-    // The pom's repackage executions leave the unclassified jar plus one
-    // artifact per classifier in target/. The runner derives the
-    // unclassified name from the pom (one source of truth); the Dockerfile
-    // selects by classifier exclusion with a loud cardinality guard.
-    expect(script).toContain('qwen-managed-agent-server-${pomVersion}.jar');
-    expect(script).not.toContain('packagedJars');
+    expect(script).toContain(
+      'qwen-managed-agent-server-${pomVersion}-exec.jar',
+    );
     const dockerfile = read('packages/managed-agent-server/Dockerfile');
-    expect(dockerfile).not.toContain('qwen-managed-agent-server-0.1.0-alpha');
+    expect(dockerfile).toContain('qwen-managed-agent-server-*-exec.jar');
     expect(dockerfile).toContain('/tmp/qwen-managed-agent-server.jar');
-    // The exclusion set must cover every classifier the pom declares, or a
-    // pom edit surfaces as an operator's failed docker build ("found 2")
-    // instead of a red here: derive the set from the pom, the one source
-    // of truth, rather than pinning a literal copy of it.
-    const classifiers = [
-      ...read('packages/managed-agent-server/pom.xml').matchAll(
-        /<classifier>([^<]+)<\/classifier>/g,
-      ),
-    ].map((match) => match[1]);
-    expect(classifiers.length).toBeGreaterThan(0);
-    for (const classifier of classifiers) {
-      expect(dockerfile).toContain(`*-${classifier}.jar`);
-    }
+    expect(read('packages/managed-agent-server/server/pom.xml')).toContain(
+      '<classifier>exec</classifier>',
+    );
   });
 
   it('unrefs the waitUntil stall timer so a fast success does not idle the runner', () => {
@@ -1418,7 +2117,7 @@ describe('managed-agent-server e2e runner', () => {
     const pattern = new Function(`return ${patternSource};`)();
     const match = read('packages/managed-agent-server/pom.xml').match(pattern);
     expect(match?.[0]).toContain(
-      '<artifactId>qwen-managed-agent-server</artifactId>',
+      '<artifactId>qwen-managed-agent-parent</artifactId>',
     );
     expect(match?.[1]).toBeTruthy();
     expect(match?.[1]).not.toContain('${');
@@ -1430,10 +2129,10 @@ describe('managed-agent-server e2e runner', () => {
     // whitespace-tolerant, and an empty element still matches nothing, so
     // the runner's descriptive guard fires.
     const wrapped =
-      '<artifactId>qwen-managed-agent-server</artifactId>\n  <version>\n    9.9.9\n  </version>';
+      '<artifactId>qwen-managed-agent-parent</artifactId>\n  <version>\n    9.9.9\n  </version>';
     expect(wrapped.match(pattern)?.[1]).toBe('9.9.9');
     expect(
-      '<artifactId>qwen-managed-agent-server</artifactId><version></version>'.match(
+      '<artifactId>qwen-managed-agent-parent</artifactId><version></version>'.match(
         pattern,
       ),
     ).toBeNull();
@@ -1462,15 +2161,13 @@ describe('managed-agent-server e2e runner', () => {
     // --server.address on the command line and the e2e runner passes none,
     // so a flipped yml default would otherwise ship silently.
     const applicationYml = read(
-      'packages/managed-agent-server/src/main/resources/application.yml',
+      'packages/managed-agent-server/server/src/main/resources/application.yml',
     );
     expect(applicationYml).toMatch(
       /address: '\$\{QWEN_MANAGED_AGENT_SERVER_ADDRESS:127\.0\.0\.1\}'/,
     );
     expect(dockerfile).toMatch(/\{ \[ "\$count" -eq 1 \] \|\|/);
-    expect(dockerfile).toContain(
-      'expected exactly one unclassified server jar',
-    );
+    expect(dockerfile).toContain('expected exactly one executable server jar');
     // Host Maven output must not ride the build context into the stage the
     // guard inspects: a stale jar from a developer's target/ would trip the
     // cardinality check with an artifact this build did not produce. Both
@@ -1597,7 +2294,7 @@ describe('managed-agent-server e2e runner', () => {
     () => {
       const dockerfile = read('packages/managed-agent-server/Dockerfile');
       const stage = dockerfile.match(
-        /cd packages\/managed-agent-server\/target \\[\s\S]*?&& cp "\$main" \/tmp\/qwen-managed-agent-server\.jar/,
+        /cd packages\/managed-agent-server\/server\/target \\[\s\S]*?&& cp "\$main" \/tmp\/qwen-managed-agent-server\.jar/,
       );
       expect(
         stage,
@@ -1610,10 +2307,12 @@ describe('managed-agent-server e2e runner', () => {
         .join(' ');
       const populations = [
         { jars: [], status: 1, found: 0 },
-        { jars: ['qwen-managed-agent-server-1.0.jar'], status: 0 },
+        { jars: ['qwen-managed-agent-server-1.0.jar'], status: 1, found: 0 },
+        { jars: ['qwen-managed-agent-server-1.0-exec.jar'], status: 0 },
         {
           jars: [
             'qwen-managed-agent-server-1.0.jar',
+            'qwen-managed-agent-server-1.0-exec.jar',
             'qwen-managed-agent-server-1.0-workspace-bundle.jar',
             'qwen-managed-agent-server-1.0-operator-recovery.jar',
           ],
@@ -1622,6 +2321,7 @@ describe('managed-agent-server e2e runner', () => {
         {
           jars: [
             'qwen-managed-agent-server-1.0.jar',
+            'qwen-managed-agent-server-1.0-exec.jar',
             'qwen-managed-agent-server-1.0-workspace-bundle.jar',
             'qwen-managed-agent-server-1.0-workspace-migration.jar',
             'qwen-managed-agent-server-1.0-operator-recovery.jar',
@@ -1630,8 +2330,8 @@ describe('managed-agent-server e2e runner', () => {
         },
         {
           jars: [
-            'qwen-managed-agent-server-1.0.jar',
-            'qwen-managed-agent-server-2.0.jar',
+            'qwen-managed-agent-server-1.0-exec.jar',
+            'qwen-managed-agent-server-2.0-exec.jar',
           ],
           status: 1,
           found: 2,
@@ -1643,7 +2343,7 @@ describe('managed-agent-server e2e runner', () => {
           for (const jar of jars) writeFileSync(join(dir, jar), '');
           const fixture = script
             .replace(
-              'cd packages/managed-agent-server/target',
+              'cd packages/managed-agent-server/server/target',
               `cd '${dir.replaceAll('\\', '/')}'`,
             )
             .replace(
@@ -1654,7 +2354,7 @@ describe('managed-agent-server e2e runner', () => {
           expect(run.status, `${jars.length} jars: ${run.stderr}`).toBe(status);
           if (found !== undefined) {
             expect(run.stderr).toContain(
-              `expected exactly one unclassified server jar, found ${found}`,
+              `expected exactly one executable server jar, found ${found}`,
             );
           }
         } finally {
