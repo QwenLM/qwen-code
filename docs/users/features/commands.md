@@ -159,6 +159,7 @@ These commands invoke bundled skills that provide specialized workflows.
 | `/autofix-pr` | Watch a PR and fix its CI, review feedback and conflicts      | `/autofix-pr 123`, `/autofix-pr 123 --once`, `/autofix-pr resume`, `/autofix-pr stop 123` |
 | `/simplify`   | Review recent changes and apply safe cleanup edits directly   | `/simplify`, `/simplify focus on duplication`                                             |
 | `/qc-helper`  | Answer questions about Qwen Code usage and configuration      | `/qc-helper how do I configure MCP?`                                                      |
+| `/pr`         | Draft, push and open or update the PR for the current branch  | `/pr`, `/pr create`, `/pr create --draft --base release`                                  |
 
 See [Code Review](./code-review.md) for full `/review` documentation, and [Autofix a Pull Request](./autofix-pr.md) for `/autofix-pr`.
 
