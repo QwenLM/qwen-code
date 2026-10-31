@@ -2309,6 +2309,9 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
   const ciRestore = ciSteps.find(
     (s) => s.name === 'Restore workspace ownership',
   )?.run;
+  const ciRecreate = ciSteps.find(
+    (s) => s.name === 'Recreate runner Git metadata',
+  )?.run;
   const poolJobs = [
     ['sdk-java.yml', 'test'],
     ['sdk-java.yml', 'flyway-migrations'],
@@ -2353,10 +2356,15 @@ describe('SDK Java pre-checkout hygiene on the ECS pool', () => {
       const sweep = steps.find(
         (s) => s.name === 'Clean stale .qwen before checkout',
       )?.run;
+      const recreate = steps.find(
+        (s) => s.name === 'Recreate runner Git metadata',
+      )?.run;
       expect(ciRestore).toBeDefined();
       expect(ciSweep).toBeDefined();
+      expect(ciRecreate).toBeDefined();
       expect(restore, name).toBe(ciRestore);
       expect(sweep, name).toBe(ciSweep);
+      expect(recreate, name).toBe(ciRecreate);
     },
   );
 

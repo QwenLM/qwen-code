@@ -13,6 +13,12 @@ import { join } from 'node:path';
 import { parse } from 'yaml';
 import { expect, it } from 'vitest';
 
+// Listed, not derived. Deriving the corpus from "jobs that carry the reset
+// step" would stay green when the step is deleted from a pool job — the job
+// simply leaves the corpus, and nothing else in the tree asserts the reset —
+// so the list stays closed and complete instead. Every job in the tree that
+// carries the step is enumerated here; `rg -c 'Recreate runner Git metadata'
+// .github/workflows` is the sweep that keeps it honest.
 const jobs = [
   ['desktop-release', 'prepare'],
   ...['triage', 'tmux-testing', 'verify'].map((name) => ['qwen-triage', name]),
@@ -23,9 +29,23 @@ const jobs = [
     'integration_cli',
     'web_shell_e2e_smoke',
   ].map((name) => ['ci', name]),
-  ...['test', 'flyway-migrations', 'mysql-integration', 'daemon-e2e'].map(
-    (name) => ['sdk-java', name],
-  ),
+  ...[
+    'test',
+    'flyway-migrations',
+    'mysql-integration',
+    'event-transport-broker',
+    'event-transport-multi-node',
+    'daemon-e2e',
+  ].map((name) => ['sdk-java', name]),
+  // The two open-PR re-check workflows run on the same shared `ecs-qwen` pool
+  // as `sdk-java.yml`, so they inherit the same stale workspace `.git`; they
+  // were missed when the reset first landed and are pinned here so the gap
+  // cannot reopen silently. The two below joined the pool with the main merge
+  // and were missed the same way.
+  ...['recheck'].map((name) => ['sdk-java-flyway-open-prs', name]),
+  ...['recheck'].map((name) => ['sdk-java-contract-open-prs', name]),
+  ...['scope'].map((name) => ['managed-agent-gate', name]),
+  ...['build'].map((name) => ['release-managed-agent-reference', name]),
   ...['issue-autofix', 'build-cli', 'review-address'].map((name) => [
     'qwen-autofix',
     name,
