@@ -59,6 +59,9 @@ let originalApprovalPlan: SavedApprovalPlan | undefined;
 // re-decided by the recovery generation.
 let siblingApprovalId: string | undefined;
 let siblingApprovalOptions: SavedApprovalOptions | undefined;
+// B3: tool B's new Action, detected after Allow A and decided by the runner's
+// second Allow; both earlier Actions must end decided under their original IDs.
+let secondApprovalId: string | undefined;
 let verifiedOriginalTerminal: string | undefined;
 function saveEvidence(name: string, body: unknown): void {
   if (!verificationMode) return;
@@ -91,6 +94,7 @@ const approvalFaults = [
   'after-result',
   'finished-before-commit',
   'sibling-approval',
+  'after-earlier-tools',
   'cleanup-failed',
   'decision-reply-lost',
   'admission-reply-lost',
@@ -137,7 +141,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     index += 1;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|sibling-approval|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|sibling-approval|after-earlier-tools|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
     );
   }
 }
@@ -346,6 +350,15 @@ const inflightSideEffectContent = 'MANAGED_INFLIGHT_TOOL_EXECUTED\n';
 const siblingSideEffectName = 'managed-sibling-side-effect.txt';
 const siblingSideEffect = path.join(workspaceMount, siblingSideEffectName);
 const siblingSideEffectContent = 'MANAGED_SIBLING_TOOL_EXECUTED\n';
+// B3 after-earlier-tools arm: a second, later tool round writes its own file so
+// each earlier round's single execution has its own physical effect. The +Nk
+// budget directive makes the TurnBudget snapshot non-null so its restoration is
+// numerically assertable (the default null budget hides a ledger reset). A round
+// reset is caught by the exactly-once / deep-equal / round-continuity assertions.
+const b3SecondSideEffectName = 'managed-b3-second-side-effect.txt';
+const b3SecondSideEffect = path.join(workspaceMount, b3SecondSideEffectName);
+const b3SecondSideEffectContent = 'MANAGED_B3_SECOND_TOOL_EXECUTED\n';
+const b3BudgetDirective = '+500k';
 const workspaceId = createHash('sha256')
   .update(workspace)
   .digest('hex')
@@ -1370,6 +1383,88 @@ function siblingFinalPlan(
   return plan;
 }
 
+// B3: read the durable round and cost ledger the way recovery restores them.
+// The round comes from the latest hosted-model-request (model.attempt.recoveryRef);
+// the budget snapshot and per-model token metrics are reverse-scanned from the
+// route/usage resources exactly as bindBudget does on a cold load.
+interface B3RoundBudget {
+  round: number;
+  budget: unknown;
+  models: unknown;
+}
+function b3RoundAndBudget(port: number, sessionFilter: string): B3RoundBudget {
+  const rows = runMysql(
+    port,
+    `SELECT HEX(record_bytes) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} ORDER BY first_sequence`,
+  ).split('\n');
+  const attempts: Array<{
+    sequence: number;
+    payload: Record<string, unknown>;
+  }> = [];
+  for (const row of rows) {
+    if (!row || row === 'NULL') continue;
+    for (const line of Buffer.from(row, 'hex').toString('utf8').split('\n')) {
+      if (!line) continue;
+      const record = JSON.parse(line) as {
+        subtype?: unknown;
+        managedSession?: {
+          kind?: unknown;
+          sequence?: unknown;
+          payload?: Record<string, unknown>;
+        };
+      };
+      if (record.subtype !== 'managed_session_event_v1') continue;
+      const event = record.managedSession;
+      if (
+        !event ||
+        typeof event.sequence !== 'number' ||
+        event.kind !== 'model.attempt'
+      )
+        continue;
+      attempts.push({ sequence: event.sequence, payload: event.payload ?? {} });
+    }
+  }
+  attempts.sort((a, b) => a.sequence - b.sequence);
+  if (attempts.length === 0) throw new Error('B3 window has no model attempt');
+  const readResource = (ref: unknown): Record<string, unknown> | undefined => {
+    const resourceId = (ref as { resourceId?: string } | null)?.resourceId;
+    if (!resourceId) return undefined;
+    // HEX + decode avoids the mysql --batch backslash escaping that would
+    // corrupt the JSON's \" sequences — the saved request carries the full
+    // system prompt, unlike the small approval-continuation plan.
+    const hex = runMysql(
+      port,
+      `SELECT HEX(inline_bytes) FROM qwen_managed_agent.ma_resource WHERE ${sessionFilter} AND resource_id=${sqlString(resourceId)}`,
+    );
+    if (!hex || hex === 'NULL') return undefined;
+    return JSON.parse(Buffer.from(hex, 'hex').toString('utf8')) as Record<
+      string,
+      unknown
+    >;
+  };
+  let round = -1;
+  for (let i = attempts.length - 1; i >= 0; i -= 1) {
+    const req = readResource(attempts[i].payload['recoveryRef']);
+    if (req && typeof req['round'] === 'number') {
+      round = req['round'];
+      break;
+    }
+  }
+  let budget: unknown;
+  let models: unknown;
+  for (let i = attempts.length - 1; i >= 0; i -= 1) {
+    for (const field of ['usageRef', 'routeRef']) {
+      const saved = readResource(attempts[i].payload[field]);
+      if (!saved) continue;
+      if (budget === undefined && 'budget' in saved) budget = saved['budget'];
+      if (models === undefined && saved['models']) models = saved['models'];
+    }
+    if (budget !== undefined && models !== undefined) break;
+  }
+  if (round < 0) throw new Error('B3 window has no saved model-request round');
+  return { round, budget: budget ?? null, models: models ?? null };
+}
+
 function assertPublicAnswer(events: PublicEvent[], expected: string): void {
   const terminal = events.filter((event) => event.terminal);
   const text = events
@@ -1641,6 +1736,77 @@ try {
       }
 
       if (continuationFailover && serialized.includes(continuationMarker)) {
+        // B3: two earlier tool rounds, then a held post-tool round. The fake
+        // model decides by the number of tool results already in the history:
+        // 0 -> tool A (round 0), 1 -> tool B (round 1), >=2 -> the held final
+        // answer (round 2). The crash lands on the round-2 request so recovery
+        // must resume the saved round and cost ledger, not restart them.
+        if (approvalFault === 'after-earlier-tools') {
+          const toolResultCount = (serialized.match(/"role":"tool"/g) ?? [])
+            .length;
+          // Non-zero usage makes the token ledger numerically observable (the
+          // fake's default usage is all zeros). The earlier rounds outweigh the
+          // final round so a zeroed restore totals less than the crash-boundary
+          // ledger, not just the same sum re-counted.
+          if (toolResultCount === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: inflightSideEffectName,
+                    content: inflightSideEffectContent,
+                  },
+                  'call_managed_b3_first',
+                ),
+              ],
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 300,
+                total_tokens: 300,
+              },
+            };
+          }
+          if (toolResultCount === 1) {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: b3SecondSideEffectName,
+                    content: b3SecondSideEffectContent,
+                  },
+                  'call_managed_b3_second',
+                ),
+              ],
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 300,
+                total_tokens: 300,
+              },
+            };
+          }
+          if (approvalResultHold) {
+            return {
+              contentChunks: [continuationPartial],
+              holdAfterChunks: 1,
+              holdUntil: approvalResultHold,
+              usage: {
+                prompt_tokens: 0,
+                completion_tokens: 100,
+                total_tokens: 100,
+              },
+            };
+          }
+          return {
+            content: continuationResponse,
+            usage: {
+              prompt_tokens: 0,
+              completion_tokens: 100,
+              total_tokens: 100,
+            },
+          };
+        }
         if (!serialized.includes('"role":"tool"')) {
           // A3: a two-call batch so the replacement can be crashed in the
           // approval gap between a decided sibling and a pending one.
@@ -2041,7 +2207,9 @@ try {
           {
             type: 'text',
             text: continuationFailover
-              ? `${continuationMarker}. Execute the requested tool once and reply exactly ${continuationResponse}.`
+              ? approvalFault === 'after-earlier-tools'
+                ? `${continuationMarker}. ${b3BudgetDirective} Execute the requested tools and reply exactly ${continuationResponse}.`
+                : `${continuationMarker}. Execute the requested tool once and reply exactly ${continuationResponse}.`
               : inflightFailover
                 ? `${inflightMarker}. Execute the requested tool once and reply exactly ${inflightResponse}.`
                 : modelRoundFailover
@@ -2822,7 +2990,10 @@ try {
           policy_revision: originalApprovalOptions!.policyRevision,
           option_id: verificationMode,
         });
-        if (approvalFault === 'after-result') {
+        if (
+          approvalFault === 'after-result' ||
+          approvalFault === 'after-earlier-tools'
+        ) {
           approvalResultHold = new Promise<void>((resolve) => {
             releaseApprovalResultHold = resolve;
           });
@@ -2862,6 +3033,60 @@ try {
               `Lost decision reply produced ${operations} ACTION_RESPONSE operations, not one`,
             );
         }
+        if (approvalFault === 'after-earlier-tools') {
+          // The first Allow drives tool A (round 0); the model then asks approval
+          // for tool B (round 1) under a NEW Action. Detect that requested Action
+          // and allow it so both earlier rounds execute before the held round 2.
+          await waitUntil(
+            'Second earlier-tool approval requested',
+            () => {
+              const rows = runMysql(
+                mysqlPort,
+                `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION'`,
+              );
+              const requested = (rows ? rows.split('\n') : [])
+                .map((row) => row.split('\t'))
+                .filter(
+                  ([id, state]) =>
+                    state === 'requested' && id !== originalApprovalId,
+                );
+              if (requested.length === 1) {
+                secondApprovalId = requested[0][0];
+                return true;
+              }
+              return false;
+            },
+            120_000,
+            replacementHarness,
+          );
+          const secondOptions = JSON.parse(
+            runMysql(
+              mysqlPort,
+              `SELECT options_json FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(secondApprovalId!)}`,
+            ),
+          );
+          const secondResponse = await fetch(
+            `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${secondApprovalId}/responses`,
+            {
+              method: 'POST',
+              headers: {
+                'content-type': 'application/json',
+                'idempotency-key': `g3-answer-${secondApprovalId}`,
+                ...tenantHeaders(tenant),
+              },
+              body: JSON.stringify({
+                kind: 'permission',
+                input_revision: secondOptions.inputRevision,
+                policy_revision: secondOptions.policyRevision,
+                option_id: 'allow',
+              }),
+            },
+          );
+          if (secondResponse.status !== 202)
+            throw new Error(
+              `Second earlier-tool response returned ${secondResponse.status}: ${await secondResponse.text()}`,
+            );
+        }
       } else if (verificationMode === 'cancel') {
         const response = await fetch(
           `${replacementSpringUrl}/v1/agents/sessions/${session.id}/events`,
@@ -2885,12 +3110,14 @@ try {
       }
       let publishedPrefixSequences: number[] = [];
       let terminalAcceptsAtBarrier = 0;
+      let b3Before: B3RoundBudget | undefined;
       if (
         approvalFault === 'after-decision' ||
         approvalFault === 'after-prepare' ||
         approvalFault === 'after-result' ||
         approvalFault === 'finished-before-commit' ||
         approvalFault === 'sibling-approval' ||
+        approvalFault === 'after-earlier-tools' ||
         approvalFault === 'cleanup-failed' ||
         approvalFault === 'terminal-reply-lost' ||
         approvalFault === 'terminal-write-failed'
@@ -2952,6 +3179,45 @@ try {
             120_000,
             replacementHarness,
           );
+        } else if (approvalFault === 'after-earlier-tools') {
+          // Both earlier tool rounds must have committed their results and the
+          // round-2 post-tool request must be held with its prefix published, so
+          // the crash lands after the earlier tools but before the final output
+          // commits. Recovery must then resume the saved round and cost ledger.
+          await waitUntil(
+            'Earlier tools settled and the later round held',
+            async () => {
+              const rows = runMysql(
+                mysqlPort,
+                'SELECT execution_state, IF(result_json IS NULL, 0, 1) FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id',
+              );
+              const execs = rows ? rows.split('\n') : [];
+              if (execs.length !== 2 || execs.some((r) => r !== 'SETTLED\t1'))
+                return false;
+              const heldLaterRequest = (fake?.requests ?? []).some(
+                ({ body }) => {
+                  const messages = JSON.stringify(body['messages']);
+                  return (
+                    messages.includes(continuationMarker) &&
+                    (messages.match(/"role":"tool"/g) ?? []).length >= 2
+                  );
+                },
+              );
+              if (!heldLaterRequest) return false;
+              const view = await publicTranscript(
+                replacementSpringUrl,
+                tenant,
+                session.id,
+              );
+              return view.text.includes(continuationPartial);
+            },
+            120_000,
+            replacementHarness,
+          );
+          // Capture the durable round and cost ledger at the crash boundary so
+          // recovery can be proven to resume them rather than restart them.
+          b3Before = b3RoundAndBudget(mysqlPort, sessionFilter);
+          saveEvidence('b3-round-budget-before.json', b3Before);
         } else if (
           approvalFault === 'terminal-reply-lost' ||
           approvalFault === 'terminal-write-failed'
@@ -3128,7 +3394,8 @@ try {
               )
             : undefined;
         const publishedPrefix =
-          approvalFault === 'after-result'
+          approvalFault === 'after-result' ||
+          approvalFault === 'after-earlier-tools'
             ? await publicTranscript(replacementSpringUrl, tenant, session.id)
             : undefined;
         publishedPrefixSequences = (publishedPrefix?.events ?? [])
@@ -3160,7 +3427,8 @@ try {
               }
             : undefined,
           publishedPrefix:
-            approvalFault === 'after-result'
+            approvalFault === 'after-result' ||
+            approvalFault === 'after-earlier-tools'
               ? {
                   sequences: publishedPrefixSequences,
                   text: publishedPrefix?.text,
@@ -3171,7 +3439,10 @@ try {
           replacementHarness.child,
           'Replacement Hosted Harness (fault barrier)',
         );
-        if (approvalFault === 'after-result') {
+        if (
+          approvalFault === 'after-result' ||
+          approvalFault === 'after-earlier-tools'
+        ) {
           releaseApprovalResultHold();
           approvalResultHold = undefined;
         }
@@ -3328,7 +3599,11 @@ try {
       // a compensation that only projects a terminal would pass. The
       // result-commit arm already owns the same check with its retraction
       // diagnostic, so it keeps that message.
-      if (verificationMode === 'allow' && approvalFault !== 'after-result') {
+      if (
+        verificationMode === 'allow' &&
+        approvalFault !== 'after-result' &&
+        approvalFault !== 'after-earlier-tools'
+      ) {
         const transcript = await publicTranscript(
           replacementSpringUrl,
           tenant,
@@ -3339,7 +3614,10 @@ try {
             `Approval recovery answer differs: ${JSON.stringify(transcript.text)}`,
           );
       }
-      if (approvalFault === 'after-result') {
+      if (
+        approvalFault === 'after-result' ||
+        approvalFault === 'after-earlier-tools'
+      ) {
         // The reissue must retract the held prefix: only the recovered
         // answer may remain in the public transcript.
         const transcript = await publicTranscript(
@@ -3374,7 +3652,8 @@ try {
         : [];
       const expectedExecutions =
         verificationMode === 'allow'
-          ? approvalFault === 'sibling-approval'
+          ? approvalFault === 'sibling-approval' ||
+            approvalFault === 'after-earlier-tools'
             ? 2
             : 1
           : 0;
@@ -3385,8 +3664,26 @@ try {
       // Every approved call keeps its own original prepare key/digest and the
       // original Runtime identity, settled once. Match by prepare key so the
       // model's call order is checked, not the SQL row order; the A3 arm has
-      // two siblings, every other allow arm has one.
-      if (verificationMode === 'allow') {
+      // two siblings and B3 two earlier rounds, every other allow arm has one.
+      if (approvalFault === 'after-earlier-tools') {
+        // B3's two earlier tools live in separate rounds, so the first approval
+        // plan carries only tool A. Assert both executions' Runtime identity and
+        // settled-once directly; the two physical file effects give per-tool
+        // evidence, and a re-run of either earlier tool reds the count above.
+        for (const [ordinal, execution] of executions.entries()) {
+          if (
+            execution[2] !== originalApprovalPlan!.runtime.bindingId ||
+            execution[3] !== originalApprovalPlan!.runtime.generation ||
+            execution[4] !== originalApprovalPlan!.runtime.runtimeSessionId ||
+            execution[5] !== 'SETTLED' ||
+            execution[6] !== '1'
+          ) {
+            throw new Error(
+              `B3 earlier execution ${ordinal} changed its identity or re-ran: ${execution.join(',')}`,
+            );
+          }
+        }
+      } else if (verificationMode === 'allow') {
         const plan = originalApprovalPlan!;
         const settledAtByOrdinal: number[] = [];
         for (const [ordinal, call] of plan.calls.entries()) {
@@ -3448,6 +3745,65 @@ try {
             `Sibling physical file assertion failed: ${JSON.stringify(siblingBytes)}`,
           );
       }
+      if (approvalFault === 'after-earlier-tools') {
+        const b3Bytes = existsSync(b3SecondSideEffect)
+          ? readFileSync(b3SecondSideEffect, 'utf8')
+          : '';
+        if (b3Bytes !== b3SecondSideEffectContent)
+          throw new Error(
+            `B3 second physical file assertion failed: ${JSON.stringify(b3Bytes)}`,
+          );
+        // Round + cost ledger continuity: recovery must resume the saved round
+        // and restore the budget snapshot / token ledger, not restart them.
+        if (!b3Before)
+          throw new Error('B3 crash-boundary round/budget was not captured');
+        const b3After = b3RoundAndBudget(mysqlPort, sessionFilter);
+        saveEvidence('b3-round-budget-after.json', b3After);
+        if (b3After.round !== b3Before.round || b3After.round < 2)
+          throw new Error(
+            `B3 recovery reset the logical round: before=${b3Before.round} after=${b3After.round}`,
+          );
+        // The +Nk fixture guarantees a non-null crash-boundary snapshot; a null
+        // one means the budget was never exercised and the deep-equal below
+        // would pass vacuously (null == null) under a dropped restore.
+        if (!b3Before.budget)
+          throw new Error(
+            'B3 crash-boundary turn budget snapshot is null: the fixture did not exercise the budget',
+          );
+        if (!isDeepStrictEqual(b3After.budget, b3Before.budget))
+          throw new Error(
+            `B3 recovery reset the turn budget snapshot: before=${JSON.stringify(b3Before.budget)} after=${JSON.stringify(b3After.budget)}`,
+          );
+        // The ledger may grow as the held round completes, but every model's
+        // output-token total must survive. An empty {} ledger is truthy, so a
+        // null check alone would let a zeroed restore pass.
+        const b3ModelsBefore = (b3Before.models ?? {}) as Record<
+          string,
+          { tokens?: { candidates?: number } }
+        >;
+        const b3ModelsAfter = (b3After.models ?? {}) as Record<
+          string,
+          { tokens?: { candidates?: number } }
+        >;
+        const b3LedgerEntries = Object.entries(b3ModelsBefore);
+        if (
+          b3LedgerEntries.length === 0 ||
+          b3LedgerEntries.every(
+            ([, metric]) => (metric.tokens?.candidates ?? 0) === 0,
+          )
+        )
+          throw new Error(
+            'B3 crash-boundary per-model token ledger is empty: the fixture did not exercise the ledger',
+          );
+        for (const [model, metric] of b3LedgerEntries) {
+          const beforeTokens = metric.tokens?.candidates ?? 0;
+          const afterTokens = b3ModelsAfter[model]?.tokens?.candidates ?? 0;
+          if (afterTokens < beforeTokens)
+            throw new Error(
+              `B3 recovery wiped the per-model token ledger: model=${model} before=${beforeTokens} after=${afterTokens}`,
+            );
+        }
+      }
       const actionRows = runMysql(
         mysqlPort,
         `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' ORDER BY action_id`,
@@ -3468,6 +3824,18 @@ try {
         if (actionRows !== expectedSiblingActions.join('\n'))
           throw new Error(
             `Sibling approval identities/states differ: ${actionRows}`,
+          );
+      } else if (approvalFault === 'after-earlier-tools') {
+        // Both earlier tools end decided under their ORIGINAL Action IDs: A by
+        // the first Allow, B by the runner's second Allow. Recovery must resume
+        // the saved model round, not re-ask either approval.
+        const expectedB3Actions = [
+          `${originalApprovalId}\t${expectedActionState}`,
+          `${secondApprovalId}\t${expectedActionState}`,
+        ].sort();
+        if (actionRows !== expectedB3Actions.join('\n'))
+          throw new Error(
+            `B3 approval identities/states differ: ${actionRows}`,
           );
       } else if (
         actionRows !== `${originalApprovalId}\t${expectedActionState}`
@@ -3587,12 +3955,14 @@ try {
         JSON.stringify(request.body.messages).includes('"role":"tool"'),
       );
       const expectedModelsAfterResults =
-        approvalFault === 'after-result' ||
-        approvalFault === 'finished-before-commit'
-          ? 2
-          : ['allow', 'deny'].includes(verificationMode)
-            ? 1
-            : 0;
+        approvalFault === 'after-earlier-tools'
+          ? 3
+          : approvalFault === 'after-result' ||
+              approvalFault === 'finished-before-commit'
+            ? 2
+            : ['allow', 'deny'].includes(verificationMode)
+              ? 1
+              : 0;
       if (
         initialRequests.length !== 1 ||
         modelAfterResults.length !== expectedModelsAfterResults
@@ -3615,6 +3985,22 @@ try {
         if (!parity)
           throw new Error(
             'Result-commit recovery changed the saved model request',
+          );
+      }
+      if (approvalFault === 'after-earlier-tools') {
+        // The held round-2 request (index 1) must be reissued deep-equal by the
+        // recovery generation (index 2); index 0 is the earlier round-1 request.
+        const parity = isDeepStrictEqual(
+          modelAfterResults[1]?.body,
+          modelAfterResults[2]?.body,
+        );
+        saveEvidence('model-request-parity.json', {
+          requests: modelAfterResults.map((request) => request.body),
+          equal: parity,
+        });
+        if (!parity)
+          throw new Error(
+            'B3 recovery changed the saved later-round model request',
           );
       }
       if (responseOperation) {

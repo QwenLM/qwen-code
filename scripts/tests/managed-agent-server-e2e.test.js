@@ -593,7 +593,7 @@ describe('managed-agent-server e2e runner', () => {
     // bare ternary also matches expectedOriginalPlanCalls, so narrowing one
     // while dropping the other must not stay green.
     expect(source).toMatch(
-      /const expectedExecutions =[\s\S]*?approvalFault === 'sibling-approval'\s*\?\s*2\s*:\s*1/,
+      /const expectedExecutions =[\s\S]*?approvalFault === 'sibling-approval' \|\|\s*approvalFault === 'after-earlier-tools'\s*\?\s*2\s*:\s*1/,
     );
     // R1-7: pin the per-call identity loop itself (match by prepare key, not
     // the pre-PR single-execution shape), so reverting it reds here at unit
@@ -641,6 +641,53 @@ describe('managed-agent-server e2e runner', () => {
     expect(a3PlanFnBody).toContain("event.kind !== 'hosted.batch.planned'");
     expect(a3PlanFnBody).toContain("payload['batchId'] !== batchId");
     expect(a3PlanFnBody).toContain("plan.stage !== 'final'");
+    // B3 after-earlier-tools: the multi-round fixture, the second-Allow
+    // choreography, the round/budget continuity readers + assertions, and the
+    // later-round deep-equal parity are all pinned so a regression reds here.
+    expect(source).toContain("'after-earlier-tools'");
+    expect(source).toContain('call_managed_b3_second');
+    expect(source).toContain('b3BudgetDirective');
+    expect(source).toContain('Second earlier-tool approval requested');
+    expect(source).toContain('Earlier tools settled and the later round held');
+    expect(source).toContain('b3RoundAndBudget(');
+    expect(source).toContain('B3 recovery reset the logical round');
+    expect(source).toContain('B3 recovery reset the turn budget snapshot');
+    expect(source).toContain('B3 recovery wiped the per-model token ledger');
+    expect(source).toContain('B3 second physical file assertion failed');
+    expect(source).toContain(
+      'B3 recovery changed the saved later-round model request',
+    );
+    expect(source).toContain('B3 earlier execution');
+    expect(source).toContain('B3 approval identities/states differ');
+    // The hold armed for B3 must also be RELEASED after the crash: a release
+    // gated to after-result alone leaves the recovery generation's reissued
+    // request held forever (the .75 head run crash-looped on exactly that).
+    const releaseAt = source.indexOf('releaseApprovalResultHold();');
+    expect(releaseAt).toBeGreaterThan(-1);
+    expect(source.slice(releaseAt - 200, releaseAt)).toContain(
+      "approvalFault === 'after-earlier-tools'",
+    );
+    // B3 shares after-result's published-prefix capture and retraction proof.
+    expect(source).toMatch(
+      /approvalFault === 'after-result' \|\|\s*approvalFault === 'after-earlier-tools'\s*\) \{\s*\/\/ The reissue must retract the held prefix/,
+    );
+    // The fixture must charge non-zero usage (the fake default is all zeros,
+    // which makes the ledger continuity assertion vacuous) and the ledger
+    // check must compare per-model totals — an empty {} ledger is truthy.
+    expect(source).toContain('completion_tokens: 300');
+    expect(source).toContain(
+      'B3 crash-boundary per-model token ledger is empty',
+    );
+    expect(source).toContain('B3 crash-boundary turn budget snapshot is null');
+    expect(source).toContain('afterTokens < beforeTokens');
+    const b3Fn = source.indexOf('function b3RoundAndBudget(');
+    expect(b3Fn).toBeGreaterThan(-1);
+    const b3FnBody = source.slice(b3Fn, source.indexOf('\n}', b3Fn));
+    expect(b3FnBody).toContain('qwen_managed_agent.ma_session_journal_tx');
+    expect(b3FnBody).toContain("event.kind !== 'model.attempt'");
+    expect(b3FnBody).toContain('SELECT HEX(inline_bytes)');
+    expect(b3FnBody).toContain("attempts[i].payload['recoveryRef']");
+    expect(b3FnBody).toContain("['usageRef', 'routeRef']");
   });
 
   // R4-2 (behavioural): the source pins above assert the window helper's
@@ -829,6 +876,96 @@ describe('managed-agent-server e2e runner', () => {
         planned(10),
       ]),
     ).toEqual(finalPlan);
+  });
+
+  // B3 (behavioural): exercise b3RoundAndBudget on injected journal rows and
+  // request/route/usage resources, so the latest-attempt round selection, the
+  // reverse-scan for budget/models, and both throw branches are proven on data.
+  // runMysql is injected through load() and dispatches on the query (journal
+  // HEX rows vs HEX resource bytes keyed by resource_id); sqlString is
+  // extracted too.
+  it('behaves b3RoundAndBudget on injected journal rows', () => {
+    const attempt = (sequence, refs) => ({
+      kind: 'model.attempt',
+      sequence,
+      payload: refs,
+    });
+    const journalRows = (events) =>
+      Buffer.from(
+        events
+          .map((event) =>
+            JSON.stringify({
+              subtype: 'managed_session_event_v1',
+              managedSession: event,
+            }),
+          )
+          .join('\n'),
+        'utf8',
+      ).toString('hex');
+    const budgetSnapshot = { budget: 500000, outputTokensAtTurnStart: 100 };
+    const resources = {
+      // The saved request carries the full system prompt, so its JSON has \"
+      // and \\ sequences — the shape mysql --batch escaping corrupted when the
+      // helper read CONVERT(inline_bytes) instead of HEX.
+      req_round2: { round: 2, prompt: 'reply "exactly" then \\ stop' },
+      req_round0: { round: 0 },
+      usage1: { budget: budgetSnapshot, models: { m: { output: 150 } } },
+      route2: { budget: budgetSnapshot },
+    };
+    const run = (events) =>
+      load(
+        ['b3RoundAndBudget', 'sqlString'],
+        'b3RoundAndBudget',
+        'runMysql',
+      )((_port, query) => {
+        if (query.includes('ma_session_journal_tx')) return journalRows(events);
+        if (query.includes('ma_resource')) {
+          const resourceId = query.match(/resource_id='([^']+)'/)?.[1];
+          const res = resources[resourceId];
+          if (!res) throw new Error(`no resource ${String(resourceId)}`);
+          return Buffer.from(JSON.stringify(res), 'utf8').toString('hex');
+        }
+        throw new Error(`unexpected query: ${query}`);
+      }).b3RoundAndBudget(0, 'filter');
+
+    // The latest attempt's request gives the round; budget/models reverse-scan
+    // across the route/usage refs (budget from the newest, models from usage1).
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usage1' },
+        }),
+        attempt(20, {
+          recoveryRef: { resourceId: 'req_round2' },
+          routeRef: { resourceId: 'route2' },
+        }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { m: { output: 150 } },
+    });
+    // Models still resolve from an earlier attempt when the newest has no usage.
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usage1' },
+        }),
+        attempt(20, { recoveryRef: { resourceId: 'req_round2' } }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { m: { output: 150 } },
+    });
+    // No attempt at all.
+    expect(() => run([])).toThrow(/no model attempt/);
+    // An attempt with no saved request round.
+    expect(() => run([attempt(10, {})])).toThrow(
+      /no saved model-request round/,
+    );
   });
 
   // #12941: the Stage A acceptance criterion names a 15-second Runtime delay,
