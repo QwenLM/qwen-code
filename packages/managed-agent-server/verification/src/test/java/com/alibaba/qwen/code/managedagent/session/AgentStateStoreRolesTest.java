@@ -23,6 +23,7 @@ class AgentStateStoreRolesTest {
     @Test
     void theCompositeIsExactlyTheSixRoles() {
         assertThat(AgentStateStore.class.getDeclaredMethods()).isEmpty();
+        assertThat(AgentStateStore.class.getDeclaredFields()).isEmpty();
         assertThat(Set.of(AgentStateStore.class.getInterfaces()))
                 .containsExactlyInAnyOrder(
                         SessionAdmissionStore.class,

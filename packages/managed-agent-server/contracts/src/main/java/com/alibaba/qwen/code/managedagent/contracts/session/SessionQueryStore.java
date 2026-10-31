@@ -47,12 +47,19 @@ public interface SessionQueryStore {
     public Optional<TurnRecord> findTurn(String tenantId, String sessionId,
             String turnId);
 
+    /** The active Turn of each given Session, in one round trip. */
     public Map<String, TurnSummary> findActiveTurns(String tenantId,
             List<String> sessionIds);
 
+    /** The latest Turn of each given Session, in one round trip. */
     public Map<String, TurnSummary> findLatestTurns(String tenantId,
             List<String> sessionIds);
 
+    /**
+     * A page of a Session's Turns, newest first: by creation time, then by
+     * Turn ID, both descending. A position excludes the Turn it names and
+     * every newer one.
+     */
     public TurnPage listTurns(String tenantId, String sessionId,
             Long beforeCreatedAt, String beforeTurnId, int limit);
 

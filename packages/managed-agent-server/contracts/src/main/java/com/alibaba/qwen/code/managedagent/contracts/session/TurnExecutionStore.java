@@ -16,14 +16,36 @@ public interface TurnExecutionStore {
         throw new UnsupportedOperationException("Session worktrees are unavailable");
     }
 
+    /**
+     * #14387: the durable error code a workflow Turn carries once its
+     * recovery was refused — the Harness generation running it was lost
+     * and its deterministic in-process work must never be re-executed
+     * while the first run's outcome stays unwitnessed. The Turn is never
+     * settled: the code stays on the active row for the child result
+     * relay to classify the record blocked from, and the dispatch sweep
+     * parks the row (a cancel still scans it — settling the Turn
+     * cancelled is the cancel's own act).
+     */
     String WORKFLOW_RECOVERY_BLOCKED = "hosted_workflow_recovery_blocked";
 
+    /**
+     * D7-2: the durable code a Turn carries while its parked Runtime
+     * execution's acceptance is still unknown. The dispatch sweep parks it,
+     * and the reconciler re-drives the cancellation load on its RECHECK
+     * cadence; the code never settles the Turn by itself. A cancel still
+     * scans it — settling the Turn cancelled is the cancel's own act.
+     */
     String RUNTIME_RECOVERY_BLOCKED = "hosted_runtime_recovery_blocked";
 
     String HARNESS_RECOVERY_BLOCKED = "hosted_harness_recovery_blocked";
 
     public List<DispatchTarget> findDispatchable(long now, int limit);
 
+    /**
+     * D7-2: active Turns parked on an unresolved Runtime execution whose
+     * recheck is due. They are never dispatched; the reconciler drives a
+     * fresh cancellation load instead.
+     */
     public List<DispatchTarget> findRuntimeRecoveryParked(long now, int limit);
 
     public Optional<TurnRecord> claimTurn(String tenantId, String sessionId,
@@ -35,10 +57,24 @@ public interface TurnExecutionStore {
     public void releaseTurnLease(String tenantId, String sessionId, String turnId,
             String owner);
 
+    /**
+     * #14387: durably marks an active Turn whose recovery was refused —
+     * the error code stays on the still-active row for the child result
+     * relay to classify from, and the dispatch lease is released so the
+     * drive ends without settling the Turn. Never a terminal status: the
+     * unwitnessed execution's outcome was never observed. A Harness park
+     * backs off before read-only journal observation; it may still settle
+     * from later authoritative evidence without replaying execution.
+     */
     public boolean markTurnRecoveryBlocked(String tenantId, String sessionId,
             String turnId, String owner, String errorCode,
             String errorMessage);
 
+    /**
+     * D7-2: parks an active Turn on {@link #RUNTIME_RECOVERY_BLOCKED} until
+     * {@code retryAfter}, releasing the dispatch lease. The Turn keeps its
+     * status: only a proven cancel may settle it.
+     */
     public boolean parkTurnForRuntimeRecovery(String tenantId, String sessionId,
             String turnId, String owner, String message, long retryAfter);
 
@@ -78,10 +114,21 @@ public interface TurnExecutionStore {
             String expectedSessionEventEpoch, String eventEpoch,
             long lastEventId);
 
+    /**
+     * Clears non-terminal text from a continuation epoch that did not reach
+     * a public terminal event, so the replacement stream is the only copy.
+     */
     public void retractContinuationOutput(String tenantId, String sessionId,
             String turnId, String owner, String harnessBootId,
             String eventEpoch);
 
+    /**
+     * Retracts the published text of the in-flight message a restarted model
+     * attempt replaces (#13319): deltas of the Turn in the live epoch with a
+     * source id at or after {@code fromSourceId} are emptied, projections are
+     * rebuilt, and a {@code stream.reconciled} event is appended. The Harness
+     * cursor advances past {@code retractionSourceId} either way.
+     */
     public void retractHarnessTurnOutput(String tenantId, String sessionId,
             String turnId, String owner, String eventEpoch,
             long fromSourceId, long retractionSourceId);

@@ -1,7 +1,6 @@
 package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.contracts.session.AcceptanceEvidence;
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
 import com.alibaba.qwen.code.managedagent.contracts.session.SessionLifecycleStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ParkedOperation;
@@ -37,7 +36,7 @@ public class RenameEvidence implements AcceptanceEvidence {
     }
 
     @Override
-    public boolean settle(AgentStateStore store, ParkedOperation parked,
+    public boolean settle(SessionLifecycleStore store, ParkedOperation parked,
             AcceptanceVerdict verdict, long retryAt) {
         return store.settleParkedRename(parked, verdict, retryAt);
     }
