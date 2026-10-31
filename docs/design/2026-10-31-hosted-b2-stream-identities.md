@@ -135,7 +135,10 @@ The capture promise is marked handled at creation (`.catch(() => undefined)`) so
 teardown abort on an early arm failure cannot become an unhandled rejection; the
 audit's await still sees the real rejection, and abort/budget errors are rewrapped
 as `B2 live SSE …`. Behavioural tests cover the drain (two terminals across the
-window), the abort semantics, and the shared observer's split-frame/wire assertions.
+window), all three failure branches (observer failure, abort, incomplete capture),
+and the shared observer's split-frame/wire assertions. The injected wait budget is
+wall-clock, like the real `waitUntil`: the drain predicate reads `Date.now()`, so an
+iteration-count budget could expire before the drain window ends on a fast runner.
 
 ### View audit
 
@@ -222,9 +225,15 @@ observation, not the generic audit string.
   the shared retraction-ordering observation, with the live/Part/blanking/replay
   checks jointly witnessing the same mechanism; M3 (constant message id) reds an
   upstream publication barrier and is recorded as an upstream-guard observation, not
-  a B2-specific witness. The view-audit clauses (live-answer identity, replay terminal
-  type, per-group item, shared Part, blanking, terminal count, drain) each have a
-  behavioural counterexample plus a verified delete-control.
+  a B2-specific witness. Every view-audit clause — converged live/replay text,
+  terminal count and type in both views, retraction count and both orderings,
+  per-group identity presence, the one shared assistant item, pairwise-distinct
+  Parts, live-answer identity equality, both prefixes blanked in reload and replay
+  (unblanked and missing frames), and the replay answer's item and Part — plus the
+  drain and all three `readPublicSse` failure branches has a permanent behavioural
+  counterexample. Every load-bearing clause is delete-control verified (deleting it
+  reds the suite at the named case); the few redundant-defence clauses are caught by
+  sibling clauses and their delete-controls survive by design.
 - Bilingual design docs aligned; CI green; no production behavior change.
 
 ## Open questions

@@ -110,7 +110,9 @@ resolve。臂在第一个前缀之前开一条 live 连接（after=0），跨两
 `Last-Event-ID: 0` 的第二条连接作 replay 见证。捕获 promise 在创建处标记已处理
 （`.catch(() => undefined)`)，使早期臂失败时 teardown 的 abort 不会变成 unhandled
 rejection；审计的 await 仍看到真实拒绝，abort/预算错误被重包装为 `B2 live SSE …`。
-行为化测试覆盖 drain（窗口内两个终态）、abort 语义、共享 observer 的分帧/wire 断言。
+行为化测试覆盖 drain（窗口内两个终态）、全部三个失败分支（observer 失败、abort、
+捕获不完整）、共享 observer 的分帧/wire 断言。注入的等待预算与真实 `waitUntil` 一样
+按墙钟计：drain 谓词读 `Date.now()`，迭代次数预算在快 runner 上可能先于 drain 窗口耗尽。
 
 ### 视图审计
 
@@ -175,9 +177,12 @@ typecheck && npm run bundle`。
   的身份（须与 reload 答案的 item 和 Part 一致）与 replay 终态的类型。
 - 变异证据按信号命名，不一刀切：M1（attemptId 确定性）红于 attempt 身份断言；
   M2（撤回短路）红于共享撤回顺序观察，live/Part/清空/replay 检查共同见证同一机制；
-  M3（messageId 常量）红于上游发布屏障，记录为上游守卫观察而非 B2 专属见证。视图审计
-  各子句（live 答案身份、replay 终态类型、每组 item、共享 Part、清空、终态计数、drain）
-  各有行为化反例加已验证的删除对照。
+  M3（messageId 常量）红于上游发布屏障，记录为上游守卫观察而非 B2 专属见证。视图审计的
+  每个子句——live/replay 收敛文本、两视图的终态计数与类型、撤回计数与两处顺序、每组身份
+  存在性、唯一共享 assistant item、逐代互异 Part、live 答案身份一致性、reload 与 replay
+  中两个前缀的清空（未清空与缺帧）、replay 答案的 item 与 Part——加上 drain 与
+  `readPublicSse` 的全部三个失败分支，各有永久行为化反例。每个承重子句都做过删除对照
+  （删掉它套件即在命名用例红）；少数纵深防御子句由兄弟子句兜底，其删除对照按设计存活。
 - 双语设计文档对齐；CI 绿；无生产行为改动。
 
 ## 开放问题

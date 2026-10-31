@@ -1187,8 +1187,13 @@ describe('managed-agent-server e2e runner', () => {
   // observed), Last-Event-ID passthrough, and abort rejects with a B2 error
   // (R1-1: the caller's .catch guard is what keeps teardown alive).
   it('behaves readPublicSse on an injected observer', async () => {
-    const waitUntilStub = async (_name, predicate) => {
-      for (let i = 0; i < 10_000; i += 1) {
+    // Wall-clock budget like the real waitUntil: the drain predicate reads
+    // Date.now(), so an iteration-count budget can expire before the drain
+    // window ends on a fast runner (10k setImmediate turns took ~136ms here
+    // but under 100ms on CI, reddening the 100ms drain deterministically).
+    const waitUntilStub = async (_name, predicate, timeoutMs) => {
+      const deadline = Date.now() + timeoutMs;
+      while (Date.now() < deadline) {
         if (await predicate()) return;
         await new Promise((resolve) => setImmediate(resolve));
       }
@@ -1302,6 +1307,36 @@ describe('managed-agent-server e2e runner', () => {
     } finally {
       process.off('unhandledRejection', onUnhandled);
     }
+    // S1: the observer-failure catch branch — a wire failure observed mid
+    // capture must surface as the B2 failed error, not a generic one.
+    class FailingObserver {
+      frames = [];
+      controller = new AbortController();
+      failure = undefined;
+      task = Promise.resolve();
+      start() {
+        this.failure = new Error('wire violation');
+        return Promise.resolve();
+      }
+    }
+    await expect(
+      loadSse(FailingObserver)('http://spring', 'sess', {
+        tenantId: 't',
+        until: () => false,
+        timeoutMs: 1_000,
+      }),
+      // Anchored: without the failure branch the same error text resurfaces
+      // wrapped in the incomplete branch, which a substring match would pass.
+    ).rejects.toThrow(/^B2 live SSE failed: Error: wire violation/);
+    // S1: the capture-incomplete catch branch — a wait budget exhausted with
+    // no observer failure and no abort must surface as incomplete.
+    await expect(
+      loadSse(DrainingObserver)('http://spring', 'sess', {
+        tenantId: 't',
+        until: () => false,
+        timeoutMs: 20,
+      }),
+    ).rejects.toThrow(/B2 live SSE capture incomplete/);
   });
 
   // B2 (behavioural): the shared SseObserver parse loop — split frames, the
@@ -1526,6 +1561,87 @@ describe('managed-agent-server e2e runner', () => {
     const replayUnblanked = views();
     replayUnblanked.replay[0] = delta(1, 'P1', 'partA');
     expect(() => audit(replayUnblanked)).toThrow(/B2 replay view/);
+    // S1 (per-clause pinning): each case below isolates one audit clause that
+    // survived a single-clause deletion before the case existed; every case
+    // was delete-control verified against its named clause.
+    // An extra delta after the last retraction breaks the converged LIVE text
+    // while every identity, ordering and terminal check still holds.
+    const liveExtraDelta = views();
+    liveExtraDelta.live = [
+      delta(1, 'P1', 'partA'),
+      reconciled(2),
+      delta(3, 'P2', 'partB'),
+      reconciled(4),
+      delta(5, 'ANSWER', 'partC'),
+      delta(6, 'EXTRA', 'partC'),
+      terminal(7),
+    ];
+    expect(() => audit(liveExtraDelta)).toThrow(
+      /B2 live SSE: text="ANSWEREXTRA"/,
+    );
+    // No retraction strictly between the two prefixes (both sit between
+    // partial2 and the answer): the first ordering clause must red while the
+    // count, converged text and second ordering all hold.
+    const earlyOrdering = views();
+    earlyOrdering.live = [
+      delta(1, 'P1', 'partA'),
+      delta(3, 'P2', 'partB'),
+      reconciled(4),
+      reconciled(5),
+      delta(6, 'ANSWER', 'partC'),
+      terminal(7),
+    ];
+    expect(() => audit(earlyOrdering)).toThrow(
+      /B2 live SSE: text="ANSWER" terminals=1 partial1=1 partial2=1 answer=1 retractions=2/,
+    );
+    // A PREFIX group under a foreign item (every group still carries an item
+    // and the live/reload answer identities agree) must red the one-shared-
+    // item clause, not slip through the per-group presence check.
+    const foreignPrefixItem = views();
+    foreignPrefixItem.live[0] = delta(1, 'P1', 'partA', 'item_foreign');
+    expect(() => audit(foreignPrefixItem)).toThrow(
+      /expected one shared assistant item/,
+    );
+    // The SECOND reload prefix left unblanked (the first is blanked) must red.
+    const reloadSecondUnblanked = views();
+    reloadSecondUnblanked.reload[1] = delta(3, 'P2', 'partB');
+    expect(() => audit(reloadSecondUnblanked)).toThrow(/not blanked in reload/);
+    // An extra delta in the REPLAY's converged text must red.
+    const replayExtraDelta = views();
+    replayExtraDelta.replay = [
+      blanked(1),
+      blanked(3),
+      delta(5, 'ANSWER', 'partC'),
+      delta(6, 'EXTRA', 'partC'),
+      terminal(7),
+    ];
+    expect(() => audit(replayExtraDelta)).toThrow(
+      /B2 replay view: text="ANSWEREXTRA"/,
+    );
+    // A double-projected terminal in the REPLAY must red the count clause.
+    const replayDoubleTerminal = views();
+    replayDoubleTerminal.replay.push(terminal(7));
+    expect(() => audit(replayDoubleTerminal)).toThrow(
+      /B2 replay view: .*terminals=2/,
+    );
+    // A MISSING blanked prefix frame in replay (not an unblanked one) must
+    // red: dropping the frame leaves the converged text intact, so only the
+    // per-sequence blanking clauses catch it.
+    const replayMissingFirst = views();
+    replayMissingFirst.replay = replayMissingFirst.replay.filter(
+      (event) => event.sequence !== 1,
+    );
+    expect(() => audit(replayMissingFirst)).toThrow(/B2 replay view/);
+    const replayMissingSecond = views();
+    replayMissingSecond.replay = replayMissingSecond.replay.filter(
+      (event) => event.sequence !== 3,
+    );
+    expect(() => audit(replayMissingSecond)).toThrow(/B2 replay view/);
+    // The replay answer under a foreign ITEM (same Part) must red the item
+    // comparison independently of the Part comparison.
+    const replayForeignItem = views();
+    replayForeignItem.replay[2] = delta(5, 'ANSWER', 'partC', 'item_foreign');
+    expect(() => audit(replayForeignItem)).toThrow(/B2 replay view/);
   });
 
   // B2: pin the identity/live-SSE observations and their harness-only gate so a
