@@ -9,6 +9,10 @@ import { getErrorMessage } from './errors.js';
 
 const BRE_OPERATORS = new Set(['+', '?', '|', '(', ')', '{', '}']);
 const SIMPLE_REGEX_QUANTIFIERS = new Set(['*', '+', '?']);
+// sed matches text as characters, not UTF-16 code units, and `.` may consume
+// the carriage return retained when a CRLF line is split. Keep both RegExp
+// construction sites on the same flags so parse-time acceptance matches runtime.
+const SED_REGEX_FLAGS = 'gsu';
 
 export interface SedEditInfo {
   filePath: string;
@@ -179,14 +183,14 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
   try {
     const jsPattern = toJavascriptPattern(sedInfo);
     if (
-      hasPosixBracketExpression(jsPattern) ||
+      hasPosixBracketExpression(sedInfo.pattern) ||
       hasLeadingBracketLiteral(jsPattern) ||
       hasSedJavascriptDivergentEscape(jsPattern) ||
       hasBracketCharacterEscape(sedInfo.pattern)
     ) {
       return false;
     }
-    new RegExp(jsPattern);
+    new RegExp(jsPattern, SED_REGEX_FLAGS);
     if (
       hasReplacementBackrefBeyondCaptures(
         sedInfo.replacement,
@@ -512,7 +516,7 @@ export function applySedSubstitution(
   const replaceAll = sedInfo.flags.includes('g');
 
   try {
-    const globalRegex = new RegExp(jsPattern, 'g');
+    const globalRegex = new RegExp(jsPattern, SED_REGEX_FLAGS);
     const parts = content.split(/(\n)/);
     const processableParts = content.endsWith('\n')
       ? parts.slice(0, -1)
@@ -557,6 +561,13 @@ function toJavascriptPattern(sedInfo: SedEditInfo): string {
     if (char === '[') {
       inCharacterClass = true;
       jsPattern += char;
+      continue;
+    }
+
+    // A closing bracket outside a character class is literal in sed, but is a
+    // syntax error in a Unicode-mode RegExp.
+    if (char === ']') {
+      jsPattern += '\\]';
       continue;
     }
 
