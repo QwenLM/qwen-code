@@ -5671,10 +5671,13 @@ export class QQChannel extends ChannelBase {
     const commandText = sanitizePromptText(rawCommandText);
 
     // Bot-authored messages are a feature when the operator opts in, and the
-    // switch is the whole tradeoff: QQ does not echo a bot's own messages, so
-    // this traffic is another bot talking in the group, and no automatic rate
-    // cap follows the switch — the group's human members and the model's own
-    // silence rules are the guard. Dropping them is the default. A
+    // switch is the whole tradeoff. This traffic is another bot talking in the
+    // group: QQ delivers message events for user-authored messages only, and a
+    // bot's own sends come back in the send API's response (a message the bot
+    // itself sent is referenced through the response's ext_info.ref_idx, not
+    // through a message event), so a self-echo cannot reach this handler. No
+    // automatic rate cap follows the switch — the group's human members and the
+    // model's own silence rules are the guard. Dropping them is the default. A
     // user-supplied `[bot]` is stripped above, so the tag cannot be forged.
     const botTag =
       event.author?.bot === true && this.qqConfig.forwardBotMessages === true

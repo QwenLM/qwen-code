@@ -90,12 +90,14 @@ export interface QQChannelConfig {
    * Default false: such messages are dropped before they reach the agent.
    *
    * Bot-to-bot conversation is a feature, not a defect, and this switch is its
-   * whole boundary: QQ does not echo a bot's own messages back to it, so the
-   * only bot-authored traffic is another bot talking in the group. Turning the
-   * switch on is an explicit operator tradeoff — there is deliberately no
-   * automatic rate cap on top; the group's human members and the model's own
-   * silence rules are the guard, and the operator who enables it owns that
-   * tradeoff.
+   * whole boundary: QQ delivers message events for user-authored messages only
+   * — a bot's own sends come back in the send API's response (a message the bot
+   * itself sent is referenced through the response's ext_info.ref_idx, not
+   * through a message event) — so the only bot-authored traffic is another bot
+   * talking in the group. Turning the switch on is an explicit operator
+   * tradeoff — there is deliberately no automatic rate cap on top; the group's
+   * human members and the model's own silence rules are the guard, and the
+   * operator who enables it owns that tradeoff.
    */
   forwardBotMessages?: boolean;
   /** Route overrides for chat IDs that haven't been seen inbound yet.
