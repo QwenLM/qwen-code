@@ -4998,38 +4998,46 @@ describe('qwen-triage verify hardening round 2', () => {
     // Review on 21014c30d6: fragment pins left the operative clauses and the
     // measured example unasserted, so the bullet is pinned whole inside its
     // section: deleting any clause, flipping the exclusion, or moving the
-    // bullet out of Rig hygiene turns this red.
-    const rigHygiene = flat.slice(
-      flat.indexOf('### Rig hygiene (local rounds)'),
-      flat.indexOf('### Targeted gates'),
-    );
+    // bullet out of Rig hygiene turns this red. Review on ff867ec035: the
+    // slice bounds are asserted, because a renamed closing heading would
+    // otherwise fail open (slice(start, -1) spans the rest of the document).
+    const rigHygieneStart = flat.indexOf('### Rig hygiene (local rounds)');
+    const rigHygieneEnd = flat.indexOf('### Targeted gates');
+    expect(rigHygieneStart).toBeGreaterThanOrEqual(0);
+    expect(rigHygieneEnd).toBeGreaterThan(rigHygieneStart);
+    const rigHygiene = flat.slice(rigHygieneStart, rigHygieneEnd);
     expect(rigHygiene).toContain(
       'Give the mutation matrix a tree of its own — never the tree a live ' +
         'cell is measured on. Restoring the source after each row is not ' +
         'enough: a build inside a row propagates the mutant into `dist/`, and a ' +
         'daemon started mid-row loads it. Isolate every artifact a launch ' +
-        "resolves, not just the checkout: `cp -al` the round's `node_modules` " +
-        'into the matrix tree and assert each `@qwen-code/*` link resolves ' +
+        "resolves, not just the checkout: `cp -al` the round's `node_modules` — " +
+        'root plus any per-package ones — into the matrix tree (never symlink ' +
+        'the directory itself) and assert each `@qwen-code/*` link resolves ' +
         'inside it (a nested tree without its own `node_modules` walks up to ' +
-        "the round's), build the sandbox image under a per-tree tag and export " +
-        "`QWEN_SANDBOX_IMAGE` for that tree's cells only (the tag in " +
-        "`packages/cli/package.json` is one shared name any tree's build " +
-        'retags), and give Java rows their own `-Dmaven.repo.local` copied from ' +
-        'the warmed repository. Before the matrix starts, record a sha256 ' +
-        "manifest of each measurement arm's clean `dist/`, and gate every " +
-        'daemon or dist-level harness launch outside the row that produced it ' +
-        'on a scripted comparison against that manifest — never against the ' +
-        "matrix tree's live source, which mid-row is the mutant and agrees with " +
-        'its own build. Prove the gate live by requiring it to refuse a ' +
-        'known-mutant build, not merely to report a fabricated mismatch. Never ' +
-        'hand-patch `dist/` to repair a contaminated build; rebuild from source ' +
-        'you have verified clean and re-record the manifest from that build — a ' +
-        'hand-patch that restores only the visible sites leaves the rest of the ' +
-        'build mutant. Measured example: a round interleaved its mutation ' +
-        'matrix with 80 live daemon cells on one tree, then hand-patched the ' +
-        'mutant it found in `dist/`; the patched build still carried the mutant ' +
-        'expression, so every live cell and the whole matrix were withdrawn and ' +
-        'the round shipped as `inconclusive`.',
+        "the round's); a row that writes under `node_modules` needs real copies " +
+        'from the store (`pnpm install --offline --frozen-lockfile`), because ' +
+        "hardlinks share the round's inodes. Build the sandbox image under a " +
+        'per-tree tag (`QWEN_SANDBOX_IMAGE_TAG=<tree>`; the build reads that ' +
+        'variable, not `QWEN_SANDBOX_IMAGE`), export `QWEN_SANDBOX_IMAGE` for ' +
+        "that tree's cells only, and pass no `--sandbox-image` in those cells — " +
+        'the flag outranks the export (the tag in `packages/cli/package.json` ' +
+        "is one shared name any tree's build retags). Give Java rows their own " +
+        '`-Dmaven.repo.local` copied from the warmed repository. Before the ' +
+        "matrix starts, record a sha256 manifest of each measurement arm's " +
+        'clean `dist/`, and gate every daemon or dist-level harness launch ' +
+        'outside the row that produced it on a scripted comparison against that ' +
+        "manifest — never against the matrix tree's live source, which mid-row " +
+        'is the mutant and agrees with its own build. Prove the gate live by ' +
+        'requiring it to refuse a known-mutant build, not merely to report a ' +
+        'fabricated mismatch. Never hand-patch `dist/` to repair a contaminated ' +
+        'build; rebuild from source you have verified clean and re-record the ' +
+        'manifest from that build — a hand-patch that restores only the visible ' +
+        'sites leaves the rest of the build mutant. Measured example: a round ' +
+        'interleaved its mutation matrix with 80 live daemon cells on one tree, ' +
+        'then hand-patched the mutant it found in `dist/`; the patched build ' +
+        'still carried the mutant expression, so every live cell and the whole ' +
+        'matrix were withdrawn and the round shipped as `inconclusive`.',
     );
     expect(flat).toContain(
       'Runner hygiene (time caps, PID-only kills, restoring the tree, a tree ' +
