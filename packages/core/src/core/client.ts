@@ -1282,6 +1282,13 @@ export class LlmClient {
       `[FILE_READ_CACHE] clear after stripOrphanedUserEntriesFromHistory(prev=${before}, new=${after})`,
     );
     this.config.getFileReadCache().clear();
+    // Stripped entries can carry the conditional-rule reminder appended to a
+    // read_file result, so the consumed marker must be dropped with them.
+    // Note: the Retry caller (sendMessageStream) strips provisionally — if
+    // the retry itself fails, the send-failure finally block handles the
+    // rollback. The blanket reset here is safe because a successful retry
+    // re-reads the same files and re-triggers the rules.
+    this.resetConditionalRuleInjectionMarkers();
     this.config
       .getMemoryManager()
       .restoreMemoryBodiesPresentInHistory(
@@ -1372,6 +1379,7 @@ export class LlmClient {
     // exist in the new history.
     debugLogger.debug('[FILE_READ_CACHE] clear after setHistory');
     this.config.getFileReadCache().clear();
+    this.resetConditionalRuleInjectionMarkers();
     this.config
       .getMemoryManager()
       .restoreMemoryBodiesPresentInHistory(
@@ -1414,6 +1422,7 @@ export class LlmClient {
         `[FILE_READ_CACHE] clear after truncateHistory(keep=${keepCount}, prev=${prevLen}, new=${newLen})`,
       );
       this.config.getFileReadCache().clear();
+      this.resetConditionalRuleInjectionMarkers();
       this.config
         .getMemoryManager()
         .restoreMemoryBodiesPresentInHistory(
@@ -1434,6 +1443,23 @@ export class LlmClient {
         .invalidatePendingExtract(this.config.getSessionId());
     }
     this.forceFullIdeContext = true;
+  }
+
+  /**
+   * Drop the "this rule was already injected" markers once their reminder text
+   * has left the conversation.
+   *
+   * A conditional rule reminder is appended to the tool result that matched
+   * its `paths:` glob. Anything that evicts that result — pre-send
+   * microcompaction, `/compress`, `/compress-fast`, auto-compaction,
+   * memory-pressure `compact_history`, `/rewind`, or a wholesale history
+   * replacement — removes the text but leaves the marker behind, which
+   * would suppress every later re-injection for the rest of the session.
+   * Call this wherever history loses tool results, alongside the other
+   * derived-state invalidations.
+   */
+  private resetConditionalRuleInjectionMarkers(): void {
+    this.config.getConditionalRulesRegistry()?.resetInjected();
   }
 
   async setTools(options: { skipHistoryReveal?: boolean } = {}): Promise<void> {
@@ -2094,6 +2120,10 @@ export class LlmClient {
     // pointing at content the model can no longer retrieve.
     debugLogger.debug('[FILE_READ_CACHE] clear after resetChat');
     this.config.getFileReadCache().clear();
+    // startChat() drops every tool result, so no conditional-rule reminder
+    // survives /clear. Without this the new session could never inject the
+    // rule again for the life of the process.
+    this.resetConditionalRuleInjectionMarkers();
     // Clean up old tool result overflow files on /clear
     void cleanupOldToolResults(Storage.getGlobalTempDir(), 24 * 60 * 60 * 1000);
     this.config.getBaseLlmClient().clearPerModelGeneratorCache();
@@ -3555,6 +3585,11 @@ export class LlmClient {
       }
 
       const m = mcResult.meta;
+      // tokensSaved is incremented by tool-result, nested-media, and
+      // top-level-media branches alike, so changed can be true even when
+      // no tool results were evicted (e.g. only media was compacted).
+      // The blanket reset is safe in that case — re-arming a rule whose
+      // reminder is still resident costs one extra injection at most.
       const changed = m.tokensSaved > 0;
       if (changed) {
         // setHistory conservatively clears loaded-skill tracking.
@@ -3571,6 +3606,7 @@ export class LlmClient {
             m.evictedMemoryBodies ?? [],
           );
         }
+        this.resetConditionalRuleInjectionMarkers();
       }
       if (m.triggerReason === 'size') {
         const pendingNote =
@@ -5596,6 +5632,7 @@ export class LlmClient {
             }
             this.resetManagedAutoMemoryAfterCompression();
             memoryDeliveryStateInvalidated = true;
+            this.resetConditionalRuleInjectionMarkers();
             // Auto-compaction summarized away the startup prelude. Rebuild it
             // before the next turn so env/tool/MCP context isn't lost for the
             // rest of the session (manual /compress gets this via startChat).
@@ -6242,6 +6279,11 @@ export class LlmClient {
       settleMemoryDelivery();
       if (messageType === SendMessageType.ToolResult && !modelRequestAccepted) {
         this.restoreMemoryBodyStateFromHistory();
+        // The tool result never reached the model, so neither did the
+        // conditional-rule reminder appended to it. Roll the marker back for
+        // the same reason the memory bodies are restored above: a transient
+        // send failure must not burn the rule for the rest of the session.
+        this.resetConditionalRuleInjectionMarkers();
       }
       if (
         this.activeAutomaticTodoWorkChainPromptIds.has(prompt_id) &&
@@ -6452,6 +6494,7 @@ export class LlmClient {
       // Reads re-emit bytes the model can no longer see in history.
       debugLogger.debug('[FILE_READ_CACHE] clear after tryCompressChat');
       this.config.getFileReadCache().clear();
+      this.resetConditionalRuleInjectionMarkers();
       this.getChat().setLastPromptTokenCount(
         info.newTokenCount,
         info.newTokenCountIsEstimated ?? true,
@@ -6557,6 +6600,7 @@ export class LlmClient {
           microcompactMeta.evictedMemoryBodies ?? [],
         );
       }
+      this.resetConditionalRuleInjectionMarkers();
     }
     this.config.getMemoryManager().resetExhaustedBodyRefsForCurrentTurn();
     // The fast path rewrites history too, so the delivery state derived from

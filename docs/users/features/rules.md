@@ -28,7 +28,7 @@ Components are function components. Co-locate the test beside the component.
 Never reach for a global store for state one screen owns.
 ```
 
-- **With `paths:`** — a _conditional_ rule. It stays out of the prompt until a tool call reads or edits a file matching one of its globs, and is then injected once for the rest of the session.
+- **With `paths:`** — a _conditional_ rule. It stays out of the prompt until a tool call reads or edits a file matching one of its globs, and is then injected — a second matching file does not repeat it while that reminder is still in the conversation.
 - **Without `paths:`** — a _baseline_ rule. It is part of the system prompt from the first request, exactly like a context file, and costs the same on every turn.
 
 Both fields are optional, and a rule with no frontmatter at all is a baseline rule.
@@ -37,7 +37,7 @@ Details worth knowing:
 
 - Globs are matched against the path **relative to the project root**, with forward slashes on every platform, and they match dotfiles.
 - Symlinks are resolved, so a rule matches whether the tool call used the link or the real path.
-- A conditional rule is injected **once per session** — the second matching file does not repeat it.
+- A conditional rule is injected **at most once while its reminder is still in the conversation** — the second matching file does not repeat it. If the reminder leaves the context (compaction, `/clear`, a rewind), the rule becomes eligible for injection again.
 - HTML comments are stripped from a rule's body before it is sent.
 
 ## Rules from extensions
