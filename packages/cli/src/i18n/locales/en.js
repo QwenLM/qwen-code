@@ -1066,6 +1066,8 @@ export default {
     'No plugins available in this marketplace.',
   'Select a plugin to install from marketplace "{{name}}":':
     'Select a plugin to install from marketplace "{{name}}":',
+  'Selecting a plugin from a marketplace needs an interactive terminal. Run `qwen extensions install <source> --consent` to install non-interactively.':
+    'Selecting a plugin from a marketplace needs an interactive terminal. Run `qwen extensions install <source> --consent` to install non-interactively.',
   'Plugin selection cancelled.': 'Plugin selection cancelled.',
   'Select a plugin from "{{name}}"': 'Select a plugin from "{{name}}"',
   'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':

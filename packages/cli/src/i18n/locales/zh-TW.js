@@ -994,6 +994,8 @@ export default {
   'No plugins available in this marketplace.': '此市場中沒有可用的插件。',
   'Select a plugin to install from marketplace "{{name}}":':
     '從市場 "{{name}}" 中選擇要安裝的插件：',
+  'Selecting a plugin from a marketplace needs an interactive terminal. Run `qwen extensions install <source> --consent` to install non-interactively.':
+    '從市場選擇外掛需要互動式終端。請執行 `qwen extensions install <source> --consent` 進行非互動安裝。',
   'Plugin selection cancelled.': '插件選擇已取消。',
   'Select a plugin from "{{name}}"': '從 "{{name}}" 中選擇插件',
   'Use ↑↓ or j/k to navigate, Enter to select, Escape to cancel':
