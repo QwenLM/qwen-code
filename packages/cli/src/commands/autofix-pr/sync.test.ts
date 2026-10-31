@@ -567,12 +567,34 @@ describe('runSync (real git, bare remote)', () => {
     run(author, 'commit', '-q', '-m', 'bump to nowhere');
     run(author, 'push', '-q', 'origin', 'feat');
     expect(runSync(7)).toMatchObject({ synced: false, moved: true });
-    // Discarding cannot check it out either, and says the worktree is
-    // still not clean.
+    // The author pushes once more. Discarding cannot check it out either,
+    // and says the worktree is still not clean — having adopted the push
+    // all the same, which gives a spent check its pushes back.
+    const red = {
+      identity: 'run:1:2:pull_request:Test',
+      check: 'Test',
+      head: withSub,
+      pushes: 3,
+    };
+    writeState(paths.statePath, {
+      ...readState(paths.statePath)!,
+      failingChecks: [red],
+    });
+    run(
+      author,
+      'update-index',
+      '--cacheinfo',
+      `160000,${'d'.repeat(40)},vendor/sub`,
+    );
+    run(author, 'commit', '-q', '-m', 'bump to nowhere again');
+    run(author, 'push', '-q', 'origin', 'feat');
     expect(runSync(7, true)).toMatchObject({
       synced: false,
       reason: expect.stringContaining('still not clean after discarding'),
     });
+    expect(readState(paths.statePath)!.failingChecks).toEqual([
+      { ...red, pushes: 0 },
+    ]);
   });
 
   it('never recurses into a submodule the worktree has not checked out, whatever submodule.recurse says', () => {

@@ -21,12 +21,14 @@ import {
   commitCheckResults,
   runSnapshot,
   trackFailingChecks,
+  type CheckResult,
   type CheckResults,
   type PrData,
 } from './snapshot.js';
 import {
   MAX_CHECK_FIX_PUSHES,
   MAX_FAILING_CHECKS,
+  MAX_PUSHES,
   autofixPrPaths,
   readState,
   withKnownHead,
@@ -285,7 +287,7 @@ describe('trackFailingChecks', () => {
       },
     };
   };
-  const results = (result: 'passed' | 'failed') =>
+  const results = (result: CheckResult) =>
     new Map([[TEST, result]]) as CheckResults;
 
   it("asks what the check ended in on the watch's pushes in between", () => {
@@ -309,13 +311,19 @@ describe('trackFailingChecks', () => {
     expect(read(results('passed'))).toEqual([record(H3, 0, H3)]);
     // It failed there: both pushes spent.
     expect(read(results('failed'))).toEqual([record(H3, 3, H3)]);
-    // No result there (cancelled by the next push), or GitHub not
-    // answering: only H3 spends, and H2 is asked about again later.
-    for (const on of [new Map() as CheckResults, null]) {
+    // Still running there, or GitHub not answering: only H3 spends, and
+    // H2 is asked about again later.
+    for (const on of [results('pending'), null]) {
       expect(read(on)).toEqual([
         { ...record(H3, 2, H3), unanswered: [{ sha: H2, pushes: 2 }] },
       ]);
     }
+    // Not listed while other checks there still run: it may yet come.
+    expect(
+      read(Object.assign(new Map() as CheckResults, { running: true })),
+    ).toEqual([{ ...record(H3, 2, H3), unanswered: [{ sha: H2, pushes: 2 }] }]);
+    // Cancelled by the next push, or not run there: nothing to come.
+    expect(read(new Map())).toEqual([record(H3, 2, H3)]);
   });
 
   it('asks nothing when the push follows the one it last failed on', () => {
@@ -357,8 +365,8 @@ describe('trackFailingChecks', () => {
     expect(ask.asked).toEqual([between[4], between[3]]);
   });
 
-  it(`keeps the newest ${MAX_CHECK_LOOKUPS} heads it had no result for`, () => {
-    const between = ['1', '2', '3', '4', '5', '6'].map(sha);
+  it(`keeps the newest ${MAX_PUSHES} heads it had no result for`, () => {
+    const between = Array.from({ length: 11 }, (_, i) => sha(i.toString(16)));
     expect(
       trackFailingChecks(
         pr(H3, [checkRun('FAILURE')]),
@@ -370,9 +378,41 @@ describe('trackFailingChecks', () => {
     ).toEqual([
       {
         ...record(H3, 1, H3),
-        unanswered: between.slice(-4).map((s) => ({ sha: s, pushes: 1 })),
+        unanswered: between.slice(-10).map((s) => ({ sha: s, pushes: 1 })),
       },
     ]);
+  });
+
+  it('asks about a re-run on the head it last failed on before the pushes in between', () => {
+    const ask = answers({});
+    trackFailingChecks(
+      pr(H4, [checkRun('FAILURE')]),
+      state({
+        pushedShas: [H1, H2, H3, H4],
+        rerunChecks: [`${TEST}@${H1}@100`],
+        failingChecks: [record(H1, 1, H1)],
+      }),
+      ask.resultsOn,
+    );
+    expect(ask.asked).toEqual([H1, H3, H2]);
+  });
+
+  it("asks about every record's recent heads before the ones asked about again", () => {
+    const [s1, s2, s3, s4, s5] = ['1', '2', '3', '4', '5'].map(sha);
+    const other = { ...record(s3, 1, s3), identity: 'status:ci/jenkins' };
+    const ask = answers({});
+    trackFailingChecks(
+      pr(H3, [checkRun('FAILURE'), status('FAILURE')]),
+      state({
+        pushedShas: [s1, s2, s3, s4, s5, H3],
+        failingChecks: [
+          { ...record(s5, 1, s5), unanswered: [{ sha: s1, pushes: 1 }] },
+          other,
+        ],
+      }),
+      ask.resultsOn,
+    );
+    expect(ask.asked).toEqual([s5, s4, s1]);
   });
 
   it('asks whether a re-run on the head it last failed on passed since', () => {
@@ -396,7 +436,6 @@ describe('trackFailingChecks', () => {
     // Re-run on H2 before the push to H3, and passed after the round moved on.
     for (const extra of [
       { rerunChecks: [`${TEST}@${H2}@100`] },
-      { heldChecks: [`123:${TEST}@${H2}@100`] },
       { rerunChecks: [`${TEST}@${H2}`] },
     ]) {
       expect(read(extra, results('passed'))).toEqual({
@@ -405,16 +444,23 @@ describe('trackFailingChecks', () => {
       });
       expect(read(extra, results('failed')).next).toEqual([record(H3, 3, H3)]);
     }
-    // Not re-run there: nothing to ask.
-    expect(
-      read({ rerunChecks: [`${TEST}@${H1}@100`] }, results('passed')),
-    ).toEqual({ next: [record(H3, 3, H3)], asked: [] });
+    // Not re-run there, or only held for a run still going — which starts
+    // on its own head only, and the watch has pushed since: nothing to ask.
+    for (const extra of [
+      { rerunChecks: [`${TEST}@${H1}@100`] },
+      { heldChecks: [`123:${TEST}@${H2}@100`] },
+    ]) {
+      expect(read(extra, results('passed'))).toEqual({
+        next: [record(H3, 3, H3)],
+        asked: [],
+      });
+    }
   });
 
   it('asks again on the next push about a re-run that had not ended', () => {
     const rerun = { rerunChecks: [`${TEST}@${H2}@100`] };
     // H2's re-run is still going (or GitHub does not answer) when H3 fails.
-    for (const on of [new Map() as CheckResults, null]) {
+    for (const on of [results('pending'), null]) {
       const ask = answers({ [H2]: on });
       expect(
         trackFailingChecks(
@@ -446,18 +492,23 @@ describe('trackFailingChecks', () => {
     };
     // It passed later: H3 was a first failure again, and H4 spends one.
     expect(next(results('passed'))).toEqual([record(H4, 1, H4)]);
-    // It failed again: spent already, nothing more.
-    expect(next(results('failed'))).toEqual([record(H4, 4, H4)]);
+    // It failed again, or ended with no result: spent already, nothing
+    // more.
+    for (const on of [results('failed'), new Map() as CheckResults]) {
+      expect(next(on)).toEqual([record(H4, 4, H4)]);
+    }
     // Still no result: asked again on the push after.
-    expect(next(null)).toEqual([
-      { ...record(H4, 4, H4), unanswered: [{ sha: H2, pushes: 3 }] },
-    ]);
+    for (const on of [results('pending'), null]) {
+      expect(next(on)).toEqual([
+        { ...record(H4, 4, H4), unanswered: [{ sha: H2, pushes: 3 }] },
+      ]);
+    }
   });
 
   it('counts from the newest head a late pass was found on', () => {
     // A fix pushed as H1 had no result when H2 failed, nor did a re-run
     // on H2 when H3 failed; H1 passed after all.
-    const ask = answers({ [H1]: results('passed'), [H2]: new Map() });
+    const ask = answers({ [H1]: results('passed'), [H2]: results('pending') });
     expect(
       trackFailingChecks(
         pr(H4, [checkRun('FAILURE')]),
@@ -505,21 +556,50 @@ describe('trackFailingChecks', () => {
     expect(later.asked).toEqual([H2]);
   });
 
-  it('keeps a head it had no result for once, re-run there after a rollback', () => {
-    // H1 had no result when H2 failed; the branch went back to H1, where a
-    // round re-ran the check, and H3 fails before that re-run ends.
+  it('counts a late pass after a rollback as an answer at once would', () => {
+    // H1 had no result when H2 failed; the branch goes back to H1, and a
+    // round sees it fail there: H1 has its answer.
+    const pushed = { pushedShas: [H0, H1, H2] };
+    const back = trackFailingChecks(
+      pr(H1, [checkRun('FAILURE')]),
+      state({
+        ...pushed,
+        failingChecks: [
+          { ...record(H2, 1, H2), unanswered: [{ sha: H1, pushes: 1 }] },
+        ],
+      }),
+    );
+    expect(back).toEqual([record(H1, 1, H2)]);
+    // The round re-runs it on H1, and H3 fails before that re-run ends.
+    const rerun = { rerunChecks: [`${TEST}@${H1}@100`] };
+    const after = trackFailingChecks(
+      pr(H3, [checkRun('FAILURE')]),
+      state({
+        ...rerun,
+        pushedShas: [H0, H1, H2, H3],
+        failingChecks: back,
+      }),
+      answers({ [H1]: results('pending') }).resultsOn,
+    );
+    expect(after).toEqual([
+      { ...record(H3, 2, H3), unanswered: [{ sha: H1, pushes: 2 }] },
+    ]);
+    // It passed: H3 was a first failure again, and H4 spends one — as had
+    // the pass been known at H3.
+    expect(
+      trackFailingChecks(
+        pr(H4, [checkRun('FAILURE')]),
+        state({ pushedShas: [H0, H1, H2, H3, H4], failingChecks: after }),
+        answers({ [H1]: results('passed') }).resultsOn,
+      ),
+    ).toEqual([record(H4, 1, H4)]);
     expect(
       trackFailingChecks(
         pr(H3, [checkRun('FAILURE')]),
-        state({
-          pushedShas: [H0, H1, H2, H3],
-          rerunChecks: [`${TEST}@${H1}@100`],
-          failingChecks: [
-            { ...record(H1, 1, H2), unanswered: [{ sha: H1, pushes: 1 }] },
-          ],
-        }),
+        state({ ...rerun, pushedShas: [H0, H1, H2, H3], failingChecks: back }),
+        answers({ [H1]: results('passed') }).resultsOn,
       ),
-    ).toEqual([{ ...record(H3, 2, H3), unanswered: [{ sha: H1, pushes: 1 }] }]);
+    ).toEqual([record(H3, 0, H3)]);
   });
 
   it("gives a spent check back after someone else's push", () => {
@@ -691,6 +771,29 @@ describe('trackFailingChecks', () => {
     expect(next.some((r) => r.identity === 'status:old-0')).toBe(false);
   });
 
+  it('keeps a record a read leaves as it was in its place', () => {
+    // Test fails again on the head it last failed on; ci/jenkins, later in
+    // the list, is still running there.
+    const watch = state({
+      pushedShas: [H1],
+      failingChecks: [
+        record(H1, 1, H1),
+        {
+          identity: 'status:ci/jenkins',
+          check: 'ci/jenkins',
+          head: H0,
+          pushes: 0,
+        },
+      ],
+    });
+    expect(
+      trackFailingChecks(
+        pr(H1, [checkRun('FAILURE'), status('PENDING')]),
+        watch,
+      ),
+    ).toEqual(watch.failingChecks);
+  });
+
   it('keeps the most recently added checks', () => {
     const many = Array.from({ length: 100 }, (_, i) => ({
       ...record(H0, 0),
@@ -729,6 +832,32 @@ describe('buildSnapshot: the fix budget of a check', () => {
         exhausted: true,
       }),
     ]);
+  });
+
+  it('marks only the spent check of a round with two failing', () => {
+    const events = buildSnapshot(
+      pr(H3, [
+        checkRun('FAILURE'),
+        checkRun('FAILURE', { name: 'Lint', id: 200 }),
+      ]),
+      state({
+        lastKnownHeadSha: H3,
+        pushedShas: [H1, H2, H3],
+        failingChecks: [
+          record(H3, MAX_CHECK_FIX_PUSHES, H3),
+          {
+            ...record(H3, 1, H3),
+            identity: 'run:15368:2:pull_request:Lint',
+            check: 'Lint',
+          },
+        ],
+      }),
+    ).events;
+    expect(events).toEqual([
+      expect.objectContaining({ check: 'Test', exhausted: true }),
+      expect.not.objectContaining({ exhausted: expect.anything() }),
+    ]);
+    expect(events[1]).toMatchObject({ check: 'Lint' });
   });
 
   it('never marks a workflow GitHub could not start, which has no fix to spend', () => {
@@ -951,6 +1080,28 @@ describe('runSnapshot: recording the fix budget', () => {
     });
     runSnapshot({ pr: 7 });
     expect(stored().failingChecks).toEqual([record(H0, 0)]);
+    // The round is built from the state re-read under the lock.
+    expect(written().action).toBe('resync');
+  });
+
+  it('builds the round from the state re-read under the lock when that read changes nothing', () => {
+    mockGh.mockImplementationOnce(() => {
+      // A helper answers the failure, and a read records it, while the PR
+      // is being read.
+      writeState(paths().statePath, {
+        ...stored(),
+        handledChecks: [`Test@${H0}@#100`],
+        failingChecks: [record(H0, 0)],
+      });
+      return JSON.stringify({
+        data: {
+          viewer: { login: 'me' },
+          repository: { pullRequest: pr(H0, [checkRun('FAILURE')]) },
+        },
+      });
+    });
+    runSnapshot({ pr: 7 });
+    expect(written()).toMatchObject({ action: 'wait', events: [] });
   });
 
   it('takes a rollup cut at the page limit for no answer', () => {
@@ -1137,13 +1288,15 @@ describe('runSnapshot: recording the fix budget', () => {
     );
     runSnapshot({ pr: 7 });
     // Test asks about s5 back to s2, which also answer B's pushes in
-    // between and its re-run on s2; s1 is past the budget: no result, for
-    // Test and for C's re-run there, to ask about on the next push.
+    // between and its re-run on s2 (none of them ran there); s1 is past the
+    // budget, for Test and for C's re-run there: asked about on the next
+    // push.
     expect(commitQueries()).toEqual([s5, s4, s3, s2]);
-    expect(stored().failingChecks![0]).toEqual({
-      ...record(H3, 1, H3),
-      unanswered: [s2, s3, s4, s5].map((s) => ({ sha: s, pushes: 1 })),
-    });
+    expect(stored().failingChecks).toEqual([
+      { ...record(H3, 1, H3), unanswered: [{ sha: s1, pushes: 1 }] },
+      { ...other('B', H3), pushes: 2 },
+      { ...other('C', H3), pushes: 2, unanswered: [{ sha: s1, pushes: 2 }] },
+    ]);
   });
 
   it('takes no answer about a commit for no result, and still writes the round', () => {
@@ -1216,6 +1369,122 @@ describe('runSnapshot: recording the fix budget', () => {
       expect(stored().failingChecks).toEqual([record(H2, 2, H2)]);
       expect(commitQueries()).toEqual([]);
     }
+  });
+
+  it('takes a re-run GitHub has not listed yet for one still to come', () => {
+    writeState(
+      paths().statePath,
+      state({
+        lastKnownHeadSha: H3,
+        pushedShas: [H1, H2, H3],
+        // Re-run on H2 after its check run 150.
+        rerunChecks: [`${TEST}@${H2}@150`],
+        failingChecks: [record(H2, 2, H2)],
+      }),
+    );
+    // GitHub still lists the run that was re-run as the latest.
+    github(pr(H3, [checkRun('FAILURE', { id: 300 })]), {
+      [H2]: [checkRun('FAILURE', { id: 150 })],
+    });
+    runSnapshot({ pr: 7 });
+    expect(stored().failingChecks).toEqual([
+      { ...record(H3, 3, H3), unanswered: [{ sha: H2, pushes: 3 }] },
+    ]);
+    // The re-run passed.
+    pushTo(H4);
+    mockGh.mockReset();
+    github(pr(H4, [checkRun('FAILURE', { id: 400 })]), {
+      [H2]: [
+        checkRun('FAILURE', { id: 150 }),
+        checkRun('SUCCESS', { id: 151 }),
+      ],
+    });
+    runSnapshot({ pr: 7 });
+    expect(stored().failingChecks).toEqual([record(H4, 1, H4)]);
+  });
+
+  it('takes no floor from a re-run only held, which a push has left behind', () => {
+    writeState(
+      paths().statePath,
+      state({
+        lastKnownHeadSha: H3,
+        pushedShas: [H1, H2, H3],
+        // Held on H2 for a run still going after its check run 150; the
+        // watch pushed H3 before it started.
+        heldChecks: [`5:${TEST}@${H2}@150`],
+        failingChecks: [record(H1, 1, H1)],
+      }),
+    );
+    github(pr(H3, [checkRun('FAILURE', { id: 300 })]), {
+      [H2]: [checkRun('FAILURE', { id: 150 })],
+    });
+    runSnapshot({ pr: 7 });
+    expect(stored().failingChecks).toEqual([record(H3, 3, H3)]);
+  });
+
+  it('tells a commit whose check still runs from one where it ended with no result', () => {
+    const answer = (nodes: Contexts) => {
+      mockGh.mockReset();
+      mockGh.mockReturnValueOnce(
+        JSON.stringify({
+          data: {
+            repository: {
+              object: {
+                statusCheckRollup: {
+                  contexts: { pageInfo: { hasNextPage: false }, nodes },
+                },
+              },
+            },
+          },
+        }),
+      );
+      return commitCheckResults({ owner: 'o', repo: 'r' }, H2);
+    };
+    expect(answer([checkRun(null, { status: 'QUEUED' })])).toEqual(
+      new Map([[TEST, 'pending']]),
+    );
+    // Another check still runs there: one not listed may yet come.
+    const running = answer([
+      checkRun('SUCCESS', { name: 'Lint', id: 4 }),
+      checkRun(null, { name: 'Build', id: 5, status: 'IN_PROGRESS' }),
+    ]);
+    expect(running?.get(TEST)).toBeUndefined();
+    expect(running?.running).toBe(true);
+    expect(
+      answer([checkRun('SUCCESS', { name: 'Lint', id: 4 })])?.running,
+    ).toBe(false);
+    expect(answer([status('PENDING')])).toEqual(
+      new Map([['status:ci/jenkins', 'pending']]),
+    );
+    for (const ended of ['CANCELLED', 'SKIPPED', 'STALE']) {
+      expect(answer([checkRun(ended)])).toEqual(new Map());
+    }
+  });
+
+  it('still hints a stale base for a fresh failure beside a spent check', () => {
+    writeState(
+      paths().statePath,
+      state({
+        lastKnownHeadSha: H3,
+        pushedShas: [H1, H2, H3],
+        failingChecks: [record(H2, MAX_CHECK_FIX_PUSHES - 1, H2)],
+      }),
+    );
+    respond(
+      pr(H3, [
+        checkRun('FAILURE', { id: 300 }),
+        checkRun('FAILURE', { name: 'Lint', id: 301 }),
+      ]),
+    );
+    // The compare: the branch is behind its base.
+    mockGh.mockReturnValue('behind');
+    runSnapshot({ pr: 7 });
+    expect(written().events).toEqual([
+      expect.objectContaining({ check: 'Test', exhausted: true }),
+      expect.not.objectContaining({ exhausted: expect.anything() }),
+    ]);
+    expect(compareCalls()).toHaveLength(1);
+    expect(written().baseBehind).toBe(true);
   });
 
   it('keeps what another helper wrote while the PR was being read', () => {

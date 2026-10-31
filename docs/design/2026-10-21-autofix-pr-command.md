@@ -61,8 +61,8 @@ Goals:
 - Never touch the user's working tree, and never force-push or push to the
   default branch.
 - Reply to the feedback it handled, so reviewers can see what changed.
-- Stop on its own when the PR is merged or closed, or when the attempt budgets
-  run out, and report why.
+- Stop on its own when the PR is merged or closed, or when a budget that ends
+  the watch runs out (Section 10), and report why.
 - Wake the session only when something changed; a quiet check costs no model
   turn.
 
@@ -384,26 +384,35 @@ Event rules:
   watch spends nothing. Only a read of the head the watch knows (the one
   `sync` or `push` recorded) counts: any other is the API lagging behind
   the branch, or a push the round syncs to and reads again. A read whose
-  head rollup is cut at the page limit changes nothing either: a later run
-  of a check may be on the pages not read. The gate wakes no round for a
-  pass, so a round may never read one:
+  head rollup is cut short (at the page limit, the time limit, or by the
+  head moving while it pages) changes nothing either: a later run of a
+  check may be on the pages not read. The gate wakes no round for a pass,
+  so a round may never read one:
   the watch can push again (for a comment) before its fix's checks end, or
   a re-run can pass after the round moved on. So when a check fails on a
   later push of the watch, the snapshot asks GitHub what it ended in on the
   watch's pushes in between that the entry did not count, and — when a
-  round re-ran it there — on the head it last failed on
+  round re-ran it there (not one only held for a run still going, which
+  starts on its own head only) — on the head it last failed on
   (`commitCheckResults`: one GraphQL read of a commit's rollup, paged like
   the PR's, a rollup cut at the page limit taken for no answer; at most 4
-  commits a read, shared by every check, each asked once, newest first). A
-  pass there ends the entry as a pass a round reads would, so this failure
-  is a first one again; a failure on a push in between spends one (a
-  re-run that failed again on the last head spends nothing more). A head
-  with no result (still running, cancelled, not listed, or no answer from
-  GitHub) spends nothing and stays on the entry (`unanswered`, the newest
-  4), asked about again on its next push: a pass found there then leaves
+  commits a read, shared by every check and each asked once: every entry's
+  re-run first, then its pushes in between newest first, before any head
+  asked about again). A pass there ends the entry as a pass a round reads would, so
+  this failure is a first one again; a failure on a push in between spends
+  one (a re-run that failed again on the last head spends nothing more). A
+  head with no result spends nothing. One that may still get one — still
+  running, a re-run GitHub has not listed yet (no check run after the one
+  it re-ran), not listed while other checks of the commit still run (a job
+  that needs another, a status posted once CI ends), or no answer from
+  GitHub or past a read's 4 commits — stays
+  on the entry (`unanswered`, at most 10, as many as a watch's pushes) and
+  is asked about again on its next push: a pass found there then leaves
   only the pushes counted since a round next saw the check fail, and a
   failure found there spends nothing — only a result known when a push is
-  counted spends. Only a read that changes an entry takes the watch's lock, to
+  counted spends. One that ended with none (cancelled, skipped, or not
+  listed once the commit's checks have all ended) is dropped, and so is a head the round then sees fail on a return
+  to it. Only a read that changes an entry takes the watch's lock, to
   re-read the state and write it; the entries a read changed go last, and
   at most 100 are kept. Once 3 pushes left a check failing, its `ci_failed`
   carries `exhausted: true`, and the skill answers it as needing a human
@@ -467,7 +476,9 @@ Event rules:
 
 Action precedence: `stop` (merged or closed) → `resync` (head moved
 externally) → `fix` (a conflict, a failed check or a trusted comment) →
-`wait`. The loop adds three more inputs: an exhausted budget means `stop`; a
+`wait`. The loop adds three more inputs: an exhausted budget that ends the
+watch (Section 10) means `stop` — a check out of fix pushes is answered as
+needing a human and leaves the action as it was; a
 background fix in flight (its attempt marker, Section 6.14) keeps the gate
 quiet and the prepared snapshot refused until the attempt ends; and an
 attempt its session left behind (a stale marker) is a source of `fix` too —
@@ -974,7 +985,9 @@ treated as real once the run has ended. That is a known limit.
 two helper calls the model issues at once would otherwise each write back
 what they read, undoing the other's record of a push, a reply or a re-run.
 `prepare` holds it while it creates the worktree and the state file, so two
-starts at once cannot roll back or take over each other's worktree.
+starts at once cannot roll back or take over each other's worktree, and
+`snapshot` holds it while it writes the fix budget of a check, and only
+when a read changes it (Section 6.2).
 The lock is created whole, as a hard link to a file already holding its
 token, and removed only while it still holds that token. A sandbox may run
 each command in a pid namespace of its own, where pids repeat, so the
@@ -1730,14 +1743,14 @@ Replies are on by default; `--no-reply` turns them off.
 
 Budgets, stored in the state file:
 
-| Budget                                             | Default | When exhausted                    |
-| -------------------------------------------------- | ------- | --------------------------------- |
-| Fix pushes per failing check without turning green | 3       | left for a person until it passes |
-| Re-runs per check per head SHA                     | 1       | treat the next failure as real    |
-| Fix attempts per review comment                    | 1       | never offered again               |
-| Pushes per start                                   | 10      | stop the loop                     |
-| Consecutive external head moves                    | 2       | stop the loop                     |
-| Minutes one background fix may run                 | 30      | stop its agent, discard it        |
+| Budget                                             | Default | When exhausted                                           |
+| -------------------------------------------------- | ------- | -------------------------------------------------------- |
+| Fix pushes per failing check without turning green | 3       | left for a person until it passes or someone else pushes |
+| Re-runs per check per head SHA                     | 1       | treat the next failure as real                           |
+| Fix attempts per review comment                    | 1       | never offered again                                      |
+| Pushes per start                                   | 10      | stop the loop                                            |
+| Consecutive external head moves                    | 2       | stop the loop                                            |
+| Minutes one background fix may run                 | 30      | stop its agent, discard it                               |
 
 Stop conditions: the PR is merged or closed; `/autofix-pr stop`; a budget in
 the table says stop; the cron job expires. Every stop but the scheduled task's expiry (7 days by default: `experimental.cronRecurringMaxAgeDays`, or `QWEN_CODE_CRON_MAX_AGE_DAYS`), which ends the watch without a round, runs `cleanup` and

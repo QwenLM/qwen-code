@@ -44,6 +44,7 @@ import { normalizeSegment } from '../review/lib/remote-match.js';
 import {
   MAX_CHECK_FIX_PUSHES,
   MAX_FAILING_CHECKS,
+  MAX_PUSHES,
   REPLY_MARKER,
   assertWatching,
   autofixPrPaths,
@@ -664,31 +665,52 @@ export function checkEvents(
   };
 }
 
-/** What a commit's checks ended in, by check identity: a check that is
- * still running, was cancelled or skipped, or is not listed has no entry. */
-export type CheckResults = ReadonlyMap<string, 'passed' | 'failed'>;
+/** What a commit's checks ended in, by check identity: `pending` for one
+ * still running; one that was cancelled or skipped, or is not listed, has
+ * no entry. `running`: a check of the commit has not ended, so one not
+ * listed yet may still come (a job that needs another, a status posted
+ * once CI ends). */
+export type CheckResults = ReadonlyMap<string, CheckResult> & {
+  readonly running?: boolean;
+};
+export type CheckResult = 'passed' | 'failed' | 'pending';
 
 /** Commits a read asks GitHub about for the fix budget, at most. */
 export const MAX_CHECK_LOOKUPS = 4;
 
+/** `floors`: by identity, the check run a re-run of the check on this
+ * commit must come after (`rerunFrom`); until GitHub lists a later one,
+ * the re-run is still to come. */
 function checkResults(
   contexts: CheckContext[],
-): Map<string, 'passed' | 'failed'> {
-  const results = new Map<string, 'passed' | 'failed'>();
+  floors: ReadonlyMap<string, number> = new Map(),
+): Map<string, CheckResult> {
+  const results = new Map<string, CheckResult>();
   for (const ctx of latestContexts(contexts)) {
-    const [failed, passed] =
-      ctx.__typename === 'CheckRun'
-        ? ctx.status === 'COMPLETED'
-          ? [
-              FAILED_CONCLUSIONS.has(ctx.conclusion ?? ''),
-              PASSED_CONCLUSIONS.has(ctx.conclusion ?? ''),
-            ]
-          : [false, false]
-        : [FAILED_STATUSES.has(ctx.state), ctx.state === 'SUCCESS'];
-    if (failed) results.set(checkIdentity(ctx), 'failed');
-    else if (passed) results.set(checkIdentity(ctx), 'passed');
+    const identity = checkIdentity(ctx);
+    const result = checkResult(ctx, floors.get(identity));
+    if (result) results.set(identity, result);
   }
   return results;
+}
+
+function checkResult(
+  ctx: CheckContext,
+  floor: number | undefined,
+): CheckResult | undefined {
+  if (ctx.__typename !== 'CheckRun') {
+    if (PENDING_STATUSES.has(ctx.state)) return 'pending';
+    if (FAILED_STATUSES.has(ctx.state)) return 'failed';
+    return ctx.state === 'SUCCESS' ? 'passed' : undefined;
+  }
+  if (
+    ctx.status !== 'COMPLETED' ||
+    (floor !== undefined && ctx.databaseId <= floor)
+  ) {
+    return 'pending';
+  }
+  if (FAILED_CONCLUSIONS.has(ctx.conclusion ?? '')) return 'failed';
+  return PASSED_CONCLUSIONS.has(ctx.conclusion ?? '') ? 'passed' : undefined;
 }
 
 /**
@@ -696,8 +718,9 @@ function checkResults(
  * pushes per failing check (Section 10). A check is recorded on the first
  * head a round sees it fail on, and every later push of the watch it fails
  * on spends one of its pushes; a pass ends the record, and a head someone
- * else pushed gives every check its pushes back. A rollup cut at the page
- * limit may hold a later run of a check on the pages not read: it changes
+ * else pushed gives every check its pushes back. A rollup cut short (at
+ * the page limit, the time limit, or by the head moving while it was
+ * paged) may hold a later run of a check on the pages not read: it changes
  * nothing.
  *
  * The gate wakes no round for a pass, so a round may never read one: the
@@ -708,10 +731,13 @@ function checkResults(
  * a round re-ran it there, on the head it last failed on. A pass there ends
  * the record as a pass a round reads would, so this failure is a first one
  * again; a failure on a push in between spends one (a re-run that failed
- * again on the last head spends nothing more). A head with no result (still
- * running, cancelled, not listed, or GitHub not answering) spends nothing
- * and is asked about again on the record's next push: a pass found there
- * then leaves only the pushes counted since, and a failure spends nothing.
+ * again on the last head spends nothing more). A head with no result
+ * spends nothing; one still running (a re-run GitHub has not listed yet
+ * included) or not answered — GitHub not replying, or past a read's
+ * lookups — is asked about again on the record's next push, at most
+ * MAX_PUSHES of them: a pass found there then leaves only the pushes
+ * counted since a round next saw the check fail, and a failure spends
+ * nothing.
  * A return to a push of the watch older than the latest one the record
  * counted spends nothing.
  */
@@ -740,9 +766,11 @@ export function trackFailingChecks(
   // one is no new push.
   const baseline = at >= 0 ? head : state.pushedShas.at(-1);
   const now = checkResults(commit.statusCheckRollup?.contexts.nodes ?? []);
-  // `<identity>@<head>` of the checks a round re-ran on a head.
+  // `<identity>@<head>` of the checks a round re-ran on a head. Not the
+  // held ones: a re-run held for a run still going starts only on its own
+  // head, which the push this counts has left.
   const reran = new Set(
-    rerunFloors(state).map((entry) => entry.replace(/@\d+$/, '')),
+    (state.rerunChecks ?? []).map((entry) => entry.replace(/@\d+$/, '')),
   );
   const fresh = (identity: string, check: string): FailingCheck => ({
     identity,
@@ -751,50 +779,74 @@ export function trackFailingChecks(
     pushes: 0,
     ...(baseline === undefined ? {} : { lastPush: baseline }),
   });
-  // A recorded check failing on a later push of the watch. Asked newest
-  // first: a pass on a newer head makes the older ones moot.
-  const spend = (record: FailingCheck, check: string): FailingCheck => {
-    const result = (sha: string) => resultsOn(sha)?.get(record.identity);
-    const between = state.pushedShas.slice(pushOrder(record.lastPush) + 1, at);
-    const reranOn =
-      record.head !== head && reran.has(`${record.identity}@${record.head}`)
-        ? [record.head]
-        : [];
-    let failed = 0;
+  // What a check ended in on a head, `pending` while GitHub may still
+  // answer: the run has not ended, the check is not listed while others
+  // there still run, or GitHub did not reply.
+  const resultOn = (sha: string, identity: string) => {
+    const on = resultsOn(sha);
+    if (on === null) return 'pending';
+    return on.get(identity) ?? (on.running ? 'pending' : undefined);
+  };
+  // A recorded check failing on a later push of the watch: what it ended
+  // in where no round read it — first on the head it last failed on when a
+  // round re-ran it there, the likeliest to have passed since, then on the
+  // watch's pushes in between, newest first. A pass on any of them ends
+  // the record, so the rest are not asked about.
+  const spends = (record: FailingCheck) =>
+    at >= 0 &&
+    now.get(record.identity) === 'failed' &&
+    at > pushOrder(record.lastPush);
+  const recent = (record: FailingCheck) => {
+    const asked = { passed: false, failed: 0, open: [] as string[] };
+    if (
+      record.head !== head &&
+      reran.has(`${record.identity}@${record.head}`)
+    ) {
+      const there = resultOn(record.head, record.identity);
+      if (there === 'passed') return { ...asked, passed: true };
+      // Failed again: that head is counted already.
+      if (there === 'pending') asked.open.push(record.head);
+    }
     const open: string[] = [];
-    for (const sha of [...between].reverse()) {
-      const there = result(sha);
-      if (there === 'passed') return fresh(record.identity, check);
-      if (there === 'failed') failed += 1;
-      else open.unshift(sha);
+    for (const sha of state.pushedShas
+      .slice(pushOrder(record.lastPush) + 1, at)
+      .reverse()) {
+      const there = resultOn(sha, record.identity);
+      if (there === 'passed') return { ...asked, passed: true };
+      if (there === 'failed') asked.failed += 1;
+      else if (there === 'pending') open.unshift(sha);
     }
-    for (const sha of reranOn) {
-      const there = result(sha);
-      if (there === 'passed') return fresh(record.identity, check);
-      if (there === undefined) open.unshift(sha);
-    }
-    // What earlier reads got no result for.
+    asked.open.push(...open);
+    return asked;
+  };
+  // Every record's recent heads are asked about first, so heads asked about
+  // again do not take the reads a push in between needs.
+  const asked = new Map(
+    records.filter(spends).map((record) => [record.identity, recent(record)]),
+  );
+  const spend = (record: FailingCheck, check: string): FailingCheck => {
+    const { passed, failed, open } = asked.get(record.identity)!;
+    if (passed) return fresh(record.identity, check);
+    // What earlier reads got no result for, newest first.
     const earlier: UnansweredHead[] = [];
     let since = 0;
     for (const entry of [...(record.unanswered ?? [])].reverse()) {
-      const there = result(entry.sha);
+      const there = resultOn(entry.sha, record.identity);
       if (there === 'passed') {
         since = entry.pushes;
         break;
       }
-      if (there === undefined) earlier.unshift(entry);
+      if (there === 'pending') earlier.unshift(entry);
     }
     const pushes = Math.max(record.pushes - since, 0) + failed + 1;
-    // Asked again on the next push: the newest, as many as a read asks about.
+    // Asked again on the next push; a watch has no more pushes than this.
     const unanswered = [
       ...earlier.map((entry) => ({
         sha: entry.sha,
         pushes: Math.max(entry.pushes - since, 0),
       })),
-      ...open
-        .filter((sha) => !earlier.some((entry) => entry.sha === sha))
-        .map((sha) => ({ sha, pushes })),
-    ].slice(-MAX_CHECK_LOOKUPS);
+      ...open.map((sha) => ({ sha, pushes })),
+    ].slice(-MAX_PUSHES);
     return {
       identity: record.identity,
       check,
@@ -833,10 +885,18 @@ export function trackFailingChecks(
               pushes: 0,
               ...(baseline === undefined ? {} : { lastPush: baseline }),
             };
-    } else if (result === 'failed' && at > pushOrder(record.lastPush)) {
+    } else if (spends(record)) {
       next = spend(record, names.get(record.identity)!);
     } else if (result === 'failed') {
-      next = { ...record, check: names.get(record.identity)!, head };
+      // A round sees it fail here: a head it had no result for has one.
+      const { unanswered, ...rest } = record;
+      const left = unanswered?.filter((entry) => entry.sha !== head) ?? [];
+      next = {
+        ...rest,
+        check: names.get(record.identity)!,
+        head,
+        ...(left.length ? { unanswered: left } : {}),
+      };
     } else {
       kept.push(record);
       continue;
@@ -876,6 +936,7 @@ const COMMIT_CHECKS_QUERY = `query($owner: String!, $name: String!, $oid: GitObj
 export function commitCheckResults(
   target: Pick<PrTarget, 'owner' | 'repo'>,
   sha: string,
+  floors?: ReadonlyMap<string, number>,
 ): CheckResults | null {
   const contexts: CheckContext[] = [];
   let after: string | null = null;
@@ -925,7 +986,11 @@ export function commitCheckResults(
   } catch {
     return null;
   }
-  return cut ? null : checkResults(contexts);
+  if (cut) return null;
+  const results = checkResults(contexts, floors);
+  return Object.assign(results, {
+    running: [...results.values()].includes('pending'),
+  });
 }
 
 /**
@@ -2384,11 +2449,20 @@ export function runSnapshot(args: SnapshotArgs): void {
   // Asked only for a recorded check failing on a later push, at most
   // MAX_CHECK_LOOKUPS commits a read, each once.
   const looked = new Map<string, CheckResults | null>();
+  // The re-runs the watch started, as `trackFailingChecks` asks about.
+  const reruns = rerunFrom(state.rerunChecks ?? []);
   const resultsOn = (sha: string) => {
     if (!looked.has(sha)) {
+      const floors = new Map(
+        [...reruns]
+          .filter(([key]) => key.endsWith(`@${sha}`))
+          .map(([key, run]) => [key.slice(0, -sha.length - 1), run]),
+      );
       looked.set(
         sha,
-        looked.size < MAX_CHECK_LOOKUPS ? commitCheckResults(state, sha) : null,
+        looked.size < MAX_CHECK_LOOKUPS
+          ? commitCheckResults(state, sha, floors)
+          : null,
       );
     }
     return looked.get(sha) ?? null;

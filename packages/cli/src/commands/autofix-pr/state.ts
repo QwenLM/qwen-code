@@ -125,9 +125,10 @@ export interface FailingCheck {
    * watch made after this one spends another, so a return to an earlier
    * push does not count twice. */
   lastPush?: string;
-  /** Heads the count asked GitHub about and got no result for, oldest
-   * first, each with the record's `pushes` once that read counted: a pass
-   * there found later leaves only the pushes counted since. */
+  /** Heads the count has no result for yet — still running, or not
+   * answered — oldest first, each with the record's `pushes` once that
+   * read counted: a pass found there later leaves only the pushes counted
+   * since. */
   unanswered?: UnansweredHead[];
 }
 
