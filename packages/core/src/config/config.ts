@@ -3250,6 +3250,7 @@ export class Config {
   private readonly modelProposedGoals: ModelProposedGoalsMode;
   private goalProposalHostSupported = false;
   private goalProposalTurnKey: string | undefined;
+  private askUserQuestionHostSupported = false;
   private readonly skipWorkflowUsageWarning: boolean = false;
   private workflowSizeGuideline: WorkflowSizeGuideline | undefined;
   private readonly workflowNameOnly: boolean;
@@ -11228,6 +11229,20 @@ export class Config {
 
   getGoalProposalHostSupported(): boolean {
     return this.goalProposalHostSupported;
+  }
+
+  /**
+   * Whether the ACP host understands the structured `ask_user_question`
+   * payload (`_meta.qwenQuestions` and the private `answers` response field).
+   * When false, the session flattens a single-select question into real
+   * per-choice `PermissionOption`s so a spec-conformant client can answer it.
+   */
+  setAskUserQuestionHostSupported(supported: boolean): void {
+    this.askUserQuestionHostSupported = supported;
+  }
+
+  getAskUserQuestionHostSupported(): boolean {
+    return this.askUserQuestionHostSupported;
   }
 
   setGoalProposalTurnKey(turnKey: string | undefined): boolean {

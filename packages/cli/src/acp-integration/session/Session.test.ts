@@ -1197,6 +1197,9 @@ describe('Session', () => {
       getGoalRuntimeReady: vi.fn().mockResolvedValue(mockGoalRuntime),
       takePendingGoalProposal: vi.fn(),
       getGoalProposalHostSupported: vi.fn().mockReturnValue(false),
+      // The rich `_meta.qwenQuestions` path is the default these fixtures
+      // exercise; flattening is opted into per test.
+      getAskUserQuestionHostSupported: vi.fn().mockReturnValue(true),
       setGoalProposalTurnKey: vi.fn((turnKey: string | undefined) => {
         if (goalProposalTurnKey === turnKey) return false;
         goalProposalTurnKey = turnKey;
@@ -49920,6 +49923,10 @@ describe('Session', () => {
       },
     ];
 
+    // Hoisted so tests can assert the tool-facing payload the confirmation
+    // actually receives, not just the parallel trusted-answer side channel.
+    const onConfirmMock = vi.fn().mockResolvedValue(undefined);
+
     class AskUserQuestionTool {
       readonly name = core.ToolNames.ASK_USER_QUESTION;
       readonly kind = core.Kind.Think;
@@ -49939,7 +49946,7 @@ describe('Session', () => {
           type: 'ask_user_question',
           title: 'Please answer the following question(s):',
           questions: trustedAnswerQuestions,
-          onConfirm: vi.fn().mockResolvedValue(undefined),
+          onConfirm: onConfirmMock,
         }),
         getDescription: vi.fn().mockReturnValue(this.name),
         toolLocations: vi.fn().mockReturnValue([]),
@@ -49978,6 +49985,36 @@ describe('Session', () => {
         'call-auq',
         trustedAnswerQuestions,
         { '0': 'Yes' },
+      );
+    });
+
+    it('flattens a lone question for a non-capable host and recovers the answer', async () => {
+      useBuiltinAskUserQuestionTool();
+      vi.mocked(mockConfig.getAskUserQuestionHostSupported).mockReturnValue(
+        false,
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValue({
+        outcome: { outcome: 'selected', optionId: 'ask:q0:o1' },
+      });
+
+      await runAskUserQuestion();
+
+      expect(mockClient.requestPermission).toHaveBeenCalledOnce();
+      const request = vi.mocked(mockClient.requestPermission).mock.calls[0]![0];
+      expect(
+        request.options.map((option: { optionId: string }) => option.optionId),
+      ).toEqual(['ask:q0:o0', 'ask:q0:o1', 'ask:q0:other', 'cancel']);
+      expect(mockLlmClient.recordTrustedUserAnswers).toHaveBeenCalledWith(
+        'call-auq',
+        trustedAnswerQuestions,
+        { '0': 'No' },
+      );
+      // The tool-facing consumer must receive the recovered answers too; a
+      // revert of the payload literal to `output.answers` leaves the
+      // side-channel assertion above green while the tool reports no answers.
+      expect(onConfirmMock).toHaveBeenCalledWith(
+        core.ToolConfirmationOutcome.ProceedOnce,
+        { answers: { '0': 'No' } },
       );
     });
 

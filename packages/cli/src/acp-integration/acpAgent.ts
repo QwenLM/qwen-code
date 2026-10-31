@@ -10,6 +10,7 @@ import {
 } from '@qwen-code/qwen-code-core/memory/import-model.js';
 
 import { prepareFileWatchersForProcessExit } from '@qwen-code/qwen-code-core/utils/file-watcher-cleanup.js';
+import { ASK_USER_QUESTION_CAPABILITY_META_KEY } from '@qwen-code/qwen-code-core/utils/invocation-context.js';
 import {
   findSessionAgentBinding,
   type SessionAgentNativeBinding,
@@ -16485,6 +16486,17 @@ class QwenAgent implements Agent {
       this.clientCapabilities?._meta?.['qwen.goalProposals'] === true
     ) {
       config.setGoalProposalHostSupported(true);
+    }
+    // A host that understands the structured question payload keeps the rich
+    // `_meta.qwenQuestions` path; any other ACP client gets a flat per-choice
+    // option list (see `toPermissionOptions`). This is a wire-format
+    // capability, so it is honored on read-only Agent Hosts too.
+    if (
+      this.clientCapabilities?._meta?.[
+        ASK_USER_QUESTION_CAPABILITY_META_KEY
+      ] === true
+    ) {
+      config.setAskUserQuestionHostSupported(true);
     }
     // Only the daemon bridge, whose Web Shell renders MCP Apps, declares this;
     // TUI, headless, editor and channel clients never receive Generated UI.

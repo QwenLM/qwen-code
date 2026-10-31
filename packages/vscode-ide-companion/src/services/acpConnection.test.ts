@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { Readable, Writable } from 'node:stream';
 import { RequestError } from '@agentclientprotocol/sdk';
 import type {
   ContentBlock,
@@ -24,7 +25,12 @@ vi.mock('child_process', async (importOriginal) => {
   return { ...actual, spawn: spawnMock, execFile: execFileMock };
 });
 
-import { AcpConnection } from './acpConnection.js';
+import {
+  AcpConnection,
+  buildAcpClientCapabilities,
+  resolveAskUserQuestionOptionId,
+} from './acpConnection.js';
+import { ToolConfirmationOutcome } from '@qwen-code/qwen-code-core/tools/tools.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
 
 type MockChild = {
@@ -139,6 +145,213 @@ describe('AcpConnection process spawning', () => {
     const options = spawnMock.mock.calls.at(-1)?.[2] as { detached?: boolean };
     expect(options.detached).toBe(false);
   });
+});
+
+describe('AcpConnection initialize capabilities', () => {
+  it('advertises the structured-question capability', () => {
+    // Pinned by value: dropping the key would silently move the companion onto
+    // the flattened option path while the rest of the suite stayed green.
+    expect(buildAcpClientCapabilities()).toEqual({
+      _meta: { 'qwen.askUserQuestion': true },
+      fs: { readTextFile: true, writeTextFile: true },
+    });
+  });
+});
+
+describe('resolveAskUserQuestionOptionId', () => {
+  it('pins the fallback literal to the core wire value', () => {
+    // Test-only import: production compares against a peer-offered string and
+    // has no need for the enum. Without this pin a core-side rename of
+    // ProceedOnce leaves the helper voting an id no peer offers.
+    expect(ToolConfirmationOutcome.ProceedOnce).toBe('proceed_once');
+  });
+
+  it('votes the webview choice when the peer offered it', () => {
+    expect(
+      resolveAskUserQuestionOptionId(
+        [{ optionId: 'proceed_once' }, { optionId: 'cancel' }],
+        'proceed_once',
+      ),
+    ).toBe('proceed_once');
+  });
+
+  it('falls back to proceed_once when the webview chose an unoffered id', () => {
+    expect(
+      resolveAskUserQuestionOptionId(
+        [{ optionId: ToolConfirmationOutcome.ProceedOnce }],
+        'stale',
+      ),
+    ).toBe(ToolConfirmationOutcome.ProceedOnce);
+  });
+
+  it('refuses to vote when the peer offers neither, so the turn is not aborted', () => {
+    // A flattened question offers `ask:q0:oN`, not `proceed_once`; echoing an
+    // unoffered id makes the agent throw and discard the typed answers.
+    expect(
+      resolveAskUserQuestionOptionId(
+        [{ optionId: 'ask:q0:o0' }, { optionId: 'cancel' }],
+        'proceed_once',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('treats a missing option list as offering nothing', () => {
+    expect(
+      resolveAskUserQuestionOptionId(undefined, 'proceed_once'),
+    ).toBeUndefined();
+  });
+});
+
+describe('AcpConnection handshake wiring', () => {
+  afterEach(() => {
+    // The stub below is a one-shot child that cannot serve a second spawn, so
+    // it must not outlive this describe: the file's other `spawnMock.mockReset`
+    // lives in a sibling `beforeEach` and does not cover tests added here.
+    spawnMock.mockReset();
+    vi.restoreAllMocks();
+  });
+
+  type CapturingConnection = {
+    connect: (cliEntryPath: string) => Promise<void>;
+    onAskUserQuestion: (data: unknown) => Promise<{
+      optionId: string;
+      answers?: Record<string, string>;
+    }>;
+  };
+
+  /**
+   * Boots a connection against the real `setupChildProcessHandlers` —
+   * deliberately not stubbed, so what these tests assert is what the extension
+   * puts on the wire — with a capturing stdin, a pushable stdout, and returns
+   * once the `initialize` frame has been written. `settle` fires the exit
+   * listeners `connect()` waits on.
+   */
+  async function connectCapturingHandshake(): Promise<{
+    conn: CapturingConnection;
+    written: string[];
+    stdout: Readable;
+    settle: () => Promise<void>;
+  }> {
+    const written: string[] = [];
+    const exitListeners: Array<
+      (code: number | null, signal: string | null) => void
+    > = [];
+    // A real Writable so the SDK's ndjson stream actually serializes into it.
+    const stdin = new Writable({
+      write(chunk, _encoding, callback) {
+        written.push(String(chunk));
+        callback();
+      },
+    });
+    const stdout = new Readable({ read() {} });
+    const child = createMockChild({
+      stdin,
+      stdout,
+      stderr: new Readable({ read() {} }),
+      on: (event: string, listener: (...args: unknown[]) => void) => {
+        if (event === 'exit') {
+          exitListeners.push(
+            listener as (code: number | null, signal: string | null) => void,
+          );
+        }
+        return child;
+      },
+    });
+    spawnMock.mockReturnValue(child);
+    const conn = new AcpConnection() as unknown as CapturingConnection;
+    const pending = conn.connect(process.execPath).catch(() => undefined);
+    // Poll rather than sleep past the handler's settle delay: a fixed sleep
+    // leaves only whatever margin that unnamed literal allows, and a miss reads
+    // as an empty capture. The timeout must stay above it, since vi.waitFor
+    // defaults to the same 1s.
+    await vi.waitFor(
+      () => expect(written.join('')).toContain('"method":"initialize"'),
+      { timeout: 5_000, interval: 25 },
+    );
+    return {
+      conn,
+      written,
+      stdout,
+      // connect() settles only once the child exits, and that same window is
+      // how a spawn failure is reported.
+      settle: async () => {
+        for (const listener of exitListeners) listener(0, null);
+        await pending;
+      },
+    };
+  }
+
+  it('writes the structured-question capability on the initialize request it sends', async () => {
+    const { written, settle } = await connectCapturingHandshake();
+    await settle();
+
+    expect(written.join('')).toContain('"qwen.askUserQuestion":true');
+  }, 20_000);
+
+  it('cancels a flattened question rather than voting an id the peer did not offer', async () => {
+    const { conn, written, stdout, settle } = await connectCapturingHandshake();
+    // The webview votes the structured-question id. A peer that flattened the
+    // question never offered it, so the handler must cancel instead of echoing
+    // it back: the agent throws "unoffered option" and discards the answers.
+    conn.onAskUserQuestion = vi.fn().mockResolvedValue({
+      optionId: ToolConfirmationOutcome.ProceedOnce,
+      answers: { '0': 'Alpha' },
+    });
+
+    // A flattened frame arriving from a peer that ignored (or predates) the
+    // capability this companion just advertised. Its option set matches
+    // `buildAskUserQuestionOptions`: one encoded id per choice, the synthetic
+    // `Other…`, then cancel — and no `proceed_once` for the webview's vote to
+    // land on.
+    const toolCall = {
+      toolCallId: 'tool-1',
+      title: 'Ask',
+      kind: 'think',
+      status: 'pending',
+      rawInput: {
+        questions: [
+          {
+            question: 'Pick one',
+            header: 'Choice',
+            options: [
+              { label: 'Alpha', description: 'A' },
+              { label: 'Beta', description: 'B' },
+            ],
+            multiSelect: false,
+          },
+        ],
+      },
+      _meta: {
+        toolName: 'ask_user_question',
+        qwenInteractionKind: 'user_question',
+      },
+    };
+    stdout.push(
+      `${JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'session/request_permission',
+        params: {
+          sessionId: 'session-1',
+          toolCall,
+          options: [
+            { optionId: 'ask:q0:o0', name: 'Alpha', kind: 'allow_once' },
+            { optionId: 'ask:q0:o1', name: 'Beta', kind: 'allow_once' },
+            { optionId: 'ask:q0:other', name: 'Other…', kind: 'allow_once' },
+            { optionId: 'cancel', name: 'Cancel', kind: 'reject_once' },
+          ],
+        },
+      })}\n`,
+    );
+
+    await vi.waitFor(() => expect(written.join('')).toContain('"cancelled"'), {
+      timeout: 5_000,
+      interval: 25,
+    });
+    expect(written.join('')).not.toContain(ToolConfirmationOutcome.ProceedOnce);
+
+    await settle();
+  }, 20_000);
 });
 
 describe('AcpConnection readTextFile error mapping', () => {

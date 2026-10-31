@@ -11,6 +11,7 @@ import {
 } from './AcpBridge.js';
 import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
 import {
+  ACP_ASK_USER_QUESTION_CAPABILITY_META_KEY,
   ACP_PRIVATE_PARENT_CAPABILITY_ENV,
   ACP_PRIVATE_PARENT_CAPABILITY_META_KEY,
   CHANNEL_BTW_METHOD,
@@ -201,10 +202,20 @@ describe('AcpBridge', () => {
     expect(typeof capability).toBe('string');
     expect(capability!.length).toBeGreaterThan(0);
     const initializeParams = child.connections[0]!.initialize.mock
-      .calls[0]![0] as { _meta?: Record<string, unknown> };
+      .calls[0]![0] as {
+      _meta?: Record<string, unknown>;
+      clientCapabilities?: { _meta?: Record<string, unknown> };
+    };
     expect(
       initializeParams._meta?.[ACP_PRIVATE_PARENT_CAPABILITY_META_KEY],
     ).toBe(capability);
+    // The channel loop answers questions through the rich payload, so it must
+    // advertise the structured-question capability (R1-5 pin).
+    expect(
+      initializeParams.clientCapabilities?._meta?.[
+        ACP_ASK_USER_QUESTION_CAPABILITY_META_KEY
+      ],
+    ).toBe(true);
   });
 
   it('registers the channel loop MCP server once across concurrent calls', async () => {
