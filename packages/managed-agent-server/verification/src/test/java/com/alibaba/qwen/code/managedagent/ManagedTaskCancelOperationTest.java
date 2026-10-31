@@ -3,6 +3,7 @@ package com.alibaba.qwen.code.managedagent;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.persistence.ManagedExtensionProjection;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore.TaskCancelOutcome;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.AcceptanceVerdict;
@@ -291,10 +292,14 @@ class ManagedTaskCancelOperationTest {
                 "actor".getBytes(java.nio.charset.StandardCharsets.UTF_8));
         String bound = new TransactionTemplate(
                 new DataSourceTransactionManager(jdbc.getDataSource()))
-                .execute(status -> store.insertWorkspaceSessionCommand(
-                        TENANT, "actor", "create-bound", "create-digest",
-                        "qwen-code", null, null, List.of(), null,
-                        new WorkspaceSelection("ws", "services"))
+                .execute(status -> store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(TENANT)
+                        .actorId("actor")
+                        .idempotencyKey("create-bound")
+                        .requestDigest("create-digest")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("ws", "services"))
+                        .build())
                         .sessionId());
         String previous = sessionId;
         sessionId = bound;
