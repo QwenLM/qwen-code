@@ -215,6 +215,7 @@ export interface ConnectionRegistrySnapshot {
 }
 
 export class AcpConnection {
+  preserveRunningPromptsOnDisconnect = false;
   readonly connectionId: string;
   /** Connection-scoped SSE stream (the client's `GET /acp` with only the conn header). */
   connStream?: TransportStream;
@@ -474,6 +475,32 @@ export class AcpConnection {
     return false;
   }
 
+  hasRunningDetachedPrompt(): boolean {
+    return (
+      this.preserveRunningPromptsOnDisconnect &&
+      [...this.sessions.values()].some(
+        (binding) =>
+          binding.promptAbort !== undefined &&
+          !binding.promptAbort.signal.aborted,
+      )
+    );
+  }
+
+  promptSettled(sessionId: string): void {
+    const binding = this.sessions.get(sessionId);
+    if (
+      !this.preserveRunningPromptsOnDisconnect ||
+      !binding ||
+      binding.stream ||
+      binding.graceTimer ||
+      binding.promptAbort ||
+      !binding.abort.signal.aborted
+    )
+      return;
+    this.closeSessionStream(sessionId);
+    this.onSessionGraceExpired?.();
+  }
+
   /**
    * True if any session is mid-reconnect: its transport stream detached but
    * its `SESSION_GRACE_MS` reclaim window is still armed (`graceTimer` set),
@@ -485,6 +512,7 @@ export class AcpConnection {
    * still inside its OWN grace window — the reconnect would then 404.
    */
   hasRecoverableSession(): boolean {
+    if (this.hasRunningDetachedPrompt()) return true;
     for (const b of this.sessions.values()) {
       if (b.graceTimer) return true;
     }
@@ -845,6 +873,15 @@ export class AcpConnection {
     binding.stream = undefined;
     if (binding.graceTimer) clearTimeout(binding.graceTimer);
     binding.graceTimer = setTimeout(() => {
+      binding.graceTimer = undefined;
+      // Revoking a remote entrance detaches its client, not the running job.
+      // The prompt's finally path releases this binding once it settles.
+      if (
+        this.preserveRunningPromptsOnDisconnect &&
+        binding.promptAbort &&
+        !binding.promptAbort.signal.aborted
+      )
+        return;
       // Grace expired with no reconnect → full teardown (aborts the prompt,
       // releases ownership, detaches the bridge client). Log it so an operator
       // debugging a vanished session can tell grace-expiry teardown apart from
@@ -1668,7 +1705,8 @@ export class ConnectionRegistry {
   private sweep(): void {
     const cutoff = Date.now() - this.idleTtlMs;
     for (const [id, conn] of this.byId) {
-      if (conn.lastActiveMs >= cutoff) continue;
+      if (conn.lastActiveMs >= cutoff || conn.hasRunningDetachedPrompt())
+        continue;
       // Observability: a reaped connection silently dropping its SSE
       // streams is otherwise invisible to operators chasing "my client
       // froze". Note that `touch()` fires on inbound HTTP AND on event

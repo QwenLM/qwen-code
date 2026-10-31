@@ -1,7 +1,9 @@
 // @vitest-environment jsdom
-import type { ReactElement } from 'react';
+import { act, type ReactElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { I18nProvider } from '../../i18n';
+import { DaemonAvailability } from '../../daemon/availability.js';
+import { DaemonAvailabilityContext } from '../../daemon/availability-context.js';
 import { cleanupReact, flushReact, mountReact } from '../../test/reactHarness';
 
 const state = vi.hoisted(() => ({
@@ -146,6 +148,42 @@ describe('WorkspaceHostHeading / OtherHostProjects', () => {
     expect(
       others.querySelector('[data-testid="other-host-projects"]'),
     ).toBeNull();
+  });
+
+  it('updates the focused host badge after disconnect, rejected credentials, and recovery', async () => {
+    state.baseUrl = 'http://remote.example:4173';
+    let status = 200;
+    const availability = new DaemonAvailability(
+      state.baseUrl,
+      undefined,
+      async (url) =>
+        Response.json(
+          String(url).endsWith('/health') ? { status: 'ok' } : { features: [] },
+          { status },
+        ),
+    );
+    const heading = renderWithHosts(
+      <DaemonAvailabilityContext.Provider value={availability}>
+        <WorkspaceHostHeading />
+      </DaemonAvailabilityContext.Provider>,
+    );
+    const badge = () =>
+      heading.querySelector('[data-testid="host-focused-badge"]');
+    try {
+      expect(badge()?.textContent).toBe('connected');
+      for (const [code, label] of [
+        [503, 'offline'],
+        [401, 'unauthorized'],
+        [200, 'connected'],
+      ] as const) {
+        status = code;
+        await act(async () => availability.check(true));
+        expect(badge()?.textContent).toBe(label);
+        expect(heading.textContent).toContain('remote.example:4173');
+      }
+    } finally {
+      availability.dispose();
+    }
   });
 
   it('renders live workspaces and sessions from every online host', async () => {

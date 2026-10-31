@@ -60,6 +60,32 @@ For the deeper "what we won't fix in Stage 1" enumeration (single-host session-s
 
 ### Remote Web Shell and phone access
 
+To connect to a running local daemon from another machine, open its Web Shell
+and go to **Settings → Connections → Allow remote connections**. Remote access
+is off by default. Turn it on, choose a network interface if prompted, and copy
+the displayed address and bearer token into the other Web Shell's connection
+form. No extra terminal command or daemon restart is required.
+
+The remote listener serves the same workspaces and sessions as the local
+listener. It first uses the same numeric port on the selected interface. If
+that address is occupied, choose a different port in advanced settings; Qwen
+does not silently change ports or stop another service. HTTP pages on
+`localhost` and `127.0.0.1` at any port are allowed. Advanced settings accept
+additional exact browser origins, including HTTPS pages.
+
+Turning access off or resetting the token revokes existing remote connections;
+local clients and daemon-owned running tasks continue. Re-enabling generates a
+new token. The setting is not persisted across daemon restarts. The token is
+available only to the authorized local operator. A primary listener already
+exposed by explicit startup/proxy configuration is labeled separately and is
+not closed by this switch.
+
+The address must be reachable through the network and firewall. HTTP does not
+encrypt the token; use a trusted network or configure HTTPS. An HTTPS page
+cannot connect to a remote HTTP endpoint. The UI distinguishes authentication,
+policy, and mixed-content errors; a generic browser network error cannot
+reliably distinguish CORS, certificate, and connectivity failures.
+
 ```bash
 qwen serve --hostname 0.0.0.0
 ```

@@ -7,6 +7,7 @@
 import type { Server } from 'node:http';
 import type { Duplex } from 'node:stream';
 import type { Request } from 'express';
+import type { OriginMatcher } from '../auth.js';
 
 /**
  * Which listener a request arrived on.
@@ -21,7 +22,7 @@ import type { Request } from 'express';
  * carried the runtime token; in-daemon we get it by attributing the request to
  * its listener instead.
  */
-export type ListenerKind = 'primary' | 'local-control';
+export type ListenerKind = 'primary' | 'local-control' | 'remote-access';
 
 export interface ListenerIdentity {
   readonly kind: ListenerKind;
@@ -34,6 +35,7 @@ export interface ListenerIdentity {
   readonly authority?: string;
   /** Exact browser Origin accepted by the Local Control WebSocket gate. */
   readonly origin?: string;
+  readonly allowedOrigins?: OriginMatcher;
 }
 
 /**

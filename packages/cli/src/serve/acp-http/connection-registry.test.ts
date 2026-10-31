@@ -1448,6 +1448,38 @@ describe('ConnectionRegistry.getSnapshot', () => {
     }
   });
 
+  it('keeps a remote prompt beyond disconnect grace and releases it when it settles', () => {
+    vi.useFakeTimers();
+    const detached = vi.fn();
+    const registry = new ConnectionRegistry(undefined, detached);
+    try {
+      const conn = registry.create(false)!;
+      conn.preserveRunningPromptsOnDisconnect = true;
+      conn.ownSession('remote-session');
+      const stream = new FakeStream('sse');
+      const binding = conn.attachSessionStream(
+        'remote-session',
+        stream,
+        new AbortController(),
+      );
+      const running = new AbortController();
+      binding.promptAbort = running;
+      conn.detachSessionStream('remote-session', stream, 10_000);
+      vi.advanceTimersByTime(31 * 60_000);
+      expect(running.signal.aborted).toBe(false);
+      expect(registry.get(conn.connectionId)).toBe(conn);
+      expect(conn.ownsSession('remote-session')).toBe(true);
+      expect(detached).not.toHaveBeenCalled();
+      binding.promptAbort = undefined;
+      conn.promptSettled('remote-session');
+      expect(conn.ownsSession('remote-session')).toBe(false);
+      expect(detached).toHaveBeenCalled();
+    } finally {
+      registry.dispose();
+      vi.useRealTimers();
+    }
+  });
+
   it('attachSessionStream within the grace window reclaims (cancels the pending teardown)', () => {
     vi.useFakeTimers();
     const detached: string[] = [];

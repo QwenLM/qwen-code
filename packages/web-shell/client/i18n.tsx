@@ -101,6 +101,44 @@ function ruPlural(
 }
 
 const EN: Messages = {
+  'remoteAccess.title': 'Allow remote connections',
+  'remoteAccess.description':
+    'Enable access to this server without restarting it. Local sessions and tasks keep running.',
+  'remoteAccess.server': 'Current server',
+  'remoteAccess.loading': 'Reading remote access status…',
+  'remoteAccess.on': 'Remote access is enabled.',
+  'remoteAccess.off':
+    'Remote access is off. Enable it here when needed; it defaults to off after a server restart.',
+  'remoteAccess.external':
+    'The primary listener is externally configured. This switch cannot close access opened by startup or proxy configuration.',
+  'remoteAccess.localOnly':
+    'Open this server’s settings through its authorized local connection to manage remote access.',
+  'remoteAccess.unavailable':
+    'This daemon does not support remote access settings.',
+  'remoteAccess.network': 'Network interface',
+  'remoteAccess.noNetwork':
+    'No external IPv4 interface is available on this server.',
+  'remoteAccess.address': 'Connection address',
+  'remoteAccess.reveal': 'Show token',
+  'remoteAccess.hide': 'Hide token',
+  'remoteAccess.copyToken': 'Copy token',
+  'remoteAccess.reset': 'Reset token',
+  'remoteAccess.resetHint':
+    'Turning access off or resetting the token disconnects remote clients. Running server tasks continue.',
+  'remoteAccess.http':
+    'HTTP is unencrypted. Use this address on a trusted network; HTTPS pages require an HTTPS endpoint.',
+  'remoteAccess.encrypted':
+    'This endpoint uses HTTPS. The client must trust its certificate.',
+  'remoteAccess.advanced': 'Advanced connection settings',
+  'remoteAccess.port': 'Port (blank uses the current server port)',
+  'remoteAccess.origins': 'Additional page origins (one per line)',
+  'remoteAccess.originsHint':
+    'HTTP pages on localhost and 127.0.0.1 at any port are already allowed. Applying origins reconnects remote clients.',
+  'remoteAccess.apply': 'Apply origins',
+  'remoteAccess.copied': 'Copied.',
+  'remoteAccess.copyFailed':
+    'Could not copy. Reveal and select the value to copy it manually.',
+
   'capacityChoice.persistenceUnconfirmed':
     'Saving the last interrupted turn could not be confirmed.',
   'capacityChoice.title': 'Choose a workspace to stop',
@@ -1418,6 +1456,22 @@ const EN: Messages = {
     'The daemon did not accept the connection; the stored credential was left unchanged.',
   'daemon.connection.authFailed':
     'The daemon rejected that token; the stored credential was left unchanged.',
+  'daemon.connection.unreachable':
+    'The browser could not reach the daemon. A network, certificate, or cross-origin failure may be responsible. Check the remote connection setup below; your saved token has not changed.',
+  'daemon.connection.policyBlocked':
+    'The server or proxy refused the request (HTTP 403). Check its access rules, Host policy, and allowed page origins.',
+  'daemon.connection.mixedContent':
+    'This HTTPS page cannot connect to a remote HTTP daemon. Use an HTTPS address for the remote service.',
+  'daemon.connection.setup': 'Remote connection setup',
+  'daemon.connection.pageOrigin': "This page's origin",
+  'daemon.connection.setupCommand':
+    'On the server, open Settings → Connections and turn on Allow remote connections. Then enter the displayed address and bearer token here.',
+  'daemon.connection.setupHttps':
+    'An HTTPS address requires a trusted TLS certificate or an HTTPS proxy. Use HTTPS on untrusted networks.',
+  'daemon.connection.setupOrigins':
+    'For an HTTPS page or a custom page hostname, add the page origin shown above in the server’s advanced remote connection settings.',
+  'daemon.connection.existingService':
+    'The switch takes effect without restarting the server. Existing listeners or proxies configured separately remain independently managed.',
   'daemon.connection.reloadUnavailable':
     'Browser storage is unavailable, so the new token could not be applied to this connection.',
   'daemon.connection.switchUnavailable':
@@ -4683,6 +4737,39 @@ const EN: Messages = {
 
 const ZH: Messages = {
   ...EN,
+  'remoteAccess.title': '允许远程连接',
+  'remoteAccess.description':
+    '无需重启即可开放当前服务器，本地会话和任务继续运行。',
+  'remoteAccess.server': '当前服务器',
+  'remoteAccess.loading': '正在读取远程访问状态…',
+  'remoteAccess.on': '远程访问已开启。',
+  'remoteAccess.off': '远程访问已关闭。需要时在此开启；服务重启后默认关闭。',
+  'remoteAccess.external':
+    '主入口由外部配置开放；此开关无法关闭启动参数或代理配置开放的访问。',
+  'remoteAccess.localOnly':
+    '请通过该服务器已授权的本地连接打开设置，管理远程访问。',
+  'remoteAccess.unavailable': '此 daemon 不支持远程访问设置。',
+  'remoteAccess.network': '网络接口',
+  'remoteAccess.noNetwork': '当前服务器没有可用的外部 IPv4 网络接口。',
+  'remoteAccess.address': '连接地址',
+  'remoteAccess.reveal': '查看 token',
+  'remoteAccess.hide': '隐藏 token',
+  'remoteAccess.copyToken': '复制 token',
+  'remoteAccess.reset': '重置 token',
+  'remoteAccess.resetHint':
+    '关闭访问或重置 token 会断开远程客户端，服务器上运行的任务继续。',
+  'remoteAccess.http':
+    'HTTP 未加密，请在可信网络使用；HTTPS 页面需要连接 HTTPS 入口。',
+  'remoteAccess.encrypted': '该入口使用 HTTPS，客户端需信任其证书。',
+  'remoteAccess.advanced': '高级连接设置',
+  'remoteAccess.port': '端口（留空沿用当前服务器端口）',
+  'remoteAccess.origins': '额外页面来源（每行一个）',
+  'remoteAccess.originsHint':
+    '已允许 localhost 和 127.0.0.1 任意端口的 HTTP 页面。应用来源设置会断开远程客户端以便重新连接。',
+  'remoteAccess.apply': '应用来源',
+  'remoteAccess.copied': '已复制。',
+  'remoteAccess.copyFailed': '复制失败，请显示并选中内容后手动复制。',
+
   'capacityChoice.persistenceUnconfirmed':
     '无法确认最后一轮被中断内容是否已保存。',
   'capacityChoice.title': '选择要停止的工作区',
@@ -5976,6 +6063,22 @@ const ZH: Messages = {
   'daemon.connection.notReady': 'Daemon 未接受该连接，已保存的凭据未被修改。',
   'daemon.connection.authFailed':
     'Daemon 拒绝了该 token，已保存的凭据未被修改。',
+  'daemon.connection.unreachable':
+    '浏览器无法连接守护进程，可能是网络、证书或跨域问题。请查看下方的远程连接配置说明，已保存的 token 未被修改。',
+  'daemon.connection.policyBlocked':
+    '服务或代理拒绝了请求（HTTP 403），请检查访问规则、Host 策略和允许的页面来源。',
+  'daemon.connection.mixedContent':
+    '当前 HTTPS 页面无法连接远端 HTTP 服务，请使用远端服务的 HTTPS 地址。',
+  'daemon.connection.setup': '远程连接如何配置',
+  'daemon.connection.pageOrigin': '当前页面来源',
+  'daemon.connection.setupCommand':
+    '在服务器的「设置 → 连接」开启「允许远程连接」，然后在此填写显示的地址和 bearer token。',
+  'daemon.connection.setupHttps':
+    'HTTPS 地址需要可信的 TLS 证书或 HTTPS 代理；不可信网络上请使用 HTTPS。',
+  'daemon.connection.setupOrigins':
+    'HTTPS 页面或自定义页面域名，请在服务器的远程连接高级设置中添加上方显示的页面来源。',
+  'daemon.connection.existingService':
+    '开关无需重启即可生效；已有启动参数或代理开放的入口仍由原配置独立管理。',
   'daemon.connection.reloadUnavailable':
     '浏览器存储不可用，因此新 token 无法应用到当前连接。',
   'daemon.connection.switchUnavailable':
