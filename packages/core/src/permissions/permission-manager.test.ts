@@ -3409,6 +3409,13 @@ describe('PermissionManager — compound shell write attribution', () => {
     ['my-tool >&-notes.txt', 'Edit', 'deny'],
     ['rm -- >&--x', 'Edit', 'deny'],
     ['df -hT / >&/dev/null', 'Edit', 'allow'],
+    // A chain of closes: the last word is still an argument.
+    ['rm >&->&-notes.txt', 'Edit(notes.txt)', 'deny'],
+    ['rm >&->&-notes.txt', 'Edit', 'deny'],
+    // A quoted or escaped `)` is part of the file name.
+    ['printf TXT >"notes)"', 'WriteFileTool(notes))', 'deny'],
+    ['printf TXT >notes\\)', 'WriteFileTool(notes))', 'deny'],
+    ['printf TXT >&"y)"', 'WriteFileTool(y))', 'deny'],
   ])(
     'Bash(*) allow, %s with %s denied → %s',
     async (command, deny, expected) => {
@@ -3419,6 +3426,17 @@ describe('PermissionManager — compound shell write attribution', () => {
       expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
     },
   );
+
+  // A long chain of closes in one word must still get a verdict, not a
+  // stack overflow out of the permission check.
+  it('Bash(*) allow, a long >&- chain with Edit(notes.txt) denied → deny', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)'],
+      permissionsDeny: ['Edit(notes.txt)'],
+    });
+    const command = `rm ${'>&-'.repeat(20000)}notes.txt`;
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+  });
 
   // #11865: a redirect target of non-separator characters (one NBSP here) is a
   // real filename to bash and must survive into the virtual op; deleting it

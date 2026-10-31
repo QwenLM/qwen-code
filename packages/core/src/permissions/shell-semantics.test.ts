@@ -464,6 +464,9 @@ describe('extractShellOperations', () => {
     ['printf TXT >"&protected.txt"', '&protected.txt'],
     ['printf TXT >\\&protected.txt', '&protected.txt'],
     ['printf TXT >"x&"', 'x&'],
+    ['printf TXT >"notes)"', 'notes)'],
+    ["printf TXT >'notes)'", 'notes)'],
+    ['printf TXT >notes\\)', 'notes)'],
     ['printf TXT >"&"', '&'],
     ['printf TXT >\\&', '&'],
   ])('quoted or escaped & is part of the file name: %s', (command, file) => {
@@ -482,6 +485,7 @@ describe('extractShellOperations', () => {
     ['printf TXT >&2fa-notes.md', [write(`${CWD}/2fa-notes.md`)]],
     ['printf TXT 2>&protected.txt', [write(`${CWD}/protected.txt`)]],
     ['cat <&protected.txt', [read(`${CWD}/protected.txt`)]],
+    ['printf TXT >&"y)"', [write(`${CWD}/y)`)]],
   ])('fd redirect word: %s', (command, expected) => {
     expectSorted(command, expected);
   });
@@ -523,9 +527,44 @@ describe('extractShellOperations', () => {
     ['my-tool >&-notes.txt', [write(`${CWD}/&-notes.txt`)]],
     ['rm -- >&--x', [write(`${CWD}/&--x`)]],
     ['printf X >&->&"-x"', [write(`${CWD}/-x`), write(`${CWD}/&->&-x`)]],
+    // A closed descriptor can close again: each `>&-` starts a new word, and
+    // only the first redirect reports the whole word.
+    [
+      'rm >&->&-notes.txt',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&->&-notes.txt`)],
+    ],
+    [
+      'rm >&-<&-notes.txt',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&-<&-notes.txt`)],
+    ],
+    [
+      'rm >&-2>&-notes.txt',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&-2>&-notes.txt`)],
+    ],
+    ['printf X >&->&-', [write(`${CWD}/&->&-`)]],
+    ['tee >&->&y', [write(`${CWD}/&->&y`), write(`${CWD}/y`)]],
     ['df -hT / >&-', []],
     ['df -hT / >&"-"', []],
   ])('unquoted - closes the descriptor: %s', (command, expected) => {
+    expectSorted(command, expected);
+  });
+
+  // A long chain of closes in one word is walked in a loop: it must not
+  // overflow the stack, and the whole word is reported once.
+  it.each(['>&-', '<&-', '2>&-'])('a long chain of %s returns', (unit) => {
+    const command = `rm ${unit.repeat(20000)}notes.txt`;
+    const result = ops(command);
+    expect(result).toHaveLength(2);
+    expect(result).toContainEqual(edit(`${CWD}/notes.txt`));
+  });
+
+  // A quoted or escaped `)` is part of the word; a bare one closes a subshell.
+  it.each<[command: string, expected: ShellOperation[]]>([
+    ['(echo hi >out.txt)', [write(`${CWD}/out.txt`)]],
+    ['(echo hi > out.txt)', [write(`${CWD}/out.txt`)]],
+    ['cat "notes)"', [read(`${CWD}/notes)`)]],
+    ['rm notes\\)', [edit(`${CWD}/notes)`)]],
+  ])('trailing ): %s', (command, expected) => {
     expectSorted(command, expected);
   });
 
@@ -738,9 +777,23 @@ describe('extractShellOperationsAcrossCommand', () => {
     for (const command of [
       'cd "$QWEN_HOME" && echo hi > /tmp/out.txt',
       'cd "$QWEN_HOME" && echo hi 1>/tmp/out.txt',
+      'cd "$QWEN_HOME" && echo hi >&/tmp/out.txt',
+      'cd "$QWEN_HOME" && echo hi 1>&/tmp/out.txt',
     ]) {
       expect(across(command)).toEqual([uncertainWrite('/tmp/out.txt', false)]);
     }
+    expect(across('cd "$QWEN_HOME" && cat <&/tmp/in.txt')).toEqual([
+      {
+        virtualTool: 'read_file',
+        filePath: '/tmp/in.txt',
+        cwdUnknown: true,
+        pathMayDependOnCwd: false,
+      },
+    ]);
+    // A quoted `&` is part of a relative name: `&/tmp/out.txt` in the cwd.
+    expect(across('cd "$QWEN_HOME" && echo hi >"&"/tmp/out.txt')).toEqual([
+      uncertainWrite('/repo/&/tmp/out.txt'),
+    ]);
   });
 
   it('falls back gracefully on excessively deep wrapper nesting', () => {

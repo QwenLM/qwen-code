@@ -153,43 +153,47 @@ function pushToken(
   fdRedirects: Set<number> | undefined,
   fdCloses?: Set<number>,
 ): void {
-  if (token === '{' || token === '}') return;
-  const normalized = trimShellSyntax(token, bare);
-  if (!normalized) return;
-  if (!fdRedirects) {
-    tokens.push(normalized);
-    return;
-  }
-  // trimShellSyntax only drops leading `(` and trailing `)`/`&`.
-  const start = /^\(*/.exec(token)![0].length;
-  const normBare = bare.slice(start, start + normalized.length);
-  const op = /^[12]?>&|^<&/.exec(normalized)?.[0];
-  if (op && normBare.slice(op.length - 2, op.length) === '11') {
-    fdRedirects.add(tokens.length);
-    // Right after an unquoted `>&`, `N>&` or `<&`, bash reads an unquoted
-    // `-` as "close the descriptor" and starts a new word after it:
-    // `rm >&-notes.txt` closes stdout and removes `notes.txt`. The redirect
-    // token keeps the whole word (see extractRedirects) and the rest of the
-    // word follows it as an argument.
-    const close = op.length;
-    if (
-      normalized[close] === '-' &&
-      normBare[close] === '1' &&
-      normalized.length > close + 1
-    ) {
-      fdCloses?.add(tokens.length);
+  // Right after an unquoted `>&`, `N>&` or `<&`, bash reads an unquoted `-`
+  // as "close the descriptor" and starts a new word after it:
+  // `rm >&-notes.txt` closes stdout and removes `notes.txt`. The redirect
+  // token keeps the whole word (see extractRedirects) and the rest of the
+  // word follows it as an argument. The new word can close again
+  // (`rm >&->&-notes.txt`); a loop handles that, so a long chain can't
+  // overflow the stack, and only the first redirect keeps the whole word,
+  // as on `main`: the closes after it open no file.
+  let chained = false;
+  for (;;) {
+    if (token === '{' || token === '}') return;
+    const normalized = trimShellSyntax(token, bare);
+    if (!normalized) return;
+    if (!fdRedirects) {
       tokens.push(normalized);
-      pushToken(
-        tokens,
-        normalized.slice(close + 1),
-        normBare.slice(close + 1),
-        fdRedirects,
-        fdCloses,
-      );
       return;
     }
+    // trimShellSyntax only drops leading `(` and trailing `)`/`&`.
+    const start = /^\(*/.exec(token)![0].length;
+    const normBare = bare.slice(start, start + normalized.length);
+    const op = /^[12]?>&|^<&/.exec(normalized)?.[0];
+    if (!op || normBare.slice(op.length - 2, op.length) !== '11') {
+      tokens.push(normalized);
+      return;
+    }
+    const close = op.length;
+    const closes = normalized[close] === '-' && normBare[close] === '1';
+    if (!closes || normalized.length === close + 1) {
+      fdRedirects.add(tokens.length);
+      tokens.push(normalized);
+      return;
+    }
+    if (!chained) {
+      fdRedirects.add(tokens.length);
+      fdCloses?.add(tokens.length);
+      tokens.push(normalized);
+      chained = true;
+    }
+    token = normalized.slice(close + 1);
+    bare = normBare.slice(close + 1);
   }
-  tokens.push(normalized);
 }
 
 function trimShellSyntax(token: string, bare: string): string {
@@ -201,8 +205,9 @@ function trimShellSyntax(token: string, bare: string): string {
   }
   while (end > start) {
     const ch = token[end - 1];
-    // A quoted or escaped `&` is part of the word: `>"x&"` writes `x&`.
-    if (ch !== ')' && !(ch === '&' && bare[end - 1] === '1')) break;
+    // A quoted or escaped `)` or `&` is part of the word: `>"x&"` writes
+    // `x&`, `>"notes)"` writes `notes)`.
+    if ((ch !== ')' && ch !== '&') || bare[end - 1] !== '1') break;
     end--;
   }
 
@@ -2441,8 +2446,12 @@ function hasAbsolutePathTokenForOperation(
   filePath: string,
 ): boolean {
   for (const token of tokenize(command)) {
+    // `[12]?>&` and `<&` come before `1>`, `>` and `<`, or those would match
+    // first and leave `&/abs/path`. A quoted `&` (`>"&"/tmp/x` writes the
+    // relative `&/tmp/x`) can't match by mistake: the resolved path must
+    // equal the operation's path.
     const redirectTarget = token.match(
-      /^(?:1>>|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
+      /^(?:1>>|[12]?>&|<&|1>|>>|>|2>>|2>|&>>|&>|<)([\s\S]+)$/,
     )?.[1];
     const candidate = redirectTarget ?? token;
     if (
