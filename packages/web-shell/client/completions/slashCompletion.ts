@@ -427,11 +427,12 @@ type SkillHintToken =
   | { kind: 'flag'; text: string; flags: string[]; valueHint: string | null }
   | { kind: 'literal'; text: string; alternatives: string[] };
 
-// Source labels that are unambiguously skill-backed on their own. Live
-// sessions keep the loader's label ('skill-dir-command' for project/user
-// skills, 'bundled-skill' for bundled ones); only the pre-session workspace
-// bootstrap synthesizes 'skill'. Extension skills share 'plugin-command'
-// with ordinary plugin commands and are recognized via skillNames instead.
+// Source labels whose commands always take the free-form argument hint
+// path: 'skill-dir-command' (project/user skills and custom markdown
+// commands alike), 'bundled-skill', and the 'skill' label synthesized by
+// the pre-session workspace bootstrap. Extension skills share
+// 'plugin-command' with ordinary plugin commands and are recognized via
+// skillNames instead.
 const SKILL_BACKED_SOURCES = new Set([
   'skill',
   'skill-dir-command',
@@ -563,9 +564,15 @@ function getRemainingSkillArgumentHint(
   for (const branch of splitHintParts(argumentHint, (ch) => ch === '|')) {
     const tokens = splitHintParts(branch.trim(), (ch) => /\s/.test(ch))
       .map(parseSkillHintToken)
-      // Empty groups are malformed metadata: they must not survive as
-      // renderable leftover tokens (e.g. '[] []' echoing '[]').
-      .filter((token) => token.text !== '[]' && token.text !== '<>');
+      // Empty groups — including whitespace-only ones like '[ ]' — are
+      // malformed metadata and must not survive as renderable leftovers.
+      .filter(
+        (token) =>
+          !(
+            token.kind === 'placeholder' &&
+            token.text.slice(1, -1).trim() === ''
+          ),
+      );
     const result = matchSkillHintBranch(tokens, typed);
     if (result && (!best || result.literals > best.literals)) best = result;
   }

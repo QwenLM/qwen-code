@@ -364,6 +364,20 @@ describe('getSlashCommandArgumentHint progressive skill hints', () => {
     expect(getSlashCommandArgumentHint('/demo x', commands, 'en')).toBeNull();
   });
 
+  it('hides whitespace-only empty groups instead of echoing them', () => {
+    for (const hint of ['[ ] [ ]', '< > < >', '[\t] [\t]']) {
+      const commands: CommandInfo[] = [
+        {
+          name: 'demo',
+          description: 'Demo',
+          source: 'skill',
+          argumentHint: hint,
+        },
+      ];
+      expect(getSlashCommandArgumentHint('/demo x', commands, 'en')).toBeNull();
+    }
+  });
+
   it('consumes flags typed after a free-text placeholder', () => {
     const commands: CommandInfo[] = [
       {
