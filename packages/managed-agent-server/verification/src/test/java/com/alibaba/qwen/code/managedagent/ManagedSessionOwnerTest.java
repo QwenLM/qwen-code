@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
@@ -47,9 +48,14 @@ class ManagedSessionOwnerTest {
                 new DataSourceTransactionManager(source));
 
         String bound = transactions.execute(ignored -> store
-                .insertWorkspaceSessionCommand("tenant", "actor", "bound",
-                        "digest-bound", "qwen-code", null, null, List.of(),
-                        null, new WorkspaceSelection("workspace", "."))
+                .insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId("tenant")
+                        .actorId("actor")
+                        .idempotencyKey("bound")
+                        .requestDigest("digest-bound")
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("workspace", "."))
+                        .build())
                 .sessionId());
         assertThat(jdbc.queryForObject("SELECT owner_actor_key FROM"
                 + " ma_session WHERE session_id = ?",
