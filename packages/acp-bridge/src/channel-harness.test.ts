@@ -10,6 +10,7 @@ import type { AcpChannel } from './channel.js';
 import type { BridgeSession } from './bridgeTypes.js';
 import { createChannelHarness } from './channel-harness.js';
 import * as channelLifecycle from './channel-lifecycle.js';
+import { SERVE_STATUS_EXT_METHODS } from './status.js';
 import { createSessionControlPlane } from './session-control-plane.js';
 
 describe('channel harness ownership', () => {
@@ -17,6 +18,100 @@ describe('channel harness ownership', () => {
     vi.restoreAllMocks();
     vi.useRealTimers();
   });
+
+  it('keeps a workspace-timeout retirement at warn when explicitly stopped', async () => {
+    vi.useFakeTimers();
+    let settleStatus!: (value: Record<string, unknown>) => void;
+    const stalledStatus = new Promise<Record<string, unknown>>((resolve) => {
+      settleStatus = resolve;
+    });
+    const handle = makeChannel({
+      extMethodImpl: async (method) =>
+        method === SERVE_STATUS_EXT_METHODS.workspaceMcp ? stalledStatus : {},
+    });
+    const diagnostics: Array<{ line: string; level?: string }> = [];
+    let harness!: ReturnType<typeof createChannelHarness>;
+    const bridge = createSessionControlPlane(
+      {
+        boundWorkspace: WS_A,
+        channelFactory: async () => handle.channel,
+        initializeTimeoutMs: 50,
+        onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
+      },
+      (options) => (harness = createChannelHarness(options)),
+    );
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      const info = harness.current!;
+      const status = bridge.queryWorkspaceStatus(
+        SERVE_STATUS_EXT_METHODS.workspaceMcp,
+        () => ({ discoveryState: 'not_started', servers: [] }),
+      );
+      void status.catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(50);
+      await expect(status).rejects.toThrow(/timed out/i);
+      expect(info.retireWhenSessionsDrain).toBe(true);
+      expect(info.isDying).toBe(false);
+      expect(handle.killed).toBe(false);
+      await harness.stopChannel(info);
+      await handle.channel.exited;
+      expect(
+        diagnostics.filter(({ line }) => line.includes('channel exited')),
+      ).toEqual([
+        { line: expect.stringContaining('channel exited'), level: 'warn' },
+      ]);
+    } finally {
+      settleStatus({});
+      await bridge.shutdown();
+    }
+  });
+
+  it.each(['rearm', 'pending work', 'armed pending failure', 'new activity'])(
+    'classifies failed idle retirement after %s',
+    async (scenario) => {
+      vi.useFakeTimers();
+      const handle = makeChannel();
+      const diagnostics: Array<{ line: string; level?: string }> = [];
+      let harness!: ReturnType<typeof createChannelHarness>;
+      const bridge = createSessionControlPlane(
+        {
+          boundWorkspace: WS_A,
+          channelFactory: async () => handle.channel,
+          channelIdleTimeoutMs: 1000,
+          onDiagnosticLine: (line, level) => diagnostics.push({ line, level }),
+        },
+        (options) => (harness = createChannelHarness(options)),
+      );
+      try {
+        const info = await harness.ensure();
+        if (scenario === 'armed pending failure') {
+          await harness.startIdleTimer(info, 'planned', undefined, true);
+        }
+        const pending =
+          scenario === 'pending work' || scenario === 'armed pending failure';
+        if (pending) harness.reserveRuntimeOperation();
+        await harness.startIdleTimer(info, 'failed initialization');
+        if (pending) {
+          await harness.releaseRuntimeOperationReservation('settled');
+        } else {
+          if (scenario === 'new activity') await harness.ensure();
+          await harness.startIdleTimer(info, 'settled', undefined, true);
+        }
+        await vi.advanceTimersByTimeAsync(1000);
+        await handle.channel.exited;
+        expect(
+          diagnostics.filter(({ line }) => line.includes('channel exited')),
+        ).toEqual([
+          {
+            line: expect.stringContaining('channel exited'),
+            level: scenario === 'new activity' ? 'info' : 'warn',
+          },
+        ]);
+      } finally {
+        await bridge.shutdown();
+      }
+    },
+  );
 
   it('preserves all six exit cleanup steps for the current channel', async () => {
     vi.useFakeTimers();

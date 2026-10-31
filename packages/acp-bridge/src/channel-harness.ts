@@ -81,6 +81,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   const pendingKeepAliveDeadlines = new Map<symbol, number>();
   const idleTimers = new Map<HarnessChannel, ReturnType<typeof setTimeout>>();
   const pendingIdleTimers = new Set<HarnessChannel>();
+  const failedIdleRetirements = new Set<HarnessChannel>();
 
   function liveHarnessChannel(
     engine: BridgeExecutionEngine | undefined = defaultEngine,
@@ -103,8 +104,13 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   }
 
   function cancelIdleTimer(channel?: HarnessChannel): void {
-    if (channel) pendingIdleTimers.delete(channel);
-    else pendingIdleTimers.clear();
+    if (channel) {
+      pendingIdleTimers.delete(channel);
+      failedIdleRetirements.delete(channel);
+    } else {
+      pendingIdleTimers.clear();
+      failedIdleRetirements.clear();
+    }
     for (const [owner, timer] of idleTimers) {
       if (channel !== undefined && owner !== channel) continue;
       clearTimeout(timer);
@@ -115,7 +121,11 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   async function killChannelWithLog(
     ci: HarnessChannel,
     context?: string,
+    routineRetirement = false,
   ): Promise<void> {
+    if (routineRetirement && !ci.isDying && !channelShouldReapWhenIdle(ci)) {
+      ci.routineRetirementStarted = true;
+    }
     ci.isDying = true;
     options.onChannelTerminationStart?.(ci);
     cancelIdleTimer(ci);
@@ -178,6 +188,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
     ci: HarnessChannel,
     context?: string,
     exclusions?: ChannelWorkExclusions,
+    routineRetirement = false,
   ): Promise<void> {
     if (
       options.isRuntimeStopping() ||
@@ -185,14 +196,18 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
       liveHarnessChannel(ci.executionEngine) !== ci
     )
       return;
+    // Settlement can re-arm the same idle cycle after a failed operation.
+    routineRetirement = routineRetirement && !failedIdleRetirements.has(ci);
+    if (!routineRetirement) failedIdleRetirements.add(ci);
     if (!hasNoChannelWork(ci, exclusions)) {
       pendingIdleTimers.add(ci);
       return;
     }
     cancelIdleTimer(ci);
+    if (!routineRetirement) failedIdleRetirements.add(ci);
     const timeoutMs = resolvedChannelIdleTimeoutMs(ci.executionEngine);
     if (timeoutMs <= 0) {
-      await killChannelWithLog(ci, context);
+      await killChannelWithLog(ci, context, routineRetirement);
       return;
     }
     const idleTimer = setTimeout(() => {
@@ -201,7 +216,11 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
         writeStderrLine(
           `qwen serve: idle timeout (${timeoutMs}ms) expired, killing channel`,
         );
-        void killChannelWithLog(ci, 'idle timeout');
+        void killChannelWithLog(
+          ci,
+          'idle timeout',
+          routineRetirement && !failedIdleRetirements.has(ci),
+        );
       } else {
         pendingIdleTimers.add(ci);
       }
@@ -211,6 +230,9 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
   }
 
   function retireChannel(info: HarnessChannel, context: string) {
+    if (!info.isDying && !channelShouldReapWhenIdle(info)) {
+      info.routineRetirementStarted = true;
+    }
     info.isDying = true;
     cancelIdleTimer(info);
     if (info.executionEngine === defaultEngine) keepAliveUntil = 0;
@@ -259,7 +281,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
       );
       await reapPendingEmptyChannel(ci);
       if (!ci.isDying && liveHarnessChannel(ci.executionEngine) === ci) {
-        await startIdleTimer(ci, 'workspace control');
+        await startIdleTimer(ci, 'workspace control', undefined, true);
       }
     }
   }
@@ -276,7 +298,7 @@ export function createChannelHarness(options: ChannelHarnessOptions) {
         !idleTimers.has(ci) &&
         hasNoChannelWork(ci)
       ) {
-        await startIdleTimer(ci, context);
+        await startIdleTimer(ci, context, undefined, true);
       }
     }
   }

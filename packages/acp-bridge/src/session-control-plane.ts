@@ -2668,7 +2668,13 @@ export function createSessionControlPlane(
       const message = `qwen serve: session lifecycle callback failed: ${
         err instanceof Error ? err.message : String(err)
       }`;
-      opts.onDiagnosticLine?.(message, 'warn');
+      // Callers run this inside teardown loops, so a throwing sink must not
+      // escape and strand the remaining sessions.
+      try {
+        opts.onDiagnosticLine?.(message, 'warn');
+      } catch {
+        /* Best effort. */
+      }
       writeStderrLine(message);
     }
   };
@@ -5121,10 +5127,8 @@ export function createSessionControlPlane(
           ? { 'qwen-code.daemon.channel.signal': exitInfo.signalCode }
           : {}),
       });
-      writeStderrLine(
-        `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.harness.transportFailed ? (info.harness.transportFailureCode ?? 'failed') : 'ok'}${info.harness.transportFailureDetail ? `, transport_detail=${info.harness.transportFailureDetail}` : ''}, ${sessions.length} session(s) torn down)`,
-      );
     }
+    let tornDownCount = 0;
     const stoppedByRuntimeStop = runtimeStop?.channels.includes(info) === true;
     for (const sid of sessions) {
       const sessEntry = byId.get(sid);
@@ -5181,6 +5185,43 @@ export function createSessionControlPlane(
       info.client.markSessionClosed(sid);
       if (defaultEntry === sessEntry) defaultEntry = undefined;
       sessEntry.events.close();
+      tornDownCount++;
+    }
+    if (!shuttingDown) {
+      // Keep this handler's teardown count distinct from the association
+      // snapshot: a failed restore can leave byId before cleanup finishes.
+      const message = `qwen serve: channel exited (code=${exitInfo?.exitCode ?? 'none'}, signal=${exitInfo?.signalCode ?? 'none'}, transport=${info.harness.transportFailed ? (info.harness.transportFailureCode ?? 'failed') : 'ok'}${info.harness.transportFailureDetail ? `, transport_detail=${info.harness.transportFailureDetail}` : ''}, ${tornDownCount} session(s) torn down, ${sessions.length} associated at exit)`;
+      // Clients such as the VS Code companion stop reading daemon stderr
+      // after startup, so the teardown reason must also reach daemon.log.
+      // `info` is reserved for a routine retirement: an exit after a failed
+      // handshake, a transport failure, a workspace timeout, a condemned
+      // channel or an unsettled abandonment is a failure even when the
+      // daemon initiated the kill.
+      // Only the level widens; `channelExitExpected` still feeds the
+      // lifecycle telemetry above unchanged.
+      // The guarded spawn transport reports stdout EOF even when a child
+      // closes its pipes during a successful daemon-initiated retirement.
+      const cleanRetirementEof =
+        channelExitExpected &&
+        exitInfo?.exitCode === 0 &&
+        exitInfo.signalCode == null &&
+        info.harness.transportFailureCode === 'ndjson_unexpected_eof';
+      const routineRetirement =
+        channelExitExpected &&
+        info.harness.routineRetirementStarted === true &&
+        (exitInfo === undefined ||
+          (exitInfo.exitCode === 0 && exitInfo.signalCode === null)) &&
+        !channelIsCondemned(info) &&
+        info.harness.handshakeComplete &&
+        (!info.harness.transportFailed || cleanRetirementEof) &&
+        info.unsettledAbandonedRestores.size === 0 &&
+        info.unsettledAbandonedNewSessions.size === 0;
+      try {
+        opts.onDiagnosticLine?.(message, routineRetirement ? 'info' : 'warn');
+      } catch {
+        /* Best effort. */
+      }
+      writeStderrLine(message);
     }
   }
 
@@ -9732,7 +9773,13 @@ export function createSessionControlPlane(
         // Delete BEFORE settling: `hasNoChannelWork` counts in-flight
         // restores as channel work, so this restore's own entry would
         // otherwise block the reap of a channel it left empty.
-        if (ci) void harness.startIdleTimer(ci.harness, 'session restore');
+        if (ci)
+          void harness.startIdleTimer(
+            ci.harness,
+            'session restore',
+            undefined,
+            true,
+          );
         void harness.settleReleasedRuntimeWork('session restore');
       }
     });
@@ -9985,7 +10032,12 @@ export function createSessionControlPlane(
     if (ci) {
       await harness.reapPendingEmptyChannel(ci.harness);
       if (!ci.harness.isDying) {
-        await harness.startIdleTimer(ci.harness, `closeSession "${sessionId}"`);
+        await harness.startIdleTimer(
+          ci.harness,
+          `closeSession "${sessionId}"`,
+          undefined,
+          true,
+        );
       }
     }
   }
@@ -10224,7 +10276,12 @@ export function createSessionControlPlane(
         // the idle policy.
         for (const ci of channels) {
           if (!ci.harness.isDying && harness.has(ci.harness)) {
-            void harness.startIdleTimer(ci.harness, 'workspace runtime stop');
+            void harness.startIdleTimer(
+              ci.harness,
+              'workspace runtime stop',
+              undefined,
+              true,
+            );
           }
         }
       }
@@ -17035,6 +17092,8 @@ export function createSessionControlPlane(
           await harness.startIdleTimer(
             ci.harness,
             `killSession "${sessionId}"`,
+            undefined,
+            true,
           );
         }
       }
