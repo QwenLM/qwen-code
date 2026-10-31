@@ -10358,6 +10358,8 @@ export function App({
     }
   }, [closePanel, showChat]);
   const sidebarRailEnabled =
+    // 托管模式没有工作区/项目页，rail 会留下一列空图标；强制单栏侧边栏，和参考实现一致。
+    managedAgentProvider === undefined &&
     sidebarOptions.enabled &&
     Boolean(
       sidebarOptions.primaryNav?.items?.some((item) => {
@@ -21034,9 +21036,12 @@ export function App({
     () => renderWelcomeFooter?.(welcomeHeaderProps),
     [renderWelcomeFooter, welcomeHeaderProps],
   );
+  // managed 宿主（app-host 整页接入）的空态由托管选择决定：daemon 连接在 managed
+  // 模式下永远没有 sessionId，不能用 connection.sessionId 判定；选中托管会话后
+  // 必须退出空态，否则欢迎区与转录内容会同时渲染。
   const isChatEmptyState =
-    !managedMode &&
     !connection.sessionId &&
+    !(managedAgentProvider !== undefined && managedSessionId) &&
     displayMessages.length === 0 &&
     !showFloatingTodos &&
     !pendingApproval &&

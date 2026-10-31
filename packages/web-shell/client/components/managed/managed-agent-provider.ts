@@ -716,7 +716,7 @@ export interface ManagedAgentProvider {
     sessionId: string,
     request: { text: string; input?: ManagedInputBlock[] },
     options: ManagedAgentCommandOptions,
-  ): Promise<ManagedAgentTurnAdmission & { operationId: string }>;
+  ): Promise<ManagedAgentTurnAdmission & { operationId?: string }>;
   cancel(
     sessionId: string,
     turnId: string,

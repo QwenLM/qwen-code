@@ -3,6 +3,36 @@
 Qwen Code Web Shell 是面向浏览器的 daemon 会话终端 UI，可以作为 React
 组件嵌入到其他项目中。
 
+## 宿主已有 Managed Session
+
+`ManagedAgentWebShell` 支持注入 `managedAgentProvider`，省略时仍创建 Java provider。
+宿主传 `hostSessionOnly: true` 时只打开显式给定的 `sessionId`，隐藏内部会话列表、
+New 与列表刷新；没有 ID 时等待宿主选择，不自动选择或创建。官方消息列表和 composer
+沿用 provider 的真实 capabilities；四 API 宿主应设置 `canCancel: false`、省略不支持的
+可选 API，并按单轮/运行状态提供 `capabilities.canSend`。
+
+非 React 宿主可使用本地 ESM 入口：
+
+```ts
+import { renderManagedAgentWebShell } from './managed-host/index.js';
+
+const shell = renderManagedAgentWebShell(container, {
+  managedAgentProvider: provider,
+  hostSessionOnly: true,
+  sessionId: existingSessionId,
+  language: 'zh-CN',
+  theme: 'dark',
+});
+// update 接受完整的新 props；宿主销毁时调用 shell.unmount()。
+```
+
+在包内执行 `npx vite build --config vite.lib.config.ts --mode managed-host`，输出
+`dist/managed-host/index.js` 及相对 chunks，已 bundle React/React DOM 和运行时依赖，
+复用原有 scoped CSS 自动注入，无需单独 CSS 或 import map。需提供整个输出目录。
+自定义 provider 的 `storageKey` 必须包含租户/账号身份；切换身份时更换 provider 与
+storageKey，旧 scope 沿用的 ID 会先丢弃，再由宿主显式给出新选择。详见
+[宿主接入设计](../../docs/design/2026-10-29-managed-host-webshell.zh-CN.md)。
+
 ## Managed 工作区与模型
 
 完整 Web Shell 在配置 `managedAgentProvider` 后，在同一个工作区列表中同时显示本地和托管工作区，不再使用本地/托管 tab。名称旁的标志显示所属服务，工作区的新建会话使用统一的书写图标；顶部“新建会话”继承当前会话或草稿的服务。新会话的工作区菜单可双向选择两类服务已有的工作区，保留原身份和独立草稿，提交前不创建工作区或会话。添加工作区时可明确选择本地（daemon）或托管（Managed Agent），切换表单或取消不会改变当前会话。托管模式复用标准欢迎界面、输入框、对话和工具卡片、审批、停止按钮及侧栏，后台任务继续运行。未配置 provider 时保持原首页。Java Vite 演示入口 `?managedProvider=java` 默认托管，`managed=0` 可明确选择本地，`managed=1&managedSession=...` 深链继续有效；直接打开本地会话链接时保持本地。完整行为与边界见[统一工作区导航设计](../../docs/design/2026-10-21-unified-workspace-navigation.zh-CN.md)。
