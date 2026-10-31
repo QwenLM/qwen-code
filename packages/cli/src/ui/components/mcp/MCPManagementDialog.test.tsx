@@ -35,4 +35,19 @@ describe('MCPManagementDialog', () => {
     expect(lastFrame()).toContain('╭');
     expect(lastFrame()).toContain('╮');
   });
+
+  it('opens the details of a configured server with an empty name', async () => {
+    const config = createConfig();
+    vi.spyOn(config, 'getMcpServers').mockReturnValue({
+      '': { command: 'node' },
+    });
+    const { lastFrame, stdin } = renderWithProviders(
+      <MCPManagementDialog onClose={vi.fn()} />,
+      { config },
+    );
+    await vi.waitFor(() => expect(lastFrame()).toContain('User MCPs'));
+    stdin.write('\r');
+    await vi.waitFor(() => expect(lastFrame()).toContain('Command:'));
+    expect(lastFrame()).toContain('node');
+  });
 });
