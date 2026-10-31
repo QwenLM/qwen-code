@@ -13,6 +13,8 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  lstatSync,
   realpathSync,
   rmSync,
   writeFileSync,
@@ -21,6 +23,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { expect, it } from 'vitest';
+import { parse as parseYaml } from 'yaml';
 import { InteractiveSession } from './interactive-session.js';
 import {
   startFakeOpenAIServer,
@@ -89,6 +92,8 @@ type Context = {
   server: FakeOpenAIServer;
   editorLog: string;
   workspace: string;
+  home: string;
+  evidence: string;
   ownedTemp: string;
   sentinel: string;
   release: () => void;
@@ -131,6 +136,14 @@ async function scenario(
   const editor = join(scratch, 'owned-editor.mjs');
   copyFileSync(join(here, 'fixtures/owned-editor.mjs'), editor);
   chmodSync(editor, 0o700);
+  const managerEditing =
+    name === 'edits-and-deletes-project-subagent-without-model';
+  const editorBin = join(scratch, 'editor-bin');
+  if (managerEditing) {
+    mkdirSync(editorBin);
+    copyFileSync(editor, join(editorBin, 'vim'));
+    chmodSync(join(editorBin, 'vim'), 0o700);
+  }
   const controlFile = join(scratch, 'editor-control.json');
   const editorLog = join(scratch, 'editor.jsonl');
   const sentinel = join(scratch, 'must-not-execute');
@@ -144,7 +157,11 @@ async function scenario(
       auth: { selectedType: 'openai' },
       folderTrust: { enabled: false },
     },
-    general: { enableAutoUpdate: false, showSessionRecap: false },
+    general: {
+      enableAutoUpdate: false,
+      showSessionRecap: false,
+      ...(managerEditing ? { preferredEditor: 'vim' } : {}),
+    },
     ui: { enableFollowupSuggestions: false },
     memory: E2E_MEMORY_SETTINGS_DEFAULTS,
   });
@@ -243,7 +260,9 @@ async function scenario(
         inheritEnv: false,
         args,
         env: {
-          PATH: process.env['PATH'],
+          PATH: managerEditing
+            ? editorBin + ':' + process.env['PATH']
+            : process.env['PATH'],
           HOME: scratch,
           QWEN_HOME: home,
           QWEN_RUNTIME_DIR: runtimeDir,
@@ -282,6 +301,8 @@ async function scenario(
       server,
       editorLog,
       workspace,
+      home,
+      evidence,
       ownedTemp: realpathSync(temp),
       sentinel,
       release,
@@ -320,6 +341,14 @@ async function scenario(
         () => {
           if (existsSync(editorLog))
             copyFileSync(editorLog, join(evidence, 'editor.jsonl'));
+        },
+      ],
+      [
+        'copy project settings',
+        () => {
+          const file = join(workspace, '.qwen', 'settings.json');
+          if (existsSync(file))
+            copyFileSync(file, join(evidence, 'project-settings.json'));
         },
       ],
       [
@@ -888,3 +917,772 @@ it('vim-insert-controls-and-disable', () =>
     await context.submit('ordinary again');
     expect(context.server.requests).toHaveLength(2);
   }));
+
+it(
+  'permissions-edits-and-completes-without-model',
+  () =>
+    scenario(
+      'permissions-edits-and-completes-without-model',
+      async ({
+        session,
+        server,
+        workspace,
+        ownedTemp,
+        type,
+        press,
+        paste,
+        frame,
+      }) => {
+        const settingsFile = join(workspace, '.qwen', 'settings.json');
+        const settings = () =>
+          JSON.parse(readFileSync(settingsFile, 'utf8')) as {
+            permissions?: { allow?: string[] };
+            context?: { includeDirectories?: string[] };
+          };
+        const parent = join(ownedTemp, 'permission-parent');
+        mkdirSync(parent);
+        mkdirSync(join(parent, 'alpha'));
+        mkdirSync(join(parent, '.hidden'));
+        writeFileSync(join(parent, 'ordinary.txt'), 'fixture');
+        await until(
+          async () =>
+            (await frame('permissions-ready')).includes('Type your message'),
+          'composer ready',
+        );
+        await type('/permissions');
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('permissions-list')).includes('Add a new rule'),
+          'permission list',
+        );
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('rule-input')).includes('Enter permission rule'),
+          'rule input',
+        );
+        await paste('Bash(lx)');
+        await press(keys.left);
+        await press('\x7f');
+        await type('s');
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('scope')).includes('Where should this rule be saved?'),
+          'scope',
+        );
+        await press('\r');
+        await until(
+          () =>
+            existsSync(settingsFile) &&
+            settings().permissions?.allow?.includes('Bash(ls)') === true,
+          'exact persisted rule',
+        );
+        expect(settings().permissions?.allow).toEqual(['Bash(ls)']);
+        expect(settings().permissions?.allow).not.toContain('Bash(lx)');
+        expect(settings().permissions?.allow).not.toContain('Bash(lxs)');
+        for (let i = 0; i < 3; i++) await press('\t');
+        await until(
+          async () => (await frame('workspace-list')).includes('Add directory'),
+          'workspace list',
+        );
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('directory-input')).includes(
+              'Enter the path to the directory:',
+            ),
+          'directory input',
+        );
+        await paste(parent + '/');
+        await until(
+          async () => /alpha\/\s+directory/.test(await frame('candidate')),
+          'real visible alpha candidate',
+        );
+        const candidates = await frame('candidate-qualified');
+        expect(candidates).not.toMatch(/\.hidden\/\s+directory/);
+        expect(candidates).not.toMatch(/ordinary\.txt\/\s+directory/);
+        await press('\t');
+        await press('\r');
+        const selected = realpathSync(join(parent, 'alpha'));
+        await until(
+          () =>
+            settings().context?.includeDirectories?.includes(selected) === true,
+          'exact selected directory committed',
+        );
+        expect(settings().context?.includeDirectories).toEqual([selected]);
+        expect(settings().context?.includeDirectories).not.toContain(
+          realpathSync(parent),
+        );
+        const beforeCancel = readFileSync(settingsFile, 'utf8');
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('cancel-input')).includes(
+              'Enter the path to the directory:',
+            ),
+          'new directory form',
+        );
+        await paste(join(parent, 'missing'));
+        await press('\x1b');
+        await until(
+          async () => (await frame('cancelled')).includes('Add directory'),
+          'cancelled directory form',
+        );
+        expect(readFileSync(settingsFile, 'utf8')).toBe(beforeCancel);
+        await press('\x1b');
+        await until(
+          async () => (await frame('composer')).includes('Type your message'),
+          'composer',
+        );
+        await type('/quit');
+        await press('\r');
+        await until(() => session.exitResult() !== undefined, 'natural quit');
+        expect(session.exitResult()?.exitCode).toBe(0);
+        expect(session.exitResult()?.signal ?? 0).toBe(0);
+        expect(server.requests).toHaveLength(0);
+      },
+    ),
+  90_000,
+);
+
+it(
+  'permissions-clear-undo-replace-without-model',
+  () =>
+    scenario(
+      'permissions-clear-undo-replace-without-model',
+      async ({ session, server, workspace, type, press, paste, frame }) => {
+        const settingsFile = join(workspace, '.qwen', 'settings.json');
+        const settings = () =>
+          JSON.parse(readFileSync(settingsFile, 'utf8')) as {
+            permissions?: { allow?: string[] };
+          };
+        const exitHint = 'Press Ctrl+C again to exit.';
+        const originalRuleRow =
+          renderer === 'ink'
+            ? /^[ \t]*│[ \t]*│ > WebFetch[ \t]*│[ \t]*│[ \t]*$/m
+            : /^[ \t]*│[ \t]*│ WebFetch[ \t]*│[ \t]*│[ \t]*$/m;
+        await until(
+          async () =>
+            (await frame('clear-ready')).includes('Type your message'),
+          'composer ready',
+        );
+        await type('/permissions');
+        await press('\r');
+        await until(
+          async () => (await frame('clear-list')).includes('Add a new rule'),
+          'permission list',
+        );
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('clear-input')).includes('Enter permission rule…'),
+          'rule field',
+        );
+        await paste('WebFetch');
+        await until(
+          async () => originalRuleRow.test(await frame('clear-before')),
+          'exact original rule',
+        );
+        await press('\x03');
+        await until(async () => {
+          const screen = await frame('clear-empty');
+          return (
+            screen.includes('Enter permission rule…') &&
+            screen.includes(exitHint)
+          );
+        }, 'first C clears the field while global exit remains armed');
+        expect(session.exitResult()).toBeUndefined();
+        await press(keys.undo);
+        await until(
+          async () => originalRuleRow.test(await frame('clear-undo')),
+          'Undo restores the whole original rule',
+        );
+        // Observe the existing guard expiry before another deliberate clear.
+        // Otherwise its second C would correctly confirm process exit.
+        await until(
+          async () => !(await frame('clear-expired')).includes(exitHint),
+          'first C guard expires before the separate replacement edit',
+        );
+        await press('\x03');
+        await until(
+          async () =>
+            (await frame('replacement-empty')).includes(
+              'Enter permission rule…',
+            ),
+          'second independent clear',
+        );
+        expect(session.exitResult()).toBeUndefined();
+        await paste('Read');
+        await press('\r');
+        await until(
+          async () =>
+            (await frame('clear-scope')).includes(
+              'Where should this rule be saved?',
+            ),
+          'replacement rule scope',
+        );
+        await press('\r');
+        await until(
+          () =>
+            existsSync(settingsFile) &&
+            settings().permissions?.allow?.includes('Read') === true,
+          'replacement rule persisted',
+        );
+        expect(settings().permissions?.allow).toEqual(['Read']);
+        await press('\x1b');
+        await until(
+          async () =>
+            (await frame('clear-composer')).includes('Type your message'),
+          'composer after Permissions',
+        );
+        await type('/quit');
+        await press('\r');
+        await until(() => session.exitResult() !== undefined, 'natural quit');
+        expect(session.exitResult()?.exitCode).toBe(0);
+        expect(session.exitResult()?.signal ?? 0).toBe(0);
+        expect(server.requests).toHaveLength(0);
+      },
+    ),
+  90_000,
+);
+
+it(
+  'manually-creates-project-subagent-without-model',
+  () =>
+    scenario(
+      'manually-creates-project-subagent-without-model',
+      async ({
+        session,
+        server,
+        workspace,
+        home,
+        evidence,
+        frame,
+        press,
+        type,
+        restart,
+      }) => {
+        const name = 'owned-manual-proof';
+        const prompt =
+          'You are an owned test subagent. Reply only OWNED_AGENT_REPLY.';
+        const description = 'Owned manual subagent proof.';
+        const projectRoot = join(workspace, '.qwen', 'agents');
+        const userRoot = join(home, 'agents');
+        const file = join(projectRoot, name + '.md');
+        const expected = `---\nname: ${name}\ndescription: ${description}\ncolor: blue\n---\n\n${prompt}\n`;
+        const tree = (root: string): Record<string, unknown> => {
+          const rows: Record<string, unknown> = {};
+          const visit = (path: string, relative: string) => {
+            const stat = lstatSync(path);
+            expect(stat.isSymbolicLink()).toBe(false);
+            rows[relative] = stat.isDirectory()
+              ? { type: 'dir', mode: stat.mode & 0o777 }
+              : {
+                  type: 'file',
+                  mode: stat.mode & 0o777,
+                  raw: readFileSync(path, 'utf8'),
+                };
+            if (stat.isDirectory())
+              for (const child of readdirSync(path).sort())
+                visit(
+                  join(path, child),
+                  relative === '.' ? child : relative + '/' + child,
+                );
+          };
+          if (existsSync(root)) visit(root, '.');
+          return rows;
+        };
+        const before = { project: tree(projectRoot), user: tree(userRoot) };
+        const screen = async (label: string, texts: string[]) =>
+          until(async () => {
+            const viewport = await frame(label);
+            return texts.every((text) => viewport.includes(text));
+          }, label);
+        await type('/agents create');
+        await press('\r');
+        await screen('create-location-cancel', [
+          'Choose Location',
+          'Project Level',
+          'User Level',
+        ]);
+        await press('\x1b');
+        await screen('create-cancelled', ['Type your message']);
+        const afterCancel = {
+          project: tree(projectRoot),
+          user: tree(userRoot),
+        };
+        writeFileSync(
+          join(evidence, 'agent-cancel-states.json'),
+          JSON.stringify({ before, afterCancel }, null, 2),
+        );
+        expect(afterCancel).toEqual(before);
+        await type('/agents create');
+        await press('\r');
+        await screen('create-location', ['Choose Location', 'Project Level']);
+        await press('\r');
+        await screen('create-method', [
+          'Choose Generation Method',
+          'Manual Creation',
+        ]);
+        await press('\x1b[B');
+        await press('\r');
+        await screen('create-name', ['Enter Subagent Name']);
+        await type(name);
+        await press('\r');
+        await screen('create-prompt', ['Enter System Prompt']);
+        await type(prompt);
+        await press('\r');
+        await screen('create-description', ['Enter Description']);
+        await type(description);
+        await press('\r');
+        await screen('create-tools', ['Select Tools', 'All Tools']);
+        await press('\r');
+        await screen('create-color', ['Choose Background Color', 'Blue']);
+        await press('\x1b[B');
+        await press('\r');
+        await screen('create-confirm', [
+          'Confirm and Save',
+          name,
+          description,
+          prompt,
+          'Tools:',
+        ]);
+        if (renderer === 'opentui') {
+          await screen('create-ready-to-save', [
+            'Press Enter to save, Esc to go back',
+          ]);
+        }
+        expect(existsSync(file)).toBe(false);
+        expect(tree(userRoot)).toEqual(before.user);
+        expect(server.requests).toHaveLength(0);
+        await press('\r');
+        await until(() => existsSync(file), 'project agent committed');
+        expect(readFileSync(file, 'utf8')).toBe(expected);
+        expect(readdirSync(projectRoot)).toEqual([name + '.md']);
+        expect(tree(userRoot)).toEqual(before.user);
+        writeFileSync(join(evidence, 'created-agent.md'), readFileSync(file));
+        const afterSave = { project: tree(projectRoot), user: tree(userRoot) };
+        writeFileSync(
+          join(evidence, 'agent-store-states.json'),
+          JSON.stringify(
+            {
+              before,
+              after: afterSave,
+            },
+            null,
+            2,
+          ),
+        );
+        const inspectCreatedAgent = async (phase: 'hot' | 'cold') => {
+          await screen(`${phase}-created-agent-list`, [name]);
+          await press('\r');
+          await screen(`${phase}-created-agent-actions`, [
+            'Choose Action',
+            'View Agent',
+          ]);
+          await press('\r');
+          await screen(`${phase}-created-agent-detail`, [
+            name,
+            'Description:',
+            description,
+            'System Prompt:',
+            prompt,
+            'Color: blue',
+          ]);
+          await press('\x1b');
+          await screen(`${phase}-created-agent-actions-back`, [
+            'Choose Action',
+            'View Agent',
+          ]);
+          await press('\x1b');
+          await screen(`${phase}-created-agent-list-back`, [
+            name,
+            'Enter to select',
+          ]);
+          const afterRead = {
+            project: tree(projectRoot),
+            user: tree(userRoot),
+          };
+          writeFileSync(
+            join(evidence, `agent-${phase}-read-only-states.json`),
+            JSON.stringify({ before: afterSave, after: afterRead }, null, 2),
+          );
+          expect(afterRead).toEqual(afterSave);
+        };
+        await screen('create-saved-composer', ['Type your message']);
+        await type('/agents manage');
+        await press('\r');
+        await inspectCreatedAgent('hot');
+        expect(readFileSync(file, 'utf8')).toBe(expected);
+        expect(tree(userRoot)).toEqual(before.user);
+        await press('\x1b');
+        await screen('hot-composer', ['Type your message']);
+        await type('/quit');
+        await press('\r');
+        await until(
+          () => session.exitResult() !== undefined,
+          'first natural quit',
+        );
+        expect(session.exitResult()?.exitCode).toBe(0);
+        expect(session.exitResult()?.signal ?? 0).toBe(0);
+        const cold = await restart();
+        await type('/agents manage');
+        await press('\r');
+        await inspectCreatedAgent('cold');
+        expect(tree(userRoot)).toEqual(before.user);
+        expect(readdirSync(projectRoot)).toEqual([name + '.md']);
+        writeFileSync(
+          join(evidence, 'agent-cold-store-states.json'),
+          JSON.stringify(
+            { project: tree(projectRoot), user: tree(userRoot) },
+            null,
+            2,
+          ),
+        );
+        expect(readFileSync(file, 'utf8')).toBe(expected);
+        await press('\x1b');
+        await screen('cold-composer', ['Type your message']);
+        await type('/quit');
+        await press('\r');
+        await until(() => cold.exitResult() !== undefined, 'cold natural quit');
+        expect(cold.exitResult()?.exitCode).toBe(0);
+        expect(cold.exitResult()?.signal ?? 0).toBe(0);
+        expect(server.requests).toHaveLength(0);
+      },
+    ),
+  120_000,
+);
+
+it(
+  'edits-and-deletes-project-subagent-without-model',
+  () =>
+    scenario(
+      'edits-and-deletes-project-subagent-without-model',
+      async ({
+        session,
+        server,
+        workspace,
+        home,
+        evidence,
+        editorLog,
+        frame,
+        press,
+        type,
+        restart,
+        control,
+      }) => {
+        const name = 'owned-manager-mutation';
+        const description = 'Owned project manager fixture.';
+        const updatedDescription = 'Owned editor manager result.';
+        const prompt =
+          'You are an owned manager fixture. Do not request a model.';
+        const projectRoot = join(workspace, '.qwen', 'agents');
+        const userRoot = join(home, 'agents');
+        mkdirSync(projectRoot, { recursive: true });
+        mkdirSync(userRoot, { recursive: true });
+        const file = join(projectRoot, name + '.md');
+        const userFile = join(userRoot, name + '.md');
+        const content = (desc: string, color: string, restricted = false) =>
+          `---\nname: ${name}\ndescription: ${desc}\n${restricted ? 'tools:\n  - ReadFile\n' : ''}color: ${color}\n---\n\n${prompt}\n`;
+        writeFileSync(file, content(description, 'blue', true));
+        writeFileSync(userFile, content('Owned user sentinel.', 'red'));
+        const tree = (directory: string): Record<string, unknown> => {
+          const rows: Record<string, unknown> = {};
+          const visit = (path: string, relative: string) => {
+            const stat = lstatSync(path);
+            expect(stat.isSymbolicLink()).toBe(false);
+            rows[relative] = stat.isDirectory()
+              ? { type: 'dir', mode: stat.mode & 0o777 }
+              : {
+                  type: 'file',
+                  mode: stat.mode & 0o777,
+                  raw: readFileSync(path, 'utf8'),
+                };
+            if (stat.isDirectory())
+              for (const child of readdirSync(path).sort())
+                visit(
+                  join(path, child),
+                  relative === '.' ? child : relative + '/' + child,
+                );
+          };
+          visit(directory, '.');
+          return rows;
+        };
+        const before = { project: tree(projectRoot), user: tree(userRoot) };
+        const snapshots: Record<string, unknown> = { before };
+        const snapshot = (label: string) => {
+          snapshots[label] = {
+            project: tree(projectRoot),
+            user: tree(userRoot),
+          };
+          json(join(evidence, 'manager-store-states.json'), snapshots);
+        };
+        snapshot('prepared');
+        expect(server.requests).toHaveLength(0);
+        const framesSeen: Record<string, string> = {};
+        const screen = async (label: string, texts: string[]) =>
+          until(async () => {
+            framesSeen[label] = await frame(label);
+            return texts.every((text) => framesSeen[label].includes(text));
+          }, label);
+        const openActions = async (label: string) => {
+          await type('/agents manage');
+          await press('\r');
+          await screen(label + '-list', [name]);
+          await press('\r');
+          await screen(label + '-actions', [
+            'Choose Action',
+            'View Agent',
+            'Edit Agent',
+            'Delete Agent',
+          ]);
+        };
+        const assertProjectAgent = (desc: string, color: string) => {
+          const current = tree(projectRoot);
+          const key = name + '.md';
+          const original = before.project[key] as {
+            type: string;
+            mode: number;
+          };
+          const written = current[key] as {
+            type: string;
+            mode: number;
+            raw: string;
+          };
+          expect(written.type).toBe(original.type);
+          expect(written.mode).toBe(original.mode);
+          expect({ ...current, [key]: before.project[key] }).toEqual(
+            before.project,
+          );
+          const match = written.raw.match(/^---\n([\s\S]*?)\n---\n([\s\S]*)$/);
+          expect(match).not.toBeNull();
+          expect(parseYaml(match![1])).toEqual({
+            name,
+            description: desc,
+            color,
+          });
+          expect(match![2]).toBe('\n' + prompt + '\n');
+          expect(tree(userRoot)).toEqual(before.user);
+        };
+        let caseFailed = false;
+        let snapshotFailure: { error: unknown } | undefined;
+        try {
+          await openActions('initial');
+          await press('\x1b[B');
+          await press('\x1b[B');
+          await press('\r');
+          await screen('delete-cancel-confirm', [
+            'Are you sure you want to delete agent',
+            name,
+          ]);
+          await press('n');
+          await screen('delete-cancelled', ['Choose Action', 'Edit Agent']);
+          expect({ project: tree(projectRoot), user: tree(userRoot) }).toEqual(
+            before,
+          );
+          snapshot('after-delete-cancel');
+          // Return to the list and re-enter: the public action selection starts at View.
+          await press('\x1b');
+          await screen('before-tools-list', [name, 'Enter to select']);
+          await press('\r');
+          await screen('before-tools-actions', ['Choose Action']);
+          await press('\x1b[B');
+          await press('\r');
+          await screen('edit-options', [
+            'Open in editor',
+            'Edit tools',
+            'Edit color',
+          ]);
+          await press('\x1b[B');
+          await press('\r');
+          await screen('edit-tools', ['Edit Tools:', name, 'All Tools']);
+          const choices = [
+            'All Tools',
+            'Read-only Tools',
+            'Read & Edit Tools',
+            'Read & Edit & Execution Tools',
+          ];
+          const selectedRow = framesSeen['edit-tools']
+            .split('\n')
+            .find(
+              (row) =>
+                row.includes('›') &&
+                choices.some((choice) => row.includes(choice)),
+            );
+          expect(selectedRow).toBeDefined();
+          const selected = choices.findIndex((choice) =>
+            selectedRow!.includes(choice),
+          );
+          expect(selected).toBeGreaterThanOrEqual(0);
+          for (let index = 0; index < selected; index++) await press('\x1b[A');
+          expect(await frame('all-tools-selected')).toMatch(
+            /›\s+(?:\d+\.\s+)?All Tools/,
+          );
+          await press('\r');
+          await screen('tools-saved-options', ['Open in editor', 'Edit color']);
+          assertProjectAgent(description, 'blue');
+          expect(tree(userRoot)).toEqual(before.user);
+          snapshot('after-tools');
+          await press('\x1b[B');
+          await press('\x1b[B');
+          await press('\r');
+          await screen('edit-color', ['Edit Color:', name, 'Blue', 'Green']);
+          const colors = [
+            'Automatic Color',
+            'Blue',
+            'Green',
+            'Purple',
+            'Orange',
+            'Red',
+            'Cyan',
+          ];
+          const colorRow = framesSeen['edit-color']
+            .split('\n')
+            .find(
+              (row) =>
+                row.includes('›') &&
+                colors.some((color) => row.includes(color)),
+            );
+          expect(colorRow).toBeDefined();
+          const colorIndex = colors.findIndex((color) =>
+            colorRow!.includes(color),
+          );
+          expect(colorIndex).toBeGreaterThanOrEqual(0);
+          for (
+            let index = 0;
+            index < (2 - colorIndex + colors.length) % colors.length;
+            index++
+          )
+            await press('\x1b[B');
+          expect(await frame('green-selected')).toMatch(
+            /›\s+(?:\d+\.\s+)?Green/,
+          );
+          await press('\r');
+          await screen('color-saved-options', ['Open in editor', 'Edit tools']);
+          assertProjectAgent(description, 'green');
+          expect(tree(userRoot)).toEqual(before.user);
+          snapshot('after-color');
+          control({
+            behavior: 'changed',
+            output: content(updatedDescription, 'green'),
+          });
+          await press('\r');
+          await until(
+            () =>
+              existsSync(editorLog) &&
+              readFileSync(editorLog, 'utf8').includes('"phase":"finished"'),
+            'owned editor completed',
+          );
+          const editorRows = readFileSync(editorLog, 'utf8')
+            .trim()
+            .split('\n')
+            .map((row) => JSON.parse(row));
+          expect(editorRows.map((row) => row.phase)).toEqual([
+            'started',
+            'finished',
+          ]);
+          expect(
+            editorRows.every((row) => row.realFile === realpathSync(file)),
+          ).toBe(true);
+          expect(
+            editorRows.every(
+              (row) => row.argv.length === 1 && row.argv[0] === file,
+            ),
+          ).toBe(true);
+          expect(readFileSync(file, 'utf8')).toBe(
+            content(updatedDescription, 'green'),
+          );
+          expect(tree(userRoot)).toEqual(before.user);
+          snapshot('after-editor');
+          await press('\x1b');
+          await screen('editor-actions-back', ['Choose Action']);
+          await press('\x1b');
+          await screen('editor-list-back', [name, 'Enter to select']);
+          await press('\x1b');
+          await screen('editor-composer', ['Type your message']);
+          await openActions('edited');
+          await press('\r');
+          await screen('edited-details', [
+            name,
+            updatedDescription,
+            prompt,
+            'Color: green',
+          ]);
+          await press('\x1b');
+          await screen('delete-actions', ['Choose Action']);
+          // Back navigation preserves the last action (View) here.
+          await press('\x1b[B');
+          await press('\x1b[B');
+          await press('\r');
+          await screen('delete-confirm', [
+            'Are you sure you want to delete agent',
+            name,
+          ]);
+          await press('y');
+          await until(() => !existsSync(file), 'project agent deleted');
+          await screen('user-fallback-list', [name]);
+          expect(tree(userRoot)).toEqual(before.user);
+          expect(readdirSync(projectRoot)).toEqual([]);
+          snapshot('after-delete');
+          await press('\x1b');
+          await screen('hot-composer', ['Type your message']);
+          expect(server.requests).toHaveLength(0);
+          await type('/quit');
+          await press('\r');
+          await until(
+            () => session.exitResult() !== undefined,
+            'first natural quit',
+          );
+          expect(session.exitResult()?.exitCode).toBe(0);
+          expect(session.exitResult()?.signal ?? 0).toBe(0);
+          const cold = await restart();
+          await openActions('cold-user');
+          await press('\r');
+          await screen('cold-user-detail', [
+            name,
+            'Owned user sentinel.',
+            prompt,
+            'Color: red',
+          ]);
+          expect(tree(userRoot)).toEqual(before.user);
+          expect(readdirSync(projectRoot)).toEqual([]);
+          snapshot('cold-after-delete');
+          await press('\x1b');
+          await screen('cold-actions', ['Choose Action']);
+          await press('\x1b');
+          await screen('cold-list', [name, 'Enter to select']);
+          await press('\x1b');
+          await screen('cold-composer', ['Type your message']);
+          await type('/quit');
+          await press('\r');
+          await until(
+            () => cold.exitResult() !== undefined,
+            'cold natural quit',
+          );
+          expect(cold.exitResult()?.exitCode).toBe(0);
+          expect(cold.exitResult()?.signal ?? 0).toBe(0);
+          expect(server.requests).toHaveLength(0);
+        } catch (error) {
+          caseFailed = true;
+          throw error;
+        } finally {
+          try {
+            snapshot('finally-at-case-exit');
+          } catch (error) {
+            if (!caseFailed) snapshotFailure = { error };
+            try {
+              json(join(evidence, 'manager-final-snapshot-error.json'), {
+                error: String(error),
+              });
+            } catch {
+              // Preserve the original case failure if evidence storage also fails.
+            }
+          }
+        }
+        if (snapshotFailure) throw snapshotFailure.error;
+      },
+    ),
+  120_000,
+);
