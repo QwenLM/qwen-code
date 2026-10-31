@@ -107,6 +107,8 @@ import {
 } from '../utils/sedEditParser.js';
 import {
   detectLineEnding,
+  ensureCrlfLineEndings,
+  needsCrlfLineEndings,
   type ReadTextFileResponse,
 } from '../services/fileSystemService.js';
 import { createPatchSmart, getDiffStat } from './diffOptions.js';
@@ -1921,9 +1923,10 @@ export class ShellToolInvocation extends BaseToolInvocation<
       );
     }
     await this.checkSedPriorRead(filePath);
-    const { content, _meta } = await this.config
-      .getFileSystemService()
-      .readTextFile({ path: filePath });
+    const fileSystemService = this.config.getFileSystemService();
+    const { content, _meta } = await fileSystemService.readTextFile({
+      path: filePath,
+    });
     let newContent: string;
     try {
       newContent = applySedSubstitution(content, sedInfo);
@@ -1931,15 +1934,34 @@ export class ShellToolInvocation extends BaseToolInvocation<
       throw new SedEditSimulationError(getErrorMessage(err));
     }
 
+    const meta = {
+      ..._meta,
+      lineEnding: _meta?.lineEnding ?? detectLineEnding(content),
+    };
+    // Judge the edit by the content a read-back would return, not by the
+    // substitution string: the local writer re-applies CRLF for
+    // `lineEnding: 'crlf'` (and for Windows command scripts), so a substitution
+    // whose only effect is consuming the trailing `\r` (e.g. `s/.$//` on a CRLF
+    // file) would otherwise report an applied edit whose bytes never change.
+    // Comparing strings also keeps a BOM or a non-UTF-8 encoding from making
+    // the comparison false on a file that did not change. The prediction
+    // always assumes the normalization: a write capability says a client *can*
+    // write, not how it stores the content, and the in-repo `qwen serve` writer
+    // re-applies CRLF, so assuming verbatim would report a false success there.
+    const restored =
+      meta.lineEnding === 'crlf' || needsCrlfLineEndings(filePath);
+    if (
+      (restored ? ensureCrlfLineEndings(newContent) : newContent) === content
+    ) {
+      newContent = content;
+    }
+
     return {
       filePath,
       fileName: path.basename(filePath),
       originalContent: content,
       newContent,
-      meta: {
-        ..._meta,
-        lineEnding: _meta?.lineEnding ?? detectLineEnding(content),
-      },
+      meta,
     };
   }
 

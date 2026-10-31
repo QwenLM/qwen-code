@@ -243,6 +243,22 @@ describe('sedEditParser', () => {
     expect(parseSedEditCommand("sed -i 's/\\d/X/g' file.txt")).toBeNull();
     expect(parseSedEditCommand("sed -i 's/\\</X/g' file.txt")).toBeNull();
     expect(parseSedEditCommand("sed -i 's/\\>/X/g' file.txt")).toBeNull();
+    // Under the `u` flag these are JavaScript Unicode property / code-point
+    // escapes, so the simulation used to rewrite files that real sed rejects
+    // (`\p{L}`) or leaves unchanged (`\u{41}`).
+    expect(parseSedEditCommand("sed -E -i 's/\\p{L}/X/g' file.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -E -i 's/\\P{L}/X/g' file.txt")).toBeNull();
+    expect(
+      parseSedEditCommand("sed -E -i 's/\\u{41}/X/g' file.txt"),
+    ).toBeNull();
+    // `\0` is a NUL to an ES regex with the `u` flag, but a literal `0` to sed.
+    expect(parseSedEditCommand("sed -i 's/\\0/X/g' file.txt")).toBeNull();
+  });
+
+  it('declines u-only invalid escapes so the real sed runs', () => {
+    expect(parseSedEditCommand("sed -i 's/a\\-b/X/g' file.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -i 's/a\\ b/X/g' file.txt")).toBeNull();
+    expect(parseSedEditCommand("sed -E -i 's/a{/X/g' file.txt")).toBeNull();
   });
 
   it('preserves carriage returns in sed pattern space', () => {
@@ -250,6 +266,21 @@ describe('sedEditParser', () => {
       'foo\r\n',
     );
     expect(applySed("sed -i 's/\\r$//g' file.txt", 'foo\r\n')).toBe('foo\n');
+  });
+
+  it('matches one character for . and bracket expressions', () => {
+    // sed matches `\r` with `.`, and treats an astral character as one
+    // character rather than two UTF-16 code units.
+    expect(applySed("sed -i 's/^.//' f.txt", '😀 Title\n')).toBe(' Title\n');
+    expect(applySed("sed -E -i 's/^.//' f.txt", '😀 Title\n')).toBe(' Title\n');
+    expect(applySed("sed -i 's/.$//' f.txt", 'abc😀\n')).toBe('abc\n');
+    expect(applySed("sed -i 's/[^a-z]/_/g' f.txt", 'a😀b\n')).toBe('a_b\n');
+    // BSD sed advances over characters for zero-width global matches; GNU sed
+    // advances over bytes for this pattern.
+    expect(applySed("sed -i 's/x*/-/g' f.txt", '😀\n')).toBe('-😀-\n');
+    expect(applySed("sed -i 's/=.*$/=new/' f.txt", 'key=old\r\nk2=v\r\n')).toBe(
+      'key=new\nk2=new\n',
+    );
   });
 
   it('applies substitutions to empty lines', () => {

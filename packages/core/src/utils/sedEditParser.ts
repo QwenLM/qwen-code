@@ -179,14 +179,14 @@ function canCompileSedPattern(sedInfo: SedEditInfo): boolean {
   try {
     const jsPattern = toJavascriptPattern(sedInfo);
     if (
-      hasPosixBracketExpression(jsPattern) ||
+      hasPosixBracketExpression(sedInfo.pattern) ||
       hasLeadingBracketLiteral(jsPattern) ||
       hasSedJavascriptDivergentEscape(jsPattern) ||
       hasBracketCharacterEscape(sedInfo.pattern)
     ) {
       return false;
     }
-    new RegExp(jsPattern);
+    new RegExp(jsPattern, 'su');
     if (
       hasReplacementBackrefBeyondCaptures(
         sedInfo.replacement,
@@ -227,8 +227,13 @@ function hasLeadingBracketLiteral(pattern: string): boolean {
   return /\[\^?\]/u.test(pattern);
 }
 
+// `\p{…}`, `\P{…}` and `\u{…}` are literals to sed but Unicode property and
+// code-point escapes to an ES regex with the `u` flag, so the simulation would
+// rewrite a file that real sed rejects or leaves alone. `\0` is the mirror
+// case: NUL to an ES regex, a literal `0` to sed. Declining falls back to real
+// sed, which is the module's documented policy for divergent constructs.
 function hasSedJavascriptDivergentEscape(pattern: string): boolean {
-  return /\\[<>dDwWsS]/u.test(pattern);
+  return /\\[0<>dDwWsSpPu]/u.test(pattern);
 }
 
 /**
@@ -512,7 +517,7 @@ export function applySedSubstitution(
   const replaceAll = sedInfo.flags.includes('g');
 
   try {
-    const globalRegex = new RegExp(jsPattern, 'g');
+    const globalRegex = new RegExp(jsPattern, 'gsu');
     const parts = content.split(/(\n)/);
     const processableParts = content.endsWith('\n')
       ? parts.slice(0, -1)
@@ -557,6 +562,11 @@ function toJavascriptPattern(sedInfo: SedEditInfo): string {
     if (char === '[') {
       inCharacterClass = true;
       jsPattern += char;
+      continue;
+    }
+
+    if (char === ']') {
+      jsPattern += '\\]';
       continue;
     }
 

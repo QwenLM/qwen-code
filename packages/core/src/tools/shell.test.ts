@@ -1577,6 +1577,48 @@ describe('ShellTool', () => {
         expect(result.llmContent).toContain('sed edit made no changes');
       });
 
+      it('does not report a CRLF edit whose only effect is the carriage return', async () => {
+        // `.$` consumes the `\r` under dotAll, but the write path restores CRLF,
+        // so the bytes on disk would be identical to the original.
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'abc\r\n',
+          _meta: { ...sedMeta(), lineEnding: 'crlf' },
+        });
+
+        const result = await applySed("sed -i 's/.$//' file.txt");
+
+        expectSedSkipped();
+        expect(result.llmContent).toContain('sed edit made no changes');
+      });
+
+      it('still skips that CRLF edit when the file carries a BOM', async () => {
+        // The read returns the content without the BOM, so the prediction has
+        // to compare content strings or the BOM bytes make it unequal.
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'abc\r\n',
+          _meta: { ...sedMeta(), bom: true, lineEnding: 'crlf' },
+        });
+
+        const result = await applySed("sed -i 's/.$//' file.txt");
+
+        expectSedSkipped();
+        expect(result.llmContent).toContain('sed edit made no changes');
+      });
+
+      it('writes a CRLF edit whose bytes do change', async () => {
+        mockFileSystemService.readTextFile.mockResolvedValue({
+          content: 'foo\r\n',
+          _meta: { ...sedMeta(), lineEnding: 'crlf' },
+        });
+
+        const result = await applySed("sed -i 's/foo/bar/' file.txt");
+
+        expect(mockFileSystemService.writeTextFile).toHaveBeenCalledWith(
+          expect.objectContaining({ content: 'bar\r\n' }),
+        );
+        expect(result.llmContent).toContain('sed edit applied');
+      });
+
       it.each([
         { code: 'ENOENT', type: ToolErrorType.FILE_NOT_FOUND },
         { code: 'EACCES', type: ToolErrorType.READ_CONTENT_FAILURE },
