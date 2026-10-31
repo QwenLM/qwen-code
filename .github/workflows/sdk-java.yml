@@ -281,12 +281,13 @@ jobs:
           # Seed from the host-shared repo so a warm host still starts warm.
           # The seed only reads the host cache and is best-effort, so it takes
           # no lock and cannot delay the lane.
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          mkdir -p "${RUNNER_TEMP}/m2-repo"
+          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
           # Maven truncates and rewrites its resolver tracking markers in
           # place, so a seeded hardlink would let the unlocked runs mutate
           # the host cache. Drop them; Maven recreates them job-locally.
           find "${RUNNER_TEMP}/m2-repo" \
-            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name '*.tmp' \) \
             -delete 2>/dev/null || true
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
@@ -422,16 +423,18 @@ jobs:
           # -n never replaces a host file, so the backstop can leave an
           # artifact missing for the next job to re-resolve, never truncated.
           # No write-back child inherits fd 9, or a cancelled job's survivor
-          # would hold the host lock until it exits.
-          # The seed drops Maven's resolver tracking markers because they
-          # record a resolution outcome, and a hard-killed transfer leaves
-          # *.tmp fragments behind; a red suite can leave both in the
-          # job-local copy, and publishing either would make the failure
-          # stick for every reader of the host cache, so skip the same names.
-          mkdir -p "${HOME}/.m2/repository" 9>&-
-          cd "${RUNNER_TEMP}/m2-repo"
+          # would hold the host lock until it exits. The in-house coordinates
+          # are never published, so drop any pre-PR copies from the host cache
+          # in the same locked stanza. Resolver bookkeeping stays job-local:
+          # it records a resolution outcome, a red suite can leave it in the
+          # job-local copy, and a hard-killed transfer leaves *.tmp fragments;
+          # publishing either would make the failure stick for every reader
+          # of the host cache, so skip the same names the seed drops.
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          rm -rf -- "${HOME}/.m2/repository/com/alibaba/qwencode-sdk" "${HOME}/.m2/repository/com/alibaba/"qwen-managed-agent-* 9>&- || write_back=$?
+          mkdir -p "${HOME}/.m2/repository" 9>&- || write_back=$?
+          cd "${RUNNER_TEMP}/m2-repo"
+          timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' \) -prune -o -type f -links 1 ! -name '_remote.repositories' ! -name 'maven-metadata-local.xml' ! -name 'resolver-status.properties' ! -name '*.lastUpdated' ! -name '*.tmp' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -489,7 +492,14 @@ jobs:
         working-directory: 'packages/managed-agent-server'
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
-        run: 'mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle'
+        run: |-
+          # The ECS leg resolves the SDK from the job-local repository the
+          # self-hosted step installed it into; the hosted leg's SDK comes
+          # from the default repository the state-test step populated.
+          if [ "${RUNNER_ENVIRONMENT}" = "self-hosted" ]; then
+            export MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${RUNNER_TEMP}/m2-repo"
+          fi
+          mvn --batch-mode --no-transfer-progress checkstyle:check checkstyle:check@runtime-broker-checkstyle
 
       - name: 'Build release artifacts'
         if: "${{ matrix.os == 'ubuntu-latest' && matrix.java == '11' }}"
@@ -921,12 +931,13 @@ jobs:
           # so it and the egress proxy keep paying off for the job-local copy.
           # The seed only reads the host cache and is best-effort, so it takes
           # no lock and cannot delay the lane.
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          mkdir -p "${RUNNER_TEMP}/m2-repo"
+          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
           # Maven truncates and rewrites its resolver tracking markers in
           # place, so a seeded hardlink would let the unlocked runs mutate
           # the host cache. Drop them; Maven recreates them job-locally.
           find "${RUNNER_TEMP}/m2-repo" \
-            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name '*.tmp' \) \
             -delete 2>/dev/null || true
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
@@ -1037,15 +1048,17 @@ jobs:
           # -n never replaces a host file, so the backstop can leave an
           # artifact missing for the next job to re-resolve, never truncated.
           # No write-back child inherits fd 9, or a cancelled job's survivor
-          # would hold the host lock until it exits.
-          # This lane's Maven runs fail inline, so only a green run reaches
-          # this copy: a marker here can only come from a green run's own
-          # resolution, and the seed drops the same names so a seeded copy
-          # never republishes a stale outcome.
-          mkdir -p "${HOME}/.m2/repository" 9>&-
-          cd "${RUNNER_TEMP}/m2-repo"
+          # would hold the host lock until it exits. This lane's Maven runs
+          # fail inline, so only a green run reaches this copy: a marker here
+          # can only come from a green run's own resolution, and the seed
+          # drops the same names so a seeded copy never republishes a stale
+          # outcome. The in-house coordinates are never published, so drop any
+          # pre-PR copies from the host cache in the same locked stanza.
           write_back=0
-          timeout 300 find . \( -path ./com/alibaba/qwencode-sdk -o -path ./com/alibaba/qwen-managed-agent-parent -o -path ./com/alibaba/qwen-managed-agent-contracts -o -path ./com/alibaba/qwen-managed-agent-control-plane -o -path ./com/alibaba/qwen-managed-agent-runtime-broker -o -path ./com/alibaba/qwen-managed-agent-persistence -o -path ./com/alibaba/qwen-managed-agent-adapters -o -path ./com/alibaba/qwen-managed-agent-server -o -path ./com/alibaba/qwen-managed-agent-verification -o -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) -prune -o -type f -links 1 -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
+          rm -rf -- "${HOME}/.m2/repository/com/alibaba/qwencode-sdk" "${HOME}/.m2/repository/com/alibaba/"qwen-managed-agent-* 9>&- || write_back=$?
+          mkdir -p "${HOME}/.m2/repository" 9>&- || write_back=$?
+          cd "${RUNNER_TEMP}/m2-repo"
+          timeout 300 find . \( -path '*/com/alibaba/qwencode-sdk' -o -path '*/com/alibaba/qwen-managed-agent-parent' -o -path '*/com/alibaba/qwen-managed-agent-contracts' -o -path '*/com/alibaba/qwen-managed-agent-control-plane' -o -path '*/com/alibaba/qwen-managed-agent-runtime-broker' -o -path '*/com/alibaba/qwen-managed-agent-persistence' -o -path '*/com/alibaba/qwen-managed-agent-adapters' -o -path '*/com/alibaba/qwen-managed-agent-server' -o -path '*/com/alibaba/qwen-managed-agent-verification' \) -prune -o -type f -links 1 ! -name '_remote.repositories' ! -name 'maven-metadata-local.xml' ! -name 'resolver-status.properties' ! -name '*.lastUpdated' ! -name '*.tmp' -exec cp -ln --parents -t "${HOME}/.m2/repository" {} + 9>&- || write_back=$?
           if [ "${write_back}" -eq 124 ]; then
             echo "::warning::Maven cache write-back stopped after 300 s; the gate result above is unaffected"
           elif [ "${write_back}" -ne 0 ]; then
@@ -1790,12 +1803,13 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: |-
           # Seed from the host-shared repo (cache-restored on hosted runners).
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          mkdir -p "${RUNNER_TEMP}/m2-repo"
+          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
           # Maven truncates and rewrites its resolver tracking markers in
           # place, so a seeded hardlink would let the unlocked runs mutate
           # the host cache. Drop them; Maven recreates them job-locally.
           find "${RUNNER_TEMP}/m2-repo" \
-            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name '*.tmp' \) \
             -delete 2>/dev/null || true
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked
@@ -2079,12 +2093,13 @@ jobs:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
         run: |-
           # Seed from the host-shared repo (cache-restored on hosted runners).
-          cp -aln "${HOME}/.m2/repository" "${RUNNER_TEMP}/m2-repo" 2>/dev/null || true
+          mkdir -p "${RUNNER_TEMP}/m2-repo"
+          cp -aln "${HOME}/.m2/repository/." "${RUNNER_TEMP}/m2-repo/" 2>/dev/null || true
           # Maven truncates and rewrites its resolver tracking markers in
           # place, so a seeded hardlink would let the unlocked runs mutate
           # the host cache. Drop them; Maven recreates them job-locally.
           find "${RUNNER_TEMP}/m2-repo" \
-            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name '*.tmp' \) \
+            \( -name '*.lastUpdated' -o -name 'resolver-status.properties' -o -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name '*.tmp' \) \
             -delete 2>/dev/null || true
           # Both in-house coordinates are fixed release versions this job
           # builds locally, so a seeded copy is only a hardlink the unlocked

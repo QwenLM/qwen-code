@@ -326,11 +326,14 @@ jobs:
           set -euo pipefail
           export MAVEN_ARGS="--settings ${RUNNER_TEMP}/setup-java-m2/settings.xml --toolchains ${RUNNER_TEMP}/setup-java-m2/toolchains.xml"
           if [[ "${RUNNER_ENVIRONMENT}" == 'self-hosted' ]]; then
-            # Both in-house artifacts use fixed release coordinates, so this
-            # PR's build must never reach the host-shared ~/.m2.
+            # The in-house artifacts use fixed release coordinates and the
+            # resolver rewrites its bookkeeping through hardlinked seeds, so
+            # this build must never reach the host-shared ~/.m2.
             repo="${RUNNER_TEMP}/m2-repo"
-            cp -aln "${HOME}/.m2/repository" "${repo}" 2>/dev/null || true
+            mkdir -p "${repo}"
+            cp -aln "${HOME}/.m2/repository/." "${repo}/" 2>/dev/null || true
             rm -rf -- "${repo}/com/alibaba/qwencode-sdk" "${repo}/com/alibaba/"qwen-managed-agent-*
+            find "${repo}" \( -name '_remote.repositories' -o -name 'maven-metadata-local.xml' -o -name 'resolver-status.properties' -o -name '*.lastUpdated' -o -name '*.tmp' \) -delete 2>/dev/null || true
             MAVEN_ARGS="${MAVEN_ARGS} -Dmaven.repo.local=${repo}"
           fi
           mvn --batch-mode --no-transfer-progress -f packages/sdk-java/qwencode/pom.xml -DskipTests -Dgpg.skip=true clean install

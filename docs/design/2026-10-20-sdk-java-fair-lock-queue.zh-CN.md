@@ -93,11 +93,13 @@ runner 注册抢同一把锁，需求随到达率增长而容量一次只能放�
 
 两次 Maven 运行本来就都从 job 本地仓库解析，不触碰宿主机共享状态。只有
 缓存写回会修改 `~/.m2`，因此只有写回取锁。种子复制（`cp -aln`）是只读且
-尽力而为的，放在取锁之前；它随后会从 job 本地副本中删除两个内部固定发布
+尽力而为的，放在取锁之前；它随后会从 job 本地副本中删除内部固定发布
 坐标，使不持锁的 `mvn install` 写入新的 inode，而不是穿透硬链接改写宿主机
 缓存。Maven 的跟踪标记（`resolver-status.properties`、`*.lastUpdated`、
-`_remote.repositories`）会被原地截断重写，因此播种时也会删除这些硬链接，
-由 Maven 在 job 本地重新创建。两次 Maven 运行不持锁；写回只取一次锁，且
+`_remote.repositories`、`maven-metadata-local.xml`）会被原地截断重写，
+因此播种时也会删除这些硬链接，由 Maven 在 job 本地重新创建；写回从不发布
+它们，因此下一个 job 的播种没有宿主机缓存中的 inode 可删除。两次 Maven
+运行不持锁；写回只取一次锁，且
 它的 `mkdir` 和有界 `find`/`cp` 子进程会关闭 fd 9，避免幸存进程继续持有锁。这样一次持锁
 只量一次复制，而不是一整套测试，fast 通道的预算又远大于一次持锁时长。
 
@@ -257,11 +259,14 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   就地失败）、两个 job 的 Maven 运行都在取锁之前、test 通道每条 `mvn` 行
   都以 `|| mvn_status=$?` 结尾并带阶段名、容忍跳过分支分别以绿色与红色
   状态各跑一次（红色分支断言阶段注解与 300 秒预算）、写回子进程关闭 fd 9、
-  每个播种 job 本地仓库与两处写回 prune 都排除了两个内部坐标、跟踪标记与
-  `*.tmp`、该注解保持在 `INFRA_FAILURE_SIGNATURES` 之外，以及每个站点的
-  seed 删除集合与 prune 集合一致。故障分支覆盖 `flock` 缺失、
-  `mkdir` 损坏、队列路径被占、锁路径是目录、`flock` 超时以及 `flock`
-  返回意外状态。`.size-baseline` 条目在最后一次编辑后重新实测到工作流的尺寸。
+  每个播种 job 本地仓库与两处写回 prune 都排除了内部坐标与解析器
+  记账文件——`_remote.repositories`、`maven-metadata-local.xml`、
+  `resolver-status.properties`、`*.lastUpdated` 与 `*.tmp`、写回在宿主侧
+  删除内部坐标、按任意深度 prune、缓存目录创建失败降级为警告、该注解
+  保持在 `INFRA_FAILURE_SIGNATURES` 之外，以及每个站点的 seed 删除集合与
+  prune 集合一致。故障分支覆盖 `flock` 缺失、`mkdir` 损坏、队列路径被占、
+  锁路径是目录、`flock` 超时以及 `flock` 返回意外状态。`.size-baseline`
+  条目在最后一次编辑后重新实测到工作流的尺寸。
 - 真实宿主机上的浸泡验证就是 CI 本身：合并后第一批池上运行要么
   按票序拿到锁，要么带着可归因的票据号超时。
 
@@ -271,7 +276,7 @@ normal 票在内核中占到比之后到达的 fast 票更靠前的位置，而�
   200 分钟；MariaDB 写回站点保留 5400 秒和 310 分钟上限。test job 传入
   自己的 tier，MariaDB 站点默认 normal。两处都先让 Maven 套件从 job
   本地仓库跑完，再取锁。每个播种 job 本地仓库的 job 都会在运行 Maven
-  之前删除两个内部固定发布坐标。
+  之前删除内部固定发布坐标。
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
   通过。

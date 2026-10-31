@@ -109,12 +109,14 @@ the bound.
 Both Maven runs already resolve from a job-local repository, so they touch no
 host-shared state. Only the cache write-back mutates `~/.m2`, so only the
 write-back takes the lock. The seed (`cp -aln`) is read-only and best-effort
-and runs before the acquisition; it then drops the two in-house fixed-release
+and runs before the acquisition; it then drops the in-house fixed-release
 coordinates from the job-local copy, so the unlocked `mvn install` writes
 fresh inodes instead of rewriting the host cache through a hardlink. Maven's
 tracking markers (`resolver-status.properties`, `*.lastUpdated`,
-`_remote.repositories`) are truncated and rewritten in place, so the seed
-drops those hardlinks too and Maven recreates them job-locally. The
+`_remote.repositories`, `maven-metadata-local.xml`) are truncated and
+rewritten in place, so the seed drops those hardlinks too and Maven
+recreates them job-locally; the write-back never publishes them, so the
+next job's seed has no host-cache inode to unlink. The
 Maven runs run unlocked; the write-back holds one acquisition, and its `mkdir`
 and bounded `find`/`cp` children drop fd 9 so a survivor cannot retain the
 lock. A hold now measures the copy instead of the suite, and the fast tier's
@@ -315,9 +317,13 @@ order this section exists to prevent.
   `|| mvn_status=$?` with a named stage, the tolerated-skip arms exercised
   with both a green and a red status (the red ones assert the stage
   annotation and the 300 s budget), their write-back children's fd 9 close,
-  the two in-house coordinates' and the tracking-marker and `*.tmp` names'
-  absence from every seeded job-local repository and from both write-back
-  prunes, the annotation staying clear of `INFRA_FAILURE_SIGNATURES`, and the
+  the in-house coordinates' and the resolver bookkeeping's —
+  `_remote.repositories`, `maven-metadata-local.xml`,
+  `resolver-status.properties`, `*.lastUpdated`, and `*.tmp` — absence from
+  every seeded job-local repository and from both write-back prunes, the
+  write-back's host-side removal of the in-house coordinates, its any-depth
+  prune, a failed cache-directory creation downgraded to a warning, the
+  annotation staying clear of `INFRA_FAILURE_SIGNATURES`, and the
   seed-drop/prune sets agreeing at every site. The fault arms cover a missing
   `flock`, a broken `mkdir`, a stray queue file, a lock path that is a
   directory, a timed-out `flock`, and an unexpected `flock` status. The
@@ -333,7 +339,7 @@ order this section exists to prevent.
   its 310-minute ceiling. The test job passes its tier and the MariaDB site
   defaults to normal. Both sites run their Maven suites from a job-local
   repository before the acquisition. Every job that seeds a job-local
-  repository drops the two in-house fixed-release coordinates from the copy
+  repository drops the in-house fixed-release coordinates from the copy
   before running Maven.
 - `npx vitest run scripts/tests/sdk-java-lock.test.js
 scripts/tests/sdk-java-workflow.test.js scripts/tests/workflow-size.test.js`
