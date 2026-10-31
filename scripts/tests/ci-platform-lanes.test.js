@@ -1268,11 +1268,20 @@ describe('GitHub helper tests', () => {
       (candidate) => candidate.name === 'Run .github/scripts helper tests',
     );
     expect(step, 'helper-tests step missing').toBeDefined();
-    const run = String(step.run);
+    // Comments stripped: the rationale above the export names it too, so a pin
+    // satisfied by prose would stay green with the routing commented out.
+    const run = String(step.run)
+      .split('\n')
+      .filter((line) => !line.trim().startsWith('#'))
+      .join('\n');
     expect(run).toContain('export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"');
     expect(run.indexOf('export TMPDIR')).toBeLessThan(
       run.indexOf('node --test'),
     );
+    // The routed dir is private to the run and reaped on exit: RUNNER_TEMP
+    // itself is shared with every other job on the host.
+    expect(run).toContain('mktemp -d "${TMPDIR}/helper-tests-XXXXXX"');
+    expect(run).toContain('trap \'rm -rf "$HELPER_TMPDIR"\' EXIT');
   });
 
   it('retries the full-profile battery once against pool contention', () => {
