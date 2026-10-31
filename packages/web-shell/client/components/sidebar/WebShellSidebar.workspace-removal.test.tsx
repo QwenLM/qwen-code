@@ -435,6 +435,9 @@ function renderSidebar(
     onNewSession?: (workspaceCwd?: string) => boolean;
     onNewStandaloneSession?: () => Promise<boolean> | boolean;
     onLoadSession?: (sessionId: string, workspaceCwd?: string) => void;
+    onAddSessionToSplitView?: (sessionId: string) => void;
+    canOpenSplitView?: boolean;
+    splitSessionIds?: readonly string[];
     onLoadStandaloneSession?: (sessionId: string) => void;
     onStandaloneNotice?: (message: string) => void;
     workspaces?: DaemonWorkspaceCapability[];
@@ -454,6 +457,7 @@ function renderSidebar(
         | 'group'
         | 'export'
         | 'delete'
+        | 'split'
       )[];
       inlineItems?: readonly ('pin' | 'rename' | 'export' | 'delete')[];
     };
@@ -479,6 +483,9 @@ function renderSidebar(
           onOpenGoals={overrides.onOpenGoals ?? (() => {})}
           onOpenSessions={() => {}}
           onOpenSplitView={() => {}}
+          onAddSessionToSplitView={overrides.onAddSessionToSplitView}
+          canOpenSplitView={overrides.canOpenSplitView}
+          splitSessionIds={overrides.splitSessionIds}
           onNewSession={overrides.onNewSession ?? (() => false)}
           onNewStandaloneSession={overrides.onNewStandaloneSession}
           onLoadSession={overrides.onLoadSession ?? (() => {})}
@@ -910,6 +917,213 @@ afterEach(() => {
   container.remove();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
+});
+
+describe('WebShellSidebar session split action', () => {
+  it('offers a dropdown-only action that adds the selected session', async () => {
+    active.sessions.push({
+      sessionId: 'target',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Target session',
+    });
+    const onAddSessionToSplitView = vi.fn();
+    const onLoadSession = vi.fn();
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView,
+      onLoadSession,
+      sessionActions: { items: ['split'] },
+    });
+    await ensureWorkspaceExpanded('project');
+    await selectSessionMenuItem('Target session', 'Add to Split View');
+    expect(onAddSessionToSplitView).toHaveBeenCalledExactlyOnceWith('target');
+    expect(onLoadSession).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { label: 'small screens', canOpenSplitView: false },
+    { label: 'missing callback', onAddSessionToSplitView: undefined },
+    {
+      label: 'action allowlist',
+      sessionActions: { items: ['rename'] as const },
+    },
+  ])(
+    'hides the split action for $label',
+    async ({ label: _, ...overrides }) => {
+      active.sessions.push({
+        sessionId: 'target',
+        workspaceCwd: '/tmp/project',
+        displayName: 'Target session',
+      });
+      renderSidebar({
+        canOpenSplitView: true,
+        onAddSessionToSplitView: vi.fn(),
+        ...overrides,
+      });
+      await ensureWorkspaceExpanded('project');
+      expect(await openSessionMenuItems('Target session')).not.toContain(
+        'Add to Split View',
+      );
+    },
+  );
+
+  it('disables adding a new session at the six-pane limit', async () => {
+    active.sessions.push({
+      sessionId: 'target',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Target session',
+    });
+    const onAddSessionToSplitView = vi.fn();
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView,
+      splitSessionIds: ['s1', 's2', 's3', 's4', 's5', 's6'],
+    });
+    await ensureWorkspaceExpanded('project');
+    const item = await openSessionMenuItem(
+      'Target session',
+      'Add to Split View',
+    );
+    expect(item.getAttribute('data-disabled')).not.toBeNull();
+    // Sidebar-specific capacity message (not the overview's "select at
+    // most N"): it names the cause and the remedy.
+    expect(item.title).toBe(
+      'Split View already shows 6 sessions — close a pane to add another',
+    );
+    await act(async () => click(item));
+    expect(onAddSessionToSplitView).not.toHaveBeenCalled();
+  });
+
+  it('disables adding the current session while the split is closed', async () => {
+    connection.sessionId = 'current-session';
+    active.sessions.push({
+      sessionId: 'current-session',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Current session',
+    });
+    const onAddSessionToSplitView = vi.fn();
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView,
+    });
+    await ensureWorkspaceExpanded('project');
+    const item = await openSessionMenuItem(
+      'Current session',
+      'Add to Split View',
+    );
+    expect(item.getAttribute('data-disabled')).not.toBeNull();
+    expect(item.title).not.toBe('');
+    await act(async () => click(item));
+    expect(onAddSessionToSplitView).not.toHaveBeenCalled();
+  });
+
+  it('disables adding a session that is already open in the split', async () => {
+    active.sessions.push({
+      sessionId: 'target',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Target session',
+    });
+    const onAddSessionToSplitView = vi.fn();
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView,
+      splitSessionIds: ['target'],
+    });
+    await ensureWorkspaceExpanded('project');
+    const item = await openSessionMenuItem(
+      'Target session',
+      'Add to Split View',
+    );
+    expect(item.getAttribute('data-disabled')).not.toBeNull();
+    expect(item.title).toBe('This session is already open in Split View');
+    await act(async () => click(item));
+    expect(onAddSessionToSplitView).not.toHaveBeenCalled();
+  });
+
+  it('allows sessions from a trusted secondary workspace', async () => {
+    useWorkspaceSessionCatalog(async (cwd, options) =>
+      cwd === '/tmp/other' && options?.archiveState === 'active'
+        ? [
+            {
+              sessionId: 'secondary',
+              workspaceCwd: cwd,
+              displayName: 'Secondary',
+            },
+          ]
+        : [],
+    );
+    const onAddSessionToSplitView = vi.fn();
+    renderSidebar({ canOpenSplitView: true, onAddSessionToSplitView });
+    await expandWorkspace('other');
+    await selectSessionMenuItem('Secondary', 'Add to Split View');
+    expect(onAddSessionToSplitView).toHaveBeenCalledExactlyOnceWith(
+      'secondary',
+    );
+  });
+
+  it('does not offer secondary workspace channel sessions for split', async () => {
+    enableChannelOrganization();
+    useWorkspaceSessionCatalog(async (cwd, options) =>
+      cwd === '/tmp/other' && options?.archiveState === 'active'
+        ? [
+            {
+              sessionId: 'secondary-channel',
+              workspaceCwd: cwd,
+              displayName: 'Secondary channel',
+              sourceType: 'channel',
+            },
+          ]
+        : [],
+    );
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView: vi.fn(),
+    });
+    await switchSessionSource('Channels');
+    await expandWorkspace('other');
+    const items = await openSessionMenuItems('Secondary channel');
+    expect(items).toContain('Rename');
+    expect(items).not.toContain('Add to Split View');
+  });
+
+  it('does not offer archived sessions for split', async () => {
+    archived.sessions.push({
+      sessionId: 'archived',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Archived target',
+    });
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView: vi.fn(),
+    });
+    await openArchiveSettings();
+    expect(await openSessionMenuItems('Archived target')).not.toContain(
+      'Add to Split View',
+    );
+  });
+
+  it('does not expose split for an untrusted workspace', async () => {
+    connection.capabilities = {
+      ...capabilities,
+      workspaces: capabilities.workspaces.map((entry) =>
+        entry.primary ? { ...entry, trusted: false } : entry,
+      ),
+    };
+    workspace.capabilities = connection.capabilities;
+    active.sessions.push({
+      sessionId: 'untrusted',
+      workspaceCwd: '/tmp/project',
+      displayName: 'Untrusted target',
+    });
+    renderSidebar({
+      canOpenSplitView: true,
+      onAddSessionToSplitView: vi.fn(),
+      sessionActions: { items: ['split'] },
+    });
+    await ensureWorkspaceExpanded('project');
+    expect(container.textContent).toContain('Untrusted target');
+    expect(sessionAction('Untrusted target')).toBeUndefined();
+  });
 });
 
 describe('WebShellSidebar workspace removal', () => {

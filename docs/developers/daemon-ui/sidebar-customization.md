@@ -237,7 +237,8 @@ type WebShellSidebarSessionActionItem =
   | 'export' // 📤 Export chat history (dropdown menu)
   | 'delete' // 🗑 Delete session (dropdown menu)
   | 'pin' // 📌 Pin/Unpin (inline button)
-  | 'archive'; // 📦 Archive (dropdown menu)
+  | 'archive' // 📦 Archive (dropdown menu)
+  | 'split'; // ◫ Add to Split View (dropdown menu)
 
 /** Subset with working inline (hover-button) handlers. */
 type WebShellSidebarSessionInlineActionItem =
@@ -255,7 +256,7 @@ interface WebShellSidebarSessionActionsOptions {
 Controls which action buttons appear on session rows:
 
 - **`items`**: Master control for all actions (both inline and dropdown). If an item is not in `items`, it's hidden everywhere.
-- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover) on standard session rows. Defaults to `['pin']`. Only items with working inline handlers can be used: `'pin'`, `'rename'`, `'export'`, `'delete'`. `'details'`, `'group'`, and `'archive'` are dropdown-only on standard rows.
+- **`inlineItems`**: Controls which items appear as **inline buttons** (on hover) on standard session rows. Defaults to `['pin']`. Only items with working inline handlers can be used: `'pin'`, `'rename'`, `'export'`, `'delete'`. `'details'`, `'group'`, `'archive'`, and `'split'` are dropdown-only on standard rows.
 
 Archived rows in Settings use Export conversation and Restore as inline buttons, with Rename and Delete in More. Their actions still follow `items` and built-in availability restrictions; `inlineItems` does not change this layout. The existing styles reveal these buttons on hover or keyboard focus and keep them visible on touch devices.
 
@@ -273,6 +274,12 @@ are enabled. Inline buttons are only shown when both
 their capability condition and `items` include them. Archive is disabled on
 the current session and on any session with a running turn, because the daemon
 closes the live session when it archives.
+
+`'split'` is default-enabled like the other items, but it only takes effect
+when the host wires `onAddSessionToSplitView`. The sidebar also reads its
+`splitSessionIds` prop for capacity: a session that is already open in the
+split renders the item disabled with an explanatory title, as does the
+pane-limit case and the current session while the split is closed.
 
 ```tsx
 sidebar={{

@@ -60,6 +60,176 @@ async function installScenario(
   });
 }
 
+async function openSessionMenu(page: Page, name: string): Promise<void> {
+  const row = page
+    .locator('[data-web-shell-session-title]', { hasText: name })
+    .locator('..');
+  await row.hover();
+  await row.getByRole('button', { name: 'More actions', exact: true }).click();
+}
+
+test('adds sidebar sessions to split without losing existing panes or drafts @smoke', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  const scenario = createSplitScenario();
+  scenario.capabilities.features.push('standalone_sessions_v1');
+  await installScenario(page, scenario, testInfo);
+  await page.route(/\/standalone\/sessions\/[^/?]+$/, async (route) => {
+    // Classification is a network request on current daemons, not a microtask.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ code: 'standalone_session_not_found' }),
+    });
+  });
+  await page.goto(`/session/${MAIN_SESSION}`);
+
+  await openSessionMenu(page, 'Session A');
+  await page
+    .getByRole('menuitem', { name: 'Add to Split View', exact: true })
+    .click();
+  const split = page.getByTestId('split-view');
+  const mainPane = page.locator(`[data-pane-session-id="${MAIN_SESSION}"]`);
+  const paneA = page.locator(`[data-pane-session-id="${SESSION_A}"]`);
+  const paneB = page.locator(`[data-pane-session-id="${SESSION_B}"]`);
+  await expect(split).toBeVisible();
+  await expect(split.getByTestId('chat-pane')).toHaveCount(2);
+  await expect(mainPane).toBeVisible();
+  await expect(paneA).toBeVisible();
+  const existingPane = await paneA.elementHandle();
+  expect(existingPane).not.toBeNull();
+  await paneA.locator('.cm-content').fill('Keep this split draft');
+  await paneA
+    .getByRole('button', { name: 'Maximize pane', exact: true })
+    .click();
+  await expect(mainPane).toBeHidden();
+
+  await openSessionMenu(page, 'Session B');
+  await page
+    .getByRole('menuitem', { name: 'Add to Split View', exact: true })
+    .click();
+  await expect(split.getByTestId('chat-pane')).toHaveCount(3);
+  await expect(mainPane).toBeVisible();
+  await expect(paneA).toBeVisible();
+  await expect(paneB).toBeVisible();
+  await expect(paneB.getByTestId('chat-pane')).toHaveAttribute(
+    'data-pane-active',
+  );
+  await expect(paneA.locator('.cm-content')).toHaveText(
+    'Keep this split draft',
+  );
+  expect(await existingPane!.evaluate((element) => element.isConnected)).toBe(
+    true,
+  );
+
+  await openSessionMenu(page, 'Session A');
+  // Session A is already a pane: the split gate disables the action and the
+  // title names the cause, so the spec asserts the disabled state instead of
+  // a no-op click.
+  const reAdd = page.getByRole('menuitem', {
+    name: 'Add to Split View',
+    exact: true,
+  });
+  await expect(reAdd).toBeDisabled();
+  await expect(reAdd).toHaveAttribute(
+    'title',
+    'This session is already open in Split View',
+  );
+  await expect(split.getByTestId('chat-pane')).toHaveCount(3);
+  await expect(paneA.locator('.cm-content')).toHaveText(
+    'Keep this split draft',
+  );
+  expect(await existingPane!.evaluate((element) => element.isConnected)).toBe(
+    true,
+  );
+  await expect
+    .poll(() =>
+      page.evaluate((key) => sessionStorage.getItem(key), STORAGE_KEY),
+    )
+    .toBe(JSON.stringify([MAIN_SESSION, SESSION_A, SESSION_B]));
+});
+
+test('keeps consecutive sidebar additions while the first split is opening', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  const scenario = createSplitScenario();
+  scenario.capabilities.features.push('standalone_sessions_v1');
+  await installScenario(page, scenario, testInfo);
+  let releaseClassification!: () => void;
+  const classification = new Promise<void>((resolve) => {
+    releaseClassification = resolve;
+  });
+  const classifiedSessions: string[] = [];
+  await page.route(/\/standalone\/sessions\/[^/?]+$/, async (route) => {
+    classifiedSessions.push(new URL(route.request().url()).pathname);
+    await classification;
+    await route.fulfill({
+      status: 404,
+      contentType: 'application/json',
+      body: JSON.stringify({ code: 'standalone_session_not_found' }),
+    });
+  });
+  try {
+    await page.goto(`/session/${MAIN_SESSION}`);
+    for (const [name, id] of [
+      ['Session A', SESSION_A],
+      ['Session B', SESSION_B],
+    ]) {
+      await openSessionMenu(page, name);
+      await page
+        .getByRole('menuitem', { name: 'Add to Split View', exact: true })
+        .click();
+      await expect
+        .poll(() => classifiedSessions.some((path) => path.endsWith(`/${id}`)))
+        .toBe(true);
+    }
+    await expect(page.getByTestId('split-view')).toHaveCount(0);
+  } finally {
+    releaseClassification();
+  }
+  const split = page.getByTestId('split-view');
+  await expect(split.getByTestId('chat-pane')).toHaveCount(3);
+  for (const id of [MAIN_SESSION, SESSION_A, SESSION_B]) {
+    await expect(split.locator(`[data-pane-session-id="${id}"]`)).toBeVisible();
+  }
+});
+
+test('disables the sidebar split action when six panes are open', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1920, height: 1080 });
+  const scenario = createSplitScenario();
+  const extraSessions = ['c', 'd', 'e', 'f'].map((suffix) => ({
+    ...scenario.sessions[1],
+    sessionId: `split-session-${suffix}`,
+    displayName: `Session ${suffix.toUpperCase()}`,
+  }));
+  scenario.sessions.push(...extraSessions);
+  await installScenario(page, scenario, testInfo);
+  const ids = scenario.sessions
+    .filter((session) => session.sessionId !== SESSION_A)
+    .map((session) => session.sessionId);
+  await page.goto(`/?split=${ids.join(',')}`);
+  const split = page.getByTestId('split-view');
+  await expect(split.getByTestId('chat-pane')).toHaveCount(6);
+  await openSessionMenu(page, 'Session A');
+  const add = page.getByRole('menuitem', {
+    name: 'Add to Split View',
+    exact: true,
+  });
+  await expect(add).toBeDisabled();
+  // The sidebar-specific capacity message (not the overview's "select at
+  // most N"): it names the cause and the remedy.
+  await expect(add).toHaveAttribute(
+    'title',
+    /Split View already shows 6 sessions/,
+  );
+  await expect(split.getByTestId('chat-pane')).toHaveCount(6);
+});
+
 test('restores the split across a reload and isolates it per tab @smoke', async ({
   page,
   context,

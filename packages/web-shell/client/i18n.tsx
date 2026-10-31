@@ -1141,6 +1141,8 @@ const EN: Messages = {
   'session.contextConflict':
     'A standalone or Live conversation link cannot include a workspace target.',
   'session.loadFailed': 'Failed to load conversation',
+  'session.splitAddFailed':
+    'Some sessions could not be added to Split View. Please try again.',
   'session.notFound': 'Conversation not found',
   'session.notFoundDescription':
     'This standalone conversation no longer exists.',
@@ -2331,6 +2333,12 @@ const EN: Messages = {
   'sidebar.projectFallback': 'Workspace',
   'sidebar.sessionsOverview': 'Session Overview',
   'sidebar.splitView': 'Split View',
+  'sidebar.addToSplitView': 'Add to Split View',
+  'sidebar.splitAtCapacity': (v) =>
+    `Split View already shows ${v?.max ?? 6} sessions — close a pane to add another`,
+  'sidebar.splitAlreadyOpen': 'This session is already open in Split View',
+  'sidebar.splitCurrentDisabled':
+    'The current session cannot be added while Split View is closed',
   'sidebar.settings': 'Settings',
   'update.button': 'Update',
   'update.restarting': 'Restarting…',
@@ -5728,6 +5736,7 @@ const ZH: Messages = {
   'session.capabilitiesFailed': '无法加载 Daemon 能力。请重试后再打开该会话。',
   'session.contextConflict': 'Standalone 或 Live 会话链接不能同时指定工作区。',
   'session.loadFailed': '会话加载失败',
+  'session.splitAddFailed': '部分会话无法添加到分屏视图，请重试。',
   'session.notFound': '会话不存在',
   'session.notFoundDescription': '该 Standalone 会话已不存在。',
   'session.resolving': '正在打开会话...',
@@ -6819,6 +6828,11 @@ const ZH: Messages = {
   'sidebar.projectFallback': '工作区',
   'sidebar.sessionsOverview': '会话总览',
   'sidebar.splitView': '分屏',
+  'sidebar.addToSplitView': '添加到分屏视图',
+  'sidebar.splitAtCapacity': (v) =>
+    `分屏视图已显示 ${v?.max ?? 6} 个会话 — 请先关闭一个面板再添加`,
+  'sidebar.splitAlreadyOpen': '该会话已在分屏视图中打开',
+  'sidebar.splitCurrentDisabled': '分屏视图关闭时，无法添加当前会话',
   'sidebar.settings': '设置',
   'update.button': '更新',
   'update.restarting': '重启中…',
