@@ -615,30 +615,6 @@ for (const theme of THEMES) {
           } satisfies DaemonSessionContextUsageStatus,
         }),
       );
-      // The memory read goes through the primary singular route; serve the
-      // file content there so the preview opens without the sandboxed file API.
-      await page.route(/\/workspace\/memory(?:\?|$)/, (route) =>
-        route.fulfill({
-          json: {
-            v: 1,
-            workspaceCwd: scenario.workspaceCwd,
-            initialized: true,
-            files: [
-              {
-                kind: 'memory_file',
-                path: '/workspace/AGENTS.md',
-                scope: 'workspace',
-                bytes: 120,
-                content:
-                  '# AGENTS.md\n\n## Working Principles\n\n- Simplicity first: minimum code that solves the problem.\n- No abstractions for single-use code.\n',
-              },
-            ],
-            totalBytes: 120,
-            fileCount: 1,
-            ruleCount: 0,
-          },
-        }),
-      );
       await gotoSession(page, scenario, daemon, theme);
       await page
         .getByRole('button', { name: 'Context Usage', exact: true })

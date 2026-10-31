@@ -101,20 +101,25 @@ function parseMemoryFiles(
   memoryContent: string,
   workingDir: string,
   extensionOwners: ReadonlyMap<string, string> = new Map(),
+  admissionRoot: string = workingDir,
 ): ContextMemoryDetail[] {
   if (!memoryContent || memoryContent.trim().length === 0) return [];
 
   const results: ContextMemoryDetail[] = [];
-  // The context preview opens a row through the session workspace's file
-  // route or, for a global memory file, the memory route. Parent-directory
-  // and extension instruction files live outside both scopes, so they must
-  // stay non-interactive: only hand the client a path it can actually read.
-  const cwd = path.resolve(workingDir);
-  const globalDir = Storage.getGlobalQwenDir();
+  // The preview resolves the owning workspace from the session's admission
+  // root (status.workspaceRoot), which stays put when session/cd relocates
+  // the live cwd. Gate on that same root — not the live working dir — so a
+  // row is a link exactly when the client can read it; a global memory file
+  // is read through the workspace-independent memory route. Normalize both
+  // sides of the global-dir comparison: getGlobalQwenDir() returns an
+  // absolute QWEN_HOME verbatim, trailing separator included, while
+  // path.dirname() never produces one.
+  const root = path.resolve(admissionRoot);
+  const globalDir = path.resolve(Storage.getGlobalQwenDir());
   const memoryFilenames = new Set(getAllMemoryFilenames());
   const openablePath = (absolutePath: string): string | undefined =>
-    isSubpath(cwd, absolutePath) ||
-    (path.dirname(absolutePath) === globalDir &&
+    isSubpath(root, absolutePath) ||
+    (path.resolve(path.dirname(absolutePath)) === globalDir &&
       memoryFilenames.has(path.basename(absolutePath)))
       ? absolutePath
       : undefined;
@@ -488,6 +493,7 @@ export async function collectContextData(
     memoryContent,
     config.getWorkingDir(),
     extensionContextFileOwners(config, config.getWorkingDir()),
+    config.storage.getProjectRoot(),
   );
   const memoryFiles: ContextMemoryDetail[] = [];
   const instructionFilesTokens = instructionFiles.reduce(

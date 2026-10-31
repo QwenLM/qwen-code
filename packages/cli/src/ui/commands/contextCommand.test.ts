@@ -84,6 +84,7 @@ function makeMockConfig(contextWindowSize = 32_000): Config {
     getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
     isInteractive: vi.fn().mockReturnValue(true),
     getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+    storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
   } as unknown as Config;
 }
 
@@ -124,6 +125,7 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
     } as unknown as Config;
   });
 
@@ -131,6 +133,7 @@ describe('collectContextData (contextCommand)', () => {
     const config = {
       ...makeMockConfig(200_000),
       getWorkingDir: vi.fn().mockReturnValue('/workspace'),
+      storage: { getProjectRoot: vi.fn().mockReturnValue('/workspace') },
       getUserMemory: vi
         .fn()
         .mockReturnValue(
@@ -154,15 +157,18 @@ describe('collectContextData (contextCommand)', () => {
     expect(autoMemory?.absolutePath).toBeUndefined();
   });
 
-  it('only exposes absolute paths the context preview can open', async () => {
-    // A session in a repository subdirectory inherits a parent instruction
-    // file, and an installed extension contributes its own context file.
-    // Neither is readable through the workspace file route or the memory
-    // route, so those rows must stay non-interactive (no absolutePath).
+  it('gates openable paths on the admission root, not the live working dir', async () => {
+    // A session that cd'd into a subdirectory keeps its admission root. The
+    // gate must key on that root (the same one the client resolves the owner
+    // from), so the root's own AGENTS.md stays openable even though it is
+    // above the live cwd, while files outside the admission root (an
+    // unrelated directory, an installed extension) stay non-interactive.
+    const admissionRoot = '/workspace/repo';
     const workingDir = '/workspace/repo/sub';
     const globalMemory = path.join(Storage.getGlobalQwenDir(), 'QWEN.md');
-    const workspaceFile = path.join(workingDir, 'AGENTS.md');
-    const parentFile = '/workspace/repo/AGENTS.md';
+    const rootFile = path.join(admissionRoot, 'AGENTS.md');
+    const subdirFile = path.join(workingDir, 'AGENTS.md');
+    const outsideFile = '/tmp/outside/AGENTS.md';
     const extensionFile = '/opt/extensions/foo/AGENTS.md';
     const marker = (absolute: string) => {
       const relative = path.relative(workingDir, absolute);
@@ -171,10 +177,11 @@ describe('collectContextData (contextCommand)', () => {
     const config = {
       ...makeMockConfig(200_000),
       getWorkingDir: vi.fn().mockReturnValue(workingDir),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(admissionRoot) },
       getUserMemory: vi
         .fn()
         .mockReturnValue(
-          [globalMemory, workspaceFile, parentFile, extensionFile]
+          [globalMemory, rootFile, subdirFile, outsideFile, extensionFile]
             .map(marker)
             .join('\n\n'),
         ),
@@ -182,14 +189,51 @@ describe('collectContextData (contextCommand)', () => {
 
     const data = await collectContextData(config, true);
     const rows = data.instructionFiles ?? [];
-    expect(rows).toHaveLength(4);
+    expect(rows).toHaveLength(5);
     const openPaths = rows
       .map((file) => file.absolutePath)
       .filter((value): value is string => value !== undefined);
-    expect(new Set(openPaths)).toEqual(new Set([globalMemory, workspaceFile]));
+    expect(new Set(openPaths)).toEqual(
+      new Set([globalMemory, rootFile, subdirFile]),
+    );
+    // The admission root's own file is openable after cd into a subdirectory.
+    expect(
+      rows.find((file) => file.absolutePath === rootFile)?.absolutePath,
+    ).toBe(rootFile);
     expect(rows.filter((file) => file.absolutePath === undefined)).toHaveLength(
       2,
     );
+  });
+
+  it('keeps the global memory row openable when QWEN_HOME has a trailing separator', async () => {
+    // getGlobalQwenDir() returns an absolute QWEN_HOME verbatim, so a trailing
+    // separator must not defeat the exact-directory match against dirname().
+    const previousHome = process.env['QWEN_HOME'];
+    process.env['QWEN_HOME'] = '/srv/qwen/';
+    try {
+      const workingDir = '/workspace';
+      const globalMemory = path.join('/srv/qwen/', 'QWEN.md');
+      const relative = path.relative(workingDir, globalMemory);
+      const config = {
+        ...makeMockConfig(200_000),
+        getWorkingDir: vi.fn().mockReturnValue(workingDir),
+        storage: { getProjectRoot: vi.fn().mockReturnValue(workingDir) },
+        getUserMemory: vi
+          .fn()
+          .mockReturnValue(
+            `--- Context from: ${relative} ---\nbody\n--- End of Context from: ${relative} ---`,
+          ),
+      } as unknown as Config;
+
+      const data = await collectContextData(config, true);
+      const globalRow = (data.instructionFiles ?? []).find(
+        (file) => file.absolutePath === globalMemory,
+      );
+      expect(globalRow?.absolutePath).toBe(globalMemory);
+    } finally {
+      if (previousHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = previousHome;
+    }
   });
 
   it('queries getFunctionDeclarations with no args, matching the actual API request', async () => {
@@ -1833,6 +1877,7 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
     } as unknown as Config;
 
     const data = await collectContextData(config, true);
@@ -1884,6 +1929,7 @@ describe('collectContextData (contextCommand)', () => {
       getExperimentalZedIntegration: vi.fn().mockReturnValue(false),
       isInteractive: vi.fn().mockReturnValue(true),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      storage: { getProjectRoot: vi.fn().mockReturnValue(process.cwd()) },
     } as unknown as Config;
 
     const data = await collectContextData(config, true);

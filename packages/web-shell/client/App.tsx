@@ -312,7 +312,10 @@ import {
   resolveArtifactWorkspaceOwner,
   useArtifactWorkspaceTarget,
 } from './components/artifacts/useArtifactWorkspaceTarget';
-import { readContextInstructionFile } from './components/artifacts/readContextInstructionFile';
+import {
+  readContextInstructionFile,
+  type ContextInstructionFileContent,
+} from './components/artifacts/readContextInstructionFile';
 import {
   getArtifactsByTurn,
   getFileChangesByTurn,
@@ -8048,13 +8051,13 @@ export function App({
     async (file: DaemonContextMemoryDetail, fileWorkspaceCwd: string) => {
       const absolutePath = file.absolutePath;
       if (!absolutePath) return;
-      let content: string;
+      let result: ContextInstructionFileContent;
       try {
         const client = workspace.client;
         if (!client) {
           throw new Error('The workspace for this file is not available.');
         }
-        content = await readContextInstructionFile(
+        result = await readContextInstructionFile(
           client,
           workspace.capabilities,
           fileWorkspaceCwd,
@@ -8064,12 +8067,15 @@ export function App({
         pushToast('error', err instanceof Error ? err.message : String(err));
         return;
       }
+      if (result.truncated) {
+        pushToast('warning', t('contextUsage.previewTruncated'));
+      }
       const tab: ArtifactPanelTab = {
         id: `memory-file:${absolutePath}`,
         kind: 'file',
         title: file.path,
         workspacePath: absolutePath,
-        previewContent: content,
+        previewContent: result.content,
         previewOnly: true,
         ...(fileWorkspaceCwd ? { workspaceCwd: fileWorkspaceCwd } : {}),
       };
@@ -8081,7 +8087,7 @@ export function App({
       setActiveArtifactPanelTabId(tab.id);
       setArtifactPanelOpen(true);
     },
-    [workspace, pushToast],
+    [workspace, pushToast, t],
   );
   const closeArtifactPanel = useCallback(() => {
     setArtifactPanelOpen(false);
@@ -23988,6 +23994,11 @@ export function App({
                                 onShowContextDetail={
                                   contextUsageAvailable
                                     ? openCurrentContextUsagePanel
+                                    : undefined
+                                }
+                                onOpenMemoryFile={
+                                  contextUsageAvailable
+                                    ? openMemoryFilePreview
                                     : undefined
                                 }
                                 loadingTranscript={connection.loadingTranscript}
