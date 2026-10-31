@@ -1115,14 +1115,12 @@ export class ShellExecutionService {
         let pendingCaptureWrites = 0;
         let stdoutEnded = false;
         let stderrEnded = false;
-        // Which streams had ended when the shell was stopped: at a cancel,
-        // before the kill, or else at the exit. A kill makes the streams it
-        // cuts end before the exit is reported, so by then the flags above
-        // no longer show which streams it cut.
-        let endedAtStop: { stdout: boolean; stderr: boolean } | undefined;
-        const recordStop = () => {
-          endedAtStop ??= { stdout: stdoutEnded, stderr: stderrEnded };
-        };
+        // Whether a cancel killed the shell while this stream was still open,
+        // recorded before the kill: the streams a kill cuts can end before
+        // its exit is reported, and then the flags above no longer show
+        // which streams it cut.
+        let stdoutOpenAtCancel = false;
+        let stderrOpenAtCancel = false;
         let stdoutWrite: Promise<void> = Promise.resolve();
         let stderrWrite: Promise<void> = Promise.resolve();
 
@@ -1396,27 +1394,20 @@ export class ShellExecutionService {
             // The first chunk picked the decoder, and an ASCII one is valid
             // UTF-8; decode each stream again from its complete bytes, as
             // the PTY path does at exit.
-            // A stream that ended delivered every byte. A cancel or a signal
-            // cuts only the streams still open when it stopped the shell, the
-            // capture limit only the streams it dropped bytes from, and the
-            // post-exit drain only the streams it stopped waiting for. A
-            // background promote that finds the shell already exited cut
-            // nothing.
-            const endedEarly =
-              (abortSignal.aborted &&
-                getShellAbortReasonKind(abortSignal.reason) !== 'background') ||
-              signal !== null;
-            const ended = endedAtStop ?? {
-              stdout: stdoutEnded,
-              stderr: stderrEnded,
-            };
+            // A stream counts as cut off only where the service cut it: the
+            // capture limit cuts the streams it dropped bytes from, the
+            // post-exit drain the streams it stopped waiting for, and a
+            // cancel the streams still open when it killed the shell. A
+            // signal sent from outside is only seen at the exit, and the
+            // streams it cut may have ended by then, as complete output does,
+            // so its output is judged as complete output.
             stdout = decodeCompleteOutput(
               Buffer.concat(stdoutBytes),
-              stdoutCut || stdoutHeld || (endedEarly && !ended.stdout),
+              stdoutCut || stdoutHeld || stdoutOpenAtCancel,
             );
             stderr = decodeCompleteOutput(
               Buffer.concat(stderrBytes),
-              stderrCut || stderrHeld || (endedEarly && !ended.stderr),
+              stderrCut || stderrHeld || stderrOpenAtCancel,
             );
           }
           // Ensure we don't add an extra newline if stdout already ends with one.
@@ -1522,7 +1513,6 @@ export class ShellExecutionService {
           if (child.pid) {
             this.activeChildProcesses.delete(child.pid);
           }
-          recordStop();
           if (!streamStdout && !rawCapture) {
             void handleExit(code, signal);
             return;
@@ -1553,8 +1543,8 @@ export class ShellExecutionService {
         child.stdout?.on('data', stdoutHandler);
         child.stderr?.on('data', stderrHandler);
         // The drain reports a stdout still held (raw capture and streaming),
-        // and the buffered re-decode treats only a stream still open at a
-        // cancel or kill as cut off.
+        // and the buffered re-decode treats a stream still open when a
+        // cancel kills the shell as cut off.
         child.stdout?.on('end', () => {
           stdoutEnded = true;
         });
@@ -1887,7 +1877,8 @@ export class ShellExecutionService {
 
         const performCancelKill = async (): Promise<void> => {
           if (!child.pid || exited) return;
-          recordStop();
+          stdoutOpenAtCancel = !stdoutEnded;
+          stderrOpenAtCancel = !stderrEnded;
           if (isWindows) {
             const killer = cpSpawn(
               WINDOWS_TASKKILL,

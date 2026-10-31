@@ -2378,37 +2378,21 @@ describe('ShellExecutionService child_process fallback', () => {
       { rawCapture: capture },
     );
     // stderr ends with the complete 目浣 (GBK C4 BF E4 BD); stdout stays
-    // open until the kill.
+    // open until the kill, which ends it before the exit is reported.
     emitOut(Buffer.from('c4bfe4bd', 'hex'), 'stderr');
     mockChildProcess.stderr!.emit('end');
+    mockChildProcess.stdout!.emit('end');
     finish(null, 'SIGKILL');
     const result = await handle.result;
     expect(result.output).toBe('目浣');
   });
 
-  it.each([
-    [
-      'a cancel',
-      (abortController: AbortController) => {
-        abortController.abort();
-        // The kill ends both streams before the exit is reported.
-        mockChildProcess.stdout!.emit('end');
-        mockChildProcess.stderr!.emit('end');
-        finish(1);
-      },
-    ],
-    [
-      'a kill',
-      () => {
-        mockChildProcess.emit('exit', null, 'SIGKILL');
-        mockChildProcess.stdout!.emit('end');
-        mockChildProcess.stderr!.emit('end');
-        mockChildProcess.emit('close', null, 'SIGKILL');
-      },
-    ],
+  it.each<[string, number | null, NodeJS.Signals | null]>([
+    ['exit code 1, as taskkill reports it', 1, null],
+    ['the signal of its kill', null, 'SIGTERM'],
   ])(
-    'keeps raw-capture stdout that %s cut inside a character as UTF-8 on a legacy code page',
-    async (_label, stop) => {
+    'keeps raw-capture stdout that a cancel cut inside a character as UTF-8 on a legacy code page (exit reported with %s)',
+    async (_label, code, signal) => {
       useSystemEncoding('gbk');
       for (const pipe of [mockChildProcess.stdout!, mockChildProcess.stderr!]) {
         Object.assign(pipe, { pause: vi.fn(), resume: vi.fn() });
@@ -2431,11 +2415,80 @@ describe('ShellExecutionService child_process fallback', () => {
       );
       // 目 (E7 9B AE) and the lead byte of the next character.
       emitOut(Buffer.from('e79baee5', 'hex'));
-      stop(abortController);
+      abortController.abort();
+      // The kill ends both streams before the exit is reported.
+      mockChildProcess.stdout!.emit('end');
+      mockChildProcess.stderr!.emit('end');
+      finish(code, signal);
       const result = await handle.result;
       expect(result.output).toBe('目\ufffd');
     },
   );
+
+  it('decodes raw-capture stdout that a kill from outside the service cut inside a character with the code page', async () => {
+    useSystemEncoding('gbk');
+    for (const pipe of [mockChildProcess.stdout!, mockChildProcess.stderr!]) {
+      Object.assign(pipe, { pause: vi.fn(), resume: vi.fn() });
+    }
+    const capture = {
+      write: vi.fn(async () => {}),
+      finish: vi.fn(async () => {}),
+      setStarted: vi.fn(),
+      setProcessResult: vi.fn(),
+    };
+    const handle = await ShellExecutionService.execute(
+      'build',
+      '/test/dir',
+      onOutputEventMock,
+      new AbortController().signal,
+      true,
+      shellExecutionConfig,
+      { rawCapture: capture },
+    );
+    // 目 (E7 9B AE) and the lead byte of the next character.
+    emitOut(Buffer.from('e79baee5', 'hex'));
+    // Node reports both streams ended before the exit that carries the
+    // signal, as for output that ended on its own, so the service cannot
+    // tell that the kill cut stdout and judges it as complete output.
+    mockChildProcess.stdout!.emit('end');
+    mockChildProcess.stderr!.emit('end');
+    finish(null, 'SIGKILL');
+    const result = await handle.result;
+    // E7 9B AE E5 in the code page: 鐩 and a private-use character.
+    expect(result.output).toBe('鐩\ue1bc');
+  });
+
+  it('keeps complete output in the code page when a kill from outside ends the shell before a background process finishes writing it', async () => {
+    useSystemEncoding('gbk');
+    for (const pipe of [mockChildProcess.stdout!, mockChildProcess.stderr!]) {
+      Object.assign(pipe, { pause: vi.fn(), resume: vi.fn() });
+    }
+    const capture = {
+      write: vi.fn(async () => {}),
+      finish: vi.fn(async () => {}),
+      setStarted: vi.fn(),
+      setProcessResult: vi.fn(),
+    };
+    const handle = await ShellExecutionService.execute(
+      'build',
+      '/test/dir',
+      onOutputEventMock,
+      new AbortController().signal,
+      true,
+      shellExecutionConfig,
+      { rawCapture: capture },
+    );
+    // The kill ends the shell while a background process still holds both
+    // pipes; that process then writes the complete 目浣 (GBK C4 BF E4
+    // BD) and exits, so nothing cut stdout.
+    mockChildProcess.emit('exit', null, 'SIGKILL');
+    emitOut(Buffer.from('c4bfe4bd', 'hex'));
+    mockChildProcess.stdout!.emit('end');
+    mockChildProcess.stderr!.emit('end');
+    mockChildProcess.emit('close', null, 'SIGKILL');
+    const result = await handle.result;
+    expect(result.output).toBe('目浣');
+  });
 
   it('keeps recent stderr visible after later stdout fills the preview tail', async () => {
     const { result, capture } = await runCaptured(
@@ -2646,11 +2699,14 @@ describe('ShellExecutionService child_process fallback', () => {
         },
       ],
       [
-        'a kill',
+        'a cancel whose kill is reported as a signal',
         {},
-        (bytes: Buffer) => {
+        (bytes: Buffer, ac: AbortController) => {
           emitOut(bytes.subarray(8, 10));
-          finish(null, 'SIGKILL');
+          ac.abort();
+          mockChildProcess.stdout!.emit('end');
+          mockChildProcess.stderr!.emit('end');
+          finish(null, 'SIGTERM');
         },
       ],
     ])(
@@ -2673,6 +2729,23 @@ describe('ShellExecutionService child_process fallback', () => {
         );
       },
     );
+
+    it('decodes UTF-8 output that a kill from outside the service cut inside a character with the code page', async () => {
+      useSystemEncoding('gbk');
+      // The output ends inside 好. Node reports both streams ended before
+      // the exit that carries the signal, as for output that ended on its
+      // own, so the service cannot tell the cut and judges the output as
+      // complete output.
+      const bytes = Buffer.from('ASCII\n你好世界');
+      const { result } = await simulateExecution('git log', (cp) => {
+        emitOut(bytes.subarray(0, 8));
+        emitOut(bytes.subarray(8, 10));
+        cp.stdout?.emit('end');
+        cp.stderr?.emit('end');
+        finish(null, 'SIGKILL');
+      });
+      expect(result.output).toBe('ASCII\n浣犲');
+    });
 
     it('keeps complete stdout in the code page when only stderr hit the capture limit', async () => {
       useSystemEncoding('gbk');
@@ -2714,6 +2787,7 @@ describe('ShellExecutionService child_process fallback', () => {
         emitOut(Buffer.from('c4bfe4bd', 'hex'), 'stderr');
         cp.stderr?.emit('end');
         ac.abort();
+        cp.stdout?.emit('end');
         finish(1);
       });
       expect(result.output).toBe('目浣');
@@ -2724,12 +2798,33 @@ describe('ShellExecutionService child_process fallback', () => {
       // 管理员 in GBK (B9 DC C0 ED D4 B1) is cut inside 员. Its lead byte D4
       // could start a UTF-8 character, but the bytes before it are not
       // UTF-8, so the code page decodes the output.
-      const { result } = await simulateExecution('dir', () => {
+      const { result } = await simulateExecution('dir', (cp, ac) => {
         emitOut('C:\\Users\\');
         emitOut(Buffer.from('b9dcc0edd4', 'hex'));
-        finish(null, 'SIGKILL');
+        ac.abort();
+        cp.stdout?.emit('end');
+        cp.stderr?.emit('end');
+        finish(1);
       });
       expect(result.output).toBe('C:\\Users\\管理\ufffd');
+    });
+
+    it('reads cut-off output as UTF-8 when the bytes before the cut are UTF-8, even if a GBK program wrote them', async () => {
+      useSystemEncoding('gbk');
+      // GBK 目 and the lead byte of 浣 (C4 BF E4) are byte for byte the UTF-8
+      // character Ŀ and the lead byte of a three-byte character. The bytes
+      // cannot tell them apart, and cut-off output is read as UTF-8 here:
+      // UTF-8 output cut inside a character takes this shape whenever a
+      // multibyte character comes before the cut, while GBK output takes it
+      // only when every character before the cut also forms UTF-8.
+      const { result } = await simulateExecution('type notes.txt', (cp, ac) => {
+        emitOut(Buffer.from('c4bfe4', 'hex'));
+        ac.abort();
+        cp.stdout?.emit('end');
+        cp.stderr?.emit('end');
+        finish(1);
+      });
+      expect(result.output).toBe('Ŀ\ufffd');
     });
 
     it('decodes cut-off output that does not end inside a UTF-8 character with the code page', async () => {
