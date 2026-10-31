@@ -508,7 +508,7 @@ Focused verification passed 841 core tests and 111 shared-contract tests. The ex
 
 Integration regressions proved that model request preparation failures preserve admitted, unsettled inputs through both the ordinary prompt route and the wake driver, and that interrupted channel settlement confirms the original cleanup owner only after its terminal and file-history retirement. A first release failure retained the cleanup fence; passive resident attachment then released the same binding/generation and added one confirmation without a second terminal. A separate Spring/H2 probe passed the bounded-retraction/replay-floor combination: readers remained usable while the snapshot was rebuilding, and old cursors expired again after snapshot coverage caught up. This probe is not MySQL or process-takeover acceptance.
 
-The machine-readable reports, manifests and retained failed diagnostics are under `.qwen/investigations/g3-step3-implementation/`; the current consolidated report is `packaged-verification.md`. These five packaged gates do not prove the whole matrix above. Since [replaceable-Harness D11](2026-10-02-hosted-replaceable-harness.md#d11--residual-gates-step-3-in-ci-the-model-round-arm-and-q2s-binding-half), they are CI steps of the `hosted-failover-e2e` job, which runs apart from the Hosted MySQL verify (see D11), next to a model-round arm that packages the main observations of B1 for a no-tool Session and of B2, though not their attempt and stream identities, the live SSE view or the admission count.
+The machine-readable reports, manifests and retained failed diagnostics are under `.qwen/investigations/g3-step3-implementation/`; the current consolidated report is `packaged-verification.md`. These five packaged gates do not prove the whole matrix above. Since [replaceable-Harness D11](2026-10-02-hosted-replaceable-harness.md#d11--residual-gates-step-3-in-ci-the-model-round-arm-and-q2s-binding-half), they are CI steps of the `hosted-failover-e2e` job, which runs apart from the Hosted MySQL verify (see D11), next to a model-round arm that packages the main observations of B1 for a no-tool Session and of B2 — including, since [B2 stream identities](2026-10-31-hosted-b2-stream-identities.md), the attempt and stream identities and the live SSE view; the same audit also pins the admission count.
 
 #14481's packaged gates add fourteen fault arms to the same job. Seven landed with
 the second step. Five layer one fault on the Allow path: three crash the
@@ -560,11 +560,16 @@ restore the turn cost snapshot and per-model token ledger rather than restart th
 with each earlier execution occurring once and the later request reissued deep-equal
 ([B3 round and cost budget](2026-10-31-hosted-b3-round-cost-budget.md)). "Cost budget"
 here is the TurnBudget snapshot plus the token ledger, not a cumulative spend gate.
+The streamed-prefix identities and the live SSE view (B2) are packaged too: the
+same model-round arm audits three distinct attempt ids, pairwise-distinct content
+Parts under one shared assistant item, blanked retracted prefixes in reload and
+replay, and a live SSE capture whose converged text, answer identity and single
+terminal equal reload and replay
+([B2 stream identities](2026-10-31-hosted-b2-stream-identities.md)).
 Malformed or foreign refs, snapshot overflow, the rewritten-input and
 Hook-no-rerun half of A3 (a commandStep follow-up, since a native continuation
 refuses Hook/MCP sessions), Hook/MCP/child
-uncertainty (A6), the attempt and stream identities plus the live SSE view
-(B2), and the mixed-version reader/bundle
+uncertainty (A6), and the mixed-version reader/bundle
 closure (R2) stay focused or integration evidence. Full-owner restart, real-provider
 acceptance and a real mixed-version cluster remain separate. Q2's binding
 half has the D11 frozen control-plane arm for a woken former Spring's stale
