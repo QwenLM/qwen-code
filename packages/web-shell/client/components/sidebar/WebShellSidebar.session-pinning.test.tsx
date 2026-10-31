@@ -1,100 +1,46 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import * as React from 'react';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import type { DaemonSessionSummary } from '@qwen-code/sdk/daemon';
 import {
   clickSidebarElement as click,
+  createSidebarMocks,
+  DAEMON_APPROVAL_MODES,
   flushSidebar,
   installSidebarDomShims,
   makeSidebarSession as makeSession,
-  resolveWebShellSessions,
+  useResolvedWebShellSessions,
+  sidebarSessionPage,
+  useSidebarSessionCatalogQuery,
 } from '../../test/sidebarHarness';
 
-const { connection, workspace, workspaceActions, active, pinned, archived } =
-  vi.hoisted(() => {
-    const makeSessions = () => {
-      const state = {
-        sessions: [] as DaemonSessionSummary[],
-        loading: false,
-        error: null as Error | null,
-        data: [] as DaemonSessionSummary[] | undefined,
-        reload: vi.fn().mockResolvedValue(undefined),
-        deleteSession: vi.fn().mockResolvedValue(true),
-        archiveSession: vi.fn().mockResolvedValue(true),
-        unarchiveSession: vi.fn().mockResolvedValue(true),
-        exportSession: vi.fn(),
-      };
-      state.data = state.sessions;
-      return state;
-    };
-    return {
-      connection: {
-        status: 'connected',
-        sessionId: null as string | null,
-        workspaceCwd: '/tmp/project',
-        capabilities: undefined as
-          | { qwenCodeVersion: string; features: string[] }
-          | undefined,
-      },
-      workspace: {
-        capabilities: undefined as
-          | { qwenCodeVersion: string; features: string[] }
-          | undefined,
-        client: {
-          // Default no content-search hits; search tests override per test.
-          searchWorkspaceSessions: vi.fn().mockResolvedValue({ results: [] }),
-          workspaceByCwd: vi.fn(() => ({
-            listWorkspaceSessions: vi.fn().mockResolvedValue([]),
-            listSessionGroups: vi.fn().mockResolvedValue({
-              groups: [],
-              colorOptions: [
-                'red',
-                'orange',
-                'yellow',
-                'green',
-                'blue',
-                'purple',
-              ],
-            }),
-          })),
-        },
-        refreshCapabilities: vi.fn(),
-      },
-      workspaceActions: {
-        addWorkspace: vi.fn(),
-        removeWorkspace: vi.fn(),
-        listSessionGroups: vi.fn().mockResolvedValue({
-          groups: [],
-          colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
-        }),
-        createSessionGroup: vi.fn(),
-        updateSessionGroup: vi.fn(),
-        deleteSessionGroup: vi.fn(),
-        updateSessionOrganization: vi.fn(),
-      },
-      active: makeSessions(),
-      pinned: makeSessions(),
-      archived: makeSessions(),
-    };
-  });
-const refreshSessionCatalogQueries = vi.hoisted(() => vi.fn());
-const useSessionCatalogQueries = vi.hoisted(() => vi.fn(() => []));
-const loadSession = vi.hoisted(() => vi.fn());
+const mocks = createSidebarMocks({
+  colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+  searchWorkspaceSessions: true,
+  connection: { capabilities: undefined },
+});
+const {
+  connection,
+  workspace,
+  workspaceActions,
+  active,
+  pinned,
+  archived,
+  refreshSessionCatalogQueries,
+  useSessionCatalogQueries,
+  loadSession,
+} = mocks;
 
 vi.mock('@qwen-code/web-shell/daemon-react-sdk', () => ({
-  DAEMON_APPROVAL_MODES: ['default', 'plan', 'auto-edit', 'auto', 'yolo'],
-  useConnection: () => connection,
-  useActions: () => ({ renameSession: vi.fn() }),
-  useWorkspace: () => workspace,
-  useWorkspaceActions: () => workspaceActions,
-  useChannels: () => ({ data: undefined, catalog: [], channels: {} }),
-  useSessions: (options?: { archiveState?: string; group?: string }) => {
-    if (options?.archiveState === 'archived') return archived;
-    if (options?.group === 'pinned') return pinned;
-    return active;
-  },
+  DAEMON_APPROVAL_MODES,
+  useConnection: () => mocks.connection,
+  useActions: () => mocks.actions,
+  useWorkspace: () => mocks.workspace,
+  useWorkspaceActions: () => mocks.workspaceActions,
+  useChannels: () => mocks.channels,
+  useSessions: (options?: { archiveState?: string; group?: string }) =>
+    sidebarSessionPage(mocks, options),
 }));
 
 vi.mock('../../session-catalog/session-catalog-hooks', () => ({
@@ -102,24 +48,7 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
     enabled?: boolean;
     archiveState?: string;
     group?: string;
-  }) => {
-    const state =
-      options?.archiveState === 'archived'
-        ? archived
-        : options?.group === 'pinned'
-          ? pinned
-          : active;
-    const catalogQuery = {
-      routeKind: 'legacy',
-      workspaceCwd: connection.workspaceCwd,
-      options,
-    };
-    return resolveWebShellSessions(
-      state,
-      options?.enabled !== false,
-      catalogQuery,
-    );
-  },
+  }) => useResolvedWebShellSessions(mocks, options),
   useSessionCatalogController: () => ({
     refreshQueries: refreshSessionCatalogQueries,
     invalidateWorkspace: vi.fn(),
@@ -174,30 +103,10 @@ vi.mock('../../session-catalog/session-catalog-hooks', () => ({
   }),
   useSessionCatalogPolling: () => undefined,
   useSessionCatalogQuery: (
-    client: typeof workspace.client,
+    client: typeof mocks.workspace.client,
     query: { workspaceCwd: string; options?: Record<string, unknown> },
     options: { autoLoad?: boolean; enabled?: boolean },
-  ) => {
-    const [snapshot, setSnapshot] = React.useState({
-      sessions: [] as DaemonSessionSummary[],
-      loading: false,
-      error: undefined as Error | undefined,
-    });
-    const reload = React.useCallback(async () => {
-      const sessions = await client
-        .workspaceByCwd(query.workspaceCwd)
-        .listWorkspaceSessions(query.options);
-      setSnapshot({ sessions, loading: false, error: undefined });
-      return { sessions };
-    }, [client, query.options, query.workspaceCwd]);
-    React.useEffect(() => {
-      if (options.enabled === false || !options.autoLoad) return;
-      void reload().catch((error: Error) => {
-        setSnapshot((current) => ({ ...current, loading: false, error }));
-      });
-    }, [options.autoLoad, options.enabled, reload]);
-    return { ...snapshot, reload };
-  },
+  ) => useSidebarSessionCatalogQuery(client, query, options),
   useSessionCatalogQueries,
 }));
 
