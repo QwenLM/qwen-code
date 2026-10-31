@@ -887,10 +887,18 @@ class Session {
       debugLogger.info('[Session] Shutdown signal received');
       this.isShuttingDown = true;
       this.abortSession();
+      // `run()` checks for shutdown only after a message arrives. Close the
+      // reader so an idle session (stdin still open) also reaches
+      // drainAndShutdown() instead of waiting forever.
+      this.inputReader.close();
     };
 
     process.on('SIGINT', this.shutdownHandler);
     process.on('SIGTERM', this.shutdownHandler);
+    // Same as the per-turn handlers in nonInteractiveCli: a hangup (ssh or
+    // terminal teardown) must shut the session down instead of killing the
+    // process by default action, which would skip abortTaskRegistries().
+    process.on('SIGHUP', this.shutdownHandler);
   }
 
   /**
@@ -1003,6 +1011,7 @@ class Session {
     if (this.shutdownHandler) {
       process.removeListener('SIGINT', this.shutdownHandler);
       process.removeListener('SIGTERM', this.shutdownHandler);
+      process.removeListener('SIGHUP', this.shutdownHandler);
       this.shutdownHandler = null;
     }
   }
