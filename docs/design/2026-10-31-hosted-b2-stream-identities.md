@@ -109,25 +109,46 @@ client helper; no new serve hook, no CLI/Java source edit.
 
 ### Identity readers
 
-- `b2AttemptIdentities(port, sessionFilter)`: parse journal HEX rows for
-  `model.attempt` events of the original prompt, collect `payload.attemptId` with the
-  event `state`/sequence; return the ordered distinct attempt ids. Reuses the
-  `b3RoundAndBudget` journal-reading pattern (HEX + decode, never `--batch` text).
-- Extend `PublicEvent` with optional `item_id` / `content_part_id` and read them in
-  `publicTranscript` (they are already on the wire). A `b2StreamIdentities` helper
-  groups delta events by the prefix text they carry and returns each group's identity
-  set plus the retracted (empty-text, null-identity) delta sequences.
+- `b2ModelAttempts(port, sessionFilter, promptId)` returns the original prompt's
+  `{attemptId, state, sequence}` rows, oldest first; the audit requires
+  `partials + 1` distinct attempt ids. It rides `readJournalManagedEvents`, the one
+  shared journal HEX decode (HEX + decode, never `--batch` text) also used by
+  `finishedBeforeCommitWindow`, `siblingFinalPlan` and `b3RoundAndBudget`.
+- `PublicEvent` carries optional `turn_id` / `item_id` / `content_part_id` (already
+  on the wire). `b2DeltaIdentity(events, text)` groups the text deltas carrying a
+  prefix into `{itemIds, partIds, sequences}` via the shared `textDeltas` selector
+  (the same selector `deltaSequences` uses, minus its empty-match throw).
 
 ### Live SSE client
 
-A top-level `readPublicSse(springUrl, tenant, sessionId, { after, lastEventId, until,
-signal })` helper: `fetch` with `Accept: text/event-stream`, parse `id:` / `event:` /
-`data:` frames across chunk boundaries, resolve when `until(events)` holds or the
-budget expires, and return the collected frames plus the last seen id. The arm opens
-one live connection before the first prefix (after=0), keeps it across both crashes,
-and asserts the observed frame sequence; a second connection with `Last-Event-ID: 0`
-after the terminal is the replay witness. The helper gets behavioural tests on
-injected chunk streams (split frames, multi-frame chunks, terminal detection).
+`readPublicSse(storeUrl, sessionId, { tenantId, after, lastEventId, until, timeoutMs,
+drainMs })` drives the shared `SseObserver`
+(`integration-tests/helpers/hosted-sse-observer.ts`) — the repo's consolidated SSE
+parse loop, which asserts the content-type, `id === payload.sequence` and
+`event === payload.type` — instead of a private parse loop. `until` is a PROGRESS
+signal, not the exit: after it first holds, a bounded drain window (`drainMs`,
+default 2s) keeps reading so a double-projected terminal is still observed; the
+capture then resolves with every frame plus the last id. The arm opens one live
+connection before the first prefix (after=0), keeps it across both crashes, and a
+second connection with `Last-Event-ID: 0` after the terminal is the replay witness.
+The capture promise is marked handled at creation (`.catch(() => undefined)`) so a
+teardown abort on an early arm failure cannot become an unhandled rejection; the
+audit's await still sees the real rejection, and abort/budget errors are rewrapped
+as `B2 live SSE …`. Behavioural tests cover the drain (two terminals across the
+window), the abort semantics, and the shared observer's split-frame/wire assertions.
+
+### View audit
+
+`assertB2StreamViews({ live, reload, replay, partials, answer, firstPrefixSequence,
+secondPrefixSequence, originalTurnId })` is a top-level helper so behavioural tests
+execute every clause: converged live text (deltas after the last payload-less
+`stream.reconciled`), exactly one terminal of the original turn in live AND replay,
+retraction ordering, one shared assistant item with a pairwise-distinct content Part
+per generation (every group must actually carry the item), blanked prefix deltas in
+reload AND replay, and replay identity matching the reload answer's item AND Part.
+The model-round arm has no gate mode, so its evidence is written through the shared
+`writeEvidenceFile` into an explicitly named `model-round-<epoch>` directory (or
+`G3_VERIFY_REPORT_DIR`), never a borrowed `packaged-undefined-<epoch>` one.
 
 ### Assertion placement
 

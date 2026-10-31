@@ -88,22 +88,40 @@ deep-equal 已保存请求重发、不同 boot id 与递进 writer head。缺三
 
 ### 身份读法
 
-- `b2AttemptIdentities(port, sessionFilter)`：解析 journal HEX 行取原 prompt 的
-  `model.attempt` 事件，收集 `payload.attemptId` 及事件 `state`/sequence；返回有序
-  不同 attempt id。复用 `b3RoundAndBudget` 的 journal 读法（HEX + 解码，绝不
-  `--batch` 文本）。
-- `PublicEvent` 扩展可选 `item_id` / `content_part_id` 并在 `publicTranscript` 读取
-  （它们已在 wire 上）。`b2StreamIdentities` helper 按 delta 携带的前缀文本分组，
-  返回每组身份集合与被撤回（空文本、null 身份）的 delta sequence。
+- `b2ModelAttempts(port, sessionFilter, promptId)` 返回原 prompt 的
+  `{attemptId, state, sequence}` 行（最旧优先）；审计要求 `partials + 1` 个不同
+  attempt id。它复用 `readJournalManagedEvents`——唯一的共享 journal HEX 解码
+  （HEX + 解码，绝不 `--batch` 文本），`finishedBeforeCommitWindow`、
+  `siblingFinalPlan`、`b3RoundAndBudget` 同样复用。
+- `PublicEvent` 带可选 `turn_id` / `item_id` / `content_part_id`（已在 wire 上）。
+  `b2DeltaIdentity(events, text)` 经共享 `textDeltas` 选择器（与 `deltaSequences`
+  同一选择器，去掉其空匹配 throw）把携带某前缀的文本 delta 分组为
+  `{itemIds, partIds, sequences}`。
 
 ### Live SSE 客户端
 
-顶层 `readPublicSse(springUrl, tenant, sessionId, { after, lastEventId, until,
-signal })` helper：`fetch` 带 `Accept: text/event-stream`，跨 chunk 边界解析
-`id:` / `event:` / `data:` 帧，`until(events)` 成立或预算耗尽时 resolve，返回收集的
-帧与最后 seen id。臂在第一个前缀之前开一条 live 连接（after=0），跨两次崩溃保持，
-断言观察到的帧序列；终态后用 `Last-Event-ID: 0` 的第二条连接作 replay 见证。helper
-配注入 chunk 流的行为化测试（分裂帧、多帧 chunk、终态检测）。
+`readPublicSse(storeUrl, sessionId, { tenantId, after, lastEventId, until, timeoutMs,
+drainMs })` 驱动共享 `SseObserver`
+（`integration-tests/helpers/hosted-sse-observer.ts`）——仓库收拢的 SSE 解析循环，
+断言 content-type、`id === payload.sequence`、`event === payload.type`——而非私有
+解析循环。`until` 是**推进**信号而非出口：首次成立后再有界地读一个 drain 窗口
+（`drainMs`，默认 2s），使重复投影的终态仍被观察；随后捕获以全部帧加最后 id
+resolve。臂在第一个前缀之前开一条 live 连接（after=0），跨两次崩溃保持；终态后用
+`Last-Event-ID: 0` 的第二条连接作 replay 见证。捕获 promise 在创建处标记已处理
+（`.catch(() => undefined)`)，使早期臂失败时 teardown 的 abort 不会变成 unhandled
+rejection；审计的 await 仍看到真实拒绝，abort/预算错误被重包装为 `B2 live SSE …`。
+行为化测试覆盖 drain（窗口内两个终态）、abort 语义、共享 observer 的分帧/wire 断言。
+
+### 视图审计
+
+`assertB2StreamViews({ live, reload, replay, partials, answer, firstPrefixSequence,
+secondPrefixSequence, originalTurnId })` 是顶层 helper，使行为化测试执行每个子句：
+收敛 live 文本（最后一条无 payload 的 `stream.reconciled` 之后的 delta）、live 与
+replay 中原 Turn 恰好一个终态、撤回顺序、唯一共享 assistant item 加逐代互不相同的
+content Part（每组必须真的携带 item）、reload 与 replay 中被清空的前缀 delta、
+replay 身份与 reload 答案的 item 和 Part 都一致。model-round 臂无 gate 模式，其证据
+经共享 `writeEvidenceFile` 写入显式命名的 `model-round-<epoch>` 目录（或
+`G3_VERIFY_REPORT_DIR`），绝不借用 `packaged-undefined-<epoch>` 目录。
 
 ### 断言位置
 

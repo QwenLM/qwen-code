@@ -25,7 +25,7 @@ import {
   ScriptTarget,
   transpileModule,
 } from 'typescript';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { QWEN_SERVER_TOKEN_ENV } from '../../packages/cli/src/serve/channel-worker-env.js';
 import { HOSTED_HARNESS_CAPABILITY_DIGEST_ENV } from '../../packages/cli/src/serve/hosted-harness-contract.js';
 import { validateHostedHarnessProfile } from '../../packages/cli/src/serve/hosted-harness-profile.js';
@@ -521,7 +521,15 @@ describe('managed-agent-server e2e runner', () => {
       windowFn,
       source.indexOf('\n}', windowFn),
     );
-    expect(windowFnBody).toContain('qwen_managed_agent.ma_session_journal_tx');
+    // The journal HEX decode is shared (R1-7); the window reader rides it.
+    expect(windowFnBody).toContain('readJournalManagedEvents(');
+    const journalFn = source.indexOf('function readJournalManagedEvents(');
+    expect(journalFn).toBeGreaterThan(-1);
+    // A fixed window: the return-type annotation contains "\n}>" which would
+    // truncate a first-"\n}" slice before the body.
+    expect(source.slice(journalFn, journalFn + 1500)).toContain(
+      'qwen_managed_agent.ma_session_journal_tx',
+    );
     expect(windowFnBody).toContain(':main:');
     expect(windowFnBody).toContain(
       "latestAttempt.payload['state'] !== 'output_committed'",
@@ -644,7 +652,7 @@ describe('managed-agent-server e2e runner', () => {
       a3PlanFn,
       source.indexOf('\n}', a3PlanFn),
     );
-    expect(a3PlanFnBody).toContain('qwen_managed_agent.ma_session_journal_tx');
+    expect(a3PlanFnBody).toContain('readJournalManagedEvents(');
     expect(a3PlanFnBody).toContain("event.kind !== 'hosted.batch.planned'");
     expect(a3PlanFnBody).toContain("payload['batchId'] !== batchId");
     expect(a3PlanFnBody).toContain("plan.stage !== 'final'");
@@ -710,8 +718,8 @@ describe('managed-agent-server e2e runner', () => {
     const b3Fn = source.indexOf('function b3RoundAndBudget(');
     expect(b3Fn).toBeGreaterThan(-1);
     const b3FnBody = source.slice(b3Fn, source.indexOf('\n}', b3Fn));
-    expect(b3FnBody).toContain('qwen_managed_agent.ma_session_journal_tx');
-    expect(b3FnBody).toContain("event.kind !== 'model.attempt'");
+    expect(b3FnBody).toContain('readJournalManagedEvents(');
+    expect(b3FnBody).toContain("event.kind === 'model.attempt'");
     expect(b3FnBody).toContain('SELECT HEX(inline_bytes)');
     expect(b3FnBody).toContain("attempts[i].payload['recoveryRef']");
     expect(b3FnBody).toContain("['usageRef', 'routeRef']");
@@ -752,7 +760,7 @@ describe('managed-agent-server e2e runner', () => {
       ).toString('hex');
     const run = (events) =>
       load(
-        ['finishedBeforeCommitWindow'],
+        ['finishedBeforeCommitWindow', 'readJournalManagedEvents'],
         'finishedBeforeCommitWindow',
         'runMysql',
       )(() => rows(events)).finishedBeforeCommitWindow(0, 'filter', promptId);
@@ -843,7 +851,7 @@ describe('managed-agent-server e2e runner', () => {
       ).toString('hex');
     const run = (events, plans = { res_final: finalPlan }) =>
       load(
-        ['siblingFinalPlan', 'sqlString'],
+        ['siblingFinalPlan', 'sqlString', 'readJournalManagedEvents'],
         'siblingFinalPlan',
         'runMysql',
       )((_port, query) => {
@@ -953,7 +961,7 @@ describe('managed-agent-server e2e runner', () => {
     };
     const run = (events) =>
       load(
-        ['b3RoundAndBudget', 'sqlString'],
+        ['b3RoundAndBudget', 'sqlString', 'readJournalManagedEvents'],
         'b3RoundAndBudget',
         'runMysql',
       )((_port, query) => {
@@ -1094,8 +1102,10 @@ describe('managed-agent-server e2e runner', () => {
   // distinct item/part ids per prefix text, sequences collected, and blanked
   // (null-identity) deltas excluded from the identity sets.
   it('behaves b2DeltaIdentity on injected public events', () => {
-    const group = load(['b2DeltaIdentity', 'eventText'], 'b2DeltaIdentity')()
-      .b2DeltaIdentity;
+    const group = load(
+      ['b2DeltaIdentity', 'eventText', 'textDeltas'],
+      'b2DeltaIdentity',
+    )().b2DeltaIdentity;
     const delta = (sequence, text, itemId, partId) => ({
       sequence,
       terminal: false,
@@ -1161,7 +1171,7 @@ describe('managed-agent-server e2e runner', () => {
       attempt(40, 'other_turn:main:z', 'started'),
     ]);
     const attempts = load(
-      ['b2ModelAttempts', 'sqlString'],
+      ['b2ModelAttempts', 'readJournalManagedEvents'],
       'b2ModelAttempts',
       'runMysql',
     )(() => rows).b2ModelAttempts(0, 'filter', 'turn_b2');
@@ -1172,95 +1182,292 @@ describe('managed-agent-server e2e runner', () => {
     ]);
   });
 
-  // B2 (behavioural): the SSE client on an injected fetch — frames split across
-  // chunks, multi-frame chunks, Last-Event-ID passthrough, lastId tracking and
-  // the early-close failure. fetch is injected through load().
-  it('behaves readPublicSse on injected chunk streams', async () => {
-    const readSse = (stub) =>
+  // B2 (behavioural): the SSE client on an injected observer — the drain window
+  // keeps reading past the first terminal (R1-2: a double projection must be
+  // observed), Last-Event-ID passthrough, and abort rejects with a B2 error
+  // (R1-1: the caller's .catch guard is what keeps teardown alive).
+  it('behaves readPublicSse on an injected observer', async () => {
+    const waitUntilStub = async (_name, predicate) => {
+      for (let i = 0; i < 10_000; i += 1) {
+        if (await predicate()) return;
+        await new Promise((resolve) => setImmediate(resolve));
+      }
+      throw new Error('waitUntil stub budget expired');
+    };
+    const loadSse = (FakeObserver) =>
       load(
-        ['readPublicSse', 'b2SseControllers'],
+        ['readPublicSse', 'b2SseObservers'],
         'readPublicSse',
-        'fetch',
-      )(stub).readPublicSse;
-    const frame = (id, event) =>
-      `id: ${id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`;
-    const delta = (sequence, text) => ({
-      sequence,
-      terminal: false,
-      type: 'item.output_text.delta',
-      data: { text },
-    });
+        'SseObserver',
+        'waitUntil',
+      )(FakeObserver, waitUntilStub).readPublicSse;
     const terminal = (sequence) => ({
       sequence,
       terminal: true,
       type: 'turn.completed',
       data: {},
     });
+    // The drain witness: the first terminal arrives at once, a SECOND terminal
+    // 20ms later — inside the 100ms drain. A client that returned on the first
+    // terminal would report one; the drained capture must report both.
+    class DrainingObserver {
+      frames = [];
+      controller = new AbortController();
+      failure = undefined;
+      task = Promise.resolve();
+      constructor(opts) {
+        this.opts = opts;
+        DrainingObserver.last = this;
+      }
+      async start(after) {
+        this.startedWith = after;
+        this.frames.push({ id: 1, event: 'turn.completed', data: terminal(1) });
+        // start resolves at connect (first frame); the second terminal arrives
+        // asynchronously on the task, like the real observer's stream.
+        this.task = new Promise((resolve) => {
+          setTimeout(() => {
+            this.frames.push({
+              id: 2,
+              event: 'turn.completed',
+              data: terminal(2),
+            });
+            resolve();
+          }, 20);
+        });
+      }
+    }
+    const capture = await loadSse(DrainingObserver)('http://spring', 'sess', {
+      tenantId: 't',
+      after: 0,
+      until: (events) => events.some((event) => event.terminal),
+      timeoutMs: 5_000,
+      drainMs: 100,
+    });
+    expect(DrainingObserver.last.startedWith).toBe(0);
+    expect(capture.events.filter((event) => event.terminal)).toHaveLength(2);
+    expect(capture.lastId).toBe('2');
+    // Last-Event-ID is converted to the observer's numeric after.
+    class ReplayObserver extends DrainingObserver {}
+    await loadSse(ReplayObserver)('http://spring', 'sess', {
+      tenantId: 't',
+      lastEventId: '0',
+      until: (events) => events.some((event) => event.terminal),
+      timeoutMs: 5_000,
+      drainMs: 0,
+    });
+    expect(ReplayObserver.last.startedWith).toBe(0);
+    // Abort semantics (R1-1): a pending capture rejects with a B2 error when
+    // the teardown aborts the registry; with the runner's .catch guard attached
+    // no unhandledRejection fires, and a later await still sees the rejection.
+    class PendingObserver {
+      frames = [];
+      controller = new AbortController();
+      failure = undefined;
+      task = Promise.resolve();
+      constructor(opts) {
+        this.opts = opts;
+        PendingObserver.last = this;
+      }
+      start() {
+        return new Promise((_resolve, reject) => {
+          this.controller.signal.addEventListener('abort', () =>
+            reject(new Error('This operation was aborted')),
+          );
+        });
+      }
+    }
+    const readSsePending = load(
+      ['readPublicSse', 'b2SseObservers'],
+      'readPublicSse',
+      'SseObserver',
+      'waitUntil',
+    )(PendingObserver, waitUntilStub).readPublicSse;
+    let unhandled = false;
+    const onUnhandled = () => {
+      unhandled = true;
+    };
+    process.on('unhandledRejection', onUnhandled);
+    try {
+      const pending = readSsePending('http://spring', 'sess', {
+        tenantId: 't',
+        until: () => false,
+        timeoutMs: 5_000,
+      });
+      pending.catch(() => undefined); // the runner's R1-1 guard
+      await new Promise((resolve) => setImmediate(resolve));
+      PendingObserver.last.controller.abort(); // what the main finally does
+      await expect(pending).rejects.toThrow(/B2 live SSE aborted/);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(unhandled).toBe(false);
+    } finally {
+      process.off('unhandledRejection', onUnhandled);
+    }
+  });
+
+  // B2 (behavioural): the shared SseObserver parse loop — split frames, the
+  // wire-format assertions (id === sequence, event === type, SSE content-type)
+  // and early close. This is the tree's split-frame witness now that the
+  // runner drives the shared observer instead of a private loop (R1-5).
+  it('behaves SseObserver on split chunks and wire violations', async () => {
+    const { SseObserver } = await import(
+      '../../integration-tests/helpers/hosted-sse-observer.js'
+    );
     const chunksOf = (text, size) => {
       const chunks = [];
       for (let i = 0; i < text.length; i += size)
-        chunks.push(Buffer.from(text.slice(i, i + size), 'utf8'));
+        chunks.push(text.slice(i, i + size));
       return chunks;
     };
-    const stubFetch = (chunks, seen) => async (url, init) => {
-      seen.url = url;
-      seen.headers = init.headers;
-      return {
-        ok: true,
-        body: (async function* () {
-          for (const chunk of chunks) yield chunk;
-        })(),
-      };
+    const sseResponse = (chunks, contentType = 'text/event-stream') => ({
+      status: 200,
+      headers: {
+        get: (name) => (name === 'content-type' ? contentType : null),
+      },
+      body: new ReadableStream({
+        start(controller) {
+          for (const chunk of chunks)
+            controller.enqueue(new TextEncoder().encode(chunk));
+          controller.close();
+        },
+      }),
+    });
+    const opts = {
+      surface: 'public',
+      sessionId: 'sess',
+      storeUrl: 'http://spring',
+      tenantId: 't',
+      timeoutMs: 5_000,
     };
     const stream =
-      frame(1, delta(1, 'PREFIX')) +
-      frame(2, {
-        sequence: 2,
-        terminal: false,
-        type: 'stream.reconciled',
-        data: {},
-      }) +
-      frame(3, delta(3, 'ANSWER')) +
-      frame(4, terminal(4));
-    // One byte per chunk: every frame boundary is split.
-    const seen = {};
-    const capture = await readSse(stubFetch(chunksOf(stream, 1), seen))(
-      'http://spring/events',
-      {
-        headers: { 'x-qwen-tenant-id': 't' },
-        after: 0,
-        until: (events) => events.some((event) => event.terminal),
-        timeoutMs: 5_000,
-      },
+      'id: 1\nevent: item.output_text.delta\ndata: {"sequence":1,"type":"item.output_text.delta","data":{"text":"A"}}\n\n' +
+      'id: 2\nevent: turn.completed\ndata: {"sequence":2,"type":"turn.completed","terminal":true}\n\n';
+    vi.stubGlobal('fetch', async () => sseResponse(chunksOf(stream, 1)));
+    const observer = new SseObserver(opts);
+    await observer.start(0);
+    await observer.task;
+    expect(observer.failure).toBeUndefined();
+    expect(observer.frames.map((frame) => frame.id)).toEqual([1, 2]);
+    expect(observer.frames[0].data.data.text).toBe('A');
+    // id disagreeing with the payload sequence is a wire failure, not a frame.
+    vi.stubGlobal('fetch', async () =>
+      sseResponse([
+        'id: 9\nevent: item.output_text.delta\ndata: {"sequence":1,"type":"item.output_text.delta"}\n\n',
+      ]),
     );
-    expect(seen.url).toBe('http://spring/events?after=0');
-    expect(seen.headers.accept).toBe('text/event-stream');
-    expect(capture.lastId).toBe('4');
-    expect(capture.events.map((event) => event.sequence)).toEqual([1, 2, 3, 4]);
-    // Last-Event-ID is passed through and takes the URL without after.
-    const seenReplay = {};
-    await readSse(stubFetch(chunksOf(stream, 7), seenReplay))(
-      'http://spring/events',
-      {
-        headers: {},
-        lastEventId: '0',
-        until: (events) => events.some((event) => event.terminal),
-        timeoutMs: 5_000,
-      },
+    const badId = new SseObserver(opts);
+    await badId.start();
+    await badId.task;
+    expect(badId.failure).toBeDefined();
+    expect(badId.frames).toHaveLength(0);
+    // A 200 that is not an SSE stream fails at start, not as zero frames.
+    vi.stubGlobal('fetch', async () => sseResponse([], 'text/html'));
+    const html = new SseObserver(opts);
+    await expect(html.start()).rejects.toThrow();
+    vi.unstubAllGlobals();
+  });
+
+  // B2 (behavioural): the lifted stream-view audit (R1-6) — every clause is
+  // executed on injected views, including the double-terminal, shared-Part,
+  // missing-item, blanking and replay-Part regressions (R1-2/R1-3/R1-4).
+  it('behaves assertB2StreamViews on injected views', () => {
+    const audit = load(
+      [
+        'assertB2StreamViews',
+        'b2DeltaIdentity',
+        'textDeltas',
+        'eventText',
+        'reconciledBetween',
+      ],
+      'assertB2StreamViews',
+    )().assertB2StreamViews;
+    const delta = (sequence, text, partId, itemId = 'item_turn_assistant') => ({
+      sequence,
+      terminal: false,
+      type: 'item.output_text.delta',
+      turn_id: 'turn_x',
+      item_id: itemId,
+      content_part_id: partId,
+      data: { text },
+    });
+    const blanked = (sequence) => ({
+      sequence,
+      terminal: false,
+      type: 'item.output_text.delta',
+      turn_id: 'turn_x',
+      item_id: null,
+      content_part_id: null,
+      data: { text: '' },
+    });
+    const reconciled = (sequence) => ({
+      sequence,
+      terminal: false,
+      type: 'stream.reconciled',
+      turn_id: 'turn_x',
+      data: {},
+    });
+    const terminal = (sequence) => ({
+      sequence,
+      terminal: true,
+      type: 'turn.completed',
+      turn_id: 'turn_x',
+      data: {},
+    });
+    const views = () => ({
+      live: [
+        delta(1, 'P1', 'partA'),
+        reconciled(2),
+        delta(3, 'P2', 'partB'),
+        reconciled(4),
+        delta(5, 'ANSWER', 'partC'),
+        terminal(6),
+      ],
+      reload: [
+        blanked(1),
+        blanked(3),
+        delta(5, 'ANSWER', 'partC'),
+        terminal(6),
+      ],
+      replay: [
+        blanked(1),
+        blanked(3),
+        delta(5, 'ANSWER', 'partC'),
+        terminal(6),
+      ],
+      partials: ['P1', 'P2'],
+      answer: 'ANSWER',
+      firstPrefixSequence: 1,
+      secondPrefixSequence: 3,
+      originalTurnId: 'turn_x',
+    });
+    const healthy = audit(views());
+    expect(healthy.livePartial1.partIds).toEqual(['partA']);
+    expect(healthy.reloadAnswer.partIds).toEqual(['partC']);
+    // R1-2: a second terminal in the drained live capture must red.
+    const doubleTerminal = views();
+    doubleTerminal.live.push(terminal(7));
+    expect(() => audit(doubleTerminal)).toThrow(/B2 live SSE: .*terminals=2/);
+    // A shared content Part means the retraction never broke the continuation.
+    const sharedPart = views();
+    sharedPart.live[2] = delta(3, 'P2', 'partA');
+    expect(() => audit(sharedPart)).toThrow(/share a content Part/);
+    // R1-3: a generation carrying no item_id must red, not pass via the union.
+    const missingItem = views();
+    missingItem.live[0] = delta(1, 'P1', 'partA', null);
+    expect(() => audit(missingItem)).toThrow(
+      /expected one shared assistant item/,
     );
-    expect(seenReplay.url).toBe('http://spring/events');
-    expect(seenReplay.headers['last-event-id']).toBe('0');
-    // A stream that closes before the predicate holds is a failure, not a pass.
-    await expect(
-      readSse(stubFetch(chunksOf(frame(1, delta(1, 'PREFIX')), 3), {}))(
-        'http://spring/events',
-        {
-          headers: {},
-          until: (events) => events.some((event) => event.terminal),
-          timeoutMs: 5_000,
-        },
-      ),
-    ).rejects.toThrow(/closed before the capture completed/);
+    // An unblanked prefix in reload must red.
+    const unblanked = views();
+    unblanked.reload[0] = delta(1, 'P1', 'partA');
+    expect(() => audit(unblanked)).toThrow(/not blanked in reload/);
+    // R1-4: the replay must match the surviving answer's Part, not just item.
+    const replayPart = views();
+    replayPart.replay[2] = delta(5, 'ANSWER', 'partD');
+    expect(() => audit(replayPart)).toThrow(/B2 replay view/);
+    // A wrong converged live text must red.
+    const wrongText = views();
+    wrongText.live[4] = delta(5, 'WRONG', 'partC');
+    expect(() => audit(wrongText)).toThrow(/B2 live SSE/);
   });
 
   // B2: pin the identity/live-SSE observations and their harness-only gate so a
@@ -1270,26 +1477,50 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain('function b2DeltaIdentity(');
     expect(source).toContain('function b2ModelAttempts(');
     expect(source).toContain('async function readPublicSse(');
+    expect(source).toContain('function assertB2StreamViews(');
+    expect(source).toContain('function readJournalManagedEvents(');
+    expect(source).toContain('function textDeltas(');
     expect(source).toContain('item_id?: string | null;');
     expect(source).toContain('content_part_id?: string | null;');
+    expect(source).toContain('turn_id?: string | null;');
     expect(source).toContain('B2 attempt identities:');
     expect(source).toContain('B2 live SSE:');
     expect(source).toContain('B2 stream identities:');
     expect(source).toContain('B2 replay view:');
     expect(source).toContain('b2-identities.json');
+    // R1-5: the runner drives the shared observer, not a private parse loop.
+    expect(source).toContain(
+      "import { SseObserver } from '../integration-tests/helpers/hosted-sse-observer.js';",
+    );
+    // R1-2: the terminal is a progress signal; a bounded drain keeps reading.
+    expect(source).toContain('const drainMs = options.drainMs ?? 2_000;');
+    // R1-1: the capture promise is marked handled at creation, and the
+    // teardown aborts observers (not bare controllers).
+    expect(source).toContain('b2LiveCapture.catch(() => undefined);');
+    expect(source).toContain(
+      'for (const observer of b2SseObservers) observer.controller.abort();',
+    );
+    // R1-10: the model-round evidence is named explicitly, not borrowed from
+    // a packaged-undefined-<epoch> gate directory.
+    expect(source).toContain('const modelRoundEvidenceDirectory =');
+    expect(source).toContain('writeEvidenceFile(modelRoundEvidenceDirectory, ');
     // The live capture starts before the first prefix and only in the
     // harness-only model-round variant; the frozen control plane keeps scope.
     const captureAt = source.indexOf('b2LiveCapture = readPublicSse(');
     expect(captureAt).toBeGreaterThan(-1);
-    expect(source.slice(captureAt - 400, captureAt)).toContain(
+    expect(source.slice(captureAt - 600, captureAt)).toContain(
       'if (harnessOnly)',
     );
     // The converged live view is the deltas after the LAST retraction — the
     // public stream.reconciled frame has no payload, so a raw concatenation of
     // every delta frame would still include the dead prefixes.
-    expect(source).toContain('event.sequence > b2LastReconciled');
-    // The audit checks run only after the existing model-round audit, gated on
-    // harnessOnly, and the replay uses Last-Event-ID rather than after.
+    const viewsAt = source.indexOf('function assertB2StreamViews(');
+    expect(viewsAt).toBeGreaterThan(-1);
+    expect(source.slice(viewsAt, viewsAt + 1600)).toContain(
+      'event.sequence > last',
+    );
+    // The attempt-identity check runs before the shared audit (root-cause
+    // diagnosis), gated on harnessOnly; the replay uses Last-Event-ID.
     const auditAt = source.indexOf('B2 attempt identities:');
     expect(source.slice(auditAt - 600, auditAt)).toContain('if (harnessOnly)');
     expect(source).toContain("lastEventId: '0',");
