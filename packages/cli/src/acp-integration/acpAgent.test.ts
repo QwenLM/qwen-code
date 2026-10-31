@@ -12854,14 +12854,30 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
       },
     ]);
+    const routes = models.filter((model) =>
+      model.modelId.startsWith('qwen-route:v1:'),
+    );
+    expect(routes).toHaveLength(2);
+    // The tiered stable family keeps its manifest controls on opaque routes.
+    for (const route of routes) {
+      expect(route.configOptions).toMatchObject([
+        {
+          id: 'reasoning_effort',
+          currentValue: 'xhigh',
+          options: [
+            { value: 'none' },
+            { value: 'low' },
+            { value: 'medium' },
+            { value: 'xhigh' },
+          ],
+        },
+      ]);
+    }
     expect(
       models
-        .filter((model) => model !== stable)
+        .filter((model) => model !== stable && !routes.includes(model))
         .every((model) => model.configOptions === undefined),
     ).toBe(true);
-    expect(
-      models.filter((model) => model.modelId.startsWith('qwen-route:v1:')),
-    ).toHaveLength(2);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -13887,6 +13903,96 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     },
   );
 
+  it('keeps a declared Qwen capability on duplicate-endpoint routes in an ACP session', async () => {
+    const sessionId = 'qwen4-declared-routes';
+    const maasA =
+      'https://llm-a.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    const maasB =
+      'https://llm-b.cn-beijing.maas.aliyuncs.com/compatible-mode/v1';
+    const innerConfig = await setupSessionMocks(sessionId);
+    const generation = innerConfig.getContentGeneratorConfig();
+    Object.assign(generation, {
+      model: 'qwen4-plus',
+      authType: AuthType.USE_OPENAI,
+      baseUrl: maasA,
+    });
+    innerConfig.getModel = vi.fn(() => generation.model);
+    innerConfig.getAuthType = vi.fn(() => AuthType.USE_OPENAI);
+    innerConfig.getCurrentModelRegistryBaseUrl = vi.fn().mockReturnValue(maasA);
+    innerConfig.getAllConfiguredModels = vi.fn().mockReturnValue([
+      {
+        id: 'qwen4-plus',
+        label: 'Qwen4 A',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: maasA,
+        registryBaseUrl: maasA,
+      },
+      {
+        id: 'qwen4-plus',
+        label: 'Qwen4 B',
+        authType: AuthType.USE_OPENAI,
+        baseUrl: maasB,
+        registryBaseUrl: maasB,
+      },
+    ]);
+    Object.assign(innerConfig, {
+      getResolvedModelConfig: vi.fn(() => ({
+        baseUrl: maasA,
+        generationConfig: {},
+        capabilities: {
+          reasoning: {
+            thinking: true,
+            efforts: ['high'],
+            defaultEffort: 'high',
+            canDisable: false,
+            disableField: 'reasoning_effort',
+          },
+        },
+      })),
+    });
+    const { agent, agentPromise } = await bootAcpAgent();
+    try {
+      const response = (await agent.newSession({
+        cwd: '/tmp',
+        mcpServers: [],
+      })) as NewSessionResponse;
+      // The duplicate endpoints make the selected route opaque; the declared
+      // high-only, non-disableable capability must survive the routing rather
+      // than being replaced by the tiered manifest. Pin the opaque selector
+      // first so the reasoning assertions provably exercise the routed branch.
+      expect(
+        response.configOptions?.find((entry) => entry.id === 'model')
+          ?.currentValue,
+      ).toMatch(/^qwen-route:v1:/);
+      const option = response.configOptions?.find(
+        (entry) => entry.id === 'reasoning_effort',
+      );
+      expect(option?.currentValue).toBe('high');
+      expect(
+        option?.options.flatMap((entry) =>
+          'value' in entry ? [entry.value] : [],
+        ),
+      ).toEqual(['high']);
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'low',
+        }),
+      ).rejects.toThrow('Unknown reasoning effort: low');
+      await expect(
+        agent.setSessionConfigOption({
+          sessionId,
+          configId: 'reasoning_effort',
+          value: 'none',
+        }),
+      ).rejects.toThrow();
+    } finally {
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('exposes and applies the ACP reasoning effort selector', async () => {
     const sessionId = 'reasoning-effort-session';
     const innerConfig = await setupSessionMocks(sessionId);
@@ -14902,7 +15008,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   it.each([
     { modelId: 'qwen-plus', value: 'high', opaque: false },
-    { modelId: 'qwen3.8-max', value: 'medium', opaque: true },
+    { modelId: 'qwen-plus', value: 'medium', opaque: true },
   ])(
     'hides and rejects unsupported reasoning for $modelId with opaque=$opaque',
     async ({ modelId, value, opaque }) => {

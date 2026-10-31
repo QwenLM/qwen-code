@@ -86,6 +86,8 @@ import type {
   DaemonSessionListPageOptions,
   DaemonSessionCatalogRequest,
   DaemonSessionCatalogResult,
+  DaemonSessionLiveStateBatchRequest,
+  DaemonSessionLiveStateBatchResult,
   DaemonSessionSearchOptions,
   DaemonSessionSearchResult,
   DaemonWorkspaceSessionInfo,
@@ -3637,6 +3639,28 @@ export class DaemonClient {
     opts: { clientId?: string; timeoutMs?: number } = {},
   ): Promise<DaemonWorkspaceSessionLiveState> {
     return this.workspaceByCwd(workspaceCwd).getSessionLiveState(opts);
+  }
+
+  /**
+   * Read complete memory-only snapshots for selected workspaces in one native
+   * REST request. Callers pre-flight `workspace_session_live_state_batch` once
+   * and use the single-workspace route on older daemons.
+   */
+  getSessionsLiveState(
+    request: DaemonSessionLiveStateBatchRequest,
+    opts?: { signal?: AbortSignal; timeoutMs?: number },
+  ): Promise<DaemonSessionLiveStateBatchResult> {
+    return this.jsonRequest<DaemonSessionLiveStateBatchResult>(
+      '/sessions/live-state',
+      'POST /sessions/live-state',
+      {
+        method: 'POST',
+        body: request,
+        mode: 'rest',
+        signal: opts?.signal,
+        timeoutMs: opts?.timeoutMs,
+      },
+    );
   }
 
   async listSessionGroups(
