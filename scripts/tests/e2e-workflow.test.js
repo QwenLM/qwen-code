@@ -633,17 +633,17 @@ describe('TUI product evidence', () => {
   });
 
   it('excludes every tree the pnpm workspace itself leaves out', async () => {
-    const excluded = [
-      ...readFileSync('pnpm-workspace.yaml', 'utf8').matchAll(
-        /^\s*- '!packages\/([^']+)'$/gm,
-      ),
-    ].map(([, name]) => name);
+    // Parse by value, not by literal spelling: a trailing comment or an
+    // `!integrations/...` negation is lint-legal and must still be reconciled.
+    const excluded = parse(readFileSync('pnpm-workspace.yaml', 'utf8'))
+      .packages.filter((entry) => entry.startsWith('!'))
+      .map((entry) => entry.slice(1));
     expect(excluded.length).toBeGreaterThan(0);
-    for (const name of excluded) {
+    for (const tree of excluded) {
       const { outputs } = await impact([
-        { filename: `packages/${name}/placeholder.ts` },
+        { filename: `${tree}/placeholder.ts` },
       ]);
-      expect(outputs.component, name).toBe('false');
+      expect(outputs.component, tree).toBe('false');
     }
   });
 
