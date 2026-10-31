@@ -1347,6 +1347,8 @@ export interface ConfigParameters {
   fileCheckpointingEnabled?: boolean;
   /** Directory where approved plan files are stored. Must resolve inside targetDir. */
   plansDirectory?: string;
+  /** Directory where todo session files are stored. Must resolve inside targetDir. */
+  todosDirectory?: string;
   proxy?: string;
   /**
    * Whether construction installs the process-global undici proxy
@@ -3324,7 +3326,10 @@ export class Config {
   private readonly jsonSchema: Record<string, unknown> | undefined;
   private readonly inputFile: string | undefined;
   private readonly plansDir: string;
+  private readonly todosDir: string;
+  private readonly todosAnchorTargetDir: string;
   private readonly plansDirectoryConfigured: boolean;
+  private readonly todosDirectoryConfigured: boolean;
   private readonly defaultFileEncoding: FileEncodingType | undefined;
   private readonly enableManagedAutoMemory: boolean;
   private readonly enableManagedAutoDream: boolean;
@@ -3441,7 +3446,10 @@ export class Config {
     this.sandbox = params.sandbox;
     this.targetDir = path.resolve(params.targetDir);
     this.plansDirectoryConfigured = Boolean(params.plansDirectory?.trim());
+    this.todosDirectoryConfigured = Boolean(params.todosDirectory?.trim());
     this.plansDir = Storage.getPlansDir(this.targetDir, params.plansDirectory);
+    this.todosAnchorTargetDir = this.targetDir;
+    this.todosDir = Storage.getTodosDir(this.targetDir, params.todosDirectory);
     this.explicitIncludeDirectories = Array.from(
       new Set(params.includeDirectories ?? []),
     );
@@ -3738,6 +3746,7 @@ export class Config {
     }
     this.warnings = params.warnings ?? [];
     this.addLegacyPlanLocationWarning();
+    this.addLegacyTodoLocationWarning();
     this.allowedHttpHookUrls = params.allowedHttpHookUrls ?? [];
     this.allowPrivateNetworkHooks = params.allowPrivateNetworkHooks ?? false;
     this.onPersistPermissionRuleCallback = params.onPersistPermissionRule;
@@ -9971,6 +9980,30 @@ export class Config {
     return this.plansDir;
   }
 
+  getTodosDir(): string {
+    return this.todosDir;
+  }
+
+  /**
+   * The project root a configured `todosDirectory` must stay inside: the
+   * canonical Config's `targetDir`, frozen at construction beside `todosDir`.
+   * It deliberately is not the live `getTargetDir()`, for two reasons:
+   * - `relocateWorkingDirectory()` (`/cd`, ACP `session/cd`) moves
+   *   `targetDir` but never recomputes `todosDir`, so a live anchor would
+   *   reject every later todo write.
+   * - Derived agent/worktree Configs (`Object.create(base)`) rebind
+   *   `getTargetDir()` to their own workspace but write to the base's todos
+   *   directory; they reach this field through the prototype chain and must
+   *   never own it.
+   */
+  getTodosAnchorTargetDir(): string {
+    return this.todosAnchorTargetDir;
+  }
+
+  isTodosDirectoryConfigured(): boolean {
+    return this.todosDirectoryConfigured;
+  }
+
   /**
    * The plans-directory state (`plansDirectoryConfigured` / `plansDir`) is
    * installed by the canonical Config constructor and inherited by derived
@@ -10031,33 +10064,71 @@ export class Config {
   }
 
   private addLegacyPlanLocationWarning(): void {
+    this.addLegacyStorageLocationWarning({
+      configured: this.plansDirectoryConfigured,
+      legacyDir: Storage.getPlansDir(),
+      currentDir: this.plansDir,
+      extension: '.md',
+      settingName: 'plansDirectory',
+      noun: 'plan',
+    });
+  }
+
+  private addLegacyTodoLocationWarning(): void {
+    this.addLegacyStorageLocationWarning({
+      configured: this.todosDirectoryConfigured,
+      legacyDir: Storage.getTodosDir(),
+      currentDir: this.todosDir,
+      extension: '.json',
+      settingName: 'todosDirectory',
+      noun: 'todo',
+    });
+  }
+
+  /**
+   * Warns when a configured storage directory hides files that still live in
+   * the legacy default location. Shared by plansDirectory and todosDirectory.
+   */
+  private addLegacyStorageLocationWarning(options: {
+    configured: boolean;
+    legacyDir: string;
+    currentDir: string;
+    extension: string;
+    settingName: string;
+    noun: string;
+  }): void {
+    const { configured, legacyDir, currentDir, extension, settingName, noun } =
+      options;
     try {
-      if (!this.plansDirectoryConfigured) {
+      if (!configured) {
         return;
       }
 
-      const legacyPlansDir = Storage.getPlansDir();
-      const legacyPlanFiles = this.getPlanFileNames(legacyPlansDir);
-      if (legacyPlanFiles.length === 0) {
+      // The configured dir can coincide with the legacy one (cwd = $HOME). An
+      // unreadable shared dir warns once here, and a readable one hides nothing.
+      const legacyFiles = this.getStorageFileNames(legacyDir, extension, noun);
+      if (legacyFiles.length === 0) {
         return;
       }
 
-      const configuredPlanFiles = new Set(this.getPlanFileNames(this.plansDir));
-      const hiddenLegacyPlanFiles = legacyPlanFiles.filter(
-        (fileName) => !configuredPlanFiles.has(fileName),
+      const currentFiles = new Set(
+        this.getStorageFileNames(currentDir, extension, noun),
       );
-      if (hiddenLegacyPlanFiles.length === 0) {
+      const hiddenLegacyFiles = legacyFiles.filter(
+        (fileName) => !currentFiles.has(fileName),
+      );
+      if (hiddenLegacyFiles.length === 0) {
         return;
       }
 
       this.warnings.push(
-        `Warning: Saved plan files exist at ${legacyPlansDir}, but ` +
-          `plansDirectory is configured to use ${this.plansDir}. Move ` +
-          `existing plan files to ${this.plansDir} if you want to keep ` +
+        `Warning: Saved ${noun} files exist at ${legacyDir}, but ` +
+          `${settingName} is configured to use ${currentDir}. Move ` +
+          `existing ${noun} files to ${currentDir} if you want to keep ` +
           `using them.`,
       );
     } catch (err: unknown) {
-      const message = `Failed to check legacy plan directory migration warning: ${
+      const message = `Failed to check legacy ${noun} directory migration warning: ${
         err instanceof Error ? err.message : String(err)
       }`;
       this.warnings.push(message);
@@ -10065,16 +10136,20 @@ export class Config {
     }
   }
 
-  private getPlanFileNames(plansDir: string): string[] {
+  private getStorageFileNames(
+    dir: string,
+    extension: string,
+    noun: string,
+  ): string[] {
     try {
-      return fs.readdirSync(plansDir).filter((entry) => entry.endsWith('.md'));
+      return fs.readdirSync(dir).filter((entry) => entry.endsWith(extension));
     } catch (err: unknown) {
       const code = (err as NodeJS.ErrnoException).code;
       if (code === 'ENOENT') {
         return [];
       }
       if (code === 'EACCES' || code === 'EPERM') {
-        const message = `Failed to read plan directory ${plansDir}: ${
+        const message = `Failed to read ${noun} directory ${dir}: ${
           err instanceof Error ? err.message : String(err)
         }`;
         this.warnings.push(message);

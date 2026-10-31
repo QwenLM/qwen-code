@@ -10,7 +10,15 @@ import {
 } from '../hooks/hook-execution-context.js';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { Mock } from 'vitest';
-import { mkdir, mkdtemp, open, rm, stat, writeFile } from 'node:fs/promises';
+import {
+  mkdir,
+  mkdtemp,
+  open,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises';
 import type { Stats } from 'node:fs';
 import type {
   ConfigParameters,
@@ -79,6 +87,7 @@ import { LlmClient } from '../core/client.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { buildSessionAgentToolConfig } from '../agents/workspace-agents/capability.js';
 import { ShellTool } from '../tools/shell.js';
+import { TodoWriteTool } from '../tools/todoWrite.js';
 import { canUseRipgrep } from '../utils/ripgrepUtils.js';
 import {
   getSessionProjectDir,
@@ -11485,6 +11494,29 @@ describe('setApprovalMode with folder trust', () => {
       );
     });
 
+    it('should warn once when configured plansDirectory is an unreadable legacy dir', () => {
+      const legacyPlans = vi
+        .spyOn(Storage, 'getPlansDir')
+        .mockReturnValue(PLANS_DIR);
+      withReaddir(
+        () =>
+          (fs.readdirSync as Mock).mockImplementation(() => {
+            throw errnoError('EACCES');
+          }),
+        () => {
+          try {
+            expect(
+              configuredPlansWarnings().filter((warning) =>
+                warning.includes('Failed to read plan directory'),
+              ),
+            ).toHaveLength(1);
+          } finally {
+            legacyPlans.mockRestore();
+          }
+        },
+      );
+    });
+
     it('should reject configured plansDirectory outside targetDir', () => {
       expect(() => makeConfig({ plansDirectory: '../project-plans' })).toThrow(
         CONTAINMENT_ERROR,
@@ -11506,6 +11538,303 @@ describe('setApprovalMode with folder trust', () => {
         expect(fs.readFileSync).not.toHaveBeenCalled();
       } finally {
         restoreRealpath();
+      }
+    });
+  });
+
+  describe('todos directory config', () => {
+    it('should use configured todosDirectory for todo directory path', () => {
+      const config = new Config({
+        ...baseParams,
+        todosDirectory: './project-todos',
+      });
+
+      expect(config.getTodosDir()).toBe(
+        path.join(path.resolve(baseParams.targetDir), 'project-todos'),
+      );
+      expect(config.isTodosDirectoryConfigured()).toBe(true);
+    });
+
+    it('should track when todosDirectory is not configured', () => {
+      const config = new Config(baseParams);
+
+      expect(config.isTodosDirectoryConfigured()).toBe(false);
+    });
+
+    it('should warn when configured todosDirectory hides a legacy todo file', () => {
+      const targetDir = path.resolve(baseParams.targetDir);
+      const currentTodosDir = path.join(targetDir, 'project-todos');
+      const legacyTodosDir = Storage.getTodosDir();
+      (fs.readdirSync as Mock).mockImplementation((pathToCheck) => {
+        const resolvedPath = pathToCheck.toString();
+        if (resolvedPath === currentTodosDir) {
+          return [];
+        }
+        if (resolvedPath === legacyTodosDir) {
+          return ['other-session.json'];
+        }
+        return [];
+      });
+
+      try {
+        const config = new Config({
+          ...baseParams,
+          todosDirectory: './project-todos',
+        });
+
+        expect(config.getWarnings()).toContainEqual(
+          expect.stringContaining(legacyTodosDir),
+        );
+        expect(config.getWarnings()).toContainEqual(
+          expect.stringContaining('todosDirectory is configured'),
+        );
+      } finally {
+        (fs.readdirSync as Mock).mockReturnValue([]);
+      }
+    });
+
+    it('should not warn when configured todosDirectory already contains the legacy todo files', () => {
+      const targetDir = path.resolve(baseParams.targetDir);
+      const currentTodosDir = path.join(targetDir, 'project-todos');
+      const legacyTodosDir = Storage.getTodosDir();
+      (fs.readdirSync as Mock).mockImplementation((pathToCheck) => {
+        const resolvedPath = pathToCheck.toString();
+        if (resolvedPath === currentTodosDir) {
+          return ['other-session.json'];
+        }
+        if (resolvedPath === legacyTodosDir) {
+          return ['other-session.json'];
+        }
+        return [];
+      });
+
+      try {
+        const config = new Config({
+          ...baseParams,
+          todosDirectory: './project-todos',
+        });
+
+        expect(config.getWarnings()).not.toContainEqual(
+          expect.stringContaining('todosDirectory is configured'),
+        );
+      } finally {
+        (fs.readdirSync as Mock).mockReturnValue([]);
+      }
+    });
+
+    it('should surface legacy todo directory read failures as warnings', () => {
+      const legacyError = new Error('EACCES') as NodeJS.ErrnoException;
+      legacyError.code = 'EACCES';
+      (fs.readdirSync as Mock).mockImplementation((pathToCheck) => {
+        const resolvedPath = pathToCheck.toString();
+        if (
+          resolvedPath ===
+          path.join(path.resolve(baseParams.targetDir), 'project-todos')
+        ) {
+          return [];
+        }
+        throw legacyError;
+      });
+
+      try {
+        const config = new Config({
+          ...baseParams,
+          todosDirectory: './project-todos',
+        });
+
+        expect(config.getWarnings()).toContainEqual(
+          expect.stringContaining('Failed to read todo directory'),
+        );
+      } finally {
+        (fs.readdirSync as Mock).mockReturnValue([]);
+      }
+    });
+
+    it('should warn once when configured todosDirectory is an unreadable legacy dir', () => {
+      const currentTodosDir = path.join(
+        path.resolve(baseParams.targetDir),
+        'project-todos',
+      );
+      const legacyTodos = vi
+        .spyOn(Storage, 'getTodosDir')
+        .mockReturnValue(currentTodosDir);
+      const legacyError = new Error('EACCES') as NodeJS.ErrnoException;
+      legacyError.code = 'EACCES';
+      (fs.readdirSync as Mock).mockImplementation(() => {
+        throw legacyError;
+      });
+
+      try {
+        const config = new Config({
+          ...baseParams,
+          todosDirectory: './project-todos',
+        });
+
+        expect(
+          config
+            .getWarnings()
+            .filter((warning) =>
+              warning.includes('Failed to read todo directory'),
+            ),
+        ).toHaveLength(1);
+      } finally {
+        legacyTodos.mockRestore();
+        (fs.readdirSync as Mock).mockReturnValue([]);
+      }
+    });
+
+    it('should reject configured todosDirectory outside targetDir', () => {
+      expect(
+        () =>
+          new Config({
+            ...baseParams,
+            todosDirectory: '../project-todos',
+          }),
+      ).toThrow('todosDirectory must resolve within the project root');
+    });
+
+    it('should still write todos after relocateWorkingDirectory', async () => {
+      const targetDir = await mkdtemp(path.join(os.tmpdir(), 'todos-anchor-'));
+      const otherDir = await mkdtemp(
+        path.join(os.tmpdir(), 'todos-anchor-other-'),
+      );
+      try {
+        const config = new Config({
+          ...baseParams,
+          targetDir,
+          todosDirectory: './project-todos',
+        });
+        await config.relocateWorkingDirectory(otherDir, undefined, {
+          skipProcessChdir: true,
+          skipArtifactMigration: true,
+        });
+
+        const result = await new TodoWriteTool(config)
+          .build({
+            todos: [{ id: '1', content: 'Keep the list', status: 'pending' }],
+          })
+          .execute(new AbortController().signal);
+
+        expect(result.returnDisplay).toEqual(
+          expect.objectContaining({
+            type: 'todo_list',
+            todos: [{ id: '1', content: 'Keep the list', status: 'pending' }],
+          }),
+        );
+        expect(config.getTargetDir()).toBe(otherDir);
+        expect(config.getTodosDir()).toBe(
+          path.join(targetDir, 'project-todos'),
+        );
+        const written = JSON.parse(
+          await readFile(
+            path.join(
+              targetDir,
+              'project-todos',
+              `${config.getSessionId()}.json`,
+            ),
+            'utf-8',
+          ),
+        ) as { todos: Array<{ id: string; content: string; status: string }> };
+        expect(written.todos).toEqual([
+          { id: '1', content: 'Keep the list', status: 'pending' },
+        ]);
+      } finally {
+        await rm(targetDir, { recursive: true, force: true });
+        await rm(otherDir, { recursive: true, force: true });
+      }
+    });
+
+    it('should write todos from a derived agent config whose cwd differs from the project root', async () => {
+      const targetDir = await mkdtemp(path.join(os.tmpdir(), 'todos-derived-'));
+      const agentCwd = await mkdtemp(
+        path.join(os.tmpdir(), 'todos-derived-agent-'),
+      );
+      try {
+        const config = new Config({
+          ...baseParams,
+          targetDir,
+          todosDirectory: './project-todos',
+        });
+        // The agent's workspace is outside the base project root. Its todos
+        // still belong to the base's configured directory, so containment
+        // must anchor at the base Config (inherited through the prototype
+        // chain), not at the derived workspace.
+        const { config: agentConfig } = deriveAgentConfig(config, agentCwd);
+        expect(agentConfig.getTargetDir()).toBe(agentCwd);
+        expect(Object.hasOwn(agentConfig, 'todosAnchorTargetDir')).toBe(false);
+
+        const result = await new TodoWriteTool(agentConfig)
+          .build({
+            todos: [{ id: '1', content: 'Agent task', status: 'pending' }],
+          })
+          .execute(new AbortController().signal);
+
+        expect(result.returnDisplay).toEqual(
+          expect.objectContaining({
+            type: 'todo_list',
+            todos: [{ id: '1', content: 'Agent task', status: 'pending' }],
+          }),
+        );
+        expect(agentConfig.getTodosAnchorTargetDir()).toBe(targetDir);
+        const written = JSON.parse(
+          await readFile(
+            path.join(
+              targetDir,
+              'project-todos',
+              `${agentConfig.getSessionId()}.json`,
+            ),
+            'utf-8',
+          ),
+        ) as { todos: Array<{ id: string; content: string; status: string }> };
+        expect(written.todos).toEqual([
+          { id: '1', content: 'Agent task', status: 'pending' },
+        ]);
+        await expect(
+          readFile(
+            path.join(
+              agentCwd,
+              'project-todos',
+              `${agentConfig.getSessionId()}.json`,
+            ),
+            'utf-8',
+          ),
+        ).rejects.toMatchObject({ code: 'ENOENT' });
+      } finally {
+        await rm(targetDir, { recursive: true, force: true });
+        await rm(agentCwd, { recursive: true, force: true });
+      }
+    });
+
+    it('should reject configured todosDirectory symlink outside targetDir', () => {
+      const targetDir = path.resolve(baseParams.targetDir);
+      const todosDir = path.join(targetDir, 'project-todos');
+      const outsideTodosDir = path.resolve(
+        path.dirname(targetDir),
+        'outside-todos',
+      );
+      vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) => {
+        const resolvedPath = pathToResolve.toString();
+        if (resolvedPath === targetDir) {
+          return targetDir;
+        }
+        if (resolvedPath === todosDir) {
+          return outsideTodosDir;
+        }
+        return resolvedPath;
+      });
+
+      try {
+        expect(
+          () =>
+            new Config({
+              ...baseParams,
+              todosDirectory: './project-todos',
+            }),
+        ).toThrow('todosDirectory must resolve within the project root');
+      } finally {
+        vi.mocked(fs.realpathSync).mockImplementation((pathToResolve) =>
+          pathToResolve.toString(),
+        );
       }
     });
   });
