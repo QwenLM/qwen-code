@@ -1,6 +1,6 @@
 package com.alibaba.qwen.code.managedagent.session;
 
-import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.EventProjectionStore;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.ReplayFloorTarget;
 import com.alibaba.qwen.code.managedagent.settings.ManagedAgentSettings;
 import org.slf4j.Logger;
@@ -18,10 +18,10 @@ public class ReplayFloorAdvancer {
     private static final Logger LOG = LoggerFactory.getLogger(
             ReplayFloorAdvancer.class);
     private static final int TARGET_LIMIT = 64;
-    private final AgentStateStore store;
+    private final EventProjectionStore store;
     private final ManagedAgentSettings properties;
 
-    public ReplayFloorAdvancer(AgentStateStore store,
+    public ReplayFloorAdvancer(EventProjectionStore store,
             ManagedAgentSettings properties) {
         this.store = store;
         this.properties = properties;
