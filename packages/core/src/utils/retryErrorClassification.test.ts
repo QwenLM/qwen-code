@@ -992,6 +992,35 @@ describe('isFallbackEligible', () => {
     ).toBe(false);
   });
 
+  it('returns true for a 429 whose body carries an unrecognized provider code', () => {
+    // Z.AI quota exhaustion: the body code is not a rate-limit code, so the
+    // primary fails fast, but a different model can still serve the request.
+    const error = {
+      status: 429,
+      error: {
+        code: '1310',
+        message:
+          'Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-13 23:52:51',
+      },
+    };
+    const classification = classifyRetryError(error);
+
+    expect(classification).toMatchObject({
+      diagnosis: 'fail-fast',
+      reason: 'client-error',
+      statusCode: 429,
+    });
+    expect(isFallbackEligible(classification)).toBe(true);
+  });
+
+  it('returns false for a 4xx client error outside the capacity statuses', () => {
+    const error = {
+      status: 400,
+      error: { code: '1210', message: 'Invalid parameter' },
+    };
+    expect(isFallbackEligible(classifyRetryError(error))).toBe(false);
+  });
+
   it('returns false for a status-less upstream error', () => {
     // "Retryable, yet not fallback-eligible": no HTTP status means no capacity
     // signal, so retries stay on the primary model. The classification is

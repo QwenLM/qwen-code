@@ -350,9 +350,9 @@ The `extra_body` field allows you to add custom parameters to the request body s
 
 #### modelFallbacks
 
-| Setting          | Type   | Description                                                                                                                                                                                                                             | Default |
-| ---------------- | ------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
-| `modelFallbacks` | string | Ordered list of fallback model IDs (comma-separated, max 3) to try when the primary model hits capacity errors (429/503/529). Example: `"qwen-plus,qwen-turbo"`. Can also be set via the `--fallback-model` CLI flag. Requires restart. | `""`    |
+| Setting          | Type   | Description                                                                                                                                                                                                                                                                                                                         | Default |
+| ---------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------- |
+| `modelFallbacks` | string | Ordered list of fallback model IDs (comma-separated, max 3) to try when the primary model hits capacity errors (429/503/529). Example: `"qwen-plus,qwen-turbo"`. Can also be set via the `--fallback-model` CLI flag. Not used when `QWEN_CODE_UNATTENDED_RETRY` is set, which retries the primary model instead. Requires restart. | `""`    |
 
 #### modelPricing
 

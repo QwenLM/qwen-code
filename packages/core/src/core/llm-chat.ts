@@ -5831,7 +5831,9 @@ export class LlmChat {
                   currentErrorClassification = fallbackClassification;
 
                   // Only continue to next fallback if this error is also
-                  // fallback-eligible. Auth/client errors should fail immediately.
+                  // fallback-eligible. Auth errors and most client errors fail
+                  // immediately; a 429 with an unrecognized provider code
+                  // (e.g. a quota limit) still advances to the next fallback.
                   if (!canTryNextFallback) {
                     debugLogger.warn(
                       `[FALLBACK] Error from "${resolvedFallbackModel}" is not ` +
