@@ -157,8 +157,8 @@
       "zh": "自动化扫描器从一轮扫描结束到下一轮开始之间等待的时长。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。"
     },
     "qwen.managed-agent.automation.scanner-threads": {
-      "en": "How many definition rows one scanner tick works in parallel; the tick waits for all of them before the next tick starts. Each row's lease runs from that row's own claim, not from the tick's start, so a long tick hands out no already-expired lease. Startup refuses a value below 1 when `qwen.managed-agent.automation.enabled` is true.",
-      "zh": "单个扫描轮次并行处理的定义行数；该轮会等待所有行处理完毕，下一轮才开始。每一行的租约都从该行自己的认领时刻起算，而不是从本轮开始时起算，因此扫描轮次再长也不会发放已经过期的租约。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。"
+      "en": "How many definition rows one scanner tick works in parallel; the tick waits for all of them before the next tick starts. Because a lease is not counted from the tick's start (see `qwen.managed-agent.automation.lease`), a long tick hands out no already-expired lease. Startup refuses a value below 1 when `qwen.managed-agent.automation.enabled` is true.",
+      "zh": "单个扫描轮次并行处理的定义行数；该轮会等待所有行处理完毕，下一轮才开始。由于租约不是从本轮开始时起算（见 `qwen.managed-agent.automation.lease`），扫描轮次再长也不会发放已经过期的租约。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。"
     },
     "qwen.managed-agent.channels.claim-lease": {
       "en": "How long a channel adapter's claim on an outbound delivery stays valid without a receipt. Once it lapses, the reconcile pass records the delivery's outcome as unknown and never resends it automatically. A plain number is seconds.",
