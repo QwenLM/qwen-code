@@ -1258,6 +1258,23 @@ describe('GitHub helper tests', () => {
     }
   });
 
+  it('routes the battery tmpdir off the host /tmp tmpfs', () => {
+    // #15965: e2e-build.test.mjs mkdtemps thousands of chunk files via
+    // os.tmpdir(); on the ECS pool that defaulted to the shared /tmp tmpfs,
+    // whose ~1M inode quota filled up and failed the lane with ENOSPC while
+    // 202G of capacity stayed free. RUNNER_TEMP sits on the roomy data disk,
+    // same routing the unit lanes already use (#10035).
+    const step = (ci.jobs.lint_and_static.steps ?? []).find(
+      (candidate) => candidate.name === 'Run .github/scripts helper tests',
+    );
+    expect(step, 'helper-tests step missing').toBeDefined();
+    const run = String(step.run);
+    expect(run).toContain('export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"');
+    expect(run.indexOf('export TMPDIR')).toBeLessThan(
+      run.indexOf('node --test'),
+    );
+  });
+
   it('retries the full-profile battery once against pool contention', () => {
     // #12772: the battery spawns real subprocess loops on the shared ECS
     // pool, and a push to main has no flaky-rerun patrol — one host hiccup
