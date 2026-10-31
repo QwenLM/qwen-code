@@ -12,6 +12,7 @@ import type { WebShellRightPanelItem } from '../../customization';
 import {
   useConnection,
   useWorkspace,
+  type DaemonContextMemoryDetail,
   type DaemonSessionOwnerSnapshot,
   type DaemonSessionActions,
   type DaemonScheduledTask,
@@ -459,6 +460,11 @@ interface ArtifactPanelProps {
     workspaceCwd?: string,
     workspaceId?: string,
   ) => void;
+  /** Open a context-panel memory file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   latestReviewAvailable?: boolean;
   onOpenLatestReview?: () => void;
   /** Open an interactive terminal tab in this panel (shown as an empty-state action). */
@@ -670,6 +676,7 @@ export function ArtifactPanel({
   onSelectTurnCallsPrompt,
   onCloseTab,
   onOpenFilePreview,
+  onOpenMemoryFile,
   latestReviewAvailable = false,
   onOpenLatestReview,
   onOpenTerminal,
@@ -1706,6 +1713,7 @@ export function ArtifactPanel({
             controls={contextUsageControls?.[activeTab.sessionId]}
             sessionActions={activeTab.sessionActions}
             sessionId={activeTab.sessionId}
+            onOpenMemoryFile={onOpenMemoryFile}
           />
         ) : activeTab.kind === 'trajectory' ? (
           <TrajectoryPanel

@@ -27,9 +27,8 @@ env:
   MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
 
 concurrency:
-  # Keyed by event and commit: a Managed Agent gate fast run and a full run
-  # on the same pull request must not queue behind each other, where a newer
-  # pending run would displace the older one.
+  # Event and commit keys prevent a new pending fast/full run from replacing
+  # an older one in the same queue.
   group: 'sdk-java-${{ github.workflow }}-${{ github.event_name }}-${{ inputs.ref || github.ref }}'
   # Release callers and daily runs must not displace each other's validation.
   cancel-in-progress: false
@@ -1394,9 +1393,9 @@ jobs:
     # that a failing integration test there no longer skips them: they need
     # only the bundled CLI, the server jar and a runner-private mysqld, not
     # its MySQL service or cgroup root. Each arm also runs when an earlier
-    # one failed. Ceilings: 25 arms × 10 = 250 plus ~13 minutes for the
-    # uncapped setup steps (Checkout.. Install MySQL binaries): 263 + 2.
-    timeout-minutes: 265
+    # one failed. Ceilings: 26 arms × 10 = 260 plus ~13 minutes for the
+    # uncapped setup steps (Checkout.. Install MySQL binaries): 273 + 2.
+    timeout-minutes: 275
     env:
       QWEN_E2E_REGISTER_STORAGE: '1'
     steps:
@@ -1540,6 +1539,11 @@ jobs:
         timeout-minutes: 10
         run: >-
           npm run test:e2e:managed-harness-restart-approval-finished-before-commit
+      - name: 'Run sibling-approval crash E2E'
+        if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
+        timeout-minutes: 10
+        run: >-
+          npm run test:e2e:managed-harness-restart-approval-sibling-approval
       - name: 'Run approval decision reply-loss E2E'
         if: "${{ !cancelled() && steps.failover_prerequisites.outcome == 'success' }}"
         timeout-minutes: 10

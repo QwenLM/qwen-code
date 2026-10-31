@@ -167,8 +167,8 @@ cross-cutting "how the system works today" tour.
    construction sites. If eliminating that risk is a goal, P0 must also ship
    a named-construction path — a builder with per-component methods, such as
    `SessionCreationCommand.builder().tenantId(...).actorId(...).build()` —
-   which is an explicit scope decision recorded under open questions, not
-   something the bare record already solves. Second, adding a component
+   which P0 ships: every migrated call site uses named construction rather
+   than the positional canonical constructor. Second, adding a component
    changes the canonical constructor signature, so existing construction
    call sites break at source and binary level and must be updated in the
    same change; the pre-release hard cut makes this acceptable now, not after
@@ -241,8 +241,8 @@ cross-cutting "how the system works today" tour.
   construction call sites and binary compatibility need handling in every
   extension — acceptable under the pre-release hard cut, not afterwards. A
   named-construction builder is the mechanism if misordering elimination
-  becomes a goal; whether P0 ships it is an explicit open question, not a
-  risk the bare record has already closed.
+  becomes a goal; P0 ships it, and every migrated call site uses named
+  construction.
 - **Hard cut over a deprecated bridge.** Pre-release, simplicity-first wins;
   a bridge preserves the chain and doubles the contract surface during
   migration.
@@ -306,11 +306,12 @@ cross-cutting "how the system works today" tour.
 
 ## Open questions
 
-- Exact home of `SessionCreationCommand`: the contracts session package next
-  to `AgentStateStore`, or `managedagent.model` next to `StoreModels`?
-- Whether P0 also ships a named-construction builder for
-  `SessionCreationCommand` to close the same-typed-swap risk at construction
-  sites; the bare record leaves that risk open.
+- Resolved (2026-10-31): `SessionCreationCommand` lives in the contracts
+  session package next to `AgentStateStore`.
+- Resolved (2026-10-31): P0 ships the named-construction builder, and every
+  migrated call site uses it; the overload convergence and the builder landed
+  in the same change. Role-interface segregation (P0 step 3) follows as a
+  separate slice.
 - Whether to introduce the class-size ratchet gate before P1 (to stop
   regrowth) or only after the splits land.
 - Sequencing of P1 slices against in-flight feature work on the same classes.
