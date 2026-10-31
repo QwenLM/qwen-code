@@ -51,6 +51,7 @@ import { HostedSessionMessageSession } from './hosted-session-message-session.js
 import { sessionMessageId } from '@qwen-code/qwen-code-core/managed-runtime/managed-session-message-operations.js';
 import {
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+  HostedToolRecoveryRequiredError,
   HostedWorkspaceToolTurn,
 } from './hosted-workspace-tool-turn.js';
 // The Broker is mocked below purely so the ToolTurn's constructor warm-up
@@ -244,10 +245,13 @@ describe('hosted child wait recovery (#13708)', () => {
   };
 
   /** Parks a live session at the durable wait, then closes it (the wedge). */
-  async function parkWedged(withAssistantRound = false): Promise<void> {
+  async function parkWedged(
+    withAssistantRound = false,
+    orphanName = 'agent',
+  ): Promise<void> {
     const session = await open('boot-1', true);
     try {
-      await park(session, withAssistantRound);
+      await park(session, withAssistantRound, orphanName);
     } finally {
       await session.close();
     }
@@ -261,6 +265,7 @@ describe('hosted child wait recovery (#13708)', () => {
   async function park(
     session: ManagedSession,
     withAssistantRound: boolean,
+    orphanName = 'agent',
   ): Promise<void> {
     const harness = createManagedHarnessHandle(session);
     const authority = session.authority;
@@ -328,7 +333,7 @@ describe('hosted child wait recovery (#13708)', () => {
           role: 'model',
           parts: [
             { functionCall: { id: 'call-1', name: 'agent', args: {} } },
-            { functionCall: { id: 'call-2', name: 'agent', args: {} } },
+            { functionCall: { id: 'call-2', name: orphanName, args: {} } },
           ],
         },
       });
@@ -1077,6 +1082,122 @@ describe('hosted child wait recovery (#13708)', () => {
       expect(
         toolResultEntries(projected).map((entry) => entry.parentUuid),
       ).toContain('assistant-1');
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  // A6 (G3): the child ledger is the never-started proof for an agent gap.
+  // When the ledger adapter is unavailable (child-lane config/version drift
+  // between generations), the fill must block — folding "never ran" would
+  // answer unavailable evidence as proven absence.
+  it('an agent gap with an unavailable child ledger blocks, never folds never-ran', async () => {
+    await parkWedged(true);
+    const replacement = await open('boot-2', false);
+    try {
+      const consumption: string[] = [];
+      await settleTheChild(replacement);
+      await resumeTurn(replacement, consumption).resumeAgentWaitRuns(
+        [{ ...waitRun, functionCallId: 'call-1' }],
+        'recovered',
+        new AbortController().signal,
+      );
+      const error = await fillParkedRoundAgentGaps({
+        managed: replacement,
+        sessionId: SESSION_ID,
+        promptId: PROMPT_ID,
+        cwd: root,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+        children: undefined,
+      }).catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(HostedToolRecoveryRequiredError);
+      expect((error as HostedToolRecoveryRequiredError).cause).toBe(
+        'Child run ledger is unavailable; the agent gap cannot be proven never-started.',
+      );
+      // Only the wait's own fold landed; the agent gap owes an answer and
+      // must not receive a fabricated one.
+      const ids = toolResultEntries(await replacement.sink.project())
+        .flatMap((entry) => entry.message?.parts ?? [])
+        .map((part) => part.functionResponse?.id);
+      expect(ids).toEqual(['call-1']);
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('a non-agent gap with an unavailable child ledger keeps its honest fold', async () => {
+    await parkWedged(true, 'write_file');
+    const replacement = await open('boot-2', false);
+    try {
+      const consumption: string[] = [];
+      await settleTheChild(replacement);
+      await resumeTurn(replacement, consumption).resumeAgentWaitRuns(
+        [{ ...waitRun, functionCallId: 'call-1' }],
+        'recovered',
+        new AbortController().signal,
+      );
+      const filled = await fillParkedRoundAgentGaps({
+        managed: replacement,
+        sessionId: SESSION_ID,
+        promptId: PROMPT_ID,
+        cwd: root,
+        gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+        children: undefined,
+      });
+      expect(filled).toBe(1);
+      const callTwo = toolResultEntries(await replacement.sink.project()).find(
+        (entry) =>
+          entry.message?.parts?.some(
+            (part) => part.functionResponse?.id === 'call-2',
+          ),
+      );
+      expect(JSON.stringify(callTwo?.message?.parts)).toContain(
+        'interrupted before this child agent was admitted',
+      );
+    } finally {
+      await replacement.close();
+    }
+  });
+
+  it('a replayed fill stays silent for a journaled agent gap even without the ledger', async () => {
+    await parkWedged(true);
+    const replacement = await open('boot-2', false);
+    try {
+      const consumption: string[] = [];
+      await settleTheChild(replacement);
+      await resumeTurn(replacement, consumption).resumeAgentWaitRuns(
+        [{ ...waitRun, functionCallId: 'call-1' }],
+        'recovered',
+        new AbortController().signal,
+      );
+      // The first fill lands the honest never-admitted answer with the
+      // ledger present; a later generation whose child lane drifted away
+      // replays the fill and must neither re-fold nor block.
+      await expect(
+        fillParkedRoundAgentGaps({
+          managed: replacement,
+          sessionId: SESSION_ID,
+          promptId: PROMPT_ID,
+          cwd: root,
+          gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+          children: childrenOf(replacement),
+        }),
+      ).resolves.toBe(1);
+      await expect(
+        fillParkedRoundAgentGaps({
+          managed: replacement,
+          sessionId: SESSION_ID,
+          promptId: PROMPT_ID,
+          cwd: root,
+          gapText: HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
+          children: undefined,
+        }),
+      ).resolves.toBe(0);
+      const ids = toolResultEntries(await replacement.sink.project())
+        .flatMap((entry) => entry.message?.parts ?? [])
+        .map((part) => part.functionResponse?.id)
+        .sort();
+      expect(ids).toEqual(['call-1', 'call-2']);
     } finally {
       await replacement.close();
     }

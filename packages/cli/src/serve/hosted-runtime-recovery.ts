@@ -79,6 +79,7 @@ import {
   fitChildResultInline,
   HOSTED_AGENT_CALL_NOT_REACHED_TEXT,
   HOSTED_AGENT_WAIT_ABANDONED_TEXT,
+  HostedToolRecoveryRequiredError,
   hostedChildBackgroundStartedText,
   hostedBroadcastCommitted,
   hostedChildRunIdFor,
@@ -1502,6 +1503,14 @@ export async function fillParkedRoundAgentGaps(input: {
       }
       continue;
     }
+    // A6: an unavailable child ledger is unknown evidence, not the
+    // never-started proof a present ledger's missing record gives
+    // (admitLaunch commits before dispatch). Block, never fold "never ran".
+    // An already-journaled gap owes nothing: a replayed fill stays silent.
+    if (foldOwed && children === undefined && name === 'agent')
+      throw new HostedToolRecoveryRequiredError(
+        'Child run ledger is unavailable; the agent gap cannot be proven never-started.',
+      );
     const admitted =
       children === undefined
         ? undefined

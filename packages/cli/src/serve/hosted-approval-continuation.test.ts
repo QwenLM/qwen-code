@@ -564,3 +564,115 @@ it.each(
   },
   TEST_TIMEOUT_MS,
 );
+
+// A6 (G1/G2): the saved-batch owner gate is the only backstop for the
+// extensions-enabled continuation entry admitting a Hook/MCP session: a
+// non-commandStep plan must be refused, never resumed under a Hook/MCP
+// owner. The gate reads ownership, not plan contents — a minimal
+// identity-matching plan isolates the clause (the reader has its own suite).
+it.each([
+  { owner: 'hooks', hooks: true, mcp: false, extensions: false },
+  { owner: 'mcp', hooks: false, mcp: true, extensions: false },
+  { owner: 'hooks+extensions', hooks: true, mcp: false, extensions: true },
+])(
+  'refuses a non-commandStep saved batch owned by a $owner session',
+  async ({ hooks, mcp, extensions }) => {
+    const root = await mkdtemp(path.join(tmpdir(), 'g3-a6-owner-'));
+    const sessionKey = {
+      tenantId: 'tenant',
+      workspaceId: 'workspace',
+      sessionId: randomUUID(),
+    };
+    const resources = LocalManagedSessionResourceStore.create({
+      runtimeBaseDir: root,
+      sessionKey,
+    });
+    const session = await openManagedSession({
+      runtimeBaseDir: root,
+      cwd: root,
+      transcriptPath: path.join(root, 'transcript.jsonl'),
+      sessionId: sessionKey.sessionId,
+      sessionKey,
+      version: 'g3-a6-owner',
+      activationLeaseDurationMs: 60_000,
+      workerId: 'a6-owner-probe',
+      create: {
+        definitionRef: await resources.publish(
+          'managed-definition',
+          Buffer.from(
+            JSON.stringify({
+              engine: 'managed',
+              toolProfile: 'hosted-workspace-files/1',
+            }),
+          ),
+        ),
+        rootSnapshotRef: await resources.publish(
+          'managed-root',
+          Buffer.from('{}'),
+        ),
+        createdBy: 'a6-owner-probe',
+      },
+    });
+    try {
+      const promptId = randomUUID();
+      const turn = new HostedWorkspaceToolTurn(
+        { baseUrl: 'http://127.0.0.1:1', token: 'fixture-no-traffic' },
+        session,
+        createManagedHarnessHandle(session),
+        promptId,
+        vi.fn().mockResolvedValue('unused'),
+        () => true,
+        undefined,
+        undefined,
+        {
+          settings: { mode: 'default', timeoutMs: 60_000 },
+          waiters: new HostedApprovalWaiters(),
+        },
+        {
+          profile: 'hosted-workspace-files/1',
+          ...(hooks
+            ? {
+                hooks:
+                  {} as unknown as import('./hosted-hook-session.js').HostedHookSession,
+              }
+            : {}),
+          ...(mcp
+            ? {
+                mcp: {
+                  ensureReady: async () => undefined,
+                } as unknown as import('./hosted-mcp-session.js').HostedMcpSession,
+              }
+            : {}),
+          ...(extensions
+            ? { extensionConfig: { revision: 1, packages: [] } }
+            : {}),
+        },
+      );
+      const saved = {
+        plan: {
+          promptId,
+          calls: [],
+          runtime: {
+            bindingId: 'binding-1',
+            generation: '1',
+            workspaceGeneration: '1',
+            runtimeSessionId: hostedRuntimeSessionId(promptId),
+          },
+        },
+        parts: [],
+        inputs: [],
+      } as unknown as import('./hosted-approval-continuation.js').RestoredHostedApprovalContinuation;
+      const error = await turn
+        .resumeSavedNativeBatch(saved, 1, new AbortController().signal)
+        .catch((cause: unknown) => cause);
+      expect(error).toBeInstanceOf(HostedToolRecoveryRequiredError);
+      expect((error as HostedToolRecoveryRequiredError).cause).toBe(
+        'Unsupported saved batch owner.',
+      );
+    } finally {
+      await session.close();
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+  TEST_TIMEOUT_MS,
+);

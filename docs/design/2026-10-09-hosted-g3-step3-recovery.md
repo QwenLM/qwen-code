@@ -570,7 +570,11 @@ Malformed or foreign refs, snapshot overflow, the rewritten-input and
 Hook-no-rerun half of A3 (a commandStep follow-up, since a native continuation
 refuses Hook/MCP sessions), Hook/MCP/child
 uncertainty (A6), and the mixed-version reader/bundle
-closure (R2) stay focused or integration evidence. Full-owner restart, real-provider
+closure (R2) stay focused or integration evidence. A6's focused evidence has
+landed: the Hook/MCP saved-batch ownership refusal and the ledger-less agent
+gap-fill block are pinned by behavioural tests
+([A6 uncertainty evidence](2026-10-31-hosted-a6-uncertainty-evidence.md)); the
+row remains focused rather than packaged. Full-owner restart, real-provider
 acceptance and a real mixed-version cluster remain separate. Q2's binding
 half has the D11 frozen control-plane arm for a woken former Spring's stale
 claim and a store test of the bind guards; two live control planes remain a
