@@ -637,14 +637,26 @@ class ReadFileToolInvocation extends BaseToolInvocation<
  * just produced" contract stated — ONLY when the selected model can perceive
  * them. A text-only model must not be told it can "watch a video", or it will
  * call read_file expecting to see a clip it cannot ingest (the exact failure
- * behind fine-detail video QA where the model clips but never re-reads). The
- * PDF/text/image handling and the vision-bridge fallback are model-agnostic and
- * always stated. Recomputed live in {@link ReadFileTool.schema} so it tracks a
- * mid-session `/model` switch, not just the modalities at construction time.
+ * behind fine-detail video QA where the model clips but never re-reads).
+ * Images are advertised only when the model accepts image input or a vision
+ * bridge can transcribe them: otherwise the engine hands back a text
+ * placeholder and the promise is a wasted call. Recomputed live in
+ * {@link ReadFileTool.schema} so it tracks a mid-session `/model` switch, not
+ * just the modalities at construction time.
  */
-export function buildReadFileDescription(modalities: InputModalities): string {
+export function buildReadFileDescription(
+  modalities: InputModalities,
+  imagesReadable = true,
+): string {
   const preamble = `Reads and returns the content of a specified file. The file_path argument MUST be an absolute path. Always construct it by combining the project root with the file's relative path (e.g. project root '/path/to/project/' + relative 'foo/bar.txt' = '/path/to/project/foo/bar.txt'). If the user provides a relative path, resolve it against the project root first. If the file is large, the content will be truncated. For text files, the tool's response will clearly indicate if truncation has occurred and will provide details on how to read more of the file using the 'offset' and 'limit' parameters. `;
   const trailer = ` For text files, it can read specific line ranges. For PDF files, use the 'pages' parameter to extract specific page ranges as text (e.g. '1-5'). Large PDFs cannot be read all at once when the model does not support native PDF input; retry with narrower page ranges if the tool reports a PDF is too large. With a configured vision bridge, failed PDF text extraction or an irreducibly large single page may be transcribed automatically, at most four pages per call; this transcription is lossy and marked as untrusted. Jupyter notebooks return structured cell content with outputs.`;
+
+  const images = imagesReadable
+    ? 'images (PNG, JPG, GIF, WEBP, SVG, BMP), '
+    : '';
+  const imageNote = imagesReadable
+    ? ''
+    : ' Reading an image returns a placeholder instead of the picture: the selected model is not configured to accept image input.';
 
   const nouns: string[] = [];
   const formats: string[] = [];
@@ -659,7 +671,7 @@ export function buildReadFileDescription(modalities: InputModalities): string {
 
   if (nouns.length === 0) {
     // Text-only (or image/PDF-only) model: never advertise audio/video.
-    return `${preamble}Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), PDF files, and Jupyter notebooks (.ipynb).${trailer}`;
+    return `${preamble}Handles text, ${images}PDF files, and Jupyter notebooks (.ipynb).${imageNote}${trailer}`;
   }
 
   const perceive =
@@ -670,7 +682,20 @@ export function buildReadFileDescription(modalities: InputModalities): string {
         : 'listen to an audio file';
   const viewHear = modalities.video ? 'view/hear' : 'hear';
 
-  return `${preamble}Handles text, images (PNG, JPG, GIF, WEBP, SVG, BMP), ${nouns.join(', ')}, PDF files, and Jupyter notebooks (.ipynb); ${formats.join(' and ')} require the selected model to support the corresponding modality. When multimodal support is enabled, ${nouns.join(' and ')} files are delivered to you for DIRECT perception — you can actually ${perceive} by reading it. In particular, after you cut or downscale a media segment with a clip/extract tool, call read_file on the resulting clip to actually ${viewHear} that segment yourself before answering — do not assume its contents.${trailer}`;
+  return `${preamble}Handles text, ${images}${nouns.join(', ')}, PDF files, and Jupyter notebooks (.ipynb); ${formats.join(' and ')} require the selected model to support the corresponding modality. When multimodal support is enabled, ${nouns.join(' and ')} files are delivered to you for DIRECT perception — you can actually ${perceive} by reading it. In particular, after you cut or downscale a media segment with a clip/extract tool, call read_file on the resulting clip to actually ${viewHear} that segment yourself before answering — do not assume its contents.${imageNote}${trailer}`;
+}
+
+/**
+ * Whether read_file can really deliver pixels in this session: the model takes
+ * image input, or the configured vision bridge transcribes images for a
+ * text-only one. With neither, the engine substitutes a text placeholder, so
+ * the description must not promise a picture the model will never see.
+ */
+function imagesReadable(config: Config): boolean {
+  return (
+    config.getEffectiveInputModalities?.()?.image === true ||
+    shouldRunVisionBridge(config)
+  );
 }
 
 /**
@@ -697,7 +722,10 @@ export class ReadFileTool extends BaseDeclarativeTool<
     super(
       ReadFileTool.Name,
       ToolDisplayNames.READ_FILE,
-      buildReadFileDescription(config.getEffectiveInputModalities?.() ?? {}),
+      buildReadFileDescription(
+        config.getEffectiveInputModalities?.() ?? {},
+        imagesReadable(config),
+      ),
       Kind.Read,
       {
         properties: {
@@ -737,6 +765,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
       name: this.name,
       description: buildReadFileDescription(
         this.config.getEffectiveInputModalities?.() ?? {},
+        imagesReadable(this.config),
       ),
       parametersJsonSchema: this.parameterSchema,
     };
