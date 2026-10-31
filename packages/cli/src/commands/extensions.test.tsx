@@ -54,14 +54,17 @@ describe('extensions command', () => {
     );
   });
 
-  it('should register list subcommand', () => {
+  it('should register list subcommand', async () => {
     const parser = yargs([])
       .command(extensionsCommand)
       .fail(false)
       .locale('en');
 
-    // list doesn't require arguments, so it should not throw
-    expect(() => parser.parse('extensions list')).not.toThrow();
+    // list doesn't require arguments, so it should not throw. Awaiting
+    // parseAsync keeps the async handler in-band: a failing list must
+    // surface as this test's failure, not float past the file's teardown
+    // as an unhandled rejection.
+    await expect(parser.parseAsync('extensions list')).resolves.toBeDefined();
   });
 
   it('should register update subcommand', () => {
