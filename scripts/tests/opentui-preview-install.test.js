@@ -58,6 +58,14 @@ function tree(root) {
   return entries;
 }
 
+// Windows shells create their own %USERPROFILE%\AppData folders on first run;
+// only file contents are an installer's to preserve.
+function filesIn(root) {
+  return Object.fromEntries(
+    Object.entries(tree(root) ?? {}).filter(([, row]) => row.sha256),
+  );
+}
+
 function put(file, content, executable = false) {
   mkdirSync(path.dirname(file), { recursive: true });
   writeFileSync(file, content);
@@ -105,7 +113,7 @@ function fixture() {
   };
   const initialPath = process.env.PATH;
   const initialProtected = tree(protectedRoot);
-  const initialHome = tree(path.join(root, 'home'));
+  const initialHome = filesIn(path.join(root, 'home'));
   const entry = (base) => path.join(base, 'bin', windows ? 'qwen.cmd' : 'qwen');
   const seed = (base, marker) => {
     put(
@@ -224,7 +232,7 @@ function fixture() {
     },
     assertProtected() {
       expect(tree(protectedRoot)).toEqual(initialProtected);
-      expect(tree(path.join(root, 'home'))).toEqual(initialHome);
+      expect(filesIn(path.join(root, 'home'))).toEqual(initialHome);
       expect(process.env.PATH).toBe(initialPath);
       expect(readFileSync(path.join(dir, 'outside-preview-data'), 'utf8')).toBe(
         'PRESERVE_SIBLING\n',
