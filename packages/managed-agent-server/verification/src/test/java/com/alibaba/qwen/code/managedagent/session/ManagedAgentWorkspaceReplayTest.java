@@ -2,6 +2,7 @@ package com.alibaba.qwen.code.managedagent.session;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector.Attachment;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.harness.UnavailableHarnessConnector;
@@ -144,9 +145,14 @@ class ManagedAgentWorkspaceReplayTest {
                 tenant, "ws-a",
                 "actor-b".getBytes(StandardCharsets.UTF_8));
         return transaction.execute(status -> store
-                .insertWorkspaceSessionCommand(tenant, "actor-a", "create",
-                        "sha256:" + "a".repeat(64), "qwen-code", null, null,
-                        List.of(), null, new WorkspaceSelection("ws-a", "."))
+                .insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                        .tenantId(tenant)
+                        .actorId("actor-a")
+                        .idempotencyKey("create")
+                        .requestDigest("sha256:" + "a".repeat(64))
+                        .agentId("qwen-code")
+                        .selection(new WorkspaceSelection("ws-a", "."))
+                        .build())
                 .sessionId());
     }
 

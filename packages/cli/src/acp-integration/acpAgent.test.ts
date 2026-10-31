@@ -15422,10 +15422,18 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       SERVE_STATUS_EXT_METHODS.sessionAgents,
       { sessionId },
     );
+    // Distinguish the admission root from the live target dir so the
+    // workspaceRoot producer is pinned: a relocated session keeps its
+    // admission root while the live cwd moves. Applied after the context
+    // status read above so that assertion still sees the original cwd.
+    vi.mocked(innerConfig.storage.getProjectRoot).mockReturnValue('/repo');
+    vi.mocked(innerConfig.getTargetDir).mockReturnValue('/repo/sub');
     const contextUsage = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionContextUsage,
       { sessionId, detail: true },
     );
+    // Restore the live cwd so the later LSP status assertion still sees /tmp.
+    vi.mocked(innerConfig.getTargetDir).mockReturnValue('/tmp');
     const lsp = await agent.extMethod(
       SERVE_STATUS_EXT_METHODS.sessionLspStatus,
       {
@@ -15547,7 +15555,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(contextUsage).toMatchObject({
       v: 1,
       sessionId,
-      workspaceCwd: '/tmp',
+      workspaceCwd: '/repo/sub',
+      workspaceRoot: '/repo',
       usage: {
         modelName: 'm',
         showDetails: true,

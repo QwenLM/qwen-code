@@ -150,18 +150,18 @@ The web-shell smoke lane is pinned to `ubuntu-latest` to isolate its browsers
 from shared-host network changes (run 40915920935 failed before app startup
 with `ERR_NETWORK_CHANGED` on ARM64). Its retained `Check host font baseline
 (self-hosted)` step is dormant on that routing; should the lane return to a
-shared host, that step runs the L0 half before installing dependencies. When L0
-fails there, it downloads the two DejaVu packages using private APT lists,
-extracts only their font data into
-`${XDG_DATA_HOME:-$HOME/.local/share}/fonts/qwen-ci`, refreshes the runner's
-font cache, and verifies L0 again. This runs at the runner's existing privilege
-level: CI does not elevate or execute the host-provisioning installer. Healthy
-hosts require no download or extraction; acquisition failures and remaining
-runner-user drift still fail the gate, which reports an actionable setup error
-before the layout assertions run. Before moving browser jobs back to a shared
-host, provide network isolation as well as this font baseline; matching fonts
-alone does not prevent interrupted module loads. L1 remains a
-manual/host-provisioning check requiring an installed Chromium.
+shared host, that step runs the L0 half before installing dependencies, so a
+drifted host fails in seconds with an actionable message instead of failing two
+layout assertions 26 minutes into the suite. When L0 fails there, it downloads
+the two DejaVu packages using private APT lists, extracts only their font data
+into `${XDG_DATA_HOME:-$HOME/.local/share}/fonts/qwen-ci`, refreshes the
+runner's font cache, and verifies L0 again. This runs at the runner's existing
+privilege level: CI does not elevate or execute the host-provisioning
+installer. Healthy hosts require no download or extraction; acquisition
+failures and remaining runner-user drift still fail the gate. Before moving
+browser jobs back to a shared host, provide network isolation as well as this
+font baseline; matching fonts alone does not prevent interrupted module loads.
+L1 remains a manual/host-provisioning check requiring an installed Chromium.
 
 ## Regression check
 

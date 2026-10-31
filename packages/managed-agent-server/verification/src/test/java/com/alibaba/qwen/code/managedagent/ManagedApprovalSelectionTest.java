@@ -5,6 +5,7 @@ import com.alibaba.qwen.code.managedagent.api.TenantContextFilter;
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
 import com.alibaba.qwen.code.managedagent.contracts.harness.HarnessConnector;
 import com.alibaba.qwen.code.managedagent.contracts.session.AgentStateStore;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.contracts.workspace.WorkspaceSelection;
 import com.alibaba.qwen.code.managedagent.exception.ManagedAgentException;
 import com.alibaba.qwen.code.managedagent.model.ApiModels.CommandAdmission;
@@ -268,17 +269,15 @@ class ManagedApprovalSelectionTest {
         assertThatThrownBy(
                         () ->
                                 legacy.insertWorkspaceSessionCommand(
-                                        "tenant",
-                                        "actor",
-                                        "key",
-                                        "digest",
-                                        "qwen-code",
-                                        null,
-                                        null,
-                                        List.of(),
-                                        null,
-                                        new WorkspaceSelection("ws", "."),
-                                        "default"))
+                                        SessionCreationCommand.builder()
+                                                .tenantId("tenant")
+                                                .actorId("actor")
+                                                .idempotencyKey("key")
+                                                .requestDigest("digest")
+                                                .agentId("qwen-code")
+                                                .selection(new WorkspaceSelection("ws", "."))
+                                                .requestedApprovalMode("default")
+                                                .build()))
                 .isInstanceOf(UnsupportedOperationException.class);
     }
 

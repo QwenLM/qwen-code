@@ -3629,6 +3629,8 @@ const EN: Messages = {
   'contextUsage.compressInterrupted':
     'Connection changed during compression. Refresh to check current usage.',
   'contextUsage.compressFailed': 'Compression failed. You can try again.',
+  'contextUsage.previewTruncated':
+    'This file is large; the preview shows only its beginning.',
   'contextUsage.compressRefreshFailed':
     'Compression completed, but usage could not be refreshed. Use Refresh to retry.',
   'contextUsage.compressUnavailable':
@@ -7973,6 +7975,7 @@ const ZH: Messages = {
   'contextUsage.compressInterrupted':
     '压缩期间连接发生变化，请刷新查看当前使用量。',
   'contextUsage.compressFailed': '压缩失败，可以重试。',
+  'contextUsage.previewTruncated': '文件较大，预览仅显示开头部分。',
   'contextUsage.compressRefreshFailed':
     '压缩已完成，但用量刷新失败。请点击刷新重试。',
   'contextUsage.compressUnavailable':

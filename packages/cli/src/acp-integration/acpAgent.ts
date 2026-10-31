@@ -9296,6 +9296,7 @@ class QwenAgent implements Agent {
       v: STATUS_SCHEMA_VERSION,
       sessionId,
       workspaceCwd: this.workspaceCwd(config),
+      workspaceRoot: this.sessionWorkspaceRoot(config),
       usage: {
         modelName: usage.modelName,
         totalTokens: usage.totalTokens,
