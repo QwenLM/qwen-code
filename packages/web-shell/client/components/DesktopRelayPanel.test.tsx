@@ -374,3 +374,44 @@ it('retains relay observation when its More trigger is removed and restored', as
     vi.unstubAllGlobals();
   }
 });
+
+it('falls back to English when the UI language has no relay dictionary', async () => {
+  // A locale the shell does not ship a relay dictionary for: the provider is
+  // typed to the known languages, but the runtime value is not checked.
+  const ru = 'ru' as unknown as WebShellLanguage;
+  vi.stubGlobal('isSecureContext', true);
+  const probe = vi.spyOn(relayClient, 'probeDesktopRelay').mockResolvedValue({
+    kind: 'missing',
+  });
+  container = document.createElement('div');
+  document.body.appendChild(container);
+  root = createRoot(container);
+  const slot = document.createElement('div');
+  document.body.appendChild(slot);
+  try {
+    await act(async () => {
+      root!.render(
+        <I18nProvider language={ru}>
+          <DesktopRelayControl triggerClassName="" portalContainer={slot} />
+        </I18nProvider>,
+      );
+    });
+    const trigger = slot.querySelector<HTMLButtonElement>('button');
+    expect(trigger).not.toBeNull();
+    expect(trigger?.getAttribute('aria-label')).toBe('Use this computer');
+    expect(trigger?.getAttribute('title')).toBe('Use this computer');
+    await act(async () => trigger!.click());
+    expect(
+      document.querySelector('[data-web-shell-desktop-relay-panel]')
+        ?.textContent,
+    ).toContain('Relay not detected');
+  } finally {
+    act(() => root?.unmount());
+    root = null;
+    slot.remove();
+    container?.remove();
+    container = null;
+    probe.mockRestore();
+    vi.unstubAllGlobals();
+  }
+});
