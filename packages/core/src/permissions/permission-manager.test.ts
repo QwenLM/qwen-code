@@ -2741,28 +2741,42 @@ describe('PermissionManager', () => {
       expect(sessionAllowRules(pm)).toHaveLength(1);
     });
 
-    it('malformed session allow rule is silently ignored', async () => {
+    it('a malformed session allow rule grants nothing and reports itself', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       pm.addSessionAllowRule('Bash(git commit');
       // 'git commit' is not readonly, so default is 'ask'.
       // The malformed rule must not act as catch-all allow.
       expect(await pm.evaluate(sh('git commit'))).toBe('ask');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'session: ignoring malformed allow rule (no closing parenthesis at the end): "Bash(git commit"',
+        ),
+      );
+      warnSpy.mockRestore();
     });
 
-    it('malformed session deny rule is silently ignored', async () => {
+    it('a malformed session deny rule denies nothing and reports itself', async () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       pm.addSessionDenyRule('Bash(rm -rf /)*');
       // Should NOT deny — the malformed rule must not act as catch-all
       expect(await pm.evaluate(sh('git status'))).not.toBe('deny');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'session: ignoring malformed deny rule (no closing parenthesis at the end): "Bash(rm -rf /)*"',
+        ),
+      );
+      warnSpy.mockRestore();
     });
 
     it('tells the operator when a malformed deny rule is dropped', () => {
       const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
-        pm.addSessionDenyRule('Bash(rm -rf /)*');
+        pm.addSessionDenyRule('Bash(rm -rf /home)*');
         // A deny rule that protects nothing is the dangerous direction: the
         // operator's model says "blocked" while the runtime has no rule.
         expect(warn).toHaveBeenCalledTimes(1);
         expect(warn.mock.calls[0]![0]).toContain('deny rule');
-        expect(warn.mock.calls[0]![0]).toContain('Bash(rm -rf /)*');
+        expect(warn.mock.calls[0]![0]).toContain('Bash(rm -rf /home)*');
       } finally {
         warn.mockRestore();
       }
@@ -2804,15 +2818,130 @@ describe('PermissionManager', () => {
       expect(sessionAllow?.rule.toolName).toBe('run_shell_command');
     });
 
-    it('excludes malformed rules from listing', async () => {
+    it('lists malformed rules as unparsable instead of hiding them', () => {
+      // A dropped deny rule is a restriction the operator thinks exists. The
+      // listing has to show it so it can be seen and deleted.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       pm = makePm({
         permissionsAllow: ['ReadFileTool'],
         permissionsDeny: ['Bash(rm -rf /)*'],
       });
 
       const rules = pm.listRules();
-      expect(rules.length).toBe(1);
-      expect(rules[0]!.rule.toolName).toBe('read_file');
+      expect(rules).toHaveLength(2);
+      const malformed = rules.find((r) => r.type === 'deny');
+      expect(malformed?.rule.invalid).toBe(true);
+      expect(malformed?.rule.raw).toBe('Bash(rm -rf /)*');
+      warnSpy.mockRestore();
+    });
+  });
+
+  describe('malformed rule reporting', () => {
+    it('reports a malformed settings deny rule at startup, naming the list', () => {
+      // The reported case (#15752): a legal JSON string whose parentheses do
+      // not balance is accepted, then silently enforces nothing.
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      pm = makePm({ permissionsDeny: ['Bash(docker *'] });
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'permissions.deny: ignoring malformed deny rule (no closing parenthesis at the end): "Bash(docker *"',
+        ),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('stays quiet when every configured rule parses', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      pm = makePm({ permissionsDeny: ['Bash(docker *)'] });
+
+      expect(warnSpy).not.toHaveBeenCalledWith(
+        expect.stringContaining('permissions.'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('keeps raw escape bytes out of the warning', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      pm = makePm({ permissionsDeny: ['Bash(docker *\u001b[2J'] });
+
+      const message = warnSpy.mock.calls
+        .map(([first]) => String(first))
+        .find((text) => text.includes('ignoring malformed deny rule'));
+      expect(message).toBeDefined();
+      // A cloned repository's settings can hold an escape sequence; the
+      // warning reaches the terminal before Ink takes it over.
+      expect(message).toContain('\\u001b[2J');
+      expect(message).not.toContain('\u001b');
+      warnSpy.mockRestore();
+    });
+
+    it('reports the same malformed rule once per process, not once per manager', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      // The hosted permission path builds a manager and calls initialize() on
+      // every tool call, so a per-instance guard would repeat the warning.
+      makePm({ permissionsDeny: ['Bash(kubectl *'] });
+      makePm({ permissionsDeny: ['Bash(kubectl *'] });
+
+      expect(
+        warnSpy.mock.calls.filter(([first]) =>
+          String(first).includes('Bash(kubectl *'),
+        ),
+      ).toHaveLength(1);
+      warnSpy.mockRestore();
+    });
+
+    it('names the session as the origin of a session-scoped rule', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      pm.addSessionAllowRule('Bash(terraform *');
+
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('session: ignoring malformed allow rule'),
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('keeps an unparsable allow rule visible in AUTO mode', () => {
+      pm = makePm({
+        permissionsAllow: ['Bash(docker *'],
+        approvalMode: 'auto',
+      });
+
+      // An inert rule cannot bypass the classifier, and stashing it would hide
+      // it from the listing the operator deletes it from.
+      expect(pm.stripDangerousRulesForAutoMode().persistent).toHaveLength(0);
+      expect(
+        pm.listRules().some((entry) => entry.rule.raw === 'Bash(docker *'),
+      ).toBe(true);
+    });
+
+    it('rejects a malformed session allow rule before AUTO stashing', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      pm = makePm({ approvalMode: 'auto' });
+      pm.addSessionAllowRule('Bash(ansible *');
+
+      // `addSessionAllowRule` reports an invalid rule and returns before it is
+      // pushed, so the session half of the AUTO filter has nothing to keep:
+      // the rule can be neither stashed nor listed.
+      expect(pm.stripDangerousRulesForAutoMode().session).toEqual([]);
+      expect(pm.getStrippedDangerousRules()?.session).toEqual([]);
+      expect(
+        pm.listRules().some((entry) => entry.rule.raw === 'Bash(ansible *'),
+      ).toBe(false);
+      warnSpy.mockRestore();
+    });
+
+    it('keeps the durable debug-log record of a dropped rule', () => {
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      debugLoggerMock.warn.mockClear();
+      pm = makePm({ permissionsDeny: ['Bash(flux *'] });
+
+      // A run with stderr discarded still has to record the dropped rule in
+      // the debug log file.
+      expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+        expect.stringContaining('Ignoring malformed deny rule'),
+      );
+      warnSpy.mockRestore();
     });
   });
 

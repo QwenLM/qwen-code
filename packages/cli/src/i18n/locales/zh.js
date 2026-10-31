@@ -2743,4 +2743,5 @@ export default {
     '查看其他 Qwen Code 会话发来的待处理消息（accept | deny），并管理受信任控制器（controllers | revoke）',
   'Create a git commit with an AI-drafted message':
     '使用 AI 起草的提交信息创建 git 提交',
+  '(unparsable)': '（无法解析）',
 };

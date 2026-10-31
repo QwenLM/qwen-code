@@ -19,6 +19,7 @@ import { SettingScope } from '../../config/settings.js';
 import { TextInput } from './shared/TextInput.js';
 import { Colors } from '../colors.js';
 import { t } from '../../i18n/index.js';
+import { permissionRuleLabel } from '../utils/permission-rule-label.js';
 import type { PermissionManager } from '@qwen-code/qwen-code-core/permissions/permission-manager.js';
 import type {
   RuleWithSource,
@@ -429,7 +430,7 @@ export function PermissionsDialog({
     ];
     for (const r of filteredRules) {
       items.push({
-        label: `${r.rule.raw}`,
+        label: permissionRuleLabel(r.rule),
         value: r.rule.raw,
         key: `${r.type}-${r.scope}-${r.rule.raw}`,
       });
@@ -529,9 +530,11 @@ export function PermissionsDialog({
         'permissions'
       ] as Record<string, string[]> | undefined;
       const scopeRules = perms?.[ruleType];
-      if (scopeRules?.includes(deleteTarget.rule.raw)) {
+      // `parseRule` trims, so compare against the trimmed stored entry or a
+      // rule written with surrounding whitespace is removed from memory only.
+      if (scopeRules?.some((r: string) => r.trim() === deleteTarget.rule.raw)) {
         const updated = scopeRules.filter(
-          (r: string) => r !== deleteTarget.rule.raw,
+          (r: string) => r.trim() !== deleteTarget.rule.raw,
         );
         settings.setValue(scope, `permissions.${ruleType}`, updated);
         break;

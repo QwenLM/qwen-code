@@ -1119,11 +1119,54 @@ describe('permissions data and mutations', () => {
   it('maps PermissionManager rules and workspace directories', () => {
     const data = buildPermissionsData(config);
     expect(data.rules).toEqual([
-      { raw: 'Bash(git *)', toolName: 'Bash', type: 'allow', scope: 'user' },
-      { raw: 'Write', toolName: 'Write', type: 'deny', scope: 'session' },
+      {
+        raw: 'Bash(git *)',
+        toolName: 'Bash',
+        type: 'allow',
+        scope: 'user',
+        invalid: false,
+      },
+      {
+        raw: 'Write',
+        toolName: 'Write',
+        type: 'deny',
+        scope: 'session',
+        invalid: false,
+      },
     ]);
     expect(data.directories).toEqual(['/workspace/a']);
     expect(data.initialDirectories).toEqual(['/workspace/a']);
+  });
+
+  it('flags an unparsable rule so the dialog can mark it', () => {
+    const data = buildPermissionsData(
+      stubConfig({
+        getPermissionManager: (() => ({
+          listRules: () => [
+            {
+              rule: { raw: 'Bash(docker *', toolName: 'Bash', invalid: true },
+              type: 'deny',
+              scope: 'user',
+            },
+          ],
+          addPersistentRule,
+          removePersistentRule,
+        })) as unknown as Config['getPermissionManager'],
+        getWorkspaceContext: (() => ({
+          getDirectories: () => [],
+          getInitialDirectories: () => [],
+        })) as unknown as Config['getWorkspaceContext'],
+      }),
+    );
+    expect(data.rules).toEqual([
+      {
+        raw: 'Bash(docker *',
+        toolName: 'Bash',
+        type: 'deny',
+        scope: 'user',
+        invalid: true,
+      },
+    ]);
   });
 
   it('adds a rule to the manager and persists it to the chosen scope', () => {
@@ -1167,6 +1210,21 @@ describe('permissions data and mutations', () => {
     });
     deletePermissionRule(config, settings, 'Bash(git *)', 'allow');
     expect(removePersistentRule).toHaveBeenCalledWith('Bash(git *)', 'allow');
+    expect(written).toContainEqual({
+      scope: SettingScope.User,
+      key: 'permissions.allow',
+      value: [],
+    });
+  });
+
+  it('persists the deletion of a rule stored with surrounding whitespace', () => {
+    // `parseRule` trims, so the row's value is `Bash(git *)` while the stored
+    // entry keeps its spaces; an exact comparison would drop it from memory
+    // only and the rule would return on the next start.
+    const { settings, written } = createFakeSettings({
+      user: { permissions: { allow: [' Bash(git *) '] } } as Settings,
+    });
+    deletePermissionRule(config, settings, 'Bash(git *)', 'allow');
     expect(written).toContainEqual({
       scope: SettingScope.User,
       key: 'permissions.allow',

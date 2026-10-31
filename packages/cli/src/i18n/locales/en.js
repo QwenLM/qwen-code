@@ -2967,4 +2967,5 @@ export default {
     'Review messages held from other Qwen Code sessions (accept | deny), and manage trusted controllers (controllers | revoke)',
   'Create a git commit with an AI-drafted message':
     'Create a git commit with an AI-drafted message',
+  '(unparsable)': '(unparsable)',
 };

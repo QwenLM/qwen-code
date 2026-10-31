@@ -183,6 +183,25 @@ describe('OpenTuiPermissionsDialog rule rows', () => {
     expect(screen.getByText(/Project settings/)).toBeTruthy();
   });
 
+  it('marks a rule whose parentheses do not balance', () => {
+    // A rule the parser rejected matches nothing. It stays listed — so it can
+    // be seen and deleted — but must say so, or the row reads as active.
+    const { container } = renderPermissions([
+      { raw: 'Bash(git *)', toolName: 'Bash', type: 'allow', scope: 'user' },
+      {
+        raw: 'Bash(docker *',
+        toolName: 'Bash',
+        type: 'allow',
+        scope: 'user',
+        invalid: true,
+      },
+    ]);
+    const painted = container.textContent ?? '';
+    // The marker leads the row so tail truncation cannot clip it away.
+    expect(painted).toContain('(unparsable) Bash(docker *');
+    expect(painted.match(/\(unparsable\)/g)).toHaveLength(1);
+  });
+
   it('flattens a newline inside a workspace directory row', () => {
     const { container } = render(
       <OpenTuiPermissionsDialog

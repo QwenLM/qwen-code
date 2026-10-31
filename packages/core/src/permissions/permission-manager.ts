@@ -13,7 +13,6 @@ import {
   splitCompoundCommand,
   SHELL_TOOL_NAMES,
   toolMatchesRuleToolName,
-  warnDroppedPermissionRule,
 } from './rule-parser.js';
 import type { McpToolIdentity, PathMatchContext } from './rule-parser.js';
 import type { ToolRegistry } from '../tools/tool-registry.js';
@@ -45,6 +44,10 @@ import type {
 } from './types.js';
 
 const debugLogger = createDebugLogger('PERMISSIONS');
+
+// Malformed rules already reported, keyed by origin and raw text. Module-level
+// because the hosted permission path builds a new manager per tool call.
+const reportedMalformedRules = new Set<string>();
 
 /**
  * How a tool participates in the registry for this session.
@@ -281,6 +284,51 @@ export class PermissionManager {
   constructor(private readonly config: PermissionManagerConfig) {}
 
   /**
+   * Parse one configuration list into rules, reporting every entry that has no
+   * closing parenthesis.
+   *
+   * A malformed rule is inert: it matches nothing. For an `allow` list that is
+   * the safe direction, but for `deny`/`ask` it silently removes the
+   * restriction the operator wrote, so the report has to reach the operator —
+   * the debug log file is off in default runs.
+   */
+  private parsePersistentRules(
+    raws: string[],
+    type: RuleType,
+  ): PermissionRule[] {
+    const rules = parseRules(raws);
+    for (const rule of rules) {
+      if (rule.invalid) {
+        this.warnMalformedRule(type, rule.raw, `permissions.${type}`);
+      }
+    }
+    return rules;
+  }
+
+  /**
+   * Reports a rule `parseRule` marked invalid.
+   *
+   * `origin` names where the rule came from — a settings list or the session /
+   * a skill's `allowedTools` — because the settings list is what an operator
+   * would go looking for. The report is emitted once per distinct rule per
+   * process: the hosted path calls `initialize()` (and builds a new manager)
+   * on every tool call, so per-instance deduplication would not hold.
+   */
+  private warnMalformedRule(type: RuleType, raw: string, origin: string): void {
+    const key = `${origin}:${type}\u0000${raw}`;
+    if (reportedMalformedRules.has(key)) return;
+    reportedMalformedRules.add(key);
+    debugLogger.warn(
+      `Ignoring malformed ${type} rule (no closing parenthesis): ${raw}`,
+    );
+    // eslint-disable-next-line no-console -- operator-facing breadcrumb; the debug log file is off in default runs, where a dropped rule would otherwise be invisible
+    console.warn(
+      `${origin}: ignoring malformed ${type} rule (no closing parenthesis at the end): ${JSON.stringify(raw)}. ` +
+        `The rule has no effect; end it with ")" to apply it.`,
+    );
+  }
+
+  /**
    * Initialise from the config's permission parameters.
    * Must be called once before any rule lookups.
    *
@@ -289,9 +337,18 @@ export class PermissionManager {
    */
   initialize(): void {
     this.persistentRules = {
-      allow: parseRules(this.config.getPermissionsAllow() ?? []),
-      ask: parseRules(this.config.getPermissionsAsk() ?? []),
-      deny: parseRules(this.config.getPermissionsDeny() ?? []),
+      allow: this.parsePersistentRules(
+        this.config.getPermissionsAllow() ?? [],
+        'allow',
+      ),
+      ask: this.parsePersistentRules(
+        this.config.getPermissionsAsk() ?? [],
+        'ask',
+      ),
+      deny: this.parsePersistentRules(
+        this.config.getPermissionsDeny() ?? [],
+        'deny',
+      ),
     };
 
     // Build the coreTools allowlist (legacy whitelist semantic).
@@ -1439,10 +1496,7 @@ export class PermissionManager {
       const rule = parseRule(raw);
       if (options?.trustGated) rule.trustGated = true;
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed allow rule (unbalanced parentheses): ${rule.raw}`,
-        );
-        warnDroppedPermissionRule(rule.raw, 'allow');
+        this.warnMalformedRule('allow', rule.raw, 'session');
         return;
       }
       // AUTO mode invariant: while dangerous allow rules are stripped,
@@ -1493,10 +1547,7 @@ export class PermissionManager {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed deny rule (unbalanced parentheses): ${rule.raw}`,
-        );
-        warnDroppedPermissionRule(rule.raw, 'deny');
+        this.warnMalformedRule('deny', rule.raw, 'session');
         return;
       }
       this.sessionRules.deny.push(rule);
@@ -1510,10 +1561,7 @@ export class PermissionManager {
     if (raw && raw.trim()) {
       const rule = parseRule(raw);
       if (rule.invalid) {
-        debugLogger.warn(
-          `Ignoring malformed ask rule (unbalanced parentheses): ${rule.raw}`,
-        );
-        warnDroppedPermissionRule(rule.raw, 'ask');
+        this.warnMalformedRule('ask', rule.raw, 'session');
         return;
       }
       this.sessionRules.ask.push(rule);
@@ -1536,10 +1584,7 @@ export class PermissionManager {
   addPersistentRule(raw: string, type: RuleType): PermissionRule {
     const rule = parseRule(raw);
     if (rule.invalid) {
-      debugLogger.warn(
-        `Ignoring malformed ${type} rule (unbalanced parentheses): ${rule.raw}`,
-      );
-      warnDroppedPermissionRule(rule.raw, type);
+      this.warnMalformedRule(type, rule.raw, `permissions.${type}`);
       return rule;
     }
     // AUTO mode invariant: see addSessionAllowRule above. A dangerous
@@ -1623,21 +1668,23 @@ export class PermissionManager {
   // ---------------------------------------------------------------------------
 
   /**
-   * Return all active rules with their types and scopes, suitable for
-   * display in the /permissions dialog.
+   * Return every rule with its type and scope, including unparsable ones
+   * flagged by `rule.invalid`, suitable for display in the /permissions
+   * dialog. Callers that report enforced rules must filter those out:
+   * `evaluate()` never matches them.
    */
   listRules(): RuleWithSource[] {
     const result: RuleWithSource[] = [];
 
+    // Unparsable rules are listed too, flagged by `rule.invalid`, so the
+    // operator can see — and delete — a rule that is silently doing nothing.
     const addRules = (
       rules: PermissionRule[],
       type: RuleType,
       scope: RuleScope,
     ) => {
       for (const rule of rules) {
-        if (!rule.invalid) {
-          result.push({ rule, type, scope });
-        }
+        result.push({ rule, type, scope });
       }
     };
 
@@ -1681,10 +1728,15 @@ export class PermissionManager {
       return this.strippedAllowRules;
     }
 
+    // An unparsable rule is inert, so it cannot bypass the AUTO classifier;
+    // stashing it would hide it from the listing the operator uses to delete
+    // it, while the rule keeps matching nothing anyway.
     const persistentDangerous = findDangerousAllowRules(
-      this.persistentRules.allow,
+      this.persistentRules.allow.filter((rule) => !rule.invalid),
     );
-    const sessionDangerous = findDangerousAllowRules(this.sessionRules.allow);
+    const sessionDangerous = findDangerousAllowRules(
+      this.sessionRules.allow.filter((rule) => !rule.invalid),
+    );
 
     if (persistentDangerous.length === 0 && sessionDangerous.length === 0) {
       this.strippedAllowRules = { persistent: [], session: [] };
