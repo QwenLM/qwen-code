@@ -52,13 +52,13 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `enabled` | — | 布尔 | `false` | 是否将工具结果投影为公开工具结果和制品，以及是否提供制品读取 API。除非同时开启 `qwen.managed-agent.tool-publication.enabled`，否则读取返回未找到；读取还要求已认证的 actor。 |
+| `enabled` | — | 布尔 | `false` | 是否将工具结果投影为公开工具结果和制品，以及是否提供制品读取 API。除非同时开启 `qwen.managed-agent.tool-publication.enabled`，否则读取返回未找到；读取还要求已认证的 actor。即使为 false，已提交的工具回执仍会被记录下来等待投影，因此之后开启时，关闭期间记录的工具结果也会被投影。 |
 | `max-concurrent-reads` | — | 整数 | `4` | 本服务进程可同时提供的制品内容下载数；超出的下载返回 HTTP 429 `artifact_read_limit` 并带 `Retry-After: 1`。至少为 `1`（否则启动时拒绝）。 |
 | `projection-interval` | — | 时长 | `1000` | 工具结果投影任务的运行间隔；每次最多将 8 个待处理的工具结果投影为公开工具结果和制品。纯数字按毫秒解析，也可使用带单位的值如 `1s`。`qwen.managed-agent.artifacts.enabled` 不为 true 时该任务不做任何事。 |
 | `publish-original` | — | 布尔 | `false` | 投影时是否将工具结果中已封存的 stdout 和 stderr 流发布为可下载制品，以及可读取该 Session 的 actor 是否可以下载它们。需要开启 `qwen.managed-agent.artifacts.enabled`。 |
 | `publish-preview` | — | 布尔 | `false` | 投影后的工具结果是否附带一段简短文本预览（取自某个流开头最多 8 KiB，并去除 ANSI 与控制字符），所有 Session 读者均可见。需要开启 `qwen.managed-agent.artifacts.publish-original`。 |
-| `read-revalidation-interval` | — | 时长 | `5s` | 进行中的制品下载重新检查调用方访问权限（Workspace 授权、读取策略、Session 状态）的间隔；`PT0S` 表示每个数据块前都检查。权限撤销后，窗口内已写出的数据块仍会送达客户端。不带单位的数字按秒解析。 |
-| `read-timeout` | — | 时长 | `2m` | 单次制品内容下载允许的总时长；在数据块之间检查：首个数据块发出前超出则返回 `503 artifact_unavailable`，已在传输中的下载会被中途截断。必须为正（否则启动时拒绝）。不带单位的数字按秒解析。 |
+| `read-revalidation-interval` | — | 时长 | `5s` | 进行中的制品下载重新检查调用方访问权限（Workspace 授权、读取策略、Session 状态）的间隔；`PT0S` 表示每个数据块前都检查。权限撤销后，下一次检查之前写出的内容仍会送达客户端：流式下载最多为一个窗口内写出的数据；Range 请求的响应（最多 1 MiB）在最后一次检查后一次性写出，会完整送达。某次检查拒绝后，不再写出任何内容。不带单位的数字按秒解析。 |
+| `read-timeout` | — | 时长 | `2m` | 单次制品内容下载允许的总时长；在数据块之间检查：首个数据块发出前超出则返回 `503 artifact_unavailable`，已在传输中的下载会被中途截断。无论此值多大，以下情况也会以同样方式结束下载：一次存储读取 50 秒内未收到任何数据（OSS 客户端的默认 socket 超时，没有设置可以修改）；或两个数据块之间的间隔长到让下载对已存储输出持有的读租约过期——租约随数据块读取而续期，间隔超过 90 秒就可能结束下载，满两分钟则一定结束。必须为正（否则启动时拒绝）。不带单位的数字按秒解析。 |
 
 ## `qwen.managed-agent.auth`
 
@@ -81,9 +81,9 @@ Managed Agent 服务端的顶层设置：内置 agent 的修订号、存储的 A
 | `concurrency` | — | 整数 | `4` | 重叠策略为 `allow` 的单个自动化定义可同时持有的未结束运行数；超出后，再到期的槽位记为 `skipped`，原因为 `count_limit`。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
 | `enabled` | `QWEN_MANAGED_AGENT_AUTOMATION_ENABLED` | 布尔 | `false` | 是否运行自动化扫描器，并受理自动化的创建、修改、退役与手动运行路由；关闭时这些路由返回 `409 automation_unavailable`，读取路由照常应答。这些路由还要求开启 `qwen.managed-agent.session-store.enabled`。开启后，自动化的计数或时长若不为正，启动时拒绝。 |
 | `late-tolerance` | `QWEN_MANAGED_AGENT_AUTOMATION_LATE_TOLERANCE` | 时长 | `5m` | 扫描器发现到期槽位时，允许其迟到多久仍按计划触发。更迟的槽位按定义的补跑策略（`none`、`latest` 或 `bounded`）处理，未被补跑的记为错过。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
-| `lease` | `QWEN_MANAGED_AGENT_AUTOMATION_LEASE` | 时长 | `60s` | 扫描轮次或手动运行持有自动化定义租约的时长，从认领时起算；租约过期后其他节点即可认领该定义。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
+| `lease` | `QWEN_MANAGED_AGENT_AUTOMATION_LEASE` | 时长 | `60s` | 扫描轮次或手动运行持有自动化定义租约的时长，从认领时起算；租约过期后其他节点即可认领该定义，自该认领起，原持有者对它的写入都会被拒绝。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
 | `lookback` | `QWEN_MANAGED_AGENT_AUTOMATION_LOOKBACK` | 时长 | `24h` | 扫描器为定义推导到期槽位时最多回看的时长；早于该窗口（或早于定义启用时刻）的槽位既不触发也不记录，从而限定所有补跑的范围。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
-| `max-slots-per-tick` | — | 整数 | `1000` | 单个扫描轮次中每个定义最多保留的到期槽位数；回看窗口内超出时，最旧的槽位被截去并记录一条警告。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
+| `max-slots-per-tick` | — | 整数 | `1000` | 单个扫描轮次中每个定义最多保留的到期槽位数；回看窗口内超出时，最旧的槽位被截去并记录一条警告。该上限不会缩短扫描本身：扫描器仍会从该定义上一轮扫描停下的位置起逐分钟检查，最多覆盖整个回看窗口。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
 | `scan-delay` | `QWEN_MANAGED_AGENT_AUTOMATION_SCAN_DELAY` | 时长 | `10s` | 自动化扫描器从一轮扫描结束到下一轮开始之间等待的时长。开启自动化时，非正值启动时拒绝。不带单位的数字按毫秒计。 |
 | `scanner-threads` | — | 整数 | `4` | 单个扫描轮次并行处理的定义行数；该轮会等待所有行处理完毕，下一轮才开始。`qwen.managed-agent.automation.enabled` 为 true 时，小于 1 的值启动时拒绝。 |
 
@@ -223,7 +223,7 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 
 | 属性 | 环境变量 | 类型 | 默认值 | 说明 |
 | --- | --- | --- | --- | --- |
-| `allow-non-loopback` | `QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK` | 布尔 | `false` | 是否允许内嵌 Runtime Broker 绑定 `qwen.managed-agent.runtime-broker.host` 中的非回环地址（例如 `0.0.0.0`）；未开启时，此类地址启动时拒绝。该监听器通过明文 HTTP 使用同一个全局 bearer token，因此只应在终止 TLS 并对调用方鉴权的前置层之后开启。`managed-local` profile 无论此项如何都拒绝非回环 host。 |
+| `allow-non-loopback` | `QWEN_MANAGED_AGENT_RUNTIME_BROKER_ALLOW_NON_LOOPBACK` | 布尔 | `false` | 是否允许内嵌 Runtime Broker 绑定 `qwen.managed-agent.runtime-broker.host` 中的非回环地址（例如 `0.0.0.0`）；未开启时，此类地址启动时拒绝。该监听器通过明文 HTTP 使用同一个全局 bearer token，且没有按租户的鉴权，因此只应在终止 TLS 并对调用方鉴权的前置层之后开启：仅限制网络仍会以明文传输该 token，读到它的人可以操控 Broker 接纳的所有执行。`managed-local` profile 无论此项如何都拒绝非回环 host。 |
 | `bound-session-isolation-class` | — | 字符串 | `session` | 绑定到本地挂载 Workspace 的 Session 如何共享 Runtime worker：`session` 为每个 Session 单独启动 worker，`workspace` 让同一 Workspace 的 Session 共用一个 worker。其他取值启动时拒绝。`workspace` 要求使用 `local-process` provisioner 并开启 `qwen.managed-agent.runtime-broker.durable-local-process`，且不能与 `qwen.managed-agent.runtime-broker.child-workspaces-enabled` 同时使用；Session worktree 与公开子 agent 需要 `session`。SSH 绑定的 Session 始终使用 `session`。 |
 | `child-snapshots-enabled` | — | 布尔 | `false` | 是否允许 Hosted Session 额外启动只读的快照子 agent：子 agent 通过不含写入工具的工具 profile 读取父 Workspace 的冻结副本，该副本总会被丢弃。需要 `qwen.managed-agent.runtime-broker.child-workspaces-enabled`；单独开启时启动时拒绝，使用外部 provisioner 时也启动时拒绝。 |
 | `child-workspace-git` | — | 字符串 | `git` | 子 Workspace 与 Session worktree 步骤所调用的 Git 可执行文件；只写名称时在服务端的 `PATH` 中查找。须为 Git 2.40 及以上。开启 `qwen.managed-agent.runtime-broker.child-workspaces-enabled` 时，启动会探测其版本，更旧的 Git 启动时拒绝。 |
@@ -261,7 +261,7 @@ Workspace 扩展包的发布与管理，以及哪些 actor 有权执行这些操
 | `static-token` | `QWEN_MANAGED_AGENT_STATIC_RUNTIME_TOKEN` | 字符串 | *（空）* | Broker 访问 static Runtime worker 时出示的 Bearer 令牌，属于密钥；已保存的绑定用 Runtime 凭据密钥（`qwen.managed-agent.runtime-broker.credential-key`）加密存储它。`qwen.managed-agent.runtime-broker.provisioner` 为 `static` 时必填，最长 512 个字符。 |
 | `token` | `QWEN_MANAGED_AGENT_RUNTIME_BROKER_TOKEN` | 字符串 | *（空）* | Hosted Harness 访问内嵌 Runtime Broker 私有监听端口时出示的 Bearer 令牌；它也用于授权仅限回环地址的外部存储登记接口。属于密钥。`qwen.managed-agent.runtime-broker.enabled` 为 true 时必填，最长 512 个字符。也可以改由 `qwen.managed-agent.harness.credentials-file` 中的 `QWEN_MANAGED_RUNTIME_BROKER_TOKEN` 提供；两处同时设置时启动时拒绝。 |
 | `trusted-local-reboot-recovery` | `QWEN_MANAGED_AGENT_RUNTIME_TRUSTED_LOCAL_REBOOT_RECOVERY` | 布尔 | `true` | Linux 主机整机重启后，Broker 是否把内核 boot ID 的变化视为原本地 worker 已停止的证据，并在所有执行都已终结后清除这些已保存 Runtime 绑定的持有者。它每 5 秒扫描 8 个已保存的绑定，从不启动替代 worker，也不重放执行。要求 `qwen.managed-agent.runtime-broker.durable-local-process` 和 `local-process` provisioner；不满足条件、在 macOS 上或配置了常驻 Workspace 时启动时拒绝。 |
-| `v3-result-window` | `QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW` | 时长 | `30m` | Runtime Broker 等待 worker 返回已派发的、会发布输出的 Shell 或 Monitor 执行（Tool v3，开启 `qwen.managed-agent.tool-publication.enabled` 时使用）结果的最长时间，超时后把该执行标记为 `UNKNOWN`；若短于最长的此类调用，该调用会变成 `UNKNOWN`。其他工具执行不使用此窗口。不带单位的数字按秒解析。低于 `1s` 时启动时拒绝。 |
+| `v3-result-window` | `QWEN_MANAGED_AGENT_RUNTIME_BROKER_V3_RESULT_WINDOW` | 时长 | `30m` | Runtime Broker 等待 worker 返回已派发的、会发布输出的 Shell 或 Monitor 执行（Tool v3，开启 `qwen.managed-agent.tool-publication.enabled` 时使用）结果的最长时间，超时后把该执行标记为 `UNKNOWN`；若短于最长的此类调用，该调用会变成 `UNKNOWN`。其他工具执行不使用此窗口。大于 `30m` 在随发行版提供的执行路径上没有作用：Hosted Harness 自身等待 Tool v3 执行的期限固定为 30 分钟。不带单位的数字按秒解析。低于 `1s` 时启动时拒绝。 |
 | `verified-workspace-recovery-enabled` | `QWEN_MANAGED_AGENT_RUNTIME_VERIFIED_WORKSPACE_RECOVERY_ENABLED` | 布尔 | `false` | LOCAL Workspace 的执行是否以已验证的物理存储登记为前提：在工具、文件访问或子 Git 操作运行前，服务端检查 Workspace 根目录是否仍与登记的身份和标记一致，否则以 `409 workspace_unavailable` 拒绝。`qwen.managed-agent.runtime-broker.workspace-creation-root` 和 `qwen.managed-agent.runtime-broker.local-directory-import-enabled` 都依赖它；未配置 `qwen.managed-agent.runtime-broker.workspace-mounts` 时，它也满足 `qwen.managed-agent.harness.workspace-files-enabled` 对 Workspace 来源的要求。与外部 provisioner 或常驻 Workspace 同时使用时启动时拒绝。 |
 | `worker-entry` | `QWEN_MANAGED_AGENT_RUNTIME_WORKER_ENTRY` | 字符串 | *（空）* | 已构建的 Qwen Code CLI 包路径（例如 `dist/cli.js`），由 `qwen.managed-agent.runtime-broker.node-executable` 以 `managed-runtime-worker` 参数运行，以启动 local-process worker；LOCAL Workspace 的文件引用检查和上传也通过它执行。`qwen.managed-agent.runtime-broker.provisioner` 为 `local-process` 时必填；相对路径按服务端的工作目录解析。 |
 | `workspace-creation-root` | `QWEN_MANAGED_AGENT_WORKSPACE_CREATION_ROOT` | 字符串 | *（空）* | 已存在、规范化且服务账号可写的目录，用户“从零开始”创建 Workspace 时，服务端在其下按租户分子目录新建空 Workspace；留空则禁用 Workspace 创建。它不得与任何 `qwen.managed-agent.runtime-broker.workspace-mounts` 根目录、`qwen.managed-agent.runtime-broker.state-directory` 或 `qwen.managed-agent.runtime-broker.workspace-cwd` 重叠，并要求启用 `qwen.managed-agent.harness.workspace-files-enabled`、`qwen.managed-agent.runtime-broker.durable-local-process` 和 `qwen.managed-agent.runtime-broker.verified-workspace-recovery-enabled`；不满足条件或使用外部 provisioner 时启动时拒绝。启用后，任何已认证的租户用户都可以在其中分配存储并成为所有者。 |
