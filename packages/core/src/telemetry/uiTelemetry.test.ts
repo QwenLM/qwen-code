@@ -1189,6 +1189,12 @@ describe('UiTelemetryService', () => {
       expect(service.getMetrics().models['m']?.tokens.prompt).toBe(300);
     });
 
+    it('resetSession should clear the cached-content mirror', () => {
+      service.setLastCachedContentTokenCount(42);
+      service.resetSession(SESSION_A);
+      expect(service.getLastCachedContentTokenCount()).toBe(0);
+    });
+
     it('removeSession should prevent late events from recreating bucket', () => {
       service.addEvent(makeApiEvent('m', 100), SESSION_A);
       service.removeSession(SESSION_A);
