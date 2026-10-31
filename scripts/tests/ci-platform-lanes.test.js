@@ -113,17 +113,42 @@ describe('complete macOS test groups', () => {
 const ECS_RUNNER = '["self-hosted", "linux", "x64", "ecs-qwen"]';
 const ARM_RUNNER = '["self-hosted", "linux", "arm64"]';
 const HOSTED_RUNNER = '["ubuntu-latest"]';
-const timeoutMinutesOn = (job, ubuntuRunner) => {
+// The classifier output a job's own `runs-on` reads. Deriving it is what makes
+// a ceiling pointed at the OTHER output red: only this name is substituted, so
+// `lint_runner` left inside a gate that runs on `ubuntu_runner` survives the
+// substitution and trips the unmodelled-term throw below.
+const runnerOutputOf = (job) => {
+  const names = [
+    ...new Set(
+      [
+        ...String(ci.jobs[job]['runs-on']).matchAll(
+          /needs\.classify_pr\.outputs\.(\w+)/g,
+        ),
+      ].map((match) => match[1]),
+    ),
+  ];
+  if (names.length !== 1) {
+    throw new Error(
+      `${job} runs-on names ${names.length} classifier outputs: ${names}`,
+    );
+  }
+  return names[0];
+};
+const timeoutMinutesOn = (job, runner) => {
   // The same `|| '["ubuntu-latest"]'` default the runs-on expression carries:
   // a missing output (classify_pr skipped) is the hosted routing. The caller
   // passes the value of the output the job itself reads — ubuntu_runner for
   // the association-gated lanes, lint_runner for lint_and_static.
-  const effective = ubuntuRunner || HOSTED_RUNNER;
+  const effective = runner || HOSTED_RUNNER;
+  const output = runnerOutputOf(job);
   let expr = String(ci.jobs[job]['timeout-minutes'])
     .replace(/^\$\{\{\s*/, '')
     .replace(/\s*\}\}$/, '')
     .replace(
-      /contains\(needs\.classify_pr\.outputs\.(?:ubuntu|lint)_runner \|\| '\["ubuntu-latest"\]', 'self-hosted'\)/g,
+      new RegExp(
+        `contains\\(needs\\.classify_pr\\.outputs\\.${output} \\|\\| '\\["ubuntu-latest"\\]', 'self-hosted'\\)`,
+        'g',
+      ),
       String(effective.includes('self-hosted')),
     )
     .replace(/fromJSON\(/g, '(');
@@ -245,7 +270,8 @@ describe('raw JUnit report retention', () => {
 // but picks its own architecture, so its `runs-on` cannot be compared with
 // another lane's. Evaluate the real expression the way
 // `.github/scripts/ci-runner-routing.test.mjs` does.
-const runnerOn = (job, ubuntuRunner) => {
+const runnerOn = (job, runner) => {
+  const output = runnerOutputOf(job);
   const expression = String(ci.jobs[job]['runs-on'])
     .replace(/^\$\{\{\s*/, '')
     .replace(/\s*\}\}$/, '');
@@ -255,7 +281,7 @@ const runnerOn = (job, ubuntuRunner) => {
     'contains',
     `return (${expression});`,
   )(
-    { classify_pr: { outputs: { ubuntu_runner: ubuntuRunner } } },
+    { classify_pr: { outputs: { [output]: runner } } },
     JSON.parse,
     (labels, label) => labels.includes(label),
   );
@@ -586,6 +612,34 @@ describe('post-merge push lane', () => {
       [].concat(ci.jobs.lint_and_static.needs ?? []),
       'lint_and_static must consume the classifier',
     ).toContain('classify_pr');
+  });
+
+  it('keeps test on the association-gated output', () => {
+    // Nothing else reads test's runs-on: switching it to lint_runner would
+    // hand every untrusted fork the pool while the timeout pins above stayed
+    // green (both lanes price 120/60 on ECS). Pin the expression, not an
+    // equality with lint_and_static — the two are meant to differ.
+    expect(String(ci.jobs.test['runs-on'])).toBe(
+      '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || \'["ubuntu-latest"]\') }}',
+    );
+  });
+
+  it('isolates HOME in every lane routed past the association gate', () => {
+    // lint_runner admits untrusted forks, and the pool shares one HOME across
+    // ~27 runner registrations: a fork's `pnpm install` can write
+    // ~/.gitconfig, ~/.npmrc or ~/.cache/qwen-code/npm, and the next trusted
+    // job on that host inherits it. Any job reading lint_runner must pin its
+    // own HOME under runner.temp; the ubuntu_runner lanes need no such pin
+    // because the association clause keeps untrusted forks off the pool.
+    const ungated = Object.keys(ci.jobs).filter((job) =>
+      String(ci.jobs[job]['runs-on'] ?? '').includes('lint_runner'),
+    );
+    expect(ungated).toContain('lint_and_static');
+    for (const job of ungated) {
+      const env = ci.jobs[job].env ?? {};
+      expect(env.HOME, job).toBe('${{ runner.temp }}/qwen-ci-home');
+      expect(env.USERPROFILE, job).toBe('${{ runner.temp }}/qwen-ci-home');
+    }
   });
 
   it('lint_and_static keeps the minimal token its required-check role needs', () => {

@@ -988,10 +988,24 @@ jobs:
     timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.lint_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''90'' || ''45'') }}'
     env:
       LINT_BASE_SHA: "${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || '' }}"
+      # This lane executes PR code for EVERY pull request, untrusted forks
+      # included, on a pool that shares one HOME across ~27 registrations
+      # (docs/design/autofix-gate-runner-isolation.md). A per-job HOME keeps a
+      # fork's ~/.gitconfig, ~/.npmrc and ~/.cache/qwen-code/npm out of the
+      # next trusted job's reach. Cost: cold npm and pnpm caches — the 90/45
+      # ceiling above already prices cold installs.
+      HOME: '${{ runner.temp }}/qwen-ci-home'
+      USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
     permissions:
       contents: 'read'
       pull-requests: 'read'
     steps:
+      # The steps below write $HOME before anything would create it (git
+      # safe.directory, npm config); an isolated HOME that does not exist yet
+      # fails those writes instead of isolating them.
+      - name: 'Create isolated HOME'
+        run: 'mkdir -p "${HOME}" "${USERPROFILE}"'
+
       # Pre-checkout cleanup: a previous containerised job (e.g. qwen-triage
       # verify) may leave root-owned, read-only files anywhere in the workspace.
       # Restore ownership and write permission unconditionally so the checkout
@@ -2247,7 +2261,8 @@ jobs:
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     # Dependency installation alone can exceed 30 minutes on a contended shared
     # ECS host, before the separately bounded 20-minute integration step starts.
-    # Same self-hosted scoping as `lint_and_static`: hosted fallback routing
+    # Same self-hosted scoping as `test` (this lane keeps the association-gated
+    # ubuntu_runner, unlike lint_and_static): hosted fallback routing
     # keeps the pre-contention ceiling, and the ARM64 fleet — which carries
     # no `ecs-qwen` label — gets the contended-pool allowance it runs under.
     timeout-minutes: '${{ fromJSON(contains(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'', ''self-hosted'') && ''60'' || ''30'') }}'
