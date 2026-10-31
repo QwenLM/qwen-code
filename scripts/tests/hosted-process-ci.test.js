@@ -934,6 +934,8 @@ describe('Hosted real-process gates', () => {
     // The same held for these, which rebuild the module and use the MySQL
     // service under their own random tenants.
     'Verify Hosted admission gates',
+    // O4 already carried the condition, with nothing pinning it.
+    'Verify O4 filesystem process and capacity gates',
   ])('runs the %s step even when the Hosted verify fails', (name) => {
     const steps = java.jobs['hosted-harness-mysql'].steps;
     const gates = steps.find((step) => step.name === name);
@@ -941,7 +943,11 @@ describe('Hosted real-process gates', () => {
     expect(gates.if).toBe(
       "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}",
     );
-    expect(gates['continue-on-error']).toBeUndefined();
+    expect(gates['continue-on-error'], name).toBeUndefined();
+    // Nor may the command swallow its own failure: the hosted-gates class
+    // check counts a class that failed as one that ran.
+    expect(gates.run, name).not.toContain('|| true');
+    expect(gates.run, name).not.toContain('failure.ignore');
     // An unknown step id reads as '' and would skip the gates on every run.
     const install = steps.find((step) => step.id === 'managed_dependencies');
     expect(install, 'the managed_dependencies step').toBeDefined();
@@ -950,11 +956,11 @@ describe('Hosted real-process gates', () => {
     // The install step runs only when no step before it failed, and a step
     // skipped by its own `if:`, or one whose failure `continue-on-error`
     // absorbs, fails nothing: either on the bundle step would leave the
-    // gates spawning a missing dist/cli.js. So no step up to the install
-    // may carry either key.
-    // Name the offenders in the message: vitest abbreviates an array whose
-    // string runs long to `[ Array(1) ]`, and the install step's own name
-    // is long enough to trip that.
+    // fault and admission gates spawning a missing dist/cli.js. So no step
+    // up to the install may carry either key.
+    // Name the offenders in the message: vitest's failure headline
+    // abbreviates an array whose string runs long to `[ Array(1) ]`, and
+    // the install step's own name is long enough to trip that.
     const setup = steps.slice(0, steps.indexOf(install) + 1);
     const conditioned = setup
       .filter((step) => 'if' in step || 'continue-on-error' in step)
@@ -976,19 +982,48 @@ describe('Hosted real-process gates', () => {
     const admission = steps.find(
       (step) => step.name === 'Verify Hosted admission gates',
     );
+    expect(admission, 'the admission step').toBeDefined();
     expect(admission.id).toBe('hosted_admission');
     const check = steps.find(
       (step) =>
         step.name === 'Check that every Hosted admission gate class ran',
     );
+    expect(check, 'the admission class check').toBeDefined();
     // Without its own condition the check runs only on a green job, so
     // after a red Hosted verify it would skip while the admission step it
     // audits ran: a class silently dropped from the profile would pass.
     expect(check.if).toBe(
       "${{ !cancelled() && steps.hosted_admission.outcome == 'success' }}",
     );
-    expect(check.run).toContain('check-failsafe-reports.js hosted-gates');
+    // continue-on-error, an `|| true` on the command or a custom shell
+    // would let a red check leave the job green.
+    expect(check.run).toBe(
+      'node scripts/check-failsafe-reports.js hosted-gates packages/managed-agent-server',
+    );
+    expect(check['continue-on-error'], check.name).toBeUndefined();
+    expect(check.shell, check.name).toBeUndefined();
     expect(steps.indexOf(check)).toBe(steps.indexOf(admission) + 1);
+  });
+
+  it('boots the admission gates on a database of their own', () => {
+    const job = java.jobs['hosted-harness-mysql'];
+    const admission = job.steps.find(
+      (step) => step.name === 'Verify Hosted admission gates',
+    );
+    expect(admission, 'the admission step').toBeDefined();
+    // Managed schema validation refuses any table outside the managed set,
+    // so an fg*_fire table a killed Hosted IT left in hosted_harness_test
+    // would fail both gates at boot, on the red nights they now run on.
+    expect(admission.run).toMatch(
+      /^mysql --no-defaults .* -e 'CREATE DATABASE qwen_admission_ci'\n/,
+    );
+    expect(admission.run).toContain(
+      '-Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/qwen_admission_ci?',
+    );
+    expect(admission.run).not.toContain('hosted_harness_test');
+    expect(admission.env.MYSQL_PWD).toBe(
+      job.services.mysql.env.MYSQL_ROOT_PASSWORD,
+    );
   });
 
   // The Hosted*IT classes share one failsafe fork, so a case stalled to its
