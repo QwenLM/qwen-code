@@ -176,13 +176,13 @@ headless 的主循环以 `maxRounds: 1` 运行。因此它为每一轮做的准�
 
 有些入口在迁移前自己做了交互步骤中的一部分工作，迁到共享路径后还会继续自己做一段时间。这时用一个发送选项告诉 client 跳过这部分，避免执行两次。这类选项只是迁移期的过渡手段，不是长期 API。下表逐项列出，并写明由哪一步把它删除或改成输入。
 
-| 选项                     | 宿主为什么保留这部分                                                                                                                                                                               | 由哪一步移除                                                                                                                                                                                                           |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `toolLoopGuardsByHost`   | ACP 的工具步骤运行 daemon 工具循环守卫：每轮工具调用上限、重复调用、探索提醒，以及重复工具失败守卫                                                                                                 | PR 2b 迁移全新 prompt 的工具批：client 的守卫生效，只有 ACP 才有的守卫，即它的参数错误、半截编辑和重复工具失败停止，作为 ACP 的策略保留。带 live 工具的会话和 Agent Host 会话保留 ACP 的工具步骤和这个选项，直到 PR 2d |
-| `interactionSpanByHost`  | ACP 的 span 挂在 daemon 的 trace 下                                                                                                                                                                | 改为输入：client 加入宿主为该 prompt 开启的 span；ACP 修改默认值之前完成                                                                                                                                               |
-| `userTurnRecordedByHost` | ACP 在 slash 命令执行前，按用户输入的原样记录 prompt，连同显示文本、附件、resource link 和 daemon prompt id 一起记录，并在首次发送前为这一轮建立文件历史快照，所以发出前就被取消的 prompt 也有快照 | 改为输入：宿主传入这条记录，由 client 写入；ACP 修改默认值之前完成                                                                                                                                                     |
+| 选项                     | 宿主为什么保留这部分                                                                                                                                                                                                                                             | 由哪一步移除                                                                                                                                                                                                           |
+| ------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `toolLoopGuardsByHost`   | ACP 的工具步骤运行 daemon 工具循环守卫：每轮工具调用上限、重复调用、探索提醒，以及重复工具失败守卫                                                                                                                                                               | PR 2b 迁移全新 prompt 的工具批：client 的守卫生效，只有 ACP 才有的守卫，即它的参数错误、半截编辑和重复工具失败停止，作为 ACP 的策略保留。带 live 工具的会话和 Agent Host 会话保留 ACP 的工具步骤和这个选项，直到 PR 2d |
+| `interactionSpanByHost`  | ACP 的 span 挂在 daemon 的 trace 下                                                                                                                                                                                                                              | 改为输入：client 加入宿主为该 prompt 开启的 span；ACP 修改默认值之前完成                                                                                                                                               |
+| `userTurnRecordedByHost` | ACP 在 slash 命令执行前，按用户输入的原样记录 prompt，连同显示文本、附件、resource link 和 daemon prompt id 一起记录，并在首次发送前为这一轮建立文件历史快照，所以发出前就被取消的 prompt 也有快照；在 retry、continue 或 restore 上，宿主已经启动了 todo 工作链 | 改为输入：宿主传入这条记录，由 client 写入；ACP 修改默认值之前完成                                                                                                                                                     |
 
-`toolCallPreparations`、`memoryRecallQuery` 和 `stopPolicies` 不在表中：第一个只是请求一个额外的事件，第二个把宿主在发送前展开的 prompt 原文交给召回，第三个加入宿主在 stop 点继续的理由（见 [stop 点续发](#stop-点续发)）；三者都不关闭任何行为。PR 2c-1 删除了 `stopHookRunByHost`，ACP 原来用它在自己的 Stop 循环里触发 Stop hook。
+`toolCallPreparations`、`memoryRecallQuery`、`stopPolicies` 和 `historyPromptId` 不在表中：第一个只是请求一个额外的事件，第二个把宿主在发送前展开的 prompt 原文交给召回，第三个加入宿主在 stop 点继续的理由（见 [stop 点续发](#stop-点续发)），第四个让 `Retry` 沿用它所替代那次尝试的历史标识；四者都不关闭任何行为。PR 2c-1 删除了 `stopHookRunByHost`，ACP 原来用它在自己的 Stop 循环里触发 Stop hook。
 
 新增任何为某个宿主关闭 client 部分工作的选项，都必须在这里登记一行。入口在表中还有未关闭的行时，不修改它的默认值。
 
@@ -241,7 +241,7 @@ if (config.isUnifiedAgentLoopEnabled()) {
 
 ### ACP prompt 轮次迁到共享模型轮（PR 2a）
 
-PR 2 分步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是 retry、continue 或 restore，也不是 Goal、channel 或 Goal 提案审批轮次的 prompt。模型轮就是共享 loop 自己的 `runModelRound`：一次 `LlmClient.sendMessageStream` 调用，事件交给 ACP，终止事件变成停止原因。ACP 保留自己的工具步骤（`runToolCalls`、工具之后的下一条消息、daemon 工具循环守卫）以及轮次前后的全部逻辑。PR 2b 把这些轮次的工具批迁到 scheduler 上，PR 2c-1 把它们的 stop 点迁到 client 的链上。PR 2c-2 到 2c-4 再迁移其他轮次，因此 ACP 的每份 loop 主体只改动一次。
+PR 2 分步迁移 ACP。PR 2a 迁移全新用户 prompt 的模型轮：不是 retry、continue 或 restore，也不是 Goal、channel 或 Goal 提案审批轮次的 prompt（后五类由 PR 2c-2 迁移）。模型轮就是共享 loop 自己的 `runModelRound`：一次 `LlmClient.sendMessageStream` 调用，事件交给 ACP，终止事件变成停止原因。ACP 保留自己的工具步骤（`runToolCalls`、工具之后的下一条消息、daemon 工具循环守卫）以及轮次前后的全部逻辑。PR 2b 把这些轮次的工具批迁到 scheduler 上，PR 2c-1 把它们的 stop 点迁到 client 的链上。PR 2c-2 到 2c-4 再迁移其他轮次，因此 ACP 的每份 loop 主体只改动一次。
 
 | ACP 现在                                                                    | 设置开启后                                                                                                                                                                                      |
 | --------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -314,6 +314,24 @@ hook 诊断消息不会重新打开已结束回复的中断窗口。每个新的
 
 这一步对 core 的改动是新增 `SendMessageOptions.stopPolicies` 和 `StopPolicy` 接口，并删除只有 ACP 使用的 `stopHookRunByHost`。
 
+### 重新进入轮次的 ACP prompt，以及 channel 和 Goal 提案轮次（PR 2c-2）
+
+PR 2c-2 让另外五类 ACP 轮次使用共享模型轮、共享工具批和 client 的 stop 点。其中两类是 PR 2a 没有纳入的全新 prompt：channel prompt 和 Goal 提案审批轮次。另外三类重新进入会话中已有的轮次：retry、继续被打断的轮次（continue），以及恢复一个未回答的 `ask_user_question`（restore）。Goal 轮次、cron 和后台通知在 PR 2c-3 和 2c-4 中迁移。
+
+| 轮次                     | 设置开启后                                                                                                                                                                       |
+| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| channel prompt           | 与其他全新 prompt 一样是 `UserQuery`，和现在一样不带 submitted prompt 和 workflow 输入；它的回复不会被排队的输入打断，它的工具结果从不结束这一轮，重复工具失败守卫保持关闭       |
+| Goal 提案审批            | `UserQuery`；会话和现在一样结算提案；Todo Stop Guard 让位或 Stop hook 达到上限时，提案不会启动 Goal                                                                              |
+| retry                    | 和现在一样由 ACP 剥离失败的那次尝试，retry 一直没有发出时再把它放回；第一轮是 `Retry`，带上那次尝试的标识 `historyPromptId`，以及 `admitUserPrompt` 给出的 UserPromptSubmit 结果 |
+| continue                 | 和现在一样由 ACP 剥离被打断的那段输入，或关闭被打断的调用；第一轮是 `Retry`，带 `historyPromptId`，不运行 UserPromptSubmit；第一条请求一直没有发出时，被打断的那段输入按原样放回 |
+| 恢复 `ask_user_question` | ACP 用自己的工具步骤重新提问；回答作为第一轮，即一个 `Retry`；之后的批次使用共享工具批                                                                                           |
+
+重新进入的轮次即使带着工具结果，第一轮也是 `Retry` 而不是 `ToolResult`：`ToolResult` 不会开启 client 的一次交互，上一个 prompt 的循环检测计数会延续下来，UserPromptSubmit 也会在这些结果上运行。headless 用 `ToolResult` 继续被打断的轮次，是因为它每次运行都是一个新进程。client 不给 `Retry` 加系统提醒，所以 ACP 和现在一样为它加上 plan、arena 和 output-style 提醒；ACP 取走的 todo 提醒就是 client 会取的那一条。
+
+被恢复的问题保留 ACP 的工具步骤：共享工具批会记录每一个结果，而因超时没有回答的问题必须保持未记录，之后加载时才能再次提问。
+
+这一步对 core 的改动：`userTurnRecordedByHost` 也覆盖 `Retry`，表示宿主已经启动了它的 todo 工作链；`Retry` 也接受 `promptAdmission`；新增输入 `historyPromptId`，即 `Retry` 的请求在历史中带的标识，由第一条请求使用。
+
 ## 迁移计划
 
 | PR   | 内容                                                                                                      |
@@ -384,6 +402,8 @@ PR 3–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
 - 被输出上限截断的编辑；
 - 中途断流后重试的流；
 - 同一会话中的两个 prompt；
+- 读取文件的 channel prompt；
+- 模型报错之后的 retry；
 - 模型报错；
 - 拦截 prompt 的 UserPromptSubmit hook；
 - 拦截一次的 Stop hook，以及一直拦截到上限的 Stop hook；
@@ -426,6 +446,9 @@ PR 3–6 每一项之后，同样各自跟随默认开启和删除旧 loop 两�
   - 从 PR 2c-1 起，当前轮次在最后一个回复之后才到达的后台结果，会开启一个后台通知轮次，而不是让 prompt 继续；Todo Stop Guard 生效时，中途排队的输入成为下一个 prompt，而不是让这一个继续；
   - Todo Stop Guard 只在 Stop hook 允许回复停下后才继续，并且使用单独的请求，不再与 hook 的理由合并；Stop hook 运行期间到达的输入不再作废它的决定；
   - Stop hook 和 Todo Stop Guard 的续发沿用这一轮的 prompt id，与 TUI 的续发一样运行 UserPromptSubmit；除 Live 和 Agent Host 会话保留 ACP 的工具调用守卫外，运行 client 的守卫；并像任何一批工具一样把工具结果发回；
+  - 从 PR 2c-2 起，channel prompt 和 Goal 提案轮次在共享路径上得到与全新 prompt 相同的处理，包括日期提醒、系统提醒和 client 的召回；
+  - retry、continue 和 restore 会开启 client 的一次交互：循环检测器、探索预算和轮次预算重新开始，它们的第一轮不计入会话轮数上限；
+  - continue 的第一条请求一直没有发出时，被打断的用户输入按原样放回，而不是作为一条合并后的条目保留；
 
   ACP 对拍测试覆盖了保持不变的常见场景，并对日期提醒、工具结果上的 UserPromptSubmit、该 hook 运行时取消，以及一批的审批先于它的调用执行做了断言。
 

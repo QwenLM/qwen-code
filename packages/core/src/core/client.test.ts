@@ -2942,6 +2942,29 @@ describe('Gemini Client (client.ts)', () => {
         'prompt-retry',
         'prompt-host',
       );
+      vi.mocked(mockConfig.startActiveTodoWorkChain).mockClear();
+
+      await runTurn(
+        SendMessageType.Retry,
+        [{ text: 'hello' }],
+        'prompt-host-retry',
+        { userTurnRecordedByHost: true },
+      );
+
+      // Unless the host started it for the retry.
+      expect(mockConfig.startActiveTodoWorkChain).not.toHaveBeenCalled();
+    });
+
+    it("marks a Retry's request with the identity the host gives it", async () => {
+      await runTurn(SendMessageType.Retry, [{ text: 'hello' }], 'prompt-new', {
+        historyPromptId: 'prompt-original',
+      });
+      await runTurn(SendMessageType.Retry, [{ text: 'hello' }], 'prompt-bare');
+
+      expect(mockTurnConstructorFn.mock.calls.map((args) => args[3])).toEqual([
+        'prompt-original',
+        undefined,
+      ]);
     });
 
     it.each(['agent', 'task'])(
@@ -13493,7 +13516,29 @@ Other open files:
           expect(mockTurnRunFn).toHaveBeenCalledOnce();
         });
 
-        it('rejects an admission on a send that is not a UserQuery', async () => {
+        it('applies an admission on a Retry instead of running the hook again', async () => {
+          const bus = promptSubmitBus({ output: undefined });
+          mockTurnRunFn.mockReturnValue(textTurn('ok'));
+          vi.spyOn(
+            client,
+            'stripOrphanedUserEntriesFromHistory',
+          ).mockReturnValue([]);
+          const admission = await client.admitUserPrompt(
+            'try again',
+            'prompt-retried',
+          );
+
+          await admittedSend(
+            admission,
+            'prompt-retried',
+            SendMessageType.Retry,
+          );
+
+          expect(submitCalls(bus)).toHaveLength(1);
+          expect(mockTurnRunFn).toHaveBeenCalledOnce();
+        });
+
+        it('rejects an admission on a send that is not a UserQuery or a Retry', async () => {
           promptSubmitBus({ output: undefined });
           const admission = await client.admitUserPrompt(
             '/deploy prod',

@@ -41,6 +41,8 @@ interface Scenario {
   settings?: JsonObject;
   /** Answers each `session/request_permission`; allows once by default. */
   permission?: (request: JsonObject) => JsonObject;
+  /** The `_meta` each prompt is sent with, by index. */
+  promptMeta?: Array<JsonObject | undefined>;
   /** Sends `session/cancel` once this file exists in the test directory. */
   cancelOnFile?: string;
   /**
@@ -384,7 +386,7 @@ const allowOnce = () => ({
           cwd: dir,
           mcpServers: [],
         })) as { sessionId: string });
-        for (const text of scenario.prompts) {
+        for (const [promptIndex, text] of scenario.prompts.entries()) {
           let settled = false;
           const cancelFile = scenario.cancelOnFile;
           if (cancelFile) {
@@ -400,6 +402,9 @@ const allowOnce = () => ({
             const result = (await request('session/prompt', {
               sessionId,
               prompt: [{ type: 'text', text }],
+              ...(scenario.promptMeta?.[promptIndex] && {
+                _meta: scenario.promptMeta[promptIndex],
+              }),
             })) as JsonObject;
             stopReasons.push(result['stopReason']);
           } catch (error) {
@@ -591,6 +596,26 @@ const allowOnce = () => ({
         name: 'two prompts in one session',
         prompts: ['First question.', 'Second question.'],
         reply: (messages) => ({ content: `Answer ${userTurns(messages)}.` }),
+      },
+      {
+        name: 'a retry after a model error',
+        prompts: ['Answer, please.', 'Answer, please.'],
+        // The client retries the prompt the error ended.
+        promptMeta: [undefined, { 'qwen.daemon.retry': true }],
+        reply: (_messages, _dir, index) =>
+          index === 0
+            ? { errorContent: 'upstream exploded' }
+            : { content: 'Here is the answer.' },
+      },
+      {
+        name: 'a channel prompt that reads a file',
+        prompts: ['Read the readme.'],
+        promptMeta: [{ 'qwen.channel.prompt': true }],
+        prepare: (r) => r.createFile('readme.txt', 'readme body\n'),
+        reply: (messages, dir) =>
+          toolResults(messages) === 0
+            ? { toolCalls: [read(join(dir, 'readme.txt'), 'call_read')] }
+            : { content: 'It says readme body.' },
       },
       {
         name: 'a model error',
