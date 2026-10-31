@@ -43,6 +43,7 @@ import {
   type RunQwenServeDeps,
   maxSessionsFromSettings,
   subSessionConcurrencyCapsFromSettings,
+  subSessionCompletionTtlMsFromSettings,
   validatePolicyConfig,
   verifyWorkerTlsTrust,
   waitForRuntimeStartingForShutdown,
@@ -2361,6 +2362,59 @@ describe('subSessionConcurrencyCapsFromSettings', () => {
     const onWarning = vi.fn();
     subSessionConcurrencyCapsFromSettings({}, onWarning);
     expect(onWarning).not.toHaveBeenCalled();
+  });
+});
+
+describe('subSessionCompletionTtlMsFromSettings', () => {
+  it('passes through non-negative integer hours', () => {
+    expect(
+      subSessionCompletionTtlMsFromSettings({
+        subSessionCompletionTtlHours: 24,
+      }),
+    ).toEqual({ completionTtlMs: 86_400_000 });
+    expect(
+      subSessionCompletionTtlMsFromSettings({
+        subSessionCompletionTtlHours: 2,
+      }),
+    ).toEqual({ completionTtlMs: 7_200_000 });
+    // 0 is VALID: it disables auto-removal (the pre-TTL behavior).
+    expect(
+      subSessionCompletionTtlMsFromSettings({
+        subSessionCompletionTtlHours: 0,
+      }),
+    ).toEqual({ completionTtlMs: 0 });
+  });
+
+  it('omits the key when absent so the launcher default applies, without warning', () => {
+    const onWarning = vi.fn();
+    expect(subSessionCompletionTtlMsFromSettings({}, onWarning)).toEqual({});
+    expect(onWarning).not.toHaveBeenCalled();
+  });
+
+  it('rejects negative, fractional, string, and NaN values', () => {
+    const onWarning = vi.fn();
+    for (const value of [-1, 1.5, '10', Number.NaN]) {
+      expect(
+        subSessionCompletionTtlMsFromSettings(
+          { subSessionCompletionTtlHours: value },
+          onWarning,
+        ),
+      ).toEqual({});
+    }
+    expect(onWarning).toHaveBeenCalledTimes(4);
+  });
+
+  it('warns naming the present-but-invalid key', () => {
+    const onWarning = vi.fn();
+    subSessionCompletionTtlMsFromSettings(
+      { subSessionCompletionTtlHours: '-2' },
+      onWarning,
+    );
+    expect(onWarning).toHaveBeenCalledTimes(1);
+    expect(onWarning.mock.calls[0][0]).toContain(
+      'serve.subSessionCompletionTtlHours',
+    );
+    expect(onWarning.mock.calls[0][0]).toContain('"-2"');
   });
 });
 

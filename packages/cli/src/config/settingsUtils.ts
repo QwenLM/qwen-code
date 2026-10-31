@@ -287,6 +287,9 @@ export const WORKSPACE_RESTRICTED_SETTINGS = [
   { section: 'outboundCorrelation', key: 'allowDynamicHeaderValues' },
   { section: 'serve', key: 'tokenQr' },
   { section: 'serve', key: 'maxSessions' },
+  // A cloned repository must not make the daemon delete the user's
+  // completed sub-session transcripts: retention is the operator's call.
+  { section: 'serve', key: 'subSessionCompletionTtlHours' },
   { section: 'ui', key: 'allowedApprovalModes' },
 ] as const satisfies ReadonlyArray<{
   readonly section: keyof Settings;

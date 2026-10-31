@@ -1840,14 +1840,38 @@ function sessionArtifactsPersistenceAvailableFromSettings(
 }
 
 /**
+ * Shared contract for the optional integer `serve.*` settings: an absent key
+ * yields no override (the built-in default applies), an integer at or above
+ * `min` is honored, and anything else is reported through `onWarning`
+ * (matching the other settings-load fallback sites in this file) and falls
+ * back to the built-in default, so an operator who mistypes a value sees the
+ * fallback instead of silently running on the default.
+ */
+function intSetting(
+  key: string,
+  value: unknown,
+  min: number,
+  expectedText: string,
+  onWarning: (message: string) => void,
+): number | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value === 'number' && Number.isInteger(value) && value >= min) {
+    return value;
+  }
+  onWarning(
+    `qwen serve: ignoring invalid ${key} (${JSON.stringify(value)}); ` +
+      `${expectedText}, falling back to the built-in default.`,
+  );
+  return undefined;
+}
+
+/**
  * Reads the optional `serve.maxConcurrentSubSessions*` overrides. Only
  * positive integers are honored; anything else falls back to the launcher's
- * built-in defaults. A present-but-invalid value is reported through
- * `onWarning` (matching the other settings-load fallback sites in this file)
- * so an operator who mistypes a cap sees the fallback instead of silently
- * running on the default. Caps are a daemon-resource control, so an untrusted
- * workspace's settings (skipped at load time) must not raise them — the
- * caller passes the already trust-filtered merged settings.
+ * built-in defaults with a warning (see {@link intSetting}). Caps are a
+ * daemon-resource control, so an untrusted workspace's settings (skipped at
+ * load time) must not raise them — the caller passes the already
+ * trust-filtered merged settings.
  */
 export function subSessionConcurrencyCapsFromSettings(
   serve: {
@@ -1859,29 +1883,50 @@ export function subSessionConcurrencyCapsFromSettings(
   maxConcurrentPerCaller?: number;
   maxConcurrentTotal?: number;
 } {
-  const asCap = (key: string, value: unknown): number | undefined => {
-    if (value === undefined) return undefined;
-    if (typeof value === 'number' && Number.isInteger(value) && value >= 1) {
-      return value;
-    }
-    onWarning(
-      `qwen serve: ignoring invalid ${key} (${JSON.stringify(value)}); ` +
-        `expected a positive integer, falling back to the built-in default.`,
-    );
-    return undefined;
-  };
-  const maxConcurrentPerCaller = asCap(
-    'maxConcurrentSubSessionsPerCaller',
+  const maxConcurrentPerCaller = intSetting(
+    'serve.maxConcurrentSubSessionsPerCaller',
     serve.maxConcurrentSubSessionsPerCaller,
+    1,
+    'expected a positive integer',
+    onWarning,
   );
-  const maxConcurrentTotal = asCap(
-    'maxConcurrentSubSessionsTotal',
+  const maxConcurrentTotal = intSetting(
+    'serve.maxConcurrentSubSessionsTotal',
     serve.maxConcurrentSubSessionsTotal,
+    1,
+    'expected a positive integer',
+    onWarning,
   );
   return {
     ...(maxConcurrentPerCaller !== undefined ? { maxConcurrentPerCaller } : {}),
     ...(maxConcurrentTotal !== undefined ? { maxConcurrentTotal } : {}),
   };
+}
+
+/**
+ * Reads the optional `serve.subSessionCompletionTtlHours` override. Only
+ * non-negative integers (hours) are honored; anything else falls back to the
+ * launcher's built-in default (0 — keep completed sub-sessions forever) with
+ * a warning, same contract as the concurrency caps. `0` is a VALID value: it
+ * disables auto-removal, the default. An absent key returns no override, so
+ * the built-in default applies.
+ */
+export function subSessionCompletionTtlMsFromSettings(
+  serve: {
+    subSessionCompletionTtlHours?: unknown;
+  },
+  onWarning: (message: string) => void = writeStderrLine,
+): {
+  completionTtlMs?: number;
+} {
+  const hours = intSetting(
+    'serve.subSessionCompletionTtlHours',
+    serve.subSessionCompletionTtlHours,
+    0,
+    'expected a non-negative integer in hours (0 keeps completed sub-sessions forever)',
+    onWarning,
+  );
+  return hours === undefined ? {} : { completionTtlMs: hours * 60 * 60_000 };
 }
 
 /**
@@ -6329,6 +6374,13 @@ async function runQwenServeImpl(
       ...subSessionConcurrencyCapsFromSettings(
         runtimeBootSettings?.merged.serve ?? {},
       ),
+      ...subSessionCompletionTtlMsFromSettings(
+        runtimeBootSettings?.merged.serve ?? {},
+      ),
+      getArchiveCoordinator: () =>
+        (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+          'sessionArchiveCoordinator'
+        ],
     });
     const attachmentsRoots = sessionAttachmentsRoots(
       boundWorkspace,
@@ -6982,6 +7034,13 @@ async function runQwenServeImpl(
         ...subSessionConcurrencyCapsFromSettings(
           secondarySettings?.merged.serve ?? {},
         ),
+        ...subSessionCompletionTtlMsFromSettings(
+          secondarySettings?.merged.serve ?? {},
+        ),
+        getArchiveCoordinator: () =>
+          (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+            'sessionArchiveCoordinator'
+          ],
       });
       const secondaryAttachmentsRoots = sessionAttachmentsRoots(
         workspaceInput.cwd,
@@ -7718,6 +7777,13 @@ async function runQwenServeImpl(
         ...subSessionConcurrencyCapsFromSettings(
           wsSettings?.merged.serve ?? {},
         ),
+        ...subSessionCompletionTtlMsFromSettings(
+          wsSettings?.merged.serve ?? {},
+        ),
+        getArchiveCoordinator: () =>
+          (runtimeApp ?? runtimeAppForCleanup)?.locals?.[
+            'sessionArchiveCoordinator'
+          ],
       });
       let wsBridge: ReturnType<typeof runtime.createAcpSessionBridge>;
       try {

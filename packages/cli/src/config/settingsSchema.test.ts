@@ -27,6 +27,7 @@ import { DAEMON_APPROVAL_MODES } from '@qwen-code/sdk/daemon';
 import { advertisedMaxSessions } from '../serve/server/serve-features.js';
 import { MergeStrategy } from '../utils/deepMerge.js';
 import {
+  DEFAULT_SUB_SESSION_COMPLETION_TTL_MS,
   MAX_CONCURRENT_SUB_SESSIONS_PER_CALLER,
   MAX_CONCURRENT_SUB_SESSIONS_TOTAL,
   MAX_TRACKED_SPAWNED_SESSIONS,
@@ -880,6 +881,16 @@ describe('SettingsSchema', () => {
       expect(serve.maxConcurrentSubSessionsTotal.maximum).toBe(
         MAX_TRACKED_SPAWNED_SESSIONS,
       );
+    });
+
+    it('should pin the serve sub-session completion TTL to the runtime default', () => {
+      const serve = getSettingsSchema().serve.properties;
+      // The schema default is in hours; the launcher constant is in ms.
+      expect(serve.subSessionCompletionTtlHours.default).toBe(
+        DEFAULT_SUB_SESSION_COMPLETION_TTL_MS / 60 / 60_000,
+      );
+      // 0 is a valid value: it keeps completed sub-sessions forever.
+      expect(serve.subSessionCompletionTtlHours.minimum).toBe(0);
     });
 
     it('should infer Settings type correctly', () => {
