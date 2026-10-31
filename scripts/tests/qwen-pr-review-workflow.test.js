@@ -6921,7 +6921,7 @@ describe('review supersede salvage (#10110)', () => {
   });
 
   it('exports the salvage-post contract to the agent only where the watcher arms (shape)', () => {
-    // R32-2: the skill's anchorsAtRisk=true rule restarts unless the
+    // R32-2: the skill's anchorsAtRisk=true rule re-anchors unless the
     // environment carries the CI salvage contract; the export sits inside
     // the AUTO_REVIEW-gated arming block, so an explicit run (no watcher,
     // any marker forged) never carries it. Cross-pinned with

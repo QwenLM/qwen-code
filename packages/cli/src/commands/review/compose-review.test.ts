@@ -58,6 +58,7 @@ import {
   buildLedger,
   repositoryContextGate,
   scriptLintGate,
+  blockerReCheckGate,
   withoutGateReposts,
   testPlanGate,
   composeReviewCommand,
@@ -10111,8 +10112,8 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.disclosed[0].en).toContain('.github/workflows/ci.yml');
     expect(g.disclosed[0].en).toContain('source mapping not yet supported');
     // No "the executable-script lint" prefix: the body wraps this in a
-    // sentence that already opens "Not linted:", and the prefix rendered as
-    // "Not linted: the executable-script lint" — a lint not linted.
+    // sentence that already opens "Not fully linted:", and the prefix rendered
+    // as "Not linted: the executable-script lint" — a lint not linted.
     expect(g.disclosed[0].en).not.toContain('executable-script lint');
     // No `reasonZh` in this report — the Chinese half falls back to the
     // English reason rather than dropping the sentence.
@@ -10375,7 +10376,7 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
   });
 });
 
-describe('composeReview — the script-lint gate wired to the verdict', () => {
+describe('composeReview — the deterministic gates wired to the verdict', () => {
   // A worktree arms the gate (pr-worktree, not diff-only). That mode also owes the
   // cross-file (1c) and build-and-test (7) roles, so a test that wants the gate's
   // own outcome to decide the verdict — not an unrelated dimension gap — must record
@@ -10559,13 +10560,13 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     expect(r.event).toBe('APPROVE');
     // The whole composed sentence, both halves — pinned against the stutter
     // #10567's posted body carried ("Not linted: the executable-script lint —
-    // … — not linted"): the wrapper says "Not linted" once, then path and
-    // reason, nothing else.
+    // … — not linted"): the wrapper says "Not fully linted" once, then path
+    // and reason, nothing else.
     expect(r.body).toContain(
-      'Not linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported.',
+      'Not fully linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported.',
     );
     expect(r.body).toContain(
-      '未检查（工具限制，非阻断）：`.github/workflows/ci.yml`——source mapping not yet supported。',
+      '未完整检查（工具限制，非阻断）：`.github/workflows/ci.yml`——source mapping not yet supported。',
     );
     // the clean-approve copy is still there — the disclosure augments, it doesn't replace
     expect(r.body).toContain('No issues found. LGTM! ✅');
@@ -10604,11 +10605,153 @@ describe('composeReview — the script-lint gate wired to the verdict', () => {
     });
     expect(r.event).toBe('APPROVE');
     expect(r.body).toContain(
-      'Not linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported; `.github/workflows/release.yml` — source mapping not yet supported.',
+      'Not fully linted (tool limitation, not a blocker): `.github/workflows/ci.yml` — source mapping not yet supported; `.github/workflows/release.yml` — source mapping not yet supported.',
     );
     expect(r.body).toContain(
-      '未检查（工具限制，非阻断）：`.github/workflows/ci.yml`——尚未支持源映射；`.github/workflows/release.yml`——source mapping not yet supported。',
+      '未完整检查（工具限制，非阻断）：`.github/workflows/ci.yml`——尚未支持源映射；`.github/workflows/release.yml`——source mapping not yet supported。',
     );
+  });
+
+  it('an unruled blocker inventory key caps the verdict at COMMENT (#15974)', () => {
+    // The full-coverage plan would APPROVE; the inventory the round never
+    // accounted for is the only gap, and it must decide the verdict.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], {
+      prNumber: 15974,
+      ownerRepo: 'QwenLM/qwen-code',
+    });
+    writeGateReport({});
+    writeFileSync(
+      join(dir, 'qwen-review-pr-15974-context-blockers.json'),
+      JSON.stringify({ blockers: ['review:5721490241'] }),
+    );
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.cappedBy).toContain('unreviewed-dimension');
+    expect(r.body).toContain('blocker re-check');
+    expect(r.body).toContain('review:5721490241');
+  });
+
+  it('the same inventory, fully accounted, restores the APPROVE', () => {
+    const p = gateReadyPlan(['verify', 'reverse-audit'], {
+      prNumber: 15974,
+      ownerRepo: 'QwenLM/qwen-code',
+    });
+    writeGateReport({});
+    writeFileSync(
+      join(dir, 'qwen-review-pr-15974-context-blockers.json'),
+      JSON.stringify({ blockers: ['review:5721490241'] }),
+    );
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      blockerRulings: [{ key: 'review:5721490241', ruling: 'fixed' }],
+    });
+    expect(r.event).toBe('APPROVE');
+    expect(r.body).not.toContain('blocker re-check');
+  });
+});
+
+describe('blockerReCheckGate — the re-check walk is arithmetic, not prose', () => {
+  // The #15974 incident: a round posted past a blocker an earlier review had
+  // filed, because nothing verified the prose walk covered the promoted set.
+  // The gate joins pr-context's inventory with the round's blockerRulings;
+  // an unruled key is unreviewed scope.
+  const PR = 15974;
+  function writePlan(over: Record<string, unknown> = {}): string {
+    const p = join(dir, 'plan.json');
+    writeFileSync(p, JSON.stringify({ prNumber: PR, ...over }));
+    return p;
+  }
+  function writeInventory(blockers: unknown): void {
+    writeFileSync(
+      join(dir, `qwen-review-pr-${PR}-context-blockers.json`),
+      JSON.stringify({ blockers }),
+    );
+  }
+
+  it('caps on an inventory key the round never ruled on', () => {
+    const p = writePlan();
+    writeInventory(['comment:111', 'review:5721490241']);
+    const g = blockerReCheckGate(p, [{ key: 'comment:111', ruling: 'fixed' }]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('1 blocker(s)');
+    expect(g.unreviewed[0]).toContain('review:5721490241');
+    expect(g.unreviewed[0]).not.toContain('comment:111');
+  });
+
+  it('caps when the rulings are absent entirely — a skipped walk leaves no trace otherwise', () => {
+    const p = writePlan();
+    writeInventory(['review:5721490241']);
+    const g = blockerReCheckGate(p, undefined);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('review:5721490241');
+  });
+
+  it('silent when every inventory key is accounted for', () => {
+    const p = writePlan();
+    writeInventory(['comment:111', 'review:222']);
+    const g = blockerReCheckGate(p, [
+      { key: 'comment:111', ruling: 'still-stands' },
+      { key: 'review:222', ruling: 'cannot-tell' },
+    ]);
+    expect(g.unreviewed).toEqual([]);
+  });
+
+  it('inert without an inventory file (older CLI, pr-context never ran)', () => {
+    const p = writePlan();
+    expect(blockerReCheckGate(p, undefined).unreviewed).toEqual([]);
+  });
+
+  it('inert on an empty inventory and on a non-PR plan', () => {
+    const p = writePlan();
+    writeInventory([]);
+    expect(blockerReCheckGate(p, undefined).unreviewed).toEqual([]);
+    const local = writePlan({ prNumber: undefined });
+    expect(blockerReCheckGate(local, undefined).unreviewed).toEqual([]);
+  });
+
+  it.each([
+    ['a non-array root', '{"blockers": "comment:1"}'],
+    ['a non-string key', '{"blockers": [42]}'],
+    ['a key outside the CLI shape', '{"blockers": ["comment:1\\n@team"]}'],
+    ['unparseable JSON', '{oops'],
+  ])('fails closed on %s in the inventory', (_label, raw) => {
+    const p = writePlan();
+    writeFileSync(join(dir, `qwen-review-pr-${PR}-context-blockers.json`), raw);
+    const g = blockerReCheckGate(p, []);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('malformed');
+  });
+
+  it.each([
+    ['a non-array', 'nope'],
+    ['an entry without a key', [{ ruling: 'fixed' }]],
+    ['an unknown ruling', [{ key: 'comment:1', ruling: 'looks-fine' }]],
+    ['a null entry', [null]],
+  ])('throws on %s in blockerRulings (typed channel)', (_label, rulings) => {
+    const p = writePlan();
+    writeInventory(['comment:1']);
+    expect(() => blockerReCheckGate(p, rulings)).toThrow(/blockerRulings/);
+  });
+
+  it('bounds the named keys so a pathological thread count cannot blow the body', () => {
+    const p = writePlan();
+    const keys = Array.from({ length: 15 }, (_, i) => `comment:${i + 1}`);
+    writeInventory(keys);
+    const g = blockerReCheckGate(p, []);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('15 blocker(s)');
+    expect(g.unreviewed[0]).toContain('(+5 more)');
+    expect(g.unreviewed[0]).not.toContain('comment:11');
   });
 });
 
@@ -19426,13 +19569,13 @@ describe('composeReview — the decided-stop re-rule', () => {
     ).toThrow(/no nothingToReview decision/);
   });
 
-  it('renders the round-kind disclosure on its own line, never under "Not linted"', () => {
+  it('renders the round-kind disclosure on its own line, never under "Not fully linted"', () => {
     // The disclosure used to ride gateDisclosed, whose only renderer wraps
-    // every entry in "Not linted (tool limitation…)" — a round kind is not
-    // a linting gap.
+    // every entry in "Not fully linted (tool limitation…)" — a round kind is
+    // not a linting gap.
     const r = reRule();
     expect(r.body).toContain('Decided-stop re-rule');
-    expect(r.body).not.toMatch(/Not linted[^\n]*Decided-stop re-rule/);
+    expect(r.body).not.toMatch(/Not (fully )?linted[^\n]*Decided-stop re-rule/);
   });
 
   it('says why a cleared stop is a Comment — no dangling colon', () => {

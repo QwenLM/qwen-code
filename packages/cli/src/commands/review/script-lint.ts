@@ -86,13 +86,15 @@ export interface ScriptLintReport {
    */
   errored: Array<{ path: string; tool: LintTool; reason: string }>;
   /**
-   * Files a checker **deliberately declines** to lint (not absent, not crashed) —
-   * today only actionlint, whose embedded-shell source mapping is not yet parsed.
-   * Distinct from `skipped` precisely because the verdict must treat it
-   * differently: a deferred checker is a known tool limitation, disclosed but NOT
-   * capping — actionlint is installed on ~15% of PRs (every workflow change), and
-   * capping all of them on a checker we choose not to run would make them
-   * un-Approvable forever, which "install the tool" cannot fix.
+   * The part of a file a checker **deliberately declines** to lint (not absent,
+   * not crashed) — today only actionlint's embedded `run:` shell, whose source
+   * mapping is not yet parsed. The workflow-LEVEL checks (syntax, expression
+   * context availability, action refs) DO run and gate like any lint finding;
+   * a workflow file therefore appears in `checked` AND here. Distinct from
+   * `skipped` precisely because the verdict must treat it differently: the
+   * deferred part is a known tool limitation, disclosed but NOT capping —
+   * capping every workflow PR on the shell portion we choose not to run would
+   * make them un-Approvable forever, which "install the tool" cannot fix.
    *
    * `reasonZh` is the same reason for the review body's Chinese half — the
    * deferral is the one lint outcome rendered inside a translated sentence,
@@ -384,7 +386,19 @@ export function buildToolInvocation(
   const cfg = tool === 'hadolint' ? emptyHadolintConfig() : undefined;
   const argv: Record<LintTool, string[]> = {
     shellcheck: ['--norc', '--format=json1', '--severity=style', absPath],
-    actionlint: ['-format', '{{json .}}', '-no-color', absPath],
+    // `-shellcheck=` / `-pyflakes=` disable the embedded-language integrations
+    // (the same form the repo's own scripts/lint.js runs): their findings are
+    // the deferred portion, so whether they appear must not depend on which
+    // binaries happen to sit on the reviewer's PATH. The workflow-level checks
+    // — syntax, expression context availability, action refs — run regardless.
+    actionlint: [
+      '-shellcheck=',
+      '-pyflakes=',
+      '-format',
+      '{{json .}}',
+      '-no-color',
+      absPath,
+    ],
     // `--config <neutral>` is the ONLY channel that isolates hadolint (env is
     // ignored). When `cfg` is absent this bare form is unreachable — `runTool` has
     // already failed the hadolint run closed rather than lint without isolation.
@@ -525,11 +539,60 @@ function parseFindings(tool: LintTool, raw: string): LintFinding[] | null {
       })
       .filter((x): x is LintFinding => x !== null);
   }
-  // actionlint never reaches here — a workflow is recorded as skipped upstream
-  // (its embedded-shell source mapping is not yet parsed). Fail closed if it ever
-  // does, rather than inventing severities/lines we cannot trust.
+  // actionlint `-format '{{json .}}'` prints ONE JSON array of error objects
+  // (measured on 1.7.12: `[]` on a clean file, one entry per diagnostic
+  // otherwise), each `{message, filepath, line, column, kind, snippet,
+  // end_column}`. `kind` is the diagnostic class — `expression`, `syntax-check`,
+  // `action`, … and `shellcheck`/`pyflakes` for the embedded-language
+  // integrations (disabled in buildToolInvocation; the split in runScriptLint
+  // keeps them deferred if a version ever emits them anyway). actionlint has no
+  // severity scale — every diagnostic it reports is a real workflow defect, so
+  // the level is `error`. Unlike the two filters above, a malformed entry fails
+  // the WHOLE parse (null): silently dropping one diagnostic could drop the
+  // blocker that makes a workflow unloadable.
+  if (tool === 'actionlint') {
+    if (!Array.isArray(json)) return null;
+    const out: LintFinding[] = [];
+    for (const c of json) {
+      const o = c as {
+        line?: unknown;
+        kind?: unknown;
+        message?: unknown;
+      };
+      const l = Number(o?.line);
+      if (
+        !o ||
+        typeof o !== 'object' ||
+        !Number.isInteger(l) ||
+        l < 1 ||
+        typeof o.kind !== 'string' ||
+        !o.kind
+      ) {
+        return null;
+      }
+      out.push({
+        line: l,
+        code: o.kind,
+        level: 'error',
+        message: String(o.message ?? ''),
+        inDiff: false,
+      });
+    }
+    return out;
+  }
   return null;
 }
+
+/**
+ * actionlint diagnostic kinds produced by the embedded-language integrations —
+ * the deferred portion of a workflow lint. Their diagnostics anchor at the
+ * `run:` key and flatten the embedded linter's severity, so they stay disclosed
+ * rather than gated; every OTHER kind is a workflow-level check (syntax,
+ * expression context availability, action refs, …) and gates like any lint
+ * finding. The integrations are disabled at invocation, so this set is a
+ * backstop against version skew, not the primary split.
+ */
+const ACTIONLINT_EMBEDDED_KINDS = new Set(['shellcheck', 'pyflakes']);
 
 /** A hash of the captured diff — the identity of *what was reviewed*. `undefined`
  *  when the diff cannot be read; the gate treats an absent hash on either side as
@@ -635,7 +698,7 @@ export function runScriptLint(
         // Reason does NOT lead with the path — the gate prefixes `${path}:` when
         // it discloses, and leading with it here would print the path twice.
         // Nor does it end with "not linted": the body renders every reason
-        // under a header that already says so ("Not reviewed:" / "Not
+        // under a header that already says so ("Not reviewed:" / "Not fully
         // linted:"), and a tail here posted the phrase twice in one sentence.
         skipped.push({
           path,
@@ -647,24 +710,6 @@ export function runScriptLint(
     }
     const tool = toolFor(path, first.text);
     if (!tool) continue;
-
-    // Actionlint lints a workflow's embedded shell, but its JSON anchors each
-    // diagnostic at the `run:` key line (not the changed shell line) and flattens
-    // ShellCheck's severity — so a style nit reads as an `error` and a real finding
-    // reads as pre-existing. Until that source-mapping is parsed and verified a
-    // workflow is **deferred**: disclosed, but NOT capping the verdict (it is a
-    // tool limitation, not a finding, and actionlint touches ~15% of PRs — capping
-    // every one of them would make workflow changes un-Approvable). shellcheck
-    // still covers standalone `.sh`.
-    if (tool === 'actionlint') {
-      deferred.push({
-        path,
-        tool,
-        reason: 'actionlint embedded-shell source mapping is not yet supported',
-        reasonZh: 'actionlint 对 workflow 内嵌 shell 的源映射尚未支持',
-      });
-      continue;
-    }
 
     if (missing.has(tool)) {
       skipped.push({ path, tool, reason: `${tool} is not installed` });
@@ -705,6 +750,29 @@ export function runScriptLint(
       ...x,
       inDiff: inAnyHunk(x.line, ranges),
     }));
+    if (tool === 'actionlint') {
+      // Workflow-level diagnostics gate like any lint finding; the embedded
+      // `run:` shell stays deferred (its source mapping is not parsed). The
+      // deferral is disclosed for EVERY workflow that ran — the embedded
+      // integrations are disabled at invocation, so the shell portion is never
+      // linted, whether or not the backstop split finds any.
+      checked.push({
+        path,
+        tool,
+        findings: findings.filter(
+          (x) => !ACTIONLINT_EMBEDDED_KINDS.has(x.code),
+        ),
+      });
+      deferred.push({
+        path,
+        tool,
+        reason:
+          'actionlint ran workflow-level checks; embedded run: shell deferred (source mapping not yet supported)',
+        reasonZh:
+          'actionlint 已运行 workflow 级检查；内嵌 run: shell 延迟处理（源映射尚未支持）',
+      });
+      continue;
+    }
     checked.push({ path, tool, findings });
   }
 

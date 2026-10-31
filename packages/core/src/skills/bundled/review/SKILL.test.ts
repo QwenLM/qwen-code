@@ -62,6 +62,79 @@ describe('bundled review skill', () => {
     expect(body).toContain('decided stop with no composed artifact');
   });
 
+  it('re-anchors a completed review at the moved head — never abandons it', () => {
+    // The maintainer's ruling (PR #15578, "提交评论啊"): head movement posts
+    // the completed review at the new head, it does not throw the round
+    // away. Both movement paths — the proactive anchorsAtRisk branch and
+    // the reactive 422 recovery — must route to the one protocol, and the
+    // old abandon-and-restart wording must not survive anywhere in the
+    // corpus (a compressor that keeps only one path would re-teach it).
+    const body = skillBody();
+    expect(body).toContain(
+      'The re-anchor protocol — post the completed review at the new head',
+    );
+    expect(body).toContain(
+      'Do NOT abandon the submission and do NOT restart the review',
+    );
+    expect(body).toContain('Run the **re-anchor protocol** above');
+    // The protocol's honesty machinery: per-finding delta ruling, the
+    // unread-delta disclosure, and the post-without-asking ruling.
+    expect(body).toContain('Rule every finding against the delta');
+    expect(body).toContain(
+      'head advanced <reviewedSha>..<liveHeadSha> — re-anchored: the delta was ruled per-finding, not fully reviewed',
+    );
+    expect(body).toContain('**Post the COMMENT without asking**');
+    // The bound survives the rename: one pass per review, both paths.
+    expect(body).toContain(
+      'a review re-anchors **at most once** for head movement',
+    );
+    // Revert guards: the abandon-and-restart wording is gone for good.
+    expect(body).not.toContain(
+      'Abandon this submission and start the review again',
+    );
+    expect(body).not.toContain(
+      'abandon this submission, say so, and restart at the new SHA',
+    );
+    expect(body).not.toContain(
+      'Do not re-resolve the old findings against the new diff and submit those',
+    );
+  });
+
+  it('accounts the blocker re-check walk against the inventory — prose alone was skipped', () => {
+    // #15974: the walk is prose, and a round posted past a blocker an
+    // earlier review had filed. The rule must name the inventory file, the
+    // state field, and the cap — the three pieces the arithmetic joins.
+    const body = skillBody();
+    expect(body).toContain('qwen-review-pr-<n>-context-blockers.json');
+    expect(body).toContain('blockerRulings');
+    expect(body).toContain(
+      'Record the walk as accounting, not just as verdicts',
+    );
+    expect(body).toContain(
+      'an inventory key with no entry is unreviewed scope and caps the verdict at `COMMENT`',
+    );
+    // The floor/ceiling split: the inventory is the mechanical floor, the
+    // semantic walk may rule on more. A rewrite that makes the inventory
+    // the CEILING would retire the semantic selection rule.
+    expect(body).toContain(
+      'The inventory is the mechanical FLOOR of the walk, not its ceiling',
+    );
+  });
+
+  it('names --dry-run as the only probe and the landed review as never re-submittable', () => {
+    // #15853: the sanctioned probe existed in the CLI but was undocumented
+    // on the GitHub path, so a 422 diagnosis reached for a curl probe
+    // write; and a re-submit over a landed payload replied this round's
+    // own roots back to themselves. Both rules must survive in the corpus.
+    const body = skillBody();
+    expect(body).toContain('`--dry-run` is the only sanctioned probe');
+    expect(body).toContain('already-posted-this-commit');
+    expect(body).toContain('a landed review is never re-submitted');
+    expect(body).toContain(
+      'The question has a sanctioned, write-free answer: `submit --dry-run`',
+    );
+  });
+
   it('rules an unplanned declarer under the eighth coverage failure, not a ninth', () => {
     // `check-coverage` names a declarer whose chunk id the plan does not
     // carry in the SAME `ERROR:` line as the planned ones, so the skill's
@@ -1607,10 +1680,10 @@ describe('bundled review skill', () => {
     expect(body).not.toContain(
       'the context-unavailable cap keeps an **Approve** verdict at Comment',
     );
-    // The drift re-review is bounded by the once-per-review restart bound;
-    // the stale variant ordered it unconditionally.
+    // The drift re-review is bounded by the once-per-review head-movement
+    // bound; the stale variant ordered it unconditionally.
     expect(body).toContain(
-      'but ONLY while the per-review head-movement restart bound is unspent',
+      'but ONLY while the per-review head-movement bound is unspent',
     );
     // The could-not-re-verify relay the corrected variant adds: submit
     // prints the warning on both the success and the mid-batch-failure path.
@@ -1763,18 +1836,19 @@ describe('bundled review skill', () => {
     expect(posting).toContain('ones past a 2000-point total');
   });
 
-  it('names the CI salvage contract as the one exception to the drift restart', () => {
+  it('names the CI salvage contract as the one exception to the drift re-anchor', () => {
     // The workflow's supersede watcher arms a salvage past its threshold
     // and exports QWEN_REVIEW_SALVAGE_POST beside the marker; without this
-    // exception the anchorsAtRisk=true rule commands abandon-and-restart in
-    // exactly the drifted state a salvage creates (R32-2). Cross-pinned with
+    // exception the anchorsAtRisk=true rule commands a re-anchor pass in
+    // exactly the drifted state a salvage creates (R32-2) — a queued
+    // replacement run already owns the new head. Cross-pinned with
     // scripts/tests/qwen-pr-review-workflow.test.js, which pins the export.
     const posting = referenceBody('posting.md');
     expect(posting).toContain(
       '**One exception — the CI salvage contract:** when the environment carries `QWEN_REVIEW_SALVAGE_POST=1` **and** the file named by `QWEN_CI_REVIEW_SALVAGE_OK_FILE` exists with content equal to `headDrift.reviewedSha`',
     );
-    expect(posting).toContain('do **not** restart: submit as planned');
-    expect(posting).toContain('this consumes no restart');
+    expect(posting).toContain('do **not** re-anchor: submit as planned');
+    expect(posting).toContain('this consumes no re-anchor pass');
   });
 
   it('gates every reference file on the verdict in the core body', () => {

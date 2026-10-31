@@ -33,6 +33,15 @@ const hasShellcheck = (() => {
   }
 })();
 
+const hasActionlint = (() => {
+  try {
+    execFileSync('actionlint', ['-version'], { stdio: 'ignore' });
+    return true;
+  } catch {
+    return false;
+  }
+})();
+
 let dir: string;
 // Extra temp dirs a test makes for itself (a symlink worktree, say). Tracked and
 // torn down in `afterEach` so a failing `expect` — which throws before an inline
@@ -152,41 +161,79 @@ describe.skipIf(!hasShellcheck)(
   },
 );
 
-describe('runScriptLint — graceful degradation and scoping', () => {
-  it('defers a workflow to skipped — actionlint source-mapping is not yet supported', () => {
-    // A workflow is never certified from actionlint findings: its JSON anchors at
-    // the `run:` key line and flattens ShellCheck severity, so a wrong line/level
-    // would create false blockers. Until that is parsed and verified, the file is
-    // reported as skipped (unreviewed), never as a clean pass — and never run.
-    const { plan, worktree } = setup(
-      '.github/workflows/ci.yml',
-      'name: CI\non: push\njobs: {}\n',
-      [{ newStart: 1, newEnd: 3 }],
-    );
-    const r = runScriptLint({ plan, worktree });
-    expect(r.checked).toEqual([]);
-    // actionlint is DEFERRED (a tool limitation), not skipped — the distinction
-    // matters: deferred is disclosed but does NOT cap the verdict, so a
-    // workflow-only PR is not made un-Approvable.
-    expect(r.skipped).toEqual([]);
-    expect(r.deferred).toHaveLength(1);
-    expect(r.deferred[0].tool).toBe('actionlint');
-    expect(r.deferred[0].reason).toContain('not yet supported');
-    // The reason must not restate "not linted" — the body renders it under a
-    // wrapper that already opens with "Not linted:", and a tail here posted
-    // the phrase twice in one sentence (#10567's posted body).
-    expect(r.deferred[0].reason).not.toContain('not linted');
-    // The Chinese half of that wrapper sentence renders `reasonZh` — without
-    // it the 中文说明 block carried the English reason verbatim. Pinned to the
-    // literal: a `toContain('actionlint')` fragment was satisfied by the
-    // ENGLISH reason too, so the exact defect this field exists to fix — an
-    // English string posing as the Chinese half — shipped green under it.
-    expect(r.deferred[0].reasonZh).toBe(
-      'actionlint 对 workflow 内嵌 shell 的源映射尚未支持',
-    );
-    expect(r.ok).toBe(true);
-  });
+describe.skipIf(!hasActionlint)(
+  'runScriptLint — actionlint workflow-level checks (real binary)',
+  () => {
+    // The #15974 regression: `runner` context in `jobs.<id>.env` makes GitHub
+    // refuse to load the workflow AT ALL (zero jobs ever run). actionlint
+    // catches this at the YAML/expression level — no embedded-shell source
+    // mapping involved — so the old whole-file deferral let a workflow that
+    // cannot execute sail through as "disclosed, not blocking". The check now
+    // runs and gates; only the embedded `run:` shell stays deferred.
+    const UNLOADABLE = [
+      'name: CI',
+      'on: pull_request',
+      'jobs:',
+      '  lint:',
+      '    runs-on: ubuntu-latest',
+      '    env:',
+      '      HOME: ${{ runner.temp }}/home',
+      '    steps:',
+      '      - run: echo hi',
+      '',
+    ].join('\n');
 
+    it('blocks on a workflow GitHub cannot load (runner context in jobs.env)', () => {
+      const { plan, worktree } = setup('.github/workflows/ci.yml', UNLOADABLE, [
+        { newStart: 7, newEnd: 7 }, // the `HOME: ${{ runner.temp }}` line
+      ]);
+      const r = runScriptLint({ plan, worktree });
+      expect(r.checked).toHaveLength(1);
+      expect(r.checked[0].tool).toBe('actionlint');
+      const expr = r.checked[0].findings.find((f) => f.code === 'expression');
+      expect(expr).toBeDefined();
+      expect(expr!.line).toBe(7);
+      expect(expr!.level).toBe('error');
+      expect(expr!.message).toContain('runner');
+      expect(expr!.inDiff).toBe(true);
+      expect(r.ok).toBe(false);
+      // The embedded shell portion is STILL deferred — the file appears in
+      // both channels: checked (workflow-level) and deferred (shell portion).
+      expect(r.deferred).toHaveLength(1);
+      expect(r.deferred[0].tool).toBe('actionlint');
+      expect(r.deferred[0].reason).toContain('ran workflow-level checks');
+      expect(r.deferred[0].reason).not.toContain('not linted');
+      expect(r.deferred[0].reasonZh).toBe(
+        'actionlint 已运行 workflow 级检查；内嵌 run: shell 延迟处理（源映射尚未支持）',
+      );
+    });
+
+    it('a clean workflow passes, with the shell deferral still disclosed', () => {
+      const clean = [
+        'name: CI',
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: ubuntu-latest',
+        '    steps:',
+        '      - run: echo ok',
+        '',
+      ].join('\n');
+      const { plan, worktree } = setup('.github/workflows/ci.yml', clean, [
+        { newStart: 1, newEnd: 7 },
+      ]);
+      const r = runScriptLint({ plan, worktree });
+      expect(r.checked).toHaveLength(1);
+      expect(r.checked[0].findings).toEqual([]);
+      expect(r.ok).toBe(true);
+      // The disclosure survives a clean run: the shell portion was never
+      // linted (integrations disabled), findings or not.
+      expect(r.deferred).toHaveLength(1);
+    });
+  },
+);
+
+describe('runScriptLint — graceful degradation and scoping', () => {
   it('records a symlinked script as skipped, never dropped (empty ≠ clean)', () => {
     // A `hook.sh` that is a symlink is lint-owed by name but not a regular file;
     // it must not vanish from the report, or an empty report reads as a clean pass.

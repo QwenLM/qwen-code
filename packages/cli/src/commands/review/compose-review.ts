@@ -1402,6 +1402,27 @@ export interface ComposeReviewInput {
    */
   cannotTellCriticals?: string[];
   /**
+   * One entry per blocker in `pr-context`'s machine-readable inventory
+   * (`qwen-review-pr-<n>-context-blockers.json`): `{key, ruling}`, the key
+   * copied verbatim from the inventory (`comment:<id>` / `review:<id>`),
+   * the ruling one of `fixed` | `still-stands` | `cannot-tell` |
+   * `superseded`. The inventory is the mechanical FLOOR of the Step 6
+   * re-check walk — the walk may rule on more (semantic blockers the
+   * signal test does not catch), never on less. `compose-review`
+   * cross-checks the two: an inventory item with no entry here caps the
+   * verdict at COMMENT as unreviewed scope, so a skipped walk cannot ship
+   * a `C=0` claim past a blocker it never ruled on (measured; DESIGN.md —
+   * The blocker the re-check never ruled (PR #15974)). The rulings
+   * themselves decide nothing here — a `fixed` blocker's thread lifecycle
+   * rides `fixedFindings`, a `cannot-tell` one's cap rides
+   * `cannotTellCriticals`, a still-standing one re-posts as a Critical;
+   * this field is the ACCOUNTING that proves the walk happened. Absent
+   * when the inventory is absent (older CLI, pr-context never ran) — the
+   * gate is inert then, exactly as the script-lint gate is inert without
+   * its report.
+   */
+  blockerRulings?: Array<{ key?: unknown; ruling?: unknown }>;
+  /**
    * Step 6's `fixed` rulings — one `{id, by}` per finding whose mechanism
    * can no longer fire, the same ruling the status table renders as
    * `R1-2 fixed by <what>`. The id names the finding's thread: a
@@ -5527,8 +5548,8 @@ function composeReviewBody(
     // orchestrator's re-rule of the open ledger. Disclosed on every verdict
     // so the body says what kind of round this was — through its OWN block
     // (`stopRoundBlock` below), never `gateDisclosed`: that channel's one
-    // renderer wraps every entry in "Not linted (tool limitation…)", and a
-    // round kind is not a linting gap.
+    // renderer wraps every entry in "Not fully linted (tool limitation…)",
+    // and a round kind is not a linting gap.
     // The body↔disposition cross-check, over the FINAL local set — the
     // ingested entries plus the deferral channel's relocated Criticals,
     // past the gate-repost dedup — because that set is what the body posts.
@@ -5667,6 +5688,13 @@ function composeReviewBody(
     bodyCriticals.push(...gate.criticals); // render + count toward `c`, deterministic
     unreviewed.push(...gate.unreviewed);
     gateDisclosed.push(...gate.disclosed);
+    // The blocker re-check accounting: an inventory item the round never
+    // ruled on is unreviewed scope. Inert without the inventory side file;
+    // a decided-stop round skips it with the other gates (its contract is
+    // the ledger re-rule, disclosed as such).
+    unreviewed.push(
+      ...blockerReCheckGate(input.planPath, input.blockerRulings).unreviewed,
+    );
     testPlanNotes.push(...testPlanGate(input.planPath).notes);
     repositoryContextNotes.push(...repositoryContextGate(input.planPath));
     // Modeled-executable-system diffs (declared by the manifest domain) owe
@@ -7608,8 +7636,8 @@ function composeReviewBody(
       : undefined;
 
   // The round-kind disclosure, on its own line — never inside the lint
-  // gate's "Not linted" wrapper: a decided-stop re-rule is not a tool
-  // limitation, and a reader handed "Not linted: Decided-stop re-rule …"
+  // gate's "Not fully linted" wrapper: a decided-stop re-rule is not a tool
+  // limitation, and a reader handed "Not fully linted: Decided-stop re-rule …"
   // reads the round kind as a linting gap. Rendered on the two events a
   // granted stop can produce (REQUEST_CHANGES and COMMENT; APPROVE is
   // demoted before the body composes).
@@ -7628,16 +7656,18 @@ function composeReviewBody(
       ]
     : [];
 
-  // A deferred checker (actionlint's embedded shell): disclosed on EVERY verdict —
-  // including Approve — so the reader knows a workflow's shell was not linted, but
-  // it does not cap the verdict (it is a tool limitation, not a finding or an
-  // unrun-checker gap). This is the "disclosed but not capping" half.
+  // A deferred checker portion (actionlint's embedded shell): disclosed on EVERY
+  // verdict — including Approve — so the reader knows a workflow's shell was not
+  // linted, but it does not cap the verdict (it is a tool limitation, not a
+  // finding or an unrun-checker gap). This is the "disclosed but not capping"
+  // half. "Not FULLY linted": the workflow-level checks now run and gate, so the
+  // file named here was partially linted — the deferral is its shell portion.
   const deferredBlock: Bi[] = gateDisclosed.length
     ? [
         {
           trim: 2,
-          en: `Not linted (tool limitation, not a blocker): ${gateDisclosed.map((g) => g.en).join('; ')}.`,
-          zh: `未检查（工具限制，非阻断）：${gateDisclosed.map((g) => g.zh).join('；')}。`,
+          en: `Not fully linted (tool limitation, not a blocker): ${gateDisclosed.map((g) => g.en).join('; ')}.`,
+          zh: `未完整检查（工具限制，非阻断）：${gateDisclosed.map((g) => g.zh).join('；')}。`,
         },
       ]
     : [];
@@ -9162,11 +9192,13 @@ export function scriptLintGate(planPath: string): {
       `the executable-script lint — ${stripCommentGrammar(e.tool)} errored on ${mdField(e.path)}`,
     );
   }
-  // A deferred checker (actionlint) is disclosed but does not cap — the reader is
-  // told the workflow's embedded shell was not linted, without making every
-  // workflow PR un-Approvable on a checker we deliberately decline to run.
+  // A deferred checker portion (actionlint's embedded shell) is disclosed but
+  // does not cap — the reader is told the workflow's embedded shell was not
+  // linted, without making every workflow PR un-Approvable on the portion we
+  // deliberately decline to run. The workflow-level checks ran; their findings
+  // arrived through `checked` above and gate like any lint finding.
   // No "the executable-script lint —" prefix here: the body's own wrapper opens
-  // with "Not linted:", and naming the lint after that header rendered as
+  // with "Not fully linted:", and naming the lint after that header rendered as
   // "Not linted: the executable-script lint" — a sentence about not running a
   // lint on a lint (#10567's posted body). The path and reason carry the facts.
   for (const d of report.deferred ?? []) {
@@ -9191,6 +9223,129 @@ function scriptLintReportName(pr: unknown): string {
   return isPositivePrNumber(pr)
     ? `qwen-review-pr-${pr}-script-lint.json`
     : 'qwen-review-script-lint.json';
+}
+
+/** The ruling vocabulary the blocker inventory accounting accepts — the four
+ *  dispositions Step 6's re-check walk records. */
+const BLOCKER_RULINGS = new Set([
+  'fixed',
+  'still-stands',
+  'cannot-tell',
+  'superseded',
+]);
+
+/**
+ * Cross-check the round's blocker re-check accounting against the inventory
+ * `pr-context` wrote beside the context file. The walk itself is prose —
+ * "take each live blocker already on the PR and check it against the code" —
+ * and prose has been skipped: a round posted REQUEST_CHANGES while a blocker
+ * an earlier review had already filed went unruled, surfacing only as a
+ * post-review correction (measured; DESIGN.md — The blocker the re-check
+ * never ruled (PR #15974)). The inventory is the CLI's own promotion set
+ * (the mechanical floor of the walk), the rulings are the orchestrator's
+ * accounting, and this gate is the arithmetic that joins them: an inventory
+ * item with no ruling is unreviewed scope and caps a would-be Approve at
+ * COMMENT, exactly like a dimension nobody reviewed.
+ *
+ * Inert when the inventory is absent (an older CLI, a run whose pr-context
+ * never succeeded — the context-unavailable cap covers that state) or empty
+ * (no blockers owed). A MALFORMED inventory fails closed — it is a side file
+ * the review agent can rewrite, and a corrupt one must not read as "nothing
+ * owed". Malformed RULINGS throw: the channel is typed, and a wrong shape is
+ * a compose-time repair, not a silent pass.
+ */
+export function blockerReCheckGate(
+  planPath: string,
+  rulings: unknown,
+): { unreviewed: string[] } {
+  const unreviewed: string[] = [];
+  let plan: { prNumber?: unknown };
+  try {
+    plan = JSON.parse(readFileSync(planPath, 'utf8'));
+  } catch {
+    // Same fail-closed stance as scriptLintGate: an unreadable plan cannot
+    // prove the walk was unowed.
+    return {
+      unreviewed: [
+        'the blocker re-check — could not read the plan to check the gate',
+      ],
+    };
+  }
+  const pr = plan.prNumber;
+  if (!isPositivePrNumber(pr)) return { unreviewed };
+  const inventoryPath = join(
+    dirname(planPath),
+    `qwen-review-pr-${pr}-context-blockers.json`,
+  );
+  let raw: string;
+  try {
+    raw = readFileSync(inventoryPath, 'utf8');
+  } catch {
+    return { unreviewed }; // no inventory → no gate (the field's doc names the states)
+  }
+  let inventory: unknown;
+  try {
+    inventory = JSON.parse(raw);
+  } catch {
+    return {
+      unreviewed: [
+        'the blocker re-check — the blocker inventory is malformed; re-run `qwen review pr-context`',
+      ],
+    };
+  }
+  const keys = (inventory as { blockers?: unknown })?.blockers;
+  // The key shape is the CLI's own (`comment:<id>` / `review:<id>`), and the
+  // unruled keys render into the body — validating the shape here is what
+  // lets them render without a prose escape: a rewritten inventory carrying
+  // markdown or a newline in a "key" is malformed, not renderable.
+  if (
+    !Array.isArray(keys) ||
+    keys.some((k) => typeof k !== 'string' || !/^(comment|review):\d+$/.test(k))
+  ) {
+    return {
+      unreviewed: [
+        'the blocker re-check — the blocker inventory is malformed; re-run `qwen review pr-context`',
+      ],
+    };
+  }
+  if (keys.length === 0) return { unreviewed };
+  // Typed channel: validate the rulings' shape before accounting with them.
+  const accounted = new Set<string>();
+  if (rulings !== undefined) {
+    if (!Array.isArray(rulings)) {
+      throw new Error(
+        'compose-review: blockerRulings must be an array of {key, ruling} entries',
+      );
+    }
+    for (let i = 0; i < rulings.length; i++) {
+      const entry = rulings[i] as { key?: unknown; ruling?: unknown };
+      if (
+        !entry ||
+        typeof entry !== 'object' ||
+        typeof entry.key !== 'string' ||
+        entry.key === '' ||
+        typeof entry.ruling !== 'string' ||
+        !BLOCKER_RULINGS.has(entry.ruling)
+      ) {
+        throw new Error(
+          `compose-review: blockerRulings[${i}] must be {key: <inventory key>, ruling: fixed|still-stands|cannot-tell|superseded}, got ${JSON.stringify(entry)}`,
+        );
+      }
+      accounted.add(entry.key);
+    }
+  }
+  const missing = (keys as string[]).filter((k) => !accounted.has(k));
+  if (missing.length > 0) {
+    // Name the unruled keys — the disclosure is the repair instruction. The
+    // list is bounded the way every body-bound list is: a pathological
+    // thread count must not push the body past its own caps.
+    const named = missing.slice(0, 10).join(', ');
+    const tail = missing.length > 10 ? ` (+${missing.length - 10} more)` : '';
+    unreviewed.push(
+      `the blocker re-check — ${missing.length} blocker(s) on the PR were not ruled on (${named}${tail})`,
+    );
+  }
+  return { unreviewed };
 }
 
 /**

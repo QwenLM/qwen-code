@@ -78,26 +78,150 @@ function setup(
   return { plan: planPath, worktree: dir };
 }
 
+/** One actionlint diagnostic in the measured 1.7.12 `-format '{{json .}}'`
+ *  shape: a JSON ARRAY of `{message, filepath, line, column, kind, snippet,
+ *  end_column}` objects — `kind`, not `error_kind`, is the class field. */
+function actionlintRunner(
+  entries: Array<{ line: number; kind: string; message?: string }>,
+): ToolRunner {
+  return (tool: LintTool): ToolRun =>
+    tool === 'actionlint'
+      ? {
+          kind: 'ok',
+          stdout: JSON.stringify(
+            entries.map((e) => ({
+              message: e.message ?? 'msg',
+              filepath: '.github/workflows/ci.yml',
+              line: e.line,
+              column: 1,
+              kind: e.kind,
+              snippet: '',
+              end_column: 2,
+            })),
+          ),
+        }
+      : { kind: 'missing' };
+}
+
 describe('runScriptLint — tool JSON normalisation (injected runner)', () => {
-  it('defers a workflow to its own `deferred` state without ever running actionlint', () => {
-    // The runner would report findings, but a workflow is deferred BEFORE it runs
-    // (actionlint's source-mapping is not yet parsed), so it lands in skipped, not
-    // checked — and the runner is never even called for it.
-    const runner = vi.fn(() => {
-      throw new Error('runner must not be called for a deferred workflow');
-    });
+  it('runs actionlint and gates its workflow-level diagnostics; the shell portion stays deferred', () => {
+    // The #15974 shape: an `expression` diagnostic (runner context in
+    // jobs.env) is a workflow-level check — it gates like any lint finding.
+    // The old whole-file deferral never ran the tool at all.
+    const runner = vi.fn(
+      actionlintRunner([
+        {
+          line: 8,
+          kind: 'expression',
+          message: 'context "runner" is not allowed here',
+        },
+      ]),
+    );
     const { plan, worktree } = setup(
       '.github/workflows/ci.yml',
       'name: CI\non: push\njobs: {}\n',
       { hunks: [{ newStart: 8, newEnd: 8 }] },
     );
     const r = runScriptLint({ plan, worktree }, runner);
-    expect(r.checked).toEqual([]);
-    // deferred (a tool limitation), not skipped — and the runner was never called.
+    expect(runner).toHaveBeenCalledWith('actionlint', expect.any(String));
+    expect(r.checked).toHaveLength(1);
+    expect(r.checked[0].tool).toBe('actionlint');
+    expect(r.checked[0].findings[0]).toMatchObject({
+      line: 8,
+      code: 'expression',
+      level: 'error',
+      inDiff: true,
+    });
+    expect(r.ok).toBe(false);
+    // The file is in BOTH channels: checked (workflow-level) and deferred
+    // (the embedded shell, which the invocation disables).
+    expect(r.deferred).toHaveLength(1);
     expect(r.deferred[0].tool).toBe('actionlint');
-    expect(r.deferred[0].reason).toContain('not yet supported');
+    expect(r.deferred[0].reason).toContain('ran workflow-level checks');
+    expect(r.deferred[0].reason).not.toContain('not linted');
+    expect(r.deferred[0].reasonZh).toBe(
+      'actionlint 已运行 workflow 级检查；内嵌 run: shell 延迟处理（源映射尚未支持）',
+    );
     expect(r.skipped).toEqual([]);
-    expect(runner).not.toHaveBeenCalled();
+  });
+
+  it('a clean actionlint array still discloses the shell deferral', () => {
+    const { plan, worktree } = setup(
+      '.github/workflows/ci.yml',
+      'name: CI\non: push\njobs: {}\n',
+      { hunks: [{ newStart: 1, newEnd: 3 }] },
+    );
+    const r = runScriptLint({ plan, worktree }, actionlintRunner([]));
+    expect(r.checked).toHaveLength(1);
+    expect(r.checked[0].findings).toEqual([]);
+    expect(r.deferred).toHaveLength(1);
+    expect(r.ok).toBe(true);
+  });
+
+  it('routes embedded-language kinds to the deferral, never to a finding (version-skew backstop)', () => {
+    // The integrations are disabled at invocation, so these kinds should not
+    // appear — but if a version emits them anyway, they are the deferred
+    // portion (run:-key anchors, flattened severity), not gate findings.
+    const { plan, worktree } = setup(
+      '.github/workflows/ci.yml',
+      'name: CI\non: push\njobs: {}\n',
+      { hunks: [{ newStart: 8, newEnd: 8 }] },
+    );
+    const r = runScriptLint(
+      { plan, worktree },
+      actionlintRunner([
+        { line: 8, kind: 'shellcheck' },
+        { line: 9, kind: 'pyflakes' },
+      ]),
+    );
+    expect(r.checked).toHaveLength(1);
+    expect(r.checked[0].findings).toEqual([]);
+    expect(r.deferred).toHaveLength(1);
+    expect(r.ok).toBe(true);
+  });
+
+  it.each([
+    ['a non-array root', '{"message":"oops"}'],
+    ['an entry without a line', '[{"kind":"expression","message":"m"}]'],
+    ['an entry without a kind', '[{"line":3,"message":"m"}]'],
+    ['a null entry', '[null]'],
+  ])('fails closed on %s in actionlint output', (_label, stdout) => {
+    // Dropping one malformed diagnostic could drop the blocker that makes a
+    // workflow unloadable — the whole file errors instead.
+    const { plan, worktree } = setup(
+      '.github/workflows/ci.yml',
+      'name: CI\non: push\njobs: {}\n',
+      { hunks: [{ newStart: 1, newEnd: 3 }] },
+    );
+    const r = runScriptLint(
+      { plan, worktree },
+      fixedRunner({ kind: 'ok', stdout }),
+    );
+    expect(r.checked).toEqual([]);
+    expect(r.errored).toHaveLength(1);
+    expect(r.errored[0].tool).toBe('actionlint');
+    expect(r.errored[0].reason).toContain('unparseable');
+    expect(r.ok).toBe(false);
+  });
+
+  it('an uninstalled actionlint is skipped (unreviewed), not deferred', () => {
+    // The deferral is the SHELL PORTION of a run that happened. A tool that
+    // never ran checked nothing — the same fail-closed state shellcheck gets,
+    // which the gate caps an Approve on.
+    const { plan, worktree } = setup(
+      '.github/workflows/ci.yml',
+      'name: CI\non: push\njobs: {}\n',
+      { hunks: [{ newStart: 1, newEnd: 3 }] },
+    );
+    const r = runScriptLint(
+      { plan, worktree },
+      fixedRunner({ kind: 'missing' }),
+    );
+    expect(r.checked).toEqual([]);
+    expect(r.deferred).toEqual([]);
+    expect(r.skipped).toHaveLength(1);
+    expect(r.skipped[0].tool).toBe('actionlint');
+    expect(r.skipped[0].reason).toContain('not installed');
   });
 
   it('normalises hadolint output (code + level preserved)', () => {
@@ -361,6 +485,18 @@ describe('buildToolInvocation — config isolation (a PR config cannot suppress 
   it('shellcheck runs with --norc, ignoring a PR-added .shellcheckrc', () => {
     const { argv } = buildToolInvocation('shellcheck', '/w/x.sh');
     expect(argv).toContain('--norc');
+  });
+
+  it('actionlint disables the embedded integrations (the deferred portion must not depend on PATH)', () => {
+    // `-shellcheck=` / `-pyflakes=` — the same form scripts/lint.js runs. With
+    // them, the workflow-level checks give the same answer whether or not the
+    // reviewer's machine happens to have shellcheck/pyflakes installed; the
+    // shell portion is deferred uniformly. Drop them and a machine WITH
+    // shellcheck starts emitting the run:-key-anchored diagnostics the split
+    // exists to keep out of the gate.
+    const { argv } = buildToolInvocation('actionlint', '/w/ci.yml');
+    expect(argv).toContain('-shellcheck=');
+    expect(argv).toContain('-pyflakes=');
   });
 
   it('drops SHELLCHECK_OPTS from the env even when the process has a hostile one set', () => {
