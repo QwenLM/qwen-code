@@ -18,12 +18,44 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 // getLinterTempDir joins with the platform separator; compare normalized
 // paths so the suite also passes on the Windows gate.
 const toPosix = (value) => value.replaceAll(path.sep, '/');
+
+describe('entry-point guard (import purity)', () => {
+  // The CI provisioning steps import this module for its installer helpers;
+  // an unconditional main() turned every such import into a full lint pass
+  // that never installed anything (PR #16001, F2). The guard is only
+  // observable from a CHILD process: in-process, the suite's own argv
+  // (set in the describe below) carries no lane flag, so even the unguarded
+  // module runs nothing here — which is exactly how mutation M19 survived
+  // the repo suite. A fresh `node -e` import has no argv[1] and no lane
+  // flags: unguarded, it walks into setup + every lane and either fails or
+  // outruns the timeout; guarded, it prints the marker and exits at once.
+  it('importing lint.js from a fresh node process runs no lint lane (M19)', () => {
+    const repoRoot = path.resolve(
+      path.dirname(fileURLToPath(import.meta.url)),
+      '../..',
+    );
+    const lintUrl = pathToFileURL(
+      path.join(repoRoot, 'scripts', 'lint.js'),
+    ).href;
+    const r = spawnSync(
+      process.execPath,
+      [
+        '--input-type=module',
+        '-e',
+        `await import(${JSON.stringify(lintUrl)}); console.log('IMPORT-PURE');`,
+      ],
+      { cwd: repoRoot, encoding: 'utf8', timeout: 30_000 },
+    );
+    expect(r.status).toBe(0);
+    expect(r.stdout).toContain('IMPORT-PURE');
+  });
+});
 
 describe('linter directories', () => {
   const originalArgv = process.argv;

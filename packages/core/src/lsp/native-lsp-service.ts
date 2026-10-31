@@ -774,10 +774,10 @@ export class NativeLspService {
   }
 
   /**
-   * Ready handles for a diagnostics query. Rejects outright when nothing is
-   * ready — no matching server, a server that failed or never started, a
-   * server still starting up — because an empty ready set would otherwise be
-   * reported as a clean result. For a document query (`uri` given) the
+   * Ready handles for a query. Rejects outright when nothing is ready — no
+   * matching server, a server that failed or never started, a server still
+   * starting up — because an empty ready set would otherwise be reported as
+   * a clean (empty) result. For a document query (`uri` given) the
    * rejection names only servers the queried file does not provably exclude;
    * when every configured server is irrelevant for the file the rejection
    * says so instead of blaming a server that could never own it. Servers
@@ -788,7 +788,8 @@ export class NativeLspService {
    * for the not-ready case: `replayOpenDocuments` skips handles missing from
    * its map rather than rejecting.
    */
-  private getDiagnosticHandles(
+  private requireReadyHandles(
+    operation: string,
     serverName?: string,
     uri?: string,
   ): Array<[string, LspServerHandle & { connection: LspConnectionInterface }]> {
@@ -805,12 +806,12 @@ export class NativeLspService {
       .map(([name, handle]) => describeLspServerState(name, handle));
     if (skipped.length > 0) {
       throw new Error(
-        `No LSP server is ready to provide diagnostics (${boundedRejectionDetail(skipped)})`,
+        `No LSP server is ready to provide ${operation} (${boundedRejectionDetail(skipped)})`,
       );
     }
     if (uri && configured.length > 0) {
       throw new Error(
-        'No LSP server is ready to provide diagnostics (no configured server covers the queried file)',
+        `No LSP server is ready to provide ${operation} (no configured server covers the queried file)`,
       );
     }
     throw new Error(
@@ -1446,12 +1447,9 @@ export class NativeLspService {
   ): Promise<LspSymbolInformation[]> {
     const results: LspSymbolInformation[] = [];
 
-    for (const [serverName, handle] of Array.from(
-      this.serverManager.getHandles(),
+    for (const [serverName, handle] of this.requireReadyHandles(
+      'workspace symbols',
     )) {
-      if (handle.status !== 'READY' || !handle.connection) {
-        continue;
-      }
       try {
         await this.warmupAndTrack(serverName, handle);
         const warmedUp = this.serverManager.isTypescriptServer(handle)
@@ -1514,7 +1512,11 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspDefinition[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'definitions',
+      serverName,
+      location.uri,
+    );
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1583,7 +1585,11 @@ export class NativeLspService {
     includeDeclaration = false,
     limit = 200,
   ): Promise<LspReference[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'references',
+      serverName,
+      location.uri,
+    );
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1649,7 +1655,7 @@ export class NativeLspService {
     location: LspLocation,
     serverName?: string,
   ): Promise<LspHoverResult | null> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles('hover', serverName, location.uri);
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1700,7 +1706,11 @@ export class NativeLspService {
     serverName?: string,
     limit = 200,
   ): Promise<LspSymbolInformation[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'document symbols',
+      serverName,
+      uri,
+    );
     const requestParams = { textDocument: { uri } };
 
     for (const [name, handle] of handles) {
@@ -1780,7 +1790,11 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspDefinition[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'implementations',
+      serverName,
+      location.uri,
+    );
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -1980,7 +1994,11 @@ export class NativeLspService {
     serverName?: string,
     limit = 50,
   ): Promise<LspCallHierarchyItem[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles(
+      'call hierarchy',
+      serverName,
+      location.uri,
+    );
     const requestParams = {
       textDocument: { uri: location.uri },
       position: location.range.start,
@@ -2215,7 +2233,7 @@ export class NativeLspService {
     uri: string,
     serverName?: string,
   ): Promise<LspDiagnostic[]> {
-    const handles = this.getDiagnosticHandles(serverName, uri);
+    const handles = this.requireReadyHandles('diagnostics', serverName, uri);
     const extension = this.diagnosticFileExtension(uri);
     // Ownership is only decidable for an extension the tables can place. For
     // anything else (`h`, `mts`, an extensionless file) the answer is backed by
@@ -2421,7 +2439,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 100,
   ): Promise<LspFileDiagnostics[]> {
-    const handles = this.getDiagnosticHandles(serverName);
+    const handles = this.requireReadyHandles('diagnostics', serverName);
     const results: LspFileDiagnostics[] = [];
     const failures: Array<{ name: string; error: unknown }> = [];
     const unsupported: Array<{ name: string; error: unknown }> = [];
@@ -2621,7 +2639,7 @@ export class NativeLspService {
     serverName?: string,
     limit = 20,
   ): Promise<LspCodeAction[]> {
-    const handles = this.getReadyHandles(serverName);
+    const handles = this.requireReadyHandles('code actions', serverName, uri);
 
     for (const [name, handle] of handles) {
       try {

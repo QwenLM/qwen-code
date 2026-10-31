@@ -3550,6 +3550,7 @@ const EN: Messages = {
   'skills.toggleUnsupported':
     'The connected daemon does not support skill enable or disable actions.',
   'skills.title': 'Skills',
+  'plugins.backToChat': 'Back to conversation',
   'plugins.extensions': 'Extensions',
   'plugins.agents': 'Agents',
   'plugins.mcp': 'MCP',
@@ -7939,6 +7940,7 @@ const ZH: Messages = {
     '该技能所属扩展当前未启用，请先启用对应扩展。',
   'skills.toggleUnsupported': '当前连接的 daemon 不支持启用或禁用 Skill。',
   'skills.title': 'Skills',
+  'plugins.backToChat': '返回对话',
   'plugins.extensions': '扩展',
   'plugins.agents': '智能体',
   'plugins.mcp': 'MCP',
