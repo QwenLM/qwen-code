@@ -15,7 +15,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { inspect } from 'node:util';
+import { inspect, isDeepStrictEqual } from 'node:util';
 import {
   createSourceFile,
   isArrayLiteralExpression,
@@ -685,8 +685,28 @@ describe('managed-agent-server e2e runner', () => {
     expect(source).toContain(
       'B3 crash-boundary per-model token ledger is empty',
     );
-    expect(source).toContain('B3 crash-boundary turn budget snapshot is null');
+    expect(source).toContain('B3 crash-boundary turn budget was not exercised');
     expect(source).toContain('afterTokens < beforeTokens');
+    expect(source).toContain('assertB3CostContinuity(');
+    // R1-3: the budget guard must test the NUMERIC field — a non-null snapshot
+    // with budget: null is a legal production state, so an object-truthy guard
+    // would let a lost +Nk directive pass as null == null.
+    const b3CostFn = source.indexOf('function assertB3CostContinuity(');
+    expect(b3CostFn).toBeGreaterThan(-1);
+    const b3CostFnBody = source.slice(
+      b3CostFn,
+      source.indexOf('\n}', b3CostFn),
+    );
+    expect(b3CostFnBody).toContain(
+      'b3Budget === null || b3Budget === undefined',
+    );
+    // R1-4: site-anchor the B3 post-tool request count like the neighbouring
+    // R1-7 / F1 pins — the identifier alone survives a conflict resolution
+    // back to the pre-PR ternary, which would only red in the real-stack lane.
+    // Deleting the after-earlier-tools ? 3 clause must red here.
+    expect(source).toMatch(
+      /const expectedModelsAfterResults =[\s\S]*?approvalFault === 'after-earlier-tools'\s*\?\s*3\s*:/,
+    );
     const b3Fn = source.indexOf('function b3RoundAndBudget(');
     expect(b3Fn).toBeGreaterThan(-1);
     const b3FnBody = source.slice(b3Fn, source.indexOf('\n}', b3Fn));
@@ -918,6 +938,18 @@ describe('managed-agent-server e2e runner', () => {
       req_round0: { round: 0 },
       usage1: { budget: budgetSnapshot, models: { m: { output: 150 } } },
       route2: { budget: budgetSnapshot },
+      // R1-2: a discriminating pair — the older attempt carries a DIFFERENT
+      // budget and a smaller ledger, the newest its own. An oldest-first scan
+      // returns 900000/300 where the newest-first contract returns 500000/600,
+      // so the direction is proven on data, not only on the round selection.
+      usageOld: {
+        budget: { budget: 900000, outputTokensAtTurnStart: 0 },
+        models: { m: { tokens: { candidates: 300 } } },
+      },
+      usageNew: {
+        budget: budgetSnapshot,
+        models: { m: { tokens: { candidates: 600 } } },
+      },
     };
     const run = (events) =>
       load(
@@ -967,11 +999,94 @@ describe('managed-agent-server e2e runner', () => {
       budget: budgetSnapshot,
       models: { m: { output: 150 } },
     });
+    // R1-2: the newest attempt's own usage wins over an older, different one —
+    // an oldest-first budget/models scan reds here (900000/300 vs 500000/600).
+    expect(
+      run([
+        attempt(10, {
+          recoveryRef: { resourceId: 'req_round0' },
+          usageRef: { resourceId: 'usageOld' },
+        }),
+        attempt(20, {
+          recoveryRef: { resourceId: 'req_round2' },
+          usageRef: { resourceId: 'usageNew' },
+        }),
+      ]),
+    ).toEqual({
+      round: 2,
+      budget: budgetSnapshot,
+      models: { m: { tokens: { candidates: 600 } } },
+    });
     // No attempt at all.
     expect(() => run([])).toThrow(/no model attempt/);
     // An attempt with no saved request round.
     expect(() => run([attempt(10, {})])).toThrow(
       /no saved model-request round/,
+    );
+  });
+
+  // R1-2 / R1-3 (behavioural): the cost-continuity assertion on injected
+  // before/after states. isDeepStrictEqual is injected through load() because
+  // the extracted body's free identifiers resolve against the harness scope.
+  it('behaves assertB3CostContinuity on injected before/after states', () => {
+    const assertCost = load(
+      ['assertB3CostContinuity'],
+      'assertB3CostContinuity',
+      'isDeepStrictEqual',
+    )(isDeepStrictEqual).assertB3CostContinuity;
+    const snapshot = {
+      sessionId: 's',
+      promptId: 'p',
+      budget: 500000,
+      directiveText: '+500k',
+      outputTokensAtTurnStart: 0,
+    };
+    const ledger = (candidates) => ({
+      'fake-model': { tokens: { candidates } },
+    });
+    const before = { round: 2, budget: snapshot, models: ledger(600) };
+    // The healthy recovery: snapshot deep-equal, ledger grown by the final round.
+    expect(() =>
+      assertCost(before, { round: 2, budget: snapshot, models: ledger(700) }),
+    ).not.toThrow();
+    // R1-3: a non-null snapshot whose numeric budget is null (the +Nk directive
+    // stopped being parsed) must red — an object-truthy guard passes it and the
+    // deep-equal then compares null with null.
+    expect(() =>
+      assertCost(
+        { ...before, budget: { ...snapshot, budget: null } },
+        {
+          round: 2,
+          budget: { ...snapshot, budget: null },
+          models: ledger(700),
+        },
+      ),
+    ).toThrow(/turn budget was not exercised/);
+    // A missing snapshot reds the same guard.
+    expect(() =>
+      assertCost({ ...before, budget: null }, { ...before, budget: null }),
+    ).toThrow(/turn budget was not exercised/);
+    // A re-baselined snapshot (different turn-start baseline) reds deep-equal.
+    expect(() =>
+      assertCost(before, {
+        round: 2,
+        budget: { ...snapshot, outputTokensAtTurnStart: 600 },
+        models: ledger(700),
+      }),
+    ).toThrow(/reset the turn budget snapshot/);
+    // An empty crash-boundary ledger is vacuous and must red.
+    expect(() =>
+      assertCost({ ...before, models: {} }, { ...before, models: {} }),
+    ).toThrow(/token ledger is empty/);
+    // A zeroed ({}) after-ledger must red — {} is truthy, so a null check passes it.
+    expect(() =>
+      assertCost(before, { round: 2, budget: snapshot, models: {} }),
+    ).toThrow(/wiped the per-model token ledger/);
+    // A shrunk per-model total must red (the dropped-restore shape).
+    expect(() =>
+      assertCost(before, { round: 2, budget: snapshot, models: ledger(100) }),
+    ).toThrow(
+      /wiped the per-model token ledger: model=fake-model before=600 after=100/,
     );
   });
 

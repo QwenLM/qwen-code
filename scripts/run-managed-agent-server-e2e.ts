@@ -1465,6 +1465,54 @@ function b3RoundAndBudget(port: number, sessionFilter: string): B3RoundBudget {
   return { round, budget: budget ?? null, models: models ?? null };
 }
 
+// B3: the turn cost snapshot and per-model token ledger must survive the
+// replacement. The snapshot's NUMERIC budget must be present: a non-null
+// snapshot with budget: null is a legal production state (no +Nk directive
+// parsed), and an object-truthy guard would let null == null pass vacuously.
+// The ledger may grow as the held round completes, but every crash-boundary
+// model's output-token total must survive; an unrestored ledger is a truthy
+// {}, so a null check alone would let a zeroed restore pass too.
+function assertB3CostContinuity(
+  before: B3RoundBudget,
+  after: B3RoundBudget,
+): void {
+  const b3Budget = (before.budget as { budget?: number | null } | null)?.budget;
+  if (b3Budget === null || b3Budget === undefined)
+    throw new Error(
+      `B3 crash-boundary turn budget was not exercised: ${JSON.stringify(before.budget)}`,
+    );
+  if (!isDeepStrictEqual(after.budget, before.budget))
+    throw new Error(
+      `B3 recovery reset the turn budget snapshot: before=${JSON.stringify(before.budget)} after=${JSON.stringify(after.budget)}`,
+    );
+  const b3ModelsBefore = (before.models ?? {}) as Record<
+    string,
+    { tokens?: { candidates?: number } }
+  >;
+  const b3ModelsAfter = (after.models ?? {}) as Record<
+    string,
+    { tokens?: { candidates?: number } }
+  >;
+  const b3LedgerEntries = Object.entries(b3ModelsBefore);
+  if (
+    b3LedgerEntries.length === 0 ||
+    b3LedgerEntries.every(
+      ([, metric]) => (metric.tokens?.candidates ?? 0) === 0,
+    )
+  )
+    throw new Error(
+      'B3 crash-boundary per-model token ledger is empty: the fixture did not exercise the ledger',
+    );
+  for (const [model, metric] of b3LedgerEntries) {
+    const beforeTokens = metric.tokens?.candidates ?? 0;
+    const afterTokens = b3ModelsAfter[model]?.tokens?.candidates ?? 0;
+    if (afterTokens < beforeTokens)
+      throw new Error(
+        `B3 recovery wiped the per-model token ledger: model=${model} before=${beforeTokens} after=${afterTokens}`,
+      );
+  }
+}
+
 function assertPublicAnswer(events: PublicEvent[], expected: string): void {
   const terminal = events.filter((event) => event.terminal);
   const text = events
@@ -3763,46 +3811,7 @@ try {
           throw new Error(
             `B3 recovery reset the logical round: before=${b3Before.round} after=${b3After.round}`,
           );
-        // The +Nk fixture guarantees a non-null crash-boundary snapshot; a null
-        // one means the budget was never exercised and the deep-equal below
-        // would pass vacuously (null == null) under a dropped restore.
-        if (!b3Before.budget)
-          throw new Error(
-            'B3 crash-boundary turn budget snapshot is null: the fixture did not exercise the budget',
-          );
-        if (!isDeepStrictEqual(b3After.budget, b3Before.budget))
-          throw new Error(
-            `B3 recovery reset the turn budget snapshot: before=${JSON.stringify(b3Before.budget)} after=${JSON.stringify(b3After.budget)}`,
-          );
-        // The ledger may grow as the held round completes, but every model's
-        // output-token total must survive. An empty {} ledger is truthy, so a
-        // null check alone would let a zeroed restore pass.
-        const b3ModelsBefore = (b3Before.models ?? {}) as Record<
-          string,
-          { tokens?: { candidates?: number } }
-        >;
-        const b3ModelsAfter = (b3After.models ?? {}) as Record<
-          string,
-          { tokens?: { candidates?: number } }
-        >;
-        const b3LedgerEntries = Object.entries(b3ModelsBefore);
-        if (
-          b3LedgerEntries.length === 0 ||
-          b3LedgerEntries.every(
-            ([, metric]) => (metric.tokens?.candidates ?? 0) === 0,
-          )
-        )
-          throw new Error(
-            'B3 crash-boundary per-model token ledger is empty: the fixture did not exercise the ledger',
-          );
-        for (const [model, metric] of b3LedgerEntries) {
-          const beforeTokens = metric.tokens?.candidates ?? 0;
-          const afterTokens = b3ModelsAfter[model]?.tokens?.candidates ?? 0;
-          if (afterTokens < beforeTokens)
-            throw new Error(
-              `B3 recovery wiped the per-model token ledger: model=${model} before=${beforeTokens} after=${afterTokens}`,
-            );
-        }
+        assertB3CostContinuity(b3Before, b3After);
       }
       const actionRows = runMysql(
         mysqlPort,

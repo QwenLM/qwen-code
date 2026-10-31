@@ -80,7 +80,9 @@ real-provider 验收；两侧 owner 重启。
 崩在**较后一轮的 after-result 窗口**：第 N（N≥2）轮 post-tool 模型请求已发布（快照 +
 `model.attempt: started` 已 durable），被 fake 模型在完成前扣住。这是风险最低的窗口
 ——复用 `after-result` 的 hold/barrier 机器，hold 点在 fake 服务器侧（无需新 serve
-钩子），且已保存请求已携带轮次与预算，恢复必须恢复它们。（备选 W1——工具结果 commit
+钩子），且已保存请求携带轮次、崩溃边界的 `managed-hosted-model-route` /
+`managed-hosted-model-usage` 资源携带预算，恢复必须把两者都恢复，runner 也从各自
+的资源分别读取。（备选 W1——工具结果 commit
 与下一快照之间——可能停不住、且可能落到重置轮次的路径，干跑确认前延后。W3 与 B3a
 边界重合、仅增的多轮/budget 维度并入 W2 断言。）
 

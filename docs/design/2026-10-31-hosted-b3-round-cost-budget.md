@@ -101,8 +101,10 @@ Crash in the **after-result window of a later round**: the Nth (N≥2) post-tool
 request has been published (snapshot + `model.attempt: started` durable) and is held
 by the fake model before it finishes. This is the lowest-risk window — it reuses the
 `after-result` hold/barrier machinery, the hold point is on the fake-server side (no
-new serve hook), and the saved request already carries the round and budget, so
-recovery must restore them. (The alternative W1 — between a tool-result commit and
+new serve hook), and the saved request carries the round while the crash-boundary
+`managed-hosted-model-route` / `managed-hosted-model-usage` resources carry the
+budget, so recovery must restore both and the runner reads each from its own
+resource. (The alternative W1 — between a tool-result commit and
 the next snapshot — may not be stoppable and could route to a round-resetting path;
 it is deferred pending a dry-run. W3 overlaps B3a's boundary and adds only the
 multi-round/budget dimension, folded into W2's assertions.)
