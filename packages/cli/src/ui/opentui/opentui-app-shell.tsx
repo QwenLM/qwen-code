@@ -103,6 +103,7 @@ import type { RestoreOption } from './session-rewind.js';
 import { realUserPromptTexts } from '../utils/historyUtils.js';
 import { createDebugLogger } from '@qwen-code/qwen-code-core/utils/debugLogger.js';
 import { t } from '../../i18n/index.js';
+import { requestConsentOrFail } from '../../commands/extensions/consent.js';
 import { emitAutoModeEntryNotices } from '../hooks/useAutoAcceptIndicator.js';
 import { OpenTuiAppHost } from './opentui-host.js';
 import { executeUserShell } from './shell-mode.js';
@@ -138,6 +139,8 @@ import {
 } from './dialogs-confirm.js';
 import { useMcpApproval } from '../hooks/useMcpApproval.js';
 import { dialogAreaWidth } from './dialogs-shared.js';
+import { sanitizeTerminalText } from '../utils/textUtils.js';
+import { C } from './theme.js';
 import {
   getDialogMaxHeight,
   STATIC_EXTRA_HEIGHT,
@@ -616,6 +619,29 @@ export function OpenTuiApp(props: OpenTuiAppProps) {
     }),
     [],
   );
+
+  useEffect(() => {
+    const manager = config.getExtensionManager();
+    const controller = new AbortController();
+    manager.setRequestConsent((options) => {
+      if (controller.signal.aborted)
+        return Promise.reject(
+          new Error(t('Extension installation cancelled.')),
+        );
+      return requestConsentOrFail(
+        (description) =>
+          confirmations.presentAction(
+            <text fg={C.text}>{sanitizeTerminalText(description)}</text>,
+            {
+              signal: controller.signal,
+              isCurrent: () => !controller.signal.aborted,
+            },
+          ),
+        options,
+      );
+    });
+    return () => controller.abort();
+  }, [config, confirmations]);
 
   const activeModal = modals[0] ?? null;
   const closeShellModal = useCallback(

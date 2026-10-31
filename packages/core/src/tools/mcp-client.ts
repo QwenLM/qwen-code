@@ -273,6 +273,27 @@ function isStreamableHttpGetSseRequest(init?: RequestInit): boolean {
 }
 
 /**
+ * Whether the Agent Plugin transport must refuse redirects: it may only reach
+ * the address it was configured with, and a configured or bearer credential
+ * makes a forwarded 30x a credential leak.
+ *
+ * The SDK resolves redirects outside the compatibility fetch, against
+ * `requestInit.redirect`, so both layers have to be told. Asking the same
+ * question in one place keeps them from disagreeing.
+ */
+function agentPluginForbidsRedirect(
+  mcpServerConfig: MCPServerConfig | undefined,
+  headers: Headers | undefined,
+): boolean {
+  return (
+    mcpServerConfig?.agentPluginV1 === true &&
+    ((mcpServerConfig.headers !== undefined &&
+      Object.keys(mcpServerConfig.headers).length > 0) ||
+      headers?.has('authorization') === true)
+  );
+}
+
+/**
  * Wraps fetch to preserve OAuth challenges before the SDK discards response
  * metadata and to normalize conventional "GET not supported" rejections of
  * the optional Streamable HTTP GET SSE request to the SDK's unsupported
@@ -297,11 +318,10 @@ export function createStreamableHttpCompatibilityFetch(
     const requestHeaders = new Headers(
       init?.headers ?? (input instanceof Request ? input.headers : undefined),
     );
-    const stopAgentPluginRedirect =
-      mcpServerConfig?.agentPluginV1 === true &&
-      ((mcpServerConfig.headers !== undefined &&
-        Object.keys(mcpServerConfig.headers).length > 0) ||
-        requestHeaders.has('authorization'));
+    const stopAgentPluginRedirect = agentPluginForbidsRedirect(
+      mcpServerConfig,
+      requestHeaders,
+    );
     const effectiveInit = stopAgentPluginRedirect
       ? { ...init, redirect: 'manual' as const }
       : init;
@@ -1352,13 +1372,20 @@ async function createTransportWithOAuth(
   try {
     if (mcpServerConfig.httpUrl) {
       // Create HTTP transport with OAuth token
+      const oauthHeaders = {
+        ...mcpServerConfig.headers,
+        Authorization: `Bearer ${accessToken}`,
+      };
       const oauthTransportOptions: StreamableHTTPClientTransportOptions = {
         fetch: createMcpStreamableHttpFetch(mcpServerName, mcpServerConfig),
         requestInit: {
-          headers: {
-            ...mcpServerConfig.headers,
-            Authorization: `Bearer ${accessToken}`,
-          },
+          headers: oauthHeaders,
+          ...(agentPluginForbidsRedirect(
+            mcpServerConfig,
+            new Headers(oauthHeaders),
+          )
+            ? { redirect: 'manual' as const }
+            : {}),
         },
       };
 
@@ -2642,6 +2669,18 @@ export async function createTransport(
       transportOptions.requestInit = {
         headers: mcpServerConfig.headers,
       };
+    }
+
+    // The compatibility fetch answers the request it issues, but the SDK
+    // resolves a redirect before that, against this field.
+    if (
+      transportOptions.requestInit &&
+      agentPluginForbidsRedirect(
+        mcpServerConfig,
+        new Headers(transportOptions.requestInit.headers as HeadersInit),
+      )
+    ) {
+      transportOptions.requestInit.redirect = 'manual';
     }
 
     return new StreamableHTTPClientTransport(
