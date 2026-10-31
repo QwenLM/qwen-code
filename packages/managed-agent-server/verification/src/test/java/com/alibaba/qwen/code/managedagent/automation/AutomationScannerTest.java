@@ -27,6 +27,8 @@ import com.fasterxml.jackson.databind.node.NullNode;
 import com.fasterxml.jackson.databind.node.TextNode;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
@@ -1746,6 +1748,63 @@ class AutomationScannerTest {
     }
 
     @Test
+    void aSessionNotFoundReconcileOnAnActiveSessionKeepsTheRefusalAndTheMirror() {
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        // A pool member that drained and released the Session answers
+        // not-found while the Store still holds it ACTIVE (#15795): that is
+        // an unanswered reconcile, so the refusal stands, the mirror stays
+        // live and the next due slot asks again.
+        fake.failNextReconcile = AutomationHarnessFake.refusal(404,
+                "hosted_session_not_found");
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+                tenant, automation.id(), "schedule:2026-06-01T10:02:00Z")
+                .orElseThrow();
+        assertThat(skipped.outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(skipped.reason()).isEqualTo(AutomationScanner.REASON_OVERLAP);
+        assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
+                .state()).isEqualTo(AutomationLedgerStore.STATE_LIVE);
+        fake.crashedRuns.add(com.alibaba.qwen.code.managedagent.repository.AutomationLedgerStore.automationRunId(
+                automation.id(), "schedule:2026-06-01T10:01:00Z"));
+        clock.set(T0 + 3 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(fake.firedOccurrences()).containsExactly(
+                "schedule:2026-06-01T10:01:00Z",
+                "schedule:2026-06-01T10:03:00Z");
+    }
+
+    @Test
+    void aSessionNotFoundReconcileTheStoreConfirmsRefreshRetiresTheMirror() {
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        // The Session closes after admission read it ACTIVE: the Store now
+        // confirms the reconcile's not-found, and the mirror retires.
+        fake.beforeReconcile = () -> jdbc.update("UPDATE ma_session SET"
+                + " status = 'CLOSED' WHERE tenant_id = ? AND session_id = ?",
+                tenant, sessionId);
+        fake.failNextReconcile = AutomationHarnessFake.refusal(404,
+                "hosted_session_not_found");
+        clock.set(T0 + 2 * MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        AutomationLedgerStore.OccurrenceRow skipped = ledger.findOccurrence(
+                tenant, automation.id(), "schedule:2026-06-01T10:02:00Z")
+                .orElseThrow();
+        assertThat(skipped.outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(skipped.reason())
+                .isEqualTo(AutomationScanner.REASON_DEFINITION_RETIRED);
+        assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
+                .state()).isEqualTo(AutomationLedgerStore.STATE_RETIRED);
+    }
+
+    @Test
     void anOpenTurnBlocksFiresWithoutAskingForAReconcile() {
         PublicAutomation automation = define("* * * * *", "skip", "none", null,
                 true);
@@ -1772,6 +1831,59 @@ class AutomationScannerTest {
                 operation -> "reconcile_run".equals(operation.get("kind")));
         jdbc.update("DELETE FROM ma_turn WHERE tenant_id = ?"
                 + " AND turn_id = ?", tenant, "turn-open-reconcile");
+    }
+
+    @Test
+    void aSessionNotFoundFireOnAnActiveSessionDefersAndKeepsTheMirror() {
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        // A pool member that drained and released the Session answers
+        // not-found while the Store still holds it ACTIVE (#15795): the
+        // claim waits for a Harness that holds the Session, and the mirror
+        // stays live instead of retiring for good.
+        fake.failNextFire = AutomationHarnessFake.refusal(404,
+                "hosted_session_not_found");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        assertThat(outcomes(automation.id()))
+                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_FIRING);
+        assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
+                .state()).isEqualTo(AutomationLedgerStore.STATE_LIVE);
+        clock.set(T0 + MINUTE + 11_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(1);
+        assertThat(outcomes(automation.id()))
+                .containsOnlyKeys(AutomationLedgerStore.OUTCOME_FIRED);
+        assertThat(fake.firedOccurrences()).containsExactly(
+                "schedule:2026-06-01T10:01:00Z",
+                "schedule:2026-06-01T10:01:00Z");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"CLOSED", "DELETED"})
+    void aSessionNotFoundFireTheStoreConfirmsRetiresTheDefinition(String status) {
+        PublicAutomation automation = define("* * * * *", "skip", "none", null,
+                true);
+        fake.failNextFire = new HarnessFailure("answer lost");
+        clock.set(T0 + MINUTE + 1_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        // The Session ended while the claim waited: the Store confirms the
+        // re-drive's not-found, so the mirror retires now rather than the
+        // claim riding the backoff out to unknown.
+        jdbc.update("UPDATE ma_session SET status = ? WHERE tenant_id = ?"
+                + " AND session_id = ?", status, tenant, sessionId);
+        fake.failNextFire = AutomationHarnessFake.refusal(404,
+                "hosted_session_not_found");
+        clock.set(T0 + MINUTE + 11_000);
+        assertThat(scanner.tick(clock.get())).isEqualTo(0);
+        AutomationLedgerStore.OccurrenceRow settled = ledger.findOccurrence(
+                tenant, automation.id(), "schedule:2026-06-01T10:01:00Z")
+                .orElseThrow();
+        assertThat(settled.outcome())
+                .isEqualTo(AutomationLedgerStore.OUTCOME_SKIPPED);
+        assertThat(settled.reason())
+                .isEqualTo(AutomationScanner.REASON_DEFINITION_RETIRED);
+        assertThat(ledger.findSchedule(tenant, automation.id()).orElseThrow()
+                .state()).isEqualTo(AutomationLedgerStore.STATE_RETIRED);
     }
 
     @Test

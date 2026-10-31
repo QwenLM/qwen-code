@@ -1476,6 +1476,20 @@ jobs:
       - name: 'Run .github/scripts helper tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: |-
+          # Route os.tmpdir() off the host /tmp tmpfs: its inode quota is
+          # small and shared across the pool, and e2e-build.test.mjs creates
+          # thousands of chunk files there (#15965 ENOSPC with 202G free).
+          # Same routing as the unit lanes (#10035), private per-run dir
+          # included: RUNNER_TEMP is shared, and a cancelled battery never
+          # reaches its own after() cleanup, so the fixture tree would stick
+          # around in _work/_temp. A hard kill stays uncovered either way.
+          export TMPDIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
+          HELPER_TMPDIR="$(mktemp -d "${TMPDIR}/helper-tests-XXXXXX" 2>/dev/null)" || HELPER_TMPDIR=""
+          if [ -n "$HELPER_TMPDIR" ]; then
+            TMPDIR="$HELPER_TMPDIR"
+            export TMPDIR
+            trap 'rm -rf "$HELPER_TMPDIR"' EXIT
+          fi
           node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} 2>&1 | tee "${RUNNER_TEMP}/helper-attempt1.log" || {
             node --test --test-concurrency=1 ${{ env.HELPER_TESTS }} &&
               echo "::warning::helper tests failed once and the retry absorbed it; attempt-1 failures: $(grep -E '^not ok' "${RUNNER_TEMP}/helper-attempt1.log" | head -5 | paste -sd ';' -) — count this toward the #12772 helper-battery recurrence threshold"
