@@ -650,6 +650,21 @@ describe('splitCompoundCommand', () => {
     ['handles three-part compound', 'a && b && c', ['a', 'b', 'c']],
     ['handles mixed operators', 'a && b | c; d', ['a', 'b', 'c', 'd']],
     [
+      'keeps the `>|` redirection inside its command',
+      'printf X >| p.txt && echo done',
+      ['printf X >| p.txt', 'echo done'],
+    ],
+    [
+      'splits at `|` after an escaped `>`',
+      'echo \\>| cat .env',
+      ['echo \\>', 'cat .env'],
+    ],
+    [
+      'splits at `|` after a quoted `>`',
+      "echo '>'| cat .env",
+      ["echo '>'", 'cat .env'],
+    ],
+    [
       'trims whitespace around sub-commands',
       '  git status  &&  rm -rf /  ',
       ['git status', 'rm -rf /'],
@@ -3463,6 +3478,74 @@ describe('PermissionManager — compound shell write attribution', () => {
 });
 
 // ─── PermissionManager integration tests with toolParams ─────────────────────
+
+describe('PermissionManager — shell redirection forms (#10196)', () => {
+  /** A manager rooted at `/repo` whose Bash allow rule covers everything. */
+  const repoPm = (rules: PmOpts) =>
+    makePm({
+      permissionsAllow: ['Bash(*)'],
+      ...rules,
+      cwd: '/repo',
+      projectRoot: '/repo',
+    });
+
+  // A Bash allow rule must not outrank a file deny because the command
+  // spells its file access in a form the analysis did not recognise.
+  it.each([
+    'printf X 3>p.txt',
+    'printf X>p.txt',
+    'printf X >| p.txt',
+    'printf X >&p.txt',
+    'printf X <>p.txt',
+    'echo $(printf X > p.txt)',
+    'echo `echo a #b` > p.txt',
+    'echo ${x:-a #b} > p.txt',
+    'printf X > a>p.txt',
+    'echo a> b> p.txt',
+  ])('denies %s under Edit(p.txt)', async (command) => {
+    const pm = repoPm({ permissionsDeny: ['Edit(p.txt)'] });
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+    expect(pm.findMatchingDenyRule(sh(command, '/repo'))).toBe('Edit(p.txt)');
+  });
+
+  it.each([
+    'cat 0<.env',
+    'exec 3<.env',
+    'diff a.txt <(cat .env)',
+    'cat .env&>out.txt',
+    '(cat .env)>out.txt',
+    `env -S 'cat .env'`,
+    'env -u FOO cat .env',
+    'sudo -Eu root cat .env',
+  ])('denies %s under Read(.env)', async (command) => {
+    const pm = repoPm({ permissionsDeny: ['Read(.env)'] });
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+  });
+
+  it('denies a read in the directory `env -C` moves to', async () => {
+    const pm = repoPm({ permissionsDeny: ['Read(/sub/.env)'] });
+    const ctx = sh('env -C sub cat .env', '/repo');
+    expect(await pm.evaluate(ctx)).toBe('deny');
+  });
+
+  it('asks when `env -C` moves to a directory only known at run time', async () => {
+    const pm = repoPm({ permissionsDeny: ['Read(/sub/.env)'] });
+    expect(await pm.evaluate(sh('env -C "$X" cat .env', '/repo'))).toBe('ask');
+  });
+
+  it.each([
+    'ls -la 2>&1',
+    'npm test 2>&1 | tail -20',
+    'echo hi > /dev/null',
+    'echo hi # > p.txt',
+    "echo '>' p.txt",
+    'echo $((a>b))',
+    'echo $(( a > b ))',
+  ])('does not see a write in %s', async (command) => {
+    const pm = repoPm({ permissionsDeny: ['Write'] });
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('allow');
+  });
+});
 
 describe('PermissionManager — toolParams end-to-end', () => {
   it('evaluate respects allow rule with param matcher', async () => {

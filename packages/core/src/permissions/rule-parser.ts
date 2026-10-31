@@ -1076,6 +1076,8 @@ function findOperatorBoundaries(
   // Nesting depth of `$(( … ))` / `(( … ))`. Inside arithmetic a bare `&` is
   // bitwise AND, not the async operator, so `$(( FLAGS & MASK ))` is one word.
   let arithmeticDepth = 0;
+  // Index of the last `>` that is shell syntax: not quoted, not escaped.
+  let lastBareGreaterThan = -1;
 
   for (let i = 0; i < command.length; i++) {
     const ch = command[i]!;
@@ -1113,6 +1115,9 @@ function findOperatorBoundaries(
     if (inSingle || inDouble) {
       continue;
     }
+    if (ch === '>') {
+      lastBareGreaterThan = i;
+    }
     if (ch === '$') {
       // The second `$` of `$$` (the PID) cannot open `$'…'`.
       dollarPending = !ansiCIntroducer;
@@ -1139,6 +1144,11 @@ function findOperatorBoundaries(
       // other spellings belong to a redirection or to arithmetic, and stay in
       // the segment.
       if (op === '&' && (arithmeticDepth > 0 || !isAsyncOperator(command, i))) {
+        continue;
+      }
+      // `>|` is the clobber-override redirection, not a pipe. An escaped or
+      // quoted `>` is plain text, so the `|` after it is still a pipe.
+      if (op === '|' && lastBareGreaterThan === i - 1) {
         continue;
       }
       boundaries.push({ start: i, end: i + op.length, operator: op });

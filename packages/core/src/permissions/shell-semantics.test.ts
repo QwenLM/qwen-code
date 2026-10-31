@@ -622,3 +622,254 @@ describe('extractShellOperationsAcrossCommand', () => {
     expect(() => across(deep)).not.toThrow();
   });
 });
+
+describe('redirect grammar', () => {
+  it.each<Row>([
+    ['fd-numbered writes', 'printf X 3>p.txt', [write(`${CWD}/p.txt`)]],
+    ['clobber-override writes', 'printf X >| p.txt', [write(`${CWD}/p.txt`)]],
+    [
+      'read-write opens',
+      'printf X <> data.txt',
+      [read(`${CWD}/data.txt`), write(`${CWD}/data.txt`)],
+    ],
+    ['fd-numbered reads', 'cat 0<.env', [read(`${CWD}/.env`)]],
+    ['redirects glued to a word', 'printf X>p.txt', [write(`${CWD}/p.txt`)]],
+    ['`>&` with a file name', 'printf X >&out.txt', [write(`${CWD}/out.txt`)]],
+    ['`&>` with a file name', 'printf X &>out.txt', [write(`${CWD}/out.txt`)]],
+    [
+      '`&>` glued to the word before it',
+      'cat .env&>f',
+      [read(`${CWD}/.env`), write(`${CWD}/f`)],
+    ],
+    ['`&>>` glued to the word before it', 'printf X&>>f', [write(`${CWD}/f`)]],
+    [
+      'a subshell closing right before a redirect',
+      '(cat .env)>f',
+      [read(`${CWD}/.env`), write(`${CWD}/f`)],
+    ],
+    ['`exec` redirects', 'exec 3>p.txt', [write(`${CWD}/p.txt`)]],
+    ['no write for fd duplication', 'ls -la 2>&1', [dir(CWD)]],
+    ['no write for `>&2`', 'printf X >&2', []],
+    ['no write for `>&-`', 'printf X >&-', []],
+    ['no write for /dev/null', 'echo hi > /dev/null', []],
+    ['no write for /dev/stderr', 'echo hi > /dev/stderr', []],
+    ['no write for a here-string', 'cat <<< hello', []],
+    ['no write for a quoted `>`', 'echo ">" foo', []],
+    ['no write for a single-quoted `>`', "echo '>' foo", []],
+    ['no write for an escaped `>`', 'echo \\> foo', []],
+    [
+      'a quoted `>` is a grep pattern',
+      'grep ">" a.txt',
+      [read(`${CWD}/a.txt`)],
+    ],
+    [
+      'a quoted `>` does not hide the redirect after it',
+      "echo x '>'>f",
+      [write(`${CWD}/f`)],
+    ],
+    [
+      'an escaped `>` does not hide the redirect after it',
+      'echo x \\>>f',
+      [write(`${CWD}/f`)],
+    ],
+    ['`<&` with a spaced fd is no file', 'cat <& 3', []],
+    ['`>&` with a spaced fd is no file', 'echo x >& 10', []],
+    ['backgrounding after fd duplication', 'echo x >&2&', []],
+    [
+      '`>&` with a spaced file name writes it',
+      'echo x >& out.txt',
+      [write(`${CWD}/out.txt`)],
+    ],
+    // bash splits a spaced target at its own unquoted `<` / `>` too.
+    [
+      'a spaced target splits at its own `>`',
+      'printf X > a>p.txt',
+      [write(`${CWD}/a`), write(`${CWD}/p.txt`)],
+    ],
+    [
+      'each spaced target splits at its own `>`',
+      'echo a> b> c',
+      [write(`${CWD}/b`), write(`${CWD}/c`)],
+    ],
+    [
+      'a spaced target splits at its own `<`',
+      'echo x > a<in.txt',
+      [write(`${CWD}/a`), read(`${CWD}/in.txt`)],
+    ],
+    [
+      'a spaced target splits at a glued `&>`',
+      'echo x > a&>f',
+      [write(`${CWD}/a`), write(`${CWD}/f`)],
+    ],
+    [
+      'a quoted `>` in a spaced target is part of the name',
+      'echo x > a">"b',
+      [write(`${CWD}/a>b`)],
+    ],
+    ['no write inside a comment', 'echo hi # > foo', []],
+    [
+      'a `#` inside a word is not a comment',
+      'echo ""#x >f',
+      [write(`${CWD}/f`)],
+    ],
+    [
+      'a `#` inside backquotes is not a comment',
+      'echo `echo a #b` > f',
+      [write(`${CWD}/f`)],
+    ],
+    [
+      'a `#` inside `${…}` is not a comment',
+      'echo ${x:-a #b} > f',
+      [write(`${CWD}/f`)],
+    ],
+    ['a comment after backquotes', 'echo `echo a` # > f', []],
+    ['a comment after `${…}`', 'echo ${x} # > f', []],
+    ['no write for a `>` inside `${…}`', 'echo ${x:- > b }', []],
+    [
+      '`[[` as an argument hides no redirect',
+      'echo [[ > f',
+      [write(`${CWD}/f`)],
+    ],
+    ['`[[` without `]]` hides no redirect', '[[ x >f', [write(`${CWD}/f`)]],
+    ['no write for `[[ a > b ]]`', '[[ a > b ]]', []],
+    [
+      '`]]` glued to a redirect ends the test',
+      '[[ a > b ]]>out',
+      [write(`${CWD}/out`)],
+    ],
+    ['no write for `(( a > b ))`', '(( a > b ))', []],
+    [
+      'arithmetic keeps its `>`',
+      'echo $(( 1 > 0 )) > out.txt',
+      [write(`${CWD}/out.txt`)],
+    ],
+    ['no write for a comparison in `$((…))`', 'echo $((a>b))', []],
+    ['no write for a spaced comparison in `$((…))`', 'echo $(( a > b ))', []],
+    ['arithmetic ends at its `))`', 'echo $((a>b))>f', [write(`${CWD}/f`)]],
+    [
+      'arithmetic nests parentheses',
+      'echo $(( (a) > b )) > f',
+      [write(`${CWD}/f`)],
+    ],
+    [
+      '`$((` without `))` is a substitution, not arithmetic',
+      'echo $((true) ) > f',
+      [write(`${CWD}/f`)],
+    ],
+  ])('%s', (_title, command, expected) => {
+    expect(ops(command)).toEqual(expected);
+  });
+});
+
+describe('prefix commands and substitutions', () => {
+  it.each<Row>([
+    [
+      'a write inside a substitution is still a write',
+      'echo $(printf X > p.txt)',
+      [write(`${CWD}/p.txt`)],
+    ],
+    ['a process substitution is not a file', 'cat <(true)', []],
+    [
+      'prefix commands keep quoted words intact',
+      'sudo cat "my notes.txt"',
+      [read(`${CWD}/my notes.txt`)],
+    ],
+  ])('%s', (_title, command, expected) => {
+    expect(ops(command)).toEqual(expected);
+  });
+
+  it.each<Row>([
+    [
+      'an escaped `>` before `|` leaves a pipe',
+      'echo \\>| cat .env',
+      [read('/repo/.env')],
+    ],
+    [
+      '`[[ … ]]` after `if` compares',
+      'if [[ a > b ]]; then echo hi > f; fi',
+      [write('/repo/f')],
+    ],
+    [
+      '`[[ … ]]` after `if` ends at a glued `]]>`',
+      'if [[ a > b ]]>out; then :; fi',
+      [write('/repo/out')],
+    ],
+    [
+      '`[[ … ]]` after `if` ends at a spaced `]] >`',
+      'if [[ a > b ]] >out; then :; fi',
+      [write('/repo/out')],
+    ],
+    [
+      'nested subshells are not arithmetic',
+      '((cat .env); printf X >p.txt)',
+      [read('/repo/.env'), write('/repo/p.txt')],
+    ],
+  ])('%s', (_title, command, expected) => {
+    expect(across(command)).toEqual(expected);
+  });
+
+  it('unwraps a shell behind a prefix command', () => {
+    expect(across(`sudo bash -c 'printf X > p.txt'`)).toEqual([
+      write('/repo/p.txt'),
+    ]);
+  });
+});
+
+describe('prefix command options', () => {
+  it.each<Row>([
+    ['grouped short options', 'sudo -Eu root cat .env', [read('/repo/.env')]],
+    [
+      'a value glued to its option',
+      'sudo -uroot cat .env',
+      [read('/repo/.env')],
+    ],
+    ['`--` ends the options', 'sudo -- cat .env', [read('/repo/.env')]],
+    ['`env -u` takes a value', 'env -u FOO cat .env', [read('/repo/.env')]],
+    ['`env -S` runs its string', `env -S 'cat .env'`, [read('/repo/.env')]],
+    ['`env -S` glued', `env -S'cat .env'`, [read('/repo/.env')]],
+    [
+      '`env --split-string=`',
+      `env --split-string='cat .env'`,
+      [read('/repo/.env')],
+    ],
+    ['`env -S` in a group', `env -iS 'cat .env'`, [read('/repo/.env')]],
+    [
+      '`env -S` keeps the words after it',
+      `env -S 'cat a.txt' b.txt`,
+      [read('/repo/a.txt'), read('/repo/b.txt')],
+    ],
+    [
+      '`env -S` can hold env options',
+      `env -S '-C sub cat .env'`,
+      [read('/repo/sub/.env')],
+    ],
+    [
+      '`env -C` changes directory',
+      'env -C sub cat .env',
+      [read('/repo/sub/.env')],
+    ],
+    ['`env --chdir=`', 'env --chdir=/etc cat passwd', [read('/etc/passwd')]],
+    [
+      'the last `env -C` wins',
+      'env -C a -C b cat .env',
+      [read('/repo/b/.env')],
+    ],
+    [
+      "a split string's `-C` comes after the earlier one",
+      `env -C sub -S '-C x cat .env'`,
+      [read('/repo/x/.env')],
+    ],
+    [
+      "a later `-C` comes after the split string's",
+      `env -S '-C x' -C sub cat .env`,
+      [read('/repo/sub/.env')],
+    ],
+    [
+      '`env -C` applies to a split string',
+      `env -C sub -S 'cat .env'`,
+      [read('/repo/sub/.env')],
+    ],
+  ])('%s', (_title, command, expected) => {
+    expect(across(command)).toEqual(expected);
+  });
+});
