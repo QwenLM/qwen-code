@@ -3,6 +3,7 @@ import {
   createWebShellDaemonScenario,
   installMockDaemon,
   replayCompleteEvent,
+  turnCompleteEvent,
   type DaemonRequestRecord,
   type MockDaemonController,
   type WebShellDaemonScenario,
@@ -55,6 +56,81 @@ function standaloneCreates(
     (request) =>
       request.method === 'POST' && request.path === '/standalone/sessions',
   );
+}
+
+for (const entry of ['composer', 'sidebar'] as const) {
+  test(`lists a new standalone session before its first turn finishes from the ${entry} @smoke`, async ({
+    page,
+  }, testInfo) => {
+    const scenario = createWebShellDaemonScenario({
+      capabilities: { features: standaloneFeatures },
+      standaloneSessions: [
+        standaloneSummary(
+          '11111111-1111-4111-8111-111111111111',
+          'Existing conversation',
+        ),
+      ],
+    });
+    const daemon = await installScenario(page, scenario, testInfo);
+    await page.goto('/');
+    const group = page.getByTestId('standalone-active-group');
+    await expect(
+      group.getByText('Existing conversation', { exact: true }),
+    ).toBeVisible();
+
+    if (entry === 'composer') {
+      await selectNoWorkspaceTarget(page);
+    } else {
+      await group
+        .getByRole('button', { name: 'No-workspace sessions', exact: true })
+        .hover();
+      await group
+        .getByRole('button', { name: 'New session', exact: true })
+        .click();
+    }
+    expect(standaloneCreates(daemon)).toHaveLength(0);
+    await expect(group.locator('[data-web-shell-session-title]')).toHaveCount(
+      1,
+    );
+
+    await fillComposer(page, 'Start a standalone conversation');
+    await page.locator('[data-web-shell-composer-submit]').click();
+    const create = await waitForRequest(
+      daemon,
+      (request) =>
+        request.method === 'POST' && request.path === '/standalone/sessions',
+    );
+    const sessionId = String(requestBody(create)['sessionId']);
+    await daemon.sse.waitForConnection(sessionId);
+    await daemon.sendEvent(replayCompleteEvent({ sessionId }));
+    await waitForRequest(
+      daemon,
+      (request) => request.path === `/session/${sessionId}/prompt`,
+    );
+    await expect(
+      page.getByRole('button', { name: 'esc to cancel' }),
+    ).toBeVisible();
+    await expect(
+      group.locator('[data-web-shell-session-title]', {
+        hasText: 'Standalone 2',
+      }),
+    ).toBeVisible();
+
+    scenario.standaloneSessions.find(
+      (session) => session.sessionId === sessionId,
+    )!.displayName = 'Completed conversation';
+    await daemon.sendEvent(
+      turnCompleteEvent('prompt-e2e', { id: 1, sessionId }),
+    );
+    await expect(
+      group.locator('[data-web-shell-session-title]', {
+        hasText: 'Completed conversation',
+      }),
+    ).toBeVisible();
+    await expect(group.locator('[data-web-shell-session-title]')).toHaveCount(
+      2,
+    );
+  });
 }
 
 test('the composer no-workspace target creates an exact standalone session @smoke', async ({
@@ -178,47 +254,88 @@ test('hides the standalone entry point without the capability @smoke', async ({
   expect(standaloneCreates(daemon)).toEqual([]);
 });
 
-test('an uncertain standalone create stays recoverable and is never retried @smoke', async ({
-  page,
-}, testInfo) => {
-  const scenario = createWebShellDaemonScenario({
-    capabilities: { features: standaloneFeatures },
-    standaloneCreateError: {
-      status: 500,
-      code: 'standalone_creation_outcome_unknown',
-      message: 'creation outcome is unknown',
-    },
+for (const isArchived of [false, true]) {
+  test(`an uncertain ${isArchived ? 'archived ' : ''}standalone create stays recoverable and is never retried @smoke`, async ({
+    page,
+  }, testInfo) => {
+    const scenario = createWebShellDaemonScenario({
+      capabilities: { features: standaloneFeatures },
+      standaloneCreateError: {
+        status: 500,
+        code: 'standalone_creation_outcome_unknown',
+        message: 'creation outcome is unknown',
+      },
+    });
+    const daemon = await installScenario(page, scenario, testInfo);
+
+    await gotoNewStandaloneChat(page);
+    await fillComposer(page, 'Do not duplicate this conversation');
+    await page.locator('[data-web-shell-composer-submit]').click();
+
+    await expect(page.getByText('Creation may have succeeded')).toBeVisible();
+    expect(
+      daemon.requests.filter(
+        (request) =>
+          request.method === 'POST' && request.path === '/standalone/sessions',
+      ),
+    ).toHaveLength(1);
+    expect(daemon.requests).not.toContainEqual(
+      expect.objectContaining({ method: 'POST', path: '/session' }),
+    );
+
+    await expect(
+      page.locator('[data-web-shell-composer-submit]'),
+    ).toBeDisabled();
+    // The composer picker is not offered while the outcome is unknown, and a
+    // plain new task is blocked by the recovery guard, so neither path may
+    // start a second create.
+    await expect(page.locator('button[aria-label="Workspace"]')).toHaveCount(0);
+    await clickNewTask(page);
+    expect(
+      daemon.requests.filter(
+        (request) =>
+          request.method === 'POST' && request.path === '/standalone/sessions',
+      ),
+    ).toHaveLength(1);
+
+    const group = page.getByTestId('standalone-active-group');
+    await expect(group.locator('[data-web-shell-session-title]')).toHaveCount(
+      0,
+    );
+    const sessionId = String(
+      requestBody(standaloneCreates(daemon)[0])['sessionId'],
+    );
+    scenario.standaloneSessions.push({
+      ...standaloneSummary(sessionId, 'Recovered conversation'),
+      isArchived,
+    });
+    await page
+      .getByRole('button', { name: 'Check status', exact: true })
+      .click();
+    if (isArchived) {
+      await expect(group.locator('[data-web-shell-session-title]')).toHaveCount(
+        0,
+      );
+      expect(standaloneCreates(daemon)).toHaveLength(1);
+      await page
+        .getByRole('button', { name: 'Unarchive', exact: true })
+        .click();
+      const unarchive = await waitForRequest(
+        daemon,
+        (request) =>
+          request.method === 'POST' &&
+          request.path === '/standalone/sessions/unarchive',
+      );
+      expect(requestBody(unarchive)).toEqual({ sessionIds: [sessionId] });
+    }
+    await expect(
+      group.locator('[data-web-shell-session-title]', {
+        hasText: 'Recovered conversation',
+      }),
+    ).toBeVisible();
+    expect(standaloneCreates(daemon)).toHaveLength(1);
   });
-  const daemon = await installScenario(page, scenario, testInfo);
-
-  await gotoNewStandaloneChat(page);
-  await fillComposer(page, 'Do not duplicate this conversation');
-  await page.locator('[data-web-shell-composer-submit]').click();
-
-  await expect(page.getByText('Creation may have succeeded')).toBeVisible();
-  expect(
-    daemon.requests.filter(
-      (request) =>
-        request.method === 'POST' && request.path === '/standalone/sessions',
-    ),
-  ).toHaveLength(1);
-  expect(daemon.requests).not.toContainEqual(
-    expect.objectContaining({ method: 'POST', path: '/session' }),
-  );
-
-  await expect(page.locator('[data-web-shell-composer-submit]')).toBeDisabled();
-  // The composer picker is not offered while the outcome is unknown, and a
-  // plain new task is blocked by the recovery guard, so neither path may
-  // start a second create.
-  await expect(page.locator('button[aria-label="Workspace"]')).toHaveCount(0);
-  await clickNewTask(page);
-  expect(
-    daemon.requests.filter(
-      (request) =>
-        request.method === 'POST' && request.path === '/standalone/sessions',
-    ),
-  ).toHaveLength(1);
-});
+}
 
 test('no-workspace sessions remain visible beside collapsed Workspaces and persist independently @smoke', async ({
   page,
