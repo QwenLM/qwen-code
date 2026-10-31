@@ -139,6 +139,35 @@ function pressKey(target: Element, key: string): void {
 }
 
 describe('ToolApproval accessibility', () => {
+  it('shows a compact approval diff with original file line numbers', () => {
+    const oldLines = Array.from(
+      { length: 200 },
+      (_, i) => `fixture_line_${i + 1}`,
+    );
+    const newLines = [...oldLines];
+    newLines[99] = 'changed_line_100';
+    render(false, {
+      ...request,
+      content: [
+        {
+          type: 'diff',
+          path: 'example.txt',
+          oldText: `${oldLines.join('\n')}\n`,
+          newText: `${newLines.join('\n')}\n`,
+        },
+      ],
+    });
+    const diff = container!.querySelector('[aria-label="File diff"]')!;
+    expect(diff.children).toHaveLength(9);
+    expect(diff.textContent).toContain('@@ -97,7 +97,7 @@');
+    expect(diff.textContent).toContain('fixture_line_100');
+    expect(diff.textContent).toContain('changed_line_100');
+    expect(diff.textContent).toContain('fixture_line_97');
+    expect(diff.textContent).toContain('fixture_line_103');
+    expect(diff.textContent).not.toContain('fixture_line_200');
+    expect(optionButtons()).toHaveLength(2);
+  });
+
   it.each([false, true])(
     'preserves edit approval changes and warnings (host owns preview: %s)',
     (hostOwnsEditDiffPreview) => {
@@ -283,12 +312,7 @@ describe('ToolApproval accessibility', () => {
     );
   });
 
-  it('omits oversized edit diffs at the approval boundary', () => {
-    // The approval card renders synchronously into an [role=alertdialog], so
-    // an outsized edit would freeze the panel and drown the accessible
-    // description — surface a short notice instead. The transcript
-    // completed-edit path stays coarse but visible; the cap belongs to the
-    // approval boundary, not to buildUnifiedDiff itself.
+  it('shows compact edits in long files at the approval boundary', () => {
     const bigOld = 'line\n'.repeat(2_000);
     const bigNew = 'line\n'.repeat(2_000) + 'extra';
     const adapted = extractPendingPermission([
@@ -331,15 +355,13 @@ describe('ToolApproval accessibility', () => {
         </WebShellCustomizationProvider>,
       ),
     );
-    expect(container!.textContent).toContain(
-      'Diff omitted because it is too large to display safely.',
-    );
-    expect(container!.textContent).not.toContain('line\nline\nline\nline');
+    expect(container!.textContent).toContain('@@ -1998,3 +1998,4 @@');
+    expect(container!.textContent).toContain('extra');
+    expect(container!.textContent).not.toContain('Diff omitted');
   });
 
   it('omits edit diffs that exceed the character budget while staying under the line budget', () => {
-    // The sibling test above uses many short lines, so it only ever trips
-    // `tooManyLines`. The char gate decides on its own for any edit with
+    // The char gate decides on its own for any edit with
     // ≤1000 total lines and >100_000 total chars — 400 long lines per side is
     // 800 lines but ~119k chars, and also lands on n*m = 160_000, i.e. under
     // MAX_DIFF_PRODUCT, so nothing else would have stopped the LCS table.
@@ -709,6 +731,142 @@ describe('ToolApproval accessibility', () => {
     )!;
     expect(commandPre).toBeTruthy();
   });
+
+  it('neutralises bidi controls in the rendered diff body and its path', () => {
+    // Built as a literal request on purpose. `extractPendingPermission` runs
+    // `escapePreviewText` over diff blocks on the way in, so a request built
+    // through the adapter would arrive pre-escaped and make this case vacuous;
+    // the sink has to hold for every caller, including the ones that do not go
+    // through that adapter.
+    const craftedPath =
+      '/outside/\u202elooking.ts\n\nInjected panel prose\tmore';
+    const craftedRequest: PermissionRequest = {
+      ...request,
+      toolName: 'edit',
+      title: 'Edit',
+      content: [
+        {
+          type: 'diff',
+          path: craftedPath,
+          oldText: 'safe looking\n',
+          newText: 'safe\u202elooking\nsafe\u200dlooking\n',
+        },
+      ],
+    };
+    render();
+    act(() =>
+      root!.render(
+        <WebShellCustomizationProvider
+          value={{ hostOwnsEditDiffPreview: false }}
+        >
+          <I18nProvider language="en">
+            <ToolApproval request={craftedRequest} onConfirm={onConfirm} />
+          </I18nProvider>
+        </WebShellCustomizationProvider>,
+      ),
+    );
+    const rendered = container!.querySelector(
+      '[role="alertdialog"]',
+    )!.textContent!;
+    // The invisible override must not survive into the DOM, while the payload
+    // stays readable as its escaped form (mirroring the command/description
+    // cases above).
+    expect(rendered).not.toContain('\u202e');
+    expect(rendered).toContain('safe\\u202elooking');
+    expect(rendered).not.toContain('\u200d');
+    expect(rendered).toContain('safe\\u200dlooking');
+    expect(rendered).toContain('/outside/\\u202elooking.ts');
+    const path = Array.from(container!.querySelectorAll('div')).find(
+      (element) =>
+        element.textContent?.startsWith('/outside/') &&
+        element.children.length === 0,
+    )!;
+    expect(path).toBeTruthy();
+    expect(path.textContent).not.toMatch(/[\t\n]/);
+    expect(path.textContent).toBe(
+      '/outside/\\u202elooking.ts  Injected panel prose more',
+    );
+  });
+
+  it('localizes the omitted-diff notice instead of hardcoding English', () => {
+    // `buildContextBoundedDiff` lives in an import-free module, so it cannot
+    // reach the `t()` catalog: it used to emit an English sentence that then
+    // rendered verbatim inside an otherwise fully translated panel. The
+    // builder now emits a marker and the render boundary resolves it.
+    const longOld = Array.from(
+      { length: 400 },
+      (_, i) => `old-${i}-${'x'.repeat(140)}`,
+    ).join('\n');
+    const longNew = Array.from(
+      { length: 400 },
+      (_, i) => `new-${i}-${'y'.repeat(140)}`,
+    ).join('\n');
+    expect(longOld.length + longNew.length).toBeGreaterThan(100_000);
+    const adapted = extractPendingPermission([
+      {
+        id: 'permission-edit-zh',
+        kind: 'permission',
+        requestId: 'request-edit-zh',
+        sessionId: 'session-edit-zh',
+        title: 'Edit: /outside/zh.txt',
+        options: [],
+        toolCall: {
+          kind: 'edit',
+          _meta: { toolName: 'replace' },
+          content: [
+            {
+              type: 'diff',
+              path: '/outside/zh.txt',
+              oldText: longOld,
+              newText: longNew,
+            },
+          ],
+        },
+        preview: { kind: 'generic' },
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ])!;
+    render(
+      undefined,
+      { ...adapted, options: request.options },
+      undefined,
+      'zh-CN',
+    );
+    expect(container!.textContent).toContain(
+      '差异过大，为保证安全已省略显示。',
+    );
+    expect(container!.textContent).not.toContain('Diff omitted');
+  });
+
+  it.each([
+    { oldText: 'line', newText: 'line\n', notice: '文件末尾新增了换行符。' },
+    {
+      oldText: 'line\n',
+      newText: 'line',
+      notice: '文件末尾的换行符已被移除。',
+    },
+  ])(
+    'localizes a trailing-newline-only change: $notice',
+    ({ oldText, newText, notice }) => {
+      render(
+        undefined,
+        {
+          ...request,
+          toolName: 'edit',
+          title: 'Edit',
+          content: [
+            { type: 'diff', path: '/outside/endings.txt', oldText, newText },
+          ],
+        },
+        undefined,
+        'zh-CN',
+      );
+      expect(container!.textContent).toContain(notice);
+      expect(container!.textContent).not.toContain('approval.trailingNewline');
+      expect(container!.textContent).not.toContain('Trailing newline');
+    },
+  );
 
   it('neutralises bidi and C0 controls in the generic content block', () => {
     // #13566 named three sites. The command block, the exec warnings and the

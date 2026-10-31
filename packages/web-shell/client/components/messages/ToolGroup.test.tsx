@@ -24,7 +24,7 @@ import { SubagentDetailsProvider } from '../../subagentDetailsContext';
 import { MonitorDetailsProvider } from '../../monitorDetailsContext';
 import { WorkflowDetailsProvider } from '../../workflowDetailsContext';
 import { McpAppHostContext } from '../../mcpAppHostContext';
-import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import { buildUnifiedDiff, DIFF_OMITTED_MARKER } from '../../utils/unifiedDiff';
 import {
   result as managedResult,
   notStartedResult,
@@ -2905,6 +2905,192 @@ describe('tool output logic', () => {
     expect(buildUnifiedDiff('same\nold', 'same\nnew')).toBe(
       ' same\n-old\n+new',
     );
+  });
+
+  it('bounds pending content diffs while keeping completed content diffs', () => {
+    const oldLines = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[99] = 'updated line 100';
+    const content: ACPToolCall['content'] = [
+      {
+        type: 'diff',
+        oldText: oldLines.join('\n'),
+        newText: newLines.join('\n'),
+      },
+    ];
+    for (const status of ['pending', 'in_progress'] as const) {
+      const diff = extractDiff(makeTool({ toolName: 'edit', status, content }));
+      expect(diff).toContain('@@ -97,7 +97,7 @@');
+      expect(diff).toContain('-line 100\n+updated line 100');
+      expect(diff).not.toContain('line 200');
+      expect(diff.split('\n')).toHaveLength(9);
+    }
+    for (const status of ['completed', 'failed'] as const) {
+      const diff = extractDiff(makeTool({ toolName: 'edit', status, content }));
+      expect(diff).toBe(
+        buildUnifiedDiff(oldLines.join('\n'), newLines.join('\n')),
+      );
+      expect(diff.split('\n')).toHaveLength(201);
+    }
+  });
+
+  it('bounds pending args previews and preserves completed previews and supplied patches', () => {
+    const oldLines = Array.from({ length: 200 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[99] = 'updated line 100';
+    // Whole-file previews window around the change; fragments render
+    // headerless, so their fixture stays inside the row bound (an edit that
+    // carries more rows than that is file content, covered separately below).
+    const fragmentOld = oldLines.slice(90, 110).join('\n');
+    const fragmentNew = newLines.slice(90, 110).join('\n');
+    for (const args of [
+      {
+        oldText: oldLines.join('\n'),
+        newText: newLines.join('\n'),
+        expected: buildUnifiedDiff(oldLines.join('\n'), newLines.join('\n')),
+      },
+      {
+        old_string: fragmentOld,
+        new_string: fragmentNew,
+        expected: buildUnifiedDiff(fragmentOld, fragmentNew),
+      },
+    ]) {
+      const { expected, ...payload } = args;
+      for (const status of ['pending', 'in_progress'] as const) {
+        const diff = extractDiff(
+          makeTool({ toolName: 'edit', status, args: payload }),
+        );
+        if ('oldText' in payload) {
+          expect(diff).toContain('@@ -97,7 +97,7 @@');
+          expect(diff.split('\n')).toHaveLength(9);
+        } else {
+          expect(diff).not.toContain('@@');
+          expect(diff).toBe(expected);
+        }
+        expect(diff).toContain('-line 100\n+updated line 100');
+        expect(
+          extractDiff(
+            makeTool({
+              toolName: 'edit',
+              status,
+              args: { ...payload, patch: 'supplied patch' },
+            }),
+          ),
+        ).toBe('supplied patch');
+      }
+      expect(
+        extractDiff(
+          makeTool({ toolName: 'edit', status: 'completed', args: payload }),
+        ),
+      ).toBe(expected);
+      expect(
+        extractDiff(
+          makeTool({ toolName: 'edit', status: 'failed', args: payload }),
+        ),
+      ).toBe('');
+    }
+  });
+
+  it('omits a pending fragment that would render more rows than the card may hold', () => {
+    // 600 rows with one changed line is ~5.3k characters a side, so the
+    // character gate let it through and the approval card rendered the entire
+    // fragment behind the button the user was about to press. Rows are the
+    // unit the card pays for, so they are what the gate counts.
+    const oldLines = Array.from({ length: 600 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[299] = 'updated line 300';
+    const args = {
+      old_string: oldLines.join('\n'),
+      new_string: newLines.join('\n'),
+    };
+    expect(args.old_string.length).toBeLessThan(10_000);
+    for (const status of ['pending', 'in_progress'] as const) {
+      expect(extractDiff(makeTool({ toolName: 'edit', status, args }))).toBe(
+        DIFF_OMITTED_MARKER,
+      );
+    }
+    // A finished call shows what it did: the bound belongs to the waiting
+    // state, not to the record.
+    expect(
+      extractDiff(makeTool({ toolName: 'edit', status: 'completed', args })),
+    ).toBe(buildUnifiedDiff(args.old_string, args.new_string));
+  });
+
+  it('omits oversized pending args previews instead of fabricating a whole-file rewrite', () => {
+    const oldLines = Array.from({ length: 2_000 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[1] = 'first change';
+    newLines[1_998] = 'last change';
+    for (const status of ['pending', 'in_progress'] as const) {
+      const diff = extractDiff(
+        makeTool({
+          toolName: 'edit',
+          status,
+          args: { oldText: oldLines.join('\n'), newText: newLines.join('\n') },
+        }),
+      );
+      expect(diff).toBe(DIFF_OMITTED_MARKER);
+      expect(diff).not.toContain('@@');
+    }
+  });
+
+  it('bounds oversized pending fragments on the live projection too', () => {
+    // The live projection carries the edit tool's real parameter names
+    // (old_string/new_string); a pending card holding them used to run the
+    // unbounded builder because the size gate keyed on projection shape
+    // rather than status. The gate must cover both shapes.
+    const oldLines = Array.from({ length: 2_000 }, (_, i) => `line ${i + 1}`);
+    const newLines = [...oldLines];
+    newLines[1] = 'first change';
+    newLines[1_998] = 'last change';
+    for (const status of ['pending', 'in_progress'] as const) {
+      const args = {
+        old_string: oldLines.join('\n'),
+        new_string: newLines.join('\n'),
+      };
+      expect(extractDiff(makeTool({ toolName: 'edit', status, args }))).toBe(
+        DIFF_OMITTED_MARKER,
+      );
+    }
+    // Under the cap the fragment still renders as a headerless diff.
+    const underCap = { old_string: 'a\nb\n', new_string: 'a\nc\n' };
+    expect(
+      extractDiff(
+        makeTool({ toolName: 'edit', status: 'pending', args: underCap }),
+      ),
+    ).toBe(buildUnifiedDiff('a\nb\n', 'a\nc\n'));
+    // A completed call keeps its full diff regardless of shape.
+    expect(
+      extractDiff(
+        makeTool({
+          toolName: 'edit',
+          status: 'completed',
+          args: {
+            old_string: oldLines.join('\n'),
+            new_string: newLines.join('\n'),
+          },
+        }),
+      ),
+    ).toBe(buildUnifiedDiff(oldLines.join('\n'), newLines.join('\n')));
+  });
+
+  it('keeps embedded notice markers literal in a pending supplied patch', () => {
+    const patch = '@@ -1,1 +1,1 @@\n-old\n+new\n\\diff-omitted';
+    const tool = makeTool({
+      toolName: 'edit',
+      status: 'pending',
+      args: { path: 'document.ts', patch },
+    });
+    expect(extractDiff(tool)).toBe(patch);
+    const container = renderToolLine(
+      tool,
+      { forceExpanded: true },
+      {
+        hostOwnsEditDiffPreview: false,
+      },
+    );
+    expect(container.textContent).toContain('\\diff-omitted');
+    expect(container.textContent).not.toContain('Diff omitted');
   });
 
   it('uses a typed file-diff preview without raw output', () => {

@@ -26,7 +26,11 @@ import {
 import { SubAgentPanel } from './tools/SubAgentPanel';
 import { ParallelAgentsGroup } from './tools/ParallelAgentsGroup';
 import { DiffView } from './tools/DiffView';
-import { buildUnifiedDiff } from '../../utils/unifiedDiff';
+import {
+  buildContextBoundedDiff,
+  buildUnifiedDiff,
+  DIFF_OMITTED_MARKER,
+} from '../../utils/unifiedDiff';
 import { ShellToolOutput } from './tools/ShellToolOutput';
 import { ToolDetails } from './tools/ToolDetailsContext';
 import {
@@ -179,10 +183,17 @@ export function extractDiff(tool: ACPToolCall): string {
   const rawFileDiff = getRawFileDiff(tool);
   if (rawFileDiff) return rawFileDiff;
 
+  // Only the two builders below are status-gated: pending/in-progress calls
+  // render bounded previews. The verbatim `getRawFileDiff` early return above
+  // and the `args.patch` return below are not bounded by design.
+  const buildDiff = isActiveToolStatus(tool.status)
+    ? buildContextBoundedDiff
+    : buildUnifiedDiff;
+
   if (tool.content) {
     const diffBlock = tool.content.find((b) => b.type === 'diff');
     if (diffBlock && diffBlock.type === 'diff') {
-      return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
+      return buildDiff(diffBlock.oldText || '', diffBlock.newText || '');
     }
   }
 
@@ -198,7 +209,38 @@ export function extractDiff(tool: ACPToolCall): string {
     typeof previewNewText === 'string' ||
     typeof previewOldText === 'string'
   ) {
-    return buildUnifiedDiff(
+    // Real edit arguments are replacement fragments, not file coordinates.
+    const hasWholeFileText =
+      typeof tool.args?.oldText === 'string' ||
+      typeof tool.args?.newText === 'string';
+    // The status gate keys on the STATUS, not the projection shape: a live
+    // pending edit carries the tool's real parameter names, and its payload
+    // can still be an entire file — the fragment path must be bounded too,
+    // or the pending card renders the whole file while it waits.
+    if (!hasWholeFileText && isActiveToolStatus(tool.status)) {
+      const MAX_PENDING_FRAGMENT_CHARS = 10_000;
+      // Characters are the wrong unit on their own: a 600-line fragment with a
+      // single changed line is ~5.3k characters a side, so it passed the gate
+      // and the card rendered six hundred rows — or, for a rewritten block, a
+      // rewrite the file never contained — behind a button the user is about
+      // to press. An edit argument is a passage, not a file: past this many
+      // rows it is file content arriving through the fragment keys, and the
+      // approval card says so instead of growing a file viewer.
+      const MAX_PENDING_FRAGMENT_LINES = 100;
+      const pendingOldText =
+        typeof previewOldText === 'string' ? previewOldText : '';
+      const pendingNewText =
+        typeof previewNewText === 'string' ? previewNewText : '';
+      if (
+        pendingOldText.length > MAX_PENDING_FRAGMENT_CHARS ||
+        pendingNewText.length > MAX_PENDING_FRAGMENT_CHARS ||
+        pendingOldText.split('\n').length > MAX_PENDING_FRAGMENT_LINES ||
+        pendingNewText.split('\n').length > MAX_PENDING_FRAGMENT_LINES
+      ) {
+        return DIFF_OMITTED_MARKER;
+      }
+    }
+    return (hasWholeFileText ? buildDiff : buildUnifiedDiff)(
       typeof previewOldText === 'string' ? previewOldText : '',
       typeof previewNewText === 'string' ? previewNewText : '',
     );
