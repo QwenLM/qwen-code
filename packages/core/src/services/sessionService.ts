@@ -311,16 +311,44 @@ export class SessionIdCaseConflictError extends Error {
   }
 }
 
+const SESSION_CURSOR_SEPARATOR = '|';
+
+/** Encodes the total-order position of the last item on a page. */
+function formatSessionCursor(mtime: number, name: string): string {
+  return `${mtime}${SESSION_CURSOR_SEPARATOR}${name}`;
+}
+
+/**
+ * Decodes a pagination cursor into a position in the listSessions order.
+ *
+ * A bare number is the legacy mtime-only cursor; `"<mtime>|<name>"` also pins
+ * the position inside a group of files that share an mtime, which a timestamp
+ * alone cannot do.
+ */
+function parseSessionCursor(cursor: number | string): {
+  mtime: number;
+  name?: string;
+} {
+  if (typeof cursor === 'number') return { mtime: cursor };
+  const separator = cursor.indexOf(SESSION_CURSOR_SEPARATOR);
+  if (separator === -1) return { mtime: Number(cursor) };
+  return {
+    mtime: Number(cursor.slice(0, separator)),
+    name: cursor.slice(separator + 1),
+  };
+}
+
 /**
  * Pagination options for listing sessions.
  */
 export interface ListSessionsOptions {
   /**
-   * Cursor for pagination (mtime of the last item from previous page).
-   * Items with mtime < cursor will be returned.
+   * Cursor for pagination, as returned by {@link ListSessionsResult.nextCursor}.
+   * Either the composite `"<mtime>|<name>"` form, or the legacy numeric mtime
+   * of the last item from the previous page (items with mtime < cursor).
    * If undefined, starts from the most recent.
    */
-  cursor?: number;
+  cursor?: number | string;
   /**
    * Maximum number of items to return.
    * @default 20
@@ -344,10 +372,11 @@ export interface ListSessionsResult {
   /** Session items for this page */
   items: SessionListItem[];
   /**
-   * Cursor for next page (mtime of last item).
-   * Undefined if no more items.
+   * Cursor for next page: the `"<mtime>|<name>"` of the last item returned.
+   * The name is what makes the cursor unique when several files share an
+   * mtime. Undefined if no more items.
    */
-  nextCursor?: number;
+  nextCursor?: number | string;
   /** Whether there are more items after this page */
   hasMore: boolean;
 }
@@ -2678,13 +2707,24 @@ export class SessionService {
     }
     signal?.throwIfAborted();
 
-    // Sort by mtime descending (most recent first)
-    files.sort((a, b) => b.mtime - a.mtime);
+    // Sort by mtime descending (most recent first), with the filename as a
+    // deterministic tie-breaker. An mtime alone is not unique (bulk copies,
+    // restores, coarse-timestamp filesystems), and this total order is what
+    // lets the cursor below resume inside a group of equal mtimes.
+    files.sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name));
     signal?.throwIfAborted();
 
-    // Apply cursor filter (items with mtime < cursor)
+    // Apply cursor filter. A legacy numeric cursor keeps the strict `<`
+    // boundary; the composite cursor also skips the names already returned at
+    // exactly that mtime, so a tie group spanning a page boundary is not lost.
     if (cursor !== undefined) {
-      files = files.filter((f) => f.mtime < cursor);
+      const bound = parseSessionCursor(cursor);
+      files = files.filter((f) => {
+        if (bound.name === undefined) return f.mtime < bound.mtime;
+        return f.mtime !== bound.mtime
+          ? f.mtime < bound.mtime
+          : f.name.localeCompare(bound.name) > 0;
+      });
     }
 
     // Iterate through files until we have enough matching ones.
@@ -2693,6 +2733,7 @@ export class SessionService {
     const items: SessionListItem[] = [];
     let filesProcessed = 0;
     let lastProcessedMtime: number | undefined;
+    let lastProcessedName: string | undefined;
     let hasMoreFiles = false;
 
     // Pre-allocate the tail-read buffer once and pass it to every
@@ -2718,6 +2759,7 @@ export class SessionService {
 
       filesProcessed++;
       lastProcessedMtime = file.mtime;
+      lastProcessedName = file.name;
 
       const filePath = path.join(chatsDir, file.name);
       const readResult = signal
@@ -2801,11 +2843,13 @@ export class SessionService {
     }
     signal?.throwIfAborted();
 
-    // Determine next cursor (mtime of last processed file)
+    // Determine next cursor (position of the last processed file)
     // Only set if there are more files to process
     const nextCursor =
-      hasMoreFiles && lastProcessedMtime !== undefined
-        ? lastProcessedMtime
+      hasMoreFiles &&
+      lastProcessedMtime !== undefined &&
+      lastProcessedName !== undefined
+        ? formatSessionCursor(lastProcessedMtime, lastProcessedName)
         : undefined;
 
     return {

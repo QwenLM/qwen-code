@@ -153,9 +153,16 @@ export class InvalidCursorError extends Error {
   }
 }
 
-function parseSessionCursor(cursor: string): number | undefined {
+function parseSessionCursor(cursor: string): number | string | undefined {
   if (cursor === '') return undefined;
   const trimmed = cursor.trim();
+  // Composite `"<mtime>|<name>"` cursors, minted by listSessions when a page
+  // ends inside a group of files sharing an mtime, are opaque to this layer.
+  const parts = trimmed.split('|');
+  if (parts.length === 2 && parts[1].length > 0) {
+    const mtime = Number(parts[0]);
+    if (Number.isFinite(mtime) && mtime >= 0) return trimmed;
+  }
   const parsed = Number(trimmed);
   if (
     trimmed === '' ||
