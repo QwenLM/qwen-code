@@ -149,8 +149,8 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
    的是 store API，并没有消除构造点上的错位风险。如果消除该风险也是
    目标，P0 必须同时提供具名构造路径——按分量设值的 builder，例如
    `SessionCreationCommand.builder().tenantId(...).actorId(...).build()`
-   ——这是记录在开放问题中的显式范围决策，而不是裸 record 已经解决的
-   事。其二，新增分量会改变 canonical 构造器签名，既有构造调用点在
+   ——P0 已附带交付：全部迁移后的调用点都使用具名构造，而非位置式
+   canonical 构造器。其二，新增分量会改变 canonical 构造器签名，既有构造调用点在
    源码与二进制层面都会失效，必须在同一改动内更新；发布前硬切让这在
    当下可接受，首个 release 之后则不行。P0 的承诺范围是收敛 store 重载
    链，包括迁移每一个构造调用点。
@@ -160,9 +160,31 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
    硬切，不留 deprecated 桥：release 尚未发生，模块门禁使每个调用方都可
    枚举，留桥只会让重载链继续活着。同一改动内更新全部调用方。
 
-3. 把 `AgentStateStore` 拆成角色接口（例如 `SessionAdmissionStore`、
-   `SessionQueryStore`、`EventProjectionStore`）。这一步实现可以仍是一个类；
-   消费方只注入自己用到的角色。先接口隔离，后实现拆分（P1）。
+3. 把 `AgentStateStore` 拆成角色接口。已落地（2026-10-31）为六个角色——
+   `SessionAdmissionStore`、`SessionLifecycleStore`、`SessionQueryStore`、
+   `SessionPolicyStore`、`EventProjectionStore`、`TurnExecutionStore`——
+   `AgentStateStore` 保留为继承它们的组合接口，实现与测试继续使用完整
+   表面，嵌套 record/常量经继承解析（嵌套类型的 import 必须写拥有它的
+   角色）。角色组合 pin 保证组合接口自身为空、不拥有任何表面。消费方
+   审计（调用级，评审后更正）：18 个单角色消费方已直接注入其角色——
+   生命周期（`RenameEvidence`、`TurnInputEvidence`、
+   `ChildLifecycleAdmissions`、`ActionResponseCoordinator`、
+   `ContextCompressionCoordinator`、`ContextCompressionService`、
+   `ManagedTaskCancelService`、`OperationReconciler`）、查询
+   （`ManagedRuntimeCoordinator`、
+   `SessionRecoveryService`、`ManagedExtensionCommandVerifier`、
+   `ManagedSessionStore`）、策略（`ManagedMcpManagementService`、
+   `ManagedExtensionManagementService`）、事件投影
+   （`MessageMaterializer`、`ReplayFloorAdvancer`、`ManagedToolResultStore`）、
+   Turn 执行（`SessionWorktreeService`）。其余消费方多数跨角色，或把
+   store 透传给多角色依赖（Harness 与 broker 装配），继续
+   使用组合接口。另有四个单角色消费方暂缓迁移、仍用组合接口，在此
+   记录供 P1 跟进：`ChildWorkspaceService`、`WorkspaceRuntimeResolver`、
+   `ManagedAutomationService`（查询）与 `TaskCancelCoordinator`（生命
+   周期）——它们的 `this(...)` 是本类构造委托而非透传。
+   `AcceptanceEvidence.settle` 现已直接接收 `SessionLifecycleStore`，
+   `OperationReconciler` 也因此收窄。更窄的注入会随 P1 沿同一
+   条缝拆分实现而进一步扩散。先接口隔离，后实现拆分（P1）。
 
 4. 在 `verification` 中按 `SurfaceRegistryGateTest` 的风格加 pin 测试：断言
    `AgentStateStore`（及其后继角色接口）中名为 `insertWorkspaceSessionCommand`
@@ -205,8 +227,8 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
   并不让构造变得位置安全（同类型交换仍能编译），且每新增一个分量仍会
   改变 canonical 构造器签名，因此每次扩展都要处理构造调用点与二进制
   兼容——发布前硬切下可接受，之后则不行。若以消除错位风险为目标，
-  具名构造 builder 才是相应机制；P0 是否附带它是显式开放问题，而不是
-  裸 record 已经关闭的风险。
+  具名构造 builder 才是相应机制；P0 已附带交付，全部迁移调用点均使用
+  具名构造。
 - **硬切优于 deprecated 桥。** 发布前窗口，简单优先；桥会保住重载链，
   并在迁移期让契约面翻倍。
 - **先拆接口，后拆实现。** 消费方立即获得隔离，行为风险近乎为零；有风险
@@ -259,10 +281,11 @@ sweep 管理这个陷阱。各字段的单位本身是一份被钉住的绑定�
 
 ## 开放问题
 
-- `SessionCreationCommand` 的确切归属：`AgentStateStore` 旁边的 contracts
-  session 包，还是 `StoreModels` 旁边的 `managedagent.model`？
-- P0 是否同时为 `SessionCreationCommand` 提供具名构造 builder，以关闭
-  构造点上同类型交换的错位风险；裸 record 并不关闭该风险。
+- 已解决（2026-10-31）：`SessionCreationCommand` 放在 `AgentStateStore`
+  旁边的 contracts session 包。
+- 已解决（2026-10-31）：P0 附带具名构造 builder，全部迁移调用点均已
+  使用；重载收敛与 builder 在同一改动落地。角色接口拆分（P0 第 3 步）
+  作为独立切片跟进。
 - 类体量棘轮门禁是在 P1 之前引入（阻止继续长大），还是在拆分落地之后
   再引入。
 - P1 切片与同批类上进行中的功能工作如何排序。
