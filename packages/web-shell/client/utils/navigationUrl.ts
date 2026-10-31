@@ -11,6 +11,7 @@ export const WEB_SHELL_PAGES = [
   'scheduled-tasks',
   'pr-watches',
   'goals',
+  'todos',
   'settings',
 ] as const;
 export type WebShellPage = (typeof WEB_SHELL_PAGES)[number];

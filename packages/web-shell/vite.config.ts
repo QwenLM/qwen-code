@@ -262,6 +262,9 @@ export default defineConfig(({ command }) => ({
       // Goals page (`GET /goals`). Without it the SPA fallback returns
       // index.html in dev and the page fails JSON parsing on open.
       '/goals': daemonProxy,
+      // Todos page (`GET /todos`, `POST /todos/update`). Same reason as the
+      // routes above — the SPA fallback would return index.html in dev.
+      '/todos': daemonProxy,
       // Token-usage dashboard (Daemon Status "统计" tab). Same reason as the
       // routes above — without it the SPA fallback returns index.html in dev and
       // the tab fails JSON parsing on `GET /usage/dashboard`.

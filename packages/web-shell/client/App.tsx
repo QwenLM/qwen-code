@@ -334,6 +334,7 @@ import {
 } from './utils/splitUrl';
 import { ScheduledTasksDialog } from './components/dialogs/ScheduledTasksDialog';
 import { GoalsDialog } from './components/dialogs/GoalsDialog';
+import { TodosDialog } from './components/dialogs/TodosDialog';
 import { AutofixPrWatchesDialog } from './components/dialogs/AutofixPrWatchesDialog';
 import { WorkflowRunsPage } from './components/workflows/WorkflowRunsPage';
 import { parseWebShellGoalCommand } from './utils/goalCondition';
@@ -1941,6 +1942,7 @@ type MainView =
   | 'prWatches'
   | 'workflows'
   | 'goals'
+  | 'todos'
   | 'split';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
@@ -10244,6 +10246,7 @@ export function App({
         (mainView === 'scheduledTasks' ||
           mainView === 'prWatches' ||
           mainView === 'goals' ||
+          mainView === 'todos' ||
           mainView === 'split'))
     ) {
       setMainView('chat');
@@ -10330,6 +10333,14 @@ export function App({
     if (!navigationRef.current) showChat();
     setMainView('goals');
     navigationRef.current?.openPage('goals');
+  }, [showChat]);
+  const openTodos = useCallback(() => {
+    splitClassificationGenerationRef.current += 1;
+    setActivePanel(null);
+    // See openScheduledTasks: leaving the cockpit must strip its deep link.
+    if (!navigationRef.current) showChat();
+    setMainView('todos');
+    navigationRef.current?.openPage('todos');
   }, [showChat]);
   const openPrWatches = useCallback(() => {
     splitClassificationGenerationRef.current += 1;
@@ -10565,7 +10576,9 @@ export function App({
           ? 'pr-watches'
           : mainView === 'goals'
             ? 'goals'
-            : undefined;
+            : mainView === 'todos'
+              ? 'todos'
+              : undefined;
   useEffect(() => {
     if (!navigation || !workspaceCapabilitiesReady) return;
     const page = navigation.route.page;
@@ -10614,7 +10627,9 @@ export function App({
           ? 'prWatches'
           : nextPage === 'goals'
             ? 'goals'
-            : 'chat',
+            : nextPage === 'todos'
+              ? 'todos'
+              : 'chat',
     );
     if (nextPage === 'settings') setSettingsInitialCategory(undefined);
     if (!allowed) navigation.reconcilePage(undefined);
@@ -11129,7 +11144,8 @@ export function App({
       mainView === 'scheduledTasks' ||
       mainView === 'prWatches' ||
       mainView === 'workflows' ||
-      mainView === 'goals'
+      mainView === 'goals' ||
+      mainView === 'todos'
     ) {
       setMainView('chat');
     }
@@ -22546,6 +22562,10 @@ export function App({
                     closeMobileDrawer();
                     openGoals();
                   }}
+                  onOpenTodos={() => {
+                    closeMobileDrawer();
+                    openTodos();
+                  }}
                   {...(prWatchesAvailable
                     ? {
                         onOpenPrWatches: () => {
@@ -23394,6 +23414,41 @@ export function App({
                     </ShadowDomBoundary>
                   </div>
                 </section>
+              )}
+              {projectFeaturesAvailable && mainView === 'todos' && (
+                <div className={styles.fullPage} data-testid="todos-page">
+                  <div className={styles.fullPageHeader}>
+                    {!navigationRailVisible && (
+                      <button
+                        type="button"
+                        className={styles.fullPageBack}
+                        onClick={returnToChat}
+                        aria-label={t('common.back')}
+                        title={t('common.back')}
+                      >
+                        <svg
+                          viewBox="0 0 24 24"
+                          width="18"
+                          height="18"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <path d="M15 18l-6-6 6-6" />
+                        </svg>
+                      </button>
+                    )}
+                    <div className={styles.fullPageTitle}>
+                      {t('todos.title')}
+                    </div>
+                  </div>
+                  <div className={styles.fullPageBody}>
+                    <TodosDialog />
+                  </div>
+                </div>
               )}
               {projectFeaturesAvailable && mainView === 'scheduledTasks' && (
                 <div

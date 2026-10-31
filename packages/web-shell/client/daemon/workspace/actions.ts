@@ -948,6 +948,43 @@ export function createDaemonWorkspaceActions({
       };
     },
 
+    // Todos. `GET /todos` is REST-only like /goals: it aggregates the native
+    // per-session todo store across projects; the update path flips one todo
+    // status in place.
+    async listTodos(includeAll = false) {
+      requireClient(getClient, 'List todos failed');
+      const url = createDaemonRequestUrl(
+        baseUrl,
+        `/todos${includeAll ? '?all=1' : ''}`,
+      );
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          headers: createDaemonHeaders(token),
+        }),
+        'List todos timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, 'GET /todos'));
+      }
+      return (await res.json()) as import('./types.js').DaemonTodosSnapshot;
+    },
+
+    async updateTodo(sessionId, todoId, patch) {
+      requireClient(getClient, 'Update todo failed');
+      const url = createDaemonRequestUrl(baseUrl, '/todos/update');
+      const res = await withActionTimeout(
+        fetch(serializeDaemonRequestUrl(url, baseUrl), {
+          method: 'POST',
+          headers: createDaemonJsonHeaders(token),
+          body: JSON.stringify({ sessionId, todoId, ...patch }),
+        }),
+        'Update todo timed out',
+      );
+      if (!res.ok) {
+        throw new Error(await readDaemonError(res, 'POST /todos/update'));
+      }
+    },
+
     async clearGoal(sessionId) {
       requireClient(getClient, 'Clear goal failed');
       const url = createDaemonRequestUrl(
