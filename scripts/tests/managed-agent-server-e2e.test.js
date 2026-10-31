@@ -579,6 +579,29 @@ describe('managed-agent-server e2e runner', () => {
     expect(a3Window).toContain('siblingPlan.approvalOrdinal !== 1');
     expect(a3Window).toContain("decidedSibling?.[1] !== 'decided'");
     expect(a3Window).toContain("pendingSibling?.[1] !== 'requested'");
+    expect(a3Window).toContain('as SavedApprovalPlan');
+    expect(a3Window).toMatch(
+      /for \(const \[\s*ordinal,\s*originalCall,\s*\] of originalApprovalPlan!\.calls\.entries\(\)\)/,
+    );
+    expect(a3Window).toContain(
+      'const siblingCall = siblingPlan.calls[ordinal]',
+    );
+    expect(a3Window).toContain(
+      'const expectedActionIds = [originalApprovalId!, siblingApprovalId!]',
+    );
+    for (const field of [
+      'runtimeCallId',
+      'partIndex',
+      'prepareKey',
+      'requestDigest',
+    ]) {
+      expect(a3Window).toContain(
+        `siblingCall.${field} !== originalCall.${field}`,
+      );
+    }
+    expect(a3Window).toContain(
+      'siblingCall.actionId !== expectedActionIds[ordinal]',
+    );
     // The recovery generation re-decides the ORIGINAL pending sibling and
     // asserts its identity/deadline survived before answering.
     expect(source).toContain('const siblingBefore = await fetchJson');
