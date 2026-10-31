@@ -732,7 +732,7 @@ async function loadAllPersistedSummaries(
   const sessions: BridgeSessionSummary[] = [];
   let truncated = false;
   let scanPages = 0;
-  let cursor: number | undefined;
+  let cursor: number | string | undefined;
   do {
     scanPages += 1;
     const page = await sessionService.listSessions({
@@ -1463,16 +1463,16 @@ async function listWorkspaceSessionsForResponseInRuntime(
     );
   }
 
-  let numericCursor: number | undefined;
+  let persistedCursor: number | string | undefined;
   if (options?.cursor != null) {
-    numericCursor = parseSessionCursor(options.cursor);
+    persistedCursor = parseSessionCursor(options.cursor);
   }
-  const isFirstPage = numericCursor === undefined;
+  const isFirstPage = persistedCursor === undefined;
 
   const sessionService = new SessionService(workspaceCwd);
   const archiveState = options?.archiveState ?? 'active';
   const persisted = await sessionService.listSessions({
-    cursor: numericCursor,
+    cursor: persistedCursor,
     size: pageSize,
     archiveState,
     excludeSourceTypes: [...HIDDEN_CATALOG_SOURCE_TYPES],
