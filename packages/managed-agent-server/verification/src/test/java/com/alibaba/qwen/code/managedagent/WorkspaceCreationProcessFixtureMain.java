@@ -1,6 +1,7 @@
 package com.alibaba.qwen.code.managedagent;
 
 import com.alibaba.qwen.code.managedagent.config.ManagedAgentProperties;
+import com.alibaba.qwen.code.managedagent.contracts.session.SessionCreationCommand;
 import com.alibaba.qwen.code.managedagent.model.StoreModels.Admission;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedAgentStore;
 import com.alibaba.qwen.code.managedagent.persistence.ManagedWorkspaceRegistry;
@@ -16,7 +17,6 @@ import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.time.Clock;
 import java.util.HexFormat;
-import java.util.List;
 
 /** Separate JVM for the committed Workspace creation and replay proof. */
 public final class WorkspaceCreationProcessFixtureMain {
@@ -38,9 +38,13 @@ public final class WorkspaceCreationProcessFixtureMain {
         switch (required("W0_ACTION")) {
             case "create-and-exit" -> {
                 Admission first = transactions.execute(status ->
-                        store.insertWorkspaceSessionCommand(tenant, "actor-a",
-                                "workspace-create", digest, "qwen-code", null,
-                                null, List.of(), null, null));
+                        store.insertWorkspaceSessionCommand(SessionCreationCommand.builder()
+                                .tenantId(tenant)
+                                .actorId("actor-a")
+                                .idempotencyKey("workspace-create")
+                                .requestDigest(digest)
+                                .agentId("qwen-code")
+                                .build()));
                 require(first != null && !first.replayed(),
                         "creation did not commit a new command");
                 System.exit(23);

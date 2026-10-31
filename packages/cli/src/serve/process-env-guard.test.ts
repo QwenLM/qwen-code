@@ -87,6 +87,16 @@ const allowedProcessEnvAccesses = normalizeAllowances([
     },
   ],
   [
+    'packages/cli/src/serve/hosted-workspace-tool-turn.ts',
+    {
+      reason:
+        'The packaged A3 mixed-sibling fault arm sets QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL=<sessionId> on the single replacement generation that must crash, so the turn holds the first sibling approval it asks (the pending sibling after an earlier decided one) once its durable wait is committed. Test-gated, never set in production; read once and fires once.',
+      accesses: {
+        'key:QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL': 1,
+      },
+    },
+  ],
+  [
     'packages/cli/src/serve/workspace-recovery-worker.ts',
     {
       reason:
