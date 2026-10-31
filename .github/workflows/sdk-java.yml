@@ -27,9 +27,8 @@ env:
   MAVEN_SHA512: 'bcfe4fe305c962ace56ac7b5fc7a08b87d5abd8b7e89027ab251069faebee516b0ded8961445d6d91ec1985dfe30f8153268843c89aa392733d1a3ec956c9978'
 
 concurrency:
-  # Keyed by event and commit: a Managed Agent gate fast run and a full run
-  # on the same pull request must not queue behind each other, where a newer
-  # pending run would displace the older one.
+  # Event and commit keys prevent a new pending fast/full run from replacing
+  # an older one in the same queue.
   group: 'sdk-java-${{ github.workflow }}-${{ github.event_name }}-${{ inputs.ref || github.ref }}'
   # Release callers and daily runs must not displace each other's validation.
   cancel-in-progress: false
@@ -1027,18 +1026,11 @@ jobs:
               exit 1
             fi
           fi
-          # Close the cache loop inside that lock: the one-way seed above
-          # alone does not recapture the Server dependency tree after a pom
-          # key rotation. The excludes name the two in-house fixed release
-          # coordinates rather than the whole com/alibaba group, so
-          # third-party artifacts under it (druid) still recapture into the
-          # host-shared ~/.m2. Best-effort like the seed: the warning arms
-          # keep a copy failure from reddening the gate after mvn has already
-          # passed.
-          # On a fresh ECS host nothing creates ~/.m2/repository anymore
-          # (the hosted-only cache no longer restores it), so create it
-          # before the write-back or every job re-resolves through the
-          # egress proxy instead of bootstrapping the shared repository.
+          # Under this lock, recapture dependencies after POM key changes.
+          # Exclude only our fixed coordinates so Alibaba third-party artifacts
+          # (e.g. druid) still enter shared ~/.m2. Copy failures only warn:
+          # Maven already passed. Fresh ECS hosts need the repository created
+          # first, or each job resolves through the proxy instead of seeding it.
           # Publish only this job's downloads: seeded files are hardlinks
           # (nlink >= 2), so the delta is nlink == 1. Taring the whole tree
           # took up to 61 minutes (run 39563394993). Each link is atomic and
@@ -1065,12 +1057,19 @@ jobs:
       - name: 'Check that every non-Hosted integration test class ran'
         run: 'node scripts/check-failsafe-reports.js non-hosted packages/managed-agent-server'
 
+      - name: 'Verify ordinary and enabled embedding hosts'
+        working-directory: 'packages/managed-agent-server'
+        env:
+          MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml -Dmaven.repo.local=${{ runner.temp }}/m2-repo'
+        run: 'bash ../../.github/scripts/verify-managed-agent-embedding.sh'
+
       - name: 'Upload Maven test reports on failure'
         if: 'failure() || cancelled()'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
           name: 'sdk-java-test-reports-mysql-integration-java-21'
           path: |
+            packages/managed-agent-server/verification/src/test/embedding-host/target/surefire-reports/*
             packages/managed-agent-server/verification/target/surefire-reports/*.txt
             packages/managed-agent-server/verification/target/surefire-reports/*.dumpstream
             packages/managed-agent-server/verification/target/failsafe-reports/*.txt
@@ -1098,7 +1097,7 @@ jobs:
     name: 'Hosted process fault gates / MySQL 8.4 / Java 21'
     if: "${{ inputs.tier != 'fast' }}"
     runs-on: 'ubuntu-latest'
-    # The step ceilings today (162 + 20 + 50 + 20 = 252 — the FG8 letters
+    # The step ceilings today (201 + 20 + 50 + 20 = 291 — the FG8 letters
     # grew the shared failsafe fork to 3600 s, FG9 slice 3 to 3990 s, the
     # FG10b–f workflow relay letters to 4484 s, the FG12a MCP reply-loss
     # letter to 4499 s, the FG12c restart matrix to 4548 s, the FG13c Hook
@@ -1172,10 +1171,16 @@ jobs:
     # pending CI measurement: fork 11444 s, Verify 201 minutes, and 12044 s
     # of fork plus wrap with the same 16 s left;
     # the Broker fault gates use 20,
-    # and admission plus O4 keep per-fork ceilings) plus ~13 minutes for the
-    # uncapped setup steps (Checkout.. cgroup delegation, the report
-    # checks): 291 + 13. The failover arms run in hosted-failover-e2e.
-    timeout-minutes: 304
+    # and admission plus O4 keep per-fork ceilings) plus a 33-minute
+    # allowance for the uncapped setup steps (Checkout.. cgroup delegation,
+    # the report checks), which took under 10 minutes on every nightly from
+    # 10-14 to 10-30: 291 + 33. A Verify that timed out used to skip
+    # admission, leaving that path 50 minutes spare; admission now runs
+    # after it, so that path too can fill all four capped ceilings. The
+    # allowance sits above the ~13-minute floor so that a slow setup (the
+    # CLI install makes up to three attempts) still leaves the O4 gates
+    # time to run. The failover arms run in hosted-failover-e2e.
+    timeout-minutes: 324
     services:
       mysql:
         image: 'mysql:8.4.6'
@@ -1330,24 +1335,39 @@ jobs:
           retention-days: 7
 
       - name: 'Verify Hosted admission gates'
+        id: 'hosted_admission'
         # Its clean would otherwise discard the hosted lane's failsafe
         # reports and the fg7-cases evidence the hosts upload above, so it
         # runs after the fixture. The hosted-harness-gates profile carries a
         # 2400 s failsafe fork budget for both admission witness classes
         # (@Timeout(1800) each); the same killed-after-timeout pattern as the
         # hosted-harness-mysql verify applies.
+        # Like the fault gates it rebuilds the module and needs only what the
+        # bundle step installs and builds, the installed SDK and the MySQL
+        # service, so a red Hosted verify must not skip it: without this it
+        # was skipped on all 13 nights from 10-14 to 10-30 that the verify
+        # failed, three of them after the fault gates got this condition.
+        # It boots on a fresh database, as O4 does: schema validation refuses
+        # any table outside the managed set, and a Hosted IT killed before
+        # its cleanup can leave its fg*_fire table behind.
+        if: "${{ !cancelled() && steps.managed_dependencies.outcome == 'success' }}"
         timeout-minutes: 50
         env:
           MAVEN_ARGS: '--settings ${{ runner.temp }}/setup-java-m2/settings.xml --toolchains ${{ runner.temp }}/setup-java-m2/toolchains.xml'
           MYSQL_PORT: "${{ job.services.mysql.ports['3306'] }}"
-        run: >-
-          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml
-          -Phosted-harness-gates
-          -Dnode.executable="$(command -v node)"
-          -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js"
-          -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/hosted_harness_test?allowPublicKeyRetrieval=true&useSSL=false"
-          -Dmysql.user=root -Dmysql.password=hosted-fixture clean verify checkstyle:check
+          MYSQL_PWD: 'hosted-fixture'
+        run: |-
+          mysql --no-defaults --protocol=TCP --host=127.0.0.1 --port="${MYSQL_PORT}" --user=root -e 'CREATE DATABASE qwen_admission_ci'
+          mvn --batch-mode --no-transfer-progress -f packages/managed-agent-server/pom.xml \
+            -Phosted-harness-gates \
+            -Dnode.executable="$(command -v node)" \
+            -Dqwen.cli.entry="${GITHUB_WORKSPACE}/dist/cli.js" \
+            -Dmysql.url="jdbc:mysql://127.0.0.1:${MYSQL_PORT}/qwen_admission_ci?allowPublicKeyRetrieval=true&useSSL=false" \
+            -Dmysql.user=root -Dmysql.password=hosted-fixture clean verify checkstyle:check
       - name: 'Check that every Hosted admission gate class ran'
+        # It reads only the admission step's reports, so it follows that
+        # step rather than the job status a red Hosted verify has already set.
+        if: "${{ !cancelled() && steps.hosted_admission.outcome == 'success' }}"
         run: 'node scripts/check-failsafe-reports.js hosted-gates packages/managed-agent-server'
 
       - name: 'Verify O4 filesystem process and capacity gates'

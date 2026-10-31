@@ -281,6 +281,61 @@ class HarnessPoolConnectorTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"RELEASED,false", "QUIESCING,true", "ACTIVE,true"})
+    void aDrainingOwnerWithNoSuccessorServesOnlyThePlacementsItStillHolds(String state, boolean keepsOwner) {
+        var placements = mock(HarnessPlacementStore.class);
+        var a = endpoint("a", 4101);
+        var b = endpoint("b", 4102);
+        var leafA = leaf();
+        var leafB = leaf();
+        var clientA = client("a");
+        var clientB = client("b");
+        var owner = new Placement("tenant", "session", "workspace", "a", clientA.capabilities().getBootId(), 2, state);
+        var successor = new Placement("tenant", "session", "workspace", "b", clientB.capabilities().getBootId(), 3, "ACTIVE");
+        var saved = new AtomicReference<>(owner);
+        var snapshot = new AtomicReference<>(new HarnessDiscovery.Snapshot(List.of(a), true));
+        when(placements.get("tenant", "session")).thenAnswer(call -> saved.get());
+        // Another Session still on the draining owner keeps it a member.
+        when(placements.hasUnreleasedOwnership(owner.instanceId(), owner.bootId())).thenReturn(true);
+        when(placements.takeover("tenant", "session", owner, "b", successor.bootId())).thenAnswer(call -> {
+            saved.set(successor);
+            return successor;
+        });
+        Map<String, Object> body = Map.of("kind", "fire_run");
+        try (var pool = new HarnessPoolConnector(settings(), placements, snapshot::get,
+                endpoint -> endpoint.instanceId().equals("a") ? leafA : leafB, null, null,
+                endpoint -> endpoint.instanceId().equals("a") ? clientA : clientB)) {
+            pool.refresh();
+            when(clientA.readInstance()).thenReturn(Map.of("state", "DRAINED"));
+            pool.refresh();
+            if (keepsOwner) {
+                pool.runAutomationOperation("tenant", "session", body);
+                verify(leafA).runAutomationOperation("tenant", "session", body);
+                var routed = ArgumentCaptor.forClass(QwenHostedHarnessConnector.PoolCall.class);
+                verify(leafA).withPlacement(routed.capture(), any());
+                assertThat(routed.getValue().placement().getInstanceId()).isEqualTo("a");
+                assertThat(routed.getValue().placement().getPlacementEpoch()).isEqualTo(2);
+            } else {
+                // Nothing holds a released Session: the caller meets the
+                // pool's 503, not the drained owner's not-found (#15795).
+                assertThatThrownBy(() -> pool.runAutomationOperation("tenant", "session", body))
+                        .isInstanceOfSatisfying(ManagedAgentException.class, error -> {
+                            assertThat(error.getStatus()).isEqualTo(503);
+                            assertThat(error.getCode()).isEqualTo("harness_pool_unavailable");
+                        });
+                verify(leafA, never()).withPlacement(any(), any());
+                verify(leafA, never()).runAutomationOperation(anyString(), anyString(), any());
+                snapshot.set(new HarnessDiscovery.Snapshot(List.of(a, b), true));
+                pool.refresh();
+                pool.runAutomationOperation("tenant", "session", body);
+                verify(placements).takeover("tenant", "session", owner, "b", successor.bootId());
+                verify(leafB).runAutomationOperation("tenant", "session", body);
+            }
+            verify(placements, never()).assign(anyString(), anyString(), anyString(), anyString());
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(booleans = {true, false})
     void aKnownUnreachableOwnerWaitsForCapacityWithoutFurtherRpcs(boolean refreshFailure) {
         var placements = mock(HarnessPlacementStore.class);

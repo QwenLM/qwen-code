@@ -76,6 +76,33 @@ export interface ChannelLoopToolHandler {
   ): Promise<string | ChannelLoopToolResult>;
 }
 
+/**
+ * A platform action an adapter exposes to the agent as a client MCP tool.
+ * The handler runs in the adapter, so it owns the platform credentials and
+ * the platform-specific error mapping; the bridge only routes the call and
+ * tells the adapter which agent session invoked it.
+ */
+export interface ChannelToolDefinition {
+  name: string;
+  description: string;
+  inputSchema: Record<string, unknown>;
+  /**
+   * Channel instance that owns the tool. One bridge can serve several
+   * channels, and two instances of the same channel type register the same
+   * tool names, so the bridge only offers a tool to sessions whose channel
+   * matches this owner. Leave it unset for a tool every session may call.
+   */
+  owner?: string;
+  handler(
+    args: Record<string, unknown>,
+    context: ChannelToolContext,
+  ): Promise<string | ChannelLoopToolResult>;
+}
+
+export interface ChannelToolContext {
+  sessionId: string;
+}
+
 export interface SessionDiedEvent {
   sessionId: string;
   reason?: string;
@@ -180,7 +207,9 @@ export interface ChannelAgentBridgeSessionOptions {
   /**
    * Channel instance name (e.g. `feishu-main`) stamped as the daemon `sourceId`
    * for new sessions and restore-time attribution for legacy sessions resumed
-   * through a channel.
+   * through a channel. Adapter tools registered with an `owner` are only
+   * offered to sessions whose sourceId matches, so a session created without it
+   * sees only ownerless tools.
    */
   sourceId?: string;
   /** Request daemon-managed git worktree isolation for a fresh session. */
@@ -321,4 +350,10 @@ export interface ChannelAgentBridge {
   ): Promise<{ sessionId: string; answer: string | null }>;
   listSessions?(): BridgeSessionInfo[];
   registerChannelLoopToolHandler?(handler: ChannelLoopToolHandler): void;
+  /**
+   * Register an adapter-owned platform action for the agent session's client
+   * MCP server. Bridges without client MCP tool support omit it; adapters
+   * must then skip registration.
+   */
+  registerChannelTool?(tool: ChannelToolDefinition): void;
 }
