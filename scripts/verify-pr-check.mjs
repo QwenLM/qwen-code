@@ -148,6 +148,12 @@ export function checkMutationCoverage(text) {
   return { errors };
 }
 
+// GitHub renders CRLF and LF identically, so a Windows-authored artifact
+// must not fail the line-anchored checks on a stray \r.
+function normalizeNewlines(text) {
+  return text.replace(/\r\n?/g, '\n');
+}
+
 /**
  * The verdict line is a plain paragraph. Three rounds of PR #15984 opened
  * with `# PR … — **Verdict: …** — <the whole verdict paragraph>` on one line,
@@ -298,7 +304,8 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
   errors.push(...checkMutationCoverage(files.mutations).errors);
 
   if (files.report && files.report.trim() !== '') {
-    const lead = files.report
+    const report = normalizeNewlines(files.report);
+    const lead = report
       .split('\n')
       .filter((line) => line.trim() !== '')
       .slice(0, 10);
@@ -319,7 +326,7 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
         'report.md does not name a 40-character head OID in its first 10 non-empty lines',
       );
     }
-    warnings.push(...leadShapeWarnings(files.report, verdict, 'report.md'));
+    warnings.push(...leadShapeWarnings(report, verdict, 'report.md'));
   }
 
   // comment.md is the exact body a local round posts: report content plus
@@ -328,10 +335,9 @@ export function checkArtifacts({ files, evidence = [], expectedHead = null }) {
   // where the footer's presence is checkable. The workflow assembles its own
   // body and never writes this file, so its absence is not a defect.
   if (files.comment && files.comment.trim() !== '') {
-    warnings.push(...leadShapeWarnings(files.comment, verdict, 'comment.md'));
-    const lines = files.comment
-      .split('\n')
-      .filter((line) => line.trim() !== '');
+    const comment = normalizeNewlines(files.comment);
+    warnings.push(...leadShapeWarnings(comment, verdict, 'comment.md'));
+    const lines = comment.split('\n').filter((line) => line.trim() !== '');
     if (!FOOTER.test(lines[lines.length - 1] ?? '')) {
       warnings.push(
         'comment.md does not end with the attribution footer `_— <model> via Qwen Code /verify-pr (v<version>; skill <12-hex>)_`: append the resolved footer before posting — omit it only when the model cannot be resolved',

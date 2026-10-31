@@ -451,6 +451,15 @@ describe('verdict line shape', () => {
     );
   });
 
+  it('keeps the shape verdicts under CRLF line endings', () => {
+    const heading = check({ report: `${shippedLead}\r\n` });
+    expect(heading.warnings.join('\n')).toMatch(
+      /report\.md opens with a heading carrying the verdict/,
+    );
+    const plain = check({ report: `${shippedLead.slice(2)}\r\n` });
+    expect(plain.warnings).toEqual([]);
+  });
+
   // GFM renders an ATX heading indented up to three spaces as a heading
   // (verified against the GitHub markdown API); four spaces are a code
   // block. The indent must not be a way around the shape check.
@@ -477,6 +486,32 @@ describe('comment.md footer', () => {
   it('accepts a body ending in the resolved footer', () => {
     const result = check({ comment: `${body}\n${footer}\n` });
     expect(result.warnings).toEqual([]);
+  });
+
+  // PR #16002 review: a Windows-authored comment.md with CRLF line endings
+  // failed the anchored footer regex on the stray \r, and the local publish
+  // gate sent a valid artifact back for unnecessary repair. GitHub renders
+  // CRLF and LF identically; the checker has to agree.
+  it('accepts the same footer with CRLF line endings (LF/CRLF parity)', () => {
+    const lf = check({ comment: `${body}\n${footer}\n` });
+    const crlf = check({
+      comment: `${body}\n${footer}\n`.replace(/\n/g, '\r\n'),
+    });
+    expect(lf.warnings).toEqual([]);
+    expect(crlf.warnings).toEqual([]);
+  });
+
+  it('still flags a missing footer and a heading lead under CRLF', () => {
+    const missing = check({ comment: body.replace(/\n/g, '\r\n') });
+    expect(missing.warnings.join('\n')).toMatch(
+      /does not end with the attribution footer/,
+    );
+    const heading = check({
+      comment: `# PR 15984 round 3 verification — **Verdict: merge-ready** — ${HEAD}\r\n\r\n${footer}\r\n`,
+    });
+    expect(heading.warnings.join('\n')).toMatch(
+      /comment\.md opens with a heading carrying the verdict/,
+    );
   });
 
   it('warns when the footer is missing', () => {
@@ -549,6 +584,25 @@ describe.skipIf(process.platform === 'win32')('check (CLI)', () => {
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(
       'warn  comment.md does not end with the attribution footer',
+    );
+    expect(result.stdout).toContain(
+      'ok: verdict=merge-ready (4 passed · 0 failed · 4 total)',
+    );
+  });
+
+  // The reviewer's CLI probe: the same valid footer, only the line endings
+  // changed to CRLF, must not produce the footer warning.
+  it('accepts a CRLF comment.md with a valid footer end to end', () => {
+    const dir = makeArtifactDir(
+      validFiles({
+        comment: `merge-ready · ${HEAD}\r\n\r\n_— test-model via Qwen Code /verify-pr (v0.26.4; skill 0123456789ab)_\r\n`,
+      }),
+      ['01-ab-cells.png'],
+    );
+    const result = run(dir);
+    expect(result.status).toBe(0);
+    expect(result.stdout).not.toContain(
+      'does not end with the attribution footer',
     );
     expect(result.stdout).toContain(
       'ok: verdict=merge-ready (4 passed · 0 failed · 4 total)',
