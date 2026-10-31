@@ -128,8 +128,8 @@ const LOCK_OPTIONS: lockfile.LockOptions = {
 // lock can take `stale` + 1 s to go stale. 8 s leaves about 2 s of margin.
 const LOCK_WAIT_MS = 8000;
 
-// How many times a mutation is redone because the registry changed under
-// it (see `writeRegistry`).
+// How many times in all a mutation is attempted while the registry keeps
+// changing under it (see `writeRegistry`).
 const MAX_MUTATION_ATTEMPTS = 3;
 
 const CONTROLLER_ID_RE = /^c_[0-9a-f]{8}$/;

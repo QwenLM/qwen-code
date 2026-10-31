@@ -75,15 +75,15 @@ const registryJson = (controllers: unknown, extra: object = {}) =>
   });
 
 /**
- * Lands `rivalWrite` after each of the next `reads` mutation attempts has
- * read the registry but before it commits, as a waiter that took over a
- * stalled holder's lock would. The mutation reads synchronously as soon
- * as it holds the lock and then waits on I/O, so a `setImmediate` queued
- * at lock time runs in between.
+ * Lands `rivalWrite` inside each of the next `count` mutation attempts,
+ * after the attempt has read the registry but before it commits, as a
+ * waiter that took over a stalled holder's lock would. The mutation
+ * reads synchronously as soon as it holds the lock and then waits on
+ * I/O, so a `setImmediate` queued at lock time runs in between.
  */
-function landWriteAfterReads(rivalWrite: () => void, reads = 1) {
+function landWriteAfterReads(rivalWrite: () => void, count = 1) {
   const realLock = lockfile.lock.bind(lockfile);
-  let left = reads;
+  let left = count;
   return vi
     .spyOn(lockfile, 'lock')
     .mockImplementation(async (file, options) => {
@@ -305,8 +305,10 @@ describe('addPeerController', () => {
   });
 
   it('gives up, saving nothing, when the registry keeps changing', async () => {
-    // A rival lands a fresh write inside each of five attempts, more than
-    // the redo bound allows.
+    // A rival lands a fresh write inside every attempt, up to five times.
+    // Only three attempts should run. The rival stops after five, so a
+    // missing bound ends in a sixth attempt that succeeds instead of
+    // looping forever.
     const rivals: PeerControllerRecord[] = [];
     const lockSpy = landWriteAfterReads(() => {
       rivals.push({
@@ -319,10 +321,14 @@ describe('addPeerController', () => {
     }, 5);
     try {
       const failure = await add('voice').catch((error: unknown) => error);
-      // The CLI reports a PeerControllerError as it stands instead of
-      // blaming the file.
+      // The CLI prints a PeerControllerError's message as it stands,
+      // without adding the path, so the message has to name the file and
+      // the contention itself.
       expect(failure).toBeInstanceOf(PeerControllerError);
-      expect(failure).toMatchObject({ code: 'registry-changed' });
+      expect(failure).toMatchObject({
+        code: 'registry-changed',
+        message: `${registryPath} kept changing while this write was in progress; nothing was saved. Try again.`,
+      });
       expect(lockSpy).toHaveBeenCalledTimes(3);
       expect((await readRaw()).controllers).toEqual(rivals);
     } finally {
