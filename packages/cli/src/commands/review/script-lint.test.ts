@@ -208,6 +208,52 @@ describe.skipIf(!hasActionlint)(
       );
     });
 
+    it('a PR-added ignore-all config cannot hide the unloadable workflow (real git repo)', () => {
+      // The PR #16001 review's Critical, end to end: actionlint auto-loads
+      // .github/actionlint.yaml from the reviewed repository, and this
+      // ignore-all rule turns the expression finding into an empty report —
+      // the gate would read the broken workflow as clean. The private neutral
+      // config must override the auto-discovery. A real git repo because
+      // actionlint's config discovery is project-rooted.
+      execFileSync('git', ['init', '-q', dir]);
+      const { plan, worktree } = setup('.github/workflows/ci.yml', UNLOADABLE, [
+        { newStart: 7, newEnd: 7 },
+      ]);
+      writeFileSync(
+        join(worktree, '.github', 'actionlint.yaml'),
+        'paths:\n  "**":\n    ignore:\n      - ".*"\n',
+      );
+      const r = runScriptLint({ plan, worktree });
+      expect(r.errored).toEqual([]);
+      const expr = r.checked[0]?.findings.find((f) => f.code === 'expression');
+      expect(expr).toBeDefined();
+      expect(expr!.line).toBe(7);
+      expect(expr!.inDiff).toBe(true);
+      expect(r.ok).toBe(false);
+    });
+
+    it('custom self-hosted runner labels stay clean (the trusted exception)', () => {
+      // The ECS fleets this repo routes to carry labels actionlint cannot
+      // know; the trusted -ignore (the same one scripts/lint.js runs) keeps
+      // them from becoming false blockers. The expression check still runs.
+      const labelled = [
+        'name: CI',
+        'on: push',
+        'jobs:',
+        '  a:',
+        '    runs-on: [self-hosted, ecs-qwen-custom]',
+        '    steps:',
+        '      - run: echo ok',
+        '',
+      ].join('\n');
+      const { plan, worktree } = setup('.github/workflows/ci.yml', labelled, [
+        { newStart: 1, newEnd: 7 },
+      ]);
+      const r = runScriptLint({ plan, worktree });
+      expect(r.checked[0].findings).toEqual([]);
+      expect(r.ok).toBe(true);
+    });
+
     it('a clean workflow passes, with the shell deferral still disclosed', () => {
       const clean = [
         'name: CI',

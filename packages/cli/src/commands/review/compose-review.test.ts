@@ -10026,6 +10026,52 @@ describe('scriptLintGate — the deterministic gate reads the report', () => {
     expect(g.unreviewed).toEqual([]);
   });
 
+  it('lintDiffPath hashes the refresh diff, so a report bound to it is fresh (re-anchor)', () => {
+    // PR #16001 review: the re-anchor round recomputes the lint at the new
+    // head; the report binds to the NEW diff while the plan stays fenced at
+    // the old one. Without the override basis the refreshed report reads as
+    // stale and the gate drops the still-standing findings.
+    const p = writePlan({});
+    const newDiff = join(dir, 'reanchor.diff');
+    writeFileSync(newDiff, 'diff --git a/x b/x\n@@ -0,0 +1 @@\n+still buggy\n');
+    const newHash = createHash('sha256')
+      .update(readFileSync(newDiff))
+      .digest('hex');
+    writeReport({ ...withFinding(finding()), diffHash: newHash });
+    const g = scriptLintGate(p, newDiff);
+    expect(g.criticals).toHaveLength(1);
+    expect(g.unreviewed).toEqual([]);
+  });
+
+  it('lintDiffPath does not revive a report bound to the OLD diff', () => {
+    // The stale old-head report must still fail closed when the round names
+    // the refresh diff — the override changes the basis, it does not waive
+    // the check.
+    const p = writePlan({});
+    const newDiff = join(dir, 'reanchor.diff');
+    writeFileSync(newDiff, 'diff --git a/x b/x\n@@ -0,0 +1 @@\n+fixed\n');
+    writeReport(withFinding(finding())); // bound to freshDiff (the old one)
+    const g = scriptLintGate(p, newDiff);
+    expect(g.criticals).toEqual([]);
+    expect(g.unreviewed).toHaveLength(1);
+    expect(g.unreviewed[0]).toContain('stale');
+  });
+
+  it.each([
+    ['empty', ''],
+    ['non-string', 42],
+  ])(
+    'a malformed lintDiffPath (%s) fails closed, never falls back to the plan diff',
+    (_label, bad) => {
+      const p = writePlan({});
+      writeReport(withFinding(finding())); // fresh against the PLAN diff
+      const g = scriptLintGate(p, bad);
+      expect(g.criticals).toEqual([]);
+      expect(g.unreviewed).toHaveLength(1);
+      expect(g.unreviewed[0]).toContain('lintDiffPath');
+    },
+  );
+
   it('fails closed on a STALE report — its diffHash disagrees with the plan diff', () => {
     const p = writePlan({}); // plan binds to the fresh diff
     writeReport({ ...withFinding(finding()), diffHash: 'a-different-hash' });
@@ -10403,9 +10449,12 @@ describe('composeReview — the deterministic gates wired to the verdict', () =>
     utimesSync(p, old, old);
     return p;
   }
-  function writeGateReport(report: Record<string, unknown>): void {
+  function writeGateReport(
+    report: Record<string, unknown>,
+    name = 'qwen-review-script-lint.json',
+  ): void {
     writeFileSync(
-      join(dir, 'qwen-review-script-lint.json'),
+      join(dir, name),
       JSON.stringify({
         checked: [],
         skipped: [],
@@ -10657,6 +10706,85 @@ describe('composeReview — the deterministic gates wired to the verdict', () =>
     });
     expect(r.event).toBe('APPROVE');
     expect(r.body).not.toContain('blocker re-check');
+  });
+
+  it('re-anchor: a lint blocker the delta fixed is NOT republished (PR #16001 review regression)', () => {
+    // The review's exact reproduction: the old head's report carries SC2086,
+    // the new head quotes the variable and lints clean. Dropping authored
+    // findings alone left the gate regenerating the stale blocker from the
+    // old report — REQUEST_CHANGES over a fixed file. With the refreshed
+    // report + lintDiffPath, the stale blocker is gone; the unread-delta
+    // disclosure still caps the verdict at COMMENT. A PR plan so the ledger
+    // marker rides the body: the not-contains assertion then covers the
+    // carried work list too — the marker builder's gate calls must read the
+    // same refresh basis as the body's, or the next round re-rules a ghost.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], {
+      prNumber: 16001,
+      ownerRepo: 'QwenLM/qwen-code',
+    });
+    const reportName = 'qwen-review-pr-16001-script-lint.json';
+    writeGateReport({ checked: [lintFinding], ok: false }, reportName); // old head: SC2086
+    const newDiff = join(dir, 'reanchor.diff');
+    writeFileSync(
+      newDiff,
+      'diff --git a/deploy.sh b/deploy.sh\n@@ -1,3 +1,3 @@\n #!/bin/bash\n-rm $X\n+rm "$X"\n',
+    );
+    const newHash = createHash('sha256')
+      .update(readFileSync(newDiff))
+      .digest('hex');
+    // The protocol's step 4: the report at the derived path is REWRITTEN by
+    // the re-lint at the new head — clean, bound to the new diff.
+    writeGateReport({ diffHash: newHash }, reportName);
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      lintDiffPath: newDiff,
+      unreviewedDimensions: [
+        'head advanced old..new — re-anchored: the delta was ruled per-finding, not fully reviewed',
+      ],
+    });
+    expect(r.event).toBe('COMMENT');
+    expect(r.body).not.toContain('SC2086');
+    expect(r.body).toContain('re-anchored');
+  });
+
+  it('re-anchor: a lint blocker that STILL stands at the new head keeps gating', () => {
+    // The other direction the refresh must preserve: the refreshed report
+    // still carries the finding, and lintDiffPath makes the gate read it as
+    // fresh instead of dropping it as stale. PR plan again: the marker's
+    // work list must carry the still-standing gate Critical forward.
+    const p = gateReadyPlan(['verify', 'reverse-audit'], {
+      prNumber: 16001,
+      ownerRepo: 'QwenLM/qwen-code',
+    });
+    const newDiff = join(dir, 'reanchor.diff');
+    writeFileSync(
+      newDiff,
+      'diff --git a/deploy.sh b/deploy.sh\n@@ -0,0 +1,3 @@\n+#!/bin/bash\n+rm $X\n+echo done\n',
+    );
+    const newHash = createHash('sha256')
+      .update(readFileSync(newDiff))
+      .digest('hex');
+    writeGateReport(
+      { checked: [lintFinding], ok: false, diffHash: newHash },
+      'qwen-review-pr-16001-script-lint.json',
+    );
+    const r = composeReview({
+      criticalsInline: 0,
+      suggestionsInline: 0,
+      planPath: p,
+      env: ENV,
+      modelId: MODEL,
+      lintDiffPath: newDiff,
+      unreviewedDimensions: [
+        'head advanced old..new — re-anchored: the delta was ruled per-finding, not fully reviewed',
+      ],
+    });
+    expect(r.event).toBe('REQUEST_CHANGES');
+    expect(r.body).toContain('SC2086');
   });
 });
 

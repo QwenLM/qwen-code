@@ -1423,6 +1423,20 @@ export interface ComposeReviewInput {
    */
   blockerRulings?: Array<{ key?: unknown; ruling?: unknown }>;
   /**
+   * The re-anchor protocol's lint refresh diff (PR #16001 review): the path
+   * of the NEW head's full diff the round recomputed the executable-script
+   * lint against (`script-lint --diff`, report rewritten at the derived
+   * path). When present, the lint gate's freshness check hashes THIS diff
+   * instead of the plan's captured diff — so a lint blocker the delta fixed
+   * is gone from the recomposed body while one that still stands keeps
+   * gating, and the original plan/coverage evidence stays fenced at the old
+   * head. Absent on every ordinary round. A malformed value (non-string,
+   * empty) fails closed as unreviewed scope; it never falls back to the old
+   * basis, which would re-publish the stale report the refresh exists to
+   * retire.
+   */
+  lintDiffPath?: string;
+  /**
    * Step 6's `fixed` rulings — one `{id, by}` per finding whose mechanism
    * can no longer fire, the same ruling the status table renders as
    * `R1-2 fixed by <what>`. The id names the finding's thread: a
@@ -3348,7 +3362,7 @@ function buildPostedLedger(
       // every round.
       ...withoutGateReposts(
         ingestEntryList(input.bodyCriticals, 'bodyCriticals'),
-        scriptLintGate(planPath).criticals,
+        scriptLintGate(planPath, input.lintDiffPath).criticals,
       ),
       // The same split the body performed: a relocated Critical is a
       // posted, counted blocker and must enter the work list — carrying
@@ -3368,14 +3382,14 @@ function buildPostedLedger(
       // A SECOND invocation, not the body composer's result — the two
       // live in different functions and nothing passes the value across.
       // What makes them agree is that `scriptLintGate` is pure in
-      // `planPath` and its inputs (the plan JSON, the report, the diff)
-      // are immutable for the length of one synchronous compose; it is
-      // NOT the single-origin discipline `postedInline` gets one line
-      // below. So the standing hazard is an edit, not a race: anything
-      // that filters, caps, or carves out what the BODY pushes must
-      // change this list too, or the posted body and the carried work
-      // list stop describing the same round (R4-1).
-      ...scriptLintGate(planPath).criticals,
+      // `planPath`, `lintDiffPath` and its inputs (the plan JSON, the
+      // report, the diff) are immutable for the length of one synchronous
+      // compose; it is NOT the single-origin discipline `postedInline`
+      // gets one line below. So the standing hazard is an edit, not a
+      // race: anything that filters, caps, or carves out what the BODY
+      // pushes must change this list too, or the posted body and the
+      // carried work list stop describing the same round (R4-1).
+      ...scriptLintGate(planPath, input.lintDiffPath).criticals,
     ],
     carriedWorkList,
   );
@@ -5525,7 +5539,7 @@ function composeReviewBody(
   })();
   const gate =
     input.planPath && !stopReRuleGranted
-      ? scriptLintGate(input.planPath)
+      ? scriptLintGate(input.planPath, input.lintDiffPath)
       : { criticals: [], unreviewed: [], disclosed: [] };
   const ownAfterGateDedup = withoutGateReposts(bodyCriticals, gate.criticals);
   bodyCriticals.length = 0;
@@ -9057,7 +9071,16 @@ function structurallyValidReport(report: unknown): boolean {
   return true;
 }
 
-export function scriptLintGate(planPath: string): {
+export function scriptLintGate(
+  planPath: string,
+  /** The re-anchor protocol's refresh diff (PR #16001 review): when the round
+   *  recomputed the lint at a moved head, the report binds to THAT diff, and
+   *  the freshness check must hash it instead of the plan's captured diff —
+   *  otherwise the refreshed report reads as stale and the gate drops the
+   *  still-standing findings along with the fixed ones. Absent on every
+   *  ordinary round; the plan's diff stays the basis there. */
+  lintDiffPath?: unknown,
+): {
   criticals: string[];
   unreviewed: string[];
   disclosed: Array<{ en: string; zh: string }>;
@@ -9138,15 +9161,28 @@ export function scriptLintGate(planPath: string): {
     return { criticals, unreviewed, disclosed };
   }
   // Fail closed on a STALE report — bound to the diff's CONTENT, not a commit. The
-  // report carries a hash of the diff it ran against; we re-hash the plan's current
-  // diff. A mismatch means it is not this review's report: a later PR commit
-  // (different diff), OR — the local case HEAD cannot see — an uncommitted edit that
-  // changes the working-tree diff. An absent hash on EITHER side (the diff could not
-  // be read here or there) is unverifiable and also fails closed — `!planDiffHash`
+  // report carries a hash of the diff it ran against; we re-hash the freshness
+  // basis: the plan's captured diff, or the re-anchor refresh diff when the round
+  // names one (`lintDiffPath`, validated here — a malformed override must not
+  // silently fall back to the old basis and re-publish the stale report). A
+  // mismatch means it is not this review's report: a later PR commit (different
+  // diff), OR — the local case HEAD cannot see — an uncommitted edit that changes
+  // the working-tree diff. An absent hash on EITHER side (the diff could not be
+  // read here or there) is unverifiable and also fails closed — `!planDiffHash`
   // handles that explicitly, because `undefined !== undefined` is FALSE and would
-  // otherwise accept an arbitrary hashless report. Only both sides present and equal
-  // is fresh.
-  const planDiffHash = diffHashOf(plan.diffPathAbsolute);
+  // otherwise accept an arbitrary hashless report. Only both sides present and
+  // equal is fresh.
+  let freshnessBasis: unknown = plan.diffPathAbsolute;
+  if (lintDiffPath !== undefined) {
+    if (typeof lintDiffPath !== 'string' || lintDiffPath === '') {
+      unreviewed.push(
+        'the executable-script lint — lintDiffPath must be a non-empty path string',
+      );
+      return { criticals, unreviewed, disclosed };
+    }
+    freshnessBasis = lintDiffPath;
+  }
+  const planDiffHash = diffHashOf(freshnessBasis);
   if (!planDiffHash || report.diffHash !== planDiffHash) {
     unreviewed.push(
       'the executable-script lint — the report is stale or its diff could not be verified; re-run `qwen review script-lint`',

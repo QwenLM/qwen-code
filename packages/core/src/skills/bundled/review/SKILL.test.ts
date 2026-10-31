@@ -88,6 +88,14 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'a review re-anchors **at most once** for head movement',
     );
+    // The deterministic-lint refresh (PR #16001 review): dropping authored
+    // findings alone republished the gate's stale blocker. The protocol must
+    // recompute the lint at the new head and name the freshness-basis field.
+    expect(body).toContain('Refresh the deterministic lint at the new head');
+    expect(body).toContain('lintDiffPath');
+    expect(body).toContain(
+      '--diff .qwen/tmp/qwen-review-{target}-reanchor.diff',
+    );
     // Revert guards: the abandon-and-restart wording is gone for good.
     expect(body).not.toContain(
       'Abandon this submission and start the review again',

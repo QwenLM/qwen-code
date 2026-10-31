@@ -476,6 +476,50 @@ describe('runScriptLint — the report is bound to the diff it ran against', () 
     );
     expect(r.diffHash).toBeUndefined();
   });
+
+  it('--diff overrides the plan diff for BOTH the hash and the added-line ranges', () => {
+    // The re-anchor refresh channel (PR #16001 review): the plan stays fenced
+    // at the old head while the lint recomputes against the new head's diff.
+    // The old diff adds line 1 (the buggy line); the new diff adds line 2
+    // instead — a finding on line 1 must read as pre-existing against the NEW
+    // diff, and the report must hash the NEW diff, not the plan's.
+    const oldDiff = 'diff --git a/x.sh b/x.sh\n@@ -0,0 +1 @@\n+rm $X\n';
+    const newDiff =
+      'diff --git a/x.sh b/x.sh\n@@ -1,1 +1,2 @@\n #!/bin/bash\n+echo added\n';
+    const oldPath = join(dir, 'old.diff');
+    const newPath = join(dir, 'new.diff');
+    writeFileSync(oldPath, oldDiff);
+    writeFileSync(newPath, newDiff);
+    const { plan, worktree } = setup('x.sh', '#!/bin/bash\nrm $X\n', {
+      hunks: [{ newStart: 1, newEnd: 1 }],
+    });
+    const planObj = JSON.parse(readFileSync(plan, 'utf8'));
+    planObj.diffPathAbsolute = oldPath;
+    writeFileSync(plan, JSON.stringify(planObj));
+
+    const r = runScriptLint(
+      { plan, worktree, diff: newPath },
+      shellcheckRunner([{ line: 1, code: 2086, level: 'info' }]),
+    );
+    const expected = createHash('sha256')
+      .update(readFileSync(newPath))
+      .digest('hex');
+    expect(r.diffHash).toBe(expected);
+    // Line 1 is NOT an added line of the new diff — the range override took.
+    expect(r.checked[0].findings[0].inDiff).toBe(false);
+    expect(r.ok).toBe(true);
+  });
+
+  it('--diff with an unreadable path leaves no hash (the gate fails closed)', () => {
+    const { plan, worktree } = setup('x.sh', '#!/bin/bash\nrm $X\n', {
+      hunks: [{ newStart: 1, newEnd: 1 }],
+    });
+    const r = runScriptLint(
+      { plan, worktree, diff: join(dir, 'does-not-exist.diff') },
+      shellcheckRunner([{ line: 1, code: 2086, level: 'info' }]),
+    );
+    expect(r.diffHash).toBeUndefined();
+  });
 });
 
 describe('buildToolInvocation — config isolation (a PR config cannot suppress its own findings)', () => {
@@ -497,6 +541,37 @@ describe('buildToolInvocation — config isolation (a PR config cannot suppress 
     const { argv } = buildToolInvocation('actionlint', '/w/ci.yml');
     expect(argv).toContain('-shellcheck=');
     expect(argv).toContain('-pyflakes=');
+  });
+
+  it('actionlint runs against a private neutral config, not the PR-added .github/actionlint.yaml', () => {
+    // The PR #16001 review's Critical: without -config-file, actionlint
+    // auto-loads the reviewed repo's config, and a PR-added ignore-all rule
+    // suppresses every diagnostic. The argv must carry a private mkdtemp
+    // config whose content is the explicit empty config — never a path inside
+    // the reviewed tree, never a predictable tmpdir name.
+    const { argv } = buildToolInvocation('actionlint', '/w/ci.yml');
+    const ci = argv.indexOf('-config-file');
+    expect(ci).toBeGreaterThanOrEqual(0);
+    const cfg = argv[ci + 1];
+    expect(readFileSync(cfg, 'utf8')).toBe('{}\n');
+    expect(cfg).not.toBe(join(tmpdir(), 'actionlint.yaml'));
+    if (process.platform !== 'win32') {
+      expect(statSync(dirname(cfg)).mode & 0o777).toBe(0o700);
+    }
+  });
+
+  it('actionlint carries exactly the two trusted compatibility exceptions scripts/lint.js runs', () => {
+    // Custom self-hosted runner labels (the ECS fleets this repo routes to)
+    // and the environment.deployment schema lag (this repo's own workflows
+    // use the key). Reviewer-controlled constants — the PR cannot add a third.
+    const { argv } = buildToolInvocation('actionlint', '/w/ci.yml');
+    const ignores = argv
+      .map((a, i) => (a === '-ignore' ? argv[i + 1] : null))
+      .filter((a): a is string => a !== null);
+    expect(ignores).toEqual([
+      'label ".+" is unknown',
+      'unexpected key "deployment" for "environment" section',
+    ]);
   });
 
   it('drops SHELLCHECK_OPTS from the env even when the process has a hostile one set', () => {

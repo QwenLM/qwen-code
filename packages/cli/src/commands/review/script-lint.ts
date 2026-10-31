@@ -134,6 +134,9 @@ interface ScriptLintArgs {
   plan: string;
   worktree: string;
   out?: string;
+  /** Override the plan's captured diff — the re-anchor protocol's refresh
+   *  channel: ranges and freshness hash bind to THIS diff instead. */
+  diff?: string;
 }
 
 interface PlanFile {
@@ -345,6 +348,43 @@ function emptyHadolintConfig(): string | undefined {
   return hadolintEmptyConfigPath;
 }
 
+/**
+ * A private neutral actionlint config, created once per process — or `undefined`
+ * when we could not create one. Passed via `-config-file` (see below); an empty
+ * config is what stops a `.github/actionlint.yaml` the PR added from suppressing
+ * the findings we run actionlint to catch — measured on 1.7.12: a PR-added
+ * `paths: {"**": {ignore: [".*"]}}` turns the #15974 expression finding into an
+ * empty report, and `-config-file {}` brings it back (PR #16001 review).
+ *
+ * Same two path properties as the hadolint config, same reasons: UNPREDICTABLE
+ * (mkdtemp, not a fixed tmpdir name a symlink race could plant) and ONE WE
+ * CONTROL (a predictable fallback the attacker can write is a suppression
+ * vector, so there is NO fallback — the caller fails actionlint closed).
+ * The content is `{}` — an explicit empty config; actionlint accepts an empty
+ * file too, but the explicit form says "no rules" rather than "no content".
+ */
+let actionlintNeutralConfigPath: string | undefined;
+function neutralActionlintConfig(): string | undefined {
+  if (!actionlintNeutralConfigPath) {
+    try {
+      const d = mkdtempSync(join(tmpdir(), 'qwen-review-actionlint-'));
+      process.on('exit', () => {
+        try {
+          rmSync(d, { recursive: true, force: true });
+        } catch {
+          /* best-effort */
+        }
+      });
+      const p = join(d, 'actionlint.yaml');
+      writeFileSync(p, '{}\n');
+      actionlintNeutralConfigPath = p;
+    } catch {
+      return undefined; // no controllable config → caller must fail actionlint closed
+    }
+  }
+  return actionlintNeutralConfigPath;
+}
+
 /** The outcome of pointing a linter at one file. */
 export type ToolRun =
   | { kind: 'ok'; stdout: string }
@@ -375,6 +415,16 @@ export type ToolRunner = (tool: LintTool, absPath: string) => ToolRun;
  *   `--config <private neutral file>`, which overrides both the cwd and XDG configs.
  *   Set only for a hadolint run, and only when a private config exists; `runTool`
  *   fails hadolint closed when it does not (so it never runs unisolated).
+ * - actionlint: auto-loads `.github/actionlint.yaml` from the reviewed repository,
+ *   where a PR-added `paths: {"**": {ignore: [".*"]}}` suppresses EVERY diagnostic
+ *   (measured on 1.7.12; PR #16001 review). Isolation is `-config-file <private
+ *   neutral file>`, which overrides the auto-discovery; `runTool` fails actionlint
+ *   closed when no private config exists. The two `-ignore` patterns are the
+ *   TRUSTED compatibility exceptions the repo's own scripts/lint.js runs — custom
+ *   self-hosted runner labels (this repo routes to ECS fleets whose labels
+ *   actionlint cannot know) and the `environment.deployment` schema lag (this
+ *   repo's own workflows use the key). They are reviewer-controlled constants,
+ *   never read from the diff; every other suppression channel stays closed.
  *
  * Also carries `timeoutMs`: the wall-clock bound `runTool` puts on the spawn, kept
  * here so the bound is one asserted value rather than a literal buried in the spawn.
@@ -383,7 +433,12 @@ export function buildToolInvocation(
   tool: LintTool,
   absPath: string,
 ): { argv: string[]; env: NodeJS.ProcessEnv; timeoutMs: number } {
-  const cfg = tool === 'hadolint' ? emptyHadolintConfig() : undefined;
+  const cfg =
+    tool === 'hadolint'
+      ? emptyHadolintConfig()
+      : tool === 'actionlint'
+        ? neutralActionlintConfig()
+        : undefined;
   const argv: Record<LintTool, string[]> = {
     shellcheck: ['--norc', '--format=json1', '--severity=style', absPath],
     // `-shellcheck=` / `-pyflakes=` disable the embedded-language integrations
@@ -391,14 +446,31 @@ export function buildToolInvocation(
     // the deferred portion, so whether they appear must not depend on which
     // binaries happen to sit on the reviewer's PATH. The workflow-level checks
     // — syntax, expression context availability, action refs — run regardless.
-    actionlint: [
-      '-shellcheck=',
-      '-pyflakes=',
-      '-format',
-      '{{json .}}',
-      '-no-color',
-      absPath,
-    ],
+    // When `cfg` is absent this bare form is unreachable — `runTool` has already
+    // failed the actionlint run closed rather than lint without isolation.
+    actionlint: cfg
+      ? [
+          '-config-file',
+          cfg,
+          '-shellcheck=',
+          '-pyflakes=',
+          '-ignore',
+          'label ".+" is unknown',
+          '-ignore',
+          'unexpected key "deployment" for "environment" section',
+          '-format',
+          '{{json .}}',
+          '-no-color',
+          absPath,
+        ]
+      : [
+          '-shellcheck=',
+          '-pyflakes=',
+          '-format',
+          '{{json .}}',
+          '-no-color',
+          absPath,
+        ],
     // `--config <neutral>` is the ONLY channel that isolates hadolint (env is
     // ignored). When `cfg` is absent this bare form is unreachable — `runTool` has
     // already failed the hadolint run closed rather than lint without isolation.
@@ -441,6 +513,15 @@ function runTool(tool: LintTool, absPath: string): ToolRun {
     return {
       kind: 'error',
       reason: 'hadolint config isolation unavailable — failing closed',
+    };
+  }
+  // Same stance for actionlint: without the private neutral config it would
+  // auto-load the reviewed repo's `.github/actionlint.yaml`, and a PR-added
+  // ignore-all rule there suppresses every diagnostic (PR #16001 review).
+  if (tool === 'actionlint' && !neutralActionlintConfig()) {
+    return {
+      kind: 'error',
+      reason: 'actionlint config isolation unavailable — failing closed',
     };
   }
   const { argv, env, timeoutMs } = buildToolInvocation(tool, absPath);
@@ -620,7 +701,17 @@ export function runScriptLint(
     );
   }
   const files = Array.isArray(plan.files) ? plan.files : [];
-  // Read the captured diff EXACTLY ONCE and derive BOTH the added-line ranges and
+  // The diff the report binds to: the plan's captured diff, unless `--diff`
+  // overrides it. The override is the re-anchor protocol's refresh channel
+  // (PR #16001 review): the head moved, the plan and its coverage evidence stay
+  // fenced at the old head, and the lint must nonetheless be recomputed against
+  // the NEW head's diff — ranges and freshness hash alike — so the gate can tell
+  // a lint blocker the delta fixed from one that still stands.
+  const diffPath =
+    typeof args.diff === 'string' && args.diff !== ''
+      ? args.diff
+      : plan.diffPathAbsolute;
+  // Read the diff EXACTLY ONCE and derive BOTH the added-line ranges and
   // the freshness hash from that one immutable buffer. Reading it twice (ranges
   // before the linters run, hash after) opens a TOCTOU window: a concurrent
   // recapture could classify findings against snapshot A while the report carries
@@ -628,9 +719,9 @@ export function runScriptLint(
   let addedRanges = new Map<string, Array<[number, number]>>();
   let diffHash: string | undefined;
   let diffBuf: Buffer | undefined;
-  if (typeof plan.diffPathAbsolute === 'string') {
+  if (typeof diffPath === 'string') {
     try {
-      diffBuf = readFileSync(plan.diffPathAbsolute);
+      diffBuf = readFileSync(diffPath);
     } catch {
       diffBuf = undefined; // unreadable → no hash → the gate fails closed
     }
@@ -857,6 +948,11 @@ export const scriptLintCommand: CommandModule = {
         type: 'string',
         demandOption: true,
         describe: 'Path to the checkout whose files are linted',
+      })
+      .option('diff', {
+        type: 'string',
+        describe:
+          "Override the plan's captured diff (re-anchor refresh): ranges and the report's freshness hash bind to this diff instead",
       })
       .option('out', {
         type: 'string',
