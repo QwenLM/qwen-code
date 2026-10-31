@@ -10922,6 +10922,10 @@ export class Session implements SessionContext {
         sessionId: this.config.getSessionId(),
         history,
         config: this.config,
+        // The curated window is a closure, not a snapshot: the stable-window
+        // experiment (#15493) materializes it only at extraction execution
+        // time, and only while its flag is on. `history` above stays RAW.
+        getCuratedHistory: () => this.#getCurrentChat().getHistoryShallow(true),
         ...(getExtractNoopSkipTurns() > 0 && {
           // The next prompt's known base; see isBelowCompactionWarn.
           belowCompactionWarn: isBelowCompactionWarn(

@@ -388,11 +388,24 @@ function uncoveredParkedPrefix(
   return skippedHistory;
 }
 
+/**
+ * Opt-in stable extractor input (#15493): the parent's CURATED history and the
+ * index this run's input starts at. The start index is pinned per extraction
+ * epoch, so consecutive runs send a byte-identical prefix before the task
+ * prompt and the provider's implicit prefix cache can be reused. See
+ * `extract-window.ts` for the epoch rules.
+ */
+export interface AutoMemoryExtractionHistoryWindow {
+  curatedHistory: Content[];
+  windowStart: number;
+}
+
 export async function runAutoMemoryExtractionByAgent(
   config: Config,
   projectRoot: string,
   skippedHistory: Content[] = [],
   abortSignal?: AbortSignal,
+  historyWindow?: AutoMemoryExtractionHistoryWindow,
 ): Promise<AutoMemoryExtractionExecutionResult> {
   abortSignal?.throwIfAborted();
   const cacheSafe = getCacheSafeParams(config.getSessionId());
@@ -402,17 +415,29 @@ export async function runAutoMemoryExtractionByAgent(
         'extraction must run after a completed main turn.',
     );
   }
-  // Render the parked slice as the capture rendered the tail: the same
-  // placeholders keep stripped media from shipping again, and let media
-  // entries prove coverage.
-  const parked = slimCompactionInput(
-    skippedHistory,
-    config.getEffectiveInputModalities(),
-  ).slimmedHistory;
-  const extraHistory = buildAgentHistory([
-    ...uncoveredParkedPrefix(parked, cacheSafe.history),
-    ...cacheSafe.history,
-  ]);
+  // With a coverage cursor the window seed is never later than the last
+  // covered curated index, so a parked #13004 slice normally sits inside it.
+  // A first or rebased epoch has no coverage yet and seeds at the last-40
+  // tail, which can sit after the parked turns — so prove coverage with the
+  // existing content proof instead of trusting the window. Only the unproven
+  // residue is appended, after the window entries, so the pinned prefix bytes
+  // stay unchanged.
+  const slimmed = (entries: Content[]) =>
+    slimCompactionInput(entries, config.getEffectiveInputModalities())
+      .slimmedHistory;
+  const windowEntries = historyWindow
+    ? slimmed(historyWindow.curatedHistory.slice(historyWindow.windowStart))
+    : undefined;
+  const parked = skippedHistory.length === 0 ? [] : slimmed(skippedHistory);
+  const extraHistory = windowEntries
+    ? buildAgentHistory([
+        ...windowEntries,
+        ...uncoveredParkedPrefix(parked, windowEntries),
+      ])
+    : buildAgentHistory([
+        ...uncoveredParkedPrefix(parked, cacheSafe.history),
+        ...cacheSafe.history,
+      ]);
 
   const { topicSummaries, keywordVocabularySnapshot } =
     await buildExistingMemoryContext(projectRoot);
