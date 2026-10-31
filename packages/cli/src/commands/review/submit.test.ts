@@ -836,6 +836,58 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
       }).recordedHost,
     ).toBeUndefined();
   });
+
+  it('a prose re-review record never authorises posting — the resolution is not a record', () => {
+    // Review P2 on #15998: the skill's conversational routing resolves a
+    // prose request to a PR for the REVIEW, but this gate re-parses the
+    // CLI's verbatim record on purpose — a model-written resolution file
+    // is not an authorization source. The prose record names no PR, so
+    // posting refuses with `unbound` even though the resolved invocation
+    // parses as an effective --comment PR run; the skill must present that
+    // invocation and ask for an explicit re-run instead of completing a
+    // review whose submission is already refused.
+    const prose = authFor('有更新了，重新评审 --comment', { pr: 15998 });
+    expect(prose.ok).toBe(false);
+    expect(prose.cls).toBe('unbound');
+    expect(prose.why).toContain('do not name a pull request');
+    // The explicit re-invocation the skill presents authorises normally.
+    expect(authFor('15998 --comment', { pr: 15998 }).ok).toBe(true);
+    // The setting-driven arm refuses the same way: the record, not the
+    // flag, is what names no PR.
+    const bySetting = authFor('有更新了，重新评审', {
+      pr: 15998,
+      defaultComment: true,
+    });
+    expect(bySetting.ok).toBe(false);
+    expect(bySetting.cls).toBe('unbound');
+  });
+
+  it('a promoted count never authorises posting to the PR it names (R2-1 Critical)', () => {
+    // The exact witness from the review: the sentence names #15998, but the
+    // classifier promotes the count "2" to the target. Before the authority
+    // withdrawal the gate authorised posting to PR #2 — a PR the user never
+    // named. The parser now withholds comment.effective for a promoted bare
+    // number, and the gate refuses with the promotion-specific cause.
+    const count = authFor('--comment the 2 follow-ups to 15998', { pr: 2 });
+    expect(count.ok).toBe(false);
+    expect(count.cls).toBe('unbound');
+    expect(count.why).toContain('promoted from prose');
+    // The sentence-final count is the same hazard, and the setting-driven
+    // arm needs no flag at all — both refuse.
+    expect(authFor('review the last 3 --comment', { pr: 3 }).ok).toBe(false);
+    expect(
+      authFor('review the last 3', { pr: 3, defaultComment: true }).ok,
+    ).toBe(false);
+    // The explicit re-invocation — number typed first — authorises normally.
+    expect(authFor('2 --comment', { pr: 2 }).ok).toBe(true);
+    // A PR URL is an explicit target even beside prose: authority intact.
+    expect(
+      authFor('重新评审 https://github.com/o/r/pull/15998 --comment', {
+        pr: 15998,
+        repo: 'o/r',
+      }).ok,
+    ).toBe(true);
+  });
 });
 
 describe('the user-authorized fast path binds a recorded Aone target (round-6 witness)', () => {

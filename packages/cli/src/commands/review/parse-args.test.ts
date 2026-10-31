@@ -398,6 +398,196 @@ const CASES: Case[] = [
     },
   },
   {
+    name: 'prose typed before a PR number never steals the target (re-review intent)',
+    raw: '有更新了，重新评审 6711',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['有更新了，重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'prose alone stays a file target — fail-closed, never guessed into a PR',
+    raw: '有更新了，重新评审',
+    expect: {
+      targetType: 'file',
+      extraTokens: [],
+    },
+  },
+  {
+    name: 'an explicit path spelling of a number stays a file target',
+    raw: './6711',
+    expect: {
+      targetType: 'file',
+      extraTokens: [],
+    },
+  },
+  {
+    name: 'a PR number outranks a file path typed before it',
+    raw: 'src/foo.ts 6711',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['src/foo.ts'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'prose beside a number and its URL: the URL wins, the number restates it',
+    raw: '重新评审 6711 https://github.com/QwenLM/qwen-code/pull/6711',
+    expect: {
+      targetType: 'pr-url',
+      extraTokens: ['重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'prose before an Aone CR URL never steals the target',
+    raw: '重新评审 https://code.alibaba-inc.com/group/repo/codereview/12345',
+    expect: {
+      targetType: 'pr-url',
+      extraTokens: ['重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'two different numbers with prose: the first PR-shaped wins, the rest disclosed',
+    raw: '有更新 6711 6712',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['有更新', '6712'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'prose as an invalid --effort value beside a number: the flag warning discloses it, the number is the target',
+    raw: '--effort 有更新 6711',
+    expect: {
+      targetType: 'pr-number',
+      effort: 'high',
+      extraTokens: [],
+      warningCount: 1,
+    },
+  },
+  {
+    // Review R2-1 on #15998: a promoted bare number never grants a public
+    // write — comment.effective stays false and the withholding is warned.
+    name: '--comment beside prose and a promoted number withholds posting authority',
+    raw: '--comment 重新评审 6711',
+    expect: {
+      targetType: 'pr-number',
+      comment: { requested: true, effective: false },
+      promotedNumberTarget: true,
+      effort: 'high',
+      extraTokens: ['重新评审'],
+      // The promotion-withholding warning plus the disclosed prose extra.
+      warningCount: 2,
+    },
+  },
+  {
+    name: 'a number typed first keeps its posting authority (explicit target)',
+    raw: '6711 --comment',
+    expect: {
+      targetType: 'pr-number',
+      comment: { requested: true, effective: true },
+      promotedNumberTarget: false,
+      extraTokens: [],
+      warningCount: 0,
+    },
+  },
+  {
+    // Review R2-4 on #15998: the sentence's own trailing punctuation does
+    // not demote the number — the mark is normalised for classification
+    // only, and the original spelling stays in extraTokens.
+    name: 'a PR number carrying trailing sentence punctuation is still PR-shaped',
+    raw: '有更新了，重新评审 6711。',
+    expect: {
+      targetType: 'pr-number',
+      target: { type: 'pr-number', number: 6711 },
+      extraTokens: ['有更新了，重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'ASCII trailing punctuation normalises the same way',
+    raw: 're-review 6711.',
+    expect: {
+      targetType: 'pr-number',
+      target: { type: 'pr-number', number: 6711 },
+      extraTokens: ['re-review'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: '--resume beside prose and a number stays effective on the PR target',
+    raw: '--resume 重新评审 6711',
+    expect: {
+      targetType: 'pr-number',
+      resume: { requested: true, effective: true },
+      extraTokens: ['重新评审'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'an invalid URL beside a number never becomes the target',
+    raw: 'https://github.com/QwenLM/qwen-code/pull/42oops 6711',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['https://github.com/QwenLM/qwen-code/pull/42oops'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'number-shaped prose (第6711号) is never guessed into a PR',
+    raw: '重新评审 第6711号',
+    expect: {
+      targetType: 'file',
+      extraTokens: ['第6711号'],
+      warningCount: 1,
+    },
+  },
+  {
+    // Verification F1 on #15998: a prose LOCAL-write request keeps fix
+    // effective on its file target — the routing clause's mechanical guard
+    // reads this verdict and must never resolve a PR into it.
+    name: 'prose local-write request keeps --fix effective (routing guard input)',
+    raw: 'review my local changes --fix',
+    expect: {
+      targetType: 'file',
+      target: { type: 'file', path: 'review' },
+      fix: { requested: true, effective: true },
+      extraTokens: ['my', 'local', 'changes'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'the same --fix on a PR target is ineffective (what resolution would do)',
+    raw: '15998 --fix',
+    expect: {
+      targetType: 'pr-number',
+      fix: { requested: true, effective: false },
+      extraTokens: [],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'a hash-prefixed number is not PR-shaped; the routing clause owns the rescue',
+    raw: '有更新了，重新评审 #15998',
+    expect: {
+      targetType: 'file',
+      extraTokens: ['#15998'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'the ./ escape hatch does not survive a second PR-shaped token',
+    raw: './6711 6712',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['./6711'],
+      warningCount: 1,
+    },
+  },
+  {
     name: 'numeric-prefix junk after /pull/ is not a PR URL (bug: /pull/42oops read as PR 42)',
     raw: 'https://github.com/QwenLM/qwen-code/pull/42oops',
     expect: {
@@ -415,6 +605,30 @@ const CASES: Case[] = [
       warningCount: 1,
     },
   },
+  {
+    // Review P2 on #15998: option-only invocations are supported local
+    // reviews. The skill's routing clause must never resolve a PR into
+    // them — these pin the parser contract the clause has to leave alone.
+    name: 'option-only --fix stays a local review with fix effective',
+    raw: '--fix',
+    expect: {
+      targetType: 'local',
+      fix: { requested: true, effective: true },
+      effort: 'medium',
+      extraTokens: [],
+      warningCount: 0,
+    },
+  },
+  {
+    name: 'option-only --effort low stays a local review at low',
+    raw: '--effort low',
+    expect: {
+      targetType: 'local',
+      effort: 'low',
+      extraTokens: [],
+      warningCount: 0,
+    },
+  },
 ];
 
 describe('parseReviewArgs', () => {
@@ -428,6 +642,106 @@ describe('parseReviewArgs', () => {
     for (const [key, value] of Object.entries(rest)) {
       expect(got[key as keyof ParsedReviewArgs]).toEqual(value);
     }
+  });
+
+  it('keeps the specific invalid-URL diagnostic when a number outranks it', () => {
+    // Review nit on #15998, confirmed as a real regression once pinned:
+    // the PR-shape reorder moved the malformed URL behind the assigned
+    // target, where it fed the generic "Ignoring extra argument(s)" line
+    // and lost its specific diagnostic. The invalid-url refusal is now
+    // hoisted ahead of the target-assigned branch, so the warning is
+    // position-independent.
+    const got = parseReviewArgs(
+      'https://github.com/QwenLM/qwen-code/pull/42oops 6711',
+    );
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      got.warnings.some(
+        (w) => w.includes('Unrecognized URL') && w.includes('not a PR/CR URL'),
+      ),
+    ).toBe(true);
+    expect(got.warnings.some((w) => w.includes('Ignoring extra'))).toBe(false);
+    // The reverse order is what pins the HOIST: on the base (no preference)
+    // the number wins first and the malformed URL lands in trailingExtras
+    // with only the generic line — this assertion reds under a full revert,
+    // which the forward order alone does not (verification round-5 note).
+    const reversed = parseReviewArgs(
+      '6711 https://github.com/QwenLM/qwen-code/pull/42oops',
+    );
+    expect(reversed.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      reversed.warnings.some(
+        (w) => w.includes('Unrecognized URL') && w.includes('not a PR/CR URL'),
+      ),
+    ).toBe(true);
+    expect(reversed.warnings.some((w) => w.includes('Ignoring extra'))).toBe(
+      false,
+    );
+  });
+
+  it('withholds posting authority from a promoted number and warns exactly then', () => {
+    // Review R2-1 on #15998 (Critical): a positional guess never grants a
+    // public write. Both word orders — mid-sentence count AND sentence-final
+    // count — withhold comment.effective; deleting `!promotedNumberFinal`
+    // reds the effective assertions.
+    const midSentence = parseReviewArgs('review the last 3 commits --comment');
+    expect(midSentence.target).toEqual({ type: 'pr-number', number: 3 });
+    expect(midSentence.comment.effective).toBe(false);
+    expect(midSentence.promotedNumberTarget).toBe(true);
+    expect(
+      midSentence.warnings.some((w) =>
+        w.includes('Bare number 3 was promoted to the PR target'),
+      ),
+    ).toBe(true);
+    const sentenceFinal = parseReviewArgs('review the last 3 --comment');
+    expect(sentenceFinal.target).toEqual({ type: 'pr-number', number: 3 });
+    expect(sentenceFinal.comment.effective).toBe(false);
+    expect(
+      sentenceFinal.warnings.some((w) =>
+        w.includes('Bare number 3 was promoted to the PR target'),
+      ),
+    ).toBe(true);
+    // The setting-driven arm withholds the same way — no flag typed at all.
+    const bySetting = parseReviewArgs('review the last 3', { comment: true });
+    expect(bySetting.comment.effective).toBe(false);
+    // Review R2-2: the warning is decided AFTER the URL preference, from the
+    // token that actually became the target — a demoted number never draws
+    // it, and a courtesy particle after an unposted re-review costs nothing.
+    const urlSupersedes = parseReviewArgs(
+      '重新评审 6711 备注 https://github.com/o/r/pull/9000 --comment',
+    );
+    expect(urlSupersedes.target).toMatchObject({
+      type: 'pr-url',
+      number: 9000,
+    });
+    expect(urlSupersedes.comment.effective).toBe(true);
+    expect(
+      urlSupersedes.warnings.some((w) => w.includes('Bare number 6711')),
+    ).toBe(false);
+    const courtesy = parseReviewArgs('重新评审 6711 谢谢');
+    expect(courtesy.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      courtesy.warnings.some((w) =>
+        w.includes('was promoted to the PR target'),
+      ),
+    ).toBe(false);
+    // The canonical prose-rescue shape without posting intent stays silent.
+    const canonical = parseReviewArgs('有更新了，重新评审 6711');
+    expect(canonical.promotedNumberTarget).toBe(true);
+    expect(
+      canonical.warnings.some((w) =>
+        w.includes('was promoted to the PR target'),
+      ),
+    ).toBe(false);
+    // A same-number URL confirms the target; no warning either.
+    const urlConfirmed = parseReviewArgs(
+      '重新评审 6711 https://github.com/QwenLM/qwen-code/pull/6711',
+    );
+    expect(
+      urlConfirmed.warnings.some((w) =>
+        w.includes('was promoted to the PR target'),
+      ),
+    ).toBe(false);
   });
 
   it('extracts host/owner/repo/number from a PR URL', () => {
