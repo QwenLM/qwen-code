@@ -322,10 +322,9 @@ a nested `workflow()` call throws.
 
 It takes one of two forms. `workflow('<name>')` resolves a name against
 `<projectRoot>/.qwen/workflows` (project scope, also surfaced as `/<name>`
-slash commands) and `~/.qwen/workflows` (user scope, lower precedence when both
-define the same name); an active extension's workflow is always named
+slash commands) and `~/.qwen/workflows` (user scope). Local hosts may also enable trusted ancestor `.qwen/workflows` directories up to the nearest Git root, as project scope. Lookup prefers the current target, nearest trusted ancestors, then user scope; project saves remain in the current session target. An active extension's workflow is always named
 `'<extension>:<name>'`. `workflow({ scriptPath: '<absolute path>' })` loads a
-script file directly from either of those directories, an active extension's
+script file directly from either base directory, a direct legal `<name>.js` file in an admitted ancestor directory, an active extension's
 workflow file, or the generated-scripts root
 (`$QWEN_CODE_PROJECT_DIR/workflows/generated` — the per-project runtime dir,
 not the project tree); any other path is refused. A bare string is always a name: a path passed as a string is rejected

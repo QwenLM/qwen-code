@@ -62,7 +62,7 @@ activation release。观察真正返回给新 Harness 的事务。未结算输�
 
 驱动位于 `integration-tests/helpers/hosted-store-failure-driver.ts`；
 Spring/SQL fixture 扩展位于
-`packages/sdk-java/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java`。
+`packages/managed-agent-server/src/test/java/com/alibaba/qwen/code/managedagent/HostedWorkspaceToolTurnIT.java`。
 
 ## 验证与验收
 

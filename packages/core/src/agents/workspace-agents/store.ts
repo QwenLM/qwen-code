@@ -48,7 +48,7 @@ const HOST_ENROLLMENT_TTL_MS = 15 * 60 * 1_000;
 const LOCK_OPTIONS: lockfile.LockOptions = {
   realpath: false,
   retries: {
-    retries: 10,
+    retries: 30,
     minTimeout: 5,
     maxTimeout: 100,
     factor: 2,

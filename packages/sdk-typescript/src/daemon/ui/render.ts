@@ -415,7 +415,7 @@ export function daemonBlockToPlainText(
       // line 509 already did this; plainText was missed in the prior
       // Fix:
       const preview = daemonToolPreviewToPlainText(block.preview, opts);
-      const status = `status: ${block.status}`;
+      const status = `status: ${clean(block.status)}`;
       return [header, preview, status].filter(Boolean).join('\n');
     }
     case 'shell':
@@ -461,7 +461,7 @@ function daemonToolPreviewToPlainText(
   // HTML preview content was uncapped while every other field hit the
   // 8192 default.
   const url = (u: string) => (opts.sanitizeUrls ? sanitizeUrl(u) : u);
-  const cap = capLength(opts);
+  const cap = (raw: string) => capLength(opts)(sanitizeTerminalText(raw));
   switch (preview.kind) {
     case 'ask_user_question':
       return preview.questions
@@ -481,7 +481,7 @@ function daemonToolPreviewToPlainText(
         ? `${cap(preview.path)} (lines ${preview.range[0]}-${preview.range[1]})`
         : cap(preview.path);
     case 'web_fetch':
-      return `${preview.method ?? 'GET'} ${cap(url(preview.url))}`;
+      return `${cap(preview.method ?? 'GET')} ${cap(url(preview.url))}`;
     case 'mcp_invocation':
       return `${cap(preview.serverId)}::${cap(preview.toolName)}${preview.argsSummary ? ` (${cap(preview.argsSummary)})` : ''}`;
     case 'code_block':
@@ -519,14 +519,19 @@ function daemonToolPreviewToPlainText(
       return lines.join('\n');
     }
     case 'image_generation': {
+      // Wrapped in `sanitizeTerminalText` rather than `cap`: the protocol
+      // validator deliberately admits arbitrary-length `data:image/*`
+      // payloads, so capping here would truncate valid images into broken
+      // ones, and it would have to run on the validator's output anyway to
+      // change the protocol verdict.
       const thumb = preview.thumbnailUrl
         ? // Image URLs also get protocol validation even when sanitizeUrls
           // is false (XSS defense for img-src contexts).
-          ` [${
+          ` [${sanitizeTerminalText(
             opts.sanitizeUrls
               ? sanitizeUrl(preview.thumbnailUrl)
-              : ensureSafeImageUrl(preview.thumbnailUrl)
-          }]`
+              : ensureSafeImageUrl(preview.thumbnailUrl),
+          )}]`
         : '';
       return `image: "${cap(preview.prompt)}"${preview.model ? ` (${cap(preview.model)})` : ''}${thumb}`;
     }

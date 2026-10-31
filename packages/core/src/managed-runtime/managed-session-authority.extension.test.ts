@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LocalJsonlManagedSessionJournalStore } from './local-jsonl-managed-session-journal-store.js';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import * as fs from 'node:fs/promises';
@@ -29,7 +30,6 @@ import {
   type ManagedSessionDurableRef,
 } from './managed-session-records.js';
 
-const enablement = vi.hoisted(() => ({ monitorRun: true }));
 const chainRules = vi.hoisted(() => ({ lenient: false }));
 
 // Lets a test write revisions that do not chain, as a log written under
@@ -50,26 +50,13 @@ vi.mock('./managed-extension-projection.js', async (importOriginal) => {
   };
 });
 
-// monitor_run is enabled by H3; this suite runs the H0c path ahead of it.
-vi.mock('./managed-session-records.js', async (importOriginal) => {
-  const actual =
-    await importOriginal<typeof import('./managed-session-records.js')>();
-  return {
-    ...actual,
-    assertManagedSessionDomainEnabled: (
-      domain: Parameters<typeof actual.assertManagedSessionDomainEnabled>[0],
-    ) => {
-      if (domain !== 'monitor_run' || !enablement.monitorRun) {
-        actual.assertManagedSessionDomainEnabled(domain);
-      }
-    },
-  };
-});
+// monitor_run is enabled by H3's slice (#13856), so this suite commits
+// through the real gate with no per-test switch — no registered domain
+// stays closed to refuse (#13930 R1-65).
 
 const temporaryDirectories = new Set<string>();
 
 afterEach(async () => {
-  enablement.monitorRun = true;
   chainRules.lenient = false;
   for (const directory of temporaryDirectories) {
     await fs.rm(directory, { recursive: true, force: true });
@@ -137,7 +124,10 @@ async function withAuthority<T>(
             createdBy: 'daemon',
           };
     const authority = await LocalManagedSessionAuthority.open({
-      lease,
+      journal: LocalJsonlManagedSessionJournalStore.fromLease(
+        lease,
+        sessionKey,
+      ),
       sessionKey,
       cwd: '/workspace',
       version: 'test',
@@ -333,6 +323,21 @@ function command(commandId: string, digest = 'd') {
     commandId,
     sessionKey,
     contentDigest: digest.repeat(64),
+  };
+}
+
+/** The record a goal_state envelope carries for the reader-facing fence. */
+function goalRecord(goalId: string, title: string) {
+  return {
+    uuid: `rec-${goalId}`,
+    parentUuid: null,
+    sessionId,
+    timestamp: '2026-09-01T10:00:00.000Z',
+    type: 'system',
+    subtype: 'goal_state',
+    cwd: '/workspace',
+    version: 'test',
+    systemPayload: { goalId, title },
   };
 }
 
@@ -868,7 +873,7 @@ describe('managed session authority Stage H records', () => {
         command('rename:goal'),
         {
           domain: 'goal_state',
-          content: { goalId: 'goal-1', title: 'grown' },
+          content: { record: goalRecord('goal-1', 'grown') },
         },
         TRUSTED,
       );
@@ -915,7 +920,7 @@ describe('managed session authority Stage H records', () => {
         command('rename:goal'),
         {
           domain: 'goal_state',
-          content: { goalId: 'goal-1', title: 'pre-body' },
+          content: { record: goalRecord('goal-1', 'pre-body') },
         },
         TRUSTED,
       );
@@ -1129,32 +1134,32 @@ describe('managed session authority Stage H records', () => {
   it('refuses a record of a disabled domain on the generic paths', async () => {
     const harness = await createHarness();
     await withAuthority(harness, async (authority) => {
-      // team_state is in the domain vocabulary but neither in the plain
-      // enabled list nor in the extension-record body index: child_run
-      // is per-kind exempt here, and every H-family body takes the
-      // extension-funnel refusal before the enablement one this test
-      // names. schedule was the probe until H6b, then child_acceptance,
-      // then monitor_run served similarly.
+      // team_message is in the domain vocabulary but neither in the plain
+      // enabled list nor in this suite's extension-record body index, so
+      // the generic path reaches the enablement refusal this test names
+      // (child_run is per-kind exempt here). schedule was the probe until
+      // H6b, then child_acceptance, monitor_run and, until H4e-b1,
+      // team_state.
       const recordRef = await harness.store.publish(
-        'managed-team_state',
+        'managed-team_message',
         Buffer.from('{}', 'utf8'),
       );
       const sequence = authority.committedSequence;
       await expect(
         authority.appendExecution(
-          command('raw-team-state'),
+          command('raw-team-message'),
           [
             {
               v: 1,
               sequence: sequence + 1,
-              eventId: 'team_state-1',
+              eventId: 'team_message-1',
               sessionKey,
               kind: 'domain.committed',
               occurredAt: harness.now,
               payload: {
-                domain: 'team_state',
+                domain: 'team_message',
                 version: 1,
-                operationId: 'raw-team-state',
+                operationId: 'raw-team-message',
                 recordRef,
               },
             },
@@ -1166,9 +1171,8 @@ describe('managed session authority Stage H records', () => {
     });
   });
 
-  it('refuses domains without a body and disabled domains', async () => {
+  it('refuses domains without a body', async () => {
     const harness = await createHarness();
-    const life = await monitorLife(harness);
     await withAuthority(harness, async (authority) => {
       // This suite's registry keeps only the monitor_run body, so the
       // schedule body H6a registered is out of scope here.
@@ -1179,14 +1183,6 @@ describe('managed session authority Stage H records', () => {
           TRUSTED,
         ),
       ).rejects.toThrow(/has no Stage H record body/);
-      enablement.monitorRun = false;
-      await expect(
-        authority.commitExtensionRecord(
-          command('monitor-1:1'),
-          { domain: 'monitor_run', record: life[0] },
-          TRUSTED,
-        ),
-      ).rejects.toThrow(/not enabled for submission/);
     });
   });
 
@@ -1477,36 +1473,6 @@ describe('managed session authority Stage H records', () => {
     ).rejects.toThrow(
       /session log is corrupt: command open-1 already opened monitor_run record monitor-1/,
     );
-  });
-
-  it('replays a committed command after its domain was disabled', async () => {
-    const harness = await createHarness();
-    const life = await monitorLife(harness);
-    await withAuthority(harness, async (authority) => {
-      const first = await authority.commitExtensionRecord(
-        command('monitor-1:1'),
-        { domain: 'monitor_run', record: life[0] },
-        TRUSTED,
-      );
-      enablement.monitorRun = false;
-      await expect(
-        authority.commitExtensionRecord(
-          command('monitor-1:1'),
-          { domain: 'monitor_run', record: life[0] },
-          TRUSTED,
-        ),
-      ).resolves.toMatchObject({
-        recordRef: first.recordRef,
-        receipt: { replayed: true },
-      });
-      await expect(
-        authority.commitExtensionRecord(
-          command('monitor-1:2'),
-          { domain: 'monitor_run', record: life[1] },
-          TRUSTED,
-        ),
-      ).rejects.toThrow(/not enabled for submission/);
-    });
   });
 });
 

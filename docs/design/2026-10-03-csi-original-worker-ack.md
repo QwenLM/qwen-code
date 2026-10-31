@@ -213,7 +213,7 @@ V3 `settled`, `unknown`, outer `acknowledged` flag or drain response cannot pass
 the dedicated protocol validator.
 
 The dedicated strict reader promotes the existing `jackson-databind` 2.20.0
-dependency in `packages/sdk-java/runtime-broker/pom.xml` from test scope to
+dependency in `packages/managed-agent-server/pom.xml` from test scope to
 production scope by removing its single scope line. Keep the existing version
 pin and global legacy parser unchanged. Qualify the standalone Broker's resolved
 2.20.0 classpath and the managed application's resolved 2.21.4 classpath
@@ -351,7 +351,7 @@ Do not backfill ACK rows from old REFERENCED publications.
 | -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | ACK-1 worker protocol                  | `packages/cli/src/serve/managed-csi-envelope.ts`, `managed-csi-worker.ts`, `managed-runtime-tool-executor.ts`, `managed-runtime-attestation-worker.ts`; their focused collocated tests                                    |
 | ACK-1 Java transport                   | Runtime-broker `ManagedCsiProtocol.java`, `RuntimeTransport.java`, `HttpRuntimeTransport.java` and focused protocol/transport tests; managed-agent-server `service/WorkspaceRuntimeTransport.java`                        |
-| ACK-1 strict-reader dependency         | `packages/sdk-java/runtime-broker/pom.xml`: the existing `jackson-databind` dependency changes from test to production scope; separate standalone 2.20.0 and managed-application 2.21.4 verification                      |
+| ACK-1 strict-reader dependency         | `packages/managed-agent-server/pom.xml`: the existing `jackson-databind` dependency changes from test to production scope; separate standalone 2.20.0 and managed-application 2.21.4 verification                         |
 | ACK-2 private coordinator and evidence | New managed-agent-server `store/WorkspaceCsiWorkerAckStore.java` and `store/WorkspaceCsiWorkerAckMain.java`, with package-private authority plumbing in the existing CSI reservation/publication stores only where needed |
 | ACK-2 persistence                      | One new migration and its actual schema/migration test entry; new `WorkspaceCsiWorkerAckStoreTest.java`                                                                                                                   |
 | ACK-1 shared contract                  | A bounded ACK fixture adjacent to the existing CSI fixtures, consumed independently by Java and TypeScript; no generic Tool v3 schema change                                                                              |

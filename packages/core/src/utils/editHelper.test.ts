@@ -7,6 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   countOccurrences,
+  findLineBasedMatchOffsets,
   maybeAugmentOldStringForDeletion,
   normalizeEditStrings,
 } from './editHelper.js';
@@ -81,7 +82,116 @@ const two = 2;
     expect(result).toEqual({
       oldString: 'console.log("hi")',
       newString: 'console.log("bye")',
+      lineBasedMatch: true,
     });
+  });
+
+  it.each([
+    {
+      name: 'deleting a fuzzy line before a blank line',
+      content: 'before\nremove-me \n\nafter\n',
+      oldString: 'remove-me\n',
+      newString: '',
+      canonical: 'remove-me \n',
+      lineBasedMatch: true,
+    },
+    {
+      name: 'replacing a fuzzy line before a blank line',
+      content: 'before\nremove-me \n\nafter\n',
+      oldString: 'remove-me\n',
+      newString: 'replacement\n',
+      canonical: 'remove-me \n',
+      lineBasedMatch: true,
+    },
+    {
+      name: 'matching a multiline string before a blank line',
+      content: 'before\nconst value = `first \nsecond`;\n\nafter\n',
+      oldString: 'const value = `first\nsecond`;\n',
+      newString: 'const value = `replacement`;\n',
+      canonical: 'const value = `first \nsecond`;\n',
+      lineBasedMatch: true,
+    },
+    {
+      name: 'consuming only the requested multiple newlines',
+      content: 'before\nremove-me \n\n\nafter\n',
+      oldString: 'remove-me\n\n',
+      newString: '',
+      canonical: 'remove-me \n\n',
+      lineBasedMatch: true,
+    },
+    {
+      name: 'preserving a following whitespace-only line',
+      content: 'before\nremove-me \n \nafter\n',
+      oldString: 'remove-me\n',
+      newString: '',
+      canonical: 'remove-me \n',
+      lineBasedMatch: true,
+    },
+    {
+      name: 'matching a fuzzy line at EOF with a newline',
+      content: 'before\nremove-me \n',
+      oldString: 'remove-me\n',
+      newString: '',
+      canonical: 'remove-me \n',
+      lineBasedMatch: true,
+    },
+    {
+      name: 'preserving a literal match before a blank line',
+      content: 'before\nremove-me\n\nafter\n',
+      oldString: 'remove-me\n',
+      newString: '',
+      canonical: 'remove-me\n',
+      lineBasedMatch: false,
+    },
+    {
+      name: 'matching without a requested final newline',
+      content: 'before\nremove-me \n\nafter\n',
+      oldString: 'remove-me  ',
+      newString: '',
+      canonical: 'remove-me ',
+      lineBasedMatch: true,
+    },
+  ])('does not extend the matched slice when $name', (testCase) => {
+    expect(
+      normalizeEditStrings(
+        testCase.content,
+        testCase.oldString,
+        testCase.newString,
+      ),
+    ).toEqual({
+      oldString: testCase.canonical,
+      newString: testCase.newString,
+      ...(testCase.lineBasedMatch ? { lineBasedMatch: true } : {}),
+    });
+  });
+
+  it('keeps the fuzzy EOF fallback newline adjustment', () => {
+    expect(
+      normalizeEditStrings(
+        'before\nremove-me ',
+        'remove-me\n',
+        'replacement\n',
+      ),
+    ).toEqual({
+      oldString: 'remove-me ',
+      newString: 'replacement',
+      lineBasedMatch: true,
+    });
+  });
+
+  it('keeps repeated fuzzy lines visible to occurrence counting', () => {
+    const content = 'a \n\na \nb\n';
+    const normalized = normalizeEditStrings(content, 'a\n', 'replacement\n');
+
+    expect(normalized).toEqual({
+      oldString: 'a \n',
+      newString: 'replacement\n',
+      lineBasedMatch: true,
+    });
+    expect(countOccurrences(content, normalized.oldString)).toBe(2);
+    expect(findLineBasedMatchOffsets(content, normalized.oldString)).toEqual([
+      0, 4,
+    ]);
   });
 
   // Tests for issue #1618: Preserve trailing whitespace in newString
@@ -109,6 +219,7 @@ const two = 2;
       expect(result).toEqual({
         oldString: 'value = 1;\n', // Canonical from file
         newString: 'value = 2;   \n', // Preserved as LLM intended
+        lineBasedMatch: true,
       });
     });
 
@@ -160,6 +271,22 @@ const two = 2;
       expect(round2.newString).toBe('value = 2;\n');
     });
   });
+});
+
+describe('findLineBasedMatchOffsets', () => {
+  it.each([
+    [' a \na \n', 'a \n', [4]],
+    ['a extra\na \n', 'a ', [8]],
+    [' a \na ', 'a ', [4]],
+    [' a\na\na', 'a\na', [3]],
+    ['x\n\n\n', '\n\n', [2]],
+    ['abc', '', []],
+  ])(
+    'keeps whole-line canonical matches in %j',
+    (source, canonical, expected) => {
+      expect(findLineBasedMatchOffsets(source, canonical)).toEqual(expected);
+    },
+  );
 });
 
 describe('countOccurrences', () => {

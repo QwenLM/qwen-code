@@ -7,6 +7,10 @@
 // Portuguese translations for Qwen Code CLI (pt-BR)
 
 export default {
+  'Generated UI': 'Generated UI',
+  'Enable bundled Generated UI in supported local sessions. Restart the owning session to apply changes.':
+    'Ativa o Generated UI integrado em sessões locais compatíveis. Reinicie a sessão correspondente para aplicar as alterações.',
+
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -1867,6 +1871,8 @@ export default {
   'System prompt': 'Prompt do sistema',
   'Built-in tools': 'Ferramentas integradas',
   'MCP tools': 'MCP tools',
+  'Instruction files': 'Arquivos de instruções',
+  'Auto memory': 'Memória automática',
   'Memory files': 'Arquivos de memória',
   Skills: 'Habilidades',
   Messages: 'Mensagens',
@@ -2124,6 +2130,10 @@ export default {
   'to retry last request': 'para repetir a última solicitação',
   'Invalid API key. Coding Plan API keys start with "sk-sp-". Please check.':
     'API Key inválida. As API Keys do Coding Plan começam com "sk-sp-". Verifique.',
+  'Invalid API key. Pay-as-you-go keys start with "sk-" or "sk-ws-". Token Plan keys ("sk-sp-") need the Token Plan entry instead.':
+    'API Key inválida. As chaves pay-as-you-go começam com "sk-" ou "sk-ws-". As chaves Token Plan ("sk-sp-") precisam da entrada Token Plan.',
+  'Invalid API key. Token Plan API keys start with "sk-sp-". Generate one from the Token Plan console, or use the Standard API Key entry for a pay-as-you-go key.':
+    'API Key inválida. As Token Plan API Keys começam com "sk-sp-". Gere uma no console Token Plan ou use a entrada Standard API Key para uma chave pay-as-you-go.',
   'Lock release warning': 'Aviso de liberação de bloqueio',
   'Metadata write warning': 'Aviso de gravação de metadados',
   "Subsequent dreams may be skipped as locked until the next session's staleness sweep cleans the file.":

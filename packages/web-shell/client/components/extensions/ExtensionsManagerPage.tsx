@@ -1,3 +1,5 @@
+import { ManagedExtensionsManagerPage } from '../managed/ManagedExtensionsManagerPage';
+import type { ManagedAgentProvider } from '../managed/managed-agent-provider';
 import {
   useCallback,
   useEffect,
@@ -145,6 +147,11 @@ type PendingInteractionState = {
 const UPDATE_AVAILABLE: DaemonExtensionUpdateState = 'update available';
 
 interface ExtensionsManagerPageProps {
+  managed?: {
+    provider: ManagedAgentProvider;
+    workspaceId?: string;
+    sessionId?: string;
+  };
   onClose: () => void;
   initialFocusRef?: Ref<HTMLHeadingElement>;
   embedded?: EmbeddedManagerPage;
@@ -431,7 +438,15 @@ function ExtensionInteractionDialog({
   );
 }
 
-export function ExtensionsManagerPage({
+export function ExtensionsManagerPage(props: ExtensionsManagerPageProps) {
+  return props.managed ? (
+    <ManagedExtensionsManagerPage {...props.managed} onClose={props.onClose} />
+  ) : (
+    <NativeExtensionsManagerPage {...props} />
+  );
+}
+
+function NativeExtensionsManagerPage({
   onClose,
   initialFocusRef,
   embedded,

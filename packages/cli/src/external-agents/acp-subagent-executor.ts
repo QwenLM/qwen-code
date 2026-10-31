@@ -940,6 +940,12 @@ class AcpSubagentExecutor implements SubagentExecutor {
   }
 
   private updateTool(update: ToolCall | ToolCallUpdate): void {
+    if (
+      update._meta?.['toolLifecycle'] !== undefined &&
+      update.status === undefined &&
+      update.content === undefined
+    )
+      return;
     const callId = update.toolCallId;
     if (this.finishedTools.has(callId)) return;
     const previous = this.tools.get(callId);

@@ -37,6 +37,7 @@ import {
   type AgentApprovalRequestEvent,
   type AgentEventEmitter,
   type AgentToolResultEvent,
+  type AgentStartEvent,
 } from './runtime/agent-events.js';
 import {
   ToolConfirmationOutcome,
@@ -324,6 +325,8 @@ export interface WorkflowTask extends TaskBase<WorkflowStatus> {
   runId: string;
   /** Tool call in the parent session that launched this workflow. */
   toolUseId?: string;
+  /** Chat that owns the dispatch transcripts, including project-wide history. */
+  parentSessionId?: string;
   /** Saved workflow definition name, when this run came from one. */
   workflowName?: string;
   /** Run whose result or journal led to this attempt. */
@@ -1000,13 +1003,23 @@ export class WorkflowRunRegistry {
     const seenSources = new Set<string>();
     const isCurrentEntry = () =>
       expectedEntry === undefined || this.entries.get(runId) === expectedEntry;
+    const onStart = (event: AgentStartEvent) => {
+      if (!isCurrentEntry() || !dispatchId) return;
+      const entry = this.entries.get(runId);
+      const dispatch = entry?.dispatches.find(({ id }) => id === dispatchId);
+      if (!entry || !dispatch || dispatch.subagentId) return;
+      dispatch.subagentId = event.subagentId;
+      this.emitStatusChange(entry);
+    };
     const onWaiting = (event: AgentApprovalRequestEvent) => {
       if (!isCurrentEntry()) return;
       if (dispatchId) {
         const dispatch = this.entries
           .get(runId)
           ?.dispatches.find(({ id }) => id === dispatchId);
-        if (dispatch) dispatch.subagentId = event.subagentId;
+        if (dispatch && !dispatch.subagentId) {
+          dispatch.subagentId = event.subagentId;
+        }
       }
       const sourceKey = JSON.stringify([event.subagentId, event.callId]);
       if (seenSources.has(sourceKey)) {
@@ -1039,9 +1052,11 @@ export class WorkflowRunRegistry {
         event.timestamp,
       );
     };
+    emitter.on(AgentEventType.START, onStart);
     emitter.on(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
     emitter.on(AgentEventType.TOOL_RESULT, onResult);
     return () => {
+      emitter.off(AgentEventType.START, onStart);
       emitter.off(AgentEventType.TOOL_WAITING_APPROVAL, onWaiting);
       emitter.off(AgentEventType.TOOL_RESULT, onResult);
       if (!isCurrentEntry()) return;

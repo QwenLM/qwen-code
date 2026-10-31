@@ -36,7 +36,11 @@ import type {
 } from '../tools/tools.js';
 import { normalizeMonitorCommand } from '../utils/shell-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
-import { classifyAction, type ClassifierResult } from './classifier.js';
+import {
+  classifyAction,
+  sanitizeClassifierReason,
+  type ClassifierResult,
+} from './classifier.js';
 import { extractShellOperationsAcrossCommand } from './shell-semantics.js';
 import {
   consumePendingManualRetry,
@@ -544,6 +548,14 @@ export type AutoModeOutcome =
       kind: 'fallback';
       reason: FallbackToAskReason;
       message?: string;
+      /**
+       * Set when a deterministic security floor escalated rather than the
+       * classifier. The confirmation must be given by a human, so a
+       * `PermissionRequest` hook `allow` must not waive it — `hideAlwaysAllow`
+       * is not enough, since that suppresses persisted allow rules rather than
+       * programmatic approval.
+       */
+      requiresHumanDecision?: boolean;
     };
 
 /** Stable identity for an AUTO-mode action within its filesystem context. */
@@ -585,13 +597,46 @@ export function applyAutoModeDecision(
         recordAllow(denialState, actionFingerprint),
       );
       return { kind: 'approved' };
-    case 'blocked:destructive-command':
-      config.setAutoModeDenialState(recordBlock(denialState));
+    case 'blocked:destructive-command': {
+      const blockedState = recordBlock(denialState, actionFingerprint);
+      const fallback = shouldFallback(blockedState);
+      // The guard's reason is derived from the raw model-authored command
+      // (`isDestructiveCommand` can fall back to the whole command), and it
+      // reaches both the approval-dialog banner and the tool error the main
+      // model reads next. Sanitize it once here rather than at each
+      // interpolation point — the classifier producer does the same
+      // (classifier.ts).
+      const sanitizedReason = sanitizeClassifierReason(decision.reason);
+      if (fallback.fallback) {
+        config.setAutoModeDenialState(consumePendingManualRetry(blockedState));
+        // The scheduler's fallback log carries only the reason code, which a
+        // classifier escalation shares; name the guard so the two routes stay
+        // distinguishable to whoever reads the log.
+        autoModeDebugLogger.warn(
+          `Auto mode: destructive-command guard escalated to manual approval (${fallback.reason}): ${sanitizedReason}`,
+        );
+        return {
+          kind: 'fallback',
+          reason: fallback.reason,
+          message: formatDenialFallbackMessage(
+            fallback.reason,
+            sanitizedReason,
+          ),
+          // This arm is the deterministic floor the guard exists for, so the
+          // escalation it produces is the one a hook must not be able to
+          // waive: the reason code alone (`consecutive_block`/`total_denial`)
+          // is shared with the classifier arm and cannot distinguish them.
+          requiresHumanDecision: true,
+        };
+      }
+      config.setAutoModeDenialState(blockedState);
       return {
         kind: 'blocked',
-        errorMessage: `${decision.reason}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`,
+        // The guidance below is ours and must survive intact.
+        errorMessage: `${sanitizedReason}\n${AUTO_MODE_DESTRUCTIVE_DENIAL_GUIDANCE}`,
         reason: 'classifier_blocked',
       };
+    }
     case 'classifier':
       if (decision.shouldBlock) {
         if (decision.unavailable) {
@@ -717,7 +762,7 @@ function formatDenialFallbackMessage(
     case 'consecutive_unavailable':
       return 'Auto mode could not classify consecutive actions. Review this action manually.';
     case 'total_denial':
-      return 'Auto mode reached its session denial limit. Review this action manually.';
+      return `Auto mode reached its session denial limit${classifierReason ? ` (${classifierReason})` : ''}. Review this action manually.`;
     default: {
       const _exhaustive: never = reason;
       return _exhaustive;
@@ -826,7 +871,12 @@ export async function evaluateAutoMode(
   // L5.2.5: deterministic destructive command guard.
   // Regex-based hard blocks that run BEFORE the LLM classifier, so API
   // failures or classifier misjudgment cannot allow destructive git/IaC
-  // commands through. Only applies to shell-like tools.
+  // commands through on the denying call. The `blocked:destructive-command`
+  // arm of `applyAutoModeDecision` keeps the denial hard until denial tracking
+  // reaches the consecutive-block or session-total cap, where it escalates to a
+  // confirmation only a human can give: unlike the classifier arm, it sets
+  // `requiresHumanDecision`, so a `PermissionRequest` hook returning `allow`
+  // cannot waive it. Only applies to shell-like tools.
   if (SHELL_LIKE_TOOL_NAMES.has(input.ctx.toolName) && input.ctx.command) {
     const command =
       input.ctx.toolName === ToolNames.MONITOR

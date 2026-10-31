@@ -31,6 +31,7 @@ import type { SubagentError } from '../subagents/types.js';
 import type { Config } from '../config/config.js';
 import { Storage } from '../config/storage.js';
 import { loadExtensionWorkflows } from '../agents/runtime/workflow-extension.js';
+import { loadModSource } from '../mods/discovery.js';
 
 // The git-subdir source clones a repo; stub the network clone so the security
 // guards around the cloned subdirectory can be exercised against a real fs.
@@ -672,6 +673,173 @@ describe('convertClaudePluginPackage', () => {
         .command,
     ).toBe(`${pluginSourceDir}/scripts/post-install.sh`);
   });
+
+  it.each(['absolute', 'relative-outside'])(
+    'keeps a converted ordinary plugin usable with ignored %s hooks',
+    async (kind) => {
+      const hooks =
+        kind === 'absolute'
+          ? path.join(testDir, 'classic-hooks.json')
+          : '../classic-hooks.json';
+      const { result } = await layoutAndConvert(
+        'ordinary-external-hooks',
+        { name: 'ordinary', hooks },
+        { 'commands/ordinary.md': '# Ordinary command' },
+      );
+
+      expect(result.config.hooks).toBeUndefined();
+      expect(
+        JSON.parse(
+          fs.readFileSync(
+            path.join(result.convertedDir, '.claude-plugin/plugin.json'),
+            'utf8',
+          ),
+        ).hooks,
+      ).toBe(hooks);
+      expect(
+        fs.readFileSync(
+          path.join(result.convertedDir, 'commands/ordinary.md'),
+          'utf8',
+        ),
+      ).toBe('# Ordinary command');
+      await expect(loadModSource(result.convertedDir)).resolves.toBeUndefined();
+    },
+  );
+
+  it.each([false, true])(
+    'preserves marketplace Mod hooks with an existing plugin manifest: %s',
+    async (hasManifest) => {
+      const originalManifest = JSON.stringify({
+        name: 'original-mod',
+        version: '1.0.0',
+        hooks: './original/hooks.json',
+      });
+      const source = 'export function register() {}';
+      const classicHooks = {
+        SessionStart: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: '${CLAUDE_PLUGIN_ROOT}/setup.sh',
+              },
+            ],
+          },
+        ],
+      };
+      const dir = layoutPlugin(
+        'marketplace-mod',
+        {
+          name: 'marketplace-mod',
+          source: './plugin',
+          hooks: './custom/hooks.json',
+        },
+        {
+          'plugin/custom/hooks.json': JSON.stringify({
+            modules: ['./entry.js'],
+            hooks: classicHooks,
+          }),
+          'plugin/custom/entry.js': source,
+          'plugin/setup.sh': 'echo CLASSIC_HOOK\n',
+          'plugin/original/hooks.json': JSON.stringify({
+            modules: ['./wrong.js'],
+          }),
+          'plugin/original/wrong.js': 'throw new Error("WRONG_MODULE");',
+          ...(hasManifest
+            ? { 'plugin/.claude-plugin/plugin.json': originalManifest }
+            : {}),
+        },
+      );
+      const result = await convertPackage(dir, 'marketplace-mod');
+
+      expect((await loadModSource(result.convertedDir))?.source).toBe(source);
+      expect(result.config.hooks).toEqual({
+        SessionStart: [
+          {
+            hooks: [
+              {
+                type: HookType.Command,
+                command: expect.any(String),
+              },
+            ],
+          },
+        ],
+      });
+      const hook = result.config.hooks!['SessionStart']![0].hooks![0];
+      expect(
+        fs.readFileSync((hook as { command: string }).command, 'utf8'),
+      ).toBe('echo CLASSIC_HOOK\n');
+      const originalPath = path.join(dir, 'plugin/.claude-plugin/plugin.json');
+      if (hasManifest) {
+        expect(fs.readFileSync(originalPath, 'utf8')).toBe(originalManifest);
+      } else {
+        expect(fs.existsSync(originalPath)).toBe(false);
+      }
+    },
+  );
+
+  it('preserves Mod authoring metadata after marketplace conversion', async () => {
+    const userConfig = {
+      greeting: {
+        type: 'string',
+        title: 'Greeting',
+        description: 'A greeting',
+      },
+    };
+    const dependencies = [
+      { name: 'base', marketplace: 'example', version: '^1.0.0' },
+    ];
+    const { result } = await layoutAndConvert(
+      'unsupported-mod-config',
+      { name: 'unsupported-mod', hooks: './custom/hooks.json' },
+      {
+        '.claude-plugin/plugin.json': JSON.stringify({
+          name: 'unsupported-mod',
+          version: '1.0.0',
+          userConfig,
+          dependencies,
+        }),
+        'custom/hooks.json': JSON.stringify({
+          modules: ['./entry.js'],
+          hooks: {},
+        }),
+        'custom/entry.js': 'export function register() {}',
+      },
+    );
+    const definition = await loadModSource(result.convertedDir);
+    expect(definition?.userConfig).toEqual(userConfig);
+    expect(definition?.dependencies).toEqual(dependencies);
+  });
+
+  it.each([
+    { dependencies: [{ name: 'marketplace-base', version: '^2.0.0' }] },
+    { dependencies: [] },
+  ])(
+    'uses marketplace dependency declarations over plugin.json: $dependencies',
+    async ({ dependencies }) => {
+      const originalManifest = JSON.stringify({
+        name: 'consumer',
+        version: '1.0.0',
+        dependencies: ['plugin-base'],
+      });
+      const { dir, result } = await layoutAndConvert(
+        'marketplace-dependencies',
+        { name: 'consumer', dependencies },
+        {
+          '.claude-plugin/plugin.json': originalManifest,
+          'hooks/hooks.json': JSON.stringify({ modules: ['./entry.js'] }),
+          'hooks/entry.js': 'export function register() {}',
+        },
+      );
+
+      expect((await loadModSource(result.convertedDir))?.dependencies).toEqual(
+        dependencies,
+      );
+      expect(
+        fs.readFileSync(path.join(dir, '.claude-plugin/plugin.json'), 'utf8'),
+      ).toBe(originalManifest);
+    },
+  );
 
   it('throws when marketplace.json itself is a symlink resolving outside the plugin', async () => {
     // A hostile clone makes the marketplace manifest a symlink to a JSON-shaped

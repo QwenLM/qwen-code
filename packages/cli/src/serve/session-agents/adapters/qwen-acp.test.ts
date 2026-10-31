@@ -110,6 +110,62 @@ function thinkingBridge() {
 }
 
 describe('createQwenAcpAdapter', () => {
+  it('ignores orphan and known tool lifecycle frames without creating or repeating steps', async () => {
+    const { bridge, feed, turn } = thinkingBridge();
+    const adapter = createQwenAcpAdapter({
+      bridge: bridge as unknown as QwenAcpAdapterBridge,
+      workspaceCwd: WS,
+      agentId: AGENT_ID,
+      idleCloseMs: 60_000,
+      sessionExists: async () => true,
+    });
+    const events: AgentAdapterEvent[] = [];
+    const controller = new AbortController();
+    const result = adapter.runTurn({
+      prompt: 'run',
+      nativeSessionId: SESSION_ID,
+      cwd: WS,
+      signal: controller.signal,
+      onEvent: (event) => events.push(event),
+      awaitPermission: async () => 'yes',
+    });
+    await vi.waitFor(() => expect(turn.promptId).toBeDefined());
+    const push = (update: unknown) =>
+      feed.push({
+        type: 'session_update',
+        promptId: turn.promptId,
+        data: { update },
+      });
+    push({
+      sessionUpdate: 'tool_call',
+      toolCallId: 'known',
+      title: 'Shell',
+      status: 'in_progress',
+    });
+    for (const toolCallId of ['known', 'orphan'])
+      push({
+        sessionUpdate: 'tool_call_update',
+        toolCallId,
+        _meta: { toolLifecycle: { v: 1, phase: 'ended' } },
+      });
+    push({
+      sessionUpdate: 'agent_message_chunk',
+      content: { type: 'text', text: 'done' },
+    });
+    await vi.waitFor(() =>
+      expect(events.some((event) => event.type === 'text_delta')).toBe(true),
+    );
+    expect(events.filter((event) => event.type === 'step')).toEqual([
+      {
+        type: 'step',
+        step: { id: 'known', title: 'Shell', status: 'running' },
+      },
+    ]);
+    turn.state = 'cancelled';
+    controller.abort();
+    await expect(result).resolves.toMatchObject({ status: 'cancelled' });
+  });
+
   it('cancels the native turn when the run is stopped, and refuses its permission requests', async () => {
     const { bridge, feed, turn, permissionEvent } = thinkingBridge();
     const adapter = createQwenAcpAdapter({
