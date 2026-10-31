@@ -85,6 +85,7 @@ function waitForRewindApplied(
 
 const COMPOSER_TOOLBAR_ACTIONS = [
   'approvalMode',
+  'workflowMode',
   'contextUsage',
   'model',
 ] as const satisfies readonly ComposerToolbarAction[];

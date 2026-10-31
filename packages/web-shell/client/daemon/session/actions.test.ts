@@ -21,7 +21,12 @@ import {
   resolveCreateWatchdogTimeoutMs,
   resolveSessionRestoreTimeouts,
 } from './actions';
-import { updateConnectionFromDaemonEvent } from './mappers';
+import { applyConfigOptions, updateConnectionFromDaemonEvent } from './mappers';
+import {
+  observeSessionConfig,
+  resetSessionConfigSync,
+  type SessionConfigSyncMap,
+} from './session-config-sync';
 import { createAndAttachSessionForPrompt } from '../../utils/sessionPreparation';
 import type {
   ActivePrompt,
@@ -6676,6 +6681,56 @@ describe('createDaemonSessionActions', () => {
     },
   );
 
+  it.each([
+    ['ready', false],
+    ['ready', true],
+    ['unsupported', false],
+    ['unsupported', true],
+  ] as const)(
+    'applies confirmed reasoning before its own %s config reconciliation (deferred=%s)',
+    async (workflowModeStatus, deferConnectionUpdates) => {
+      const session = createMockSession('session-a');
+      const readback = createDeferred<DaemonSessionContextStatus>();
+      session.context.mockReturnValueOnce(readback.promise);
+      session.setConfigOption.mockResolvedValueOnce({
+        configOptions: reasoningConfigOptions('medium'),
+        persisted: true,
+      });
+      const { actions, getConnection, flushConnectionUpdates } =
+        createActionsHarness({
+          deferConnectionUpdates,
+          connection: {
+            status: 'connected',
+            sessionId: 'session-a',
+            currentModel: 'qwen3.8-max',
+            providers: workspaceProvidersStatus('low'),
+            workflowModeStatus,
+          },
+          session,
+        });
+
+      await actions.setReasoningEffort('medium', { persist: true });
+
+      expect(session.context).toHaveBeenCalledTimes(1);
+      flushConnectionUpdates();
+      expect(getConnection().reasoning).toMatchObject({
+        enabled: true,
+        effort: 'medium',
+      });
+      readback.reject(new Error('readback offline'));
+      await vi.waitFor(() => {
+        flushConnectionUpdates();
+        expect(getConnection().workflowModeStatus).toBe('unknown');
+      });
+      await actions.clearSession();
+      flushConnectionUpdates();
+      expect(getConnection().models?.[0]?.reasoningPreview).toMatchObject({
+        enabled: true,
+        effort: 'medium',
+      });
+    },
+  );
+
   it('drops the connection session context through the real clearSession action', async () => {
     const session = createMockSession('session-a');
     const { actions, getConnection } = createActionsHarness({
@@ -7044,6 +7099,7 @@ function createActionsHarness(
     addNotice?: ReturnType<typeof vi.fn>;
     clearLiveJournalRepair?: ReturnType<typeof vi.fn>;
     connection?: DaemonConnectionState;
+    deferConnectionUpdates?: boolean;
     onConnectionChange?: (connection: DaemonConnectionState) => void;
     createDetachedSession?: ReturnType<typeof vi.fn>;
     createDetachedStandaloneSession?: ReturnType<typeof vi.fn>;
@@ -7077,6 +7133,7 @@ function createActionsHarness(
     status: 'connected',
     workspaceCwd: '/workspace',
   };
+  const connectionUpdates: Array<() => void> = [];
   const replaceConnection = (next: DaemonConnectionState) => {
     connection = next;
   };
@@ -7109,6 +7166,7 @@ function createActionsHarness(
         (() => ({ blocks: [], activeAssistantBlockId: undefined })),
     ),
   };
+  const sessionConfigGeneration: SessionConfigSyncMap = new WeakMap();
   const actions = createDaemonSessionActions({
     store: store as never,
     sessionRef,
@@ -7116,7 +7174,7 @@ function createActionsHarness(
     settledPromptsRef,
     pendingSessionLoadRef,
     pendingSessionLoadIdRef: { current: 0 },
-    sessionConfigGeneration: new WeakMap(),
+    sessionConfigGeneration,
     sessionRecoveryGeneration: new WeakMap(),
     heartbeatSupportedRef: { current: false },
     manualSessionClearRef: opts.manualSessionClearRef ?? { current: false },
@@ -7155,8 +7213,12 @@ function createActionsHarness(
     onPromptRemoved: opts.onPromptRemoved,
     onGeneratedUiInvalidated: opts.onGeneratedUiInvalidated,
     setConnection: (update) => {
-      connection = typeof update === 'function' ? update(connection) : update;
-      opts.onConnectionChange?.(connection);
+      const apply = () => {
+        connection = typeof update === 'function' ? update(connection) : update;
+        opts.onConnectionChange?.(connection);
+      };
+      if (opts.deferConnectionUpdates) connectionUpdates.push(apply);
+      else apply();
     },
     setPromptStatus,
     setRestoreSessionId: opts.setRestoreSessionId ?? vi.fn(),
@@ -7168,6 +7230,10 @@ function createActionsHarness(
   });
   return {
     actions,
+    flushConnectionUpdates: () => {
+      for (const apply of connectionUpdates.splice(0)) apply();
+    },
+    sessionConfigGeneration,
     activePromptsRef,
     settledPromptsRef,
     getConnection: () => connection,
@@ -8192,4 +8258,367 @@ describe('streaming side questions', () => {
     expect(addNotice).toHaveBeenCalledOnce();
     expect(session.btw).not.toHaveBeenCalled();
   });
+});
+
+describe('Workflow mode actions', () => {
+  function configOptions(requested: boolean): unknown[] {
+    return [
+      {
+        id: 'workflow_mode',
+        type: 'select',
+        currentValue: requested ? 'on' : 'off',
+        options: [{ value: 'off' }, { value: 'on' }],
+        _meta: {
+          'qwen.workflowMode': { available: true, effective: requested },
+        },
+      },
+    ];
+  }
+
+  function fixture() {
+    const session = createMockSession('workflow-session');
+    const snapshot = (requested: boolean) => ({
+      ...contextStatus(session.sessionId),
+      state: { configOptions: configOptions(requested) },
+    });
+    session.context.mockResolvedValue(snapshot(false));
+    const addNotice = vi.fn();
+    const harness = createActionsHarness({
+      session,
+      addNotice,
+      connection: {
+        status: 'connected',
+        sessionId: session.sessionId,
+        clientId: session.clientId,
+        workflowModeStatus: 'ready',
+        workflowMode: { requested: false, available: true, effective: false },
+        context: snapshot(false),
+      },
+    });
+    const push = (requested: boolean) => {
+      observeSessionConfig(
+        harness.sessionConfigGeneration,
+        session as unknown as DaemonSessionClient,
+      );
+      harness.replaceConnection(
+        applyConfigOptions(harness.getConnection(), configOptions(requested)),
+      );
+    };
+    return { ...harness, session, snapshot, push, addNotice };
+  }
+
+  it.each(['missing array', 'newer opposite value'] as const)(
+    'reconciles a successful ACK with %s without resending the write',
+    async (shape) => {
+      const h = fixture();
+      const readback = createDeferred<DaemonSessionContextStatus>();
+      h.session.context.mockReturnValue(readback.promise);
+      h.session.setConfigOption.mockResolvedValue({
+        ...(shape === 'missing array'
+          ? {}
+          : { configOptions: configOptions(false) }),
+        persisted: true,
+      } as Awaited<ReturnType<typeof h.session.setConfigOption>>);
+      await h.actions.setWorkflowMode(true);
+      expect(h.getConnection()).toMatchObject({
+        workflowModeStatus: 'syncing',
+        workflowMode: { requested: false },
+        workflowModePending: false,
+      });
+      expect(h.session.setConfigOption).toHaveBeenCalledExactlyOnceWith(
+        'workflow_mode',
+        'on',
+      );
+      expect(h.session.context).toHaveBeenCalledTimes(1);
+      readback.resolve(h.snapshot(true));
+      await vi.waitFor(() =>
+        expect(h.getConnection()).toMatchObject({
+          workflowModeStatus: 'ready',
+          workflowMode: { requested: true },
+        }),
+      );
+      expect(h.addNotice).not.toHaveBeenCalled();
+      expect(h.session.submitPrompt).not.toHaveBeenCalled();
+      expect(h.session.cancel).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(['resolve', 'reject'] as const)(
+    'keeps a newer push when a mode ACK later %s',
+    async (outcome) => {
+      const h = fixture();
+      const ack =
+        createDeferred<Awaited<ReturnType<typeof h.session.setConfigOption>>>();
+      h.session.setConfigOption.mockReturnValue(ack.promise);
+      const pending = h.actions.setWorkflowMode(true);
+      const observed = pending.catch(() => undefined);
+      await expect(h.actions.setWorkflowMode(true)).rejects.toThrow(
+        'not available',
+      );
+      h.push(true);
+      h.push(false);
+      if (outcome === 'resolve')
+        ack.resolve({ configOptions: configOptions(true), persisted: true });
+      else ack.reject(new Error('late transport error'));
+      await observed;
+      await vi.waitFor(() =>
+        expect(h.getConnection().workflowModeStatus).toBe('ready'),
+      );
+      expect(h.getConnection().workflowMode?.requested).toBe(false);
+      expect(h.getConnection().context?.state.configOptions).toEqual(
+        configOptions(false),
+      );
+      expect(h.session.setConfigOption).toHaveBeenCalledTimes(1);
+    },
+  );
+
+  it('rejects a pre-push context and a GET completed after a newer GET', async () => {
+    const h = fixture();
+    const old = createDeferred<DaemonSessionContextStatus>();
+    h.session.context.mockReturnValueOnce(old.promise);
+    const pending = h.actions.getContext();
+    h.push(true);
+    old.resolve(h.snapshot(false));
+    await pending;
+    expect(h.getConnection().workflowMode?.requested).toBe(true);
+    const first = createDeferred<DaemonSessionContextStatus>();
+    const second = createDeferred<DaemonSessionContextStatus>();
+    h.session.context
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const a = h.actions.getContext();
+    const b = h.actions.getContext();
+    second.resolve(h.snapshot(false));
+    await b;
+    first.resolve(h.snapshot(true));
+    await a;
+    expect(h.getConnection().workflowMode?.requested).toBe(false);
+  });
+
+  it('does not read overlapping unfinished writes as idle and reads once after settlement', async () => {
+    const h = fixture();
+    const mode =
+      createDeferred<Awaited<ReturnType<typeof h.session.setConfigOption>>>();
+    const approval =
+      createDeferred<
+        Awaited<ReturnType<typeof h.session.client.setSessionApprovalMode>>
+      >();
+    h.session.setConfigOption.mockReturnValue(mode.promise);
+    h.session.client.setSessionApprovalMode.mockReturnValue(approval.promise);
+    h.session.context.mockResolvedValue(h.snapshot(true));
+    const a = h.actions.setWorkflowMode(true);
+    const b = h.actions.setApprovalMode('auto-edit');
+    await h.actions.getContext();
+    expect(h.getConnection().workflowMode?.requested).toBe(false);
+    mode.resolve({ configOptions: configOptions(true), persisted: true });
+    await a;
+    expect(h.session.context).toHaveBeenCalledTimes(1);
+    approval.resolve({
+      sessionId: h.session.sessionId,
+      mode: 'auto-edit',
+      previous: 'default',
+      persisted: false,
+    });
+    await b;
+    await vi.waitFor(() =>
+      expect(h.getConnection().workflowMode?.requested).toBe(true),
+    );
+    expect(h.session.context).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps a newer mode while reasoning returns an obsolete whole config array', async () => {
+    const h = fixture();
+    const ack =
+      createDeferred<Awaited<ReturnType<typeof h.session.setConfigOption>>>();
+    h.session.setConfigOption.mockReturnValue(ack.promise);
+    const options = [
+      ...configOptions(true),
+      ...reasoningConfigOptions('medium'),
+    ];
+    h.session.context.mockResolvedValue({
+      ...h.snapshot(true),
+      state: { configOptions: options },
+    });
+    const pending = h.actions.setReasoningEffort('medium');
+    h.push(true);
+    ack.resolve({
+      configOptions: [
+        ...configOptions(false),
+        ...reasoningConfigOptions('medium'),
+      ],
+      persisted: false,
+    });
+    await pending;
+    await vi.waitFor(() =>
+      expect(h.getConnection().reasoning?.effort).toBe('medium'),
+    );
+    expect(h.getConnection().workflowMode?.requested).toBe(true);
+    expect(h.getConnection().context?.state.configOptions).toEqual(options);
+  });
+
+  it('releases a timed-out write, reconciles once, and ignores its late ACK', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = fixture();
+      const ack =
+        createDeferred<Awaited<ReturnType<typeof h.session.setConfigOption>>>();
+      h.session.setConfigOption.mockReturnValue(ack.promise);
+      h.session.context.mockRejectedValue(new Error('read offline'));
+      const pending = h.actions.setWorkflowMode(true);
+      const result = pending.catch((error: Error) => error);
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(await result).toBeInstanceOf(Error);
+      expect(h.getConnection()).toMatchObject({
+        workflowModePending: false,
+        workflowModeStatus: 'unknown',
+        workflowMode: { requested: false },
+      });
+      expect(
+        h.sessionConfigGeneration.get(
+          h.session as unknown as DaemonSessionClient,
+        )?.pendingWrites,
+      ).toBe(0);
+      expect(h.session.context).toHaveBeenCalledTimes(1);
+      await expect(h.actions.setWorkflowMode(true)).rejects.toThrow(
+        'not available',
+      );
+      ack.resolve({ configOptions: configOptions(true), persisted: true });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.getConnection().workflowMode?.requested).toBe(false);
+      expect(h.session.setConfigOption).toHaveBeenCalledTimes(1);
+      expect(h.session.context).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('bounds an unanswered reconciliation and keeps the last confirmed mode', async () => {
+    vi.useFakeTimers();
+    try {
+      const h = fixture();
+      const read = createDeferred<DaemonSessionContextStatus>();
+      h.session.context.mockReturnValue(read.promise);
+      h.session.setConfigOption.mockResolvedValue({
+        configOptions: configOptions(true),
+        persisted: true,
+      });
+      await h.actions.setWorkflowMode(true);
+      expect(h.getConnection().workflowModeStatus).toBe('syncing');
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(h.getConnection()).toMatchObject({
+        workflowModeStatus: 'unknown',
+        workflowModePending: false,
+        workflowMode: { requested: false },
+      });
+      expect(h.session.context).toHaveBeenCalledTimes(1);
+      read.resolve(h.snapshot(true));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(h.getConnection().workflowMode?.requested).toBe(false);
+      expect(h.session.context).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('finishes mode reconciliation when cancellation also refreshes recovery', async () => {
+    const h = fixture();
+    const recovery = { kind: 'clean' as const, canContinue: false };
+    h.replaceConnection({
+      ...h.getConnection(),
+      context: { ...h.snapshot(false), recovery },
+    });
+    const read = createDeferred<DaemonSessionContextStatus>();
+    h.session.context
+      .mockReturnValueOnce(read.promise)
+      .mockResolvedValue({ ...h.snapshot(true), recovery });
+    h.session.setConfigOption.mockResolvedValue({ persisted: true } as Awaited<
+      ReturnType<typeof h.session.setConfigOption>
+    >);
+    await h.actions.setWorkflowMode(true);
+    expect(h.getConnection().workflowModeStatus).toBe('syncing');
+    h.activePromptsRef.current.set(h.session.sessionId, {
+      controller: new AbortController(),
+    });
+    await h.actions.cancel();
+    expect(h.session.context).toHaveBeenCalledTimes(2);
+    read.resolve(h.snapshot(true));
+    await vi.waitFor(() =>
+      expect(h.getConnection()).toMatchObject({
+        workflowModeStatus: 'ready',
+        workflowMode: { requested: true },
+        workflowModePending: false,
+        context: { recovery },
+      }),
+    );
+  });
+
+  it.each(['model write', 'model read', 'explicit read'] as const)(
+    'settles mode synchronization when a newer %s fails',
+    async (failure) => {
+      const h = fixture();
+      const old = createDeferred<DaemonSessionContextStatus>();
+      h.session.context.mockReturnValueOnce(old.promise);
+      h.session.setConfigOption.mockResolvedValue({
+        persisted: true,
+      } as Awaited<ReturnType<typeof h.session.setConfigOption>>);
+      await h.actions.setWorkflowMode(true);
+      expect(h.getConnection().workflowModeStatus).toBe('syncing');
+      if (failure === 'model write') {
+        h.session.setModel.mockRejectedValue(new Error('model rejected'));
+        h.session.context.mockResolvedValue(h.snapshot(true));
+        await expect(h.actions.setModel('new-model')).rejects.toThrow(
+          'model rejected',
+        );
+      } else {
+        h.session.context.mockRejectedValue(new Error('read offline'));
+        if (failure === 'model read') await h.actions.setModel('new-model');
+        else
+          await expect(h.actions.getContext()).rejects.toThrow('read offline');
+      }
+      old.resolve(h.snapshot(false));
+      await vi.waitFor(() =>
+        expect(h.getConnection().workflowModeStatus).toBe(
+          failure === 'model write' ? 'ready' : 'unknown',
+        ),
+      );
+      expect(h.getConnection().workflowModePending).toBe(false);
+      expect(h.session.context).toHaveBeenCalledTimes(2);
+      expect(h.session.setConfigOption).toHaveBeenCalledTimes(1);
+      if (failure === 'model write')
+        expect(h.getConnection().workflowMode?.requested).toBe(true);
+    },
+  );
+
+  it.each(['new client', 'new stream'] as const)(
+    'keeps same-id replacement state and notices after %s',
+    async (replacement) => {
+      const h = fixture();
+      const ack =
+        createDeferred<Awaited<ReturnType<typeof h.session.setConfigOption>>>();
+      h.session.setConfigOption.mockReturnValue(ack.promise);
+      const pending = h.actions.setWorkflowMode(true).catch(() => undefined);
+      if (replacement === 'new client') {
+        h.sessionRef.current = createMockSession(
+          h.session.sessionId,
+          'replacement',
+        ) as unknown as DaemonSessionClient;
+      } else
+        resetSessionConfigSync(
+          h.sessionConfigGeneration,
+          h.session as unknown as DaemonSessionClient,
+        );
+      const next = {
+        ...h.getConnection(),
+        workflowModePending: true,
+        workflowModeStatus: 'ready' as const,
+        workflowMode: { requested: true, available: true, effective: true },
+      };
+      h.replaceConnection(next);
+      ack.reject(new Error('old owner failure'));
+      await pending;
+      expect(h.getConnection()).toBe(next);
+      expect(h.addNotice).not.toHaveBeenCalled();
+      expect(h.session.context).not.toHaveBeenCalled();
+    },
+  );
 });
