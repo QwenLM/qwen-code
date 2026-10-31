@@ -14,7 +14,27 @@ const presentation = vi.hoisted(() => ({
   onStatus: undefined as ((state: ViewState) => void) | undefined,
   onDocument: undefined as ((document: GeneratedDocument) => void) | undefined,
   capture: vi.fn<() => CaptureResult>(),
+  onEvent: undefined as
+    | ((event: {
+        id: string;
+        type: 'input' | 'change' | 'click';
+        value: string;
+        checked: boolean;
+      }) => void)
+    | undefined,
 }));
+vi.mock('./surface.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./surface.js')>();
+  return {
+    ...actual,
+    ViewSurface: class extends actual.ViewSurface {
+      constructor(...args: ConstructorParameters<typeof actual.ViewSurface>) {
+        super(...args);
+        presentation.onEvent = args[1];
+      }
+    },
+  };
+});
 vi.mock('./controller.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./controller.js')>();
   return {
@@ -41,6 +61,7 @@ const bridge = vi.hoisted(() => ({
   getHostVersion: vi.fn(),
   getHostCapabilities: vi.fn(),
   sendMessage: vi.fn(),
+  updateModelContext: vi.fn(),
   onteardown: undefined as (() => Promise<object>) | undefined,
 }));
 vi.mock('@modelcontextprotocol/ext-apps', () => ({
@@ -89,6 +110,7 @@ beforeEach(async () => {
   bridge.getHostVersion.mockReturnValue({ name: 'qwen-code-web-shell' });
   bridge.getHostCapabilities.mockReturnValue({ message: { text: {} } });
   bridge.sendMessage.mockResolvedValue({});
+  bridge.updateModelContext.mockResolvedValue({});
   presentation.capture.mockReturnValue({ ok: false, reason: 'not-ready' });
   vi.stubGlobal('Worker', undefined);
   document.body.innerHTML = readFileSync('src/app/index.html', 'utf8');
@@ -127,6 +149,233 @@ function deferred() {
   });
   return { promise, resolve, reject };
 }
+
+async function reconnect(context: Record<string, unknown>) {
+  await bridge.onteardown!();
+  vi.resetModules();
+  bridge.getHostContext.mockReturnValue(context);
+  await import('./main.js');
+  await vi.waitFor(() => expect(bridge.connect).toHaveBeenCalled());
+  await Promise.resolve();
+}
+
+const interact = () =>
+  presentation.onEvent!({
+    id: 'workers',
+    type: 'input',
+    value: '8',
+    checked: false,
+  });
+
+describe('keep chatting with the applied values', () => {
+  async function withContextHost() {
+    await bridge.onteardown!();
+    vi.resetModules();
+    bridge.getHostCapabilities.mockReturnValue({
+      message: { text: {} },
+      updateModelContext: { text: {} },
+    });
+    await import('./main.js');
+    await vi.waitFor(() => expect(bridge.connect).toHaveBeenCalled());
+    await Promise.resolve();
+  }
+
+  it('offers the applied values as model context after the user changes them', async () => {
+    await withContextHost();
+    ready();
+    expect(text('continuation-help')).toContain('keep chatting');
+    interact();
+    present({});
+    await vi.waitFor(
+      () => expect(bridge.updateModelContext).toHaveBeenCalledTimes(1),
+      { timeout: 3000 },
+    );
+    const [request] = bridge.updateModelContext.mock.calls[0];
+    expect(request.content[0].type).toBe('text');
+    expect(request.content[0].text).toContain('attached to their message');
+    expect(request.content[0].text).toContain('"value": "8"');
+    // The capture it made publishes again; unchanged values are not resent.
+    present({});
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(bridge.updateModelContext).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not offer context before the user interacts', async () => {
+    await withContextHost();
+    ready();
+    present({});
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(bridge.updateModelContext).not.toHaveBeenCalled();
+  });
+
+  it('does not offer context to hosts without model context support', async () => {
+    ready();
+    interact();
+    present({});
+    await new Promise((resolve) => setTimeout(resolve, 1200));
+    expect(bridge.updateModelContext).not.toHaveBeenCalled();
+    expect(text('continuation-help')).not.toContain('keep chatting');
+  });
+});
+
+describe('card frame', () => {
+  it('uses the host locale for its own text', async () => {
+    await reconnect({ locale: 'zh-CN' });
+    expect(text('title')).toBe('交互视图');
+    expect(frame().title).toBe('生成的交互内容');
+    ready();
+    expect(text('stop')).toBe('停止');
+    expect(text('continue-analysis')).toBe('用当前参数继续分析');
+    expect(text('status')).toBe('已应用最新更新');
+    expect(document.documentElement.lang).toBe('zh-CN');
+  });
+
+  it('switches language when the host context changes', async () => {
+    ready();
+    expect(text('stop')).toBe('Stop');
+    bridge.getHostContext.mockReturnValue({ locale: 'zh-CN' });
+    bridge.events.get('hostcontextchanged')!();
+    expect(text('stop')).toBe('停止');
+    expect(text('status')).toBe('已应用最新更新');
+  });
+
+  it('localizes the frame’s own failures but not the document’s', async () => {
+    await reconnect({ locale: 'zh-CN' });
+    ready();
+    present({
+      phase: 'error',
+      viewAvailable: false,
+      error: 'The view exceeded its execution time limit.',
+    });
+    expect(text('status')).toBe('视图超出了执行时间限制。');
+    await reconnect({ locale: 'zh-CN' });
+    ready();
+    present({
+      phase: 'error',
+      viewAvailable: false,
+      error: "Script error: ReferenceError: 'total' is not defined",
+    });
+    expect(text('status')).toBe(
+      "Script error: ReferenceError: 'total' is not defined",
+    );
+  });
+
+  it('says how to start again when stopped before the view appeared', () => {
+    present({ phase: 'stopped', viewAvailable: false });
+    expect(document.getElementById('stopped')!.hidden).toBe(true);
+    expect(document.getElementById('notice')!.hidden).toBe(false);
+    expect(text('notice')).toBe(
+      'Reopen the view to start again from its initial values.',
+    );
+  });
+
+  it('overlays a stopped view instead of leaving its controls looking live', () => {
+    ready();
+    present({ phase: 'stopped', viewAvailable: true });
+    expect(document.getElementById('stopped')!.hidden).toBe(false);
+    expect(text('stopped-title')).toBe('This view is stopped.');
+  });
+
+  it('toggles the collapsed summary', () => {
+    ready();
+    const toggle = document.getElementById(
+      'summary-toggle',
+    ) as HTMLButtonElement;
+    const summary = document.getElementById('summary')!;
+    expect(summary.dataset['collapsed']).toBe('true');
+    toggle.click();
+    expect(summary.dataset['collapsed']).toBe('false');
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(toggle.textContent).toBe('Show less');
+    // Widened while expanded: the collapsed summary now fits.
+    Object.defineProperty(summary, 'scrollHeight', { value: 39 });
+    Object.defineProperty(summary, 'clientHeight', { value: 39 });
+    toggle.click();
+    expect(summary.dataset['collapsed']).toBe('true');
+    expect(toggle.hidden).toBe(true);
+  });
+});
+
+describe('review outcomes reported by the host', () => {
+  it.each([
+    ['cancelled', 'Not sent.'],
+    ['expired', 'The review timed out. Nothing was sent.'],
+    ['failed', 'Not sent.'],
+  ])(
+    'returns to the original action after a %s review',
+    async (outcome, message) => {
+      bridge.sendMessage.mockResolvedValue({
+        isError: true,
+        _meta: { 'qwen-code/message-review': outcome },
+      });
+      ready();
+      continuation().click();
+      await vi.waitFor(() => expect(text('continuation-status')).toBe(message));
+      expect(text('continue-analysis')).toBe(
+        'Continue analysis with current parameters',
+      );
+      expect(continuation().disabled).toBe(false);
+    },
+  );
+
+  it('keeps an earlier attempt’s warning when a retry is not sent', async () => {
+    bridge.sendMessage.mockResolvedValueOnce({ isError: true });
+    ready();
+    continuation().click();
+    await vi.waitFor(() =>
+      expect(text('continue-analysis')).toBe(
+        'Review again after checking the session',
+      ),
+    );
+    bridge.sendMessage.mockResolvedValueOnce({
+      isError: true,
+      _meta: { 'qwen-code/message-review': 'cancelled' },
+    });
+    continuation().click();
+    await vi.waitFor(() =>
+      expect(text('continuation-status')).toContain(
+        'An earlier request may still be in flight',
+      ),
+    );
+    expect(text('continue-analysis')).toBe(
+      'Review again after checking the session',
+    );
+  });
+
+  it('shows why the host did not send the values', async () => {
+    bridge.sendMessage.mockResolvedValue({
+      isError: true,
+      _meta: {
+        'qwen-code/message-review': 'failed',
+        'qwen-code/message-error':
+          'The session is busy. Wait for it to finish, then send the message again.',
+      },
+    });
+    ready();
+    continuation().click();
+    await vi.waitFor(() =>
+      expect(text('continuation-status')).toBe(
+        'Not sent. The session is busy. Wait for it to finish, then send the message again.',
+      ),
+    );
+    expect(continuation().disabled).toBe(false);
+  });
+
+  it('keeps the unconfirmed warning for outcomes after dispatch', async () => {
+    bridge.sendMessage.mockResolvedValue({
+      isError: true,
+      _meta: { 'qwen-code/message-review': 'unknown' },
+    });
+    ready();
+    continuation().click();
+    await vi.waitFor(() =>
+      expect(text('continuation-status')).toContain('could not be confirmed'),
+    );
+    expect(text('continue-analysis')).toBe(
+      'Review again after checking the session',
+    );
+  });
+});
 
 describe('ask the session to fix a failed view', () => {
   const error =
@@ -294,7 +543,7 @@ describe('continue analysis from the trusted App', () => {
         ),
       );
       expect(text('continuation-status')).toContain('could duplicate');
-      expect(text('continuation-status')).toContain('cancelled or rejected');
+      expect(text('continuation-status')).toContain('may still be in flight');
       expect(text('continue-analysis')).toContain('checking the session');
       present({});
       expect(bridge.sendMessage).toHaveBeenCalledTimes(1);
@@ -476,6 +725,8 @@ describe('generated view interaction feedback', () => {
     expect(document.getElementById('status')!.dataset['state']).toBe('dirty');
     expect(text('status')).toContain('Parameters changed');
     expect(text('status')).not.toContain('applied');
+    // The one-line status keeps its full text available as the title.
+    expect(document.getElementById('status')!.title).toBe(text('status'));
     expect(frame().hidden).toBe(false);
     expect(frame().getAttribute('aria-busy')).toBe('false');
   });
@@ -528,7 +779,7 @@ describe('generated view interaction feedback', () => {
       expect(frame().getAttribute('aria-busy')).toBe('false');
       expect(text('status')).toBe(
         phase === 'stopped'
-          ? 'Stopped. Reopen the card to start a new view.'
+          ? 'Stopped'
           : 'The event timed out. Use the summary.',
       );
     },

@@ -6,6 +6,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   parseNpmPackageSource,
   isScopedNpmPackage,
+  isNpmPackage,
   resolveNpmRegistry,
   checkNpmUpdate,
   downloadFromNpmRegistry,
@@ -35,25 +36,22 @@ vi.mock('node:stream/promises', () => ({
 
 describe('parseNpmPackageSource', () => {
   it.each<[string, string, string | undefined]>([
+    ['unscoped', 'some-package', undefined],
+    ['unscoped version', 'some-package', '1.2.0'],
+    ['unscoped tag', 'some-package', 'beta'],
     ['without version', '@ali/openclaw-tmcp-dingtalk', undefined],
     ['with version', '@ali/openclaw-tmcp-dingtalk', '1.2.0'],
     ['with latest tag', '@scope/pkg', 'latest'],
     ['with semver range', '@scope/pkg', '^1.0.0'],
-  ])('should parse scoped package %s', (_, name, version) => {
+  ])('should parse package %s', (_, name, version) => {
     const result = parseNpmPackageSource(version ? `${name}@${version}` : name);
     expect(result.name).toBe(name);
     expect(result.version).toBe(version);
   });
 
   it('should throw for invalid source', () => {
-    expect(() => parseNpmPackageSource('not-scoped')).toThrow(
-      'Invalid scoped npm package source',
-    );
-  });
-
-  it('should throw for unscoped package', () => {
-    expect(() => parseNpmPackageSource('some-package')).toThrow(
-      'Invalid scoped npm package source',
+    expect(() => parseNpmPackageSource('./missing')).toThrow(
+      'Invalid npm package source',
     );
   });
 
@@ -94,6 +92,31 @@ describe('isScopedNpmPackage', () => {
   });
 });
 
+describe('isNpmPackage', () => {
+  it.each([
+    'some-package',
+    'some-package@1.2.0',
+    'some-package@beta',
+    '@scope/pkg',
+    '@scope/pkg@latest',
+  ])('accepts %s', (source) => expect(isNpmPackage(source)).toBe(true));
+  it.each([
+    '.',
+    '..',
+    '.hidden',
+    '_private',
+    './missing',
+    '../missing',
+    '/absolute/path',
+    'C:\\missing',
+    'owner/repo',
+    'https://example.com/pkg',
+    'git@github.com:owner/repo',
+    'some package',
+    'pkg@',
+  ])('rejects %s', (source) => expect(isNpmPackage(source)).toBe(false));
+});
+
 describe('resolveNpmRegistry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -127,6 +150,13 @@ describe('resolveNpmRegistry', () => {
 
     const result = resolveNpmRegistry('@other');
     expect(result).toBe('https://custom.registry.com');
+  });
+
+  it('uses only the default registry for an unscoped package', () => {
+    vi.mocked(fs.readFileSync).mockReturnValueOnce(
+      '@scope:registry=https://scoped.example.com/\npkg:registry=https://wrong.example.com/\nregistry=https://default.example.com/',
+    );
+    expect(resolveNpmRegistry(undefined)).toBe('https://default.example.com');
   });
 
   it('should return npmjs.org as fallback', () => {
@@ -286,6 +316,15 @@ describe('downloadFromNpmRegistry', () => {
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllEnvs();
+  });
+
+  it('downloads an unscoped package from its registry metadata', async () => {
+    mockNpmDownload(TGZ);
+    const result = await download({ source: 'some-package' });
+    expect(result).toMatchObject({ type: 'npm', version: '1.0.0' });
+    expect(vi.mocked(https.get).mock.calls[0]?.[0]).toBe(
+      'https://registry.example.com/some-package',
+    );
   });
 
   it('does not send the ambient npm token to an override registry', async () => {
@@ -694,96 +733,99 @@ describe('downloadFromNpmRegistry', () => {
   });
 });
 
-describe('checkNpmUpdate', () => {
-  beforeEach(() => {
-    vi.clearAllMocks();
-    vi.mocked(fs.readFileSync).mockImplementation(() => {
-      throw new Error('ENOENT');
-    });
-  });
-
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  /** Serves these dist-tags and versions, then checks `source`@`releaseTag`. */
-  const check = (
-    source: string,
-    releaseTag: string,
-    tags: Record<string, string>,
-    versions: string[],
-    registryUrl = 'https://registry.npmjs.org',
-  ) => {
-    mockGet(() =>
-      jsonResponse({
-        'dist-tags': tags,
-        versions: Object.fromEntries(
-          versions.map((v) => [v, { dist: { tarball: '' } }]),
-        ),
-      }),
-    );
-    return checkNpmUpdate({ source, type: 'npm', releaseTag, registryUrl });
-  };
-
-  it('should report UPDATE_AVAILABLE when latest is newer', async () => {
-    const result = await check('@scope/pkg', '1.0.0', { latest: '2.0.0' }, [
-      '2.0.0',
-    ]);
-    expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
-  });
-
-  it('uses the HTTPS client for uppercase HTTPS registry URLs', async () => {
-    vi.mocked(http.get).mockImplementation(() => {
-      throw new Error('wrong client');
+describe.each(['@scope/pkg', 'some-package'])(
+  'checkNpmUpdate(%s)',
+  (packageName) => {
+    beforeEach(() => {
+      vi.clearAllMocks();
+      vi.mocked(fs.readFileSync).mockImplementation(() => {
+        throw new Error('ENOENT');
+      });
     });
 
-    const result = await check(
-      '@scope/pkg',
-      '1.0.0',
-      { latest: '1.0.0' },
-      ['1.0.0'],
-      'HTTPS://registry.npmjs.org',
-    );
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
 
-    expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
-    expect(https.get).toHaveBeenCalled();
-    expect(http.get).not.toHaveBeenCalled();
-  });
+    /** Serves these dist-tags and versions, then checks `source`@`releaseTag`. */
+    const check = (
+      source: string,
+      releaseTag: string,
+      tags: Record<string, string>,
+      versions: string[],
+      registryUrl = 'https://registry.npmjs.org',
+    ) => {
+      mockGet(() =>
+        jsonResponse({
+          'dist-tags': tags,
+          versions: Object.fromEntries(
+            versions.map((v) => [v, { dist: { tarball: '' } }]),
+          ),
+        }),
+      );
+      return checkNpmUpdate({ source, type: 'npm', releaseTag, registryUrl });
+    };
 
-  it('should report UP_TO_DATE when latest matches', async () => {
-    const result = await check('@scope/pkg', '1.0.0', { latest: '1.0.0' }, [
-      '1.0.0',
-    ]);
-    expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
-  });
+    it('should report UPDATE_AVAILABLE when latest is newer', async () => {
+      const result = await check(packageName, '1.0.0', { latest: '2.0.0' }, [
+        '2.0.0',
+      ]);
+      expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+    });
 
-  it('should report UP_TO_DATE for pinned exact version', async () => {
-    const result = await check(
-      '@scope/pkg@1.0.0',
-      '1.0.0',
-      { latest: '2.0.0' },
-      ['1.0.0', '2.0.0'],
-    );
-    expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
-  });
+    it('uses the HTTPS client for uppercase HTTPS registry URLs', async () => {
+      vi.mocked(http.get).mockImplementation(() => {
+        throw new Error('wrong client');
+      });
 
-  it('should check correct dist-tag for non-latest tag installs', async () => {
-    const result = await check(
-      '@scope/pkg@beta',
-      '2.0.0-beta.1',
-      { latest: '1.0.0', beta: '2.0.0-beta.2' },
-      ['1.0.0', '2.0.0-beta.1', '2.0.0-beta.2'],
-    );
-    expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
-  });
+      const result = await check(
+        packageName,
+        '1.0.0',
+        { latest: '1.0.0' },
+        ['1.0.0'],
+        'HTTPS://registry.npmjs.org',
+      );
 
-  it('should report UP_TO_DATE for beta tag when on latest beta', async () => {
-    const result = await check(
-      '@scope/pkg@beta',
-      '2.0.0-beta.2',
-      { latest: '1.0.0', beta: '2.0.0-beta.2' },
-      ['1.0.0', '2.0.0-beta.2'],
-    );
-    expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
-  });
-});
+      expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+      expect(https.get).toHaveBeenCalled();
+      expect(http.get).not.toHaveBeenCalled();
+    });
+
+    it('should report UP_TO_DATE when latest matches', async () => {
+      const result = await check(packageName, '1.0.0', { latest: '1.0.0' }, [
+        '1.0.0',
+      ]);
+      expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+    });
+
+    it('should report UP_TO_DATE for pinned exact version', async () => {
+      const result = await check(
+        `${packageName}@1.0.0`,
+        '1.0.0',
+        { latest: '2.0.0' },
+        ['1.0.0', '2.0.0'],
+      );
+      expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+    });
+
+    it('should check correct dist-tag for non-latest tag installs', async () => {
+      const result = await check(
+        `${packageName}@beta`,
+        '2.0.0-beta.1',
+        { latest: '1.0.0', beta: '2.0.0-beta.2' },
+        ['1.0.0', '2.0.0-beta.1', '2.0.0-beta.2'],
+      );
+      expect(result).toBe(ExtensionUpdateState.UPDATE_AVAILABLE);
+    });
+
+    it('should report UP_TO_DATE for beta tag when on latest beta', async () => {
+      const result = await check(
+        `${packageName}@beta`,
+        '2.0.0-beta.2',
+        { latest: '1.0.0', beta: '2.0.0-beta.2' },
+        ['1.0.0', '2.0.0-beta.2'],
+      );
+      expect(result).toBe(ExtensionUpdateState.UP_TO_DATE);
+    });
+  },
+);

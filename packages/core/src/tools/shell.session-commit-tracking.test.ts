@@ -38,7 +38,7 @@ import {
 import { makeFakeConfig } from '../test-utils/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import { CommitAttributionService } from '../services/commitAttribution.js';
-import { ShellTool } from './shell.js';
+import { ShellTool, ShellToolInvocation } from './shell.js';
 import { ToolNames } from './tool-names.js';
 import { evaluateAutoMode } from '../permissions/autoMode.js';
 import {
@@ -462,6 +462,83 @@ describe.skipIf(process.platform === 'win32')(
       await expectOtherRepoCommitBlocked(runShellCommand);
     });
 
+    it('does not certify an absolute `cd` whose target carries an env-var reference', async () => {
+      // R1-1: containment is decided on the literal text, so `/repo/$ESCAPE`
+      // sits lexically under `cwd` while bash lands wherever `$ESCAPE`
+      // expands to. Certifying it would splice our trailer onto a commit in
+      // the other repository — the corruption the cwd-shift latch exists to
+      // prevent. The guard must therefore run before the absolute branch.
+      const otherDir = makeOtherRepo();
+      fs.writeFileSync(path.join(otherDir, 'work.txt'), 'work\n');
+      const repoHeadBefore = headSha();
+      const escape = path.relative(repoDir, otherDir);
+
+      await runShellCommand(
+        `ESCAPE=${escape} && cd ${repoDir}/$ESCAPE && git add work.txt && git commit -m "escaped work"`,
+      );
+
+      // The commit really landed — in the OTHER repository, untouched.
+      expect(lastLog('%s', otherDir)).toBe('escaped work');
+      expect(headSha()).toBe(repoHeadBefore);
+      expect(lastLog('%B', otherDir)).not.toContain(
+        'Co-authored-by: Qwen-Coder',
+      );
+      expect(amendVerdict()?.blocked).toBe(true);
+    });
+
+    it('registers a commit after an absolute `cd` into the same repo root (issue #12514)', async () => {
+      // #12514-A: `cdTargetMayChangeRepo` returns true for ANY target starting
+      // with '/', with no reference to the shell cwd. So the
+      // product-recommended spelling `cd /abs/path/to/this/repo && git commit`
+      // latched `cwdShifted`, `attributableInCwd` went false,
+      // `trackSessionCommit` never ran and `sessionCommitShas` stayed empty —
+      // which is why the agent's own next `git commit --amend` was hard-blocked
+      // by the guard (reported by bainmariehk, 2026-10-07).
+      await expectRegisters(`cd ${repoDir} && ${COMMIT_FEATURE}`, false);
+    });
+
+    it('registers a commit after an absolute `cd` into a subdirectory of the same repo (issue #12514)', async () => {
+      // #12514-A, subdirectory arm: an absolute target inside the cwd tree must
+      // count as in-repo, not only an exact-equal path. `git` resolves the
+      // toplevel from any subdirectory, so the commit still lands in our repo
+      // and must still be registered (and carry the trailer).
+      const subDir = path.join(repoDir, 'sub');
+      fs.mkdirSync(subDir, { recursive: true });
+      const preHead = headSha();
+      fs.writeFileSync(path.join(subDir, 'feature.txt'), 'work\n');
+      await runShellCommand(
+        `cd ${subDir} && git add feature.txt && git commit -m "feature"`,
+      );
+      expectFeatureCommitLanded(preHead);
+      expect(amendVerdict()).toBeNull();
+    });
+
+    it('keeps the cwd-shift latch for an absolute `cd` into a sibling directory that shares the repo path prefix (issue #12514)', async () => {
+      // Guards the obvious wrong fix: a bare `target.startsWith(cwd)` without a
+      // separator boundary. `<repo>-sibling` shares the repo path as a *string*
+      // prefix but is a different repository, so admitting it would stamp our
+      // trailer onto a foreign repo's commit — the corruption `cwdShifted`
+      // exists to prevent.
+      const siblingDir = `${repoDir}-sibling`;
+      tempDirs.push(siblingDir);
+      fs.mkdirSync(siblingDir, { recursive: true });
+      initRepo(siblingDir, { subject: 'sibling seed' });
+      fs.writeFileSync(path.join(siblingDir, 'work.txt'), 'sibling work\n');
+      const repoHeadBefore = headSha();
+
+      await runShellCommand(
+        `cd ${siblingDir} && git add work.txt && git commit -m "sibling work"`,
+      );
+
+      // The commit really landed — in the SIBLING repository.
+      expect(lastLog('%s', siblingDir)).toBe('sibling work');
+      expect(headSha()).toBe(repoHeadBefore);
+      expect(lastLog('%B', siblingDir)).not.toContain(
+        'Co-authored-by: Qwen-Coder',
+      );
+      expect(amendVerdict()?.blocked).toBe(true);
+    });
+
     // R1-11: `COMMIT_RECOGNITION_LEADING_NOISE` feeds the one helper both
     // recognisers call, so a row per token pins registration and the trailer
     // rewrite at once. Each token leads the segment carrying `git commit`
@@ -837,6 +914,34 @@ describe.skipIf(process.platform === 'win32')(
       // original commit never registered.
       expectFeatureHead(preAmendHead);
       expect(amendVerdict()).toBeNull();
+    });
+
+    it('reports an amend reached through an absolute `cd` to the attribution range', async () => {
+      // R1-4: `isAmendCommit` now takes `cwd`, so `cd <abs repo> && git commit
+      // --amend` must be recognised as an amend. If it is not, the note's diff
+      // range flips from `${preHead}..${postHead}` (the amend delta) to
+      // `${postHead}~1..${postHead}`, which silently reports the amended
+      // commit's parent's files as AI-authored. Asserted on the flag handed to
+      // attribution because that is the only consumer of the verdict.
+      await commitAndAssertExempt();
+      fs.writeFileSync(path.join(repoDir, 'feature.txt'), 'work v2\n');
+      const amendSpy = vi.spyOn(
+        ShellToolInvocation.prototype as unknown as {
+          attachCommitAttribution: (
+            cwd: string,
+            preHead: string | null,
+            isAmend: boolean,
+          ) => Promise<string | null>;
+        },
+        'attachCommitAttribution',
+      );
+
+      await runShellCommand(
+        `cd ${repoDir} && git add feature.txt && ${AMEND_COMMAND}`,
+      );
+
+      expect(amendSpy).toHaveBeenCalledTimes(1);
+      expect(amendSpy.mock.calls[0]![2]).toBe(true);
     });
 
     it('registers the commit even when gitCoAuthor.commit attribution is disabled', async () => {

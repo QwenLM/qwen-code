@@ -30,6 +30,11 @@ import type { WebShellTheme } from './themeContext';
 
 export type MarkdownContentSource = 'assistant' | 'thinking';
 
+/** Select an existing directory on the connected daemon, or cancel with undefined. */
+export type WebShellWorkspaceDirectoryPicker = (opts?: {
+  signal?: AbortSignal;
+}) => Promise<string | undefined>;
+
 export interface MarkdownRenderContext {
   source: MarkdownContentSource;
   /**
