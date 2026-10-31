@@ -430,6 +430,174 @@ describe('extractShellOperations', () => {
     ]);
   });
 
+  // `N>&M`, `>&M`, `N<&M` and `N>&-` duplicate or close a descriptor; bash
+  // opens no file. They used to come back as a write to `<cwd>/&1`, which a
+  // bare Edit/Write deny (the headless -p default) turned into a denial.
+  it.each<[command: string, expected: ShellOperation[]]>([
+    ['df -hT / 2>&1', []],
+    ['df -hT / 1>&2', []],
+    ['df -hT / >&2', []],
+    ['df -hT / 2>&-', []],
+    ['df -hT / >&-', []],
+    ['cat <&0', []],
+    ['df -hT / 2>&1 | head -5', []],
+    ['df -hT / >&"1"', []],
+    ['cat /etc/hosts 2>&1', [read('/etc/hosts')]],
+    ['echo hi > out.txt 2>&1', [write(`${CWD}/out.txt`)]],
+    ['echo hi 2>&1 >out.txt', [write(`${CWD}/out.txt`)]],
+  ])('fd duplication is not a file operation: %s', (command, expected) => {
+    expectSorted(command, expected);
+  });
+
+  it('>&file and 1>&file write the named file, not "&file"', () => {
+    expect(ops('echo hi >&.qwen/settings.json')).toEqual([write(SETTINGS)]);
+    expect(ops('echo hi 1>&.qwen/settings.json')).toEqual([write(SETTINGS)]);
+  });
+
+  // Bash writes a file named `&1` when the `&` is quoted or escaped.
+  it.each<[command: string, file: string]>([
+    ['printf TXT >"&1"', '&1'],
+    ["printf TXT >'&1'", '&1'],
+    ['printf TXT >\\&1', '&1'],
+    ['printf TXT 2>"&1"', '&1'],
+    ['printf TXT >"&"1', '&1'],
+    ['printf TXT >"&protected.txt"', '&protected.txt'],
+    ['printf TXT >\\&protected.txt', '&protected.txt'],
+    ['printf TXT >"x&"', 'x&'],
+    ['printf TXT >"notes)"', 'notes)'],
+    ["printf TXT >'notes)'", 'notes)'],
+    ['printf TXT >notes\\)', 'notes)'],
+    ['printf TXT >"&"', '&'],
+    ['printf TXT >\\&', '&'],
+  ])('quoted or escaped & is part of the file name: %s', (command, file) => {
+    expect(ops(command)).toEqual([write(`${CWD}/${file}`)]);
+  });
+
+  it('>&$VAR keeps the literal write: it may name a file', () => {
+    expect(ops('printf TXT >&$OUT')).toEqual([write(`${CWD}/&$OUT`)]);
+  });
+
+  // Only a whole number or `-` is a descriptor; anything else names a file.
+  // (`2>&file` and `<&file` are errors in bash; reporting them keeps the
+  // check strict.)
+  it.each<[command: string, expected: ShellOperation[]]>([
+    ['printf TXT >&1.log', [write(`${CWD}/1.log`)]],
+    ['printf TXT >&2fa-notes.md', [write(`${CWD}/2fa-notes.md`)]],
+    ['printf TXT 2>&protected.txt', [write(`${CWD}/protected.txt`)]],
+    ['cat <&protected.txt', [read(`${CWD}/protected.txt`)]],
+    ['printf TXT >&"y)"', [write(`${CWD}/y)`)]],
+  ])('fd redirect word: %s', (command, expected) => {
+    expectSorted(command, expected);
+  });
+
+  // After an unquoted `>&`, `N>&` or `<&`, bash reads an unquoted `-` as
+  // "close" and starts a new word: `rm >&-notes.txt` closes stdout and
+  // removes notes.txt. The command gets that word as an argument, and the
+  // whole word also stays a file operation (`&-word`), because the parser
+  // doesn't know every command and drops numbers and `$` words as arguments:
+  // `tee >&-2` writes `2`, `my-tool >&-notes.txt` may write notes.txt.
+  it.each<[command: string, expected: ShellOperation[]]>([
+    [
+      'rm >&-notes.txt',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&-notes.txt`)],
+    ],
+    [
+      'rm 1>&-notes.txt',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&-notes.txt`)],
+    ],
+    [
+      'rm 2>&-notes.txt',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&-notes.txt`)],
+    ],
+    ['rm <&-notes.txt', [edit(`${CWD}/notes.txt`), read(`${CWD}/&-notes.txt`)]],
+    [
+      'rm >&-"notes.txt"',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&-notes.txt`)],
+    ],
+    [
+      'cat <&-notes.txt',
+      [read(`${CWD}/&-notes.txt`), read(`${CWD}/notes.txt`)],
+    ],
+    ['printf TXT >&-x', [write(`${CWD}/&-x`)]],
+    ['tee >&-2', [write(`${CWD}/&-2`)]],
+    ['tee 2>&-2', [write(`${CWD}/&-2`)]],
+    ['cat <&-2', [read(`${CWD}/&-2`)]],
+    ['tee >&-$HOME/.bashrc', [write(`${CWD}/&-$HOME/.bashrc`)]],
+    ['tee >&-{a,b}', [write(`${CWD}/&-{a,b}`)]],
+    ['my-tool >&-notes.txt', [write(`${CWD}/&-notes.txt`)]],
+    ['rm -- >&--x', [write(`${CWD}/&--x`)]],
+    ['printf X >&->&"-x"', [write(`${CWD}/-x`), write(`${CWD}/&->&-x`)]],
+    // A closed descriptor can close again: each `>&-` starts a new word, and
+    // only the first redirect reports the whole word.
+    [
+      'rm >&->&-notes.txt',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&->&-notes.txt`)],
+    ],
+    [
+      'rm >&-<&-notes.txt',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&-<&-notes.txt`)],
+    ],
+    [
+      'rm >&-2>&-notes.txt',
+      [edit(`${CWD}/notes.txt`), write(`${CWD}/&-2>&-notes.txt`)],
+    ],
+    ['printf X >&->&-', [write(`${CWD}/&->&-`)]],
+    ['tee >&->&y', [write(`${CWD}/&->&y`), write(`${CWD}/y`)]],
+    ['df -hT / >&-', []],
+    ['df -hT / >&"-"', []],
+  ])('unquoted - closes the descriptor: %s', (command, expected) => {
+    expectSorted(command, expected);
+  });
+
+  // A long chain of closes in one word is walked in a loop: it must not
+  // overflow the stack, and the whole word is reported once.
+  it.each(['>&-', '<&-', '2>&-'])('a long chain of %s returns', (unit) => {
+    const command = `rm ${unit.repeat(20000)}notes.txt`;
+    const result = ops(command);
+    expect(result).toHaveLength(2);
+    expect(result).toContainEqual(edit(`${CWD}/notes.txt`));
+  });
+
+  // A quoted or escaped `)` is part of the word; a bare one closes a subshell.
+  it.each<[command: string, expected: ShellOperation[]]>([
+    ['(echo hi >out.txt)', [write(`${CWD}/out.txt`)]],
+    ['(echo hi > out.txt)', [write(`${CWD}/out.txt`)]],
+    ['cat "notes)"', [read(`${CWD}/notes)`)]],
+    ['rm notes\\)', [edit(`${CWD}/notes)`)]],
+  ])('trailing ): %s', (command, expected) => {
+    expectSorted(command, expected);
+  });
+
+  // `>&` and `<&` aimed at a device: bash discards the output or opens a
+  // socket, so no file operation.
+  it.each<string>([
+    'df -hT / >&/dev/null',
+    'df -hT / 1>&/dev/null',
+    'cat <&/dev/null',
+    'printf TXT >&/dev/tcp/127.0.0.1/80',
+  ])('fd redirect to a device is not a file operation: %s', (command) => {
+    expectSorted(command, []);
+  });
+
+  // A quoted `>` is not a redirect, so `2">"&1` is not fd duplication; bash
+  // reads the unquoted `&` as "run in background", and the check keeps the
+  // literal write.
+  it('2">"&1 is not fd duplication', () => {
+    expect(ops('printf X 2">"&1')).toContainEqual(write(`${CWD}/&1`));
+  });
+
+  // A quoted or escaped `-` is part of the file name: `>&"-x"` writes `-x`.
+  it.each<[command: string, file: string]>([
+    ['printf TXT >&"-x"', '-x'],
+    ["printf TXT >&'-x'", '-x'],
+    ['printf TXT >&\\-x', '-x'],
+    ['printf TXT 1>&"-x"', '-x'],
+    ['printf TXT >&"-1"', '-1'],
+    ['rm >&"-"notes.txt', '-notes.txt'],
+  ])('quoted or escaped - after >& names a file: %s', (command, file) => {
+    expect(ops(command)).toEqual([write(`${CWD}/${file}`)]);
+  });
+
   it('regression: ordinary file redirects still tracked', () => {
     expect(ops('echo hi > out.txt')).toContainEqual(write(`${CWD}/out.txt`));
     expect(ops('sort < in.txt')).toContainEqual(read(`${CWD}/in.txt`));
@@ -609,9 +777,23 @@ describe('extractShellOperationsAcrossCommand', () => {
     for (const command of [
       'cd "$QWEN_HOME" && echo hi > /tmp/out.txt',
       'cd "$QWEN_HOME" && echo hi 1>/tmp/out.txt',
+      'cd "$QWEN_HOME" && echo hi >&/tmp/out.txt',
+      'cd "$QWEN_HOME" && echo hi 1>&/tmp/out.txt',
     ]) {
       expect(across(command)).toEqual([uncertainWrite('/tmp/out.txt', false)]);
     }
+    expect(across('cd "$QWEN_HOME" && cat <&/tmp/in.txt')).toEqual([
+      {
+        virtualTool: 'read_file',
+        filePath: '/tmp/in.txt',
+        cwdUnknown: true,
+        pathMayDependOnCwd: false,
+      },
+    ]);
+    // A quoted `&` is part of a relative name: `&/tmp/out.txt` in the cwd.
+    expect(across('cd "$QWEN_HOME" && echo hi >"&"/tmp/out.txt')).toEqual([
+      uncertainWrite('/repo/&/tmp/out.txt'),
+    ]);
   });
 
   it('falls back gracefully on excessively deep wrapper nesting', () => {

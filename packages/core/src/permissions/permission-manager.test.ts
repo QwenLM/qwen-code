@@ -3361,6 +3361,83 @@ describe('PermissionManager — compound shell write attribution', () => {
     expect(await pm.evaluate(ctx)).toBe('deny');
   });
 
+  // #15600: `>&file` writes `file`, so it must hit that file's deny rule, while
+  // fd duplication (`2>&1`, `>&2`) writes nothing and must not be denied.
+  it.each<[command: string, expected: 'allow' | 'deny']>([
+    ['printf TXT > protected.txt', 'deny'],
+    ['printf TXT &>protected.txt', 'deny'],
+    ['printf TXT >&protected.txt', 'deny'],
+    ['printf TXT 1>&protected.txt', 'deny'],
+    ['df -hT / 2>&1', 'allow'],
+    ['df -hT / >&2', 'allow'],
+    ['printf TXT > other.txt', 'allow'],
+  ])('Bash(*) allow + file deny: %s → %s', async (command, expected) => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)'],
+      permissionsDeny: ['WriteFileTool(protected.txt)'],
+    });
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
+  });
+
+  // A quoted or escaped `&` is part of the file name (`>"&1"` writes `&1`),
+  // so it must stay a write that the deny rule sees.
+  it.each<[command: string, deny: string, expected: 'allow' | 'deny']>([
+    ['printf TXT >"&1"', 'Edit', 'deny'],
+    ["printf TXT >'&1'", 'Edit', 'deny'],
+    ['printf TXT >\\&1', 'Edit', 'deny'],
+    ['printf TXT 2>"&1"', 'Edit', 'deny'],
+    ['printf TXT >"&"', 'Edit', 'deny'],
+    ['df -hT / 2>&1', 'Edit', 'allow'],
+    ['printf TXT >"&protected.txt"', 'WriteFileTool(&protected.txt)', 'deny'],
+    ['printf TXT >\\&protected.txt', 'WriteFileTool(&protected.txt)', 'deny'],
+    ['printf TXT >&protected.txt', 'WriteFileTool(&protected.txt)', 'allow'],
+    // A quoted `-` after `>&` is a file name; an unquoted one closes the
+    // descriptor and the rest of the word is an argument (`rm` removes it).
+    ['printf TXT >&"-x"', 'Edit', 'deny'],
+    ['printf TXT >&\\-x', 'Edit', 'deny'],
+    ['printf TXT >&-x', 'Edit', 'deny'],
+    ['rm >&-notes.txt', 'Edit', 'deny'],
+    ['rm >&-notes.txt', 'Edit(notes.txt)', 'deny'],
+    ['rm 2>&-notes.txt', 'Edit(notes.txt)', 'deny'],
+    ['cat <&-notes.txt', 'Read', 'deny'],
+    ['cat <&-notes.txt', 'Read(notes.txt)', 'deny'],
+    // The command decides what the rest of the word is, so the whole word
+    // stays a file operation: these stay denied under a bare deny.
+    ['tee >&-2', 'Edit', 'deny'],
+    ['tee >&-$HOME/.bashrc', 'Edit', 'deny'],
+    ['cat <&-2', 'Read', 'deny'],
+    ['my-tool >&-notes.txt', 'Edit', 'deny'],
+    ['rm -- >&--x', 'Edit', 'deny'],
+    ['df -hT / >&/dev/null', 'Edit', 'allow'],
+    // A chain of closes: the last word is still an argument.
+    ['rm >&->&-notes.txt', 'Edit(notes.txt)', 'deny'],
+    ['rm >&->&-notes.txt', 'Edit', 'deny'],
+    // A quoted or escaped `)` is part of the file name.
+    ['printf TXT >"notes)"', 'WriteFileTool(notes))', 'deny'],
+    ['printf TXT >notes\\)', 'WriteFileTool(notes))', 'deny'],
+    ['printf TXT >&"y)"', 'WriteFileTool(y))', 'deny'],
+  ])(
+    'Bash(*) allow, %s with %s denied → %s',
+    async (command, deny, expected) => {
+      const pm = repoPm({
+        permissionsAllow: ['Bash(*)'],
+        permissionsDeny: [deny],
+      });
+      expect(await pm.evaluate(sh(command, '/repo'))).toBe(expected);
+    },
+  );
+
+  // A long chain of closes in one word must still get a verdict, not a
+  // stack overflow out of the permission check.
+  it('Bash(*) allow, a long >&- chain with Edit(notes.txt) denied → deny', async () => {
+    const pm = repoPm({
+      permissionsAllow: ['Bash(*)'],
+      permissionsDeny: ['Edit(notes.txt)'],
+    });
+    const command = `rm ${'>&-'.repeat(20000)}notes.txt`;
+    expect(await pm.evaluate(sh(command, '/repo'))).toBe('deny');
+  });
+
   // #11865: a redirect target of non-separator characters (one NBSP here) is a
   // real filename to bash and must survive into the virtual op; deleting it
   // with `String.prototype.trim` dropped the write from a `deny` verdict.
