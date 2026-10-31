@@ -510,6 +510,48 @@ const CASES: Case[] = [
     },
   },
   {
+    // Verification F1 on #15998: a prose LOCAL-write request keeps fix
+    // effective on its file target — the routing clause's mechanical guard
+    // reads this verdict and must never resolve a PR into it.
+    name: 'prose local-write request keeps --fix effective (routing guard input)',
+    raw: 'review my local changes --fix',
+    expect: {
+      targetType: 'file',
+      target: { type: 'file', path: 'review' },
+      fix: { requested: true, effective: true },
+      extraTokens: ['my', 'local', 'changes'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'the same --fix on a PR target is ineffective (what resolution would do)',
+    raw: '15998 --fix',
+    expect: {
+      targetType: 'pr-number',
+      fix: { requested: true, effective: false },
+      extraTokens: [],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'a hash-prefixed number is not PR-shaped; the routing clause owns the rescue',
+    raw: '有更新了，重新评审 #15998',
+    expect: {
+      targetType: 'file',
+      extraTokens: ['#15998'],
+      warningCount: 1,
+    },
+  },
+  {
+    name: 'the ./ escape hatch does not survive a second PR-shaped token',
+    raw: './6711 6712',
+    expect: {
+      targetType: 'pr-number',
+      extraTokens: ['./6711'],
+      warningCount: 1,
+    },
+  },
+  {
     name: 'numeric-prefix junk after /pull/ is not a PR URL (bug: /pull/42oops read as PR 42)',
     raw: 'https://github.com/QwenLM/qwen-code/pull/42oops',
     expect: {

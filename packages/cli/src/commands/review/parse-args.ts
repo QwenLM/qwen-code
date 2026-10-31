@@ -888,8 +888,9 @@ export function parseReviewArgs(
   // order: prose typed before a PR number ("有更新了，重新评审 6711")
   // classifies as a file path, and first-token-wins let the sentence steal
   // the target while the number was demoted to extraTokens. An explicit
-  // path spelling (`./6711`) is not PR-shaped and still wins as a file
-  // target.
+  // path spelling (`./6711`) is not PR-shaped and stays a file target when
+  // no PR-shaped token is present; beside one, the PR wins and the path is
+  // disclosed as an extra.
   const prIdx = targetTokens.findIndex(isPrShapedToken);
   if (prIdx > 0) {
     const [prToken] = targetTokens.splice(prIdx, 1);

@@ -885,7 +885,7 @@ export const runCommand: CommandModule = {
         type: 'boolean',
         default: false,
         describe:
-          'Continue an interrupted review of this PR when its on-disk state still matches, instead of starting over (PR targets only) — same meaning as `/review <pr> --resume`. Falls back to a fresh review when nothing can be resumed. Not for a re-review after new commits — that is a plain run whose delta the incremental check scopes.',
+          'Continue an interrupted review of this PR when its on-disk state still matches, instead of starting over (PR targets only) — same meaning as `/review <pr> --resume`. Falls back to a fresh review when nothing can be resumed. Not for a re-review after new commits — that is a plain run whose delta the incremental check scopes at high effort.',
       })
       .option('json', {
         type: 'boolean',

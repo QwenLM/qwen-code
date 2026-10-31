@@ -943,22 +943,49 @@ describe('bundled review skill', () => {
     // departure from copy-verbatim, so pin its boundary sentences too —
     // widening it re-opens the transcribed-argument incident.
     const body = skillBody();
-    expect(body).toContain('Route conversational intent before the parser');
-    expect(body).toContain('never guess, and never pass the prose through');
+    expect(body).toContain(
+      'Route conversational intent, guarded by the parser',
+    );
+    expect(body).toContain(
+      'never guess, and never review the prose as a file path',
+    );
     expect(body).toContain(
       'any input already carrying a number, URL, or path goes to the parser untouched',
     );
     expect(body).toContain("keep the CLI's args file untouched");
     expect(body).toContain('copy it, do not reconstruct it');
-    // The routing fires on a NON-EMPTY request only: a bare `/review` is a
-    // local review, and the empty-stdin rule owns it. Without this boundary
-    // the clause reads as "no classifiable target → resolve a PR", which
-    // would hijack every bare local review into the last PR.
+    // Resolution is for PR re-review requests only, and a bare `/review`
+    // stays a local review. Without these boundaries the clause reads as
+    // "no classifiable target → resolve a PR", hijacking local runs.
     expect(body).toContain(
-      'When a non-empty request holds no classifiable target',
+      'Resolution is for requests to review a PULL REQUEST again',
     );
     expect(body).toContain(
-      'a bare `/review` with no arguments is a local review, not intent',
+      'holds no classifiable target — no PR number, no PR URL, no file path',
+    );
+    expect(body).toContain(
+      'a bare `/review` with no arguments is a local review',
+    );
+    // Verification F1 (prose local-write hijack): "review my local changes
+    // --fix" matches the no-target trigger, and resolving a PR into it
+    // disarms --fix. The guard is mechanical — the ORIGINAL verdict's
+    // fix.effective — not a wording guess; prose local intent without
+    // --fix is excluded too. The hash-decoration rule closes the "#15998"
+    // copy ambiguity the same report measured.
+    expect(body).toContain(
+      'when the original verdict has `fix.effective: true`',
+    );
+    expect(body).toContain('never resolve a PR into it');
+    expect(body).toContain(
+      'Prose that asks for a LOCAL review is not re-review intent',
+    );
+    expect(body).toContain(
+      'a `#` prefix is reference decoration, not part of the target',
+    );
+    // Verification F2: delta scoping is high-only; the clause must not
+    // promise it to lower efforts.
+    expect(body).toContain(
+      'at high effort the incremental check below scopes the delta',
     );
     // The resolved invocation keeps the flags the input already carries,
     // so the parser still sees them — but carrying a flag is NOT posting

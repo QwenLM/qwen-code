@@ -1143,7 +1143,8 @@ async function runFetchPr(args: FetchPrArgs): Promise<void> {
         `Cannot resume PR #${prNumber} (${outcome.reason}); starting a fresh review.` +
           (outcome.reason === 'head-moved'
             ? ' The PR gained commits since the interrupted run, so this fresh' +
-              ' run IS the re-review — its incremental check scopes the delta.' +
+              ' run IS the re-review — at high effort its incremental check' +
+              ' scopes the delta (lower efforts review the full diff).' +
               ' After future updates use a plain `/review <n>` without' +
               ' --resume; this refusal spends the one head-movement restart.'
             : ''),
