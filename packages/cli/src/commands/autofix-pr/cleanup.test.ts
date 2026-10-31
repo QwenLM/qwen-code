@@ -693,4 +693,68 @@ describe('runCleanup (real git)', () => {
       rmSync(sibling, { recursive: true, force: true });
     }
   });
+
+  describe('in place', () => {
+    const makeInPlace = () => {
+      run(repo, 'worktree', 'remove', '--force', paths.worktreePath);
+      run(repo, 'branch', '-D', paths.branch);
+      writeState(paths.statePath, {
+        ...readState(paths.statePath)!,
+        inPlace: true,
+        worktreePath: repo,
+        branch: 'main',
+      });
+    };
+
+    it('removes only the watch files; the checkout and its branch stay', () => {
+      makeInPlace();
+      run(repo, 'update-ref', paths.headRef, headSha);
+      const log = join(dirname(paths.statePath), 'autofix-pr-7-ci-1.log');
+      writeFileSync(log, 'log');
+      const before = run(repo, 'rev-parse', 'HEAD');
+      // cwd is the checkout itself: no "from inside it" refusal applies.
+      runCleanup(7, false);
+      expect(lastReport()).toMatchObject({
+        removed: true,
+        inPlace: true,
+        worktreePath: repo,
+      });
+      expect(existsSync(paths.statePath)).toBe(false);
+      expect(existsSync(log)).toBe(false);
+      expect(run(repo, 'for-each-ref', paths.headRef)).toBe('');
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(before);
+      expect(run(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+      expect(
+        existsSync(
+          historyPath(paths, { host: 'github.com', owner: 'o', repo: 'r' }),
+        ),
+      ).toBe(true);
+    });
+
+    it('--force keeps a dirty checkout and its unpushed commits too', () => {
+      makeInPlace();
+      run(repo, 'commit', '-q', '--allow-empty', '-m', 'mine');
+      writeFileSync(join(repo, 'dirty.txt'), 'x');
+      const before = run(repo, 'rev-parse', 'HEAD');
+      runCleanup(7, true);
+      expect(existsSync(join(repo, 'dirty.txt'))).toBe(true);
+      expect(run(repo, 'rev-parse', 'HEAD')).toBe(before);
+      expect(run(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+      expect(existsSync(paths.statePath)).toBe(false);
+    });
+
+    it('--force removes a killed helper lock, break and non-regular gate, and the head ref', () => {
+      makeInPlace();
+      run(repo, 'update-ref', paths.headRef, headSha);
+      mkdirSync(paths.lockPath, { recursive: true });
+      writeFileSync(`${paths.lockPath}.break`, '');
+      mkdirSync(paths.gatePath, { recursive: true });
+      runCleanup(7, true);
+      expect(run(repo, 'for-each-ref', paths.headRef)).toBe('');
+      expect(existsSync(paths.lockPath)).toBe(false);
+      expect(existsSync(`${paths.lockPath}.break`)).toBe(false);
+      expect(existsSync(paths.gatePath)).toBe(false);
+      expect(run(repo, 'symbolic-ref', 'HEAD')).toBe('refs/heads/main');
+    });
+  });
 });

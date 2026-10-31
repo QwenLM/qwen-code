@@ -75,9 +75,10 @@ async function handleAdd(argv: AddArgs): Promise<void> {
   try {
     added = await addPeerController(argv.label ?? '');
   } catch (error) {
-    // A PeerControllerError is a decision this command made about the
-    // user's input, so it is reported as it stands; anything else is an
-    // I/O failure worth naming the file for.
+    // A PeerControllerError explains itself (a refused request, an
+    // unusable registry, or one that kept changing under the write), so it
+    // is reported as it stands. Anything else, such as an I/O error or a
+    // lock wait that ran out, is reported with the registry's path.
     writeStderrLine(
       error instanceof PeerControllerError
         ? `Error: ${error.message}`
@@ -114,7 +115,7 @@ async function handleAdd(argv: AddArgs): Promise<void> {
   );
   writeStdoutLine(`  {"msgV":1,"type":"auth","token":"${token}"}`);
   writeStdoutLine(
-    'The target session must not have agents.crossSessionMessaging turned off (it is on by default), and must be restarted after changing that setting.',
+    'The target session must not have agents.crossSessionMessaging turned off (it is on by default), and must be restarted after changing that setting. It must also have a bound inbox: qwen sessions ps --json must show an ipcPath for it. --bare and --safe-mode bind none, and neither does the OpenTUI renderer.',
   );
   writeStdoutLine(
     'Messages it sends are delivered without per-message review, unless agents.crossSessionInbound is "hold" or "refuse".',
