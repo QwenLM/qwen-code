@@ -354,9 +354,13 @@ export function writeCodingPlanConfig(
   };
   delete settings.codingPlan;
 
-  // Default model
-  const defaultModelId = planConfig.template[0]?.id ?? 'qwen3.5-plus';
-  settings.model = { name: defaultModelId };
+  // Default model. Write name and its paired baseUrl key-by-key so model
+  // settings the CLI owns (reasoningEffort, maxSessionTurns, …) survive; ''
+  // is the tombstone the model resolver expects when no baseUrl is known.
+  const defaultModel = planConfig.template[0];
+  const model = ensureNestedObject(settings, 'model');
+  model.name = defaultModel?.id ?? 'qwen3.5-plus';
+  model.baseUrl = defaultModel?.baseUrl ?? '';
 
   writeSettings(settings);
 
@@ -412,9 +416,13 @@ export function writeModelProvidersConfig(params: {
   const nonTarget = existing.filter((e) => e.envKey !== 'OPENAI_API_KEY');
   providers[AuthType.USE_OPENAI] = [...modelArray, ...nonTarget];
 
-  // Active model
+  // Active model. Same per-key write and paired baseUrl as the provider entry
+  // above, so the pair stays consistent and sibling model keys survive.
   if (params.activeModel) {
-    settings.model = { name: params.activeModel };
+    const model = ensureNestedObject(settings, 'model');
+    model.name = params.activeModel;
+    model.baseUrl =
+      params.modelProviders[params.activeModel] || 'https://api.openai.com/v1';
   }
 
   for (const plan of SUBSCRIPTION_PLAN_OPTIONS) {
