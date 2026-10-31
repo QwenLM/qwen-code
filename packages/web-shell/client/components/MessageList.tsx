@@ -19,7 +19,10 @@ import {
 } from 'react';
 import { createPortal } from 'react-dom';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import type { DaemonSessionArtifact } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonContextMemoryDetail,
+  DaemonSessionArtifact,
+} from '@qwen-code/sdk/daemon';
 import type {
   ToolGroupMessage as DaemonToolGroupMessage,
   ThinkingMessage as DaemonThinkingMessage,
@@ -50,6 +53,7 @@ import {
 } from '../customization';
 import { useI18n } from '../i18n';
 import { formatContextTokens } from '../utils/formatTokenCount';
+import { formatTurnDuration } from '../utils/turnDuration';
 import { useWebShellPortalRoot } from '../portalRoot';
 import { useTranscriptRenderMode } from '../transcriptRenderMode';
 import { useAssistantFeedback } from '../hooks/useAssistantFeedback';
@@ -107,6 +111,11 @@ export interface MessageListProps {
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  /** Open a context instruction file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   /** Click an uploaded image in a user message to preview it in the right panel. */
   onImagePreview?: (src: string, alt?: string) => void;
   onAttachmentPreview?: (file: AttachmentPreviewRequest) => void;
@@ -2434,14 +2443,6 @@ export function shouldAdjustVirtualScrollPosition(
   return itemEnd <= scrollOffset;
 }
 
-function formatDuration(ms: number): string {
-  const totalSeconds = Math.max(0, Math.ceil(ms / 1000));
-  if (totalSeconds < 60) return `${totalSeconds}s`;
-  const minutes = Math.floor(totalSeconds / 60);
-  const seconds = totalSeconds - minutes * 60;
-  return `${minutes}m ${seconds}s`;
-}
-
 type Translate = (
   key: string,
   vars?: Record<string, string | number>,
@@ -2449,7 +2450,7 @@ type Translate = (
 
 function durationMetricText(elapsedMs: number | undefined): string {
   return elapsedMs !== undefined && elapsedMs >= 0
-    ? formatDuration(elapsedMs)
+    ? formatTurnDuration(elapsedMs)
     : '';
 }
 
@@ -3043,6 +3044,7 @@ export const MessageList = memo(
       terminalBackgroundShellTaskIds,
       pendingApproval,
       onShowContextDetail,
+      onOpenMemoryFile,
       onImagePreview,
       onAttachmentPreview,
       onInsightReportOpen,
@@ -3723,6 +3725,13 @@ export const MessageList = memo(
       isResponding,
       latestTurnAwaitsAgentSummary,
     ]);
+    const latestFinalAssistantTurnId = useMemo(() => {
+      let latest: string | undefined;
+      for (const turnId of finalAssistantTurnIdByAssistantId.values()) {
+        latest = turnId;
+      }
+      return latest;
+    }, [finalAssistantTurnIdByAssistantId]);
 
     // ── Per-turn collapse ────────────────────────────────────────────────
     // Completed turns fold down to their prompt + final answer (toggle on the
@@ -4243,8 +4252,8 @@ export const MessageList = memo(
     //   5. Session restore / reconnect — during history replay
     //      (`catchingUp === true`), all auto-scrolling is suppressed to
     //      avoid fighting the rapidly replaying transcript. Once replay
-    //      finishes (`catchingUp` flips to falsy), a single scroll-to-
-    //      bottom fires so the user lands at the latest content.
+    //      finishes (`catchingUp` flips to falsy), scroll to the bottom
+    //      unless the user paused follow to read earlier content.
     //
     //   6. Short content — if the content doesn't overflow the container
     //      (no scrollbar), scrollToBottom is a no-op. This avoids a
@@ -5669,11 +5678,13 @@ export const MessageList = memo(
     }, [messages, catchingUp, loadingTranscript, setShouldFollow]);
 
     // Rule 5: session restore — when catchingUp flips from true → falsy,
-    // replay just finished. Scroll to bottom once so the user sees the
-    // latest content without the viewport fighting the replay.
+    // replay just finished. Preserve a reading pause across reconnects.
     useLayoutEffect(() => {
-      if (prevCatchingUp.current && !catchingUp) {
-        followPausedByUserRef.current = false;
+      if (
+        prevCatchingUp.current &&
+        !catchingUp &&
+        !followPausedByUserRef.current
+      ) {
         setShouldFollow(true);
         scrollToBottom('auto');
       }
@@ -5961,6 +5972,7 @@ export const MessageList = memo(
               deleteMessageDisabled={deletion?.active}
               pendingApproval={pendingApproval}
               onShowContextDetail={onShowContextDetail}
+              onOpenMemoryFile={onOpenMemoryFile}
               onImagePreview={onImagePreview}
               onAttachmentPreview={onAttachmentPreview}
               onTurnOutputOpen={onTurnOutputOpen}
@@ -5998,6 +6010,11 @@ export const MessageList = memo(
                 displayItem.message.role === 'assistant' &&
                 (agentReply ||
                   finalAssistantTurnIdByAssistantId.has(displayItem.message.id))
+              }
+              assistantFooterAlwaysVisible={
+                !isResponding &&
+                finalAssistantTurnId !== undefined &&
+                finalAssistantTurnId === latestFinalAssistantTurnId
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
@@ -6066,6 +6083,7 @@ export const MessageList = memo(
         transcriptRenderMode,
         handleAutomaticAgentExpansionChange,
         onShowContextDetail,
+        onOpenMemoryFile,
         displayItems,
         scrollToMessage,
         onImagePreview,
@@ -6082,6 +6100,7 @@ export const MessageList = memo(
         visibleItems,
         flashTarget,
         finalAssistantTurnIdByAssistantId,
+        latestFinalAssistantTurnId,
         assistantFeedbackEnabled,
         assistantFeedbackHeadById,
         assistantFeedbackRatings,

@@ -217,6 +217,107 @@ export function mapReasoningControls(
   };
 }
 
+export function mapWorkflowMode(
+  configOptions: unknown,
+): Pick<DaemonConnectionState, 'workflowMode' | 'workflowModeStatus'> {
+  const unknown = {
+    workflowMode: undefined,
+    workflowModeStatus: 'unknown' as const,
+  };
+  if (!Array.isArray(configOptions)) return unknown;
+  const matches = configOptions
+    .map(getRecord)
+    .filter((item) => item?.['id'] === 'workflow_mode');
+  if (matches.length === 0) {
+    return { workflowMode: undefined, workflowModeStatus: 'unsupported' };
+  }
+  if (matches.length !== 1) return unknown;
+  const option = matches[0];
+  const value = option?.['currentValue'];
+  const choices = option?.['options'];
+  const meta = getRecord(getRecord(option?.['_meta'])?.['qwen.workflowMode']);
+  if (
+    option?.['type'] !== 'select' ||
+    (value !== 'on' && value !== 'off') ||
+    !Array.isArray(choices) ||
+    !['on', 'off'].every((choice) =>
+      choices.some((item) => getRecord(item)?.['value'] === choice),
+    ) ||
+    typeof meta?.['available'] !== 'boolean' ||
+    typeof meta['effective'] !== 'boolean' ||
+    meta['effective'] !== (value === 'on' && meta['available']) ||
+    (meta['reason'] !== undefined && typeof meta['reason'] !== 'string')
+  )
+    return unknown;
+  return {
+    workflowModeStatus: 'ready',
+    workflowMode: {
+      requested: value === 'on',
+      available: meta['available'],
+      effective: meta['effective'],
+      ...(typeof meta['reason'] === 'string' ? { reason: meta['reason'] } : {}),
+    },
+  };
+}
+
+export function getConfigOptionsUpdate(
+  event: DaemonEvent,
+): { configOptions: unknown } | undefined {
+  if (event.type !== 'session_update') return undefined;
+  const update = getSessionUpdatePayload(event.data);
+  return update?.sessionUpdate === 'config_option_update'
+    ? { configOptions: update.configOptions }
+    : undefined;
+}
+
+export function applyConfigOptions(
+  current: DaemonConnectionState,
+  configOptions: unknown,
+): DaemonConnectionState {
+  const mode = mapWorkflowMode(configOptions);
+  return {
+    ...current,
+    ...mode,
+    ...(mode.workflowModeStatus === 'unknown'
+      ? { workflowMode: current.workflowMode }
+      : {}),
+    reasoning: mapReasoningControls(configOptions),
+    context:
+      current.context && Array.isArray(configOptions)
+        ? {
+            ...current.context,
+            state: { ...current.context.state, configOptions },
+          }
+        : current.context,
+  };
+}
+
+export function applySessionConfigContext(
+  current: DaemonConnectionState,
+  context: DaemonSessionContextStatus,
+): DaemonConnectionState {
+  const models = mapSessionContextModels(context);
+  const mode = getCurrentMode(context);
+  return applyConfigOptions(
+    {
+      ...current,
+      ...(models?.models.length ? { models: models.models } : {}),
+      currentModel: models?.currentModel ?? current.currentModel,
+      currentMode: mode ?? current.currentMode,
+      planExecutionMode:
+        mode !== undefined
+          ? getPlanExecutionMode(context)
+          : current.planExecutionMode,
+      contextWindow: models?.contextWindow ?? current.contextWindow,
+      context: {
+        ...context,
+        recovery: current.context?.recovery ?? context.recovery,
+      },
+    },
+    context.state.configOptions ?? [],
+  );
+}
+
 export function mapSessionContextReasoning(
   status: DaemonSessionContextStatus | undefined,
 ): DaemonReasoningControls | undefined {

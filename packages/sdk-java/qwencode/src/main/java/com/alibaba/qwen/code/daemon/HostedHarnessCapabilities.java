@@ -9,6 +9,7 @@ public final class HostedHarnessCapabilities {
     private final int currentProtocolVersion;
     private final List<Integer> supportedProtocolVersions;
     private final String bootId;
+    private final String instanceId;
     private final String capabilityDigest;
     private final int lifecycleProtocolVersion;
     private final List<String> features;
@@ -47,6 +48,14 @@ public final class HostedHarnessCapabilities {
     HostedHarnessCapabilities(int currentProtocolVersion, List<Integer> supportedProtocolVersions,
             String bootId, String capabilityDigest, int lifecycleProtocolVersion, int titleProtocolVersion,
             List<String> features, List<String> lifecycleV2Profiles) {
+        this(currentProtocolVersion, supportedProtocolVersions, bootId, capabilityDigest,
+                lifecycleProtocolVersion, titleProtocolVersion, features, lifecycleV2Profiles, null);
+    }
+
+    HostedHarnessCapabilities(int currentProtocolVersion, List<Integer> supportedProtocolVersions,
+            String bootId, String capabilityDigest, int lifecycleProtocolVersion, int titleProtocolVersion,
+            List<String> features, List<String> lifecycleV2Profiles, String instanceId) {
+        this.instanceId = instanceId;
         this.features = List.copyOf(features);
         this.lifecycleV2Profiles = List.copyOf(lifecycleV2Profiles);
         this.titleProtocolVersion = titleProtocolVersion;
@@ -66,6 +75,10 @@ public final class HostedHarnessCapabilities {
 
     public List<Integer> getSupportedProtocolVersions() {
         return supportedProtocolVersions;
+    }
+
+    public String getInstanceId() {
+        return instanceId;
     }
 
     public String getBootId() {

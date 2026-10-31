@@ -276,6 +276,23 @@ describe('realUserPromptTexts', () => {
     ];
     expect(realUserPromptTexts(h)).toEqual(['valid']);
   });
+
+  it('recalls full paste text while preserving literal legacy placeholders', () => {
+    const placeholder = '[Pasted Content 1200 chars]';
+    const first = 'PASTE_ALPHA '.padEnd(1200, 'a');
+    const second = 'PASTE_BETA '.padEnd(1200, 'b');
+    const h: HistoryItem[] = [
+      mk({ type: 'user', text: placeholder, recallText: first }, 1),
+      mk({ type: 'user', text: placeholder, recallText: second }, 2),
+      mk({ type: 'user', text: placeholder }, 3),
+    ];
+    expect(realUserPromptTexts(h)).toEqual([first, second, placeholder]);
+    expect(h.map((item) => item.text)).toEqual([
+      placeholder,
+      placeholder,
+      placeholder,
+    ]);
+  });
 });
 
 describe('stripLeadingSystemReminders', () => {

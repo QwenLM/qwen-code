@@ -172,6 +172,7 @@ export interface UIState {
    * indicator; cleared when the turn returns to idle.
    */
   workflowKeywordActive: boolean;
+  pendingPastes?: Map<string, string>;
   sessionStats: SessionStatsState;
   terminalWidth: number;
   terminalHeight: number;

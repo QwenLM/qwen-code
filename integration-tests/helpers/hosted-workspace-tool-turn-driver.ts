@@ -245,26 +245,30 @@ const modelReply: FakeOpenAIHandler = ({ body }) => {
   // the lead's team tools with them, since H4e-b3a their shutdown
   // request, and since #13803 (K4) the Workflow tool — its own kind
   // reader gates the advertisement, so a child Session still hides it.
-  assert.deepEqual(tools.map((tool) => tool.function.name).sort(), [
-    ...(shellProfile ? ['agent'] : []),
-    'edit',
-    ...(shellProfile ? ['monitor'] : []),
-    'read_file',
-    ...(shellProfile
-      ? [
-          'request_shutdown',
-          'run_shell_command',
-          'send_message',
-          'task_create',
-          'task_list',
-          'task_update',
-          'team_create',
-          'team_delete',
-          'workflow',
-        ]
-      : []),
-    'write_file',
-  ]);
+  assert.deepEqual(
+    tools.map((tool) => tool.function.name).sort(),
+    [
+      ...(shellProfile ? ['agent'] : []),
+      'edit',
+      ...(shellProfile ? ['glob'] : []),
+      'read_file',
+      ...(shellProfile
+        ? [
+            'request_shutdown',
+            'run_shell_command',
+            'send_message',
+            'task_create',
+            'task_list',
+            'task_update',
+            'team_create',
+            'team_delete',
+            'workflow',
+          ]
+        : []),
+      'web_fetch',
+      'write_file',
+    ].sort(),
+  );
   const messages = body['messages'] as Array<{
     role: string;
     content: unknown;

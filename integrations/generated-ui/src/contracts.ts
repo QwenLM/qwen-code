@@ -11,6 +11,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 
 export const APP_URI = 'ui://generated-ui/view-v1.html';
+export const BUNDLED_APP_URI = 'ui://qwen-code-generated-ui/view-v1.html';
 export const META_KEY = 'qwen/generated-ui';
 export const MAX_RESULT_CHARS = 24_000;
 export const MAX_RESULT_BYTES = 24_000;

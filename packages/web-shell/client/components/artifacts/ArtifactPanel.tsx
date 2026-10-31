@@ -12,6 +12,7 @@ import type { WebShellRightPanelItem } from '../../customization';
 import {
   useConnection,
   useWorkspace,
+  type DaemonContextMemoryDetail,
   type DaemonSessionOwnerSnapshot,
   type DaemonSessionActions,
   type DaemonScheduledTask,
@@ -125,9 +126,14 @@ import { AgentWorkflow } from './AgentWorkflow';
 import type { EnvironmentAgentTask } from '../panels/EnvironmentPanel';
 import { SideTaskPanel } from './SideTaskPanel';
 import type { WebShellModelManagementOptions } from '../../modelManagement';
+import type {
+  WebShellUnavailableModel,
+  WebShellUnavailableModelTooltipMount,
+} from '../../unavailableModels';
 import { SessionWorkflowInspector } from '../workflow/SessionWorkflowInspector';
 import type { SessionWorkflowProjection } from '../workflow/session-workflow-model';
 import { TerminalPanel } from '../terminal/TerminalPanel';
+import { DaemonConnectionBanner } from '../DaemonConnectionBanner';
 import { WebPreviewPanel } from '../preview/WebPreviewPanel';
 import { SavedWebPreview } from '../preview/SavedWebPreview';
 import type { WebPreviewState } from '../preview/web-preview';
@@ -454,6 +460,11 @@ interface ArtifactPanelProps {
     workspaceCwd?: string,
     workspaceId?: string,
   ) => void;
+  /** Open a context-panel memory file in a read-only preview. */
+  onOpenMemoryFile?: (
+    file: DaemonContextMemoryDetail,
+    workspaceCwd: string,
+  ) => void;
   latestReviewAvailable?: boolean;
   onOpenLatestReview?: () => void;
   /** Open an interactive terminal tab in this panel (shown as an empty-state action). */
@@ -514,6 +525,8 @@ interface ArtifactPanelProps {
   onError?: (error: unknown, fallback: string) => void;
   sessionWorkflowEnabled?: boolean;
   modelManagement?: WebShellModelManagementOptions;
+  unavailableModels?: readonly WebShellUnavailableModel[];
+  mountUnavailableModelTooltip?: WebShellUnavailableModelTooltipMount;
   workflow?: {
     todos: readonly TodoItem[];
     tools: readonly ACPToolCall[];
@@ -663,6 +676,7 @@ export function ArtifactPanel({
   onSelectTurnCallsPrompt,
   onCloseTab,
   onOpenFilePreview,
+  onOpenMemoryFile,
   latestReviewAvailable = false,
   onOpenLatestReview,
   onOpenTerminal,
@@ -696,6 +710,8 @@ export function ArtifactPanel({
   onError,
   sessionWorkflowEnabled,
   modelManagement,
+  unavailableModels,
+  mountUnavailableModelTooltip,
   workflow,
   onImageIngestionNotice,
   deferSubagentMount = false,
@@ -1083,6 +1099,7 @@ export function ArtifactPanel({
           </button>
         </div>
       </div>
+      {(fullscreen || variant === 'drawer') && <DaemonConnectionBanner />}
       <div
         className={`${styles.body} ${
           activeTab?.kind === 'side_task' || activeTab?.kind === 'files'
@@ -1660,6 +1677,8 @@ export function ArtifactPanel({
             onError={onError}
             sessionWorkflowEnabled={sessionWorkflowEnabled}
             modelManagement={modelManagement}
+            unavailableModels={unavailableModels}
+            mountUnavailableModelTooltip={mountUnavailableModelTooltip}
             onImageIngestionNotice={onImageIngestionNotice}
           />
         ) : activeTab.kind === 'image' ? (
@@ -1694,6 +1713,7 @@ export function ArtifactPanel({
             controls={contextUsageControls?.[activeTab.sessionId]}
             sessionActions={activeTab.sessionActions}
             sessionId={activeTab.sessionId}
+            onOpenMemoryFile={onOpenMemoryFile}
           />
         ) : activeTab.kind === 'trajectory' ? (
           <TrajectoryPanel

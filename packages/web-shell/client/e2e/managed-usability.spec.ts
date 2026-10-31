@@ -16,6 +16,7 @@ for (const width of [1280, 390]) {
       displayName: `Project ${id.toUpperCase()}`,
       canCreateSession: true,
       state: 'active',
+      defaultCwdRelative: id === 'b' ? 'qwen-code' : '.',
     }));
     const errors: string[] = [];
     page.on('pageerror', (error) => errors.push(error.message));
@@ -23,6 +24,19 @@ for (const width of [1280, 390]) {
       const request = route.request();
       const path = new URL(request.url()).pathname;
       const body = request.postDataJSON();
+      if (path.endsWith('/user-messages/query'))
+        return route.fulfill({ json: { paused: false, messages: [] } });
+      if (path.endsWith('/workspace-extensions/query'))
+        return route.fulfill({ json: { supported: false, extensions: [] } });
+      if (path.endsWith('/workspaces/worktrees/options'))
+        return route.fulfill({
+          json: {
+            supported: true,
+            baseCommit: 'a'.repeat(40),
+            branches: ['main'],
+            currentBranch: 'main',
+          },
+        });
       if (path.endsWith('/runtime-nodes/query'))
         return route.fulfill({ json: { supported: false, data: [] } });
       if (path.endsWith('/sessions/query'))
@@ -84,7 +98,7 @@ for (const width of [1280, 390]) {
         return route.fulfill({ json: summary });
       if (path.endsWith('/transcript/query'))
         return route.fulfill({
-          json: { events: [], lastSequence: 0, hasMore: false },
+          json: { items: [], events: [], lastSequence: 0, hasMore: false },
         });
       if (path.endsWith('/events/stream'))
         return route.fulfill({ contentType: 'text/event-stream', body: '' });
@@ -110,6 +124,9 @@ for (const width of [1280, 390]) {
           json: {
             sessionId: summary!.sessionId,
             turnId: 'skill-turn',
+            operationId: 'submit-skill-turn',
+            admissionStage: 'java_durable',
+            deliveryState: 'pending',
             status: 'accepted',
             replayed: false,
           },
@@ -125,6 +142,15 @@ for (const width of [1280, 390]) {
     await expect(page.locator('[data-managed-standard-chat]')).toContainText(
       'Welcome to',
     );
+    await expect(page.locator('#managed-workspace-cwd')).toHaveCount(0);
+    await expect(
+      page.getByText('Relative directory', { exact: false }),
+    ).toHaveCount(0);
+    await expect(
+      page
+        .getByRole('region', { name: 'Managed conversation' })
+        .getByRole('button', { name: 'Refresh', exact: true }),
+    ).toHaveCount(0);
     await page.getByRole('button', { name: 'Workspace' }).click();
     await page.getByRole('menuitemradio', { name: 'Project B' }).click();
     await page.getByRole('button', { name: /^Select Model:/ }).click();
@@ -141,6 +167,32 @@ for (const width of [1280, 390]) {
     await editor.press('Shift+Enter');
     await editor.press('x');
     await expect(editor.locator('.cm-line')).toHaveText(['!inspect', 'x']);
+    await page.getByRole('button', { name: 'Workspace', exact: true }).click();
+    await page
+      .getByRole('menuitem', { name: 'Working directory', exact: true })
+      .click();
+    const directoryDialog = page.getByRole('dialog', {
+      name: 'Working directory',
+    });
+    const directoryInput = directoryDialog.getByRole('textbox', {
+      name: 'Directory relative to Workspace root',
+    });
+    await expect(directoryInput).toHaveValue('qwen-code');
+    await directoryInput.fill('discarded');
+    await directoryDialog
+      .getByRole('button', { name: 'cancel', exact: true })
+      .click();
+    await page.getByRole('button', { name: 'Workspace', exact: true }).click();
+    await page
+      .getByRole('menuitem', { name: 'Working directory', exact: true })
+      .click();
+    await expect(directoryInput).toHaveValue('qwen-code');
+    await directoryInput.fill('qwen-code/services/api');
+    await directoryDialog
+      .getByRole('button', { name: 'save', exact: true })
+      .click();
+    await expect(editor.locator('.cm-line')).toHaveText(['!inspect', 'x']);
+    await expect(page.locator('#managed-workspace-cwd')).toHaveCount(0);
     await expect(page.getByRole('button', { name: 'Shell mode' })).toHaveCount(
       0,
     );
@@ -161,7 +213,7 @@ for (const width of [1280, 390]) {
     expect(requests).toHaveLength(width === 390 ? 2 : 1);
     expect(requests[0]).toMatchObject({
       agentId: 'agent-b',
-      workspace: { workspaceId: 'ws-b', cwdRelative: '.' },
+      workspace: { workspaceId: 'ws-b', cwdRelative: 'qwen-code/services/api' },
       input: [{ type: 'input_text', text: '!inspect\nx' }],
     });
     if (width === 390) {
@@ -214,6 +266,19 @@ test('abandoning an unconfirmed first input warns about execution and refreshes 
   await page.route('**/api/agent/web-shell/v1/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
     const body = route.request().postDataJSON();
+    if (path.endsWith('/user-messages/query'))
+      return route.fulfill({ json: { paused: false, messages: [] } });
+    if (path.endsWith('/workspace-extensions/query'))
+      return route.fulfill({ json: { supported: false, extensions: [] } });
+    if (path.endsWith('/workspaces/worktrees/options'))
+      return route.fulfill({
+        json: {
+          supported: true,
+          baseCommit: 'a'.repeat(40),
+          branches: ['main'],
+          currentBranch: 'main',
+        },
+      });
     if (path.endsWith('/runtime-nodes/query'))
       return route.fulfill({ json: { supported: false, data: [] } });
     if (path.endsWith('/sessions/query')) {
@@ -286,14 +351,14 @@ test('abandoning an unconfirmed first input warns about execution and refreshes 
     page.getByText('may repeat its effects', { exact: false }),
   ).toBeVisible();
   await expect(
-    page.getByRole('button', { name: /Possibly admitted task/ }),
+    page.getByRole('button', { name: /^Possibly admitted task\b/ }),
   ).toHaveCount(0);
   const before = queries;
   await page
     .getByRole('button', { name: 'Abandon local confirmation' })
     .click();
   await expect(
-    page.getByRole('button', { name: /Possibly admitted task/ }),
+    page.getByRole('button', { name: /^Possibly admitted task\b/ }),
   ).toBeVisible();
   expect(queries).toBeGreaterThan(before);
   await expect(editor).toContainText('Inspect README');
