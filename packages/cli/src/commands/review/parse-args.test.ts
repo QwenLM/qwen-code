@@ -527,6 +527,30 @@ const CASES: Case[] = [
       warningCount: 1,
     },
   },
+  {
+    // Review P2 on #15998: option-only invocations are supported local
+    // reviews. The skill's routing clause must never resolve a PR into
+    // them — these pin the parser contract the clause has to leave alone.
+    name: 'option-only --fix stays a local review with fix effective',
+    raw: '--fix',
+    expect: {
+      targetType: 'local',
+      fix: { requested: true, effective: true },
+      effort: 'medium',
+      extraTokens: [],
+      warningCount: 0,
+    },
+  },
+  {
+    name: 'option-only --effort low stays a local review at low',
+    raw: '--effort low',
+    expect: {
+      targetType: 'local',
+      effort: 'low',
+      extraTokens: [],
+      warningCount: 0,
+    },
+  },
 ];
 
 describe('parseReviewArgs', () => {
@@ -540,6 +564,25 @@ describe('parseReviewArgs', () => {
     for (const [key, value] of Object.entries(rest)) {
       expect(got[key as keyof ParsedReviewArgs]).toEqual(value);
     }
+  });
+
+  it('keeps the specific invalid-URL diagnostic when a number outranks it', () => {
+    // Review nit on #15998, confirmed as a real regression once pinned:
+    // the PR-shape reorder moved the malformed URL behind the assigned
+    // target, where it fed the generic "Ignoring extra argument(s)" line
+    // and lost its specific diagnostic. The invalid-url refusal is now
+    // hoisted ahead of the target-assigned branch, so the warning is
+    // position-independent.
+    const got = parseReviewArgs(
+      'https://github.com/QwenLM/qwen-code/pull/42oops 6711',
+    );
+    expect(got.target).toEqual({ type: 'pr-number', number: 6711 });
+    expect(
+      got.warnings.some(
+        (w) => w.includes('Unrecognized URL') && w.includes('not a PR/CR URL'),
+      ),
+    ).toBe(true);
+    expect(got.warnings.some((w) => w.includes('Ignoring extra'))).toBe(false);
   });
 
   it('extracts host/owner/repo/number from a PR URL', () => {

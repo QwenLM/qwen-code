@@ -912,30 +912,32 @@ export function parseReviewArgs(
   const extraTokens: string[] = [];
   const trailingExtras: string[] = [];
   for (const tok of targetTokens) {
-    if (targetAssigned) {
-      // A bare number restating the assigned URL target's number is the
-      // same intent restated, not an extra argument (mirror of the
-      // rescue loop's restatement handling).
-      const classifiedRestate = classifyToken(tok);
-      if (
-        target.type === 'pr-url' &&
-        classifiedRestate !== null &&
-        classifiedRestate !== 'invalid-url' &&
-        classifiedRestate.type === 'pr-number' &&
-        classifiedRestate.number === target.number
-      ) {
-        continue;
-      }
-      extraTokens.push(tok);
-      trailingExtras.push(tok);
-      continue;
-    }
     const classified = classifyToken(tok);
+    // The malformed-URL diagnostic is position-independent: the PR-shape
+    // preference above can move a number ahead of a malformed URL, and the
+    // refused URL keeps its specific warning instead of demoting into the
+    // generic extra-argument line (review nit on #15998).
     if (classified === 'invalid-url') {
       warnings.push(
         `Unrecognized URL ${JSON.stringify(tok)} — not a PR/CR URL (expected …/pull/<number> or …/codereview/<id>); refusing to guess a target from it.`,
       );
       extraTokens.push(tok);
+      continue;
+    }
+    if (targetAssigned) {
+      // A bare number restating the assigned URL target's number is the
+      // same intent restated, not an extra argument (mirror of the
+      // rescue loop's restatement handling).
+      if (
+        target.type === 'pr-url' &&
+        classified !== null &&
+        classified.type === 'pr-number' &&
+        classified.number === target.number
+      ) {
+        continue;
+      }
+      extraTokens.push(tok);
+      trailingExtras.push(tok);
       continue;
     }
     target = classified ?? { type: 'local' };

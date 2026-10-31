@@ -960,12 +960,33 @@ describe('bundled review skill', () => {
     expect(body).toContain(
       'a bare `/review` with no arguments is a local review, not intent',
     );
-    // The resolved invocation keeps the flags the input already carries:
-    // resolving the target must not silently drop a `--comment` typed beside
-    // the prose, which would strip the run's posting authority.
+    // The resolved invocation keeps the flags the input already carries,
+    // so the parser still sees them — but carrying a flag is NOT posting
+    // authority (see the hard-boundary pins below).
     expect(body).toContain(
       'the target plus any flags the input already carries',
     );
+    // Review P2 (option-only hijack): `/review --fix` and `/review --effort
+    // low` are non-empty and carry no classifiable target, so the routing
+    // condition literally matched them and would retarget a working-tree
+    // run into the last PR — disarming `--fix` on the way. The exclusion
+    // must survive verbatim.
+    expect(body).toContain(
+      'an option-only invocation — flags and their values alone, like `/review --fix` or `/review --effort low` — is a supported local review the parser owns verbatim',
+    );
+    // Review P2 (authorization break): the write gate re-parses the CLI's
+    // verbatim record on purpose, so a model-written resolution can never
+    // authorise posting. The clause must keep the hard boundary (present
+    // the resolved invocation, ask for an explicit re-run) instead of
+    // promising a posting authority the gate refuses.
+    expect(body).toContain("Posting is the resolution's hard boundary.");
+    expect(body).toContain(
+      'a model-written resolution is not an authorization source',
+    );
+    expect(body).toContain(
+      'do not run a review whose submission is already refused',
+    );
+    expect(body).toContain('ask the user to re-invoke it explicitly');
     // --resume continues an interrupted run at an UNMOVED head only. The
     // exclusion must survive in the verdict bullet and the routing clause,
     // the two surfaces read before the flag is chosen; the frontmatter

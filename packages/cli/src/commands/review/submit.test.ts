@@ -836,6 +836,31 @@ describe('authorization — URL-shaped host and repo binding at the submit call 
       }).recordedHost,
     ).toBeUndefined();
   });
+
+  it('a prose re-review record never authorises posting — the resolution is not a record', () => {
+    // Review P2 on #15998: the skill's conversational routing resolves a
+    // prose request to a PR for the REVIEW, but this gate re-parses the
+    // CLI's verbatim record on purpose — a model-written resolution file
+    // is not an authorization source. The prose record names no PR, so
+    // posting refuses with `unbound` even though the resolved invocation
+    // parses as an effective --comment PR run; the skill must present that
+    // invocation and ask for an explicit re-run instead of completing a
+    // review whose submission is already refused.
+    const prose = authFor('有更新了，重新评审 --comment', { pr: 15998 });
+    expect(prose.ok).toBe(false);
+    expect(prose.cls).toBe('unbound');
+    expect(prose.why).toContain('do not name a pull request');
+    // The explicit re-invocation the skill presents authorises normally.
+    expect(authFor('15998 --comment', { pr: 15998 }).ok).toBe(true);
+    // The setting-driven arm refuses the same way: the record, not the
+    // flag, is what names no PR.
+    const bySetting = authFor('有更新了，重新评审', {
+      pr: 15998,
+      defaultComment: true,
+    });
+    expect(bySetting.ok).toBe(false);
+    expect(bySetting.cls).toBe('unbound');
+  });
 });
 
 describe('the user-authorized fast path binds a recorded Aone target (round-6 witness)', () => {
