@@ -1003,6 +1003,8 @@ public final class RuntimeBrokerHttpServer implements AutoCloseable {
                     "runtime_broker_closed",
                     "Runtime Broker is closed.", false);
         } else {
+            System.getLogger(RuntimeBrokerHttpServer.class.getName()).log(
+                    System.Logger.Level.ERROR, "Unexpected Runtime Broker operation failure.", actual);
             failure = new RuntimeBrokerException(500,
                     "runtime_broker_internal_error",
                     "Runtime Broker operation failed.", false);
