@@ -7,13 +7,13 @@
  */
 
 /**
- * Applies the publisher's consistency rules to a local `/verify-pr` round.
+ * Applies the publisher's consistency rules to a `/verify-pr` round.
  *
- * In CI the publish job refuses an artifact whose verdict contradicts its own
- * assertion counts, so a `merge-ready` report carrying `fail: 7` degrades to
- * "no usable structured verdict". A local round has no publisher: the skill
- * asks the maintainer to "keep the counts honest yourself", which is the one
- * step of that path a machine should own.
+ * The CI publish job runs this file from its trusted checkout and does not
+ * trust a verdict it refuses, so a `merge-ready` report carrying `fail: 7`
+ * degrades to "no usable structured verdict". A local round has no publisher,
+ * so the skill runs it before posting: the one step of that path a machine
+ * should own.
  *
  * Usage:
  *   node scripts/verify-pr-check.mjs <artifact-dir>

@@ -35,8 +35,15 @@ interface SavedApprovalOptions {
   continuationRef: { resourceId: string };
 }
 interface SavedApprovalPlan {
-  calls: { prepareKey: string; requestDigest: string }[];
+  calls: {
+    prepareKey: string;
+    requestDigest: string;
+    runtimeCallId?: string;
+    partIndex?: number;
+    actionId?: string | null;
+  }[];
   actionId: string;
+  approvalOrdinal?: number;
   stage: string;
   batchId: string;
   runtime: {
@@ -48,6 +55,10 @@ interface SavedApprovalPlan {
 }
 let originalApprovalOptions: SavedApprovalOptions | undefined;
 let originalApprovalPlan: SavedApprovalPlan | undefined;
+// A3: the pending second sibling's Action, captured at the crash barrier and
+// re-decided by the recovery generation.
+let siblingApprovalId: string | undefined;
+let siblingApprovalOptions: SavedApprovalOptions | undefined;
 let verifiedOriginalTerminal: string | undefined;
 function saveEvidence(name: string, body: unknown): void {
   if (!verificationMode) return;
@@ -79,6 +90,7 @@ const approvalFaults = [
   'after-prepare',
   'after-result',
   'finished-before-commit',
+  'sibling-approval',
   'cleanup-failed',
   'decision-reply-lost',
   'admission-reply-lost',
@@ -125,7 +137,7 @@ for (let index = 0; index < argumentsList.length; index += 1) {
     index += 1;
   } else {
     throw new Error(
-      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
+      'Usage: run-managed-agent-server-e2e.ts [--model ID] [--runtime-delay-ms N] [--settings PATH] [--session-failover|--inflight-failover|--continuation-failover|--model-round-failover|--big-output] [--harness-only] [--freeze] [--frozen-control-plane] [--g3-verify allow|deny|cancel|expiry|continuation] [--g3-fault after-decision|after-prepare|after-result|finished-before-commit|sibling-approval|cleanup-failed|decision-reply-lost|admission-reply-lost|load-reply-lost|terminal-reply-lost|terminal-write-failed]',
     );
   }
 }
@@ -329,6 +341,11 @@ const trustedActor = 'e2e-actor';
 const inflightSideEffectName = 'managed-inflight-side-effect.txt';
 const inflightSideEffect = path.join(workspaceMount, inflightSideEffectName);
 const inflightSideEffectContent = 'MANAGED_INFLIGHT_TOOL_EXECUTED\n';
+// A3 mixed-sibling arm: the second sibling writes a distinct file so each
+// sibling's single execution has its own physical effect.
+const siblingSideEffectName = 'managed-sibling-side-effect.txt';
+const siblingSideEffect = path.join(workspaceMount, siblingSideEffectName);
+const siblingSideEffectContent = 'MANAGED_SIBLING_TOOL_EXECUTED\n';
 const workspaceId = createHash('sha256')
   .update(workspace)
   .digest('hex')
@@ -1283,6 +1300,76 @@ function finishedBeforeCommitWindow(
   };
 }
 
+// A3: read the recovered final batch plan the way recovery does — the latest
+// hosted.batch.planned link for the batch, then its continuation resource —
+// so the sibling order/identity assertion runs on the same durable plan the
+// next generation resumed from, not on the execution store's row order.
+interface SiblingFinalPlan {
+  stage: string;
+  calls: Array<{
+    runtimeCallId: string;
+    partIndex: number;
+    prepareKey: string;
+    requestDigest: string;
+    actionId: string | null;
+  }>;
+}
+function siblingFinalPlan(
+  port: number,
+  sessionFilter: string,
+  batchId: string,
+): SiblingFinalPlan {
+  const rows = runMysql(
+    port,
+    `SELECT HEX(record_bytes) FROM qwen_managed_agent.ma_session_journal_tx WHERE ${sessionFilter} ORDER BY first_sequence`,
+  ).split('\n');
+  let planRef: { resourceId?: string } | undefined;
+  let planSequence = -1;
+  for (const row of rows) {
+    if (!row || row === 'NULL') continue;
+    for (const line of Buffer.from(row, 'hex').toString('utf8').split('\n')) {
+      if (!line) continue;
+      const record = JSON.parse(line) as {
+        subtype?: unknown;
+        managedSession?: {
+          kind?: unknown;
+          sequence?: unknown;
+          payload?: Record<string, unknown>;
+        };
+      };
+      if (record.subtype !== 'managed_session_event_v1') continue;
+      const event = record.managedSession;
+      if (
+        !event ||
+        typeof event.sequence !== 'number' ||
+        event.kind !== 'hosted.batch.planned'
+      )
+        continue;
+      const payload = event.payload ?? {};
+      if (payload['batchId'] !== batchId) continue;
+      if (event.sequence > planSequence) {
+        planSequence = event.sequence;
+        planRef = payload['planRef'] as { resourceId?: string } | undefined;
+      }
+    }
+  }
+  if (!planRef?.resourceId)
+    throw new Error(
+      `Sibling recovery has no final batch plan link: batchId=${batchId}`,
+    );
+  const plan = JSON.parse(
+    runMysql(
+      port,
+      `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE ${sessionFilter} AND resource_id=${sqlString(planRef.resourceId)}`,
+    ),
+  );
+  if (plan.stage !== 'final' || !Array.isArray(plan.calls))
+    throw new Error(
+      `Sibling recovered plan is not a final batch plan: stage=${String(plan.stage)}`,
+    );
+  return plan;
+}
+
 function assertPublicAnswer(events: PublicEvent[], expected: string): void {
   const terminal = events.filter((event) => event.terminal);
   const text = events
@@ -1555,6 +1642,30 @@ try {
 
       if (continuationFailover && serialized.includes(continuationMarker)) {
         if (!serialized.includes('"role":"tool"')) {
+          // A3: a two-call batch so the replacement can be crashed in the
+          // approval gap between a decided sibling and a pending one.
+          if (approvalFault === 'sibling-approval') {
+            return {
+              toolCalls: [
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: inflightSideEffectName,
+                    content: inflightSideEffectContent,
+                  },
+                  'call_managed_continuation_failover',
+                ),
+                fakeToolCall(
+                  'write_file',
+                  {
+                    file_path: siblingSideEffectName,
+                    content: siblingSideEffectContent,
+                  },
+                  'call_managed_continuation_sibling',
+                ),
+              ],
+            };
+          }
           return {
             toolCalls: [
               fakeToolCall(
@@ -2059,14 +2170,18 @@ try {
           `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(originalApprovalOptions.continuationRef.resourceId)}`,
         ),
       );
+      const expectedOriginalPlanCalls =
+        approvalFault === 'sibling-approval' ? 2 : 1;
       if (
         !originalApprovalPlan ||
-        originalApprovalPlan.calls?.length !== 1 ||
+        originalApprovalPlan.calls?.length !== expectedOriginalPlanCalls ||
         originalApprovalPlan.actionId !== originalApprovalId ||
-        originalApprovalPlan.stage !== 'approval'
+        originalApprovalPlan.stage !== 'approval' ||
+        (approvalFault === 'sibling-approval' &&
+          originalApprovalPlan.approvalOrdinal !== 0)
       ) {
         throw new Error(
-          'Original saved approval plan does not identify exactly one original call',
+          `Original saved approval plan does not identify the original ${expectedOriginalPlanCalls} call(s) at the first approval`,
         );
       }
       originalRuntimeSessionId = originalApprovalPlan.runtime.runtimeSessionId;
@@ -2551,6 +2666,7 @@ try {
     const startReplacementHarness = async (
       name: string,
       crashBeforeAssistantCommit = false,
+      holdPendingSiblingApproval = false,
     ): Promise<Child> => {
       const next = start(
         process.execPath,
@@ -2602,6 +2718,13 @@ try {
             ...(crashBeforeAssistantCommit
               ? { QWEN_E2E_CRASH_BEFORE_ASSISTANT_COMMIT: session.id }
               : {}),
+            // A3: only the generation that must crash carries this flag; it
+            // holds the first sibling approval it asks (the pending sibling
+            // after the decided one). The recovery generation must not inherit
+            // it, or it would hold the same approval forever.
+            ...(holdPendingSiblingApproval
+              ? { QWEN_E2E_HOLD_PENDING_SIBLING_APPROVAL: session.id }
+              : {}),
           },
         },
         name,
@@ -2623,6 +2746,7 @@ try {
     let replacementHarness = await startReplacementHarness(
       'Replacement Hosted Harness',
       approvalFault === 'finished-before-commit',
+      approvalFault === 'sibling-approval',
     );
 
     if (approvalRecovery) {
@@ -2766,6 +2890,7 @@ try {
         approvalFault === 'after-prepare' ||
         approvalFault === 'after-result' ||
         approvalFault === 'finished-before-commit' ||
+        approvalFault === 'sibling-approval' ||
         approvalFault === 'cleanup-failed' ||
         approvalFault === 'terminal-reply-lost' ||
         approvalFault === 'terminal-write-failed'
@@ -2896,6 +3021,73 @@ try {
             120_000,
             replacementHarness,
           );
+        } else if (approvalFault === 'sibling-approval') {
+          // A3: the replacement decided sibling[0] (Allow[0]) and now holds
+          // the first approval it asks — the pending sibling[1]. The barrier
+          // line proves the hook fired; the durable shape proves the crash
+          // lands in the approval gap (sibling[0] decided, sibling[1] still
+          // requested), not after the whole batch finished approving.
+          await waitUntil(
+            'Pending sibling approval held',
+            () =>
+              replacementHarness
+                .log()
+                .includes('E2E holding pending sibling approval'),
+            120_000,
+            replacementHarness,
+          );
+          const siblingActionRows = runMysql(
+            mysqlPort,
+            `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' ORDER BY action_id`,
+          );
+          const siblingActions = siblingActionRows
+            ? siblingActionRows.split('\n').map((row) => row.split('\t'))
+            : [];
+          const decidedSibling = siblingActions.find(
+            ([id]) => id === originalApprovalId,
+          );
+          const pendingSibling = siblingActions.find(
+            ([id]) => id !== originalApprovalId,
+          );
+          if (
+            siblingActions.length !== 2 ||
+            decidedSibling?.[1] !== 'decided' ||
+            pendingSibling?.[1] !== 'requested'
+          ) {
+            throw new Error(
+              `Sibling-approval crash did not land in the approval gap: ${siblingActionRows}`,
+            );
+          }
+          siblingApprovalId = pendingSibling![0];
+          siblingApprovalOptions = JSON.parse(
+            runMysql(
+              mysqlPort,
+              `SELECT options_json FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' AND action_id=${sqlString(siblingApprovalId)}`,
+            ),
+          );
+          const siblingPlan = JSON.parse(
+            runMysql(
+              mysqlPort,
+              `SELECT CONVERT(inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND resource_id=${sqlString(siblingApprovalOptions!.continuationRef.resourceId)}`,
+            ),
+          );
+          if (
+            siblingPlan.stage !== 'approval' ||
+            siblingPlan.approvalOrdinal !== 1 ||
+            siblingPlan.calls?.length !== 2 ||
+            siblingPlan.actionId !== siblingApprovalId
+          ) {
+            throw new Error(
+              `Sibling-approval crash plan is not the pending second sibling: ${JSON.stringify(siblingPlan)}`,
+            );
+          }
+          saveEvidence('sibling-approval-barrier.json', {
+            fault: approvalFault,
+            decidedAction: decidedSibling,
+            pendingAction: pendingSibling,
+            approvalOrdinal: siblingPlan.approvalOrdinal,
+            calls: siblingPlan.calls,
+          });
         } else {
           // The enclosing condition lists every crash-type fault. A new one
           // added without a barrier here must fail loudly instead of
@@ -3053,6 +3245,66 @@ try {
           );
         }
       }
+      if (approvalFault === 'sibling-approval') {
+        // The recovery generation must re-hang the ORIGINAL pending sibling
+        // Action (same ID, same deadline) and still require its own decision:
+        // it must not auto-allow sibling[1] from sibling[0]'s earlier Allow,
+        // nor re-ask the already-decided sibling[0]. Assert the preserved
+        // identity/deadline before answering, then decide the pending sibling.
+        // Read the decided sibling HERE, before answering the pending one: a
+        // recovery that resumes at the wrong ordinal and re-asks sibling[0]
+        // would flip it back to requested, and a post-terminal check could not
+        // tell "never touched" from "re-decided" once the state reconverges.
+        const decidedBefore = await fetchJson<Record<string, unknown>>(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${originalApprovalId}`,
+          { headers: tenantHeaders(tenant) },
+        );
+        if (
+          decidedBefore.id !== originalApprovalId ||
+          decidedBefore.state !== 'decided' ||
+          decidedBefore.created_at !== originalApprovalOptions!.createdAt ||
+          decidedBefore.expires_at !== originalApprovalOptions!.expiresAt
+        ) {
+          throw new Error(
+            `Recovery re-touched the decided sibling Action/deadline: ${JSON.stringify(decidedBefore)}`,
+          );
+        }
+        const siblingBefore = await fetchJson<Record<string, unknown>>(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${siblingApprovalId}`,
+          { headers: tenantHeaders(tenant) },
+        );
+        if (
+          siblingBefore.id !== siblingApprovalId ||
+          siblingBefore.state !== 'requested' ||
+          siblingBefore.created_at !== siblingApprovalOptions!.createdAt ||
+          siblingBefore.expires_at !== siblingApprovalOptions!.expiresAt
+        ) {
+          throw new Error(
+            `Recovery did not preserve the pending sibling Action/deadline: ${JSON.stringify(siblingBefore)}`,
+          );
+        }
+        const siblingResponse = await fetch(
+          `${replacementSpringUrl}/v1/agents/sessions/${session.id}/actions/${siblingApprovalId}/responses`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              'idempotency-key': `g3-answer-${siblingApprovalId}`,
+              ...tenantHeaders(tenant),
+            },
+            body: JSON.stringify({
+              kind: 'permission',
+              input_revision: siblingApprovalOptions!.inputRevision,
+              policy_revision: siblingApprovalOptions!.policyRevision,
+              option_id: 'allow',
+            }),
+          },
+        );
+        if (siblingResponse.status !== 202)
+          throw new Error(
+            `Pending sibling response returned ${siblingResponse.status}: ${await siblingResponse.text()}`,
+          );
+      }
       const recovered = await waitForTerminal(
         replacementSpringUrl,
         tenant,
@@ -3115,31 +3367,64 @@ try {
       }
       const rows = runMysql(
         mysqlPort,
-        `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id`,
+        `SELECT execution_call_id, idempotency_key, binding_id, runtime_generation, runtime_session_id, execution_state, dispatch_generation, request_digest, settled_at FROM qwen_managed_agent.ma_tool_execution ORDER BY execution_call_id`,
       );
       const executions = rows
         ? rows.split('\n').map((row) => row.split('\t'))
         : [];
-      const expectedExecutions = verificationMode === 'allow' ? 1 : 0;
+      const expectedExecutions =
+        verificationMode === 'allow'
+          ? approvalFault === 'sibling-approval'
+            ? 2
+            : 1
+          : 0;
       if (executions.length !== expectedExecutions)
         throw new Error(
           `Approval execution count ${executions.length} differs from ${expectedExecutions}`,
         );
-      if (executions.length === 1) {
-        const execution = executions[0];
+      // Every approved call keeps its own original prepare key/digest and the
+      // original Runtime identity, settled once. Match by prepare key so the
+      // model's call order is checked, not the SQL row order; the A3 arm has
+      // two siblings, every other allow arm has one.
+      if (verificationMode === 'allow') {
         const plan = originalApprovalPlan!;
-        if (
-          execution[1] !== plan.calls[0].prepareKey ||
-          execution[2] !== plan.runtime.bindingId ||
-          execution[3] !== plan.runtime.generation ||
-          execution[4] !== plan.runtime.runtimeSessionId ||
-          execution[5] !== 'SETTLED' ||
-          execution[6] !== '1' ||
-          execution[7] !== plan.calls[0].requestDigest
-        ) {
-          throw new Error(
-            `Replacement changed the original prepared execution identity: ${execution.join(',')}`,
+        const settledAtByOrdinal: number[] = [];
+        for (const [ordinal, call] of plan.calls.entries()) {
+          const execution = executions.find(
+            (row) => row[1] === call.prepareKey,
           );
+          if (
+            !execution ||
+            execution[2] !== plan.runtime.bindingId ||
+            execution[3] !== plan.runtime.generation ||
+            execution[4] !== plan.runtime.runtimeSessionId ||
+            execution[5] !== 'SETTLED' ||
+            execution[6] !== '1' ||
+            execution[7] !== call.requestDigest
+          ) {
+            throw new Error(
+              `Replacement changed the original prepared execution identity for call ${ordinal}: ${(execution ?? []).join(',')}`,
+            );
+          }
+          settledAtByOrdinal.push(Number(execution[8]));
+        }
+        // The siblings must SETTLE in plan order, not merely exist with the
+        // right identities: a recovery that dispatches the batch in reverse
+        // keeps every identity assertion green. settled_at is epoch millis;
+        // require it non-decreasing along the plan so a reverse dispatch reds.
+        for (
+          let ordinal = 1;
+          ordinal < settledAtByOrdinal.length;
+          ordinal += 1
+        ) {
+          if (
+            !Number.isFinite(settledAtByOrdinal[ordinal]) ||
+            settledAtByOrdinal[ordinal] < settledAtByOrdinal[ordinal - 1]
+          ) {
+            throw new Error(
+              `Replacement settled the siblings out of plan order: settledAt=${settledAtByOrdinal.join(',')}`,
+            );
+          }
         }
       }
       const bytes = existsSync(inflightSideEffect)
@@ -3154,9 +3439,18 @@ try {
           `Approval physical file assertion failed for ${verificationMode}`,
         );
       }
+      if (approvalFault === 'sibling-approval') {
+        const siblingBytes = existsSync(siblingSideEffect)
+          ? readFileSync(siblingSideEffect, 'utf8')
+          : '';
+        if (siblingBytes !== siblingSideEffectContent)
+          throw new Error(
+            `Sibling physical file assertion failed: ${JSON.stringify(siblingBytes)}`,
+          );
+      }
       const actionRows = runMysql(
         mysqlPort,
-        `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION'`,
+        `SELECT action_id, state FROM qwen_managed_agent.ma_session_record WHERE ${sessionFilter} AND record_kind='ACTION' ORDER BY action_id`,
       );
       const expectedActionState =
         verificationMode === 'expiry'
@@ -3164,10 +3458,24 @@ try {
           : verificationMode === 'cancel'
             ? 'cancelled'
             : 'decided';
-      if (actionRows !== `${originalApprovalId}\t${expectedActionState}`)
+      if (approvalFault === 'sibling-approval') {
+        // Both siblings end decided under their ORIGINAL Action IDs: the
+        // decided one was not re-asked, the pending one earned its own Allow.
+        const expectedSiblingActions = [
+          `${originalApprovalId}\t${expectedActionState}`,
+          `${siblingApprovalId}\t${expectedActionState}`,
+        ].sort();
+        if (actionRows !== expectedSiblingActions.join('\n'))
+          throw new Error(
+            `Sibling approval identities/states differ: ${actionRows}`,
+          );
+      } else if (
+        actionRows !== `${originalApprovalId}\t${expectedActionState}`
+      ) {
         throw new Error(
           `Original approval identity/state differs: ${actionRows}`,
         );
+      }
       // State alone proves a decision was committed, not which option won.
       // Read the committed decision resource back for the browser-facing
       // intent, and hold it to the revision and policy the browser answered.
@@ -3191,6 +3499,62 @@ try {
         throw new Error(
           `Stored approval decision differs from the chosen option: ${JSON.stringify(decisionOption)}`,
         );
+      }
+      if (approvalFault === 'sibling-approval') {
+        // The pending sibling carries its OWN Allow decision bound to its own
+        // revisions — it was not auto-allowed from sibling[0]'s earlier Allow.
+        const siblingDecision = JSON.parse(
+          runMysql(
+            mysqlPort,
+            `SELECT CONVERT(r.inline_bytes USING utf8mb4) FROM qwen_managed_agent.ma_resource_ref rr JOIN qwen_managed_agent.ma_resource r ON r.resource_key = rr.resource_key WHERE rr.owner_kind='SESSION_RECORD' AND rr.owner_key = (SELECT record_key FROM qwen_managed_agent.ma_session_record WHERE tenant_id=${sqlString(tenant)} AND session_id=${sqlString(session.id)} AND record_kind='ACTION' AND action_id=${sqlString(siblingApprovalId!)}) AND r.kind='managed-action-decision'`,
+          ),
+        );
+        if (
+          siblingDecision.optionId !== 'allow' ||
+          siblingDecision.inputRevision !==
+            siblingApprovalOptions!.inputRevision ||
+          siblingDecision.policyRevision !==
+            siblingApprovalOptions!.policyRevision
+        ) {
+          throw new Error(
+            `Stored sibling decision differs from the chosen option: ${JSON.stringify(siblingDecision)}`,
+          );
+        }
+        // Clause 2: the recovered final plan preserves the saved sibling
+        // order and identities, and each sibling keeps its original Action
+        // ID. Compare by position so a reordered or dropped sibling reds
+        // here, not only in the execution count.
+        const finalPlan = siblingFinalPlan(
+          mysqlPort,
+          sessionFilter,
+          originalApprovalPlan!.batchId,
+        );
+        const savedCalls = originalApprovalPlan!.calls;
+        if (finalPlan.calls.length !== savedCalls.length)
+          throw new Error(
+            `Sibling recovery changed the batch size: ${finalPlan.calls.length} != ${savedCalls.length}`,
+          );
+        for (const [ordinal, saved] of savedCalls.entries()) {
+          const recovered = finalPlan.calls[ordinal];
+          if (
+            recovered.runtimeCallId !== saved.runtimeCallId ||
+            recovered.partIndex !== saved.partIndex ||
+            recovered.prepareKey !== saved.prepareKey ||
+            recovered.requestDigest !== saved.requestDigest
+          ) {
+            throw new Error(
+              `Sibling recovery reordered or rewrote call ${ordinal}: ${JSON.stringify(recovered)} != ${JSON.stringify(saved)}`,
+            );
+          }
+        }
+        if (
+          finalPlan.calls[0].actionId !== originalApprovalId ||
+          finalPlan.calls[1].actionId !== siblingApprovalId
+        ) {
+          throw new Error(
+            `Sibling recovery changed the original Action IDs: ${JSON.stringify(finalPlan.calls.map((call) => call.actionId))}`,
+          );
+        }
       }
       // Expiry may only close the wait at or after the deadline it was
       // given; an early terminal would mean the replacement invented one.
