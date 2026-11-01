@@ -751,6 +751,81 @@ describe('ToolApproval accessibility', () => {
     expect(contentPre.getAttribute('title')).toBe(rendered);
   });
 
+  it('neutralises bidi and C0 controls in the goal approval body', () => {
+    const craftedObjective = [
+      'Outcome: Audit \u202eopen PRs.',
+      'Done when: Every PR has \u001b[31mevidence\u001b[0m\u0007.',
+      'Must not: Push or comment.',
+    ].join('\n');
+    render(false, {
+      ...goalRequest,
+      id: 'crafted-goal',
+      rawInput: { objective: craftedObjective },
+      content: [{ type: 'text', text: craftedObjective }],
+    });
+
+    const panel = container!.querySelector('[role="alertdialog"]')!;
+    const describedText = panel
+      .getAttribute('aria-describedby')!
+      .split(' ')
+      .map((id) => document.getElementById(id)?.textContent ?? '')
+      .join(' ');
+    expect(describedText).not.toContain('\u202e');
+    expect(describedText).not.toContain('\u001b');
+    expect(describedText).not.toContain('\u0007');
+    expect(describedText).toContain('Audit \\u202eopen PRs.');
+
+    switchGoalTab('full');
+    const fullText = container!.querySelector(
+      '[role="tabpanel"][data-state="active"]',
+    )!.textContent!;
+    expect(fullText).not.toContain('\u202e');
+    expect(fullText).not.toContain('\u001b');
+    expect(fullText).not.toContain('\u0007');
+    expect(fullText).toContain('Audit \\u202eopen PRs.');
+  });
+
+  it('neutralises controls in the goal replacement notice', () => {
+    const craftedNotice = 'Replace paused goal\u202e with this one?\u001b[31m';
+    render(false, {
+      ...goalRequest,
+      id: 'crafted-goal-notice',
+      rawInput: { objective: goalObjective },
+      content: [{ type: 'text', text: `${craftedNotice}\n\n${goalObjective}` }],
+    });
+
+    const notice = container!.querySelector('[class*="goalNotice"]')!;
+    expect(notice.textContent).toBe(
+      'Replace paused goal\\u202e with this one?\\u001b[31m',
+    );
+  });
+
+  it('neutralises controls in the edit diff path', () => {
+    const craftedPath = 'src/\u202eevil\u001b[31m\u0007.ts';
+    render(false, {
+      id: 'req-crafted-diff',
+      toolName: 'edit',
+      title: 'Edit',
+      content: [
+        {
+          type: 'diff',
+          path: craftedPath,
+          oldText: 'before',
+          newText: 'after',
+        },
+      ],
+      options: [
+        { id: 'proceed', label: 'Proceed', kind: 'allow_once' },
+        { id: 'reject', label: 'Reject', kind: 'reject_once' },
+      ],
+    });
+
+    const path = container!.querySelector(
+      '[aria-label="File diff"]',
+    )!.parentElement!.firstElementChild!;
+    expect(path.textContent).toBe('src/\\u202eevil\\u001b[31m\\u0007.ts');
+  });
+
   it('renders exec warnings alongside the command block', () => {
     const adapted = extractPendingPermission([
       {
