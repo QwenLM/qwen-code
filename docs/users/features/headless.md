@@ -41,6 +41,8 @@ Read from files and process with Qwen Code:
 cat README.md | qwen --prompt "Summarize this documentation"
 ```
 
+When `--prompt` is combined with non-TTY `stdin` and no input arrives within 500ms, Qwen Code writes a warning to `stderr` (`Warning: no stdin input received within 500ms; proceeding without stdin.`) and continues with the `--prompt` argument.
+
 ### Resume Previous Sessions (Headless)
 
 Reuse conversation context from the current project in headless scripts:
