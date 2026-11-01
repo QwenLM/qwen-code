@@ -18,6 +18,10 @@ beforeEach(() => {
   vi.useFakeTimers();
   vi.spyOn(Math, 'random').mockReturnValue(0);
   window.localStorage.clear();
+  Object.defineProperty(document, 'visibilityState', {
+    configurable: true,
+    value: 'visible',
+  });
 });
 
 afterEach(() => {
@@ -49,7 +53,11 @@ function render(props: WaitingMinigameProps): Rendered {
 
 function key(keyName: string): void {
   act(() => {
-    window.dispatchEvent(
+    const target =
+      document.activeElement instanceof HTMLElement
+        ? document.activeElement
+        : document.body;
+    target.dispatchEvent(
       new KeyboardEvent('keydown', {
         key: keyName,
         bubbles: true,
@@ -125,4 +133,64 @@ describe('WaitingMinigame', () => {
       container.querySelector('[data-component="waiting-minigame"]'),
     ).toBeNull();
   });
+
+  it('resumes gravity after the tab becomes visible again', () => {
+    const { container } = render({ active: true });
+    arm();
+    act(() => container.querySelector('button')?.click());
+    expect(activeCellIndexes(container)).toEqual([0, 1, 2, 3]);
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'hidden',
+    });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    expect(container.textContent).toContain('Paused');
+
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'visible',
+    });
+    act(() => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    key(' ');
+    act(() => {
+      vi.advanceTimersByTime(140);
+    });
+    expect(container.textContent).not.toContain('Paused');
+    expect(activeCellIndexes(container)).toEqual([1, 2, 3, 4]);
+  });
+
+  it('keeps Escape in the game and leaves Space to focused buttons', () => {
+    const { container } = render({ active: true });
+    arm();
+    act(() => container.querySelector('button')?.click());
+
+    const windowKey = vi.fn();
+    window.addEventListener('keydown', windowKey);
+    try {
+      key('Escape');
+      expect(container.textContent).toContain('Waiting for a reply');
+      expect(windowKey).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener('keydown', windowKey);
+    }
+
+    act(() => container.querySelector('button')?.click());
+    const mute = container.querySelector<HTMLButtonElement>('[aria-pressed]');
+    expect(mute).not.toBeNull();
+    act(() => mute?.focus());
+    key(' ');
+    expect(container.textContent).not.toContain('Paused');
+  });
 });
+
+function activeCellIndexes(container: HTMLElement): number[] {
+  return Array.from(container.querySelectorAll('[data-state]')).flatMap(
+    (element, index) =>
+      element.getAttribute('data-state') === '2' ? [index] : [],
+  );
+}

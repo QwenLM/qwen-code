@@ -4,7 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from 'react';
 import { useI18n } from '../i18n';
 import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
 import {
@@ -118,9 +124,10 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
   );
   const rootRef = useRef<HTMLDivElement | null>(null);
   const stripRef = useRef<HTMLButtonElement | null>(null);
-  const focusBeforeOpen = useRef<HTMLElement | null>(null);
+  const openedOnce = useRef(false);
   const noticeTimer = useRef<number | undefined>(undefined);
   const audioContext = useRef<AudioContext | undefined>(undefined);
+  const soundRef = useRef(sound);
   const previousCleared = useRef(game.cleared);
   const previousOver = useRef(game.over);
   const coarsePointer = isCoarsePointerDevice();
@@ -130,45 +137,38 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
     gameRef.current = game;
   }, [game]);
 
-  const playSound = useCallback(
-    (kind: 'clear' | 'over' | 'toggle') => {
-      if (!sound) return;
-      const context = audioContext.current;
-      if (!context) return;
-      const notes =
-        kind === 'clear'
-          ? [660, 880]
-          : kind === 'over'
-            ? [392, 294, 196]
-            : [520];
-      try {
-        const now = context.currentTime;
-        notes.forEach((frequency, index) => {
-          const start = now + index * 0.08;
-          const oscillator = context.createOscillator();
-          const gain = context.createGain();
-          oscillator.type = 'sine';
-          oscillator.frequency.value = frequency;
-          gain.gain.setValueAtTime(0.0001, start);
-          gain.gain.exponentialRampToValueAtTime(0.045, start + 0.012);
-          gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.13);
-          oscillator.connect(gain);
-          gain.connect(context.destination);
-          oscillator.start(start);
-          oscillator.stop(start + 0.15);
-        });
-      } catch {
-        // Audio is decorative; a blocked context must not break the game.
-      }
-    },
-    [sound],
-  );
+  useEffect(() => {
+    soundRef.current = sound;
+  }, [sound]);
+
+  const playSound = useCallback((kind: 'clear' | 'over' | 'toggle') => {
+    if (!soundRef.current) return;
+    const context = audioContext.current;
+    if (!context) return;
+    const notes =
+      kind === 'clear' ? [660, 880] : kind === 'over' ? [392, 294, 196] : [520];
+    try {
+      const now = context.currentTime;
+      notes.forEach((frequency, index) => {
+        const start = now + index * 0.08;
+        const oscillator = context.createOscillator();
+        const gain = context.createGain();
+        oscillator.type = 'sine';
+        oscillator.frequency.value = frequency;
+        gain.gain.setValueAtTime(0.0001, start);
+        gain.gain.exponentialRampToValueAtTime(0.045, start + 0.012);
+        gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.13);
+        oscillator.connect(gain);
+        gain.connect(context.destination);
+        oscillator.start(start);
+        oscillator.stop(start + 0.15);
+      });
+    } catch {
+      // Audio is decorative; a blocked context must not break the game.
+    }
+  }, []);
 
   const ensureAudio = useCallback(() => {
-    if (!sound) {
-      void audioContext.current?.resume?.();
-      return;
-    }
     if (audioContext.current) {
       void audioContext.current.resume?.();
       return;
@@ -180,7 +180,7 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
     } catch {
       audioContext.current = undefined;
     }
-  }, [sound]);
+  }, []);
 
   const apply = useCallback((next: WaitingMinigameState) => {
     const current = gameRef.current;
@@ -221,7 +221,7 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
   ]);
 
   useEffect(() => {
-    if (!open || !documentVisible) return;
+    if (!open) return;
     const onVisibility = () => {
       const visibleNow = !isVisibilityHidden();
       setDocumentVisible(visibleNow);
@@ -233,8 +233,9 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
       }
     };
     document.addEventListener('visibilitychange', onVisibility);
+    onVisibility();
     return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, [open, documentVisible, apply]);
+  }, [open, apply]);
 
   useEffect(() => {
     if (game.score > best) {
@@ -277,27 +278,15 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
     setNotice(null);
   }, [apply]);
 
-  const openGame = useCallback(
-    (focus = false) => {
-      focusBeforeOpen.current =
-        document.activeElement instanceof HTMLElement
-          ? document.activeElement
-          : null;
-      setOpen(true);
-      const current = gameRef.current;
-      if (current.over) restart();
-      else if (current.paused) {
-        apply(setWaitingMinigamePaused(current, false));
-      }
-      ensureAudio();
-      // Mouse entry leaves focus alone; only keyboard entry moves it into the
-      // card so arrow keys keep working without trapping the pointer user.
-      if (focus) {
-        window.requestAnimationFrame(() => rootRef.current?.focus());
-      }
-    },
-    [apply, ensureAudio, restart],
-  );
+  const openGame = useCallback(() => {
+    setOpen(true);
+    const current = gameRef.current;
+    if (current.over) restart();
+    else if (current.paused) {
+      apply(setWaitingMinigamePaused(current, false));
+    }
+    ensureAudio();
+  }, [apply, ensureAudio, restart]);
 
   const closeGame = useCallback(() => {
     setOpen(false);
@@ -305,17 +294,23 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
     if (!current.paused && !current.over) {
       apply(setWaitingMinigamePaused(current, true));
     }
-    window.requestAnimationFrame(() => {
-      if (focusBeforeOpen.current?.isConnected) {
-        focusBeforeOpen.current.focus();
-        return;
-      }
-      stripRef.current?.focus();
-    });
   }, [apply]);
+
+  useEffect(() => {
+    if (open) {
+      openedOnce.current = true;
+      rootRef.current?.focus();
+      return;
+    }
+    if (openedOnce.current) {
+      openedOnce.current = false;
+      stripRef.current?.focus();
+    }
+  }, [open]);
 
   const toggleSound = useCallback(() => {
     const next = !sound;
+    soundRef.current = next;
     setSound(next);
     writeSoundEnabled(next);
     if (next) {
@@ -325,28 +320,36 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
   }, [ensureAudio, playSound, sound]);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || open) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      const editable = isEditableTarget(event.target);
-      if (!open) {
-        if (editable || event.defaultPrevented) return;
-        if (
-          event.key === 'Enter' &&
-          !event.repeat &&
-          event.target === document.body
-        ) {
-          event.preventDefault();
-          openGame(true);
-        }
-        return;
-      }
+      if (event.defaultPrevented || event.repeat) return;
+      if (event.key !== 'Enter' || event.target !== document.body) return;
+      event.preventDefault();
+      openGame();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [visible, open, openGame]);
+
+  const handleKeyDown = useCallback(
+    (event: ReactKeyboardEvent<HTMLDivElement>) => {
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
         closeGame();
         return;
       }
-      if (editable) return;
+      if (isEditableTarget(event.target)) return;
+      const target = event.target;
+      const nativeControl =
+        target instanceof Element &&
+        target !== event.currentTarget &&
+        Boolean(
+          target.closest('button, a[href], [role="button"], [role="link"]'),
+        );
+      if (nativeControl && (event.key === ' ' || event.code === 'Space')) {
+        return;
+      }
       if (event.key === ' ' || event.code === 'Space') {
         if (!event.repeat) {
           event.preventDefault();
@@ -354,8 +357,9 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
         }
         return;
       }
-      if (event.key === 'Enter' && gameRef.current.over) {
-        if (!event.repeat) {
+      if (event.key === 'Enter') {
+        if (nativeControl) return;
+        if (gameRef.current.over && !event.repeat) {
           event.preventDefault();
           restart();
         }
@@ -380,10 +384,9 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
           apply(rotateWaitingMinigamePiece(gameRef.current));
           break;
       }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [visible, open, apply, closeGame, openGame, restart]);
+    },
+    [apply, closeGame, restart],
+  );
 
   if (!visible) return null;
 
@@ -398,6 +401,7 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
       tabIndex={open ? 0 : undefined}
       role={open ? 'group' : undefined}
       aria-label={open ? t('waitingGame.region') : undefined}
+      onKeyDown={handleKeyDown}
     >
       {open ? (
         <div className={styles.card}>
@@ -423,20 +427,22 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
               <SoundIcon muted={!sound} />
             </button>
           </div>
-          <div
-            className={styles.board}
-            style={{
-              gridTemplateColumns: `repeat(${WAITING_MINIGAME_COLS}, minmax(0, 1fr))`,
-            }}
-            aria-hidden="true"
-          >
-            {CELLS.map((index) => (
-              <span
-                key={index}
-                className={styles.cell}
-                data-state={grid[index] ?? 0}
-              />
-            ))}
+          <div className={styles.board}>
+            <div
+              className={styles.cells}
+              style={{
+                gridTemplateColumns: `repeat(${WAITING_MINIGAME_COLS}, minmax(0, 1fr))`,
+              }}
+              aria-hidden="true"
+            >
+              {CELLS.map((index) => (
+                <span
+                  key={index}
+                  className={styles.cell}
+                  data-state={grid[index] ?? 0}
+                />
+              ))}
+            </div>
             {game.paused && !game.over && (
               <div className={styles.overlay}>
                 <span className={styles.overlayTitle}>
@@ -481,7 +487,7 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
           type="button"
           className={styles.strip}
           aria-label={t('waitingGame.start')}
-          onClick={() => openGame()}
+          onClick={openGame}
         >
           <span className={styles.dots} aria-hidden="true">
             <span />
