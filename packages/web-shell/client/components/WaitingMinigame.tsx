@@ -4,13 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type KeyboardEvent as ReactKeyboardEvent,
-} from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useI18n } from '../i18n';
 import { isCoarsePointerDevice } from '../hooks/useIsTouchComposer';
 import {
@@ -32,7 +26,6 @@ import styles from './WaitingMinigame.module.css';
 
 const BEST_SCORE_KEY = 'qwen-code-web-shell-waiting-minigame-best';
 const SOUND_KEY = 'qwen-code-web-shell-waiting-minigame-sound';
-const ARM_DELAY_MS = 700;
 const NOTICE_MS = 1_200;
 const CELLS = Array.from(
   { length: WAITING_MINIGAME_ROWS * WAITING_MINIGAME_COLS },
@@ -101,14 +94,12 @@ function isVisibilityHidden(): boolean {
 }
 
 export interface WaitingMinigameProps {
-  /** True while a prompt is streaming or still marked active by the daemon. */
-  active: boolean;
+  open: boolean;
+  onClose: () => void;
 }
 
-export function WaitingMinigame({ active }: WaitingMinigameProps) {
+export function WaitingMinigame({ open, onClose }: WaitingMinigameProps) {
   const { t } = useI18n();
-  const [open, setOpen] = useState(false);
-  const [armed, setArmed] = useState(false);
   const [game, setGame] = useState<WaitingMinigameState>(() =>
     createWaitingMinigame(),
   );
@@ -122,53 +113,58 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
   const [documentVisible, setDocumentVisible] = useState(
     () => !isVisibilityHidden(),
   );
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const stripRef = useRef<HTMLButtonElement | null>(null);
-  const openedOnce = useRef(false);
   const noticeTimer = useRef<number | undefined>(undefined);
   const audioContext = useRef<AudioContext | undefined>(undefined);
-  const soundRef = useRef(sound);
   const previousCleared = useRef(game.cleared);
   const previousOver = useRef(game.over);
+  const previousOpen = useRef(false);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   const coarsePointer = isCoarsePointerDevice();
-  const visible = active && (armed || open) && !coarsePointer;
 
   useEffect(() => {
     gameRef.current = game;
   }, [game]);
 
-  useEffect(() => {
-    soundRef.current = sound;
-  }, [sound]);
-
-  const playSound = useCallback((kind: 'clear' | 'over' | 'toggle') => {
-    if (!soundRef.current) return;
-    const context = audioContext.current;
-    if (!context) return;
-    const notes =
-      kind === 'clear' ? [660, 880] : kind === 'over' ? [392, 294, 196] : [520];
-    try {
-      const now = context.currentTime;
-      notes.forEach((frequency, index) => {
-        const start = now + index * 0.08;
-        const oscillator = context.createOscillator();
-        const gain = context.createGain();
-        oscillator.type = 'sine';
-        oscillator.frequency.value = frequency;
-        gain.gain.setValueAtTime(0.0001, start);
-        gain.gain.exponentialRampToValueAtTime(0.045, start + 0.012);
-        gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.13);
-        oscillator.connect(gain);
-        gain.connect(context.destination);
-        oscillator.start(start);
-        oscillator.stop(start + 0.15);
-      });
-    } catch {
-      // Audio is decorative; a blocked context must not break the game.
-    }
-  }, []);
+  const playSound = useCallback(
+    (kind: 'clear' | 'over' | 'toggle') => {
+      if (!sound) return;
+      const context = audioContext.current;
+      if (!context) return;
+      const notes =
+        kind === 'clear'
+          ? [660, 880]
+          : kind === 'over'
+            ? [392, 294, 196]
+            : [520];
+      try {
+        const now = context.currentTime;
+        notes.forEach((frequency, index) => {
+          const start = now + index * 0.08;
+          const oscillator = context.createOscillator();
+          const gain = context.createGain();
+          oscillator.type = 'sine';
+          oscillator.frequency.value = frequency;
+          gain.gain.setValueAtTime(0.0001, start);
+          gain.gain.exponentialRampToValueAtTime(0.045, start + 0.012);
+          gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.13);
+          oscillator.connect(gain);
+          gain.connect(context.destination);
+          oscillator.start(start);
+          oscillator.stop(start + 0.15);
+        });
+      } catch {
+        // Audio is decorative; a blocked context must not break the game.
+      }
+    },
+    [sound],
+  );
 
   const ensureAudio = useCallback(() => {
+    if (!sound) {
+      void audioContext.current?.resume?.();
+      return;
+    }
     if (audioContext.current) {
       void audioContext.current.resume?.();
       return;
@@ -180,7 +176,7 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
     } catch {
       audioContext.current = undefined;
     }
-  }, []);
+  }, [sound]);
 
   const apply = useCallback((next: WaitingMinigameState) => {
     const current = gameRef.current;
@@ -190,38 +186,35 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
   }, []);
 
   useEffect(() => {
-    if (!active) {
-      setArmed(false);
-      setOpen(false);
-      const current = gameRef.current;
-      if (!current.paused && !current.over) {
-        apply(setWaitingMinigamePaused(current, true));
+    if (previousOpen.current === open) return;
+    previousOpen.current = open;
+    const current = gameRef.current;
+    if (open) {
+      if (current.over) {
+        apply(createWaitingMinigame());
+        setNotice(null);
+      } else if (current.paused) {
+        apply(setWaitingMinigamePaused(current, false));
       }
+      ensureAudio();
       return;
     }
-    const timer = window.setTimeout(() => setArmed(true), ARM_DELAY_MS);
-    return () => window.clearTimeout(timer);
-  }, [active, apply]);
+    if (!current.paused && !current.over) {
+      apply(setWaitingMinigamePaused(current, true));
+    }
+  }, [open, apply, ensureAudio]);
 
   useEffect(() => {
-    if (!open || !active || !documentVisible) return;
+    if (!open || !documentVisible) return;
     if (game.paused || game.over) return;
     const timer = window.setInterval(() => {
       apply(tickWaitingMinigame(gameRef.current));
     }, waitingMinigameTickMs(game.cleared));
     return () => window.clearInterval(timer);
-  }, [
-    open,
-    active,
-    documentVisible,
-    game.paused,
-    game.over,
-    game.cleared,
-    apply,
-  ]);
+  }, [open, documentVisible, game.paused, game.over, game.cleared, apply]);
 
   useEffect(() => {
-    if (!open) return;
+    if (!open || !documentVisible) return;
     const onVisibility = () => {
       const visibleNow = !isVisibilityHidden();
       setDocumentVisible(visibleNow);
@@ -233,9 +226,8 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
       }
     };
     document.addEventListener('visibilitychange', onVisibility);
-    onVisibility();
     return () => document.removeEventListener('visibilitychange', onVisibility);
-  }, [open, apply]);
+  }, [open, documentVisible, apply]);
 
   useEffect(() => {
     if (game.score > best) {
@@ -278,39 +270,8 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
     setNotice(null);
   }, [apply]);
 
-  const openGame = useCallback(() => {
-    setOpen(true);
-    const current = gameRef.current;
-    if (current.over) restart();
-    else if (current.paused) {
-      apply(setWaitingMinigamePaused(current, false));
-    }
-    ensureAudio();
-  }, [apply, ensureAudio, restart]);
-
-  const closeGame = useCallback(() => {
-    setOpen(false);
-    const current = gameRef.current;
-    if (!current.paused && !current.over) {
-      apply(setWaitingMinigamePaused(current, true));
-    }
-  }, [apply]);
-
-  useEffect(() => {
-    if (open) {
-      openedOnce.current = true;
-      rootRef.current?.focus();
-      return;
-    }
-    if (openedOnce.current) {
-      openedOnce.current = false;
-      stripRef.current?.focus();
-    }
-  }, [open]);
-
   const toggleSound = useCallback(() => {
     const next = !sound;
-    soundRef.current = next;
     setSound(next);
     writeSoundEnabled(next);
     if (next) {
@@ -320,36 +281,15 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
   }, [ensureAudio, playSound, sound]);
 
   useEffect(() => {
-    if (!visible || open) return;
+    if (!open || coarsePointer) return;
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.repeat) return;
-      if (event.key !== 'Enter' || event.target !== document.body) return;
-      event.preventDefault();
-      openGame();
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [visible, open, openGame]);
-
-  const handleKeyDown = useCallback(
-    (event: ReactKeyboardEvent<HTMLDivElement>) => {
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
-        closeGame();
+        onCloseRef.current();
         return;
       }
       if (isEditableTarget(event.target)) return;
-      const target = event.target;
-      const nativeControl =
-        target instanceof Element &&
-        target !== event.currentTarget &&
-        Boolean(
-          target.closest('button, a[href], [role="button"], [role="link"]'),
-        );
-      if (nativeControl && (event.key === ' ' || event.code === 'Space')) {
-        return;
-      }
       if (event.key === ' ' || event.code === 'Space') {
         if (!event.repeat) {
           event.preventDefault();
@@ -357,9 +297,8 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
         }
         return;
       }
-      if (event.key === 'Enter') {
-        if (nativeControl) return;
-        if (gameRef.current.over && !event.repeat) {
+      if (event.key === 'Enter' && gameRef.current.over) {
+        if (!event.repeat) {
           event.preventDefault();
           restart();
         }
@@ -384,124 +323,138 @@ export function WaitingMinigame({ active }: WaitingMinigameProps) {
           apply(rotateWaitingMinigamePiece(gameRef.current));
           break;
       }
-    },
-    [apply, closeGame, restart],
-  );
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [open, coarsePointer, apply, restart]);
 
-  if (!visible) return null;
+  if (!open || coarsePointer) return null;
 
   const grid = waitingMinigameRenderGrid(game);
 
   return (
     <div
-      ref={rootRef}
       className={styles.root}
       data-component="waiting-minigame"
-      data-open={open ? 'true' : 'false'}
-      tabIndex={open ? 0 : undefined}
-      role={open ? 'group' : undefined}
-      aria-label={open ? t('waitingGame.region') : undefined}
-      onKeyDown={handleKeyDown}
+      role="group"
+      aria-label={t('waitingGame.region')}
     >
-      {open ? (
-        <div className={styles.card}>
-          <div className={styles.head}>
-            <button
-              type="button"
-              className={styles.textButton}
-              onClick={closeGame}
-            >
-              <span aria-hidden="true">←</span>
-              <span>{t('waitingGame.collapse')}</span>
-            </button>
-            <span className={styles.title}>{t('waitingGame.title')}</span>
-            <button
-              type="button"
-              className={styles.iconButton}
-              aria-pressed={sound}
-              aria-label={
-                sound ? t('waitingGame.mute') : t('waitingGame.unmute')
-              }
-              onClick={toggleSound}
-            >
-              <SoundIcon muted={!sound} />
-            </button>
-          </div>
-          <div className={styles.board}>
-            <div
-              className={styles.cells}
-              style={{
-                gridTemplateColumns: `repeat(${WAITING_MINIGAME_COLS}, minmax(0, 1fr))`,
-              }}
-              aria-hidden="true"
-            >
-              {CELLS.map((index) => (
-                <span
-                  key={index}
-                  className={styles.cell}
-                  data-state={grid[index] ?? 0}
-                />
-              ))}
-            </div>
-            {game.paused && !game.over && (
-              <div className={styles.overlay}>
-                <span className={styles.overlayTitle}>
-                  {t('waitingGame.paused')}
-                </span>
-                <span className={styles.overlayHint}>
-                  {t('waitingGame.pausedHint')}
-                </span>
-              </div>
-            )}
-            {game.over && (
-              <div className={styles.overlay}>
-                <span className={styles.overlayTitle}>
-                  {t('waitingGame.gameOver')}
-                </span>
-                <button
-                  type="button"
-                  className={styles.restartButton}
-                  onClick={restart}
-                >
-                  {t('waitingGame.restart')}
-                </button>
-              </div>
-            )}
-            {notice && (
-              <span className={styles.notice} aria-live="polite">
-                {t('waitingGame.cleared', notice)}
-              </span>
-            )}
-          </div>
-          <div className={styles.foot}>
-            <span className={styles.score} aria-live="polite">
-              {t('waitingGame.score', { score: game.score })}
-            </span>
-            <span>{t('waitingGame.best', { score: best })}</span>
-            <span className={styles.controls}>{t('waitingGame.controls')}</span>
-          </div>
+      <div className={styles.card}>
+        <div className={styles.head}>
+          <button type="button" className={styles.textButton} onClick={onClose}>
+            <span aria-hidden="true">←</span>
+            <span>{t('waitingGame.collapse')}</span>
+          </button>
+          <span className={styles.title}>{t('waitingGame.title')}</span>
+          <button
+            type="button"
+            className={styles.iconButton}
+            aria-pressed={sound}
+            aria-label={sound ? t('waitingGame.mute') : t('waitingGame.unmute')}
+            onClick={toggleSound}
+          >
+            <SoundIcon muted={!sound} />
+          </button>
         </div>
-      ) : (
-        <button
-          ref={stripRef}
-          type="button"
-          className={styles.strip}
-          aria-label={t('waitingGame.start')}
-          onClick={openGame}
+        <div
+          className={styles.board}
+          style={{
+            gridTemplateColumns: `repeat(${WAITING_MINIGAME_COLS}, minmax(0, 1fr))`,
+          }}
+          aria-hidden="true"
         >
-          <span className={styles.dots} aria-hidden="true">
-            <span />
-            <span />
-            <span />
+          {CELLS.map((index) => (
+            <span
+              key={index}
+              className={styles.cell}
+              data-state={grid[index] ?? 0}
+            />
+          ))}
+          {game.paused && !game.over && (
+            <div className={styles.overlay}>
+              <span className={styles.overlayTitle}>
+                {t('waitingGame.paused')}
+              </span>
+              <span className={styles.overlayHint}>
+                {t('waitingGame.pausedHint')}
+              </span>
+            </div>
+          )}
+          {game.over && (
+            <div className={styles.overlay}>
+              <span className={styles.overlayTitle}>
+                {t('waitingGame.gameOver')}
+              </span>
+              <button
+                type="button"
+                className={styles.restartButton}
+                onClick={restart}
+              >
+                {t('waitingGame.restart')}
+              </button>
+            </div>
+          )}
+          {notice && (
+            <span className={styles.notice} aria-live="polite">
+              {t('waitingGame.cleared', notice)}
+            </span>
+          )}
+        </div>
+        <div className={styles.foot}>
+          <span className={styles.score} aria-live="polite">
+            {t('waitingGame.score', { score: game.score })}
           </span>
-          <span className={styles.stripCopy}>
-            <span className={styles.title}>{t('waitingGame.title')}</span>
-            <span className={styles.hint}>{t('waitingGame.hint')}</span>
-          </span>
-          <span className={styles.waiting}>{t('waitingGame.waiting')}</span>
-        </button>
-      )}
+          <span>{t('waitingGame.best', { score: best })}</span>
+          <span className={styles.controls}>{t('waitingGame.controls')}</span>
+        </div>
+      </div>
     </div>
+  );
+}
+
+export interface WaitingMinigameButtonProps {
+  open: boolean;
+  onToggle: () => void;
+}
+
+export function WaitingMinigameButton({
+  open,
+  onToggle,
+}: WaitingMinigameButtonProps) {
+  const { t } = useI18n();
+  if (isCoarsePointerDevice()) return null;
+  return (
+    <button
+      type="button"
+      className={styles.trigger}
+      data-component="waiting-minigame-trigger"
+      aria-label={t('waitingGame.start')}
+      aria-expanded={open}
+      title={t('waitingGame.title')}
+      onClick={onToggle}
+    >
+      <GamepadIcon />
+    </button>
+  );
+}
+
+function GamepadIcon() {
+  return (
+    <svg viewBox="0 0 20 20" width="15" height="15" fill="none" aria-hidden>
+      <path
+        d="M7.2 6.5h5.6a4.4 4.4 0 0 1 4.3 3.5l.5 2.5a1.6 1.6 0 0 1-2.9 1.1l-1-1.2H6.3l-1 1.2a1.6 1.6 0 0 1-2.9-1.1l.5-2.5a4.4 4.4 0 0 1 4.3-3.5Z"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M7 9.3v2.4M5.8 10.5h2.4"
+        stroke="currentColor"
+        strokeWidth="1.3"
+        strokeLinecap="round"
+      />
+      <circle cx="13.1" cy="10.5" r="0.9" fill="currentColor" />
+    </svg>
   );
 }
 

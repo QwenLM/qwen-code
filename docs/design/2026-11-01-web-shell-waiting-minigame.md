@@ -21,9 +21,9 @@ their own `ChatPane` composers and keep a compact status line.
 
 ## Goals
 
-- Show a small, dismissible waiting strip above the main composer during a
-  running prompt.
-- Open an inline horizontal Tetris board from the strip without leaving the
+- Show a compact gamepad button at the end of the main composer's streaming
+  status while a prompt is running.
+- Open an inline horizontal Tetris board from that button without leaving the
   conversation.
 - Keep keyboard input and the composer usable; never hijack typing.
 - Keep the feature local to the browser: no backend, transcript, telemetry, or
@@ -37,19 +37,22 @@ their own `ChatPane` composers and keep a compact status line.
 
 ## Proposed solution
 
-Add `WaitingMinigame` as a child of the main App composer region, immediately
-above `StreamingStatus`. The component renders only while a prompt is active
-and only after a short arm delay:
+A `WaitingMinigameButton` renders at the end of the `StreamingStatus` row
+while a prompt is active, and the `WaitingMinigame` card mounts above that row
+only when the button opens it:
 
-1. A 44px strip shows the game title, a start hint, and a waiting label.
-2. Clicking the strip expands a 44×7 board in the same layout slot. The card
-   grows upward by increasing the composer footer height; the transcript
-   shrinks instead of being covered.
+1. The trigger is a 22px gamepad icon button after the elapsed time, token
+   count, and cancel hint. Clicking it — or focusing it and pressing Enter or
+   Space — opens the card; the collapse button, Escape, or another click closes
+   it.
+2. Opening expands a 44×7 board above the status row. The card grows upward by
+   increasing the composer footer height; the transcript shrinks instead of
+   being covered.
 3. The game falls toward increasing columns. `↑`/`↓` move, `→` speeds up,
    `←` rotates, Space pauses, and Escape collapses. A full column clears and
    scores 50; the speed rises with cleared columns.
-4. When the prompt ends, the component unmounts and the game closes. The best
-   score and sound preference stay in `localStorage`.
+4. When the prompt ends, the button and card unmount and the game closes. The
+   best score and sound preference stay in `localStorage`.
 5. Inputs, textareas, contenteditable editors, and textboxes keep their
    keyboard behavior. The game ignores keys targeted at those elements.
 
@@ -58,6 +61,9 @@ engine can be tested without React, jsdom, or timers.
 
 ## Design decisions
 
+- **Inline trigger instead of a banner.** A full-width strip above the composer
+  competed with the conversation for vertical space. A single icon button at
+  the end of the status line keeps the game secondary and costs no extra row.
 - **Flow layout instead of an overlay.** The Web Shell owns the composer and
   transcript split; adding a normal footer child avoids DOM measurement,
   clipping, and z-index coupling with the editor. The trade-off is a transient
@@ -85,9 +91,9 @@ engine can be tested without React, jsdom, or timers.
 Captured from the Chromium Web Shell harness with the mock daemon
 (`client/e2e/waiting-minigame.spec.ts`).
 
-| Waiting strip                                                 | Expanded board                                                 |
-| ------------------------------------------------------------- | -------------------------------------------------------------- |
-| ![Waiting strip](waiting-minigame/waiting-minigame-strip.png) | ![Expanded board](waiting-minigame/waiting-minigame-board.png) |
+| Waiting trigger                                                   | Expanded board                                                 |
+| ----------------------------------------------------------------- | -------------------------------------------------------------- |
+| ![Waiting trigger](waiting-minigame/waiting-minigame-trigger.png) | ![Expanded board](waiting-minigame/waiting-minigame-board.png) |
 
 | Paused                                                  | Dark theme, Chinese                                                   |
 | ------------------------------------------------------- | --------------------------------------------------------------------- |
@@ -97,8 +103,9 @@ Captured from the Chromium Web Shell harness with the mock daemon
 
 - Engine unit tests: spawn, gravity, movement bounds, rotation kicks, locking,
   column clears, score, speed floor, game over, pause, render grid.
-- Component tests: arm delay, strip copy, open board, cell count, pause/resume,
-  Escape collapse, close when streaming stops.
+- Component tests: closed by default, open board, cell count, pause/resume,
+  Escape collapse, reopening resumes a paused board, and trigger
+  `aria-expanded`/toggle behavior.
 - App regression suite (`client/App.test.tsx`) to prove the composer and
   streaming status still render.
 - Manual visual checks on the Web Shell harness at desktop width, light/dark
@@ -107,8 +114,9 @@ Captured from the Chromium Web Shell harness with the mock daemon
 
 ## Acceptance criteria
 
-- The strip appears only while a prompt is active and after the arm delay.
-- The game opens and collapses without breaking composer input.
+- The trigger appears only while a prompt is active.
+- The game opens and collapses without breaking composer input, and the
+  trigger disappears with the status row when the turn ends.
 - Keyboard controls work outside editors and never steal keys from editors.
 - The game closes when streaming ends; localStorage keeps the best score and
   sound preference.

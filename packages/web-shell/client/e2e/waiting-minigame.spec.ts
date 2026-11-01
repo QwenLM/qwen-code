@@ -56,23 +56,24 @@ test('shows the waiting minigame during a running prompt and closes it when the 
     'Working on it',
   );
 
-  const game = page.locator('[data-component="waiting-minigame"]');
-  await expect(game).toBeVisible({ timeout: 10_000 });
-  await expect(game).toContainText('Juust Relax');
-  await expect(game).toContainText('Waiting for a reply');
+  const trigger = page.locator('[data-component="waiting-minigame-trigger"]');
+  await expect(trigger).toBeVisible({ timeout: 10_000 });
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
   await page.screenshot({
-    path: testInfo.outputPath('waiting-minigame-strip.png'),
+    path: testInfo.outputPath('waiting-minigame-trigger.png'),
   });
 
-  const strip = game.locator('button').first();
-  await strip.click();
+  await trigger.click();
+  const game = page.locator('[data-component="waiting-minigame"]');
+  await expect(game).toBeVisible();
   await expect(game.locator('[data-state]')).toHaveCount(44 * 7);
+  await expect(game).toContainText('Juust Relax');
   await expect(game).toContainText('Score 0');
+  await expect(trigger).toHaveAttribute('aria-expanded', 'true');
   await page.screenshot({
     path: testInfo.outputPath('waiting-minigame-board.png'),
   });
 
-  await game.focus();
   await page.keyboard.press('Space');
   await expect(game).toContainText('Paused');
   await page.screenshot({
@@ -82,11 +83,11 @@ test('shows the waiting minigame during a running prompt and closes it when the 
   await expect(game).not.toContainText('Paused');
 
   await page.keyboard.press('Escape');
-  await expect(game).toContainText('Waiting for a reply');
-  await expect(game.locator('[data-state]')).toHaveCount(0);
+  await expect(game).toHaveCount(0);
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
 
   await daemon.sendEvent(turnCompleteEvent('prompt-e2e', { id: 11 }));
-  await expect(game).toHaveCount(0);
+  await expect(trigger).toHaveCount(0);
 });
 
 test('renders the waiting minigame in dark theme and Chinese', async ({
@@ -110,10 +111,11 @@ test('renders the waiting minigame in dark theme and Chinese', async ({
     '正在处理',
   );
 
+  const trigger = page.locator('[data-component="waiting-minigame-trigger"]');
+  await expect(trigger).toBeVisible({ timeout: 10_000 });
+  await trigger.click();
   const game = page.locator('[data-component="waiting-minigame"]');
-  await expect(game).toBeVisible({ timeout: 10_000 });
-  await expect(game).toContainText('等待回复中');
-  await game.locator('button').first().click();
+  await expect(game).toBeVisible();
   await expect(game).toContainText('得分 0');
   await page.screenshot({
     path: testInfo.outputPath('waiting-minigame-dark-zh.png'),
